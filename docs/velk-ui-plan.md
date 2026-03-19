@@ -17,6 +17,10 @@
 - **GL renderer plugin** (`plugins/render/gl/`): OpenGL backend implementing `IRenderer`
 - **Test app** (`app/`): GLFW window, loads plugins, imports a scene, runs render loop
 - **Third-party deps**: GLAD 2, GLFW 3.4 vendored
+- **Math types** (velk repo): `mat4` added with column-major layout, identity default, multiply, translate/scale factories. Operators and named constants (`zero()`, `one()`, `identity()`, etc.) on all math types
+- **IElement updated**: `position` (vec3), `size` (velk::size), `color` (velk::color), `local_transform` (mat4), `world_matrix` (RPROP mat4), `z_index` (int32_t)
+- **Importer struct support** (velk repo): JSON importer deserializes vec2/vec3/vec4/size/rect/color from both arrays and named-field objects. Color alpha defaults to 1.0 if omitted
+- **3D size type** (velk repo): `velk::size` now has width, height, depth
 
 ### Layout model
 
@@ -28,7 +32,7 @@ Single `Element` type (poolable/hiveable), behavior defined by attachments.
 - **World matrix**: computed by the solver during `apply`. Accumulates parent chain positioning (`parent.world * local`). For the common case (no rotation/scale) this is just a translation.
 - **Local matrix** ("transform"): user-specified offset/rotation/scale, applied on top of layout. Does not affect layout of siblings or parent.
 
-Constraints (Stack, Grid, etc.) work in parent-local space — they set each child's position relative to the parent origin. The solver accumulates world matrices as it recurses: `child.world = parent.world * child_layout_position * child.local_transform`. The renderer reads the final world matrix. `mat4` needs to be added to velk's math types (`velk/api/math_types.h`).
+Constraints (Stack, Grid, etc.) work in parent-local space — they set each child's position relative to the parent origin. The solver accumulates world matrices as it recurses: `child.world = parent.world * child_layout_position * child.local_transform`. The renderer reads the final world matrix.
 
 **Attachments**: velk already supports attaching any object to any object via `IObjectStorage`. The layout system finds `IConstraint` attachments on each element.
 
@@ -37,11 +41,11 @@ Constraints (Stack, Grid, etc.) work in parent-local space — they set each chi
 ```cpp
 struct Constraint
 {
-    velk::rect available;
+    velk::aabb available;
 };
 ```
 
-**Single interface** `IConstraint` (using `velk::rect`, `velk::size` from `velk/api/math_types.h`):
+**Single interface** `IConstraint` (using `velk::aabb`, `velk::size` from `velk/api/math_types.h`):
 
 ```cpp
 class IConstraint : public velk::Interface<IConstraint>
@@ -83,13 +87,13 @@ The solver resolves `dim` values during `measure` using `Constraint::available`:
 
 JSON still uses human-readable `"50%"` — the parser converts to 0.5 at import time.
 
-**Unbounded space**: infinity lives in the `Constraint::available` rect, not in dim. A scroll container passes `FLT_MAX` on its scroll axis. When `Pct` resolves against `FLT_MAX`, the result is `FLT_MAX`, meaning "no size imposed, let content decide." An element with no content and no explicit size in an unbounded axis is zero-sized. dim itself never represents infinity — it's always a concrete value+unit.
+**Unbounded space**: infinity lives in the `Constraint::available` aabb, not in dim. A scroll container passes `FLT_MAX` on its scroll axis. When `Pct` resolves against `FLT_MAX`, the result is `FLT_MAX`, meaning "no size imposed, let content decide." An element with no content and no explicit size in an unbounded axis is zero-sized. dim itself never represents infinity — it's always a concrete value+unit.
 
 dims in JSON: `"10px"`, `"50%"`, or bare number (defaults to `px`).
 
 **Ordering**: the solver collects all `IConstraint` attachments on an element, sorts by phase (`Layout` first, then `Constraint`), and within the same phase runs them in attachment order. This gives a predictable pipeline without rigid sub-priorities.
 
-**Two-phase solve**: `measure` computes desired size, `apply` writes final bounds into element state via `velk::write_state<IElement>()`. The difference between a constraint and a layout is just scope:
+**Two-phase solve**: `measure` computes desired size, `apply` writes final bounds into element state via `velk::write_state<IElement>()`. Constraints that need multiple passes over children (e.g. Stack measuring all children before positioning them) do so internally within their own `measure`/`apply`. If a common multi-pass pattern emerges across constraints, it can be generalized into the solver. The difference between a constraint and a layout is just scope:
 
 Layout phase (touches self and children):
 - `Stack`: walks children via hierarchy, divides space along axis (vertical/horizontal). Can shrink to fit children or use explicit size
@@ -140,7 +144,18 @@ public:
 
 The Scene subscribes to the logical hierarchy's modification events (add/remove). When an element is added, the tree calls into the element (e.g. `IElement::attached(IScene*)`) so the element stores a reference to the tree. When a property changes, the element calls `tree->notify_dirty(*this, flags)` to put itself on the dirty list.
 
-**Dirty flags** distinguish "needs relayout" (size/constraint changed) from "needs redraw" (color/opacity changed) from "needs z-resort" (z_index changed). The frame loop checks the dirty list: if any element needs relayout, run the solver first, then pass all dirty elements to VisualTree for changeset generation.
+**Dirty flags**:
+
+```cpp
+enum class DirtyFlags : uint8_t
+{
+    Layout  = 1 << 0,   // size/position/constraint changed, needs relayout
+    Visual  = 1 << 1,   // color/opacity changed, needs redraw
+    ZOrder  = 1 << 2    // z_index changed, needs z-resort
+};
+```
+
+The frame loop checks the dirty list: if any element has `Layout`, run the solver first, then pass all dirty elements to VisualTree for changeset generation.
 
 **Change detection**: Element implements `IMetadataObserver`, which provides an `on_property_changed(IProperty&)` callback fired whenever any property on the object changes. From this callback, Element calls `scene->notify_dirty(*this, flags)` to put itself on the dirty list. No per-property event subscriptions needed.
 
@@ -189,14 +204,15 @@ public:
 };
 ```
 
-**IElement additions**: the current IElement has x, y, width, height, r, g, b, a. For layout:
-- `x`, `y` (existing): layout position in parent-local space, set by the solver
-- `width`, `height` (existing): layout size, set by the solver or constraints
-- `local_transform` (new, `PROP mat4`, identity default): user-specified offset/rotation/scale, does not affect layout
-- `world_matrix` (new, `RPROP mat4`, identity default): computed by solver = `parent.world * translate(x, y) * local_transform`. Read-only; the solver writes it via `write_state`
-- `z_index` (new, `PROP int32_t`, default 0): draw order among siblings
+**IElement** (already implemented):
+- `position` (`PROP vec3`): layout position in parent-local space, set by the solver
+- `size` (`PROP velk::size`): layout dimensions (width, height, depth), set by the solver or constraints
+- `color` (`PROP velk::color`): RGBA color
+- `local_transform` (`PROP mat4`, identity default): user-specified offset/rotation/scale, does not affect layout
+- `world_matrix` (`RPROP mat4`, identity default): computed by solver = `parent.world * translate(position) * local_transform`. Read-only; the solver writes it via `write_state`
+- `z_index` (`PROP int32_t`, default 0): draw order among siblings
 
-The renderer reads `world_matrix` + `width` + `height` for positioning and sizing.
+The renderer reads `world_matrix` + `size` for positioning and sizing.
 
 **Iterating constraints**: `IObjectStorage::find_attachment<IConstraint>()` returns a single match. To collect all `IConstraint` attachments, iterate via `attachment_count()` / `get_attachment(i)` and `interface_cast<IConstraint>()` each one.
 
@@ -208,11 +224,11 @@ The renderer reads `world_matrix` + `width` + `height` for positioning and sizin
     "objects": [
         { "id": "root", "class": "velk-ui.Element" },
         { "id": "child1", "class": "velk-ui.Element",
-          "properties": { "r": 1.0, "g": 0.2, "b": 0.2 } },
+          "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
         { "id": "child2", "class": "velk-ui.Element",
-          "properties": { "r": 0.2, "g": 0.3, "b": 0.9 } },
+          "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
         { "id": "child3", "class": "velk-ui.Element",
-          "properties": { "r": 0.1, "g": 0.8, "b": 0.2 } }
+          "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2 } } }
     ],
     "hierarchies": {
         "scene": {
@@ -234,21 +250,26 @@ The extension parses dimension strings (`"100px"`, `"50%"`, bare number = px) in
 **App flow with Scene**:
 1. Import JSON -> objects + hierarchy + constraints (via importer extension)
 2. Create Scene, populate hierarchy from import result
-3. Each frame: `scene.solve_layout(viewport_rect)` -> updates element x/y/w/h and world matrices
+3. Each frame: `scene.solve_layout(viewport_aabb)` -> updates element positions/sizes and world matrices
 4. Pass elements to renderer (add_visual on first frame, dirty tracking handles updates)
 5. Render loop: `scene.solve_layout(...)`, `renderer.render()`
 
 **Implementation rounds** (incremental, each ending with something testable):
 
-Round 1: **Foundation types + Scene skeleton**
-- `mat4` in velk `math_types.h` (velk repo, separate commit)
-- `dim`, `Constraint` structs in velk-ui
-- `IConstraint` interface
-- Update `IElement`: add `z_index`, `world_matrix`, `local_transform`
-- `IScene` interface + `Scene` class (owns `velk::Hierarchy`, dirty list, no solver yet)
-- Testable: Scene compiles, elements can be added to hierarchy, dirty notifications fire
+Round 1: **Foundation types** ~~DONE~~
+- `mat4`, `aabb` in velk `math_types.h` with operators, translate/scale factories, min/max accessors
+- Math type operators and named constants on all types
+- `velk::size` extended to 3D (width, height, depth)
+- `IElement` updated: position (vec3), size, color, local_transform, world_matrix, z_index
+- Importer: struct type deserialization from JSON objects and arrays
+- GL renderer updated for new IElement layout
 
-Round 2: **Constraints + Solver + Importer**
+Round 2: **Scene + Constraints + Solver + VisualTree + Importer**
+- `dim`, `Constraint` structs in velk-ui; `register_type<dim>()` in plugin init
+- `IConstraint` interface
+- `DirtyFlags` enum (Layout, Visual, ZOrder)
+- `IScene` interface + `Scene` class (owns `velk::Hierarchy`, dirty list)
+- `VisualTree`: z-sorted mirror of logical tree, produces changesets for renderer
 - `IStack`, `IFixedSize`, `IMargin` interfaces (VELK_INTERFACE)
 - `Stack`, `FixedSize`, `Margin` implementations (each implements both `IConstraint` and its specific interface)
 - `LayoutSolver` (internal to Scene): top-down recursion, measure/apply, world matrix accumulation
@@ -257,7 +278,7 @@ Round 2: **Constraints + Solver + Importer**
 - Testable: import a scene with constraints, run solver, verify element positions/world matrices are correct
 
 Round 3: **Renderer integration + Demo**
-- Update `GlRenderer` to read `world_matrix` instead of raw x/y for positioning
+- Update `GlRenderer` to consume VisualTree changesets and read `world_matrix` for positioning
 - Update test app to create Scene and use the new flow
 - New test scene JSON: vertical stack of three colored elements
 - Testable: visible vertical stack rendered on screen
