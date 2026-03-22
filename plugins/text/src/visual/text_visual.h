@@ -38,7 +38,7 @@ public:
 
 protected:
     // Override to reshape when the text property changes
-    void on_property_changed(velk::IProperty& property) override;
+    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override;
 
 private:
     void reshape();

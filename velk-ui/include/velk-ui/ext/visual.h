@@ -40,7 +40,10 @@ protected:
     }
 
     /** @brief Default: any property change fires on_visual_changed. Override to filter. */
-    void on_property_changed(velk::IProperty&) override { invoke_visual_changed(); }
+    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override
+    {
+        invoke_visual_changed();
+    }
 };
 
 } // namespace velk_ui::ext

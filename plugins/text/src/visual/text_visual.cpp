@@ -11,9 +11,12 @@ void TextVisual::set_font(const IFont::Ptr& font)
     invoke_visual_changed();
 }
 
-void TextVisual::on_property_changed(velk::IProperty&)
+void TextVisual::on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId)
 {
-    reshape();
+    if (interfaceId == ITextVisual::UID) {
+        // Only ITextVisual props can affect shaping (?)
+        reshape();
+    }
     invoke_visual_changed();
 }
 

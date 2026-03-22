@@ -23,7 +23,7 @@ void Element::on_detached(IScene&)
     pending_dirty_ = DirtyFlags::None;
 }
 
-void Element::on_property_changed(velk::IProperty& property)
+void Element::on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId)
 {
     if (!scene_) {
         return;
@@ -33,14 +33,6 @@ void Element::on_property_changed(velk::IProperty& property)
     if (!meta) {
         return;
     }
-
-    auto members = meta->get_static_metadata();
-    auto sid = property.get_storage_id();
-    if (sid >= members.size()) {
-        return;
-    }
-
-    auto name = members[sid].name;
 
     DirtyFlags flag = DirtyFlags::None;
     if (name == "position" || name == "size" || name == "local_transform") {

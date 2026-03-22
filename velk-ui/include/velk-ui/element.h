@@ -17,7 +17,7 @@ class Element : public velk::ext::Object<Element, IElement, velk::IMetadataObser
 public:
     VELK_CLASS_UID(ClassId::Element, "Element");
 
-    void on_property_changed(velk::IProperty& property) override;
+    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override;
 
     void on_attached(IScene& scene) override;
     void on_detached(IScene& scene) override;
