@@ -1,16 +1,18 @@
 #ifndef VELK_UI_FIXED_SIZE_H
 #define VELK_UI_FIXED_SIZE_H
 
-#include <velk-ui/interface/intf_constraint.h>
-#include <velk-ui/interface/constraint/intf_fixed_size.h>
 #include <velk/ext/object.h>
+
+#include <velk-ui/interface/constraint/intf_fixed_size.h>
+#include <velk-ui/interface/intf_constraint.h>
+#include <velk-ui/plugin.h>
 
 namespace velk_ui {
 
 class FixedSize : public velk::ext::Object<FixedSize, IConstraint, IFixedSize>
 {
 public:
-    VELK_CLASS_UID("a7f3c1d2-8e4b-4f6a-9c5d-1b2e3f4a5b6c", "FixedSize");
+    VELK_CLASS_UID(ClassId::Constraint::FixedSize, "FixedSize");
 
     ConstraintPhase get_phase() const override;
     Constraint measure(const Constraint& c, IElement& element, velk::IHierarchy* hierarchy) override;

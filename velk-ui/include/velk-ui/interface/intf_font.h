@@ -3,8 +3,8 @@
 
 #include <velk/api/math_types.h>
 #include <velk/interface/intf_metadata.h>
-#include <velk/vector.h>
 #include <velk/string_view.h>
+#include <velk/vector.h>
 
 #include <cstdint>
 
@@ -16,8 +16,8 @@ public:
     struct GlyphPosition
     {
         uint32_t glyph_id;
-        velk::vec2 offset;    // pixels, relative to pen position
-        velk::vec2 advance;   // pixels, how far to move the pen
+        velk::vec2 offset;  // pixels, relative to pen position
+        velk::vec2 advance; // pixels, how far to move the pen
     };
 
     struct GlyphBitmap
@@ -25,7 +25,7 @@ public:
         const uint8_t* data; // alpha bitmap, valid until next rasterize call
         uint32_t width;
         uint32_t height;
-        velk::vec2 bearing;  // left and top side bearing (pixels)
+        velk::vec2 bearing; // left and top side bearing (pixels)
     };
 
     VELK_INTERFACE(
@@ -34,6 +34,9 @@ public:
         (RPROP, float, line_height, 0.f),
         (RPROP, float, size_px, 0.f)
     )
+
+    /** @brief Initializes the font from a built-in default (embedded Inter Regular). */
+    virtual bool init_default() = 0;
 
     virtual bool set_size(float size_px) = 0;
     virtual float shape_text(velk::string_view text, velk::vector<GlyphPosition>& out) = 0;

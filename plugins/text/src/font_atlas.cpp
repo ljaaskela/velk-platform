@@ -5,9 +5,7 @@
 
 namespace velk_ui {
 
-GlyphAtlas::GlyphAtlas(uint32_t width, uint32_t height)
-    : width_(width)
-    , height_(height)
+GlyphAtlas::GlyphAtlas(uint32_t width, uint32_t height) : width_(width), height_(height)
 {
     pixels_.resize(width * height, 0);
 }
@@ -15,8 +13,9 @@ GlyphAtlas::GlyphAtlas(uint32_t width, uint32_t height)
 const AtlasRect* GlyphAtlas::ensure_glyph(IFont& font, uint32_t glyph_id)
 {
     auto it = glyphs_.find(glyph_id);
-    if (it != glyphs_.end())
+    if (it != glyphs_.end()) {
         return &it->second;
+    }
 
     IFont::GlyphBitmap bmp = font.rasterize_glyph(glyph_id);
     if (!bmp.data || bmp.width == 0 || bmp.height == 0) {
@@ -39,8 +38,9 @@ const AtlasRect* GlyphAtlas::ensure_glyph(IFont& font, uint32_t glyph_id)
     }
 
     // Out of space
-    if (cursor_y_ + gh > height_)
+    if (cursor_y_ + gh > height_) {
         return nullptr;
+    }
 
     // Copy glyph bitmap into atlas
     for (uint32_t row = 0; row < bmp.height; ++row) {

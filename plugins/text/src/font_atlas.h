@@ -1,12 +1,12 @@
 #ifndef VELK_UI_TEXT_FONT_ATLAS_H
 #define VELK_UI_TEXT_FONT_ATLAS_H
 
-#include <velk-ui/interface/intf_font.h>
 #include <velk/api/math_types.h>
 #include <velk/vector.h>
 
 #include <cstdint>
 #include <unordered_map>
+#include <velk-ui/interface/intf_font.h>
 
 namespace velk_ui {
 

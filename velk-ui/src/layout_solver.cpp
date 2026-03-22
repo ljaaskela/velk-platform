@@ -1,31 +1,35 @@
 #include "layout_solver.h"
 
-#include <velk-ui/interface/intf_constraint.h>
-#include <velk-ui/interface/intf_element.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <algorithm>
 #include <vector>
+#include <velk-ui/interface/intf_constraint.h>
+#include <velk-ui/interface/intf_element.h>
 
 namespace velk_ui {
 
 void LayoutSolver::solve(velk::IHierarchy& hierarchy, const velk::aabb& viewport)
 {
     auto root = hierarchy.root();
-    if (!root) return;
+    if (!root) {
+        return;
+    }
 
     solve_element(hierarchy, root, viewport, velk::mat4::identity());
 }
 
 void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const velk::IObject::Ptr& obj,
-                                  const velk::aabb& parent_bounds, const velk::mat4& parent_world)
+                                 const velk::aabb& parent_bounds, const velk::mat4& parent_world)
 {
     auto* element = velk::interface_cast<IElement>(obj);
-    if (!element) return;
+    if (!element) {
+        return;
+    }
 
     // Collect IConstraint attachments
-    velk::vector<IConstraint *> constraints;
+    velk::vector<IConstraint*> constraints;
     auto* storage = velk::interface_cast<velk::IObjectStorage>(obj);
     if (storage) {
         for (size_t i = 0; i < storage->attachment_count(); ++i) {
@@ -69,7 +73,9 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const velk::IObjec
 
     // Read current position and local transform
     auto reader = velk::read_state<IElement>(element);
-    if (!reader) return;
+    if (!reader) {
+        return;
+    }
 
     velk::vec3 pos = reader->position;
     velk::mat4 local = reader->local_transform;
@@ -77,9 +83,7 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const velk::IObjec
     // Compute world_matrix = parent_world * translate(position) * local_transform
     velk::mat4 world = parent_world * velk::mat4::translate(pos) * local;
 
-    velk::write_state<IElement>(element, [&](IElement::State& s) {
-        s.world_matrix = world;
-    });
+    velk::write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
 
     // Recurse into children with element's bounds as available space
     velk::aabb child_bounds;

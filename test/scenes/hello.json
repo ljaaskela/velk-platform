@@ -3,15 +3,17 @@
   "objects": [
     { "id": "r1", "class": "velk-ui.Element",
       "properties": { "position": { "x": 100, "y": 300 },
-                       "size": { "width": 200, "height": 150 },
-                       "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
+                       "size": { "width": 200, "height": 150 } } },
     { "id": "r2", "class": "velk-ui.Element",
       "properties": { "position": { "x": 400, "y": 400 },
-                       "size": { "width": 180, "height": 120 },
-                       "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
+                       "size": { "width": 180, "height": 120 } } },
     { "id": "r3", "class": "velk-ui.Element",
       "properties": { "position": { "x": 250, "y": 550 },
-                       "size": { "width": 300, "height": 100 },
-                       "color": { "r": 0.1, "g": 0.8, "b": 0.2, "a": 0.7 } } }
+                       "size": { "width": 300, "height": 100 } } }
+  ],
+  "ui-visuals": [
+    { "target": "r1", "type": "Rect", "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
+    { "target": "r2", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
+    { "target": "r3", "type": "Rect", "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2, "a": 0.7 } } }
   ]
 }

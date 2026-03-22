@@ -1,11 +1,11 @@
 #include "stack.h"
 
-#include <velk-ui/interface/intf_element.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <algorithm>
+#include <velk-ui/interface/intf_element.h>
 
 namespace velk_ui {
 
@@ -20,14 +20,14 @@ struct ChildInfo
 {
     velk::IObject::Ptr obj;
     IElement* element;
-    velk::vector<IConstraint *> constraints;
+    velk::vector<IConstraint*> constraints;
     float measured_main = 0.f;
     bool fixed = false;
 };
 
-void collect_constraints(velk::IObject *obj, velk::vector<IConstraint *> &out)
+void collect_constraints(velk::IObject* obj, velk::vector<IConstraint*>& out)
 {
-    auto *storage = velk::interface_cast<velk::IObjectStorage>(obj);
+    auto* storage = velk::interface_cast<velk::IObjectStorage>(obj);
     if (!storage) {
         return;
     }
@@ -52,19 +52,27 @@ Constraint Stack::measure(const Constraint& c, IElement& element, velk::IHierarc
 
 void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy* hierarchy)
 {
-    if (!hierarchy) return;
+    if (!hierarchy) {
+        return;
+    }
 
     auto state = velk::read_state<IStack>(this);
-    if (!state) return;
+    if (!state) {
+        return;
+    }
 
-    uint8_t axis = state->axis;   // 0 = horizontal, 1 = vertical
+    uint8_t axis = state->axis; // 0 = horizontal, 1 = vertical
     float spacing = state->spacing;
 
     auto* obj = velk::interface_cast<velk::IObject>(&element);
-    if (!obj) return;
+    if (!obj) {
+        return;
+    }
     auto self = obj->get_self();
     auto children = hierarchy->children_of(self);
-    if (children.empty()) return;
+    if (children.empty()) {
+        return;
+    }
 
     float total_available = (axis == 1) ? c.bounds.extent.height : c.bounds.extent.width;
     float cross_available = (axis == 1) ? c.bounds.extent.width : c.bounds.extent.height;
@@ -79,15 +87,16 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy* hier
         ChildInfo info;
         info.obj = child_ptr;
         info.element = velk::interface_cast<IElement>(child_ptr);
-        if (!info.element) continue;
+        if (!info.element) {
+            continue;
+        }
 
         collect_constraints(child_ptr.get(), info.constraints);
 
         // Sort: Constraint-phase first for measuring
-        std::sort(info.constraints.begin(), info.constraints.end(),
-                  [](IConstraint* a, IConstraint* b) {
-                      return static_cast<uint8_t>(a->get_phase()) > static_cast<uint8_t>(b->get_phase());
-                  });
+        std::sort(info.constraints.begin(), info.constraints.end(), [](IConstraint* a, IConstraint* b) {
+            return static_cast<uint8_t>(a->get_phase()) > static_cast<uint8_t>(b->get_phase());
+        });
 
         // Run measure on constraint-phase constraints to determine fixed sizes
         Constraint child_c;
@@ -116,12 +125,12 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy* hier
     // Distribute remaining space to non-fixed children equally
     size_t flex_count = 0;
     for (auto& info : infos) {
-        if (!info.fixed) ++flex_count;
+        if (!info.fixed) {
+            ++flex_count;
+        }
     }
 
-    float flex_size = (flex_count > 0 && remaining > 0.f)
-                          ? remaining / static_cast<float>(flex_count)
-                          : 0.f;
+    float flex_size = (flex_count > 0 && remaining > 0.f) ? remaining / static_cast<float>(flex_count) : 0.f;
 
     for (auto& info : infos) {
         if (!info.fixed) {

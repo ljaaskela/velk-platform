@@ -1,24 +1,31 @@
+#include <velk/api/state.h>
 #include <velk/api/store.h>
 #include <velk/api/velk.h>
+#include <velk/interface/intf_object_storage.h>
 #include <velk/interface/intf_plugin_registry.h>
 #include <velk/plugins/importer/api/importer.h>
 
-#include <velk-ui/interface/intf_renderer.h>
-#include <velk-ui/interface/intf_scene.h>
-#include <velk-ui/plugin.h>
-#include <velk-ui/plugins/gl/plugin.h>
-
+#include <fstream>
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
-
-#include <fstream>
 #include <sstream>
 #include <string>
+#include <velk-ui/interface/constraint/intf_fixed_size.h>
+#include <velk-ui/interface/intf_font.h>
+#include <velk-ui/interface/intf_renderer.h>
+#include <velk-ui/interface/intf_scene.h>
+#include <velk-ui/interface/intf_visual.h>
+#include <velk-ui/plugin.h>
+#include <velk-ui/plugins/gl/plugin.h>
+#include <velk-ui/plugins/text/intf_text_visual.h>
+#include <velk-ui/plugins/text/plugin.h>
 
 static std::string read_file(const char* path)
 {
     std::ifstream f(path);
-    if (!f.is_open()) return {};
+    if (!f.is_open()) {
+        return {};
+    }
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
@@ -28,7 +35,9 @@ static std::string find_scene_path(const char* exe_path, const char* filename)
 {
     std::string base(exe_path);
     for (auto& c : base) {
-        if (c == '\\') c = '/';
+        if (c == '\\') {
+            c = '/';
+        }
     }
     auto pos = base.rfind('/');
     if (pos != std::string::npos) {
@@ -45,7 +54,9 @@ static std::string find_scene_path(const char* exe_path, const char* filename)
     for (auto* prefix : prefixes) {
         std::string path = base + prefix + filename;
         std::ifstream test(path);
-        if (test.good()) return path;
+        if (test.good()) {
+            return path;
+        }
     }
     return std::string("scenes/") + filename;
 }
@@ -93,6 +104,7 @@ int main(int argc, char* argv[])
     // Load plugins
     velk.plugin_registry().load_plugin_from_path("velk_ui.dll");
     velk.plugin_registry().load_plugin_from_path("velk_gl.dll");
+    velk.plugin_registry().load_plugin_from_path("velk_text.dll");
     velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 
     // Create and init renderer
@@ -129,6 +141,51 @@ int main(int argc, char* argv[])
     scene->set_viewport({{}, {static_cast<float>(kWidth), static_cast<float>(kHeight)}});
     scene->load(*import_result.store);
 
+    // Programmatically create a text element with "Hello, Velk!"
+    velk::IObject::Ptr font_obj;
+    {
+        font_obj = velk.create<velk::IObject>(velk_ui::ClassId::Font);
+        auto* font = velk::interface_cast<velk_ui::IFont>(font_obj);
+        if (font && font->init_default() && font->set_size(32.f)) {
+            // Create TextVisual, set color to white, shape text
+            auto tv_obj = velk.create<velk::IObject>(velk_ui::ClassId::Visual::Text);
+            velk::write_state<velk_ui::IVisual>(
+                tv_obj, [](velk_ui::IVisual::State& s) { s.color = velk::color::white(); });
+
+            auto* tv = velk::interface_cast<velk_ui::ITextVisual>(tv_obj);
+            if (tv) {
+                tv->set_text("Hello, Velk!", *font);
+            }
+
+            // Create element for the text
+            auto text_elem = velk.create<velk::IObject>(velk_ui::ClassId::Element);
+
+            // Attach TextVisual to element
+            auto* storage = velk::interface_cast<velk::IObjectStorage>(text_elem);
+            if (storage) {
+                auto att = velk::interface_pointer_cast<velk::IInterface>(tv_obj);
+                storage->add_attachment(att);
+
+                // Give the element a fixed size
+                auto fs_obj = velk.create<velk::IObject>(velk_ui::ClassId::Constraint::FixedSize);
+                velk::write_state<velk_ui::IFixedSize>(fs_obj, [](velk_ui::IFixedSize::State& s) {
+                    s.width = velk_ui::dim::px(400.f);
+                    s.height = velk_ui::dim::px(50.f);
+                });
+                auto fs_att = velk::interface_pointer_cast<velk::IInterface>(fs_obj);
+                storage->add_attachment(fs_att);
+            }
+
+            // Add text element to scene hierarchy (as child of root)
+            auto root = scene->root();
+            if (root) {
+                scene->add(root, text_elem);
+            }
+
+            VELK_LOG(I, "Text element added: \"Hello, Velk!\"");
+        }
+    }
+
     // Main loop: velk.update() drives scene layout via plugin post_update
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -138,6 +195,7 @@ int main(int argc, char* argv[])
     }
 
     scene_obj = nullptr;
+    font_obj = nullptr;
     renderer->shutdown();
     renderer_obj = nullptr;
 

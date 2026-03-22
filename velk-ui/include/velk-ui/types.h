@@ -2,17 +2,40 @@
 #define VELK_UI_TYPES_H
 
 #include <velk/api/math_types.h>
+#include <velk/vector.h>
 
 #include <cstdint>
 
 namespace velk_ui {
 
+enum class DrawCommandType : uint8_t
+{
+    FillRect,    ///< Solid color rectangle.
+    TexturedQuad ///< Textured quad (glyph from atlas).
+};
+
+/**
+ * @brief POD draw command produced by IVisual.
+ *
+ * Element-local coordinates. The renderer applies world_matrix.
+ * Unused fields are zeroed (e.g. UVs for FillRect).
+ */
+struct DrawCommand
+{
+    DrawCommandType type{};
+    velk::rect bounds{}; ///< Element-local position and size.
+    velk::color color{}; ///< Visual color (fill or text tint).
+    float u0{}, v0{};    ///< Texture UV top-left.
+    float u1{}, v1{};    ///< Texture UV bottom-right.
+};
+
 enum class DirtyFlags : uint8_t
 {
-    None    = 0,
-    Layout  = 1,
-    Visual  = 2,
-    ZOrder  = 4
+    None = 0,
+    Layout = 1 << 0,
+    Visual = 1 << 1,
+    ZOrder = 1 << 2,
+    All = 0xff,
 };
 
 inline constexpr DirtyFlags operator|(DirtyFlags a, DirtyFlags b)
@@ -72,9 +95,12 @@ struct Constraint
 inline float resolve_dim(dim d, float available)
 {
     switch (d.unit) {
-    case DimUnit::Px:  return d.value;
-    case DimUnit::Pct: return d.value * available;
-    default:           return available;
+    case DimUnit::Px:
+        return d.value;
+    case DimUnit::Pct:
+        return d.value * available;
+    default:
+        return available;
     }
 }
 

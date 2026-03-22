@@ -2,7 +2,7 @@ add_executable(velk_ui_app
     main.cpp
 )
 
-target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_gl glfw)
+target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_gl velk_text glfw)
 
 # Copy velk.dll and velk_importer.dll to output directory
 set(VELK_BIN_DIR "${CMAKE_SOURCE_DIR}/../velk/build/bin/$<CONFIG>")

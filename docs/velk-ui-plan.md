@@ -22,6 +22,8 @@
 - **Importer struct support** (velk repo): JSON importer deserializes vec2/vec3/vec4/size/rect/color from both arrays and named-field objects. Color alpha defaults to 1.0 if omitted
 - **3D size type** (velk repo): `velk::size` now has width, height, depth
 - **Round 2a done**: Scene, Stack, FixedSize, LayoutSolver, constraint import handler, dirty tracking, renderer integration
+- **Text plugin**: FreeType + HarfBuzz integration, Font class, GlyphAtlas
+- **Round 2a.5 done**: Visual representation model, text rendering
 
 ### Layout model
 
@@ -152,18 +154,18 @@ public:
 
 - **Scene frame data**: two flat vectors maintained by Scene:
   - `visual_list_` (`vector<IElement*>`): all elements in draw order, rebuilt by z-sorted traversal when ZOrder or hierarchy changes
-  - `changes_` (`vector<IElement*>`): elements with `DirtyFlags::Visual` since last frame (each element notifies only once per frame via the dirty accumulator). Also includes newly added/removed elements
+  - `dirty_elements_` (`vector<IElement*>`): elements with any `DirtyFlags` since last frame (each element notifies only once per frame via the dirty accumulator). All dirty elements are pushed to the renderer via `update_visuals`, not just Visual-dirty ones, because draw commands depend on element size which changes during layout
 
 - **LayoutSolver**: internal to Scene. Runs measure/apply passes and computes world matrices in a single top-down recursion. Only invoked when at least one element has `DirtyFlags::Layout`.
 
-- **Renderer**: `IRenderer::add_visual(const IElement::Ptr&)` / `remove_visual(VisualId)` for element enter/leave. `update_visuals(velk::array_view<IElement*> changed)` called by Scene each frame with `changes_`. Renderer re-uploads GPU data for the listed elements. No tree knowledge.
+- **Renderer**: `IRenderer::add_visual(const IElement::Ptr&)` / `remove_visual(VisualId)` for element enter/leave. `update_visuals(velk::array_view<IElement*> changed)` called by Scene each frame with all dirty elements. Renderer rebuilds draw command cache for changed elements and re-uploads GPU data. Two pipelines: untextured FillRect and textured TexturedQuad. No tree knowledge, no per-property subscriptions.
 
 **Frame loop**:
-1. Scene processes dirty list: checks for `Layout`, `Visual`, `ZOrder` flags
+1. Scene processes dirty list: consumes flags from all dirty elements, collects them as changes
 2. If any element has `Layout`, run solver (top-down recursion, measure/apply, world matrix accumulation)
 3. If `ZOrder` or hierarchy changed, rebuild `visual_list_`
-4. Push `changes_` to renderer via `update_visuals`
-5. Renderer uploads dirty GPU slots and draws
+4. Push all dirty elements to renderer via `update_visuals`
+5. Renderer rebuilds draw command cache for changed elements, builds instance buffers from cache + world_matrix, uploads and draws
 
 When Scene adds/removes an element, it calls `interface_cast<ISceneObserver>(element)->on_attached(*this)` (or `on_detached`). The element stores the `IScene*` and uses it for dirty notifications. When a property changes, the element calls `scene->notify_dirty(*this, flags)`.
 
@@ -180,9 +182,9 @@ enum class DirtyFlags : uint8_t
 
 **Dirty tracking**: Element accumulates `DirtyFlags` locally in `pending_dirty_`. In `on_property_changed`, it OR's the new flag into the accumulator. If the accumulator was previously zero (first dirty this frame), it pushes itself onto the Scene's dirty vector. Otherwise it just accumulates locally -- no duplicate entry. Scene's dirty list is a `velk::vector<IElement*>` with no dedup logic. Scene iterates the vector, consumes each element's flags, then clears the list.
 
-**Change detection**: Element implements `IMetadataObserver`, which provides an `on_property_changed(IProperty&)` callback fired whenever any property on the object changes. From this callback, Element determines the appropriate `DirtyFlags` (position/size/local_transform -> Layout, color -> Visual, z_index -> ZOrder) and accumulates them as described above. No per-property event subscriptions needed.
+**Change detection**: Element implements `IMetadataObserver`, which provides an `on_property_changed(IProperty&)` callback fired whenever any property on the object changes. From this callback, Element determines the appropriate `DirtyFlags` (position/size/local_transform -> Layout, z_index -> ZOrder) and accumulates them as described above. Visual dirty comes from IVisual `on_visual_changed` events, not from element properties. No per-property event subscriptions needed.
 
-**JSON and import**: constraints live in a dedicated `"ui-constraints"` section in the scene JSON. The velk-ui plugin registers a `ConstraintImportHandler` (implements `IImportHandler`) that parses this section, creating constraint objects and attaching them to their target elements.
+**JSON and import**: constraints live in a dedicated `"ui-constraints"` section, visuals in `"ui-visuals"`. Both use the same import handler pattern: the velk-ui plugin registers handlers (implementing `IImporterExtension`) that parse their section, create objects, and attach them to target elements.
 
 **Constraint-specific interfaces** (all use `VELK_INTERFACE` for animatability/binding):
 
@@ -230,12 +232,13 @@ public:
 **IElement** (implemented):
 - `position` (`PROP vec3`): layout position in parent-local space, set by the solver
 - `size` (`PROP velk::size`): layout dimensions (width, height, depth), set by the solver or constraints
-- `color` (`PROP velk::color`): RGBA color
 - `local_transform` (`RPROP mat4`, identity default): transform relative to parent, written by solver
 - `world_matrix` (`RPROP mat4`, identity default): computed by solver = `parent.world * translate(position) * local_transform`. Read-only; the solver writes it via `write_state`
 - `z_index` (`PROP int32_t`, default 0): draw order among siblings
 
-The renderer reads `world_matrix` + `size` for positioning and sizing.
+Note: `color` was removed from IElement in Round 2a.5. Visual appearance is now defined by IVisual attachments.
+
+The renderer reads `world_matrix` + `size` for positioning. It reads IVisual attachments for visual content.
 
 **Iterating constraints**: `IObjectStorage::find_attachment<IConstraint>()` returns a single match. To collect all `IConstraint` attachments, iterate via `attachment_count()` / `get_attachment(i)` and `interface_cast<IConstraint>()` each one.
 
@@ -246,12 +249,9 @@ The renderer reads `world_matrix` + `size` for positioning and sizing.
     "version": 1,
     "objects": [
         { "id": "root", "class": "velk-ui.Element" },
-        { "id": "child1", "class": "velk-ui.Element",
-          "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
-        { "id": "child2", "class": "velk-ui.Element",
-          "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
-        { "id": "child3", "class": "velk-ui.Element",
-          "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2 } } }
+        { "id": "child1", "class": "velk-ui.Element" },
+        { "id": "child2", "class": "velk-ui.Element" },
+        { "id": "child3", "class": "velk-ui.Element" }
     ],
     "hierarchies": {
         "scene": {
@@ -259,16 +259,100 @@ The renderer reads `world_matrix` + `size` for positioning and sizing.
         }
     },
     "ui-constraints": [
-        { "target": "root", "type": "stack", "axis": "vertical", "spacing": 10 },
-        { "target": "child1", "type": "fixed-size", "height": "100px" },
-        { "target": "child2", "type": "fixed-size", "height": "150px" },
-        { "target": "child2", "type": "margin", "left": "20px", "right": "20px" },
-        { "target": "child3", "type": "fixed-size", "height": "100px" }
+        { "target": "root", "type": "Stack", "properties": { "axis": 1, "spacing": 10 } },
+        { "target": "child1", "type": "FixedSize", "properties": { "height": "100px" } },
+        { "target": "child2", "type": "FixedSize", "properties": { "height": "150px" } },
+        { "target": "child3", "type": "FixedSize", "properties": { "height": "100px" } }
+    ],
+    "ui-visuals": [
+        { "target": "child1", "type": "Rect", "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
+        { "target": "child2", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
+        { "target": "child3", "type": "Rect", "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2 } } }
     ]
 }
 ```
 
 The handler parses dimension strings (`"100px"`, `"50%"`, bare number = px) into value+unit and sets them on the constraint via its specific interface (IFixedSize, IMargin, etc.).
+
+**JSON format for visuals** (`"ui-visuals"` section, handled by `VisualImportHandler`):
+
+```json
+{
+    "ui-visuals": [
+        { "target": "child1", "type": "Rect", "properties": { "color": { "r": 0.9, "g": 0.2, "b": 0.2 } } }
+    ]
+}
+```
+
+### Visual representation model
+
+An element's visual appearance is defined by **IVisual attachments**, following the same pattern as constraints. IElement is purely about layout and hierarchy. Visual rendering is a separate concern composed via attachments.
+
+**IVisual** (in velk-ui):
+
+```cpp
+class IVisual : public velk::Interface<IVisual>
+{
+public:
+    VELK_INTERFACE(
+        (PROP, velk::color, color, {}),
+        (EVT, on_visual_changed)
+    )
+    virtual velk::vector<DrawCommand> get_draw_commands(const velk::rect& bounds) = 0;
+};
+```
+
+- `color`: base color. Meaning depends on visual type (fill color for rect, text tint for text)
+- `on_visual_changed`: fired when visual state changes. Elements subscribe when the visual is attached and mark themselves `DirtyFlags::Visual`
+- `get_draw_commands(bounds)`: produces draw commands in element-local space. The renderer applies `world_matrix`. The renderer caches the result and only re-calls when `DirtyFlags::Visual` is set
+
+**Draw commands**: POD structs in a flat array. Cache-friendly, GPU-friendly, easy to batch.
+
+```cpp
+enum class DrawCommandType : uint8_t { FillRect, TexturedQuad };
+
+struct DrawCommand
+{
+    DrawCommandType type;
+    velk::rect bounds;
+    velk::color color;
+    float u0, v0, u1, v1;   // texture UVs (zeroed for FillRect)
+};
+```
+
+**Transforms are separate**: draw commands are in element-local space. The renderer applies `world_matrix`. Element moves only update transforms; cached draw commands are reused. Visual changes rebuild draw commands; transforms are unchanged.
+
+**ITextureProvider**: separate interface for visuals that need textures (e.g. glyph atlases). The renderer checks for it alongside IVisual, uploads pixel data to a GPU texture, and caches the handle.
+
+```cpp
+class ITextureProvider : public velk::Interface<ITextureProvider>
+{
+public:
+    virtual const uint8_t* get_pixels() const = 0;
+    virtual uint32_t get_texture_width() const = 0;
+    virtual uint32_t get_texture_height() const = 0;
+    virtual bool is_texture_dirty() const = 0;
+    virtual void clear_texture_dirty() = 0;
+};
+```
+
+**Dirty notification**: IVisual fires `on_visual_changed` whenever its state changes. Element subscribes to this event when the visual is attached (via `ISceneObserver::on_attached`) and unsubscribes when detached. The handler marks the element `DirtyFlags::Visual` via `scene_->notify_dirty()`. The visual never touches the scene directly.
+
+**Visual types** (implemented):
+- **RectVisual**: solid color rectangle. Produces one FillRect command filling the element bounds. In velk-ui core plugin
+- **TextVisual**: shaped text rendered as textured glyph quads. Implements IVisual + ITextureProvider + ITextVisual. Uses IFont + GlyphAtlas internally. In text plugin. Exposes `set_text(string_view, IFont&)` via the `ITextVisual` interface
+
+**GlRenderer**: two rendering pipelines. Pass 1: untextured FillRect instances (instanced quads with color). Pass 2: textured TexturedQuad instances with atlas bound (instanced quads with color + UVs). The renderer no longer subscribes to individual element properties; all dirty notification flows through Element -> Scene -> `update_visuals()`.
+
+**Decisions made during Round 2a.5**:
+- `color` removed from IElement entirely (not deprecated, removed). Visual appearance is exclusively via IVisual attachments
+- The renderer caches draw commands per element but rebuilds instance buffers from cache + world_matrix every frame. This keeps the architecture simple and handles both visual and layout changes without complex partial-update logic
+- Scene pushes ALL dirty elements to the renderer (not just Visual-dirty), because draw commands depend on element size (passed as bounds to `get_draw_commands`), which changes during layout
+- Scene registers new elements with the renderer immediately on attach (not just during `load()`), so programmatically added elements work correctly
+- The EVT accessor on IVisual returns `velk::Event` (a value wrapper), not `IEvent::Ptr`. Use `.invoke()` / `.add_handler()`, not `->invoke()`
+- `ITextVisual` interface added to text plugin's public headers to expose `set_text()` without depending on the concrete TextVisual class
+- `IFont::init_default()` added so fonts can be created and initialized without knowing about embedded font data
+- Embedded Inter Regular font data re-sourced from Google Fonts CDN (the original embedded data was corrupted HTML)
 
 **App flow with Scene**:
 1. Import JSON -> objects + hierarchy + constraints (via import handler)
@@ -304,16 +388,32 @@ Round 2a: **Scene + Core Constraints + Solver + Importer** ~~DONE~~
 - Register all new types in velk-ui plugin; plugin `post_update` drives Scene updates
 - Testable: import a scene with stack + fixed-size constraints, run solver, verify element positions/world matrices via test app
 
+Round 2a.5: **Visual Representation + Text Rendering** ~~DONE~~
+- `DrawCommand` POD struct and `DrawCommandType` enum in types.h
+- `IVisual` interface (color PROP, on_visual_changed EVT, get_draw_commands virtual)
+- `ITextureProvider` interface (pixel data, dimensions, dirty tracking)
+- `RectVisual` implementation (single FillRect command, fires on_visual_changed on color change)
+- `TextVisual` implementation (IVisual + ITextureProvider + ITextVisual, GlyphAtlas, shaped glyph quads)
+- `ITextVisual` public interface in text plugin (exposes set_text without concrete class dependency)
+- `VisualImportHandler` for `"ui-visuals"` JSON section (creates RectVisual from color data)
+- `color` removed from IElement; visual appearance exclusively via IVisual attachments
+- Element subscribes to IVisual `on_visual_changed` events in `on_attached`, marks self Visual-dirty
+- GlRenderer rewritten: two pipelines (untextured FillRect, textured TexturedQuad), draw command caching, atlas texture management, no per-property subscriptions
+- Scene updated: pushes all dirty elements to renderer, registers elements on attach
+- `IFont::init_default()` added, embedded Inter Regular font data fixed
+- JSON scenes updated: `"ui-visuals"` section replaces color on elements
+- Test app creates programmatic text element ("Hello, Velk!") with TextVisual
+- Testable: 3 colored rects + "Hello, Velk!" text visible on screen
+
 Round 2b: **Additional Constraints**
 - `IMargin`, `IPadding`, `IAlignment`, `IMinMax`, `IFitContent` interfaces
 - `Margin`, `Padding`, `Alignment`, `MinMax`, `FitContent` implementations
 - Register new types, extend import handler
 - Testable: scenes using the full constraint set
 
-Round 3: **Renderer integration + Demo**
-- Update `GlRenderer` to use `world_matrix` for positioning
-- New test scene JSON: vertical stack of three colored elements
-- Testable: visible vertical stack rendered on screen
+Round 3: **Demo polish**
+- Additional test scenes
+- Testable: multiple visual types rendered together
 
 Round 4: **Unit tests**
 - Test framework setup
@@ -323,8 +423,8 @@ Round 4: **Unit tests**
 
 ### Ahead
 
-- **2D renderer features**: instanced quads, rounded rects, gradients, clipping, custom shaders
-- **Text shaping**: freetype + harfbuzz
+- **2D renderer features**: rounded rects, gradients, clipping, custom shaders
+- **Text features**: line wrapping, multi-line, text alignment, font size/weight variants
 - **Style system**: TBD
 - **Event/input model**: hit testing, focus, keyboard/mouse
 - **Vulkan backend**: plugins/render/vk/

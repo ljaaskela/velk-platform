@@ -1,8 +1,9 @@
 #ifndef VELK_UI_INTF_SCENE_OBSERVER_H
 #define VELK_UI_INTF_SCENE_OBSERVER_H
 
-#include <velk-ui/interface/intf_scene.h>
 #include <velk/interface/intf_interface.h>
+
+#include <velk-ui/interface/intf_scene.h>
 
 namespace velk_ui {
 

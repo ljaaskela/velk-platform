@@ -1,8 +1,9 @@
 #ifndef VELK_UI_INTF_FIXED_SIZE_H
 #define VELK_UI_INTF_FIXED_SIZE_H
 
-#include <velk-ui/types.h>
 #include <velk/interface/intf_metadata.h>
+
+#include <velk-ui/types.h>
 
 namespace velk_ui {
 

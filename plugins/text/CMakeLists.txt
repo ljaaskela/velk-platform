@@ -55,9 +55,12 @@ add_library(velk_text SHARED
     src/font.cpp
     src/font_atlas.h
     src/font_atlas.cpp
+    src/visual/text_visual.h
+    src/visual/text_visual.cpp
     src/embedded/inter_regular.h
     src/embedded/inter_regular.cpp
     include/velk-ui/plugins/text/plugin.h
+    include/velk-ui/plugins/text/intf_text_visual.h
 )
 
 target_link_libraries(velk_text PRIVATE velk velk_ui freetype harfbuzz)

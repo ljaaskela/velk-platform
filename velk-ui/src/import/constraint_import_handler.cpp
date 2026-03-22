@@ -1,13 +1,13 @@
 #include "constraint_import_handler.h"
 
-#include <velk-ui/interface/constraint/intf_fixed_size.h>
-#include <velk-ui/interface/constraint/intf_stack.h>
-#include <velk-ui/plugin.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <string>
+#include <velk-ui/interface/constraint/intf_fixed_size.h>
+#include <velk-ui/interface/constraint/intf_stack.h>
+#include <velk-ui/plugin.h>
 
 namespace velk_ui {
 
@@ -15,7 +15,9 @@ dim parse_dim(velk::string_view str)
 {
     std::string s(str.data(), str.size());
 
-    if (s.empty()) return dim::none();
+    if (s.empty()) {
+        return dim::none();
+    }
 
     // Check for "px" suffix
     if (s.size() > 2 && s.compare(s.size() - 2, 2, "px") == 0) {
@@ -40,7 +42,7 @@ velk::string_view ConstraintImportHandler::collection_key() const
 }
 
 void ConstraintImportHandler::process(const velk::IImportData& data, velk::IStore&,
-                                       const velk::IImportResolver& resolver) const
+                                      const velk::IImportResolver& resolver) const
 {
     auto& velk = velk::instance();
 
@@ -49,26 +51,36 @@ void ConstraintImportHandler::process(const velk::IImportData& data, velk::IStor
 
         // Resolve target element
         auto target_id = entry.find("target").as_string();
-        if (target_id.empty()) continue;
+        if (target_id.empty()) {
+            continue;
+        }
 
         auto target_obj = resolver.resolve(target_id);
         if (!target_obj) {
-            VELK_LOG(W, "ui-constraints: target '%.*s' not found",
-                     static_cast<int>(target_id.size()), target_id.data());
+            VELK_LOG(W,
+                     "ui-constraints: target '%.*s' not found",
+                     static_cast<int>(target_id.size()),
+                     target_id.data());
             continue;
         }
 
         auto type_str = entry.find("type").as_string();
-        if (type_str.empty()) continue;
+        if (type_str.empty()) {
+            continue;
+        }
 
         auto* storage = velk::interface_cast<velk::IObjectStorage>(target_obj);
-        if (!storage) continue;
+        if (!storage) {
+            continue;
+        }
 
         auto& props = entry.find("properties");
 
         if (type_str == "Stack") {
-            auto constraint_obj = velk.create<velk::IObject>(ClassId::Stack);
-            if (!constraint_obj) continue;
+            auto constraint_obj = velk.create<velk::IObject>(ClassId::Constraint::Stack);
+            if (!constraint_obj) {
+                continue;
+            }
 
             // Parse stack properties
             auto& axis_data = props.find("axis");
@@ -89,8 +101,10 @@ void ConstraintImportHandler::process(const velk::IImportData& data, velk::IStor
             storage->add_attachment(att);
 
         } else if (type_str == "FixedSize") {
-            auto constraint_obj = velk.create<velk::IObject>(ClassId::FixedSize);
-            if (!constraint_obj) continue;
+            auto constraint_obj = velk.create<velk::IObject>(ClassId::Constraint::FixedSize);
+            if (!constraint_obj) {
+                continue;
+            }
 
             // Parse fixed size properties
             auto& w_data = props.find("width");
@@ -119,8 +133,8 @@ void ConstraintImportHandler::process(const velk::IImportData& data, velk::IStor
             storage->add_attachment(att);
 
         } else {
-            VELK_LOG(W, "ui-constraints: unknown type '%.*s'",
-                     static_cast<int>(type_str.size()), type_str.data());
+            VELK_LOG(
+                W, "ui-constraints: unknown type '%.*s'", static_cast<int>(type_str.size()), type_str.data());
         }
     }
 }

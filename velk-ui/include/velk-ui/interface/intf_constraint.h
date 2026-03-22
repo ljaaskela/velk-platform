@@ -1,10 +1,11 @@
 #ifndef VELK_UI_INTF_CONSTRAINT_H
 #define VELK_UI_INTF_CONSTRAINT_H
 
-#include <velk-ui/interface/intf_element.h>
-#include <velk-ui/types.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_interface.h>
+
+#include <velk-ui/interface/intf_element.h>
+#include <velk-ui/types.h>
 
 namespace velk_ui {
 
@@ -16,8 +17,8 @@ namespace velk_ui {
  */
 enum class ConstraintPhase : uint8_t
 {
-    Layout,     ///< Runs first. May read/write children via hierarchy.
-    Constraint  ///< Runs second. Touches only the element itself.
+    Layout,    ///< Runs first. May read/write children via hierarchy.
+    Constraint ///< Runs second. Touches only the element itself.
 };
 
 /**

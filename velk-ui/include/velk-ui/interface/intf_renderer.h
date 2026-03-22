@@ -1,10 +1,11 @@
 #ifndef VELK_UI_INTF_RENDERER_H
 #define VELK_UI_INTF_RENDERER_H
 
-#include <velk-ui/interface/intf_element.h>
 #include <velk/array_view.h>
 #include <velk/interface/intf_metadata.h>
 #include <velk/interface/intf_object.h>
+
+#include <velk-ui/interface/intf_element.h>
 
 namespace velk_ui {
 

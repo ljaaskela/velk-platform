@@ -1,14 +1,10 @@
 {
   "version": 1,
   "objects": [
-    { "id": "root", "class": "velk-ui.Element",
-      "properties": { "color": { "r": 0.1, "g": 0.1, "b": 0.1, "a": 0.0 } } },
-    { "id": "child1", "class": "velk-ui.Element",
-      "properties": { "color": { "r": 0.9, "g": 0.2, "b": 0.2 } } },
-    { "id": "child2", "class": "velk-ui.Element",
-      "properties": { "color": { "r": 0.2, "g": 0.7, "b": 0.2 } } },
-    { "id": "child3", "class": "velk-ui.Element",
-      "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } }
+    { "id": "root", "class": "velk-ui.Element" },
+    { "id": "child1", "class": "velk-ui.Element" },
+    { "id": "child2", "class": "velk-ui.Element" },
+    { "id": "child3", "class": "velk-ui.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -20,5 +16,10 @@
     { "target": "child1", "type": "FixedSize", "properties": { "height": "150px" } },
     { "target": "child2", "type": "FixedSize", "properties": { "height": "150px" } },
     { "target": "child3", "type": "FixedSize", "properties": { "height": "150px" } }
+  ],
+  "ui-visuals": [
+    { "target": "child1", "type": "Rect", "properties": { "color": { "r": 0.9, "g": 0.2, "b": 0.2 } } },
+    { "target": "child2", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.7, "b": 0.2 } } },
+    { "target": "child3", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } }
   ]
 }

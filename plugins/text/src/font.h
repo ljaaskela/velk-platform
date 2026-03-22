@@ -1,15 +1,15 @@
 #ifndef VELK_UI_TEXT_FONT_H
 #define VELK_UI_TEXT_FONT_H
 
-#include <velk-ui/interface/intf_font.h>
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
 #include <ft2build.h>
+#include <velk-ui/interface/intf_font.h>
 #include FT_FREETYPE_H
 
-#include <hb.h>
 #include <hb-ft.h>
+#include <hb.h>
 
 namespace velk_ui {
 
@@ -24,6 +24,7 @@ public:
     bool init_from_memory(const uint8_t* data, uint32_t size);
 
     // IFont
+    bool init_default() override;
     bool set_size(float size_px) override;
     float shape_text(velk::string_view text, velk::vector<IFont::GlyphPosition>& out) override;
     GlyphBitmap rasterize_glyph(uint32_t glyph_id) override;

@@ -1,12 +1,13 @@
 #ifndef VELK_UI_INTF_SCENE_H
 #define VELK_UI_INTF_SCENE_H
 
-#include <velk-ui/interface/intf_element.h>
-#include <velk-ui/interface/intf_renderer.h>
-#include <velk-ui/types.h>
 #include <velk/array_view.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_store.h>
+
+#include <velk-ui/interface/intf_element.h>
+#include <velk-ui/interface/intf_renderer.h>
+#include <velk-ui/types.h>
 
 namespace velk_ui {
 
@@ -34,7 +35,7 @@ public:
      * @brief Processes one frame: runs layout solver, collects visual changes,
      *        rebuilds the visual list if needed, and pushes changes to the renderer.
      */
-    virtual void update(const velk::UpdateInfo &info) = 0;
+    virtual void update(const velk::UpdateInfo& info) = 0;
 
     /** @brief Called by elements when a property changes. Accumulates dirty flags. */
     virtual void notify_dirty(IElement& element, DirtyFlags flags) = 0;

@@ -3,13 +3,14 @@
 
 #include "layout_solver.h"
 
+#include <velk/api/hierarchy.h>
+#include <velk/ext/object.h>
+#include <velk/vector.h>
+
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_renderer.h>
 #include <velk-ui/interface/intf_scene.h>
 #include <velk-ui/interface/intf_scene_observer.h>
-#include <velk/api/hierarchy.h>
-#include <velk/ext/object.h>
-#include <velk/vector.h>
 
 namespace velk_ui {
 
@@ -25,7 +26,7 @@ public:
     void load(velk::IStore& store) override;
     void set_renderer(IRenderer* renderer) override;
     void set_viewport(const velk::aabb& viewport) override;
-    void update(const velk::UpdateInfo &info) override;
+    void update(const velk::UpdateInfo& info) override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
     velk::array_view<IElement*> get_visual_list() override;
@@ -56,11 +57,11 @@ private:
     void ensure_hierarchy();
     void attach_element(const velk::IObject::Ptr& obj);
     void detach_element(const velk::IObject::Ptr& obj);
-    void detach_subtree(const velk::IObject::Ptr &obj);
+    void detach_subtree(const velk::IObject::Ptr& obj);
     void register_visual(IElement* elem);
     void replicate_children(velk::IHierarchy& src, const velk::IObject::Ptr& parent);
     void rebuild_visual_list();
-    void collect_visual_list(const velk::IObject::Ptr &obj);
+    void collect_visual_list(const velk::IObject::Ptr& obj);
 
     velk::Hierarchy logical_;
     LayoutSolver solver_;

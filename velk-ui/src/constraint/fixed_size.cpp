@@ -1,7 +1,8 @@
 #include "fixed_size.h"
 
-#include <velk-ui/interface/intf_element.h>
 #include <velk/api/state.h>
+
+#include <velk-ui/interface/intf_element.h>
 
 namespace velk_ui {
 
@@ -13,7 +14,9 @@ ConstraintPhase FixedSize::get_phase() const
 Constraint FixedSize::measure(const Constraint& c, IElement& element, velk::IHierarchy*)
 {
     auto state = velk::read_state<IFixedSize>(this);
-    if (!state) return c;
+    if (!state) {
+        return c;
+    }
 
     Constraint result = c;
     float avail_w = c.bounds.extent.width;

@@ -1,11 +1,11 @@
 #include "scene.h"
 
-#include <velk-ui/interface/intf_renderer.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_store.h>
 
 #include <algorithm>
+#include <velk-ui/interface/intf_renderer.h>
 
 namespace velk_ui {
 
@@ -18,9 +18,9 @@ velk::IHierarchy* get_hierarchy(velk::Hierarchy& h)
 
 } // namespace
 
-velk::vector<Scene *> &Scene::live_scenes()
+velk::vector<Scene*>& Scene::live_scenes()
 {
-    static velk::vector<Scene *> scenes;
+    static velk::vector<Scene*> scenes;
     return scenes;
 }
 
@@ -45,16 +45,24 @@ void Scene::load(velk::IStore& store)
     velk::IObject::Ptr hierarchy_obj;
     for (auto& key : hierarchy_keys) {
         hierarchy_obj = store.find(key);
-        if (hierarchy_obj) break;
+        if (hierarchy_obj) {
+            break;
+        }
     }
 
-    if (!hierarchy_obj) return;
+    if (!hierarchy_obj) {
+        return;
+    }
 
     auto* src = velk::interface_cast<velk::IHierarchy>(hierarchy_obj);
-    if (!src) return;
+    if (!src) {
+        return;
+    }
 
     auto src_root = src->root();
-    if (!src_root) return;
+    if (!src_root) {
+        return;
+    }
 
     // Replicate imported hierarchy into our scene
     set_root(src_root);
@@ -79,19 +87,22 @@ void Scene::set_viewport(const velk::aabb& viewport)
     viewport_ = viewport;
 }
 
-void Scene::update(const velk::UpdateInfo &info)
+void Scene::update(const velk::UpdateInfo& info)
 {
     auto* h = get_hierarchy(logical_);
-    if (!h) return;
+    if (!h) {
+        return;
+    }
 
-    // Clear changes from previous frame
-    velk::vector<IElement *> changes;
+    // Collect all dirty elements for this frame
+    velk::vector<IElement*> changes;
 
     // Process dirty elements, check if layout is needed
     DirtyFlags flags = DirtyFlags::None;
     for (auto* elem : dirty_elements_) {
-        flags |= elem->consume_dirty();
-        if ((flags & DirtyFlags::Visual) != DirtyFlags::None) {
+        auto f = elem->consume_dirty();
+        flags |= f;
+        if (f != DirtyFlags::None) {
             changes.push_back(elem);
         }
     }
@@ -109,7 +120,7 @@ void Scene::update(const velk::UpdateInfo &info)
     if (visual_list_dirty_) {
         rebuild_visual_list();
     }
-    // Push changes to renderer
+    // Push all dirty elements to renderer (visual, layout, or both)
     if (renderer_ && !changes.empty()) {
         renderer_->update_visuals(changes);
     }
@@ -139,6 +150,13 @@ void Scene::attach_element(const velk::IObject::Ptr& obj)
     if (observer) {
         observer->on_attached(*this);
     }
+
+    // Register with renderer if one is set
+    auto* element = velk::interface_cast<IElement>(obj);
+    if (element) {
+        register_visual(element);
+    }
+
     visual_list_dirty_ = true;
 }
 
@@ -154,7 +172,9 @@ void Scene::detach_element(const velk::IObject::Ptr& obj)
 void Scene::detach_subtree(const velk::IObject::Ptr& obj)
 {
     auto* h = get_hierarchy(logical_);
-    if (!h) return;
+    if (!h) {
+        return;
+    }
 
     velk::vector<velk::IObject::Ptr> stack;
     stack.push_back(obj);
@@ -171,7 +191,9 @@ void Scene::detach_subtree(const velk::IObject::Ptr& obj)
 
 void Scene::register_visual(IElement* elem)
 {
-    if (!renderer_ || !elem) return;
+    if (!renderer_ || !elem) {
+        return;
+    }
     renderer_->add_visual(velk::get_self<IElement>(elem));
 }
 
@@ -215,7 +237,7 @@ velk::ReturnValue Scene::add(const velk::IObject::Ptr& parent, const velk::IObje
 }
 
 velk::ReturnValue Scene::insert(const velk::IObject::Ptr& parent, size_t index,
-                                 const velk::IObject::Ptr& child)
+                                const velk::IObject::Ptr& child)
 {
     ensure_hierarchy();
 
@@ -235,8 +257,7 @@ velk::ReturnValue Scene::remove(const velk::IObject::Ptr& object)
     return rv;
 }
 
-velk::ReturnValue Scene::replace(const velk::IObject::Ptr& old_child,
-                                  const velk::IObject::Ptr& new_child)
+velk::ReturnValue Scene::replace(const velk::IObject::Ptr& old_child, const velk::IObject::Ptr& new_child)
 {
     auto rv = logical_.replace(old_child, new_child);
     if (rv == velk::ReturnValue::Success) {
@@ -281,8 +302,7 @@ size_t Scene::child_count(const velk::IObject::Ptr& object) const
     return logical_.child_count(object);
 }
 
-void Scene::for_each_child(const velk::IObject::Ptr& object, void* context,
-                            ChildVisitorFn visitor) const
+void Scene::for_each_child(const velk::IObject::Ptr& object, void* context, ChildVisitorFn visitor) const
 {
     auto h = logical_.operator velk::IHierarchy::Ptr();
     if (h) {
@@ -322,7 +342,9 @@ void Scene::collect_visual_list(const velk::IObject::Ptr& obj)
     }
 
     auto* h = get_hierarchy(logical_);
-    if (!h) return;
+    if (!h) {
+        return;
+    }
 
     auto kids = h->children_of(obj);
     std::sort(kids.begin(), kids.end(), [](const velk::IObject::Ptr& a, const velk::IObject::Ptr& b) {

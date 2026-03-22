@@ -1,13 +1,16 @@
 #ifndef VELK_UI_ELEMENT_PLUGIN_H
 #define VELK_UI_ELEMENT_PLUGIN_H
 
-#include <velk-ui/element.h>
+#include "constraint/fixed_size.h"
+#include "import/constraint_import_handler.h"
+#include "import/visual_import_handler.h"
+#include "layout/stack.h"
+#include "scene.h"
+#include "visual/rect_visual.h"
+
 #include <velk/ext/plugin.h>
 
-#include "constraint_import_handler.h"
-#include "constraint/fixed_size.h"
-#include "scene.h"
-#include "layout/stack.h"
+#include <velk-ui/element.h>
 
 namespace velk_ui {
 

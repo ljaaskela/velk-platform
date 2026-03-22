@@ -1,30 +1,30 @@
 #ifndef VELK_UI_GL_RENDERER_H
 #define VELK_UI_GL_RENDERER_H
 
-#include <velk-ui/interface/intf_renderer.h>
-#include <velk-ui/interface/intf_element.h>
 #include <velk/ext/object.h>
 
 #include <cstdint>
 #include <unordered_map>
-#include <vector>
+#include <velk-ui/interface/intf_element.h>
+#include <velk-ui/interface/intf_renderer.h>
+#include <velk-ui/interface/intf_texture_provider.h>
+#include <velk-ui/types.h>
 
 namespace velk_ui {
 
-/// Per-instance GPU data. 32 bytes, matches IElement::State layout.
-struct InstanceData
+/// Per-instance GPU data for untextured rectangles.
+struct RectInstanceData
 {
     float x, y, width, height;
     velk::color color;
 };
 
-/// CPU-side bookkeeping per visual slot.
-struct VisualEntry
+/// Per-instance GPU data for textured quads (glyphs).
+struct TextInstanceData
 {
-    IElement::Ptr element;
-    velk::vector<velk::IFunction::ConstPtr> listeners;
-    bool dirty = false;
-    bool alive = false;
+    float x, y, width, height;
+    velk::color color;
+    float u0, v0, u1, v1;
 };
 
 class GlRenderer : public velk::ext::Object<GlRenderer, IRenderer>
@@ -44,19 +44,45 @@ public:
     void shutdown() override;
 
 private:
-    void sync_slot(uint32_t slot, IElement* element);
+    /// CPU-side bookkeeping per registered element.
+    struct ElementEntry
+    {
+        IElement::Ptr element;
+        velk::vector<DrawCommand> cached_commands;
+        ITextureProvider* texture_provider = nullptr;
+        bool alive = false;
 
-    velk::vector<InstanceData> cpu_buffer_;
-    velk::vector<VisualEntry> entries_;
+        bool is_valid() const { return alive && element; }
+    };
+
+    void rebuild_commands(uint32_t slot);
+    void rebuild_instances();
+    void upload_atlas();
+
+    velk::vector<ElementEntry> entries_;
     velk::vector<uint32_t> free_slots_;
-    velk::vector<uint32_t> dirty_slots_;
     std::unordered_map<IElement*, uint32_t> object_to_slot_;
 
-    uint32_t vao_ = 0;
-    uint32_t vbo_quad_ = 0;
-    uint32_t vbo_instance_ = 0;
-    uint32_t shader_program_ = 0;
-    int uniform_projection_ = -1;
+    // Rect batch (untextured)
+    uint32_t rect_vao_ = 0;
+    uint32_t rect_vbo_ = 0;
+    uint32_t rect_program_ = 0;
+    int rect_proj_uniform_ = -1;
+
+    // Text batch (textured)
+    uint32_t text_vao_ = 0;
+    uint32_t text_vbo_ = 0;
+    uint32_t text_program_ = 0;
+    int text_proj_uniform_ = -1;
+    int text_atlas_uniform_ = -1;
+    uint32_t atlas_texture_ = 0;
+
+    // Instance data rebuilt when dirty
+    velk::vector<RectInstanceData> rect_instances_;
+    velk::vector<TextInstanceData> text_instances_;
+
+    bool instances_dirty_ = true;
+    bool atlas_dirty_ = false;
     bool initialized_ = false;
 };
 
