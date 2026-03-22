@@ -19,10 +19,10 @@ velk::ReturnValue VelkUiPlugin::shutdown(velk::IVelk&)
     return velk::ReturnValue::Success;
 }
 
-void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo&)
+void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo &info)
 {
     for (auto* scene : Scene::live_scenes()) {
-        scene->update();
+        scene->update(info.info);
     }
 }
 

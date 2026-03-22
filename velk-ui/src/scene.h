@@ -25,7 +25,7 @@ public:
     void load(velk::IStore& store) override;
     void set_renderer(IRenderer* renderer) override;
     void set_viewport(const velk::aabb& viewport) override;
-    void update() override;
+    void update(const velk::UpdateInfo &info) override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
     velk::array_view<IElement*> get_visual_list() override;
@@ -70,7 +70,6 @@ private:
 
     velk::vector<IElement*> dirty_elements_;
     velk::vector<IElement*> visual_list_;
-    velk::vector<IElement*> changes_;
     bool visual_list_dirty_ = true;
     bool initialized_ = false;
 };

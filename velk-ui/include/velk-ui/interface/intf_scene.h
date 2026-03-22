@@ -34,7 +34,7 @@ public:
      * @brief Processes one frame: runs layout solver, collects visual changes,
      *        rebuilds the visual list if needed, and pushes changes to the renderer.
      */
-    virtual void update() = 0;
+    virtual void update(const velk::UpdateInfo &info) = 0;
 
     /** @brief Called by elements when a property changes. Accumulates dirty flags. */
     virtual void notify_dirty(IElement& element, DirtyFlags flags) = 0;

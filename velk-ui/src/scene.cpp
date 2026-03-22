@@ -63,7 +63,6 @@ void Scene::load(velk::IStore& store)
     // Register all elements with renderer if one is set
     if (renderer_) {
         rebuild_visual_list();
-        visual_list_dirty_ = false;
         for (auto* elem : visual_list_) {
             register_visual(elem);
         }
@@ -80,44 +79,39 @@ void Scene::set_viewport(const velk::aabb& viewport)
     viewport_ = viewport;
 }
 
-void Scene::update()
+void Scene::update(const velk::UpdateInfo &info)
 {
     auto* h = get_hierarchy(logical_);
     if (!h) return;
 
     // Clear changes from previous frame
-    changes_.clear();
+    velk::vector<IElement *> changes;
 
     // Process dirty elements, check if layout is needed
-    bool needs_layout = false;
+    DirtyFlags flags = DirtyFlags::None;
     for (auto* elem : dirty_elements_) {
-        DirtyFlags flags = elem->consume_dirty();
-        if ((flags & DirtyFlags::Layout) != DirtyFlags::None) {
-            needs_layout = true;
-        }
+        flags |= elem->consume_dirty();
         if ((flags & DirtyFlags::Visual) != DirtyFlags::None) {
-            changes_.push_back(elem);
-        }
-        if ((flags & DirtyFlags::ZOrder) != DirtyFlags::None) {
-            visual_list_dirty_ = true;
+            changes.push_back(elem);
         }
     }
+
     dirty_elements_.clear();
 
-    // Run layout solver only when needed
-    if (needs_layout) {
+    if ((flags & DirtyFlags::Layout) != DirtyFlags::None) {
+        // Layout dirty
         solver_.solve(*h, viewport_);
     }
-
-    // Rebuild visual list if needed
+    if ((flags & DirtyFlags::ZOrder) != DirtyFlags::None) {
+        // Draw order dirty
+        visual_list_dirty_ = true;
+    }
     if (visual_list_dirty_) {
         rebuild_visual_list();
-        visual_list_dirty_ = false;
     }
-
     // Push changes to renderer
-    if (renderer_ && !changes_.empty()) {
-        renderer_->update_visuals({changes_.data(), changes_.size()});
+    if (renderer_ && !changes.empty()) {
+        renderer_->update_visuals(changes);
     }
 }
 
@@ -314,6 +308,7 @@ velk::IHierarchy::Node Scene::node_of(const velk::IObject::Ptr& object) const
 void Scene::rebuild_visual_list()
 {
     visual_list_.clear();
+    visual_list_dirty_ = false;
     if (auto r = root()) {
         collect_visual_list(r);
     }
