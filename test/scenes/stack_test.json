@@ -11,15 +11,12 @@
       "root": ["child1", "child2", "child3"]
     }
   },
-  "ui-constraints": [
-    { "target": "root",   "type": "Stack", "properties": { "axis": 1, "spacing": 10 } },
-    { "target": "child1", "type": "FixedSize", "properties": { "height": "150px" } },
-    { "target": "child2", "type": "FixedSize", "properties": { "height": "150px" } },
-    { "target": "child3", "type": "FixedSize", "properties": { "height": "150px" } }
-  ],
-  "ui-visuals": [
-    { "target": "child1", "type": "Rect", "properties": { "color": { "r": 0.9, "g": 0.2, "b": 0.2 } } },
-    { "target": "child2", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.7, "b": 0.2 } } },
-    { "target": "child3", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } }
+  "attachments": [
+    { "targets": ["root"],            "class": "velk-ui.Stack",     "properties": { "axis": 1, "spacing": 10 } },
+    { "targets": ["child1", "child3"], "class": "velk-ui.FixedSize", "properties": { "height": "150px" } },
+    { "targets": ["child2"],          "class": "velk-ui.FixedSize", "properties": { "height": "200px" } },
+    { "targets": ["child1"],          "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.9, "g": 0.2, "b": 0.2 } } },
+    { "targets": ["child2"],          "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.2, "g": 0.7, "b": 0.2 } } },
+    { "targets": ["child3"],          "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } }
   ]
 }

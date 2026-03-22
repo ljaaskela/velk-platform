@@ -10,12 +10,10 @@ add_library(velk_ui SHARED
     src/layout/stack.cpp
     src/constraint/fixed_size.h
     src/constraint/fixed_size.cpp
-    src/import/constraint_import_handler.h
-    src/import/constraint_import_handler.cpp
     src/visual/rect_visual.h
     src/visual/rect_visual.cpp
-    src/import/visual_import_handler.h
-    src/import/visual_import_handler.cpp
+    src/import/dim_type_extension.h
+    src/import/dim_type_extension.cpp
     include/velk-ui/interface/intf_element.h
     include/velk-ui/interface/intf_font.h
     include/velk-ui/interface/intf_renderer.h

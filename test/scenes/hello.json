@@ -11,9 +11,9 @@
       "properties": { "position": { "x": 250, "y": 550 },
                        "size": { "width": 300, "height": 100 } } }
   ],
-  "ui-visuals": [
-    { "target": "r1", "type": "Rect", "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
-    { "target": "r2", "type": "Rect", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
-    { "target": "r3", "type": "Rect", "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2, "a": 0.7 } } }
+  "attachments": [
+    { "targets": ["r1"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 1.0, "g": 0.2, "b": 0.2 } } },
+    { "targets": ["r2"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.2, "g": 0.3, "b": 0.9 } } },
+    { "targets": ["r3"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.1, "g": 0.8, "b": 0.2, "a": 0.7 } } }
   ]
 }

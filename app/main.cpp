@@ -132,6 +132,9 @@ int main(int argc, char* argv[])
     auto store = velk::Store(import_result.store);
 
     VELK_LOG(I, "Imported %zu objects from %s", store.object_count(), scene_path.c_str());
+    for (auto& err : import_result.errors) {
+        VELK_LOG(E, "Import error: %s", err.c_str());
+    }
 
     // Create scene, load from store, wire up renderer and viewport
     auto scene_obj = velk.create<velk::IObject>(velk_ui::ClassId::Scene);

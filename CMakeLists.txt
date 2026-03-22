@@ -45,7 +45,7 @@ set(GLFW_EXTRACT_DIR "${CMAKE_BINARY_DIR}/_deps/glfw-src")
 if(NOT EXISTS "${GLFW_EXTRACT_DIR}/CMakeLists.txt")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
     execute_process(
-        COMMAND ${CMAKE_COMMAND} -E tar xf "${CMAKE_SOURCE_DIR}/third_party/glfw-3.4.zip"
+        COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_SOURCE_DIR}/third_party/glfw-3.4.tar.gz"
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/_deps"
     )
     # The zip extracts to glfw-3.4/; rename to glfw-src

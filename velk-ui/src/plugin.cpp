@@ -1,5 +1,7 @@
 #include "plugin.h"
 
+#include <velk/ext/any.h>
+
 namespace velk_ui {
 
 velk::ReturnValue VelkUiPlugin::initialize(velk::IVelk& velk, velk::PluginConfig& config)
@@ -10,9 +12,9 @@ velk::ReturnValue VelkUiPlugin::initialize(velk::IVelk& velk, velk::PluginConfig
     rv &= velk::register_type<Scene>(velk);
     rv &= velk::register_type<Stack>(velk);
     rv &= velk::register_type<FixedSize>(velk);
-    rv &= velk::register_type<ConstraintImportHandler>(velk);
     rv &= velk::register_type<RectVisual>(velk);
-    rv &= velk::register_type<VisualImportHandler>(velk);
+    rv &= velk::register_type<DimTypeExtension>(velk);
+    rv &= velk::register_type<velk::ext::AnyValue<dim>>(velk);
     return rv;
 }
 
