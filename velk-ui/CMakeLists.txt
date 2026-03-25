@@ -13,6 +13,7 @@ add_library(velk_ui SHARED
     src/constraint/fixed_size.cpp
     src/visual/rect_visual.h
     src/visual/rect_visual.cpp
+    src/material/shader_material.h
     src/import/dim_type_extension.h
     src/import/dim_type_extension.cpp
     include/velk-ui/interface/intf_element.h
@@ -29,9 +30,12 @@ add_library(velk_ui SHARED
     include/velk-ui/api/constraint/fixed_size.h
     include/velk-ui/api/constraint/stack.h
     include/velk-ui/api/element.h
+    include/velk-ui/api/material/shader.h
     include/velk-ui/api/scene.h
     include/velk-ui/api/trait.h
+    include/velk-ui/api/visual.h
     include/velk-ui/api/visual/rect.h
+    include/velk-ui/interface/intf_material.h
     include/velk-ui/interface/intf_trait.h
     include/velk-ui/plugin.h
     include/velk-ui/types.h

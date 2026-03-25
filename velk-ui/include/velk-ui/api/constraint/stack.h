@@ -25,9 +25,7 @@ public:
     Stack() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IStack. */
-    explicit Stack(velk::IObject::Ptr obj)
-        : Trait(obj && interface_cast<IStack>(obj) ? std::move(obj) : velk::IObject::Ptr{})
-    {}
+    explicit Stack(velk::IObject::Ptr obj) : Trait(check_object<IStack>(obj)) {}
 
     /** @brief Wraps an existing IStack pointer. */
     explicit Stack(IStack::Ptr s) : Trait(interface_pointer_cast<velk::IObject>(s)) {}

@@ -27,9 +27,7 @@ public:
     Scene() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IScene. */
-    explicit Scene(velk::IObject::Ptr obj)
-        : velk::Hierarchy(obj && interface_cast<IScene>(obj) ? std::move(obj) : velk::IObject::Ptr{})
-    {}
+    explicit Scene(velk::IObject::Ptr obj) : velk::Hierarchy(check_object<IScene>(obj)) {}
 
     /** @brief Wraps an existing IScene pointer. */
     explicit Scene(IScene::Ptr scene) : velk::Hierarchy(interface_pointer_cast<velk::IObject>(scene)) {}

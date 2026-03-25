@@ -30,6 +30,13 @@ inline constexpr velk::Uid Rect{"e3a7b1c2-d4f5-4e6a-8b9c-0d1e2f3a4b5c"};
 
 } // namespace Visual
 
+namespace Material {
+
+/** @brief Custom fragment shader material. */
+inline constexpr velk::Uid Shader{"d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a"};
+
+} // namespace Material
+
 } // namespace ClassId
 
 namespace PluginId {

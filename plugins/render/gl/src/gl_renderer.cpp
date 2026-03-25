@@ -1,11 +1,13 @@
 #include "gl_renderer.h"
 
+#include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <cstring>
 #include <glad/gl.h>
+#include <velk-ui/interface/intf_material.h>
 #include <velk-ui/interface/intf_visual.h>
 
 namespace velk_ui {
@@ -332,6 +334,30 @@ void GlRenderer::render()
         glBindVertexArray(0);
     }
 
+    // Pass 1b: custom shader rectangles (one draw call per rect)
+    for (auto& csr : custom_shader_rects_) {
+        glBindBuffer(GL_ARRAY_BUFFER, rect_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(sizeof(RectInstanceData)),
+                     &csr.instance,
+                     GL_STREAM_DRAW);
+
+        glUseProgram(csr.program);
+        auto proj_loc = glGetUniformLocation(csr.program, "u_projection");
+        glUniformMatrix4fv(proj_loc, 1, GL_FALSE, projection);
+
+        // Pass element rect as uniform for SDF/procedural effects
+        auto rect_loc = glGetUniformLocation(csr.program, "u_rect");
+        if (rect_loc >= 0) {
+            glUniform4f(rect_loc, csr.instance.x, csr.instance.y,
+                        csr.instance.width, csr.instance.height);
+        }
+
+        glBindVertexArray(rect_vao_);
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 1);
+        glBindVertexArray(0);
+    }
+
     // Pass 2: textured quads (text)
     if (!text_instances_.empty()) {
         glBindBuffer(GL_ARRAY_BUFFER, text_vbo_);
@@ -372,6 +398,12 @@ void GlRenderer::shutdown()
     rect_instances_.clear();
     text_instances_.clear();
 
+    for (auto& entry : entries_) {
+        if (entry.custom_program) {
+            glDeleteProgram(entry.custom_program);
+            entry.custom_program = 0;
+        }
+    }
     if (rect_program_) {
         glDeleteProgram(rect_program_);
         rect_program_ = 0;
@@ -413,6 +445,10 @@ void GlRenderer::rebuild_commands(uint32_t slot)
 
     entry.cached_commands.clear();
     entry.texture_provider = nullptr;
+    if (entry.custom_program) {
+        glDeleteProgram(entry.custom_program);
+        entry.custom_program = 0;
+    }
 
     auto* storage = interface_cast<velk::IObjectStorage>(entry.element);
     if (!storage) {
@@ -435,6 +471,20 @@ void GlRenderer::rebuild_commands(uint32_t slot)
             for (auto& cmd : commands) {
                 entry.cached_commands.push_back(cmd);
             }
+
+            // Check for custom material shader via state
+            auto vstate = velk::read_state<IVisual>(visual);
+            auto mat_obj = (vstate && vstate->paint) ? vstate->paint.get() : velk::IObject::Ptr{};
+            auto* mat = mat_obj ? interface_cast<IMaterial>(mat_obj) : nullptr;
+            if (mat) {
+                auto mstate = velk::read_state<IMaterial>(mat);
+                if (mstate && !mstate->fragment_source.empty()) {
+                    auto prog = build_program(rect_vertex_src, mstate->fragment_source.c_str());
+                    if (prog) {
+                        entry.custom_program = prog;
+                    }
+                }
+            }
         }
 
         // Cache texture provider pointer (avoids scanning all entries every frame)
@@ -449,6 +499,7 @@ void GlRenderer::rebuild_instances()
 {
     rect_instances_.clear();
     text_instances_.clear();
+    custom_shader_rects_.clear();
 
     for (auto& entry : entries_) {
         if (!entry.is_valid()) {
@@ -472,7 +523,12 @@ void GlRenderer::rebuild_instances()
                 inst.width = cmd.bounds.width;
                 inst.height = cmd.bounds.height;
                 inst.color = cmd.color;
-                rect_instances_.push_back(inst);
+
+                if (entry.custom_program) {
+                    custom_shader_rects_.push_back({inst, entry.custom_program});
+                } else {
+                    rect_instances_.push_back(inst);
+                }
             } else if (cmd.type == DrawCommandType::TexturedQuad) {
                 TextInstanceData inst;
                 inst.x = wx + cmd.bounds.x;
@@ -570,6 +626,10 @@ void GlRenderer::remove_visual(VisualId id)
     }
 
     object_to_slot_.erase(entry.element.get());
+    if (entry.custom_program) {
+        glDeleteProgram(entry.custom_program);
+        entry.custom_program = 0;
+    }
     entry.element = nullptr;
     entry.cached_commands.clear();
     entry.texture_provider = nullptr;

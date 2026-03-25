@@ -25,9 +25,7 @@ public:
     FixedSize() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IFixedSize. */
-    explicit FixedSize(velk::IObject::Ptr obj)
-        : Trait(interface_cast<IFixedSize>(obj) ? std::move(obj) : velk::IObject::Ptr{})
-    {}
+    explicit FixedSize(velk::IObject::Ptr obj) : Trait(check_object<IFixedSize>(obj)) {}
 
     /** @brief Wraps an existing IFixedSize pointer. */
     explicit FixedSize(IFixedSize::Ptr f) : Trait(interface_pointer_cast<velk::IObject>(f)) {}

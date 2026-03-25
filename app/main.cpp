@@ -1,3 +1,4 @@
+#include <velk/api/object_ref.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
 
@@ -5,7 +6,9 @@
 #include <GLFW/glfw3.h>
 #include <velk-ui/api/constraint/fixed_size.h>
 #include <velk-ui/api/element.h>
+#include <velk-ui/api/material/shader.h>
 #include <velk-ui/api/scene.h>
+#include <velk-ui/api/visual/rect.h>
 #include <velk-ui/plugins/gl/plugin.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
@@ -84,6 +87,33 @@ int main(int argc, char* argv[])
     glfwSetWindowUserPointer(window, renderer.get());
     glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
 
+    auto root = scene.root();
+    auto child3 = scene.child_at(root, 2);
+    // Apply a gradient shader to the blue rect (child3)
+    {
+        auto visual = child3.find_trait<velk_ui::IVisual>();
+        if (visual) {
+            auto mat = velk_ui::material::create_shader();
+            mat.set_fragment_source(R"(
+                #version 330 core
+                in vec4 v_color;
+                out vec4 frag_color;
+                uniform vec4 u_rect;
+                void main()
+                {
+                    float t = (gl_FragCoord.x - u_rect.x) / max(u_rect.z, 1.0);
+                    vec3 top = vec3(0.1, 0.4, 0.9);
+                    vec3 bot = vec3(0.9, 0.2, 0.6);
+                    frag_color = vec4(mix(top, bot, t), 1.0);
+                }
+            )");
+            // Set paint via state write
+            velk::write_state<velk_ui::IVisual>(
+                visual, [&](velk_ui::IVisual::State& s) { s.paint = velk::create_object_ref(mat.get()); });
+            VELK_LOG(I, "Paint set on child2, mat=%p", static_cast<void*>(mat.get().get()));
+        }
+    }
+
     // Programmatically create a text element with "Hello, Velk!"
     {
         auto font = velk_ui::create_font();
@@ -93,7 +123,9 @@ int main(int argc, char* argv[])
             tv.set_text("Hello, Velk!");
             tv.set_color(velk::color::white());
 
-            auto text_elem = velk_ui::create_element();
+            child3.add_trait(tv);
+
+            /*auto text_elem = velk_ui::create_element();
 
             auto fs = velk_ui::constraint::create_fixed_size();
             fs.set_size(velk_ui::dim::px(400.f), velk_ui::dim::px(50.f));
@@ -103,7 +135,7 @@ int main(int argc, char* argv[])
 
             scene.add(scene.root(), text_elem);
 
-            VELK_LOG(I, "Text element added: \"Hello, Velk!\"");
+            VELK_LOG(I, "Text element added: \"Hello, Velk!\"");*/
         }
     }
 

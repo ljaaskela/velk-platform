@@ -2,6 +2,7 @@
 #define VELK_UI_INTF_VISUAL_H
 
 #include <velk/api/math_types.h>
+#include <velk/api/object_ref.h>
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
@@ -22,8 +23,9 @@ class IVisual : public velk::Interface<IVisual, ITrait>
 {
 public:
     VELK_INTERFACE(
-        (PROP, velk::color, color, {}),  ///< Base color. Fill color for rect, text color for text.
-        (EVT, on_visual_changed)         ///< Fired when visual state changes (color, text, etc.).
+        (PROP, velk::color, color, {}),        ///< Base color. Used when no paint is set.
+        (PROP, velk::ObjectRef, paint, {}),    ///< Optional IMaterial reference. Overrides color when set.
+        (EVT, on_visual_changed)               ///< Fired when visual state changes (color, text, etc.).
     )
 
     /**

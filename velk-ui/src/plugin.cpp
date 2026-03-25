@@ -4,6 +4,7 @@
 #include "element.h"
 #include "import/dim_type_extension.h"
 #include "layout/stack.h"
+#include "material/shader_material.h"
 #include "scene.h"
 #include "visual/rect_visual.h"
 
@@ -20,6 +21,7 @@ velk::ReturnValue VelkUiPlugin::initialize(velk::IVelk& velk, velk::PluginConfig
     rv &= velk::register_type<Stack>(velk);
     rv &= velk::register_type<FixedSize>(velk);
     rv &= velk::register_type<RectVisual>(velk);
+    rv &= velk::register_type<ShaderMaterial>(velk);
     rv &= velk::register_type<DimTypeExtension>(velk);
     rv &= velk::register_type<velk::ext::AnyValue<dim>>(velk);
     return rv;

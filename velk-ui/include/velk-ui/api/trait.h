@@ -20,9 +20,7 @@ public:
     Trait() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement ITrait. */
-    explicit Trait(velk::IObject::Ptr obj)
-        : Object(interface_cast<ITrait>(obj) ? std::move(obj) : velk::IObject::Ptr{})
-    {}
+    explicit Trait(velk::IObject::Ptr obj) : Object(check_object<ITrait>(obj)) {}
 
     explicit Trait(ITrait::Ptr t) : velk::Object(interface_pointer_cast<velk::IObject>(t)) {}
 

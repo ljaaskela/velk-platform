@@ -44,12 +44,20 @@ public:
     void shutdown() override;
 
 private:
+    /// A rect draw command with a custom shader program.
+    struct CustomShaderRect
+    {
+        RectInstanceData instance;
+        uint32_t program = 0;
+    };
+
     /// CPU-side bookkeeping per registered element.
     struct ElementEntry
     {
         IElement::Ptr element;
         velk::vector<DrawCommand> cached_commands;
         ITextureProvider* texture_provider = nullptr;
+        uint32_t custom_program = 0;  ///< Compiled custom shader, 0 = use default.
         bool alive = false;
 
         bool is_valid() const { return alive && element; }
@@ -80,6 +88,7 @@ private:
     // Instance data rebuilt when dirty
     velk::vector<RectInstanceData> rect_instances_;
     velk::vector<TextInstanceData> text_instances_;
+    velk::vector<CustomShaderRect> custom_shader_rects_;
 
     bool instances_dirty_ = true;
     bool atlas_dirty_ = false;
