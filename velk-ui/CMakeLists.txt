@@ -1,6 +1,7 @@
 add_library(velk_ui SHARED
     src/plugin.h
     src/plugin.cpp
+    src/element.h
     src/element.cpp
     src/scene.h
     src/scene.cpp
@@ -25,12 +26,18 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/intf_visual.h
     include/velk-ui/interface/intf_texture_provider.h
     include/velk-ui/ext/visual.h
-    include/velk-ui/element.h
+    include/velk-ui/api/constraint/fixed_size.h
+    include/velk-ui/api/constraint/stack.h
+    include/velk-ui/api/element.h
+    include/velk-ui/api/scene.h
+    include/velk-ui/api/trait.h
+    include/velk-ui/api/visual/rect.h
+    include/velk-ui/interface/intf_trait.h
     include/velk-ui/plugin.h
     include/velk-ui/types.h
 )
 
-target_link_libraries(velk_ui PRIVATE velk)
+target_link_libraries(velk_ui PRIVATE velk velk_importer)
 
 target_include_directories(velk_ui
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

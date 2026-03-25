@@ -4,21 +4,6 @@ add_executable(velk_ui_app
 
 target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_gl velk_text glfw)
 
-# Copy velk DLLs to output directory on every build (always runs so rebuilt
-# velk DLLs are picked up even when velk_ui_app itself doesn't need relinking)
-set(VELK_BIN_DIR "${CMAKE_SOURCE_DIR}/../velk/build/bin/$<CONFIG>")
-
-add_custom_target(copy_velk_dlls ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${VELK_BIN_DIR}/velk.dll"
-        "$<TARGET_FILE_DIR:velk_ui_app>/velk.dll"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${VELK_BIN_DIR}/velk_importer.dll"
-        "$<TARGET_FILE_DIR:velk_ui_app>/velk_importer.dll"
-    COMMENT "Copying velk.dll and velk_importer.dll to output directory"
-)
-add_dependencies(copy_velk_dlls velk_ui_app)
-
 # Copy scene files to output directory
 add_custom_command(TARGET velk_ui_app POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:velk_ui_app>/scenes"

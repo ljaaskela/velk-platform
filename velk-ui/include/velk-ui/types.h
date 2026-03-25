@@ -34,7 +34,7 @@ enum class DirtyFlags : uint8_t
     None = 0,
     Layout = 1 << 0,
     Visual = 1 << 1,
-    ZOrder = 1 << 2,
+    DrawOrder = 1 << 2,
     All = 0xff,
 };
 

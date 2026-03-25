@@ -27,7 +27,7 @@ struct ChildInfo
 
 void collect_constraints(velk::IObject* obj, velk::vector<IConstraint*>& out)
 {
-    auto* storage = velk::interface_cast<velk::IObjectStorage>(obj);
+    auto* storage = interface_cast<velk::IObjectStorage>(obj);
     if (!storage) {
         return;
     }
@@ -35,7 +35,7 @@ void collect_constraints(velk::IObject* obj, velk::vector<IConstraint*>& out)
     static constexpr velk::AttachmentQuery query{IConstraint::UID, {}};
     auto matches = storage->find_attachments(query);
     for (auto& att : matches) {
-        auto* constraint = velk::interface_cast<IConstraint>(att);
+        auto* constraint = interface_cast<IConstraint>(att);
         if (constraint) {
             out.push_back(constraint);
         }
@@ -64,7 +64,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy* hier
     uint8_t axis = state->axis; // 0 = horizontal, 1 = vertical
     float spacing = state->spacing;
 
-    auto* obj = velk::interface_cast<velk::IObject>(&element);
+    auto* obj = interface_cast<velk::IObject>(&element);
     if (!obj) {
         return;
     }
@@ -86,7 +86,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy* hier
     for (auto& child_ptr : children) {
         ChildInfo info;
         info.obj = child_ptr;
-        info.element = velk::interface_cast<IElement>(child_ptr);
+        info.element = interface_cast<IElement>(child_ptr);
         if (!info.element) {
             continue;
         }

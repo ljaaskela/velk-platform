@@ -22,12 +22,13 @@ public:
     void on_attached(IScene& scene) override;
     void on_detached(IScene& scene) override;
 
+    velk::shared_ptr<IScene> get_scene() const override { return scene_.lock(); }
     DirtyFlags consume_dirty() override;
 
 private:
     void subscribe_visuals();
 
-    IScene* scene_ = nullptr;
+    IScene::WeakPtr scene_;
     DirtyFlags pending_dirty_ = DirtyFlags::None;
     velk::vector<velk::ScopedHandler> visual_subs_;
 };

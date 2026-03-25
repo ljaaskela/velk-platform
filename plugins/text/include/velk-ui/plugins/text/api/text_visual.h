@@ -1,0 +1,75 @@
+#ifndef VELK_UI_TEXT_API_TEXT_VISUAL_H
+#define VELK_UI_TEXT_API_TEXT_VISUAL_H
+
+#include <velk/api/state.h>
+
+#include <velk-ui/api/trait.h>
+#include <velk-ui/interface/intf_visual.h>
+#include <velk-ui/plugins/text/api/font.h>
+#include <velk-ui/plugins/text/intf_text_visual.h>
+#include <velk-ui/plugins/text/plugin.h>
+
+namespace velk_ui {
+
+/**
+ * @brief Convenience wrapper around ITextVisual.
+ *
+ * Inherits Trait so it can be attached to elements via add_trait().
+ *
+ *   auto tv = visual::create_text();
+ *   tv.set_font(font);
+ *   tv.set_text("Hello!");
+ *   tv.set_color(velk::color::white());
+ */
+class TextVisual : public Trait
+{
+public:
+    /** @brief Default-constructed TextVisual wraps no object. */
+    TextVisual() = default;
+
+    /** @brief Wraps an existing IObject pointer, rejected if it does not implement ITextVisual. */
+    explicit TextVisual(velk::IObject::Ptr obj)
+        : Trait(obj && interface_cast<ITextVisual>(obj) ? std::move(obj) : velk::IObject::Ptr{})
+    {}
+
+    /** @brief Wraps an existing ITextVisual pointer. */
+    explicit TextVisual(ITextVisual::Ptr t) : Trait(interface_pointer_cast<velk::IObject>(t)) {}
+
+    /** @brief Implicit conversion to ITextVisual::Ptr. */
+    operator ITextVisual::Ptr() const { return as_ptr<ITextVisual>(); }
+
+    /** @brief Sets the font used for shaping and rasterization. */
+    void set_font(const Font& font)
+    {
+        with<ITextVisual>([&](auto& tv) { tv.set_font(font); });
+    }
+
+    /** @brief Returns the text content. */
+    auto get_text() const { return read_state_value<ITextVisual>(&ITextVisual::State::text); }
+
+    /** @brief Sets the text content. */
+    void set_text(velk::string_view text)
+    {
+        with<ITextVisual>([&](auto& tv) { tv.text().set_value(velk::string(text)); });
+    }
+
+    /** @brief Returns the base color. */
+    auto get_color() const { return read_state_value<IVisual>(&IVisual::State::color); }
+
+    /** @brief Sets the base color. */
+    void set_color(const velk::color& v) { write_state_value<IVisual>(&IVisual::State::color, v); }
+};
+
+namespace visual {
+
+/** @brief Creates a new TextVisual. */
+inline TextVisual create_text()
+{
+    return TextVisual(velk::instance().create<velk::IObject>(ClassId::Visual::Text));
+}
+
+} // namespace visual
+
+} // namespace velk_ui
+
+#endif // VELK_UI_TEXT_API_TEXT_VISUAL_H

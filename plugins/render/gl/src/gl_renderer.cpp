@@ -414,7 +414,7 @@ void GlRenderer::rebuild_commands(uint32_t slot)
     entry.cached_commands.clear();
     entry.texture_provider = nullptr;
 
-    auto* storage = velk::interface_cast<velk::IObjectStorage>(entry.element);
+    auto* storage = interface_cast<velk::IObjectStorage>(entry.element);
     if (!storage) {
         return;
     }
@@ -429,7 +429,7 @@ void GlRenderer::rebuild_commands(uint32_t slot)
     for (size_t i = 0; i < storage->attachment_count(); ++i) {
         auto att = storage->get_attachment(i);
 
-        auto* visual = velk::interface_cast<IVisual>(att);
+        auto* visual = interface_cast<IVisual>(att);
         if (visual) {
             auto commands = visual->get_draw_commands(local_rect);
             for (auto& cmd : commands) {
@@ -438,7 +438,7 @@ void GlRenderer::rebuild_commands(uint32_t slot)
         }
 
         // Cache texture provider pointer (avoids scanning all entries every frame)
-        auto* tp = velk::interface_cast<ITextureProvider>(att);
+        auto* tp = interface_cast<ITextureProvider>(att);
         if (tp) {
             entry.texture_provider = tp;
         }

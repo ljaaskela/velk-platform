@@ -3,6 +3,7 @@
 
 #include "layout_solver.h"
 
+#include <velk/api/event.h>
 #include <velk/api/hierarchy.h>
 #include <velk/ext/object.h>
 #include <velk/vector.h>
@@ -23,9 +24,9 @@ public:
     ~Scene() override;
 
     // IScene
+    velk::IFuture::Ptr load_from(velk::string_view path) override;
     void load(velk::IStore& store) override;
-    void set_renderer(IRenderer* renderer) override;
-    void set_viewport(const velk::aabb& viewport) override;
+    void set_renderer(const IRenderer::Ptr& renderer) override;
     void update(const velk::UpdateInfo& info) override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
@@ -66,12 +67,14 @@ private:
     velk::Hierarchy logical_;
     LayoutSolver solver_;
 
-    IRenderer* renderer_ = nullptr;
-    velk::aabb viewport_{};
+    IRenderer::Ptr renderer_;
+    velk::vector<velk::ScopedHandler> renderer_subs_;
+
+    void set_dirty(DirtyFlags flags) { dirty_ |= flags; }
 
     velk::vector<IElement*> dirty_elements_;
     velk::vector<IElement*> visual_list_;
-    bool visual_list_dirty_ = true;
+    DirtyFlags dirty_ = DirtyFlags::All;
     bool initialized_ = false;
 };
 

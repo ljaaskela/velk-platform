@@ -59,6 +59,8 @@ add_library(velk_text SHARED
     src/visual/text_visual.cpp
     src/embedded/inter_regular.h
     src/embedded/inter_regular.cpp
+    include/velk-ui/plugins/text/api/font.h
+    include/velk-ui/plugins/text/api/text_visual.h
     include/velk-ui/plugins/text/plugin.h
     include/velk-ui/plugins/text/intf_text_visual.h
 )

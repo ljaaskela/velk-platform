@@ -23,18 +23,18 @@ void LayoutSolver::solve(velk::IHierarchy& hierarchy, const velk::aabb& viewport
 void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const velk::IObject::Ptr& obj,
                                  const velk::aabb& parent_bounds, const velk::mat4& parent_world)
 {
-    auto* element = velk::interface_cast<IElement>(obj);
+    auto* element = interface_cast<IElement>(obj);
     if (!element) {
         return;
     }
 
     // Collect IConstraint attachments
     velk::vector<IConstraint*> constraints;
-    auto* storage = velk::interface_cast<velk::IObjectStorage>(obj);
+    auto* storage = interface_cast<velk::IObjectStorage>(obj);
     if (storage) {
         for (size_t i = 0; i < storage->attachment_count(); ++i) {
             auto att = storage->get_attachment(i);
-            auto* constraint = velk::interface_cast<IConstraint>(att);
+            auto* constraint = interface_cast<IConstraint>(att);
             if (constraint) {
                 constraints.push_back(constraint);
             }

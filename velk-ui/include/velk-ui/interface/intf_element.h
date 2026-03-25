@@ -9,6 +9,8 @@
 
 namespace velk_ui {
 
+class IScene;
+
 /**
  * @brief Base interface for all UI elements.
  *
@@ -16,7 +18,7 @@ namespace velk_ui {
  * Visual appearance is defined by IVisual attachments (not by IElement itself).
  * The solver writes local_transform and world_matrix; user code reads them.
  */
-class IElement : public velk::Interface<IElement>
+class IElement : public velk::Interface<IElement, velk::IObject>
 {
 public:
     VELK_INTERFACE(
@@ -26,6 +28,9 @@ public:
         (RPROP, velk::mat4, world_matrix, {}), ///< Computed world-space transform. Written by solver.
         (PROP, int32_t, z_index, 0)            ///< Draw order among siblings. Higher draws on top.
     )
+
+    /** @brief Returns the scene this element belongs to, or nullptr. */
+    virtual velk::shared_ptr<IScene> get_scene() const = 0;
 
     /** @brief Atomically reads and clears accumulated dirty flags for this element. */
     virtual DirtyFlags consume_dirty() = 0;

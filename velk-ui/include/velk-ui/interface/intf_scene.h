@@ -2,6 +2,7 @@
 #define VELK_UI_INTF_SCENE_H
 
 #include <velk/array_view.h>
+#include <velk/interface/intf_future.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_store.h>
 
@@ -22,14 +23,14 @@ namespace velk_ui {
 class IScene : public velk::Interface<IScene, velk::IHierarchy>
 {
 public:
+    /** @brief Loads a scene from a resource URI (e.g. "app://scenes/my_scene.json"). */
+    virtual velk::IFuture::Ptr load_from(velk::string_view path) = 0;
+
     /** @brief Imports elements from a store and replicates them into the scene hierarchy. */
     virtual void load(velk::IStore& store) = 0;
 
     /** @brief Sets the renderer that will receive visual updates. May be null. */
-    virtual void set_renderer(IRenderer* renderer) = 0;
-
-    /** @brief Sets the root-level available space for layout. */
-    virtual void set_viewport(const velk::aabb& viewport) = 0;
+    virtual void set_renderer(const IRenderer::Ptr& renderer) = 0;
 
     /**
      * @brief Processes one frame: runs layout solver, collects visual changes,

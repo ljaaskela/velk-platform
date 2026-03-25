@@ -5,6 +5,7 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
+#include <velk-ui/interface/intf_trait.h>
 #include <velk-ui/types.h>
 
 namespace velk_ui {
@@ -17,7 +18,7 @@ namespace velk_ui {
  * The renderer only knows IVisual; it never needs to know about specific visual
  * types (RectVisual, TextVisual, etc.).
  */
-class IVisual : public velk::Interface<IVisual>
+class IVisual : public velk::Interface<IVisual, ITrait>
 {
 public:
     VELK_INTERFACE(

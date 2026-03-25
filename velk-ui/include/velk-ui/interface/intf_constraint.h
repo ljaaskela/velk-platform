@@ -5,6 +5,7 @@
 #include <velk/interface/intf_interface.h>
 
 #include <velk-ui/interface/intf_element.h>
+#include <velk-ui/interface/intf_trait.h>
 #include <velk-ui/types.h>
 
 namespace velk_ui {
@@ -29,7 +30,7 @@ enum class ConstraintPhase : uint8_t
  * constraints receive the hierarchy so they can walk children; constraint-phase
  * constraints ignore it.
  */
-class IConstraint : public velk::Interface<IConstraint>
+class IConstraint : public velk::Interface<IConstraint, ITrait>
 {
 public:
     /** @brief Returns when this constraint should run relative to others. */

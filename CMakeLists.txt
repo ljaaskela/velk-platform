@@ -13,30 +13,13 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/)
 
 # =============================================================================
-# Velk: IMPORTED targets from sibling repo build
+# Velk: build from source (sibling repo)
 # =============================================================================
-set(VELK_ROOT "${CMAKE_SOURCE_DIR}/../velk")
-set(VELK_BUILD "${VELK_ROOT}/build")
+set(VELK_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../velk" CACHE PATH "Path to velk source repository")
 
-# velk shared library (IMPORTED)
-add_library(velk SHARED IMPORTED GLOBAL)
-set_target_properties(velk PROPERTIES
-    IMPORTED_LOCATION "${VELK_BUILD}/bin/Release/velk.dll"
-    IMPORTED_IMPLIB   "${VELK_BUILD}/velk/Release/velk.lib"
-    IMPORTED_LOCATION_DEBUG "${VELK_BUILD}/bin/Debug/velk.dll"
-    IMPORTED_IMPLIB_DEBUG   "${VELK_BUILD}/velk/Debug/velk.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${VELK_ROOT}/velk/include;${VELK_BUILD}/velk/include"
-)
-
-# Importer plugin headers (for create_json_importer() and friends)
-add_library(velk_importer_headers INTERFACE)
-target_include_directories(velk_importer_headers INTERFACE
-    "${VELK_ROOT}/velk/plugins/importer/include"
-)
-# Make velk_importer_headers available when linking velk
-set_property(TARGET velk APPEND PROPERTY
-    INTERFACE_LINK_LIBRARIES velk_importer_headers
-)
+add_subdirectory("${VELK_SOURCE_DIR}/velk"                  "${CMAKE_BINARY_DIR}/velk")
+add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/importer"  "${CMAKE_BINARY_DIR}/velk_importer")
+add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/animator"  "${CMAKE_BINARY_DIR}/velk_animator")
 
 # =============================================================================
 # GLFW: extract vendored zip and build as subdirectory

@@ -1,5 +1,12 @@
 #include "plugin.h"
 
+#include "constraint/fixed_size.h"
+#include "element.h"
+#include "import/dim_type_extension.h"
+#include "layout/stack.h"
+#include "scene.h"
+#include "visual/rect_visual.h"
+
 #include <velk/ext/any.h>
 
 namespace velk_ui {

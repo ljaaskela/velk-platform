@@ -1,8 +1,12 @@
 #include "scene.h"
 
+#include <velk/api/future.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_store.h>
+#include <velk/interface/resource/intf_resource.h>
+#include <velk/interface/resource/intf_resource_store.h>
+#include <velk/plugins/importer/api/importer.h>
 
 #include <algorithm>
 #include <velk-ui/interface/intf_renderer.h>
@@ -13,7 +17,7 @@ namespace {
 
 velk::IHierarchy* get_hierarchy(velk::Hierarchy& h)
 {
-    return velk::interface_cast<velk::IHierarchy>(h.get());
+    return interface_cast<velk::IHierarchy>(h.get());
 }
 
 } // namespace
@@ -35,6 +39,44 @@ Scene::~Scene()
     scenes.erase(std::remove(scenes.begin(), scenes.end(), this), scenes.end());
 }
 
+velk::IFuture::Ptr Scene::load_from(velk::string_view path)
+{
+    auto promise = velk::make_promise();
+
+    auto file = velk::instance().resource_store().get_resource<velk::IFile>(path);
+    if (!file) {
+        VELK_LOG(E, "Scene::load_from: failed to resolve resource '%.*s'",
+                 static_cast<int>(path.size()), path.data());
+        promise.set_value(velk::ReturnValue::Fail);
+        return promise.get_future<velk::ReturnValue>();
+    }
+
+    velk::string json;
+    if (velk::failed(file->read_text(json))) {
+        VELK_LOG(E, "Scene::load_from: failed to read '%.*s'",
+                 static_cast<int>(path.size()), path.data());
+        promise.set_value(velk::ReturnValue::Fail);
+        return promise.get_future<velk::ReturnValue>();
+    }
+
+    auto importer = velk::create_json_importer();
+    auto result = importer.import_from(json);
+
+    for (auto& err : result.errors) {
+        VELK_LOG(E, "Scene::load_from: import error: %s", err.c_str());
+    }
+
+    if (!result.store) {
+        promise.set_value(velk::ReturnValue::Fail);
+        return promise.get_future<velk::ReturnValue>();
+    }
+
+    load(*result.store);
+
+    promise.set_value(velk::ReturnValue::Success);
+    return promise.get_future<velk::ReturnValue>();
+}
+
 void Scene::load(velk::IStore& store)
 {
     ensure_hierarchy();
@@ -54,7 +96,7 @@ void Scene::load(velk::IStore& store)
         return;
     }
 
-    auto* src = velk::interface_cast<velk::IHierarchy>(hierarchy_obj);
+    auto* src = interface_cast<velk::IHierarchy>(hierarchy_obj);
     if (!src) {
         return;
     }
@@ -67,24 +109,29 @@ void Scene::load(velk::IStore& store)
     // Replicate imported hierarchy into our scene
     set_root(src_root);
     replicate_children(*src, src_root);
+}
 
-    // Register all elements with renderer if one is set
+void Scene::set_renderer(const IRenderer::Ptr& renderer)
+{
+    renderer_subs_.clear();
+    renderer_ = renderer;
+
     if (renderer_) {
-        rebuild_visual_list();
-        for (auto* elem : visual_list_) {
-            register_visual(elem);
+        auto* meta = interface_cast<velk::IMetadata>(renderer_);
+        if (meta) {
+            auto vw = meta->get_property("viewport_width");
+            auto vh = meta->get_property("viewport_height");
+            auto on_resize = [this]() { set_dirty(DirtyFlags::Layout); };
+            if (vw) {
+                renderer_subs_.emplace_back(velk::Event(vw->on_changed()), on_resize);
+            }
+            if (vh) {
+                renderer_subs_.emplace_back(velk::Event(vh->on_changed()), on_resize);
+            }
         }
     }
-}
 
-void Scene::set_renderer(IRenderer* renderer)
-{
-    renderer_ = renderer;
-}
-
-void Scene::set_viewport(const velk::aabb& viewport)
-{
-    viewport_ = viewport;
+    set_dirty(DirtyFlags::All);
 }
 
 void Scene::update(const velk::UpdateInfo& info)
@@ -94,33 +141,37 @@ void Scene::update(const velk::UpdateInfo& info)
         return;
     }
 
-    // Collect all dirty elements for this frame
+    // Merge per-element dirty flags into scene-level flags
     velk::vector<IElement*> changes;
-
-    // Process dirty elements, check if layout is needed
-    DirtyFlags flags = DirtyFlags::None;
     for (auto* elem : dirty_elements_) {
         auto f = elem->consume_dirty();
-        flags |= f;
+        dirty_ |= f;
         if (f != DirtyFlags::None) {
             changes.push_back(elem);
         }
     }
-
     dirty_elements_.clear();
 
-    if ((flags & DirtyFlags::Layout) != DirtyFlags::None) {
-        // Layout dirty
-        solver_.solve(*h, viewport_);
+    if ((dirty_ & DirtyFlags::Layout) != DirtyFlags::None) {
+        velk::aabb viewport{};
+        if (renderer_) {
+            auto r = velk::read_state<IRenderer>(renderer_.get());
+            if (r) {
+                viewport.extent.width = static_cast<float>(r->viewport_width);
+                viewport.extent.height = static_cast<float>(r->viewport_height);
+            }
+        }
+        solver_.solve(*h, viewport);
+        for (auto* elem : visual_list_) {
+            changes.push_back(elem);
+        }
     }
-    if ((flags & DirtyFlags::ZOrder) != DirtyFlags::None) {
-        // Draw order dirty
-        visual_list_dirty_ = true;
-    }
-    if (visual_list_dirty_) {
+    if ((dirty_ & DirtyFlags::DrawOrder) != DirtyFlags::None) {
         rebuild_visual_list();
     }
-    // Push all dirty elements to renderer (visual, layout, or both)
+
+    dirty_ = DirtyFlags::None;
+
     if (renderer_ && !changes.empty()) {
         renderer_->update_visuals(changes);
     }
@@ -146,27 +197,27 @@ void Scene::ensure_hierarchy()
 
 void Scene::attach_element(const velk::IObject::Ptr& obj)
 {
-    auto* observer = velk::interface_cast<ISceneObserver>(obj);
+    auto* observer = interface_cast<ISceneObserver>(obj);
     if (observer) {
         observer->on_attached(*this);
     }
 
     // Register with renderer if one is set
-    auto* element = velk::interface_cast<IElement>(obj);
+    auto* element = interface_cast<IElement>(obj);
     if (element) {
         register_visual(element);
     }
 
-    visual_list_dirty_ = true;
+    set_dirty(DirtyFlags::DrawOrder);
 }
 
 void Scene::detach_element(const velk::IObject::Ptr& obj)
 {
-    auto* observer = velk::interface_cast<ISceneObserver>(obj);
+    auto* observer = interface_cast<ISceneObserver>(obj);
     if (observer) {
         observer->on_detached(*this);
     }
-    visual_list_dirty_ = true;
+    set_dirty(DirtyFlags::DrawOrder);
 }
 
 void Scene::detach_subtree(const velk::IObject::Ptr& obj)
@@ -328,15 +379,19 @@ velk::IHierarchy::Node Scene::node_of(const velk::IObject::Ptr& object) const
 void Scene::rebuild_visual_list()
 {
     visual_list_.clear();
-    visual_list_dirty_ = false;
     if (auto r = root()) {
         collect_visual_list(r);
+    }
+    if (renderer_) {
+        for (auto* elem : visual_list_) {
+            register_visual(elem);
+        }
     }
 }
 
 void Scene::collect_visual_list(const velk::IObject::Ptr& obj)
 {
-    auto* element = velk::interface_cast<IElement>(obj);
+    auto* element = interface_cast<IElement>(obj);
     if (element) {
         visual_list_.push_back(element);
     }
