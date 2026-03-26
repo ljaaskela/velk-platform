@@ -113,6 +113,7 @@ enum class RenderBackendType : uint8_t
 struct RenderConfig
 {
     RenderBackendType backend{RenderBackendType::GL};
+    void* backend_params = nullptr;
 };
 
 } // namespace velk_ui

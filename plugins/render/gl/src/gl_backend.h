@@ -16,7 +16,7 @@ public:
 
     ~GlBackend() override;
 
-    bool init() override;
+    bool init(void* params) override;
     void shutdown() override;
 
     bool create_surface(uint64_t surface_id, const SurfaceDesc& desc) override;

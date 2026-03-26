@@ -28,6 +28,6 @@ Property changes during a frame are not processed immediately. Elements accumula
 
 - Layout is solved once, even if multiple elements changed size
 - The draw list is rebuilt once, even if multiple z-indices changed
-- The renderer receives all changed elements in a single `update_visuals()` call
+- The renderer pulls all changes in a single `consume_state()` call
 
 Combined with velk's deferred property writes, bulk updates (e.g. animating 100 elements) result in exactly one layout pass and one renderer upload per frame.

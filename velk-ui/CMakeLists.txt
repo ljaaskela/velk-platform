@@ -18,6 +18,7 @@ add_library(velk_ui SHARED
     src/import/dim_type_extension.cpp
     include/velk-ui/interface/intf_element.h
     include/velk-ui/interface/intf_font.h
+    include/velk-ui/interface/intf_render_context.h
     include/velk-ui/interface/intf_renderer.h
     include/velk-ui/interface/intf_constraint.h
     include/velk-ui/interface/intf_scene.h

@@ -9,10 +9,26 @@ Before creating any UI objects, load the required plugins:
 ```cpp
 auto& velk = velk::instance();
 velk.plugin_registry().load_plugin_from_path("velk_ui.dll");
+velk.plugin_registry().load_plugin_from_path("velk_render.dll");
 velk.plugin_registry().load_plugin_from_path("velk_gl.dll");
 velk.plugin_registry().load_plugin_from_path("velk_text.dll");
 velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 ```
+
+## Render context
+
+Create a render context, renderer, and surface. The render context loads the backend and handles GPU initialization:
+
+```cpp
+#include <velk-ui/api/render_context.h>
+
+auto ctx = velk_ui::create_render_context(
+    {velk_ui::RenderBackendType::GL, reinterpret_cast<void*>(glfwGetProcAddress)});
+auto renderer = ctx.create_renderer();
+auto surface = ctx.create_surface(800, 600);
+```
+
+The GL backend receives `glfwGetProcAddress` through `RenderConfig::backend_params` and loads GL functions internally. No GL headers needed in the app.
 
 ## JSON scenes
 
@@ -40,7 +56,8 @@ Define a scene as a JSON file and load it with `create_scene`:
 #include <velk-ui/api/scene.h>
 
 auto scene = velk_ui::create_scene("app://scenes/my_scene.json");
-scene.set_renderer(renderer);
+scene.set_geometry(velk::aabb::from_size({800.f, 600.f}));
+renderer->attach(surface, scene);
 ```
 
 The `app://` protocol resolves paths relative to the working directory. `file://` uses absolute paths. See velk's resource store documentation for details.
@@ -98,4 +115,4 @@ while (!glfwWindowShouldClose(window)) {
 }
 ```
 
-See [Update cycle](update-cycle.md) for details on what happens during `update()`.
+See [Update cycle](update-cycle.md) for details on what happens during `update()` and `render()`.

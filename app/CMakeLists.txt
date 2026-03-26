@@ -2,7 +2,7 @@ add_executable(velk_ui_app
     main.cpp
 )
 
-target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_render velk_gl velk_text glfw)
+target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_render velk_text glfw)
 
 # Copy scene files to output directory
 add_custom_command(TARGET velk_ui_app POST_BUILD

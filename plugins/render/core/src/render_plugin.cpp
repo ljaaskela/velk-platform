@@ -1,4 +1,5 @@
 #include "render_plugin.h"
+#include "render_context.h"
 #include "renderer.h"
 #include "surface.h"
 
@@ -6,7 +7,8 @@ namespace velk_ui {
 
 velk::ReturnValue RenderPlugin::initialize(velk::IVelk& velk, velk::PluginConfig& config)
 {
-    auto rv = velk::register_type<Renderer>(velk);
+    auto rv = velk::register_type<RenderContextImpl>(velk);
+    rv &= velk::register_type<Renderer>(velk);
     rv &= velk::register_type<Surface>(velk);
     return rv;
 }

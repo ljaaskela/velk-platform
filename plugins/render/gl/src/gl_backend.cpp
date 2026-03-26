@@ -102,8 +102,17 @@ GlBackend::~GlBackend()
     }
 }
 
-bool GlBackend::init()
+bool GlBackend::init(void* params)
 {
+    if (params) {
+        auto loader = reinterpret_cast<GLADloadfunc>(params);
+        if (!gladLoadGL(loader)) {
+            VELK_LOG(E, "GlBackend::init: failed to load GL functions");
+            return false;
+        }
+        VELK_LOG(I, "OpenGL %s", reinterpret_cast<const char*>(glGetString(GL_VERSION)));
+    }
+
     // Untextured VAO + VBO
     glGenVertexArrays(1, &untextured_vao_);
     glGenBuffers(1, &untextured_vbo_);

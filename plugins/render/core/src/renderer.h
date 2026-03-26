@@ -1,6 +1,8 @@
 #ifndef VELK_UI_RENDERER_IMPL_H
 #define VELK_UI_RENDERER_IMPL_H
 
+#include "intf_renderer_internal.h"
+
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
@@ -14,15 +16,16 @@
 
 namespace velk_ui {
 
-
-class Renderer : public velk::ext::Object<Renderer, IRenderer>
+class Renderer : public velk::ext::Object<Renderer, IRendererInternal>
 {
 public:
     VELK_CLASS_UID(ClassId::Renderer, "Renderer");
 
-    bool init(const RenderConfig& config) override;
-    ISurface::Ptr create_surface(int width, int height) override;
-    void attach(const ISurface::Ptr& surface, const velk::IInterface::Ptr& scene) override;
+    // IRendererInternal
+    void set_backend(const IRenderBackend::Ptr& backend) override;
+
+    // IRenderer
+    void attach(const ISurface::Ptr& surface, const IScene::Ptr& scene) override;
     void detach(const ISurface::Ptr& surface) override;
     void render() override;
     void shutdown() override;
@@ -57,16 +60,12 @@ private:
     velk::vector<SurfaceEntry> surfaces_;
     std::unordered_map<IElement*, ElementCache> element_cache_;
 
-    // Batch building workspace (reused per frame)
-    std::unordered_map<uint64_t, size_t> batch_index_; // composite key -> index in batches_
+    std::unordered_map<uint64_t, size_t> batch_index_;
     velk::vector<RenderBatch> batches_;
 
-    // Pipeline key generation for custom materials
-    std::unordered_map<uint64_t, uint64_t> material_hash_to_pipeline_; // source hash -> pipeline key
+    std::unordered_map<uint64_t, uint64_t> material_hash_to_pipeline_;
     uint64_t next_pipeline_key_ = PipelineKey::CustomBase;
-
     uint64_t next_surface_id_ = 1;
-    bool initialized_ = false;
 };
 
 } // namespace velk_ui

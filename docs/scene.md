@@ -93,6 +93,28 @@ text.set_text("Hello!");
 text.set_color(velk::color::white());
 ```
 
+## Geometry and rendering
+
+The scene's layout bounds are set explicitly, decoupled from any renderer or surface:
+
+```cpp
+scene.set_geometry(velk::aabb::from_size({800.f, 600.f}));
+```
+
+The scene does not know about the renderer. Instead, the renderer pulls state from the scene during `render()` via `consume_state()`, which returns a `SceneState` containing:
+
+- `visual_list`: all elements in z-sorted draw order
+- `redraw_list`: elements whose visuals changed since the last consume
+- `removed_list`: elements that were detached (kept alive until consumed)
+
+To connect a scene to a renderer, attach it to a surface:
+
+```cpp
+renderer->attach(surface, scene);
+```
+
+See [Update cycle](update-cycle.md) for the full frame flow.
+
 ## Loading from JSON
 
 Scenes can be loaded from JSON files via the velk resource store:

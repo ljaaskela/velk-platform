@@ -73,7 +73,7 @@ struct RenderBatch
 class IRenderBackend : public velk::Interface<IRenderBackend>
 {
 public:
-    virtual bool init() = 0;
+    virtual bool init(void* params) = 0;
     virtual void shutdown() = 0;
 
     virtual bool create_surface(uint64_t surface_id, const SurfaceDesc& desc) = 0;

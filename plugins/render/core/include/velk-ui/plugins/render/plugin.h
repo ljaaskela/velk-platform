@@ -7,6 +7,9 @@ namespace velk_ui {
 
 namespace ClassId {
 
+/** @brief Render context. Owns the backend, creates renderers and surfaces. */
+inline constexpr velk::Uid RenderContext{"4a7c9e12-5d83-4b1f-a6e0-8f2d3c4b5a69"};
+
 /** @brief Backend-agnostic renderer. Manages surfaces, scenes, and batch collection. */
 inline constexpr velk::Uid Renderer{"8f4bdd2c-865b-4266-a1f1-abb921c9d60b"};
 

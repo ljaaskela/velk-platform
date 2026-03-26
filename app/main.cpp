@@ -2,15 +2,13 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
 
-#include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <velk-ui/api/constraint/fixed_size.h>
 #include <velk-ui/api/element.h>
 #include <velk-ui/api/material/shader.h>
+#include <velk-ui/api/render_context.h>
 #include <velk-ui/api/scene.h>
 #include <velk-ui/api/visual/rect.h>
-#include <velk-ui/interface/intf_renderer.h>
-#include <velk-ui/plugins/render/plugin.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
@@ -19,7 +17,6 @@ static void glfw_error_callback(int error, const char* description)
     VELK_LOG(E, "GLFW error %d: %s", error, description);
 }
 
-static velk_ui::IRenderer* g_renderer = nullptr;
 static velk_ui::Scene* g_scene = nullptr;
 static velk_ui::ISurface::Ptr g_surface;
 
@@ -60,17 +57,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     glfwMakeContextCurrent(window);
-
-    if (!gladLoadGL(reinterpret_cast<GLADloadfunc>(glfwGetProcAddress))) {
-        VELK_LOG(E, "Failed to load OpenGL via GLAD2");
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return 1;
-    }
-
-    VELK_LOG(I, "OpenGL %s", reinterpret_cast<const char*>(glGetString(GL_VERSION)));
-
-    glfwSwapInterval(1); // vsync
+    glfwSwapInterval(1);
 
     auto& velk = velk::instance();
 
@@ -81,33 +68,26 @@ int main(int argc, char* argv[])
     velk.plugin_registry().load_plugin_from_path("velk_text.dll");
     velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 
-    // Create and init renderer
-    auto renderer_obj = velk.create<velk_ui::IRenderer>(velk_ui::ClassId::Renderer);
-    if (!renderer_obj) {
-        VELK_LOG(E, "Failed to create renderer");
+    // Create render context, renderer, and surface
+    auto ctx = velk_ui::create_render_context(
+        {velk_ui::RenderBackendType::GL, reinterpret_cast<void*>(glfwGetProcAddress)});
+    if (!ctx) {
+        VELK_LOG(E, "Failed to create render context");
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
 
-    velk_ui::RenderConfig config{velk_ui::RenderBackendType::GL};
-    if (!renderer_obj->init(config)) {
-        VELK_LOG(E, "Failed to initialize renderer");
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return 1;
-    }
+    auto renderer = ctx.create_renderer();
+    auto surface = ctx.create_surface(kWidth, kHeight);
 
-    // Create surface and scene
-    auto surface = renderer_obj->create_surface(kWidth, kHeight);
-
+    // Load scene
     auto scene = velk_ui::create_scene("app://scenes/stack_test.json");
     scene.set_geometry(velk::aabb::from_size({
         static_cast<float>(kWidth), static_cast<float>(kHeight)}));
 
-    renderer_obj->attach(surface, static_cast<velk_ui::IScene::Ptr>(scene));
+    renderer->attach(surface, scene);
 
-    g_renderer = renderer_obj.get();
     g_scene = &scene;
     g_surface = surface;
     glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
@@ -132,9 +112,8 @@ int main(int argc, char* argv[])
                     frag_color = vec4(mix(top, bot, t), 1.0);
                 }
             )");
-            // Set paint via state write
             velk::write_state<velk_ui::IVisual>(
-                visual, [&](velk_ui::IVisual::State& s) { s.paint = velk::create_object_ref(mat.get()); });
+                visual, [&](velk_ui::IVisual::State& s) { s.paint = velk::create_object_ref(mat); });
             VELK_LOG(I, "Paint set on child2, mat=%p", static_cast<void*>(mat.get().get()));
         }
     }
@@ -148,19 +127,40 @@ int main(int argc, char* argv[])
             tv.set_text("Hello, Velk!");
             tv.set_color(velk::color::white());
 
-            auto text_elem = velk_ui::create_element();
-
             child3.add_trait(tv);
+        }
+    }
 
-            /*auto fs = velk_ui::constraint::create_fixed_size();
-            fs.set_size(velk_ui::dim::px(400.f), velk_ui::dim::px(50.f));
+    // First frame
+    velk.update();
+    renderer->render();
+    glfwSwapBuffers(window);
 
-            text_elem.add_trait(fs);
-            text_elem.add_trait(tv);
-
-            scene.add(scene.root(), text_elem);
-
-            VELK_LOG(I, "Text element added: \"Hello, Velk!\"");*/
+    // Print stats after first frame
+    {
+        auto stats = velk.get_stats();
+        VELK_LOG(I, "Plugins (%zu):", stats.plugins.size());
+        for (auto& p : stats.plugins) {
+            VELK_LOG(I, "  %.*s v%d.%d.%d [update=%s]",
+                     static_cast<int>(p.plugin_name.size()), p.plugin_name.data(),
+                     velk::version_major(p.version), velk::version_minor(p.version),
+                     velk::version_patch(p.version),
+                     p.update_enabled ? "on" : "off");
+        }
+        VELK_LOG(I, "Types (total: %zu, showing ones with live instances):", stats.types.size());
+        for (auto& t : stats.types) {
+            if (t.factory && (t.instance_count || t.policy != velk::CreationPolicy::Hive)) {
+                auto& info = t.factory->get_class_info();
+                VELK_LOG(I,
+                         "  %s %.*s: %zu (size: %zu)",
+                         t.policy == velk::CreationPolicy::Hive    ? "[hive] "
+                         : t.policy == velk::CreationPolicy::Alloc ? "[alloc]"
+                                                                   : "[auto] ",
+                         static_cast<int>(info.name.size()),
+                         info.name.data(),
+                         t.instance_count,
+                         t.factory->get_instance_size());
+            }
         }
     }
 
@@ -168,17 +168,16 @@ int main(int argc, char* argv[])
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         velk.update();
-        renderer_obj->render();
+        renderer->render();
         glfwSwapBuffers(window);
     }
 
-    g_renderer = nullptr;
     g_scene = nullptr;
     g_surface = nullptr;
 
     scene = velk_ui::Scene{};
-    renderer_obj->shutdown();
-    renderer_obj = nullptr;
+    renderer->shutdown();
+    renderer = nullptr;
 
     glfwDestroyWindow(window);
     glfwTerminate();
