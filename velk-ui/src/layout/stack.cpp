@@ -84,18 +84,13 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
 
         collect_layout_traits(child_ptr.get(), info.layout_traits);
 
-        // Sort: Constraint-phase first for measuring
-        std::sort(info.layout_traits.begin(), info.layout_traits.end(), [](ILayoutTrait* a, ILayoutTrait* b) {
-            return static_cast<uint8_t>(a->get_phase()) > static_cast<uint8_t>(b->get_phase());
-        });
-
         // Run measure on constraint-phase traits to determine fixed sizes
         Constraint child_c;
         child_c.bounds.extent.width = (axis == 1) ? cross_available : remaining;
         child_c.bounds.extent.height = (axis == 1) ? remaining : cross_available;
 
         for (auto* lt : info.layout_traits) {
-            if (lt->get_phase() == TraitPhase::Constraint) {
+            if (has_phase(lt, TraitPhase::Constraint)) {
                 child_c = lt->measure(child_c, *info.element, hierarchy);
             }
         }
@@ -157,7 +152,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
         child_c.bounds.extent.height = (axis == 1) ? child_main : child_cross;
 
         for (auto* lt : info.layout_traits) {
-            if (lt->get_phase() == TraitPhase::Constraint) {
+            if (has_phase(lt, TraitPhase::Constraint)) {
                 lt->apply(child_c, *info.element, hierarchy);
             }
         }

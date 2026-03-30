@@ -24,7 +24,7 @@ Scene overrides the velk `Hierarchy` node accessors to return `Element` instead 
 
 ## Elements
 
-An `Element` is the fundamental building block. It holds position, size, transform, and z-index properties. An element has no visual appearance on its own; that comes from traits.
+An `Element` is the fundamental building block. It holds position, size, and z-index properties. An element has no visual appearance on its own; that comes from traits.
 
 ```cpp
 auto elem = velk_ui::create_element();
@@ -43,7 +43,7 @@ elem.for_each_child<IElement>([](IElement& child) { /* ... */ });
 
 ## Traits
 
-Traits are attachments that give elements behavior. All traits implement `ITrait` and can be managed via `add_trait()` / `remove_trait()`:
+Traits are attachments that give elements behavior. All traits implement `ITrait` and belong to one of four phases (see [Update cycle](update-cycle.md) for the full pipeline). Traits are managed via `add_trait()` / `remove_trait()`:
 
 ```cpp
 elem.add_trait(some_constraint);
@@ -52,15 +52,20 @@ elem.remove_trait(some_visual);
 auto found = elem.find_trait<IFixedSize>();
 ```
 
-Currently there are two categories of traits:
+### Layout traits
 
-### Constraints
+Layout traits implement `ILayoutTrait` and control how elements are sized and positioned. They run during the scene update in two phases:
 
-Constraints control how elements are sized and positioned during layout.
+**Layout phase** (walks children, divides space):
 
 | Class | Interface | Description |
 |-------|-----------|-------------|
 | `Stack` | `IStack` | Arranges children along an axis with spacing |
+
+**Constraint phase** (touches self only, refines size):
+
+| Class | Interface | Description |
+|-------|-----------|-------------|
 | `FixedSize` | `IFixedSize` | Clamps width and/or height to a fixed value |
 
 ```cpp
@@ -74,9 +79,29 @@ fs.set_size(velk_ui::dim::px(200.f), velk_ui::dim::px(100.f));
 
 Dimensions can be absolute (`dim::px(100.f)`) or relative to parent (`dim::pct(0.5f)`). Use `dim::none()` to leave an axis unconstrained.
 
+### Transform traits
+
+Transform traits implement `ITransformTrait` and modify the element's world matrix after layout. They run after layout and constraint phases, before children are recursed.
+
+| Class | Interface | Description |
+|-------|-----------|-------------|
+| `Trs` | `ITrs` | Decomposed translate, rotate (Z), scale |
+| `Matrix` | `IMatrix` | Raw 4x4 matrix multiply |
+
+```cpp
+auto trs = velk_ui::transform::create_trs();
+trs.set_rotation(45.f);         // degrees around Z
+trs.set_scale({0.5f, 0.5f});
+elem.add_trait(trs);
+
+auto mtx = velk_ui::transform::create_matrix();
+mtx.set_matrix(velk::mat4::scale({2.f, 2.f, 1.f}));
+elem.add_trait(mtx);
+```
+
 ### Visuals
 
-Visuals define how an element appears on screen. An element can have multiple visuals.
+Visuals implement `IVisual` and define how an element appears on screen. They run during rendering when the renderer queries each element for draw commands. An element can have multiple visuals.
 
 | Class | Interface | Description |
 |-------|-----------|-------------|
@@ -142,4 +167,4 @@ The JSON format declares objects, hierarchy, and trait attachments:
 }
 ```
 
-Available class names: `velk-ui.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-ui.RectVisual`, `velk-ui.Font`, `velk-ui.TextVisual`.
+Available class names: `velk-ui.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-ui.Trs`, `velk-ui.Matrix`, `velk-ui.RectVisual`, `velk-ui.RoundedRectVisual`, `velk-ui.Font`, `velk_text.TextVisual`.
