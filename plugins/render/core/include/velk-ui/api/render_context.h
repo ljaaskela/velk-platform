@@ -20,7 +20,7 @@ class RenderContext : public ::velk::Object
 public:
     RenderContext() = default;
     explicit RenderContext(velk::IObject::Ptr obj) : ::velk::Object(check_object<IRenderContext>(obj)) {}
-    explicit RenderContext(IRenderContext::Ptr obj) : ::velk::Object(obj) {}
+    explicit RenderContext(IRenderContext::Ptr obj) : ::velk::Object(velk::as_object(obj)) {}
 
     operator IRenderContext::Ptr() const { return as_ptr<IRenderContext>(); }
 

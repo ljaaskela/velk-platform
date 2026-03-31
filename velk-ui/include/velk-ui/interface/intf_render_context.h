@@ -16,7 +16,7 @@ namespace velk_ui {
  * plugin, initializes the GPU, and provides factory methods for renderers
  * and surfaces. The app typically creates one context at startup.
  */
-class IRenderContext : public velk::Interface<IRenderContext, velk::IObject>
+class IRenderContext : public velk::Interface<IRenderContext>
 {
 public:
     /** @brief Initializes the context: loads the backend plugin and sets up the GPU. */

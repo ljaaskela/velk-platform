@@ -95,7 +95,7 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Pt
     world = reader->world_matrix;
 
     // Recurse: each child gets its own allocated bounds (set by this element's Stack)
-    auto children = hierarchy.children_of(element->get_self());
+    auto children = hierarchy.children_of(velk::as_object(element));
     for (auto& child : children) {
         auto child_elem = interface_pointer_cast<IElement>(child);
         auto child_state = velk::read_state<IElement>(child_elem);

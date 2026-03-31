@@ -18,7 +18,7 @@ class IScene;
  * Visual appearance is defined by IVisual attachments (not by IElement itself).
  * The solver writes world_matrix; user code reads it.
  */
-class IElement : public velk::Interface<IElement, velk::IObject>
+class IElement : public velk::Interface<IElement>
 {
 public:
     VELK_INTERFACE(
