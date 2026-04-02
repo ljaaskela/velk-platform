@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1280">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { width: 1280px; height: 640px; overflow: hidden; background: #060a0f; font-family: 'Courier New', monospace; }
+
+  .canvas {
+    width: 1280px;
+    height: 640px;
+    position: relative;
+    background: #060a0f;
+    overflow: hidden;
+  }
+
+  /* Grid overlay */
+  .grid {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(160,100,220,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(160,100,220,0.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  /* Noise texture via SVG filter */
+  .noise {
+    position: absolute;
+    inset: 0;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 200px 200px;
+  }
+
+  /* Glow blobs */
+  .blob1 {
+    position: absolute;
+    width: 480px; height: 480px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(160,100,220,0.08) 0%, transparent 70%);
+    top: -100px; left: -80px;
+  }
+  .blob2 {
+    position: absolute;
+    width: 400px; height: 400px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(80,160,255,0.07) 0%, transparent 70%);
+    bottom: -80px; right: 200px;
+  }
+  .blob3 {
+    position: absolute;
+    width: 300px; height: 300px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(160,100,220,0.05) 0%, transparent 70%);
+    top: 200px; right: -60px;
+  }
+
+  /* Left panel */
+  .left {
+    position: absolute;
+    left: 72px;
+    top: 0; bottom: 0;
+    width: 560px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(160,100,220,0.08);
+    border: 1px solid rgba(160,100,220,0.25);
+    border-radius: 4px;
+    padding: 4px 12px;
+    margin-bottom: 28px;
+    width: fit-content;
+  }
+  .badge-dot {
+    width: 6px; height: 6px;
+    background: #a064dc;
+    border-radius: 50%;
+  }
+  .badge-text {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: #a064dc;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+
+  .title {
+    font-family: 'Georgia', serif;
+    font-size: 78px;
+    font-weight: 700;
+    color: #e8edf5;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .title-accent {
+    color: #a064dc;
+  }
+  .title-dim {
+    color: #5a7090;
+    font-size: 78px;
+  }
+
+  .tagline {
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    color: #5a7090;
+    letter-spacing: 0.06em;
+    line-height: 1.7;
+    margin-top: 22px;
+    max-width: 440px;
+  }
+
+  /* Feature pills */
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 34px;
+  }
+  .pill {
+    padding: 5px 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 3px;
+    font-size: 11px;
+    color: #8aa8c8;
+    letter-spacing: 0.05em;
+    font-family: 'Courier New', monospace;
+  }
+  .pill.hi {
+    background: rgba(160,100,220,0.07);
+    border-color: rgba(160,100,220,0.2);
+    color: #a064dc;
+  }
+
+  /* Divider line */
+  .divider {
+    position: absolute;
+    left: 688px;
+    top: 60px; bottom: 60px;
+    width: 1px;
+    background: linear-gradient(to bottom, transparent, rgba(160,100,220,0.2) 20%, rgba(160,100,220,0.2) 80%, transparent);
+  }
+
+  /* Right panel */
+  .right {
+    position: absolute;
+    left: 720px;
+    right: 48px;
+    top: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  svg.diagram {
+    width: 480px;
+    height: 520px;
+  }
+
+  /* Corner decoration */
+  .corner-tl {
+    position: absolute;
+    top: 24px; left: 24px;
+    width: 30px; height: 30px;
+    border-top: 2px solid rgba(160,100,220,0.4);
+    border-left: 2px solid rgba(160,100,220,0.4);
+  }
+  .corner-br {
+    position: absolute;
+    bottom: 24px; right: 24px;
+    width: 30px; height: 30px;
+    border-bottom: 2px solid rgba(160,100,220,0.4);
+    border-right: 2px solid rgba(160,100,220,0.4);
+  }
+  .corner-tr {
+    position: absolute;
+    top: 24px; right: 24px;
+    width: 30px; height: 30px;
+    border-top: 2px solid rgba(160,100,220,0.15);
+    border-right: 2px solid rgba(160,100,220,0.15);
+  }
+  .corner-bl {
+    position: absolute;
+    bottom: 24px; left: 24px;
+    width: 30px; height: 30px;
+    border-bottom: 2px solid rgba(160,100,220,0.15);
+    border-left: 2px solid rgba(160,100,220,0.15);
+  }
+
+  /* Footer */
+  .footer {
+    position: absolute;
+    bottom: 36px;
+    left: 72px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .footer-item {
+    font-size: 11px;
+    color: #3a5070;
+    letter-spacing: 0.08em;
+    font-family: 'Courier New', monospace;
+  }
+  .footer-item span {
+    color: #5a7090;
+  }
+  .sep { color: #1e3050; }
+
+  /* Scanline overlay */
+  .scanlines {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 3px,
+      rgba(0,0,0,0.04) 3px,
+      rgba(0,0,0,0.04) 4px
+    );
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <!-- Background effects -->
+  <div class="grid"></div>
+  <div class="noise"></div>
+  <div class="blob1"></div>
+  <div class="blob2"></div>
+  <div class="blob3"></div>
+  <div class="scanlines"></div>
+
+  <!-- Corners -->
+  <div class="corner-tl"></div>
+  <div class="corner-br"></div>
+  <div class="corner-tr"></div>
+  <div class="corner-bl"></div>
+
+  <!-- Left content -->
+  <div class="left">
+    <div class="badge">
+      <div class="badge-dot"></div>
+      <span class="badge-text">Built on Velk · C++17 · MIT</span>
+    </div>
+
+    <div class="title">Vel<span class="title-accent">k</span><span class="title-dim">-ui</span></div>
+
+    <div class="tagline">
+      Trait-based UI framework.<br>
+      Scene graph · Layout solver · Input dispatch<br>
+      Declarative JSON · Plugin rendering
+    </div>
+
+    <div class="pills">
+      <div class="pill hi">Element</div>
+      <div class="pill hi">Traits</div>
+      <div class="pill">Stack</div>
+      <div class="pill">Click</div>
+      <div class="pill">RectVisual</div>
+      <div class="pill">InputDispatcher</div>
+    </div>
+  </div>
+
+  <!-- Divider -->
+  <div class="divider"></div>
+
+  <!-- Right diagram -->
+  <div class="right">
+    <svg class="diagram" viewBox="0 0 480 520" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="glow2">
+          <feGaussianBlur stdDeviation="6" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      <!-- Connection lines -->
+
+      <!-- Scene → Element -->
+      <line x1="240" y1="68" x2="240" y2="112" stroke="rgba(160,100,220,0.35)" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Element → Layout -->
+      <line x1="170" y1="155" x2="80" y2="220" stroke="rgba(160,100,220,0.25)" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Element → Visual -->
+      <line x1="240" y1="155" x2="240" y2="220" stroke="rgba(160,100,220,0.25)" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Element → Input -->
+      <line x1="310" y1="155" x2="400" y2="220" stroke="rgba(160,100,220,0.25)" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Layout → Stack -->
+      <line x1="80" y1="270" x2="60" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Layout → FixedSize -->
+      <line x1="80" y1="270" x2="120" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Visual → Rect -->
+      <line x1="220" y1="270" x2="200" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Visual → Text -->
+      <line x1="260" y1="270" x2="280" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Input → Click -->
+      <line x1="375" y1="270" x2="345" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Input → Hover -->
+      <line x1="400" y1="270" x2="410" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- Input → Drag -->
+      <line x1="425" y1="270" x2="455" y2="340" stroke="rgba(80,160,255,0.2)" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- InputDispatcher → Element (hit test) -->
+      <line x1="240" y1="460" x2="240" y2="155" stroke="rgba(160,100,220,0.12)" stroke-width="1" stroke-dasharray="2,6"/>
+
+      <!-- ══════════ NODES ══════════ -->
+
+      <!-- Top: Scene -->
+      <rect x="146" y="24" width="188" height="44" rx="5"
+            fill="rgba(160,100,220,0.07)" stroke="rgba(160,100,220,0.55)" stroke-width="1.2"
+            filter="url(#glow)"/>
+      <text x="240" y="43" text-anchor="middle" font-family="Courier New" font-size="11" fill="#a064dc" letter-spacing="0.05em">Scene</text>
+      <text x="240" y="60" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(160,100,220,0.55)" letter-spacing="0.08em">hierarchy · layout · updates</text>
+
+      <!-- Element -->
+      <rect x="146" y="112" width="188" height="43" rx="5"
+            fill="rgba(160,100,220,0.05)" stroke="rgba(160,100,220,0.35)" stroke-width="1"
+            filter="url(#glow)"/>
+      <text x="240" y="129" text-anchor="middle" font-family="Courier New" font-size="11" fill="#c8ddf0" letter-spacing="0.03em">Element</text>
+      <text x="240" y="146" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(140,170,200,0.5)" letter-spacing="0.06em">position · size · traits</text>
+
+      <!-- Trait phase label -->
+      <line x1="15" y1="200" x2="465" y2="200" stroke="rgba(255,255,255,0.05)" stroke-width="1" stroke-dasharray="2,6"/>
+      <text x="240" y="197" text-anchor="middle" font-family="Courier New" font-size="8" fill="rgba(255,255,255,0.15)" letter-spacing="0.12em">─── TRAIT PHASES ───</text>
+
+      <!-- Layout phase -->
+      <rect x="15" y="220" width="130" height="50" rx="4"
+            fill="rgba(20,30,50,0.7)" stroke="rgba(80,160,255,0.4)" stroke-width="1"/>
+      <text x="80" y="241" text-anchor="middle" font-family="Courier New" font-size="10" fill="#50a0ff" letter-spacing="0.04em">Layout</text>
+      <text x="80" y="257" text-anchor="middle" font-family="Courier New" font-size="8.5" fill="rgba(80,140,220,0.55)" letter-spacing="0.05em">measure · apply</text>
+
+      <!-- Visual phase -->
+      <rect x="170" y="220" width="140" height="50" rx="4"
+            fill="rgba(20,30,50,0.7)" stroke="rgba(160,100,220,0.35)" stroke-width="1"/>
+      <text x="240" y="241" text-anchor="middle" font-family="Courier New" font-size="10" fill="#a064dc" letter-spacing="0.04em">Visual</text>
+      <text x="240" y="257" text-anchor="middle" font-family="Courier New" font-size="8.5" fill="rgba(140,90,200,0.55)" letter-spacing="0.05em">draw commands</text>
+
+      <!-- Input phase -->
+      <rect x="335" y="220" width="130" height="50" rx="4"
+            fill="rgba(20,30,50,0.7)" stroke="rgba(80,160,255,0.4)" stroke-width="1"/>
+      <text x="400" y="241" text-anchor="middle" font-family="Courier New" font-size="10" fill="#50a0ff" letter-spacing="0.04em">Input</text>
+      <text x="400" y="257" text-anchor="middle" font-family="Courier New" font-size="8.5" fill="rgba(80,140,220,0.55)" letter-spacing="0.05em">intercept · bubble</text>
+
+      <!-- Concrete traits row -->
+
+      <!-- Stack -->
+      <rect x="15" y="340" width="80" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(80,160,255,0.25)" stroke-width="1"/>
+      <text x="55" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(80,140,220,0.7)">Stack</text>
+
+      <!-- FixedSize -->
+      <rect x="105" y="340" width="80" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(80,160,255,0.25)" stroke-width="1"/>
+      <text x="145" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(80,140,220,0.7)">FixedSize</text>
+
+      <!-- Rect -->
+      <rect x="200" y="340" width="50" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(160,100,220,0.25)" stroke-width="1"/>
+      <text x="225" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(140,90,200,0.7)">Rect</text>
+
+      <!-- Text -->
+      <rect x="260" y="340" width="50" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(160,100,220,0.25)" stroke-width="1"/>
+      <text x="285" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(140,90,200,0.7)">Text</text>
+
+      <!-- Click -->
+      <rect x="325" y="340" width="55" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(80,160,255,0.25)" stroke-width="1"/>
+      <text x="352" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(80,140,220,0.7)">Click</text>
+
+      <!-- Hover -->
+      <rect x="390" y="340" width="55" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(80,160,255,0.25)" stroke-width="1"/>
+      <text x="417" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(80,140,220,0.7)">Hover</text>
+
+      <!-- Drag -->
+      <rect x="435" y="340" width="45" height="34" rx="3"
+            fill="rgba(10,18,30,0.9)" stroke="rgba(80,160,255,0.25)" stroke-width="1"/>
+      <text x="457" y="361" text-anchor="middle" font-family="Courier New" font-size="9" fill="rgba(80,140,220,0.7)">Drag</text>
+
+      <!-- InputDispatcher -->
+      <rect x="136" y="430" width="208" height="50" rx="4"
+            fill="rgba(160,100,220,0.05)" stroke="rgba(160,100,220,0.35)" stroke-width="1"
+            filter="url(#glow)"/>
+      <text x="240" y="451" text-anchor="middle" font-family="Courier New" font-size="10" fill="#a064dc" letter-spacing="0.04em">InputDispatcher</text>
+      <text x="240" y="467" text-anchor="middle" font-family="Courier New" font-size="8.5" fill="rgba(160,100,220,0.5)" letter-spacing="0.05em">hit test · dispatch · capture</text>
+
+      <!-- Accent dots -->
+      <circle cx="240" cy="24" r="3" fill="#a064dc" filter="url(#glow2)" opacity="0.9"/>
+      <circle cx="240" cy="480" r="2" fill="rgba(160,100,220,0.3)" filter="url(#glow)"/>
+    </svg>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-item">LANG <span>C++17</span></div>
+    <div class="sep">·</div>
+    <div class="footer-item">LICENSE <span>MIT</span></div>
+    <div class="sep">·</div>
+    <div class="footer-item">RENDERER <span>OpenGL 3.3+</span></div>
+    <div class="sep">·</div>
+    <div class="footer-item">TEXT <span>FreeType + HarfBuzz</span></div>
+  </div>
+</div>
+</body>
+</html>
