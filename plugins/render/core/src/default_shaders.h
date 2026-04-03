@@ -3,37 +3,69 @@
 
 namespace velk_ui {
 
-inline const char* rect_vertex_src = R"(
-#version 330 core
+// All shaders use buffer_reference to access data via GPU pointers.
+// A single push constant carries the 8-byte GPU address of the DrawDataHeader.
+// Shaders dereference this to reach globals, instances, and material params.
+// Geometry is procedural: 6 vertices per quad (triangle list).
+//
+// IMPORTANT: Instance types are plain structs, NOT buffer_reference.
+// Only types that represent actual GPU pointers use buffer_reference.
 
-const vec2 quad[4] = vec2[4](
-    vec2(0.0, 0.0),
-    vec2(1.0, 0.0),
-    vec2(0.0, 1.0),
-    vec2(1.0, 1.0)
+// ============================================================================
+// Rect
+// ============================================================================
+
+inline const char* rect_vertex_src = R"(
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(buffer_reference, std430) readonly buffer Globals {
+    mat4 projection;
+    vec4 viewport;
+};
+
+struct RectInstance {
+    vec2 pos;
+    vec2 size;
+    vec4 color;
+};
+
+layout(buffer_reference, std430) readonly buffer RectInstances {
+    RectInstance data[];
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Globals globals;
+    RectInstances instances;
+    uint texture_id;
+    uint instance_count;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+const vec2 kQuad[6] = vec2[6](
+    vec2(0, 0), vec2(1, 0), vec2(1, 1),
+    vec2(0, 0), vec2(1, 1), vec2(0, 1)
 );
 
-layout(location = 0) in vec4 inst_rect;
-layout(location = 1) in vec4 inst_color;
-
-uniform mat4 u_projection;
-
-out vec4 v_color;
+layout(location = 0) out vec4 v_color;
 
 void main()
 {
-    vec2 pos = quad[gl_VertexID];
-    vec2 world_pos = inst_rect.xy + pos * inst_rect.zw;
-    gl_Position = u_projection * vec4(world_pos, 0.0, 1.0);
-    v_color = inst_color;
+    vec2 q = kQuad[gl_VertexIndex];
+    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    vec2 world_pos = inst.pos + q * inst.size;
+    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    v_color = inst.color;
 }
 )";
 
 inline const char* rect_fragment_src = R"(
-#version 330 core
+#version 450
 
-in vec4 v_color;
-out vec4 frag_color;
+layout(location = 0) in vec4 v_color;
+layout(location = 0) out vec4 frag_color;
 
 void main()
 {
@@ -41,88 +73,141 @@ void main()
 }
 )";
 
-inline const char* text_vertex_src = R"(
-#version 330 core
+// ============================================================================
+// Text
+// ============================================================================
 
-const vec2 quad[4] = vec2[4](
-    vec2(0.0, 0.0),
-    vec2(1.0, 0.0),
-    vec2(0.0, 1.0),
-    vec2(1.0, 1.0)
+inline const char* text_vertex_src = R"(
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(buffer_reference, std430) readonly buffer Globals {
+    mat4 projection;
+    vec4 viewport;
+};
+
+struct TextInstance {
+    vec2 pos;
+    vec2 size;
+    vec4 color;
+    vec2 uv_min;
+    vec2 uv_max;
+};
+
+layout(buffer_reference, std430) readonly buffer TextInstances {
+    TextInstance data[];
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Globals globals;
+    TextInstances instances;
+    uint texture_id;
+    uint instance_count;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+const vec2 kQuad[6] = vec2[6](
+    vec2(0, 0), vec2(1, 0), vec2(1, 1),
+    vec2(0, 0), vec2(1, 1), vec2(0, 1)
 );
 
-layout(location = 0) in vec4 inst_rect;
-layout(location = 1) in vec4 inst_color;
-layout(location = 2) in vec4 inst_uv;
-
-uniform mat4 u_projection;
-
-out vec4 v_color;
-out vec2 v_uv;
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec2 v_uv;
+layout(location = 2) flat out uint v_texture_id;
 
 void main()
 {
-    vec2 pos = quad[gl_VertexID];
-    vec2 world_pos = inst_rect.xy + pos * inst_rect.zw;
-    gl_Position = u_projection * vec4(world_pos, 0.0, 1.0);
-    v_color = inst_color;
-    v_uv.x = mix(inst_uv.x, inst_uv.z, pos.x);
-    v_uv.y = mix(inst_uv.y, inst_uv.w, pos.y);
+    vec2 q = kQuad[gl_VertexIndex];
+    TextInstance inst = root.instances.data[gl_InstanceIndex];
+    vec2 world_pos = inst.pos + q * inst.size;
+    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    v_color = inst.color;
+    v_uv = mix(inst.uv_min, inst.uv_max, q);
+    v_texture_id = root.texture_id;
 }
 )";
 
 inline const char* text_fragment_src = R"(
-#version 330 core
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
 
-uniform sampler2D u_atlas;
+layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 
-in vec4 v_color;
-in vec2 v_uv;
-out vec4 frag_color;
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_uv;
+layout(location = 2) flat in uint v_texture_id;
+layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float alpha = texture(u_atlas, v_uv).r;
+    float alpha = texture(velk_textures[nonuniformEXT(v_texture_id)], v_uv).r;
     frag_color = vec4(v_color.rgb, v_color.a * alpha);
 }
 )";
 
-inline const char* rounded_rect_vertex_src = R"(
-#version 330 core
+// ============================================================================
+// Rounded rect
+// ============================================================================
 
-const vec2 quad[4] = vec2[4](
-    vec2(0.0, 0.0),
-    vec2(1.0, 0.0),
-    vec2(0.0, 1.0),
-    vec2(1.0, 1.0)
+inline const char* rounded_rect_vertex_src = R"(
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(buffer_reference, std430) readonly buffer Globals {
+    mat4 projection;
+    vec4 viewport;
+};
+
+struct RectInstance {
+    vec2 pos;
+    vec2 size;
+    vec4 color;
+};
+
+layout(buffer_reference, std430) readonly buffer RectInstances {
+    RectInstance data[];
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Globals globals;
+    RectInstances instances;
+    uint texture_id;
+    uint instance_count;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+const vec2 kQuad[6] = vec2[6](
+    vec2(0, 0), vec2(1, 0), vec2(1, 1),
+    vec2(0, 0), vec2(1, 1), vec2(0, 1)
 );
 
-layout(location = 0) in vec4 inst_rect;
-layout(location = 1) in vec4 inst_color;
-
-uniform mat4 u_projection;
-
-out vec4 v_color;
-out vec2 v_local_uv;
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec2 v_local_uv;
+layout(location = 2) flat out vec2 v_size;
 
 void main()
 {
-    vec2 pos = quad[gl_VertexID];
-    vec2 world_pos = inst_rect.xy + pos * inst_rect.zw;
-    gl_Position = u_projection * vec4(world_pos, 0.0, 1.0);
-    v_color = inst_color;
-    v_local_uv = pos;
+    vec2 q = kQuad[gl_VertexIndex];
+    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    vec2 world_pos = inst.pos + q * inst.size;
+    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    v_color = inst.color;
+    v_local_uv = q;
+    v_size = inst.size;
 }
 )";
 
 inline const char* rounded_rect_fragment_src = R"(
-#version 330 core
+#version 450
 
-in vec4 v_color;
-in vec2 v_local_uv;
-out vec4 frag_color;
-
-uniform vec4 u_rect;
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
+layout(location = 0) out vec4 frag_color;
 
 float rounded_rect_sdf(vec2 p, vec2 half_size, float radius)
 {
@@ -132,10 +217,9 @@ float rounded_rect_sdf(vec2 p, vec2 half_size, float radius)
 
 void main()
 {
-    vec2 size = u_rect.zw;
-    float radius = min(min(size.x, size.y) * 0.5, 12.0);
-    vec2 half_size = size * 0.5;
-    vec2 p = (v_local_uv - 0.5) * size;
+    float radius = min(min(v_size.x, v_size.y) * 0.5, 12.0);
+    vec2 half_size = v_size * 0.5;
+    vec2 p = (v_local_uv - 0.5) * v_size;
 
     float dist = rounded_rect_sdf(p, half_size, radius);
     float alpha = 1.0 - smoothstep(-0.5, 0.5, dist);

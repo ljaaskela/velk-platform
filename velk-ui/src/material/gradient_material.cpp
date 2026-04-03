@@ -1,52 +1,99 @@
 #include "gradient_material.h"
 
+#include <velk/api/state.h>
+#include <velk-ui/gpu_data.h>
+
+#include <cstring>
+
 namespace velk_ui {
 
 namespace {
 
 const char* gradient_vertex_src = R"(
-#version 330 core
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
 
-const vec2 quad[4] = vec2[4](
-    vec2(0.0, 0.0),
-    vec2(1.0, 0.0),
-    vec2(0.0, 1.0),
-    vec2(1.0, 1.0)
+layout(buffer_reference, std430) readonly buffer Globals {
+    mat4 projection;
+    vec4 viewport;
+};
+
+struct RectInstance {
+    vec2 pos;
+    vec2 size;
+    vec4 color;
+};
+
+layout(buffer_reference, std430) readonly buffer RectInstances {
+    RectInstance data[];
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Globals globals;
+    RectInstances instances;
+    uint texture_id;
+    uint instance_count;
+    uint _pad0;
+    uint _pad1;
+    // GradientParams inline after 32-byte header
+    vec4 start_color;
+    vec4 end_color;
+    float angle;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+const vec2 kQuad[6] = vec2[6](
+    vec2(0, 0), vec2(1, 0), vec2(1, 1),
+    vec2(0, 0), vec2(1, 1), vec2(0, 1)
 );
 
-layout(location = 0) in vec4 inst_rect;
-layout(location = 1) in vec4 inst_color;
-
-uniform mat4 u_projection;
-
-out vec2 v_local_uv;
+layout(location = 0) out vec2 v_local_uv;
 
 void main()
 {
-    vec2 pos = quad[gl_VertexID];
-    vec2 world_pos = inst_rect.xy + pos * inst_rect.zw;
-    gl_Position = u_projection * vec4(world_pos, 0.0, 1.0);
-    v_local_uv = pos;
+    vec2 q = kQuad[gl_VertexIndex];
+    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    vec2 world_pos = inst.pos + q * inst.size;
+    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    v_local_uv = q;
 }
 )";
 
 const char* gradient_fragment_src = R"(
-#version 330 core
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
 
-in vec2 v_local_uv;
-out vec4 frag_color;
+// Dummy buffer_reference type to skip over 8-byte pointer fields
+layout(buffer_reference, std430) readonly buffer Ptr64 { uint _dummy; };
 
-uniform vec4 start_color;
-uniform vec4 end_color;
-uniform float angle;
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Ptr64 globals;
+    Ptr64 instances;
+    uint texture_id;
+    uint instance_count;
+    uint _pad0;
+    uint _pad1;
+    // GradientParams inline after 32-byte header
+    vec4 start_color;
+    vec4 end_color;
+    float angle;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec2 v_local_uv;
+layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float rad = radians(angle);
+    float rad = radians(root.angle);
     vec2 dir = vec2(cos(rad), sin(rad));
     float t = dot(v_local_uv - 0.5, dir) + 0.5;
     t = clamp(t, 0.0, 1.0);
-    frag_color = mix(start_color, end_color, t);
+    frag_color = mix(root.start_color, root.end_color, t);
 }
 )";
 
@@ -61,6 +108,28 @@ uint64_t GradientMaterial::get_pipeline_handle(IRenderContext& ctx)
         }
     }
     return shader_mat_ ? shader_mat_->get_pipeline_handle(ctx) : 0;
+}
+
+size_t GradientMaterial::get_gpu_data(void* out, size_t max_size) const
+{
+    if (max_size < sizeof(GradientParams)) return 0;
+
+    auto state = velk::read_state<IGradient>(this);
+    if (!state) return 0;
+
+    GradientParams params{};
+    params.start_color[0] = state->start_color.r;
+    params.start_color[1] = state->start_color.g;
+    params.start_color[2] = state->start_color.b;
+    params.start_color[3] = state->start_color.a;
+    params.end_color[0] = state->end_color.r;
+    params.end_color[1] = state->end_color.g;
+    params.end_color[2] = state->end_color.b;
+    params.end_color[3] = state->end_color.a;
+    params.angle = state->angle;
+
+    std::memcpy(out, &params, sizeof(params));
+    return sizeof(GradientParams);
 }
 
 } // namespace velk_ui

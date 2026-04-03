@@ -18,7 +18,7 @@ public:
     VELK_CLASS_UID(ClassId::Visual::Rect, "RectVisual");
 
     // IVisual
-    velk::vector<DrawCommand> get_draw_commands(const velk::rect& bounds) override;
+    velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) override;
 };
 
 } // namespace velk_ui

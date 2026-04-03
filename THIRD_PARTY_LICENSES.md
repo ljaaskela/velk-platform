@@ -1,11 +1,13 @@
 # Third-party licenses
 
-velk-ui bundles the following third-party software:
+velk-ui bundles or links the following third-party software:
 
 | Component | Version | License | Location |
 |-----------|---------|---------|----------|
 | [GLFW](https://www.glfw.org/) | 3.4 | Zlib | `third_party/glfw-3.4.tar.gz` |
-| [GLAD 2](https://github.com/Dav1dde/glad) | 2.x | MIT / CC0 | `plugins/render/gl/third_party/glad/` |
+| [volk](https://github.com/zeux/volk) | via Vulkan SDK | MIT | Vulkan SDK headers |
+| [VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | via Vulkan SDK | MIT | Vulkan SDK headers |
+| [shaderc](https://github.com/google/shaderc) | via Vulkan SDK | Apache 2.0 | Vulkan SDK shared library |
 | [FreeType](https://freetype.org/) | 2.13.3 | FreeType License (BSD-style) | `plugins/text/third_party/freetype-2.13.3.zip` |
 | [HarfBuzz](https://harfbuzz.github.io/) | 10.2.0 | MIT | `plugins/text/third_party/harfbuzz-10.2.0.zip` |
 | [Inter](https://rsms.me/inter/) | 4.x | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
@@ -26,6 +28,14 @@ HarfBuzz is distributed under the MIT license. The full license is included in t
 
 GLFW is distributed under the Zlib license. The full license is included in the GLFW source archive.
 
-## GLAD
+## volk
 
-GLAD 2 generated loader code is public domain (CC0) or MIT at the user's choice.
+volk is a meta-loader for Vulkan, distributed under the MIT license.
+
+## VMA (Vulkan Memory Allocator)
+
+VMA is distributed under the MIT license by AMD GPUOpen.
+
+## shaderc
+
+shaderc is Google's GLSL to SPIR-V compiler, distributed under the Apache 2.0 license. Used as a shared library from the Vulkan SDK for runtime shader compilation.

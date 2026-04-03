@@ -1,31 +1,59 @@
 #include "render_context.h"
 
 #include "default_shaders.h"
-#include "renderer.h"
+#include "intf_renderer_internal.h"
+#include "shader_compiler.h"
 #include "surface.h"
 
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk-ui/interface/intf_material_internal.h>
 #include <velk-ui/plugin.h>
+#include <velk-ui/plugins/render/platform.h>
 
 namespace velk_ui {
 
+namespace {
+
+PipelineId compile_and_register(IRenderBackend& backend,
+                                const char* vert_glsl, const char* frag_glsl)
+{
+    auto vert_spirv = compile_glsl_to_spirv(vert_glsl, ShaderStage::Vertex);
+    auto frag_spirv = compile_glsl_to_spirv(frag_glsl, ShaderStage::Fragment);
+    if (vert_spirv.empty() || frag_spirv.empty()) {
+        VELK_LOG(E, "compile_and_register: SPIR-V compilation failed");
+        return 0;
+    }
+
+    PipelineDesc desc;
+    desc.vertex_spirv = vert_spirv.data();
+    desc.vertex_spirv_size = vert_spirv.size() * sizeof(uint32_t);
+    desc.fragment_spirv = frag_spirv.data();
+    desc.fragment_spirv_size = frag_spirv.size() * sizeof(uint32_t);
+
+    return backend.create_pipeline(desc);
+}
+
+} // namespace
+
 bool RenderContextImpl::init(const RenderConfig& config)
 {
-    static constexpr velk::Uid kGlPluginId{"e1e9e004-21cd-4cfa-b843-49b0eb358149"};
-    static constexpr velk::Uid kGlBackendId{"2302c979-1531-4d0b-bab6-d1bac99f0a11"};
+    // Resolve Default to the platform backend
+    RenderBackendType backend_type = config.backend;
+    if (backend_type == RenderBackendType::Default) {
+        backend_type = RenderBackendType::Vulkan;
+    }
 
     velk::Uid plugin_id;
     velk::Uid class_id;
 
-    switch (config.backend) {
-    case RenderBackendType::GL:
-        plugin_id = kGlPluginId;
-        class_id = kGlBackendId;
+    switch (backend_type) {
+    case RenderBackendType::Vulkan:
+        plugin_id = PluginId::VkPlugin;
+        class_id = ClassId::VkBackend;
         break;
     default:
-        VELK_LOG(E, "RenderContext::init: unsupported backend type %d", static_cast<int>(config.backend));
+        VELK_LOG(E, "RenderContext::init: unsupported backend type %d", static_cast<int>(backend_type));
         return false;
     }
 
@@ -48,17 +76,23 @@ bool RenderContextImpl::init(const RenderConfig& config)
         return false;
     }
 
-    PipelineDesc rect_desc{rect_vertex_src, rect_fragment_src, VertexFormat::Untextured};
-    backend_->register_pipeline(PipelineKey::Rect, rect_desc);
+    // Compile and register built-in pipelines
+    auto rect_id = compile_and_register(*backend_, rect_vertex_src, rect_fragment_src);
+    auto text_id = compile_and_register(*backend_, text_vertex_src, text_fragment_src);
+    auto rounded_rect_id = compile_and_register(*backend_, rounded_rect_vertex_src, rounded_rect_fragment_src);
 
-    PipelineDesc text_desc{text_vertex_src, text_fragment_src, VertexFormat::Textured};
-    backend_->register_pipeline(PipelineKey::Text, text_desc);
+    if (!rect_id || !text_id || !rounded_rect_id) {
+        VELK_LOG(E, "RenderContext::init: failed to compile built-in shaders");
+        backend_ = nullptr;
+        return false;
+    }
 
-    PipelineDesc rounded_rect_desc{rounded_rect_vertex_src, rounded_rect_fragment_src, VertexFormat::Untextured};
-    backend_->register_pipeline(PipelineKey::RoundedRect, rounded_rect_desc);
+    pipeline_map_[PipelineKey::Rect] = rect_id;
+    pipeline_map_[PipelineKey::Text] = text_id;
+    pipeline_map_[PipelineKey::RoundedRect] = rounded_rect_id;
 
     initialized_ = true;
-    VELK_LOG(I, "RenderContext initialized (backend=%d)", static_cast<int>(config.backend));
+    VELK_LOG(I, "RenderContext initialized (Vulkan, pointer-based)");
     return true;
 }
 
@@ -66,20 +100,12 @@ ISurface::Ptr RenderContextImpl::create_surface(int width, int height)
 {
     auto obj = velk::instance().create<velk::IObject>(Surface::static_class_id());
     auto surface = interface_pointer_cast<ISurface>(obj);
-    if (!surface) {
-        return nullptr;
-    }
+    if (!surface) return nullptr;
 
     velk::write_state<ISurface>(surface, [&](ISurface::State& s) {
         s.width = width;
         s.height = height;
     });
-
-    if (backend_) {
-        uint64_t sid = next_surface_id_++;
-        SurfaceDesc desc{width, height};
-        backend_->create_surface(sid, desc);
-    }
 
     return surface;
 }
@@ -108,25 +134,21 @@ IRenderer::Ptr RenderContextImpl::create_renderer()
 velk::IObject::Ptr RenderContextImpl::create_shader_material(const char* fragment_source,
                                                               const char* vertex_source)
 {
-    if (!initialized_ || !backend_ || !fragment_source) {
-        return nullptr;
-    }
+    if (!initialized_ || !backend_ || !fragment_source) return nullptr;
+
+    const char* vert_src = vertex_source ? vertex_source : rect_vertex_src;
+    PipelineId pid = compile_and_register(*backend_, vert_src, fragment_source);
+    if (!pid) return nullptr;
 
     uint64_t key = next_pipeline_key_++;
-    PipelineDesc desc{vertex_source ? vertex_source : rect_vertex_src,
-                      fragment_source, VertexFormat::Untextured};
-    if (!backend_->register_pipeline(key, desc)) {
-        return nullptr;
-    }
+    pipeline_map_[key] = pid;
 
     auto obj = velk::instance().create<velk::IObject>(ClassId::Material::Shader);
-    if (!obj) {
-        return nullptr;
-    }
+    if (!obj) return nullptr;
 
-    auto* internal = interface_cast<IMaterialInternal>(obj);
-    if (internal) {
-        internal->set_pipeline_handle(key);
+    auto* mat_internal = interface_cast<IMaterialInternal>(obj);
+    if (mat_internal) {
+        mat_internal->set_pipeline_handle(key);
     }
 
     return obj;

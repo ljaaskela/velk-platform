@@ -3,6 +3,8 @@
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 
+#include <cstring>
+
 namespace velk_ui {
 
 void TextVisual::set_font(const IFont::Ptr& font)
@@ -36,7 +38,7 @@ void TextVisual::ensure_default_font()
 
 void TextVisual::reshape()
 {
-    cached_commands_.clear();
+    cached_entries_.clear();
     text_width_ = 0.f;
     text_height_ = 0.f;
 
@@ -76,15 +78,24 @@ void TextVisual::reshape()
         float glyph_w = static_cast<float>(rect->w);
         float glyph_h = static_cast<float>(rect->h);
 
-        DrawCommand cmd{};
-        cmd.type = DrawCommandType::TexturedQuad;
-        cmd.bounds = {glyph_x, glyph_y, glyph_w, glyph_h};
-        cmd.u0 = static_cast<float>(rect->x) / atlas_w;
-        cmd.v0 = static_cast<float>(rect->y) / atlas_h;
-        cmd.u1 = static_cast<float>(rect->x + rect->w) / atlas_w;
-        cmd.v1 = static_cast<float>(rect->y + rect->h) / atlas_h;
+        float u0 = static_cast<float>(rect->x) / atlas_w;
+        float v0 = static_cast<float>(rect->y) / atlas_h;
+        float u1 = static_cast<float>(rect->x + rect->w) / atlas_w;
+        float v1 = static_cast<float>(rect->y + rect->h) / atlas_h;
 
-        cached_commands_.push_back(cmd);
+        DrawEntry entry{};
+        entry.pipeline_key = PipelineKey::Text;
+        entry.bounds = {glyph_x, glyph_y, glyph_w, glyph_h};
+
+        // Pack textured instance data: {x, y, w, h, r, g, b, a, u0, v0, u1, v1}
+        // Color is filled at draw time in get_draw_entries; store UVs here.
+        float data[] = {glyph_x, glyph_y, glyph_w, glyph_h,
+                        0.f, 0.f, 0.f, 0.f,
+                        u0, v0, u1, v1};
+        std::memcpy(entry.instance_data, data, sizeof(data));
+        entry.instance_size = sizeof(data);
+
+        cached_entries_.push_back(entry);
         cursor_x += gp.advance.x;
     }
 
@@ -92,7 +103,7 @@ void TextVisual::reshape()
     text_height_ = line_height;
 }
 
-velk::vector<DrawCommand> TextVisual::get_draw_commands(const velk::rect& bounds)
+velk::vector<DrawEntry> TextVisual::get_draw_entries(const velk::rect& bounds)
 {
     auto visual_state = velk::read_state<IVisual>(this);
     velk::color col = visual_state ? visual_state->color : velk::color::white();
@@ -116,14 +127,27 @@ velk::vector<DrawCommand> TextVisual::get_draw_commands(const velk::rect& bounds
     default: break;
     }
 
-    velk::vector<DrawCommand> result;
-    result.reserve(cached_commands_.size());
+    velk::vector<DrawEntry> result;
+    result.reserve(cached_entries_.size());
 
-    for (auto& cmd : cached_commands_) {
-        DrawCommand out = cmd;
+    for (auto& entry : cached_entries_) {
+        DrawEntry out = entry;
+        // Offset bounds
         out.bounds.x += offset_x;
         out.bounds.y += offset_y;
-        out.color = col;
+
+        // Update instance data: offset position (first 2 floats) and fill color (floats 4-7)
+        float* inst = reinterpret_cast<float*>(out.instance_data);
+        inst[0] += offset_x;
+        inst[1] += offset_y;
+        inst[4] = col.r;
+        inst[5] = col.g;
+        inst[6] = col.b;
+        inst[7] = col.a;
+
+        // Texture key: use this TextureProvider's address as key (matches renderer's upload key)
+        out.texture_key = reinterpret_cast<uint64_t>(static_cast<const ITextureProvider*>(this));
+
         result.push_back(out);
     }
 
