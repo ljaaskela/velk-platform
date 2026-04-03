@@ -2,14 +2,13 @@
 #define VELK_UI_VK_BACKEND_H
 
 #include <velk/ext/object.h>
-#include <velk-ui/plugins/vk/plugin.h>
-#include <velk-ui/plugins/render/intf_render_backend.h>
-
-#include <volk/volk.h>
-#include <vma/vk_mem_alloc.h>
+#include <velk/vector.h>
 
 #include <unordered_map>
-#include <vector>
+#include <velk-ui/plugins/render/intf_render_backend.h>
+#include <velk-ui/plugins/vk/plugin.h>
+#include <vma/vk_mem_alloc.h>
+#include <volk/volk.h>
 
 namespace velk_ui {
 
@@ -35,8 +34,7 @@ public:
 
     TextureId create_texture(const TextureDesc& desc) override;
     void destroy_texture(TextureId texture) override;
-    void upload_texture(TextureId texture,
-                        const uint8_t* pixels, int width, int height) override;
+    void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) override;
 
     PipelineId create_pipeline(const PipelineDesc& desc) override;
     void destroy_pipeline(PipelineId pipeline) override;
@@ -77,7 +75,7 @@ private:
     VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
     VkSampler linear_sampler_ = VK_NULL_HANDLE;
-    uint32_t next_bindless_index_ = 1;  // 0 reserved for "no texture"
+    uint32_t next_bindless_index_ = 1; // 0 reserved for "no texture"
 
     // Shared pipeline layout (push constants + bindless set)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
@@ -93,9 +91,9 @@ private:
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
         VkRenderPass render_pass = VK_NULL_HANDLE;
-        std::vector<VkImage> images;
-        std::vector<VkImageView> image_views;
-        std::vector<VkFramebuffer> framebuffers;
+        velk::vector<VkImage> images;
+        velk::vector<VkImageView> image_views;
+        velk::vector<VkFramebuffer> framebuffers;
         VkFormat image_format = VK_FORMAT_UNDEFINED;
         int width = 0;
         int height = 0;
@@ -158,8 +156,8 @@ private:
 
     VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(VkCommandBuffer cb);
-    void transition_image_layout(VkCommandBuffer cb, VkImage image,
-                                 VkImageLayout old_layout, VkImageLayout new_layout);
+    void transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+                                 VkImageLayout new_layout);
 };
 
 } // namespace velk_ui

@@ -2,9 +2,7 @@
 
 #include <velk/api/velk.h>
 
-#include <algorithm>
 #include <cstring>
-#include <vector>
 
 namespace velk_ui {
 
@@ -14,12 +12,11 @@ VkFormat choose_surface_format(VkPhysicalDevice device, VkSurfaceKHR surface)
 {
     uint32_t count = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &count, nullptr);
-    std::vector<VkSurfaceFormatKHR> formats(count);
+    velk::vector<VkSurfaceFormatKHR> formats(count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &count, formats.data());
 
     for (auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
-            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             return f.format;
         }
     }
@@ -30,21 +27,22 @@ VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKHR surfa
 {
     uint32_t count = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &count, nullptr);
-    std::vector<VkPresentModeKHR> modes(count);
+    velk::vector<VkPresentModeKHR> modes(count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &count, modes.data());
 
     for (auto m : modes) {
-        if (m == VK_PRESENT_MODE_FIFO_KHR) return m;
+        if (m == VK_PRESENT_MODE_FIFO_KHR) {
+            return m;
+        }
     }
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 #ifndef NDEBUG
-VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageTypeFlagsEXT /*type*/,
-    const VkDebugUtilsMessengerCallbackDataEXT* data,
-    void* /*user_data*/)
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                              VkDebugUtilsMessageTypeFlagsEXT /*type*/,
+                                              const VkDebugUtilsMessengerCallbackDataEXT* data,
+                                              void* /*user_data*/)
 {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         VELK_LOG(E, "Vulkan: %s", data->pMessage);
@@ -60,7 +58,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 VkBackend::~VkBackend()
 {
     if (initialized_) {
-        shutdown();
+        VkBackend::shutdown();
     }
 }
 
@@ -70,25 +68,29 @@ VkBackend::~VkBackend()
 
 bool VkBackend::init(void* params)
 {
-    if (initialized_) return true;
+    if (initialized_) {
+        return true;
+    }
 
     if (volkInitialize() != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: volk init failed");
         return false;
     }
 
-    if (!create_vk_instance()) return false;
+    if (!create_vk_instance()) {
+        return false;
+    }
     volkLoadInstance(instance_);
 
 #ifndef NDEBUG
     {
         VkDebugUtilsMessengerCreateInfoEXT ci{};
         ci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        ci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
-                           | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        ci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
-                       | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
-                       | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        ci.messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        ci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         ci.pfnUserCallback = debug_callback;
         vkCreateDebugUtilsMessengerEXT(instance_, &ci, nullptr, &debug_messenger_);
     }
@@ -109,15 +111,29 @@ bool VkBackend::init(void* params)
     initial_sd.surface = initial_surface;
     surfaces_[next_surface_id_] = initial_sd;
 
-    if (!select_physical_device()) return false;
-    if (!create_device()) return false;
+    if (!select_physical_device()) {
+        return false;
+    }
+    if (!create_device()) {
+        return false;
+    }
     volkLoadDevice(device_);
 
-    if (!create_allocator()) return false;
-    if (!create_command_pool()) return false;
-    if (!create_sync_objects()) return false;
-    if (!create_bindless_descriptor()) return false;
-    if (!create_pipeline_layout()) return false;
+    if (!create_allocator()) {
+        return false;
+    }
+    if (!create_command_pool()) {
+        return false;
+    }
+    if (!create_sync_objects()) {
+        return false;
+    }
+    if (!create_bindless_descriptor()) {
+        return false;
+    }
+    if (!create_pipeline_layout()) {
+        return false;
+    }
 
     // Create a default render pass from the initial surface format.
     // This is needed so pipelines can be created before a swapchain exists.
@@ -171,7 +187,9 @@ bool VkBackend::init(void* params)
 
 void VkBackend::shutdown()
 {
-    if (!initialized_) return;
+    if (!initialized_) {
+        return;
+    }
 
     vkDeviceWaitIdle(device_);
 
@@ -203,7 +221,9 @@ void VkBackend::shutdown()
     }
     surfaces_.clear();
 
-    if (default_render_pass_) vkDestroyRenderPass(device_, default_render_pass_, nullptr);
+    if (default_render_pass_) {
+        vkDestroyRenderPass(device_, default_render_pass_, nullptr);
+    }
     vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptor_layout_, nullptr);
     vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
@@ -241,14 +261,14 @@ bool VkBackend::create_vk_instance()
     app_info.pApplicationName = "velk-ui";
     app_info.apiVersion = VK_API_VERSION_1_2;
 
-    std::vector<const char*> extensions = {
+    velk::vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef _WIN32
         "VK_KHR_win32_surface",
 #endif
     };
 
-    std::vector<const char*> layers;
+    velk::vector<const char*> layers;
 #ifndef NDEBUG
     layers.push_back("VK_LAYER_KHRONOS_validation");
     extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -278,7 +298,7 @@ bool VkBackend::select_physical_device()
         return false;
     }
 
-    std::vector<VkPhysicalDevice> devices(count);
+    velk::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
 
     // Prefer discrete GPU
@@ -295,22 +315,29 @@ bool VkBackend::select_physical_device()
     // Find graphics queue family with present support
     uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &family_count, nullptr);
-    std::vector<VkQueueFamilyProperties> families(family_count);
+    velk::vector<VkQueueFamilyProperties> families(family_count);
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &family_count, families.data());
 
     // Check against the first surface for present support
     VkSurfaceKHR check_surface = VK_NULL_HANDLE;
     for (auto& [id, sd] : surfaces_) {
-        if (sd.surface) { check_surface = sd.surface; break; }
+        if (sd.surface) {
+            check_surface = sd.surface;
+            break;
+        }
     }
 
     bool found = false;
     for (uint32_t i = 0; i < family_count; ++i) {
-        if (!(families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) continue;
+        if (!(families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+            continue;
+        }
         if (check_surface) {
             VkBool32 present = VK_FALSE;
             vkGetPhysicalDeviceSurfaceSupportKHR(physical_device_, i, check_surface, &present);
-            if (!present) continue;
+            if (!present) {
+                continue;
+            }
         }
         graphics_family_ = i;
         found = true;
@@ -337,7 +364,7 @@ bool VkBackend::create_device()
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &priority;
 
-    const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     // Vulkan 1.2 features: BDA + descriptor indexing
     VkPhysicalDeviceVulkan12Features features12{};
@@ -410,10 +437,12 @@ bool VkBackend::create_command_pool()
     alloc_info.commandBufferCount = kFrameOverlap;
 
     VkCommandBuffer cbs[kFrameOverlap];
-    if (vkAllocateCommandBuffers(device_, &alloc_info, cbs) != VK_SUCCESS)
+    if (vkAllocateCommandBuffers(device_, &alloc_info, cbs) != VK_SUCCESS) {
         return false;
-    for (uint32_t i = 0; i < kFrameOverlap; ++i)
+    }
+    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         frame_sync_[i].command_buffer = cbs[i];
+    }
 
     return true;
 }
@@ -428,12 +457,15 @@ bool VkBackend::create_sync_objects()
     fence_ci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
-        if (vkCreateFence(device_, &fence_ci, nullptr, &frame_sync_[i].fence) != VK_SUCCESS)
+        if (vkCreateFence(device_, &fence_ci, nullptr, &frame_sync_[i].fence) != VK_SUCCESS) {
             return false;
-        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].image_available) != VK_SUCCESS)
+        }
+        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].image_available) != VK_SUCCESS) {
             return false;
-        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].render_finished) != VK_SUCCESS)
+        }
+        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].render_finished) != VK_SUCCESS) {
             return false;
+        }
     }
     return true;
 }
@@ -460,10 +492,9 @@ bool VkBackend::create_bindless_descriptor()
     binding.descriptorCount = kMaxBindlessTextures;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    VkDescriptorBindingFlags binding_flags =
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-        | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-        | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+    VkDescriptorBindingFlags binding_flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                                             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                                             VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -546,7 +577,9 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
         if (sd.surface && sd.swapchain == VK_NULL_HANDLE) {
             sd.width = desc.width;
             sd.height = desc.height;
-            if (!create_swapchain(sd)) return 0;
+            if (!create_swapchain(sd)) {
+                return 0;
+            }
             return id;
         }
     }
@@ -559,7 +592,9 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
 void VkBackend::destroy_surface(uint64_t surface_id)
 {
     auto it = surfaces_.find(surface_id);
-    if (it == surfaces_.end()) return;
+    if (it == surfaces_.end()) {
+        return;
+    }
 
     vkDeviceWaitIdle(device_);
     destroy_swapchain(it->second);
@@ -572,7 +607,9 @@ void VkBackend::destroy_surface(uint64_t surface_id)
 void VkBackend::resize_surface(uint64_t surface_id, int width, int height)
 {
     auto it = surfaces_.find(surface_id);
-    if (it == surfaces_.end()) return;
+    if (it == surfaces_.end()) {
+        return;
+    }
 
     vkDeviceWaitIdle(device_);
     it->second.width = width;
@@ -703,10 +740,18 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
 
 void VkBackend::destroy_swapchain(SurfaceData& sd)
 {
-    for (auto fb : sd.framebuffers) vkDestroyFramebuffer(device_, fb, nullptr);
-    for (auto iv : sd.image_views) vkDestroyImageView(device_, iv, nullptr);
-    if (sd.render_pass) vkDestroyRenderPass(device_, sd.render_pass, nullptr);
-    if (sd.swapchain) vkDestroySwapchainKHR(device_, sd.swapchain, nullptr);
+    for (auto fb : sd.framebuffers) {
+        vkDestroyFramebuffer(device_, fb, nullptr);
+    }
+    for (auto iv : sd.image_views) {
+        vkDestroyImageView(device_, iv, nullptr);
+    }
+    if (sd.render_pass) {
+        vkDestroyRenderPass(device_, sd.render_pass, nullptr);
+    }
+    if (sd.swapchain) {
+        vkDestroySwapchainKHR(device_, sd.swapchain, nullptr);
+    }
 
     sd.framebuffers.clear();
     sd.image_views.clear();
@@ -724,14 +769,13 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
-    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                 | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                 | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
     VmaAllocationCreateInfo alloc_ci{};
     if (desc.cpu_writable) {
-        alloc_ci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT
-                       | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        alloc_ci.flags =
+            VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
         alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
     } else {
         alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -756,7 +800,9 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
 void VkBackend::destroy_buffer(GpuBuffer buffer)
 {
     auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) return;
+    if (it == buffers_.end()) {
+        return;
+    }
 
     vmaDestroyBuffer(allocator_, it->second.buffer, it->second.allocation);
     buffers_.erase(it);
@@ -765,14 +811,18 @@ void VkBackend::destroy_buffer(GpuBuffer buffer)
 void* VkBackend::map(GpuBuffer buffer)
 {
     auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) return nullptr;
+    if (it == buffers_.end()) {
+        return nullptr;
+    }
     return it->second.mapped;
 }
 
 uint64_t VkBackend::gpu_address(GpuBuffer buffer)
 {
     auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) return 0;
+    if (it == buffers_.end()) {
+        return 0;
+    }
 
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
@@ -793,9 +843,7 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     td.format = desc.format;
     td.bindless_index = next_bindless_index_++;
 
-    VkFormat vk_format = (desc.format == PixelFormat::R8)
-        ? VK_FORMAT_R8_UNORM
-        : VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat vk_format = (desc.format == PixelFormat::R8) ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
 
     VkImageCreateInfo img_ci{};
     img_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -830,8 +878,8 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
 
     // Transition to shader read layout (will be transferred into when upload_texture is called)
     auto cb = begin_one_shot_commands();
-    transition_image_layout(cb, td.image,
-                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition_image_layout(
+        cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     end_one_shot_commands(cb);
 
     // Update bindless descriptor
@@ -859,18 +907,21 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
 void VkBackend::destroy_texture(TextureId texture)
 {
     auto it = textures_.find(texture);
-    if (it == textures_.end()) return;
+    if (it == textures_.end()) {
+        return;
+    }
 
     vkDestroyImageView(device_, it->second.view, nullptr);
     vmaDestroyImage(allocator_, it->second.image, it->second.allocation);
     textures_.erase(it);
 }
 
-void VkBackend::upload_texture(TextureId texture,
-                               const uint8_t* pixels, int width, int height)
+void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int width, int height)
 {
     auto it = textures_.find(texture);
-    if (it == textures_.end()) return;
+    if (it == textures_.end()) {
+        return;
+    }
 
     auto& td = it->second;
     size_t bpp = (td.format == PixelFormat::R8) ? 1 : 4;
@@ -883,15 +934,16 @@ void VkBackend::upload_texture(TextureId texture,
     buf_ci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
     VmaAllocationCreateInfo alloc_ci{};
-    alloc_ci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT
-                   | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    alloc_ci.flags =
+        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
     alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
 
     VkBuffer staging = VK_NULL_HANDLE;
     VmaAllocation staging_alloc = VK_NULL_HANDLE;
     VmaAllocationInfo staging_info{};
 
-    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &staging, &staging_alloc, &staging_info) != VK_SUCCESS) {
+    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &staging, &staging_alloc, &staging_info) !=
+        VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create texture staging buffer");
         return;
     }
@@ -901,9 +953,8 @@ void VkBackend::upload_texture(TextureId texture,
     auto cb = begin_one_shot_commands();
 
     // Transition to transfer dst
-    transition_image_layout(cb, td.image,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    transition_image_layout(
+        cb, td.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     // Copy
     VkBufferImageCopy region{};
@@ -914,9 +965,8 @@ void VkBackend::upload_texture(TextureId texture,
     vkCmdCopyBufferToImage(cb, staging, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     // Transition back to shader read
-    transition_image_layout(cb, td.image,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition_image_layout(
+        cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     end_one_shot_commands(cb);
 
@@ -1001,15 +1051,15 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc)
     blend_att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
     blend_att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     blend_att.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-                             | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     blend.attachmentCount = 1;
     blend.pAttachments = &blend_att;
 
-    VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamic.dynamicStateCount = 2;
@@ -1031,7 +1081,8 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc)
     pipeline_ci.subpass = 0;
 
     PipelineEntry pe{};
-    if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline) !=
+        VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create graphics pipeline");
         vkDestroyShaderModule(device_, vert_module, nullptr);
         vkDestroyShaderModule(device_, frag_module, nullptr);
@@ -1050,7 +1101,9 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc)
 void VkBackend::destroy_pipeline(PipelineId pipeline)
 {
     auto it = pipelines_.find(pipeline);
-    if (it == pipelines_.end()) return;
+    if (it == pipelines_.end()) {
+        return;
+    }
 
     vkDestroyPipeline(device_, it->second.pipeline, nullptr);
     pipelines_.erase(it);
@@ -1063,7 +1116,9 @@ void VkBackend::destroy_pipeline(PipelineId pipeline)
 void VkBackend::begin_frame(uint64_t surface_id)
 {
     auto it = surfaces_.find(surface_id);
-    if (it == surfaces_.end()) return;
+    if (it == surfaces_.end()) {
+        return;
+    }
     auto& sd = it->second;
 
     current_surface_ = surface_id;
@@ -1071,8 +1126,8 @@ void VkBackend::begin_frame(uint64_t surface_id)
     auto& sync = frame_sync_[frame_sync_index_];
     vkWaitForFences(device_, 1, &sync.fence, VK_TRUE, UINT64_MAX);
 
-    VkResult result = vkAcquireNextImageKHR(device_, sd.swapchain, UINT64_MAX,
-                                            sync.image_available, VK_NULL_HANDLE, &sd.image_index);
+    VkResult result = vkAcquireNextImageKHR(
+        device_, sd.swapchain, UINT64_MAX, sync.image_available, VK_NULL_HANDLE, &sd.image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         // Swapchain needs recreation; caller should resize_surface
         return;
@@ -1097,7 +1152,8 @@ void VkBackend::begin_frame(uint64_t surface_id)
     rp_begin.clearValueCount = 1;
     rp_begin.pClearValues = &clear_value;
 
-    vkCmdBeginRenderPass(frame_sync_[frame_sync_index_].command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(
+        frame_sync_[frame_sync_index_].command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
     // Set viewport and scissor
     VkViewport viewport{};
@@ -1111,8 +1167,14 @@ void VkBackend::begin_frame(uint64_t surface_id)
     vkCmdSetScissor(frame_sync_[frame_sync_index_].command_buffer, 0, 1, &scissor);
 
     // Bind bindless descriptor set
-    vkCmdBindDescriptorSets(frame_sync_[frame_sync_index_].command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
+    vkCmdBindDescriptorSets(frame_sync_[frame_sync_index_].command_buffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline_layout_,
+                            0,
+                            1,
+                            &descriptor_set_,
+                            0,
+                            nullptr);
 }
 
 void VkBackend::submit(velk::array_view<const DrawCall> calls)
@@ -1121,24 +1183,34 @@ void VkBackend::submit(velk::array_view<const DrawCall> calls)
         const auto& call = calls[i];
 
         auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) continue;
-
-        vkCmdBindPipeline(frame_sync_[frame_sync_index_].command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
-
-        if (call.root_constants_size > 0) {
-            vkCmdPushConstants(frame_sync_[frame_sync_index_].command_buffer, pipeline_layout_,
-                               VK_SHADER_STAGE_ALL, 0,
-                               call.root_constants_size, call.root_constants);
+        if (pit == pipelines_.end()) {
+            continue;
         }
 
-        vkCmdDraw(frame_sync_[frame_sync_index_].command_buffer, call.vertex_count, call.instance_count, 0, 0);
+        vkCmdBindPipeline(frame_sync_[frame_sync_index_].command_buffer,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pit->second.pipeline);
+
+        if (call.root_constants_size > 0) {
+            vkCmdPushConstants(frame_sync_[frame_sync_index_].command_buffer,
+                               pipeline_layout_,
+                               VK_SHADER_STAGE_ALL,
+                               0,
+                               call.root_constants_size,
+                               call.root_constants);
+        }
+
+        vkCmdDraw(
+            frame_sync_[frame_sync_index_].command_buffer, call.vertex_count, call.instance_count, 0, 0);
     }
 }
 
 void VkBackend::end_frame()
 {
     auto it = surfaces_.find(current_surface_);
-    if (it == surfaces_.end()) return;
+    if (it == surfaces_.end()) {
+        return;
+    }
     auto& sd = it->second;
 
     vkCmdEndRenderPass(frame_sync_[frame_sync_index_].command_buffer);
@@ -1212,8 +1284,8 @@ void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
     vkFreeCommandBuffers(device_, command_pool_, 1, &cb);
 }
 
-void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image,
-                                         VkImageLayout old_layout, VkImageLayout new_layout)
+void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+                                        VkImageLayout new_layout)
 {
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
