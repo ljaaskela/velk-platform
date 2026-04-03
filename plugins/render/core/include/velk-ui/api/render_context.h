@@ -11,7 +11,7 @@ namespace velk_ui {
 /**
  * @brief Convenience wrapper around IRenderContext.
  *
- *   auto ctx = create_render_context({RenderBackendType::GL, glfwGetProcAddress});
+ *   auto ctx = create_render_context({&vk_params});
  *   auto renderer = ctx.create_renderer();
  *   auto surface = ctx.create_surface(800, 600);
  */

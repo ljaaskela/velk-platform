@@ -1,27 +1,14 @@
 #ifndef VELK_UI_VK_PLUGIN_H
 #define VELK_UI_VK_PLUGIN_H
 
-#include <velk/common.h>
+#include <velk-ui/plugins/render/platform.h>
 
 namespace velk_ui {
-
-namespace ClassId {
-
-/** @brief Vulkan 1.2 render backend (bindless). */
-inline constexpr velk::Uid VkBackend{"f7a23c01-8e4d-4b19-a652-1d3f09b7e5c8"};
-
-} // namespace ClassId
-
-namespace PluginId {
-
-inline constexpr velk::Uid VkPlugin{"b91d4f6a-c583-47e0-9a1b-6e82d0f4a3b7"};
-
-} // namespace PluginId
 
 /**
  * @brief Initialization parameters for the Vulkan backend.
  *
- * Passed via RenderConfig::backend_params when RenderBackendType::Vulkan is selected.
+ * Passed via RenderConfig::backend_params.
  * The backend creates its own VkInstance, VkDevice, and VkSurfaceKHR.
  */
 /**

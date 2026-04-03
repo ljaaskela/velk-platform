@@ -7,6 +7,8 @@
 #include <velk-ui/plugins/render/intf_render_backend.h>
 #include <velk-ui/plugins/render/plugin.h>
 
+#include <unordered_map>
+
 namespace velk_ui {
 
 class RenderContextImpl : public velk::ext::ObjectCore<RenderContextImpl, IRenderContext>
@@ -20,10 +22,12 @@ public:
     velk::IObject::Ptr create_shader_material(const char* fragment_source,
                                               const char* vertex_source = nullptr) override;
 
+    // Pipeline key -> PipelineId mapping (used by renderer)
+    const std::unordered_map<uint64_t, PipelineId>& pipeline_map() const { return pipeline_map_; }
+
 private:
     IRenderBackend::Ptr backend_;
-    RenderBackendType backend_type_ = RenderBackendType::GL;
-    uint64_t next_surface_id_ = 1;
+    std::unordered_map<uint64_t, PipelineId> pipeline_map_;
     uint64_t next_pipeline_key_ = PipelineKey::CustomBase;
     bool initialized_ = false;
 };

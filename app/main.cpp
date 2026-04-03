@@ -2,6 +2,8 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
 
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
 #include <velk-ui/api/input/click.h>
 #include <velk-ui/api/input_dispatcher.h>
@@ -10,6 +12,7 @@
 #include <velk-ui/api/render_context.h>
 #include <velk-ui/api/scene.h>
 #include <velk-ui/api/visual/rect.h>
+#include <velk-ui/plugins/vk/plugin.h>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -42,9 +45,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
     constexpr int kWidth = 1280;
     constexpr int kHeight = 720;
@@ -55,21 +56,30 @@ int main(int argc, char* argv[])
         glfwTerminate();
         return 1;
     }
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
 
     auto& velk = velk::instance();
 
     // Load plugins
     velk.plugin_registry().load_plugin_from_path("velk_ui.dll");
     velk.plugin_registry().load_plugin_from_path("velk_render.dll");
-    velk.plugin_registry().load_plugin_from_path("velk_gl.dll");
+    velk.plugin_registry().load_plugin_from_path("velk_vk.dll");
     velk.plugin_registry().load_plugin_from_path("velk_text.dll");
     velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 
     // Create render context, renderer, and surface
-    auto ctx = velk_ui::create_render_context(
-        {velk_ui::RenderBackendType::GL, reinterpret_cast<void*>(glfwGetProcAddress)});
+    static velk_ui::VulkanInitParams vk_params;
+    vk_params.user_data = window;
+    vk_params.create_surface = [](void* vk_instance, void* out_surface, void* user_data) -> bool {
+        auto instance = static_cast<VkInstance>(vk_instance);
+        auto* surface = static_cast<VkSurfaceKHR*>(out_surface);
+        auto* win = static_cast<GLFWwindow*>(user_data);
+        return glfwCreateWindowSurface(instance, win, nullptr, surface) == VK_SUCCESS;
+    };
+
+    velk_ui::RenderConfig render_config;
+    render_config.backend_params = &vk_params;
+
+    auto ctx = velk_ui::create_render_context(render_config);
     if (!ctx) {
         VELK_LOG(E, "Failed to create render context");
         glfwDestroyWindow(window);
@@ -152,7 +162,6 @@ int main(int argc, char* argv[])
     // First frame
     velk.update();
     renderer->render();
-    glfwSwapBuffers(window);
 
     // Print stats after first frame
     {
@@ -190,7 +199,6 @@ int main(int argc, char* argv[])
         glfwPollEvents();
         velk.update();
         renderer->render();
-        glfwSwapBuffers(window);
     }
 
     g_input = nullptr;

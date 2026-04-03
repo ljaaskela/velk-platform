@@ -8,8 +8,8 @@
 #include <volk/volk.h>
 #include <vma/vk_mem_alloc.h>
 
-#include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 namespace velk_ui {
 
@@ -20,123 +20,146 @@ public:
 
     ~VkBackend() override;
 
+    // IRenderBackend
     bool init(void* params) override;
     void shutdown() override;
 
-    bool create_surface(uint64_t surface_id, const SurfaceDesc& desc) override;
+    uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
-    void update_surface(uint64_t surface_id, const SurfaceDesc& desc) override;
+    void resize_surface(uint64_t surface_id, int width, int height) override;
 
-    bool register_pipeline(uint64_t pipeline_key, const PipelineDesc& desc) override;
-    velk::vector<UniformInfo> get_pipeline_uniforms(uint64_t pipeline_key) const override;
-    void upload_texture(uint64_t texture_key,
+    GpuBuffer create_buffer(const GpuBufferDesc& desc) override;
+    void destroy_buffer(GpuBuffer buffer) override;
+    void* map(GpuBuffer buffer) override;
+    uint64_t gpu_address(GpuBuffer buffer) override;
+
+    TextureId create_texture(const TextureDesc& desc) override;
+    void destroy_texture(TextureId texture) override;
+    void upload_texture(TextureId texture,
                         const uint8_t* pixels, int width, int height) override;
 
+    PipelineId create_pipeline(const PipelineDesc& desc) override;
+    void destroy_pipeline(PipelineId pipeline) override;
+
     void begin_frame(uint64_t surface_id) override;
-    void submit(velk::array_view<const RenderBatch> batches) override;
+    void submit(velk::array_view<const DrawCall> calls) override;
     void end_frame() override;
 
 private:
-    static constexpr uint32_t kMaxBindlessTextures = 1024;
+    // Vulkan core
+    VkInstance instance_ = VK_NULL_HANDLE;
+    VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkQueue graphics_queue_ = VK_NULL_HANDLE;
+    uint32_t graphics_family_ = 0;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
 
-    // Push constant layout: mat4 projection (64B) + vec4 rect (16B) + uint texture_index (4B)
-    // Material uniforms follow after (up to 128B total).
-    static constexpr uint32_t kPushConstantOffset_Projection = 0;
-    static constexpr uint32_t kPushConstantOffset_Rect = 64;
-    static constexpr uint32_t kPushConstantOffset_TextureIndex = 80;
-    static constexpr uint32_t kPushConstantOffset_MaterialStart = 84;
-    static constexpr uint32_t kMaxPushConstantSize = 128;
+    // Command submission with double-buffered sync objects.
+    // Even with single frame-in-flight, we need 2 sets because the present
+    // engine may still reference the previous frame's semaphores.
+    VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
-    struct PipelineEntry
+    static constexpr uint32_t kFrameOverlap = 3;
+    struct FrameSync
     {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        VkPipelineLayout layout = VK_NULL_HANDLE;
-        VkShaderModule vert_module = VK_NULL_HANDLE;
-        VkShaderModule frag_module = VK_NULL_HANDLE;
-        uint32_t instance_stride = 0;
-        velk::vector<UniformInfo> uniforms;
+        VkFence fence = VK_NULL_HANDLE;
+        VkSemaphore image_available = VK_NULL_HANDLE;
+        VkSemaphore render_finished = VK_NULL_HANDLE;
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     };
+    FrameSync frame_sync_[kFrameOverlap]{};
+    uint32_t frame_sync_index_ = 0;
 
+    // Bindless textures
+    static constexpr uint32_t kMaxBindlessTextures = 1024;
+    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
+    VkSampler linear_sampler_ = VK_NULL_HANDLE;
+    uint32_t next_bindless_index_ = 1;  // 0 reserved for "no texture"
+
+    // Shared pipeline layout (push constants + bindless set)
+    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+
+    // Default render pass (created at init from the initial surface format,
+    // used for pipeline creation before any swapchain exists)
+    VkRenderPass default_render_pass_ = VK_NULL_HANDLE;
+    VkFormat default_surface_format_ = VK_FORMAT_UNDEFINED;
+
+    // Surfaces
     struct SurfaceData
     {
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+        VkRenderPass render_pass = VK_NULL_HANDLE;
+        std::vector<VkImage> images;
+        std::vector<VkImageView> image_views;
+        std::vector<VkFramebuffer> framebuffers;
+        VkFormat image_format = VK_FORMAT_UNDEFINED;
         int width = 0;
         int height = 0;
-        VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-        velk::vector<VkImage> images;
-        velk::vector<VkImageView> image_views;
-        velk::vector<VkFramebuffer> framebuffers;
-        VkRenderPass render_pass = VK_NULL_HANDLE;
-        VkFormat image_format = VK_FORMAT_B8G8R8A8_SRGB;
         uint32_t image_index = 0;
     };
 
+    std::unordered_map<uint64_t, SurfaceData> surfaces_;
+    uint64_t next_surface_id_ = 1;
+    uint64_t current_surface_ = 0;
+
+    // Buffers
+    struct BufferData
+    {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        size_t size = 0;
+    };
+
+    std::unordered_map<GpuBuffer, BufferData> buffers_;
+    GpuBuffer next_buffer_id_ = 1;
+
+    // Textures
     struct TextureData
     {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
         uint32_t bindless_index = 0;
+        int width = 0;
+        int height = 0;
+        PixelFormat format = PixelFormat::RGBA8;
     };
 
-    // Vulkan core objects
-    VkInstance instance_ = VK_NULL_HANDLE;
-    VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
-    VkDevice device_ = VK_NULL_HANDLE;
-    VkQueue graphics_queue_ = VK_NULL_HANDLE;
-    uint32_t queue_family_ = 0;
-    VkSurfaceKHR surface_khr_ = VK_NULL_HANDLE;
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    std::unordered_map<TextureId, TextureData> textures_;
 
-    // Command submission
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
-    VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+    // Pipelines
+    struct PipelineEntry
+    {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+    };
 
-    // Synchronization (single frame in flight)
-    VkSemaphore image_available_semaphore_ = VK_NULL_HANDLE;
-    VkSemaphore render_finished_semaphore_ = VK_NULL_HANDLE;
-    VkFence in_flight_fence_ = VK_NULL_HANDLE;
-
-    // Bindless descriptor set
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
-    VkSampler default_sampler_ = VK_NULL_HANDLE;
-    uint32_t next_bindless_index_ = 0;
-
-    // Per-pipeline data
-    std::unordered_map<uint64_t, PipelineEntry> pipelines_;
-
-    // Per-surface data
-    std::unordered_map<uint64_t, SurfaceData> surfaces_;
-    uint64_t current_surface_id_ = 0;
-
-    // Textures
-    std::unordered_map<uint64_t, TextureData> textures_;
-
-    // Instance data staging buffer (host-visible, reused each frame)
-    VkBuffer staging_buffer_ = VK_NULL_HANDLE;
-    VmaAllocation staging_allocation_ = VK_NULL_HANDLE;
-    size_t staging_buffer_size_ = 0;
-    static constexpr size_t kInitialStagingSize = 256 * 1024; // 256 KB
-
-    // Current frame projection
-    float projection_[16]{};
+    std::unordered_map<PipelineId, PipelineEntry> pipelines_;
+    PipelineId next_pipeline_id_ = 1;
 
     bool initialized_ = false;
 
-    bool create_instance();
+    // Internal helpers
+    bool create_vk_instance();
     bool select_physical_device();
     bool create_device();
     bool create_allocator();
     bool create_command_pool();
     bool create_sync_objects();
     bool create_bindless_descriptor();
-    bool create_staging_buffer(size_t size);
+    bool create_pipeline_layout();
 
-    bool create_swapchain(SurfaceData& surface);
-    void destroy_swapchain(SurfaceData& surface);
+    bool create_swapchain(SurfaceData& sd);
+    void destroy_swapchain(SurfaceData& sd);
 
-    void ensure_staging_buffer(size_t required_size);
+    VkCommandBuffer begin_one_shot_commands();
+    void end_one_shot_commands(VkCommandBuffer cb);
+    void transition_image_layout(VkCommandBuffer cb, VkImage image,
+                                 VkImageLayout old_layout, VkImageLayout new_layout);
 };
 
 } // namespace velk_ui

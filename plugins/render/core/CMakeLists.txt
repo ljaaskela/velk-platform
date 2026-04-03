@@ -16,8 +16,6 @@ add_library(velk_render SHARED
     src/renderer.cpp
     src/shader_compiler.h
     src/shader_compiler.cpp
-    src/spirv_reflect.h
-    src/spirv_reflect.cpp
     src/surface.h
     src/intf_renderer_internal.h
     include/velk-ui/plugins/render/plugin.h

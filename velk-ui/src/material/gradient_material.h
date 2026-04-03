@@ -14,8 +14,8 @@ namespace velk_ui {
  * @brief Built-in linear gradient material.
  *
  * Lazily compiles a gradient shader on first use via create_shader_material().
- * Per-instance IGradient properties (start_color, end_color, angle) are
- * mapped to shader uniforms by the renderer via metadata introspection.
+ * Provides gradient parameters (start_color, end_color, angle) as GPU data
+ * that the shader reads via buffer_reference.
  */
 class GradientMaterial : public velk::ext::Object<GradientMaterial, IMaterial, IGradient>
 {
@@ -23,6 +23,7 @@ public:
     VELK_CLASS_UID(ClassId::Material::Gradient, "GradientMaterial");
 
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
+    size_t get_gpu_data(void* out, size_t max_size) const override;
 
 private:
     IMaterial::Ptr shader_mat_;

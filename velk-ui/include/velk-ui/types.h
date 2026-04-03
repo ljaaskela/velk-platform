@@ -135,13 +135,13 @@ enum class VAlign : uint8_t
 
 enum class RenderBackendType : uint8_t
 {
-    GL,
-    Vulkan
+    Default,    // Platform best: Vulkan on Windows/Linux/Android, Metal on Apple
+    Vulkan,
 };
 
 struct RenderConfig
 {
-    RenderBackendType backend{RenderBackendType::GL};
+    RenderBackendType backend = RenderBackendType::Default;
     void* backend_params = nullptr;
 };
 
