@@ -86,13 +86,17 @@ private:
     // Pipeline key -> PipelineId mapping (pointer to context's map, stays in sync)
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;
 
-    // Frame GPU buffers (double-buffered)
-    static constexpr size_t kFrameBufferSize = 4 * 1024 * 1024; // 4 MB
+    // Per-frame staging buffers (double-buffered, grows on demand)
+    static constexpr size_t kInitialFrameBufferSize = 256 * 1024; // 256 KB
     GpuBuffer frame_buffer_[2]{};
     void* frame_ptr_[2]{};
     uint64_t frame_gpu_base_[2]{};
+    size_t frame_buffer_size_ = 0;
     size_t write_offset_ = 0;
+    size_t peak_usage_ = 0;
     int frame_index_ = 0;
+
+    void ensure_frame_buffer_capacity();
 
     // Globals buffer (long-lived)
     GpuBuffer globals_buffer_ = 0;

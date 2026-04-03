@@ -23,6 +23,9 @@ public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return pipeline_handle_; }
     void set_pipeline_handle(uint64_t handle) override { pipeline_handle_ = handle; }
 
+    size_t gpu_data_size() const override { return 0; }
+    void write_gpu_data(void*, size_t) const override {}
+
 private:
     uint64_t pipeline_handle_ = 0;
 };

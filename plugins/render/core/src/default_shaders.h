@@ -6,7 +6,7 @@ namespace velk_ui {
 // All shaders use buffer_reference to access data via GPU pointers.
 // A single push constant carries the 8-byte GPU address of the DrawDataHeader.
 // Shaders dereference this to reach globals, instances, and material params.
-// Geometry is procedural: 6 vertices per quad (triangle list).
+// Geometry is procedural: 4 vertices per quad (triangle strip).
 //
 // IMPORTANT: Instance types are plain structs, NOT buffer_reference.
 // Only types that represent actual GPU pointers use buffer_reference.
@@ -44,9 +44,8 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 
 layout(push_constant) uniform PC { DrawData root; };
 
-const vec2 kQuad[6] = vec2[6](
-    vec2(0, 0), vec2(1, 0), vec2(1, 1),
-    vec2(0, 0), vec2(1, 1), vec2(0, 1)
+const vec2 kQuad[4] = vec2[4](
+    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
 );
 
 layout(location = 0) out vec4 v_color;
@@ -108,9 +107,8 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 
 layout(push_constant) uniform PC { DrawData root; };
 
-const vec2 kQuad[6] = vec2[6](
-    vec2(0, 0), vec2(1, 0), vec2(1, 1),
-    vec2(0, 0), vec2(1, 1), vec2(0, 1)
+const vec2 kQuad[4] = vec2[4](
+    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
 );
 
 layout(location = 0) out vec4 v_color;
@@ -180,9 +178,8 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 
 layout(push_constant) uniform PC { DrawData root; };
 
-const vec2 kQuad[6] = vec2[6](
-    vec2(0, 0), vec2(1, 0), vec2(1, 1),
-    vec2(0, 0), vec2(1, 1), vec2(0, 1)
+const vec2 kQuad[4] = vec2[4](
+    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
 );
 
 layout(location = 0) out vec4 v_color;

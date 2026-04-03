@@ -44,9 +44,8 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 
 layout(push_constant) uniform PC { DrawData root; };
 
-const vec2 kQuad[6] = vec2[6](
-    vec2(0, 0), vec2(1, 0), vec2(1, 1),
-    vec2(0, 0), vec2(1, 1), vec2(0, 1)
+const vec2 kQuad[4] = vec2[4](
+    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
 );
 
 layout(location = 0) out vec2 v_local_uv;
@@ -110,26 +109,27 @@ uint64_t GradientMaterial::get_pipeline_handle(IRenderContext& ctx)
     return shader_mat_ ? shader_mat_->get_pipeline_handle(ctx) : 0;
 }
 
-size_t GradientMaterial::get_gpu_data(void* out, size_t max_size) const
+size_t GradientMaterial::gpu_data_size() const
 {
-    if (max_size < sizeof(GradientParams)) return 0;
-
-    auto state = velk::read_state<IGradient>(this);
-    if (!state) return 0;
-
-    GradientParams params{};
-    params.start_color[0] = state->start_color.r;
-    params.start_color[1] = state->start_color.g;
-    params.start_color[2] = state->start_color.b;
-    params.start_color[3] = state->start_color.a;
-    params.end_color[0] = state->end_color.r;
-    params.end_color[1] = state->end_color.g;
-    params.end_color[2] = state->end_color.b;
-    params.end_color[3] = state->end_color.a;
-    params.angle = state->angle;
-
-    std::memcpy(out, &params, sizeof(params));
     return sizeof(GradientParams);
+}
+
+void GradientMaterial::write_gpu_data(void* out, size_t /*size*/) const
+{
+    auto state = velk::read_state<IGradient>(this);
+    if (!state) return;
+
+    auto& p = *static_cast<GradientParams*>(out);
+    p = {};
+    p.start_color[0] = state->start_color.r;
+    p.start_color[1] = state->start_color.g;
+    p.start_color[2] = state->start_color.b;
+    p.start_color[3] = state->start_color.a;
+    p.end_color[0] = state->end_color.r;
+    p.end_color[1] = state->end_color.g;
+    p.end_color[2] = state->end_color.b;
+    p.end_color[3] = state->end_color.a;
+    p.angle = state->angle;
 }
 
 } // namespace velk_ui

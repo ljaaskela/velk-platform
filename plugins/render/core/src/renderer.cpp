@@ -51,9 +51,10 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     }
 
     // Create double-buffered frame GPU buffers
+    frame_buffer_size_ = kInitialFrameBufferSize;
     for (int i = 0; i < 2; ++i) {
         GpuBufferDesc desc;
-        desc.size = kFrameBufferSize;
+        desc.size = frame_buffer_size_;
         desc.cpu_writable = true;
         frame_buffer_[i] = backend_->create_buffer(desc);
         frame_ptr_[i] = backend_->map(frame_buffer_[i]);
@@ -221,12 +222,11 @@ void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entr
 
 uint64_t Renderer::write_to_frame_buffer(const void* data, size_t size, size_t alignment)
 {
-    // Align offset
     write_offset_ = (write_offset_ + alignment - 1) & ~(alignment - 1);
 
-    if (write_offset_ + size > kFrameBufferSize) {
-        VELK_LOG(E, "Renderer: frame buffer overflow (%zu + %zu > %zu)",
-                 write_offset_, size, kFrameBufferSize);
+    if (write_offset_ + size > frame_buffer_size_) {
+        VELK_LOG(E, "Renderer: frame buffer overflow (%zu + %zu > %zu), will grow next frame",
+                 write_offset_, size, frame_buffer_size_);
         return 0;
     }
 
@@ -235,7 +235,39 @@ uint64_t Renderer::write_to_frame_buffer(const void* data, size_t size, size_t a
 
     uint64_t gpu_addr = frame_gpu_base_[frame_index_] + write_offset_;
     write_offset_ += size;
+
+    if (write_offset_ > peak_usage_) {
+        peak_usage_ = write_offset_;
+    }
+
     return gpu_addr;
+}
+
+void Renderer::ensure_frame_buffer_capacity()
+{
+    // Grow if last frame used more than 75% of the buffer
+    if (peak_usage_ <= frame_buffer_size_ * 3 / 4) return;
+
+    size_t new_size = frame_buffer_size_;
+    while (new_size < peak_usage_ * 2) {
+        new_size *= 2;
+    }
+
+    VELK_LOG(I, "Renderer: growing frame buffers %zu -> %zu KB (peak usage: %zu KB)",
+             frame_buffer_size_ / 1024, new_size / 1024, peak_usage_ / 1024);
+
+    for (int i = 0; i < 2; ++i) {
+        backend_->destroy_buffer(frame_buffer_[i]);
+        GpuBufferDesc desc;
+        desc.size = new_size;
+        desc.cpu_writable = true;
+        frame_buffer_[i] = backend_->create_buffer(desc);
+        frame_ptr_[i] = backend_->map(frame_buffer_[i]);
+        frame_gpu_base_[i] = backend_->gpu_address(frame_buffer_[i]);
+    }
+
+    frame_buffer_size_ = new_size;
+    peak_usage_ = 0;
 }
 
 void Renderer::build_draw_calls()
@@ -257,27 +289,31 @@ void Renderer::build_draw_calls()
             }
         }
 
-        // Build draw data header
+        // Write draw data: header + material data, contiguous in staging buffer.
+        // The header is 32 bytes (aligned), material data follows immediately.
         DrawDataHeader header{};
         header.globals_address = globals_gpu_addr_;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        // If material, append material GPU data after header
-        size_t total_size = sizeof(DrawDataHeader);
-        uint8_t draw_data[256]{};
-        std::memcpy(draw_data, &header, sizeof(header));
+        size_t mat_size = batch.material ? batch.material->gpu_data_size() : 0;
+        size_t total_size = sizeof(DrawDataHeader) + mat_size;
 
-        if (batch.material) {
-            size_t mat_size = batch.material->get_gpu_data(
-                draw_data + sizeof(DrawDataHeader),
-                sizeof(draw_data) - sizeof(DrawDataHeader));
-            total_size += mat_size;
+        // Reserve contiguous space for header + material data
+        write_offset_ = (write_offset_ + 15) & ~size_t(15);
+        if (write_offset_ + total_size > frame_buffer_size_) continue;
+
+        auto* dst = static_cast<uint8_t*>(frame_ptr_[frame_index_]) + write_offset_;
+        uint64_t draw_data_addr = frame_gpu_base_[frame_index_] + write_offset_;
+
+        std::memcpy(dst, &header, sizeof(header));
+        if (mat_size > 0) {
+            batch.material->write_gpu_data(dst + sizeof(DrawDataHeader), mat_size);
         }
 
-        uint64_t draw_data_addr = write_to_frame_buffer(draw_data, total_size);
-        if (!draw_data_addr) continue;
+        write_offset_ += total_size;
+        if (write_offset_ > peak_usage_) peak_usage_ = write_offset_;
 
         // Resolve pipeline
         if (!pipeline_map_) continue;
@@ -286,7 +322,7 @@ void Renderer::build_draw_calls()
 
         DrawCall call{};
         call.pipeline = pit->second;
-        call.vertex_count = 6;  // procedural quad (triangle list)
+        call.vertex_count = 4;  // procedural quad (triangle strip)
         call.instance_count = batch.instance_count;
         call.root_constants_size = sizeof(uint64_t);
         std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
@@ -369,7 +405,8 @@ void Renderer::render()
             entry.batches_dirty = false;
         }
 
-        // Reset frame buffer bump allocator
+        // Grow frame buffers if needed, then reset bump allocator
+        ensure_frame_buffer_capacity();
         write_offset_ = 0;
 
         // Update globals

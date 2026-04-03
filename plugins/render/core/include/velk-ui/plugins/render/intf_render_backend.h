@@ -33,12 +33,19 @@ struct TextureDesc
     PixelFormat format{PixelFormat::RGBA8};
 };
 
+enum class Topology : uint8_t
+{
+    TriangleStrip,  // 4 verts per quad (default for UI)
+    TriangleList,   // 3 verts per triangle (meshes)
+};
+
 struct PipelineDesc
 {
     const uint32_t* vertex_spirv{};
     size_t vertex_spirv_size{};
     const uint32_t* fragment_spirv{};
     size_t fragment_spirv_size{};
+    Topology topology{Topology::TriangleStrip};
 };
 
 inline constexpr size_t kMaxRootConstantsSize = 128;

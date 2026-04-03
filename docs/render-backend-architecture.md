@@ -53,7 +53,7 @@ Frame:      begin_frame, submit, end_frame
 
 **Textures** (`create_texture`, `destroy_texture`, `upload_texture`) handle image data. `create_texture` returns a `TextureId` which is a `uint32_t` that shaders use directly as an index into a global texture array. Create a texture, get an index, use it in any shader, any draw call. The backend manages the descriptor array internally.
 
-**Pipelines** (`create_pipeline`, `destroy_pipeline`) compile shaders. SPIR-V bytecode in, opaque handle out. The pipeline is just compiled shader code. The shader itself defines what data it reads and how, so the pipeline doesn't need to describe vertex layouts, uniform bindings, or resource layouts.
+**Pipelines** (`create_pipeline`, `destroy_pipeline`) compile shaders. SPIR-V bytecode and a topology (triangle strip or triangle list) in, opaque handle out. The pipeline is compiled shader code plus the primitive assembly mode. The shader itself defines what data it reads and how, so the pipeline doesn't need to describe vertex layouts, uniform bindings, or resource layouts.
 
 **Frame** (`begin_frame`, `submit`, `end_frame`) drives presentation. Acquire a swapchain image, submit an array of `DrawCall` structs, present. The backend handles command buffer recording, synchronization, and image transitions internally.
 
@@ -74,24 +74,27 @@ struct DrawCall
 
 The `root_constants` field carries up to 128 bytes of data that gets pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 128 bytes is Vulkan's guaranteed minimum push constant size.
 
-In practice, we use 8 of those bytes: a single GPU pointer to a `DrawDataHeader` in the frame buffer. The shader dereferences this pointer to reach all its data.
+In practice, we use 8 of those bytes: a single GPU pointer to a `DrawDataHeader` in the per-frame staging buffer. The shader dereferences this pointer to reach all its data.
 
 Why 128 bytes and not just 8? For simple draws that need very little data (a fullscreen clear, a debug line), the shader can read everything directly from push constants without an extra indirection through a GPU buffer.
 
 ## Data Flow: How Pixels Get Drawn
 
-### Frame buffer: the bump allocator
+### Per-frame staging buffer
 
-The renderer owns two GPU buffers (4 MB each, double-buffered). Each frame it resets an offset to zero and writes data sequentially:
+The renderer owns two GPU staging buffers (double-buffered, starting at 256 KB and growing on demand). Each frame it resets an offset to zero and writes data sequentially:
 
 ```mermaid
 block-beta
     columns 6
-    A["Instances 0"]:2 B["Header 0"]:1 C["Instances 1"]:2 D["Header 1"]:1
-    E["Material 1"]:1 F["Instances 2"]:2 G["Header 2"]:1 H["..."]:2
+    A["Shader data 0"]:2 B["DrawDataHeader 0"]:1 C["Shader data 1"]:2 D["DrawDataHeader 1"]:1
+    E["Material params"]:1 F["Shader data 2"]:2 G["DrawDataHeader 2"]:1 H["..."]:2
 ```
 
-Each write returns the GPU address of what was written. The `DrawDataHeader` contains GPU pointers to the instance data and the globals buffer. This is written last (after instances), and its address goes into the `DrawCall`'s push constants.
+- **Shader data**: whatever the draw call's shader reads via pointer. For 2D UI this is instance arrays (position, size, color per quad). For 3D meshes it could be per-instance transforms or vertex/index buffers.
+- **DrawDataHeader**: the root struct that the shader receives a pointer to. Contains GPU addresses pointing to the shader data and globals, plus a texture index. Material-specific parameters (if any) follow inline after the header.
+
+Each write returns the GPU address of what was written. The DrawDataHeader is written last (after shader data), and its address goes into the `DrawCall`'s push constants.
 
 ### The DrawDataHeader
 
@@ -175,13 +178,12 @@ There is no geometry API. Vertex data, index data, instance data, and uniform da
 Built-in UI visuals don't use geometry buffers at all. The vertex shader generates a quad from `gl_VertexIndex`:
 
 ```glsl
-const vec2 kQuad[6] = vec2[6](
-    vec2(0, 0), vec2(1, 0), vec2(1, 1),
-    vec2(0, 0), vec2(1, 1), vec2(0, 1)
+const vec2 kQuad[4] = vec2[4](
+    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
 );
 ```
 
-Six vertices, two triangles, one quad. Instance data provides position and size. The draw call is `vertex_count=6, instance_count=N`.
+Four vertices for one quad. Instance data provides position and size. The draw call is `vertex_count=4, instance_count=N`.
 
 ### 3D meshes: Vertex pulling
 
@@ -216,10 +218,47 @@ Materials override a visual's pipeline and can provide additional GPU data. The 
 
 ```cpp
 virtual uint64_t get_pipeline_handle(IRenderContext& ctx) = 0;
-virtual size_t get_gpu_data(void* out, size_t max_size) const { return 0; }
+virtual size_t gpu_data_size() const { return 0; }
+virtual void write_gpu_data(void* out) const {}
 ```
 
-`get_gpu_data` writes material-specific parameters (colors, angles, whatever the shader needs) into a buffer. The renderer writes this data immediately after the `DrawDataHeader` in the frame buffer. The material's shader knows the layout because it's defined alongside the shader:
+The renderer asks the material for its data size, reserves contiguous space in the staging buffer for the header + material data, and lets the material write directly:
+
+```cpp
+// In the renderer's draw call builder:
+size_t mat_size = material ? material->gpu_data_size() : 0;
+size_t total_size = sizeof(DrawDataHeader) + mat_size;
+
+// Reserve contiguous space in staging buffer
+auto* dst = staging_ptr + write_offset_;
+memcpy(dst, &header, sizeof(header));                    // bytes 0..31
+if (mat_size > 0) {
+    material->write_gpu_data(dst + sizeof(DrawDataHeader));  // bytes 32..N
+}
+```
+
+The material's implementation writes its own struct:
+
+```cpp
+size_t GradientMaterial::gpu_data_size() const { return sizeof(GradientParams); }
+
+void GradientMaterial::write_gpu_data(void* out, size_t size) const
+{
+    if (size != sizeof(GradientParams)) {
+        return;
+    }
+    auto& p = *static_cast<GradientParams*>(out);
+    if (auto r = velk::read_state<IMaterial>(this)) {
+        p.start_color = { ... };
+        p.end_color = { ... };
+        p.angle = ...;
+    } else {
+        p = {};
+    }
+}
+```
+
+The result in GPU memory:
 
 ```mermaid
 block-beta
@@ -228,7 +267,9 @@ block-beta
     B["GradientParams<br/>start_color<br/>end_color<br/>angle"]:2
 ```
 
-No uniform reflection. No name-based binding. No type introspection. The CPU struct and the GLSL layout are maintained in parallel, and std430 packing rules ensure they match.
+The shader's `DrawData` layout declares matching fields after the standard header fields. The CPU struct sizes and the GLSL std430 layout must agree (see the alignment section below).
+
+No uniform reflection, name-based binding or type introspection. Each material defines a C++ struct and a matching GLSL layout, and `get_gpu_data` is the bridge between them.
 
 ## Textures: Bindless by Default
 
@@ -326,7 +367,7 @@ Vulkan pipelines reference a render pass at creation time. The backend creates a
 
 The interface is 15 methods. A new backend (Metal, D3D12) implements those 15 methods and everything works. There is no backend-specific abstraction leaking into the renderer or the app.
 
-Adding a new visual type means writing a shader and a struct. No interface changes, no backend changes, no pipeline layout changes.
+Adding a new visual type means writing a shader and a struct. No interface changes, backend changes, or pipeline layout changes are needed.
 
 Adding a new material means implementing `get_pipeline_handle` and `get_gpu_data`. The shader reads the data from the same root pointer as everything else.
 
@@ -342,7 +383,7 @@ The Vulkan backend (`velk_vk`) uses:
 - **Persistent mapping** via `VMA_ALLOCATION_CREATE_MAPPED_BIT` + `VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT`
 - **Push constants** (128 bytes, `VK_SHADER_STAGE_ALL`) for root data pointer
 - **Global descriptor set** with variable-length `sampler2D` array (1024 max)
-- **Empty vertex input** (all pipelines use `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` with programmatic vertex generation)
+- **Empty vertex input** with per-pipeline topology (triangle strip for UI quads, triangle list for meshes)
 - **Single shared pipeline layout** (push constants + bindless descriptor set)
 
 All synchronization is internal. The backend manages fences, semaphores, command buffer recording, and image layout transitions. None of this is exposed to the renderer.

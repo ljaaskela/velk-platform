@@ -34,13 +34,22 @@ public:
     virtual uint64_t get_pipeline_handle(IRenderContext& ctx) = 0;
 
     /**
-     * @brief Writes material-specific GPU data into the provided buffer.
+     * @brief Returns the size in bytes of this material's GPU data.
      *
-     * The data layout must match what the material's shader expects to read
-     * after the standard DrawDataHeader. Returns the number of bytes written.
+     * The renderer allocates this many bytes after the DrawDataHeader in
+     * the staging buffer and passes the pointer to write_gpu_data().
      * Returns 0 if no material data is needed.
      */
-    virtual size_t get_gpu_data(void* out, size_t max_size) const { return 0; }
+    virtual size_t gpu_data_size() const = 0;
+
+    /**
+     * @brief Writes material-specific GPU data into the provided buffer.
+     *
+     * Called with a pointer to exactly gpu_data_size() bytes. The data
+     * layout must match what the material's shader expects to read after
+     * the standard DrawDataHeader.
+     */
+    virtual void write_gpu_data(void* out, size_t size) const = 0;
 };
 
 } // namespace velk_ui
