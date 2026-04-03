@@ -27,7 +27,7 @@ public:
     void set_font(const IFont::Ptr& font) override;
 
     // IVisual
-    velk::vector<DrawCommand> get_draw_commands(const velk::rect& bounds) override;
+    velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) override;
 
     // ITextureProvider
     const uint8_t* get_pixels() const override;
@@ -46,7 +46,7 @@ private:
 
     IFont::Ptr font_;
     GlyphAtlas atlas_;
-    velk::vector<DrawCommand> cached_commands_;
+    velk::vector<DrawEntry> cached_entries_;
     float text_width_{};
     float text_height_{};
 };

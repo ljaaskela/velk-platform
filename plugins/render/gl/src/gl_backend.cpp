@@ -7,29 +7,41 @@ namespace velk_ui {
 
 namespace {
 
-GLuint compile_shader(GLenum type, const char* source)
+GLuint load_spirv_shader(GLenum type, const uint32_t* spirv, size_t word_count)
 {
     GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
+    glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
+                   spirv, static_cast<GLsizei>(word_count * sizeof(uint32_t)));
+    glSpecializeShader(shader, "main", 0, nullptr, nullptr);
+
     GLint success = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (!success) {
         char log[512];
         glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        VELK_LOG(E, "Shader compile error: %s", log);
+        VELK_LOG(E, "SPIR-V specialization error: %s", log);
         glDeleteShader(shader);
         return 0;
     }
     return shader;
 }
 
-GLuint link_program(GLuint vert, GLuint frag)
+GLuint build_program(const uint32_t* vert_spirv, size_t vert_size,
+                     const uint32_t* frag_spirv, size_t frag_size)
 {
+    GLuint vert = load_spirv_shader(GL_VERTEX_SHADER, vert_spirv, vert_size);
+    GLuint frag = load_spirv_shader(GL_FRAGMENT_SHADER, frag_spirv, frag_size);
+    if (!vert || !frag) {
+        if (vert) glDeleteShader(vert);
+        if (frag) glDeleteShader(frag);
+        return 0;
+    }
+
     GLuint program = glCreateProgram();
     glAttachShader(program, vert);
     glAttachShader(program, frag);
     glLinkProgram(program);
+
     GLint success = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &success);
     if (!success) {
@@ -37,73 +49,41 @@ GLuint link_program(GLuint vert, GLuint frag)
         glGetProgramInfoLog(program, sizeof(log), nullptr, log);
         VELK_LOG(E, "Program link error: %s", log);
         glDeleteProgram(program);
-        return 0;
+        program = 0;
     }
-    return program;
-}
 
-GLuint build_program(const char* vert_src, const char* frag_src)
-{
-    GLuint vert = compile_shader(GL_VERTEX_SHADER, vert_src);
-    GLuint frag = compile_shader(GL_FRAGMENT_SHADER, frag_src);
-    if (!vert || !frag) {
-        if (vert) glDeleteShader(vert);
-        if (frag) glDeleteShader(frag);
-        return 0;
-    }
-    GLuint program = link_program(vert, frag);
     glDeleteShader(vert);
     glDeleteShader(frag);
     return program;
 }
 
-void setup_untextured_vao(GLuint vao, GLuint vbo)
+GLint attrib_component_count(VertexAttribType type)
 {
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, VertexFormat::UntexturedStride, reinterpret_cast<void*>(0));
-    glVertexAttribDivisor(0, 1);
-
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, VertexFormat::UntexturedStride, reinterpret_cast<void*>(16));
-    glVertexAttribDivisor(1, 1);
-
-    glBindVertexArray(0);
-}
-
-void setup_textured_vao(GLuint vao, GLuint vbo)
-{
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, VertexFormat::TexturedStride, reinterpret_cast<void*>(0));
-    glVertexAttribDivisor(0, 1);
-
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, VertexFormat::TexturedStride, reinterpret_cast<void*>(16));
-    glVertexAttribDivisor(1, 1);
-
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, VertexFormat::TexturedStride, reinterpret_cast<void*>(32));
-    glVertexAttribDivisor(2, 1);
-
-    glBindVertexArray(0);
-}
-
-velk::Uid gl_type_to_velk_uid(GLenum gl_type)
-{
-    switch (gl_type) {
-    case GL_FLOAT:      return velk::type_uid<float>();
-    case GL_FLOAT_VEC2: return velk::type_uid<velk::vec2>();
-    case GL_FLOAT_VEC4: return velk::type_uid<velk::color>(); // vec4 and color are the same layout
-    case GL_FLOAT_MAT4: return velk::type_uid<velk::mat4>();
-    case GL_INT:        return velk::type_uid<int32_t>();
-    case GL_SAMPLER_2D: return velk::type_uid<int32_t>(); // sampler bound as int
-    default:            return {};
+    switch (type) {
+    case VertexAttribType::Float:  return 1;
+    case VertexAttribType::Float2: return 2;
+    case VertexAttribType::Float3: return 3;
+    case VertexAttribType::Float4: return 4;
     }
+    return 4;
+}
+
+void setup_vao(GLuint vao, GLuint vbo, const VertexInputDesc& desc)
+{
+    glBindVertexArray(vao);
+
+    for (auto& attr : desc.attributes) {
+        glEnableVertexAttribArray(attr.location);
+        glVertexAttribFormat(attr.location,
+                             attrib_component_count(attr.type),
+                             GL_FLOAT, GL_FALSE, attr.offset);
+        glVertexAttribBinding(attr.location, 0);
+    }
+
+    glBindVertexBuffer(0, vbo, 0, desc.stride);
+    glVertexBindingDivisor(0, 1);
+
+    glBindVertexArray(0);
 }
 
 } // namespace
@@ -126,18 +106,16 @@ bool GlBackend::init(void* params)
         VELK_LOG(I, "OpenGL %s", reinterpret_cast<const char*>(glGetString(GL_VERSION)));
     }
 
-    // Untextured VAO + VBO
-    glGenVertexArrays(1, &untextured_vao_);
-    glGenBuffers(1, &untextured_vbo_);
-    setup_untextured_vao(untextured_vao_, untextured_vbo_);
-
-    // Textured VAO + VBO
-    glGenVertexArrays(1, &textured_vao_);
-    glGenBuffers(1, &textured_vbo_);
-    setup_textured_vao(textured_vao_, textured_vbo_);
-
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Create globals UBO (binding 0)
+    glCreateBuffers(1, &globals_ubo_);
+    glNamedBufferStorage(globals_ubo_, kGlobalsUboSize, nullptr, GL_DYNAMIC_STORAGE_BIT);
+
+    // Create material UBO (binding 1)
+    glCreateBuffers(1, &material_ubo_);
+    glNamedBufferStorage(material_ubo_, kMaterialUboMaxSize, nullptr, GL_DYNAMIC_STORAGE_BIT);
 
     initialized_ = true;
     return true;
@@ -145,28 +123,22 @@ bool GlBackend::init(void* params)
 
 void GlBackend::shutdown()
 {
-    if (!initialized_) {
-        return;
-    }
+    if (!initialized_) return;
 
     for (auto& [key, entry] : pipelines_) {
-        if (entry.program) {
-            glDeleteProgram(entry.program);
-        }
+        if (entry.program) glDeleteProgram(entry.program);
+        if (entry.vbo) glDeleteBuffers(1, &entry.vbo);
+        if (entry.vao) glDeleteVertexArrays(1, &entry.vao);
     }
     pipelines_.clear();
 
     for (auto& [key, tex] : textures_) {
-        if (tex) {
-            glDeleteTextures(1, &tex);
-        }
+        if (tex) glDeleteTextures(1, &tex);
     }
     textures_.clear();
 
-    if (untextured_vbo_) { glDeleteBuffers(1, &untextured_vbo_); untextured_vbo_ = 0; }
-    if (textured_vbo_) { glDeleteBuffers(1, &textured_vbo_); textured_vbo_ = 0; }
-    if (untextured_vao_) { glDeleteVertexArrays(1, &untextured_vao_); untextured_vao_ = 0; }
-    if (textured_vao_) { glDeleteVertexArrays(1, &textured_vao_); textured_vao_ = 0; }
+    if (globals_ubo_) { glDeleteBuffers(1, &globals_ubo_); globals_ubo_ = 0; }
+    if (material_ubo_) { glDeleteBuffers(1, &material_ubo_); material_ubo_ = 0; }
 
     surfaces_.clear();
     initialized_ = false;
@@ -193,39 +165,24 @@ void GlBackend::update_surface(uint64_t surface_id, const SurfaceDesc& desc)
 
 bool GlBackend::register_pipeline(uint64_t pipeline_key, const PipelineDesc& desc)
 {
-    if (pipelines_.count(pipeline_key)) {
-        return true;
-    }
+    if (pipelines_.count(pipeline_key)) return true;
 
-    GLuint program = build_program(desc.vertex_source, desc.fragment_source);
-    if (!program) {
-        return false;
-    }
+    GLuint program = build_program(desc.vertex_spirv, desc.vertex_spirv_size,
+                                   desc.fragment_spirv, desc.fragment_spirv_size);
+    if (!program) return false;
 
     PipelineEntry entry;
     entry.program = program;
 
-    // Introspect all active uniforms
-    GLint uniform_count = 0;
-    glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &uniform_count);
-    for (GLint i = 0; i < uniform_count; ++i) {
-        char name_buf[128];
-        GLsizei name_len = 0;
-        GLint size = 0;
-        GLenum gl_type = 0;
-        glGetActiveUniform(program, static_cast<GLuint>(i), sizeof(name_buf),
-                           &name_len, &size, &gl_type, name_buf);
+    glGenVertexArrays(1, &entry.vao);
+    glGenBuffers(1, &entry.vbo);
+    setup_vao(entry.vao, entry.vbo, desc.vertex_input);
 
-        int location = glGetUniformLocation(program, name_buf);
-        if (location < 0) {
-            continue;
-        }
+    entry.uniforms = desc.uniforms;
 
-        UniformInfo info;
-        info.name = velk::string(name_buf, static_cast<size_t>(name_len));
-        info.typeUid = gl_type_to_velk_uid(gl_type);
-        info.location = location;
-        entry.uniforms.push_back(std::move(info));
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        VELK_LOG(E, "GL error 0x%X during pipeline %llu registration", err, pipeline_key);
     }
 
     pipelines_[pipeline_key] = std::move(entry);
@@ -235,9 +192,7 @@ bool GlBackend::register_pipeline(uint64_t pipeline_key, const PipelineDesc& des
 velk::vector<UniformInfo> GlBackend::get_pipeline_uniforms(uint64_t pipeline_key) const
 {
     auto it = pipelines_.find(pipeline_key);
-    if (it != pipelines_.end()) {
-        return it->second.uniforms;
-    }
+    if (it != pipelines_.end()) return it->second.uniforms;
     return {};
 }
 
@@ -283,10 +238,8 @@ void GlBackend::begin_frame(uint64_t surface_id)
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    float L = 0.0f;
-    float R = static_cast<float>(w);
-    float T = 0.0f;
-    float B = static_cast<float>(h);
+    float L = 0.0f, R = static_cast<float>(w);
+    float T = 0.0f, B = static_cast<float>(h);
 
     std::memset(projection_, 0, sizeof(projection_));
     projection_[0]  = 2.0f / (R - L);
@@ -300,106 +253,86 @@ void GlBackend::begin_frame(uint64_t surface_id)
 void GlBackend::submit(velk::array_view<const RenderBatch> batches)
 {
     for (auto& batch : batches) {
-        if (batch.instance_count == 0) {
-            continue;
-        }
+        if (batch.instance_count == 0) continue;
 
-        // Look up pipeline
         auto pit = pipelines_.find(batch.pipeline_key);
-        if (pit == pipelines_.end()) {
-            continue;
-        }
+        if (pit == pipelines_.end()) continue;
         auto& pipeline = pit->second;
-
-        // Determine VAO and VBO based on vertex format
-        GLuint vao = 0;
-        GLuint vbo = 0;
-        if (batch.vertex_format_key == VertexFormat::Untextured) {
-            vao = untextured_vao_;
-            vbo = untextured_vbo_;
-        } else if (batch.vertex_format_key == VertexFormat::Textured) {
-            vao = textured_vao_;
-            vbo = textured_vbo_;
-        } else {
-            continue;
-        }
 
         glUseProgram(pipeline.program);
 
-        // Set u_projection and u_atlas from introspected pipeline uniforms
-        for (auto& info : pipeline.uniforms) {
-            if (info.location < 0) continue;
-            if (info.name == "u_projection") {
-                glUniformMatrix4fv(info.location, 1, GL_FALSE, projection_);
-            }
-        }
-
-        // Set per-batch element rect uniform (legacy path for backwards compat)
+        // Pack and upload globals UBO (binding 0): projection (64B) + rect (16B)
+        struct {
+            float projection[16];
+            float rect[4];
+        } globals;
+        std::memcpy(globals.projection, projection_, sizeof(projection_));
         if (batch.has_rect) {
-            for (auto& info : pipeline.uniforms) {
-                if (info.name == "u_rect" && info.location >= 0) {
-                    glUniform4f(info.location,
-                                batch.rect.x, batch.rect.y,
-                                batch.rect.width, batch.rect.height);
-                    break;
+            globals.rect[0] = batch.rect.x;
+            globals.rect[1] = batch.rect.y;
+            globals.rect[2] = batch.rect.width;
+            globals.rect[3] = batch.rect.height;
+        } else {
+            std::memset(globals.rect, 0, sizeof(globals.rect));
+        }
+        glNamedBufferSubData(globals_ubo_, 0, sizeof(globals), &globals);
+        glBindBufferBase(GL_UNIFORM_BUFFER, kGlobalsUboBinding, globals_ubo_);
+
+        // Pack and upload material UBO (binding 1) if there are material uniforms
+        if (!batch.uniforms.empty()) {
+            uint8_t material_data[kMaterialUboMaxSize] = {};
+            size_t max_offset = 0;
+            for (auto& u : batch.uniforms) {
+                if (u.location < 0) continue;
+                size_t offset = static_cast<size_t>(u.location);
+                size_t data_size = 0;
+                if (u.typeUid == velk::type_uid<float>()) data_size = 4;
+                else if (u.typeUid == velk::type_uid<velk::color>() || u.typeUid == velk::type_uid<velk::vec4>()) data_size = 16;
+                else if (u.typeUid == velk::type_uid<velk::mat4>()) data_size = 64;
+                else if (u.typeUid == velk::type_uid<int32_t>()) data_size = 4;
+                else if (u.typeUid == velk::type_uid<velk::vec2>()) data_size = 8;
+
+                if (data_size > 0 && offset + data_size <= kMaterialUboMaxSize) {
+                    std::memcpy(material_data + offset, u.data, data_size);
+                    if (offset + data_size > max_offset) max_offset = offset + data_size;
                 }
             }
-        }
-
-        // Set all per-batch material uniforms
-        for (auto& u : batch.uniforms) {
-            if (u.location < 0) {
-                continue;
-            }
-            if (u.typeUid == velk::type_uid<float>()) {
-                glUniform1f(u.location, u.data[0]);
-            } else if (u.typeUid == velk::type_uid<velk::color>()
-                       || u.typeUid == velk::type_uid<velk::vec4>()) {
-                glUniform4f(u.location, u.data[0], u.data[1], u.data[2], u.data[3]);
-            } else if (u.typeUid == velk::type_uid<velk::mat4>()) {
-                glUniformMatrix4fv(u.location, 1, GL_FALSE, u.data);
-            } else if (u.typeUid == velk::type_uid<int32_t>()) {
-                glUniform1i(u.location, static_cast<GLint>(u.data[0]));
-            } else if (u.typeUid == velk::type_uid<velk::vec2>()) {
-                glUniform2f(u.location, u.data[0], u.data[1]);
+            if (max_offset > 0) {
+                glNamedBufferSubData(material_ubo_, 0, static_cast<GLsizeiptr>(max_offset), material_data);
+                glBindBufferBase(GL_UNIFORM_BUFFER, kMaterialUboBinding, material_ubo_);
             }
         }
 
-        // Bind texture if present
+        // Bind texture
         if (batch.texture_key != 0) {
             auto tit = textures_.find(batch.texture_key);
             if (tit != textures_.end()) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, tit->second);
-                for (auto& info : pipeline.uniforms) {
-                    if (info.name == "u_atlas" && info.location >= 0) {
-                        glUniform1i(info.location, 0);
-                        break;
-                    }
-                }
             }
         }
 
-        // Upload instance data
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(batch.instance_data.size()),
-                     batch.instance_data.data(),
-                     GL_STREAM_DRAW);
-
-        // Draw
-        glBindVertexArray(vao);
+        // Upload instance data and draw
+        glNamedBufferData(pipeline.vbo,
+                          static_cast<GLsizeiptr>(batch.instance_data.size()),
+                          batch.instance_data.data(), GL_STREAM_DRAW);
+        glBindVertexArray(pipeline.vao);
+        glBindVertexBuffer(0, pipeline.vbo, 0, batch.instance_stride);
         glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4,
                               static_cast<GLsizei>(batch.instance_count));
+
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            VELK_LOG(E, "GL error 0x%X after draw (pipeline %llu, %u instances)",
+                     err, batch.pipeline_key, batch.instance_count);
+        }
+
         glBindVertexArray(0);
 
-        // Unbind texture
         if (batch.texture_key != 0) {
             glBindTexture(GL_TEXTURE_2D, 0);
         }
     }
-
-    glUseProgram(0);
 }
 
 void GlBackend::end_frame()

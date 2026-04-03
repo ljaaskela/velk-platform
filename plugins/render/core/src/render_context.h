@@ -22,6 +22,7 @@ public:
 
 private:
     IRenderBackend::Ptr backend_;
+    RenderBackendType backend_type_ = RenderBackendType::GL;
     uint64_t next_surface_id_ = 1;
     uint64_t next_pipeline_key_ = PipelineKey::CustomBase;
     bool initialized_ = false;

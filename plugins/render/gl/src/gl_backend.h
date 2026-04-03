@@ -37,7 +37,9 @@ private:
     struct PipelineEntry
     {
         uint32_t program = 0;
-        velk::vector<UniformInfo> uniforms; ///< All active uniforms (introspected at registration).
+        uint32_t vao = 0;
+        uint32_t vbo = 0;
+        velk::vector<UniformInfo> uniforms;
     };
 
     struct SurfaceInfo
@@ -46,25 +48,22 @@ private:
         int height = 0;
     };
 
-    // VAOs and VBOs per vertex format
-    uint32_t untextured_vao_ = 0;
-    uint32_t untextured_vbo_ = 0;
-    uint32_t textured_vao_ = 0;
-    uint32_t textured_vbo_ = 0;
+    // Globals UBO (binding 0): mat4 projection + vec4 rect = 80 bytes (std140)
+    static constexpr uint32_t kGlobalsUboBinding = 0;
+    static constexpr uint32_t kGlobalsUboSize = 80;
+    uint32_t globals_ubo_ = 0;
 
-    // Texture cache
-    std::unordered_map<uint64_t, uint32_t> textures_; // texture_key -> GL texture id
+    // Material UBO (binding 1): per-batch material uniforms
+    static constexpr uint32_t kMaterialUboBinding = 1;
+    static constexpr uint32_t kMaterialUboMaxSize = 256;
+    uint32_t material_ubo_ = 0;
 
-    // Pipeline cache
+    std::unordered_map<uint64_t, uint32_t> textures_;
     std::unordered_map<uint64_t, PipelineEntry> pipelines_;
-
-    // Surface tracking
     std::unordered_map<uint64_t, SurfaceInfo> surfaces_;
     uint64_t current_surface_ = 0;
 
-    // Current frame projection (set in begin_frame)
     float projection_[16]{};
-
     bool initialized_ = false;
 };
 

@@ -5,25 +5,17 @@ namespace velk_ui {
 namespace {
 
 const char* gradient_vertex_src = R"(
-#version 330 core
-
-const vec2 quad[4] = vec2[4](
-    vec2(0.0, 0.0),
-    vec2(1.0, 0.0),
-    vec2(0.0, 1.0),
-    vec2(1.0, 1.0)
-);
+#version 450
+#include "velk_common.glsl"
 
 layout(location = 0) in vec4 inst_rect;
 layout(location = 1) in vec4 inst_color;
 
-uniform mat4 u_projection;
-
-out vec2 v_local_uv;
+layout(location = 0) out vec2 v_local_uv;
 
 void main()
 {
-    vec2 pos = quad[gl_VertexID];
+    vec2 pos = vec2(float(VERTEX_INDEX & 1), float(VERTEX_INDEX >> 1));
     vec2 world_pos = inst_rect.xy + pos * inst_rect.zw;
     gl_Position = u_projection * vec4(world_pos, 0.0, 1.0);
     v_local_uv = pos;
@@ -31,14 +23,16 @@ void main()
 )";
 
 const char* gradient_fragment_src = R"(
-#version 330 core
+#version 450
 
-in vec2 v_local_uv;
-out vec4 frag_color;
+layout(location = 0) in vec2 v_local_uv;
+layout(location = 0) out vec4 frag_color;
 
-uniform vec4 start_color;
-uniform vec4 end_color;
-uniform float angle;
+layout(std140, binding = 1) uniform MaterialParams {
+    vec4 start_color;
+    vec4 end_color;
+    float angle;
+};
 
 void main()
 {

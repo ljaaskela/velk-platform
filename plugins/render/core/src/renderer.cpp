@@ -18,16 +18,9 @@ namespace velk_ui {
 
 namespace {
 
-uint64_t make_batch_key(uint64_t pipeline, uint64_t format, uint64_t texture)
+uint64_t make_batch_key(uint64_t pipeline, uint64_t texture)
 {
-    return (pipeline * 31 + format) * 31 + texture;
-}
-
-void pack_instance(velk::vector<uint8_t>& buf, const float* data, uint32_t stride)
-{
-    auto offset = buf.size();
-    buf.resize(offset + stride);
-    std::memcpy(buf.data() + offset, data, stride);
+    return pipeline * 31 + texture;
 }
 
 } // namespace
@@ -98,10 +91,7 @@ void Renderer::rebuild_commands(IElement* element)
         auto* visual = interface_cast<IVisual>(att);
         if (visual) {
             VisualCommands vc;
-            auto commands = visual->get_draw_commands(local_rect);
-            for (auto& cmd : commands) {
-                vc.commands.push_back(cmd);
-            }
+            vc.entries = visual->get_draw_entries(local_rect);
 
             auto vstate = velk::read_state<IVisual>(visual);
             auto mat_obj = (vstate && vstate->paint) ? vstate->paint.get() : velk::IObject::Ptr{};
@@ -109,7 +99,7 @@ void Renderer::rebuild_commands(IElement* element)
             if (mat && render_ctx_) {
                 uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
                 if (handle != 0) {
-                    vc.pipeline_key = handle;
+                    vc.pipeline_override = handle;
                     vc.material = mat;
                     populate_uniform_bindings(vc, mat);
                 }
@@ -146,80 +136,58 @@ void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entr
         float wy = elem_state->world_matrix(1, 3);
 
         for (auto& vc : cache.visuals) {
-        for (auto& cmd : vc.commands) {
-            uint64_t pipeline = vc.pipeline_key;
-            uint64_t format = 0;
-            uint64_t texture = 0;
+            bool has_material = vc.material != nullptr;
 
-            if (cmd.type == DrawCommandType::FillRect) {
-                if (pipeline == 0) pipeline = PipelineKey::Rect;
-                format = VertexFormat::Untextured;
-            } else if (cmd.type == DrawCommandType::FillRoundedRect) {
-                if (pipeline == 0) pipeline = PipelineKey::RoundedRect;
-                format = VertexFormat::Untextured;
-            } else if (cmd.type == DrawCommandType::TexturedQuad) {
-                if (pipeline == 0) pipeline = PipelineKey::Text;
-                format = VertexFormat::Textured;
-                texture = cache.texture_provider
-                    ? reinterpret_cast<uint64_t>(cache.texture_provider)
-                    : TextureKey::Atlas;
-            } else {
-                continue;
-            }
+            for (auto& entry : vc.entries) {
+                uint64_t pipeline = (vc.pipeline_override != 0) ? vc.pipeline_override : entry.pipeline_key;
+                uint64_t texture = entry.texture_key;
 
-            bool needs_rect = (pipeline >= PipelineKey::CustomBase)
-                || (cmd.type == DrawCommandType::FillRoundedRect);
+                // Entries with material uniforms get per-element batches
+                bool per_element = has_material || (pipeline >= PipelineKey::CustomBase)
+                    || (pipeline == PipelineKey::RoundedRect);
 
-            uint64_t bkey = needs_rect
-                ? make_batch_key(pipeline, format, reinterpret_cast<uintptr_t>(element))
-                : make_batch_key(pipeline, format, texture);
+                uint64_t bkey = per_element
+                    ? make_batch_key(pipeline, reinterpret_cast<uintptr_t>(element))
+                    : make_batch_key(pipeline, texture);
 
-            auto bit = batch_index_.find(bkey);
-            size_t batch_idx;
-            if (bit != batch_index_.end()) {
-                batch_idx = bit->second;
-            } else {
-                batch_idx = batches_.size();
-                batch_index_[bkey] = batch_idx;
-                RenderBatch batch;
-                batch.pipeline_key = pipeline;
-                batch.vertex_format_key = format;
-                batch.texture_key = texture;
-                batch.instance_stride = (format == VertexFormat::Untextured)
-                    ? VertexFormat::UntexturedStride : VertexFormat::TexturedStride;
-                batches_.push_back(std::move(batch));
-            }
-
-            auto& batch = batches_[batch_idx];
-
-            float x = wx + cmd.bounds.x;
-            float y = wy + cmd.bounds.y;
-            float w = cmd.bounds.width;
-            float h = cmd.bounds.height;
-
-            if (format == VertexFormat::Textured) {
-                float data[] = {x, y, w, h,
-                                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a,
-                                cmd.u0, cmd.v0, cmd.u1, cmd.v1};
-                pack_instance(batch.instance_data, data, VertexFormat::TexturedStride);
-            } else {
-                float data[] = {x, y, w, h,
-                                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a};
-                pack_instance(batch.instance_data, data, VertexFormat::UntexturedStride);
-            }
-
-            if (needs_rect && !batch.has_rect) {
-                batch.rect = {x, y, w, h};
-                batch.has_rect = true;
-
-                // Fill material uniforms for this batch (once per batch creation)
-                if (vc.material) {
-                    fill_batch_uniforms(batch, vc, x, y, w, h);
+                auto bit = batch_index_.find(bkey);
+                size_t batch_idx;
+                if (bit != batch_index_.end()) {
+                    batch_idx = bit->second;
+                } else {
+                    batch_idx = batches_.size();
+                    batch_index_[bkey] = batch_idx;
+                    RenderBatch batch;
+                    batch.pipeline_key = pipeline;
+                    batch.texture_key = texture;
+                    batch.instance_stride = entry.instance_size;
+                    batches_.push_back(std::move(batch));
                 }
-            }
 
-            batch.instance_count++;
-        }
+                auto& batch = batches_[batch_idx];
+
+                // Copy instance data and apply world offset to first two floats (x, y)
+                auto data_offset = batch.instance_data.size();
+                batch.instance_data.resize(data_offset + entry.instance_size);
+                std::memcpy(batch.instance_data.data() + data_offset, entry.instance_data, entry.instance_size);
+
+                float* inst = reinterpret_cast<float*>(batch.instance_data.data() + data_offset);
+                inst[0] += wx;
+                inst[1] += wy;
+
+                if (per_element && !batch.has_rect) {
+                    float x = wx + entry.bounds.x;
+                    float y = wy + entry.bounds.y;
+                    batch.rect = {x, y, entry.bounds.width, entry.bounds.height};
+                    batch.has_rect = true;
+
+                    if (vc.material) {
+                        fill_batch_uniforms(batch, vc, x, y, entry.bounds.width, entry.bounds.height);
+                    }
+                }
+
+                batch.instance_count++;
+            }
         } // for each visual
     }
 }
@@ -311,7 +279,7 @@ void Renderer::populate_uniform_bindings(VisualCommands& vc, IMaterial* mat)
 {
     if (!backend_) return;
 
-    uint64_t key = vc.pipeline_key;
+    uint64_t key = vc.pipeline_override;
 
     // Get or cache pipeline uniforms
     auto uit = pipeline_uniforms_.find(key);
@@ -365,26 +333,8 @@ void Renderer::populate_uniform_bindings(VisualCommands& vc, IMaterial* mat)
 void Renderer::fill_batch_uniforms(RenderBatch& batch, const VisualCommands& vc,
                                    float x, float y, float w, float h) const
 {
-    // Projection uniform
-    auto proj_it = pipeline_uniforms_.find(batch.pipeline_key);
-    if (proj_it != pipeline_uniforms_.end()) {
-        for (auto& info : proj_it->second) {
-            if (info.name == "u_projection") {
-                // Projection is set per-frame; we don't have it here.
-                // The backend still needs it. We'll pack it from the entry.
-                // For now, leave it for the caller to set.
-            } else if (info.name == "u_rect") {
-                UniformValue uv;
-                uv.location = info.location;
-                uv.typeUid = info.typeUid;
-                uv.data[0] = x;
-                uv.data[1] = y;
-                uv.data[2] = w;
-                uv.data[3] = h;
-                batch.uniforms.push_back(uv);
-            }
-        }
-    }
+    // u_projection and u_rect are in the globals UBO/push constants,
+    // managed by the backend directly via batch.rect.
 
     // Material property uniforms
     for (auto& binding : vc.uniform_bindings) {

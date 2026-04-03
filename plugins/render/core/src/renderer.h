@@ -43,8 +43,8 @@ private:
 
     struct VisualCommands
     {
-        velk::vector<DrawCommand> commands;
-        uint64_t pipeline_key = 0;
+        velk::vector<DrawEntry> entries;
+        uint64_t pipeline_override = 0; ///< Non-zero if a material overrides the pipeline.
         IMaterial* material = nullptr;
         velk::vector<UniformBinding> uniform_bindings;
     };

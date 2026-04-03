@@ -6,31 +6,34 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
+#include <velk-ui/types.h>
+
 #include <cstdint>
 
 namespace velk_ui {
 
-/// Well-known pipeline keys used by the Renderer and consumed by backends.
-namespace PipelineKey {
-inline constexpr uint64_t Rect = 1;
-inline constexpr uint64_t Text = 2;
-inline constexpr uint64_t RoundedRect = 3;
-inline constexpr uint64_t Gradient = 4;
-inline constexpr uint64_t CustomBase = 1000;
-} // namespace PipelineKey
+// PipelineKey and TextureKey constants are defined in velk-ui/types.h.
 
-/// Well-known vertex format keys. Backends use these to select VAO / vertex input state.
-namespace VertexFormat {
-inline constexpr uint64_t Untextured = 1;  ///< {x, y, w, h, r, g, b, a} = 32 bytes
-inline constexpr uint64_t Textured = 2;    ///< {x, y, w, h, r, g, b, a, u0, v0, u1, v1} = 48 bytes
-inline constexpr uint32_t UntexturedStride = 32;
-inline constexpr uint32_t TexturedStride = 48;
-} // namespace VertexFormat
+enum class VertexAttribType : uint8_t
+{
+    Float,      ///< 1 float  (4 bytes)
+    Float2,     ///< 2 floats (8 bytes)
+    Float3,     ///< 3 floats (12 bytes)
+    Float4,     ///< 4 floats (16 bytes)
+};
 
-/// Well-known texture keys.
-namespace TextureKey {
-inline constexpr uint64_t Atlas = 1;
-} // namespace TextureKey
+struct VertexAttribute
+{
+    uint32_t location{};
+    uint32_t offset{};          ///< Byte offset within stride.
+    VertexAttribType type{};
+};
+
+struct VertexInputDesc
+{
+    uint32_t stride{};
+    velk::vector<VertexAttribute> attributes;
+};
 
 struct SurfaceDesc
 {
@@ -38,19 +41,22 @@ struct SurfaceDesc
     int height{};
 };
 
-struct PipelineDesc
-{
-    const char* vertex_source = nullptr;
-    const char* fragment_source = nullptr;
-    uint64_t vertex_format_key{};
-};
-
-/** @brief Descriptor for a shader uniform discovered via introspection. */
+/** @brief Descriptor for a shader uniform extracted from SPIR-V reflection. */
 struct UniformInfo
 {
     velk::string name;   ///< Uniform name in the shader (e.g. "u_start_color").
     velk::Uid typeUid;   ///< Mapped velk type UID (float, color/vec4, mat4).
-    int location{-1};    ///< Backend-specific location handle.
+    int location{-1};    ///< Layout location (GL) or push constant offset (Vulkan).
+};
+
+struct PipelineDesc
+{
+    const uint32_t* vertex_spirv = nullptr;
+    size_t vertex_spirv_size = 0;
+    const uint32_t* fragment_spirv = nullptr;
+    size_t fragment_spirv_size = 0;
+    VertexInputDesc vertex_input;
+    velk::vector<UniformInfo> uniforms; ///< Uniform metadata extracted from SPIR-V reflection.
 };
 
 /** @brief A uniform value to be set on the GPU before a draw call. */
@@ -70,7 +76,6 @@ struct UniformValue
 struct RenderBatch
 {
     uint64_t pipeline_key{};
-    uint64_t vertex_format_key{};
     uint64_t texture_key{};
     velk::vector<uint8_t> instance_data;
     uint32_t instance_stride{};

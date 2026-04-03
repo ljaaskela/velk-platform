@@ -29,11 +29,11 @@ public:
     )
 
     /**
-     * @brief Produces draw commands for this visual within the given bounds.
+     * @brief Produces draw entries for this visual within the given bounds.
      * @param bounds Element-local rect (from layout). The visual fills within this space.
-     * @return Draw commands in element-local space. The renderer applies world_matrix.
+     * @return Draw entries in element-local space. The renderer applies world_matrix.
      */
-    virtual velk::vector<DrawCommand> get_draw_commands(const velk::rect& bounds) = 0;
+    virtual velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) = 0;
 };
 
 } // namespace velk_ui

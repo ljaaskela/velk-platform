@@ -8,26 +8,40 @@
 
 namespace velk_ui {
 
-enum class DrawCommandType : uint8_t
-{
-    FillRect,        ///< Solid color rectangle.
-    FillRoundedRect, ///< Rounded rectangle (SDF corners).
-    TexturedQuad     ///< Textured quad (glyph from atlas).
-};
+/// Well-known pipeline keys used by built-in visuals and consumed by backends.
+namespace PipelineKey {
+inline constexpr uint64_t Rect = 1;
+inline constexpr uint64_t Text = 2;
+inline constexpr uint64_t RoundedRect = 3;
+inline constexpr uint64_t Gradient = 4;
+inline constexpr uint64_t CustomBase = 1000;
+} // namespace PipelineKey
+
+/// Well-known texture keys.
+namespace TextureKey {
+inline constexpr uint64_t Atlas = 1;
+} // namespace TextureKey
+
+/// Maximum inline instance data size in a DrawEntry.
+inline constexpr uint32_t kMaxInstanceDataSize = 64;
 
 /**
- * @brief POD draw command produced by IVisual.
+ * @brief Generic draw entry produced by IVisual.
  *
- * Element-local coordinates. The renderer applies world_matrix.
- * Unused fields are zeroed (e.g. UVs for FillRect).
+ * Visuals pack their own instance data matching their pipeline's vertex input.
+ * The renderer groups entries by (pipeline_key, texture_key), concatenates
+ * instance data into batches, and applies the world transform.
+ *
+ * Convention: the first two floats in instance_data are element-local (x, y).
+ * The renderer offsets them by the element's world position.
  */
-struct DrawCommand
+struct DrawEntry
 {
-    DrawCommandType type{};
-    velk::rect bounds{}; ///< Element-local position and size.
-    velk::color color{}; ///< Visual color (fill or text tint).
-    float u0{}, v0{};    ///< Texture UV top-left.
-    float u1{}, v1{};    ///< Texture UV bottom-right.
+    uint64_t pipeline_key{};        ///< Pipeline to draw with.
+    uint64_t texture_key{};         ///< Texture binding (0 = none).
+    velk::rect bounds{};            ///< Element-local bounds (used for per-element uniforms).
+    uint8_t instance_data[kMaxInstanceDataSize]{}; ///< Packed instance data for the GPU.
+    uint32_t instance_size{};       ///< Bytes used in instance_data.
 };
 
 enum class DirtyFlags : uint8_t
