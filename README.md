@@ -1,4 +1,8 @@
-# velk-platform
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/ljaaskela/velk/blob/main/docs/logos/logo/velk-logo-standard-dark%402x.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://github.com/ljaaskela/velk/blob/main/docs/logos/logo/velk-logo-standard-light%402x.png">
+  <img alt="Velk" src="https://github.com/ljaaskela/velk/blob/main/docs/logos/logo/velk-logo-standard-dark%402x.png" width="200">
+</picture>
 
 Application platform built on the [Velk](https://github.com/ljaaskela/velk) component object model. Provides GPU rendering, a UI framework, text rendering, and application infrastructure.
 
@@ -7,7 +11,7 @@ Application platform built on the [Velk](https://github.com/ljaaskela/velk) comp
 ### [velk-render](velk-render/) — Rendering foundation
 
 Pointer-based GPU rendering abstraction:
-* 15-method backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls. No vertex input descriptions, uniform reflection, or descriptor management.
+* Minimal (currently 15 methods) backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls. This means no vertex input descriptions or descriptor management.
 * Includes a Vulkan 1.2 backend (`velk::vk`) with BDA and bindless descriptors.
 * See [Render Backend Architecture](velk-render/docs/render-backend-architecture.md) for the full technical writeup.
 
@@ -16,11 +20,8 @@ Pointer-based GPU rendering abstraction:
 Declarative UI framework:
 * Scene graphs, element composition via traits (constraints, visuals, transforms, input), JSON scene loading.
 * A scene renderer using velk-render that walks the visual tree and submits draw calls to the render backend.
+* Text rendering plugin using FreeType + HarfBuzz text shaping and rendering. Glyph atlas management, bindless texture integration.
 * See [Getting Started](velk-ui/docs/getting-started.md) for an introduction.
-
-#### plugins/text — Text rendering
-
-FreeType + HarfBuzz text shaping and rendering. Glyph atlas management, bindless texture integration.
 
 ## Quick start
 
