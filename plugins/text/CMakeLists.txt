@@ -65,7 +65,7 @@ add_library(velk_text SHARED
     include/velk-ui/plugins/text/intf_text_visual.h
 )
 
-target_link_libraries(velk_text PRIVATE velk velk_ui freetype harfbuzz)
+target_link_libraries(velk_text PRIVATE velk velk_ui velk_render freetype harfbuzz)
 
 target_include_directories(velk_text
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

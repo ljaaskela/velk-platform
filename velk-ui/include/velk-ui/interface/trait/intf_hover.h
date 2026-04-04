@@ -3,7 +3,7 @@
 
 #include <velk/interface/intf_metadata.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Input trait that tracks pointer hover state.
@@ -11,7 +11,7 @@ namespace velk_ui {
  * Sets hovered to true when the pointer enters the element's bounds and
  * false when it leaves. Fires on_hover_changed on each transition.
  */
-class IHover : public velk::Interface<IHover>
+class IHover : public Interface<IHover>
 {
 public:
     VELK_INTERFACE(
@@ -20,6 +20,6 @@ public:
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_HOVER_H

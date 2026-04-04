@@ -6,36 +6,29 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
+#include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_trait.h>
-#include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Visual representation attached to an element.
  *
  * Defines how an element appears on screen. An element can have one or more
  * IVisual attachments. The renderer iterates them and draws what they produce.
- * The renderer only knows IVisual; it never needs to know about specific visual
- * types (RectVisual, TextVisual, etc.).
  */
-class IVisual : public velk::Interface<IVisual, ITrait>
+class IVisual : public Interface<IVisual, ITrait>
 {
 public:
     VELK_INTERFACE(
-        (PROP, velk::color, color, {}),        ///< Base color. Used when no paint is set.
-        (PROP, velk::ObjectRef, paint, {}),    ///< Optional IMaterial reference. Overrides color when set.
-        (EVT, on_visual_changed)               ///< Fired when visual state changes (color, text, etc.).
+        (PROP, ::velk::color, color, {}),
+        (PROP, ObjectRef, paint, {}),
+        (EVT, on_visual_changed)
     )
 
-    /**
-     * @brief Produces draw entries for this visual within the given bounds.
-     * @param bounds Element-local rect (from layout). The visual fills within this space.
-     * @return Draw entries in element-local space. The renderer applies world_matrix.
-     */
-    virtual velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) = 0;
+    virtual vector<DrawEntry> get_draw_entries(const rect& bounds) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_VISUAL_H

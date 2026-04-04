@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace velk_ui {
+namespace velk::ui {
 
 GlyphAtlas::GlyphAtlas(uint32_t width, uint32_t height) : width_(width), height_(height)
 {
@@ -74,4 +74,4 @@ void GlyphAtlas::clear()
     dirty_ = true;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

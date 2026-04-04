@@ -8,7 +8,7 @@
 #define INPUT_LOG(...) ((void)0)
 #endif
 
-namespace velk_ui {
+namespace velk::ui {
 
 InputResult Click::on_pointer_event(PointerEvent& event)
 {
@@ -19,12 +19,12 @@ InputResult Click::on_pointer_event(PointerEvent& event)
     }
 
     if (event.action == PointerAction::Up) {
-        auto reader = velk::read_state<IClick>(this);
+        auto reader = read_state<IClick>(this);
         INPUT_LOG("Click: pointer up, pressed=%s", (reader && reader->pressed) ? "true" : "false");
         if (reader && reader->pressed) {
             set_pressed(false);
             INPUT_LOG("Click: firing on_click");
-            velk::invoke_event(get_interface(velk::IInterface::UID), "on_click");
+            invoke_event(get_interface(IInterface::UID), "on_click");
             return InputResult::Consumed;
         }
     }
@@ -35,7 +35,7 @@ InputResult Click::on_pointer_event(PointerEvent& event)
 void Click::on_pointer_leave(const PointerEvent&)
 {
     // Cancel press when pointer leaves bounds
-    auto reader = velk::read_state<IClick>(this);
+    auto reader = read_state<IClick>(this);
     if (reader && reader->pressed) {
         INPUT_LOG("Click: pointer leave while pressed, cancelling");
         set_pressed(false);
@@ -44,7 +44,7 @@ void Click::on_pointer_leave(const PointerEvent&)
 
 void Click::set_pressed(bool v)
 {
-    velk::write_state<IClick>(this, [v](IClick::State& s) { s.pressed = v; });
+    write_state<IClick>(this, [v](IClick::State& s) { s.pressed = v; });
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Layout constraint that arranges children sequentially along an axis.
@@ -13,7 +13,7 @@ namespace velk_ui {
  * Children are laid out one after another with optional spacing. Each child
  * fills the cross-axis by default. The stack itself fills its parent.
  */
-class IStack : public velk::Interface<IStack>
+class IStack : public Interface<IStack>
 {
 public:
     VELK_INTERFACE(
@@ -22,6 +22,6 @@ public:
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_STACK_H

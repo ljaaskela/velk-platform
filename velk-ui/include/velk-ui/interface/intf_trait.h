@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Bit flags for the element pipeline phases.
@@ -50,7 +50,7 @@ inline constexpr bool operator!(TraitPhase a)
  * inherit this interface. Enables uniform discovery and management via
  * Element::add_trait / remove_trait.
  */
-class ITrait : public velk::Interface<ITrait>
+class ITrait : public Interface<ITrait>
 {
 public:
     /** @brief Returns which phases of the element pipeline this trait participates in. */
@@ -63,6 +63,6 @@ inline bool has_phase(const ITrait* trait, TraitPhase phase)
     return trait && static_cast<uint8_t>(trait->get_phase() & phase) != 0;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_TRAIT_H

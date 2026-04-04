@@ -5,17 +5,17 @@
 #include <velk-ui/interface/trait/intf_stack.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class Stack : public ext::Layout<Stack, TraitPhase::Layout, IStack>
 {
 public:
     VELK_CLASS_UID(ClassId::Constraint::Stack, "Stack");
 
-    Constraint measure(const Constraint& c, IElement& element, velk::IHierarchy& hierarchy) override;
-    void apply(const Constraint& c, IElement& element, velk::IHierarchy& hierarchy) override;
+    Constraint measure(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
+    void apply(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_STACK_H

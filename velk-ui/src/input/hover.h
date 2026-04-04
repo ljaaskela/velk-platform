@@ -5,7 +5,7 @@
 #include <velk-ui/interface/trait/intf_hover.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class Hover : public ext::Input<Hover, IHover>
 {
@@ -16,6 +16,6 @@ public:
     void on_pointer_leave(const PointerEvent& event) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INPUT_HOVER_H

@@ -3,11 +3,11 @@
 
 #include <velk/ext/object.h>
 
-#include <velk-ui/interface/intf_material.h>
-#include <velk-ui/interface/intf_material_internal.h>
+#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/intf_material_internal.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Material with a custom shader program.
@@ -15,7 +15,7 @@ namespace velk_ui {
  * The pipeline handle is set by the render context factory after compiling
  * the shader, via the IMaterialInternal interface.
  */
-class ShaderMaterial : public velk::ext::Object<ShaderMaterial, IMaterial, IMaterialInternal>
+class ShaderMaterial : public ::velk::ext::Object<ShaderMaterial, IMaterial, IMaterialInternal>
 {
 public:
     VELK_CLASS_UID(ClassId::Material::Shader, "ShaderMaterial");
@@ -30,6 +30,6 @@ private:
     uint64_t pipeline_handle_ = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_SHADER_MATERIAL_H

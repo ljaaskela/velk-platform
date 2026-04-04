@@ -9,15 +9,15 @@
 #include <velk-ui/interface/intf_input_trait.h>
 #include <velk-ui/interface/intf_scene.h>
 
-namespace velk_ui::impl {
+namespace velk::ui::impl {
 
-class InputDispatcher : public velk::ext::Object<InputDispatcher, IInputDispatcher>
+class InputDispatcher : public ::velk::ext::Object<InputDispatcher, IInputDispatcher>
 {
 public:
     VELK_CLASS_UID(ClassId::Input::Dispatcher, "InputDispatcher");
 
     // IInputDispatcher
-    void set_scene(const velk::shared_ptr<IScene>& scene) override;
+    void set_scene(const shared_ptr<IScene>& scene) override;
     void pointer_event(const PointerEvent& event) override;
     void scroll_event(const ScrollEvent& event) override;
     void key_event(const KeyEvent& event) override;
@@ -29,16 +29,16 @@ public:
 
 private:
     /** @brief Finds the deepest element with an IInputTrait under the given point. */
-    IElement* hit_test(velk::vec2 point) const;
+    IElement* hit_test(vec2 point) const;
 
     /** @brief Returns the IInputTrait attached to an element, or nullptr. */
     static IInputTrait* get_input_trait(IElement* element);
 
     /** @brief Computes the element's world-space AABB from world_matrix + size. */
-    static velk::rect get_world_rect(IElement* element);
+    static rect get_world_rect(IElement* element);
 
     /** @brief Converts a scene-space point to element-local space. */
-    static velk::vec2 to_local(IElement* element, velk::vec2 scene_point);
+    static vec2 to_local(IElement* element, vec2 scene_point);
 
     /**
      * @brief Builds the ancestor chain from root to the target element.
@@ -46,7 +46,7 @@ private:
      * Used for intercept (top-down) and bubble (bottom-up) passes.
      * Only includes ancestors that have an IInputTrait.
      */
-    void build_ancestor_chain(IElement* target, velk::vector<IElement*>& chain) const;
+    void build_ancestor_chain(IElement* target, vector<IElement*>& chain) const;
 
     /** @brief Dispatches a pointer event through the intercept + bubble pipeline. */
     InputResult dispatch_pointer(PointerEvent& event, IElement* hit);
@@ -57,13 +57,13 @@ private:
     /** @brief Updates hover state and fires enter/leave. */
     void update_hover(IElement* new_hover, const PointerEvent& event);
 
-    velk::weak_ptr<IScene> scene_;
+    weak_ptr<IScene> scene_;
     IElement::Ptr hovered_;
     IElement::Ptr pressed_;
     IElement::Ptr focused_;
     bool captured_ = false;
 };
 
-} // namespace velk_ui::impl
+} // namespace velk::ui::impl
 
 #endif // VELK_UI_INPUT_DISPATCHER_H

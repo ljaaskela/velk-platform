@@ -7,7 +7,7 @@
 #include <velk-ui/interface/trait/intf_stack.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IStack.
@@ -25,10 +25,10 @@ public:
     Stack() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IStack. */
-    explicit Stack(velk::IObject::Ptr obj) : Trait(check_object<IStack>(obj)) {}
+    explicit Stack(IObject::Ptr obj) : Trait(check_object<IStack>(obj)) {}
 
     /** @brief Wraps an existing IStack pointer. */
-    explicit Stack(IStack::Ptr s) : Trait(velk::as_object(s)) {}
+    explicit Stack(IStack::Ptr s) : Trait(as_object(s)) {}
 
     /** @brief Implicit conversion to IStack::Ptr. */
     operator IStack::Ptr() const { return as_ptr<IStack>(); }
@@ -51,11 +51,11 @@ namespace constraint {
 /** @brief Creates a new Stack constraint. */
 inline Stack create_stack()
 {
-    return Stack(velk::instance().create<IStack>(ClassId::Constraint::Stack));
+    return Stack(instance().create<IStack>(ClassId::Constraint::Stack));
 }
 
 } // namespace constraint
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_TRAIT_STACK_H

@@ -5,7 +5,7 @@
 
 #include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Constraint that clamps an element to a specific width and/or height.
@@ -13,7 +13,7 @@ namespace velk_ui {
  * Either axis can be dim::none() to leave it unconstrained. Values are
  * resolved against the parent's available space (px = absolute, pct = relative).
  */
-class IFixedSize : public velk::Interface<IFixedSize>
+class IFixedSize : public Interface<IFixedSize>
 {
 public:
     VELK_INTERFACE(
@@ -22,6 +22,6 @@ public:
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_FIXED_SIZE_H

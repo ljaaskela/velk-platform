@@ -3,7 +3,7 @@
 
 #include <velk/interface/intf_metadata.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Input trait that detects pointer click gestures.
@@ -11,7 +11,7 @@ namespace velk_ui {
  * Fires on_click when a pointer down + up sequence completes within the element.
  * Exposes a read-only pressed property for visual feedback during the press.
  */
-class IClick : public velk::Interface<IClick>
+class IClick : public Interface<IClick>
 {
 public:
     VELK_INTERFACE(
@@ -20,6 +20,6 @@ public:
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_CLICK_H

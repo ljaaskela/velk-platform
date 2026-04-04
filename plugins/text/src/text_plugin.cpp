@@ -3,18 +3,18 @@
 #include "font.h"
 #include "visual/text_visual.h"
 
-namespace velk_ui {
+namespace velk::ui {
 
-velk::ReturnValue TextPlugin::initialize(velk::IVelk& velk, velk::PluginConfig&)
+ReturnValue TextPlugin::initialize(IVelk& velk, PluginConfig&)
 {
-    auto rv = velk::register_type<Font>(velk);
-    rv &= velk::register_type<TextVisual>(velk);
+    auto rv = register_type<Font>(velk);
+    rv &= register_type<TextVisual>(velk);
     return rv;
 }
 
-velk::ReturnValue TextPlugin::shutdown(velk::IVelk&)
+ReturnValue TextPlugin::shutdown(IVelk&)
 {
-    return velk::ReturnValue::Success;
+    return ReturnValue::Success;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

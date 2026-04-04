@@ -4,7 +4,7 @@
 #include <velk/api/math_types.h>
 #include <velk/interface/intf_metadata.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Interface for linear gradient properties.
@@ -13,16 +13,16 @@ namespace velk_ui {
  * Properties are mapped to shader uniforms by the renderer via metadata
  * introspection (uniform names match property names with a u_ prefix).
  */
-class IGradient : public velk::Interface<IGradient>
+class IGradient : public Interface<IGradient>
 {
 public:
     VELK_INTERFACE(
-        (PROP, velk::color, start_color, (velk::color::white())),
-        (PROP, velk::color, end_color, (velk::color::black())),
+        (PROP, color, start_color, (color::white())),
+        (PROP, color, end_color, (color::black())),
         (PROP, float, angle, 0.f)
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_GRADIENT_H

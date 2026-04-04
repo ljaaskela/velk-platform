@@ -5,7 +5,7 @@
 #include <velk-ui/interface/trait/intf_matrix.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class Matrix : public ext::Transform<Matrix, IMatrix>
 {
@@ -15,6 +15,6 @@ public:
     void transform(IElement& element) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_MATRIX_TRANSFORM_H

@@ -5,11 +5,11 @@
 
 #include <velk-ui/ext/visual.h>
 #include <velk-ui/interface/intf_font.h>
-#include <velk-ui/interface/intf_texture_provider.h>
+#include <velk-render/interface/intf_texture_provider.h>
 #include <velk-ui/plugins/text/intf_text_visual.h>
 #include <velk-ui/plugins/text/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Renders shaped text as textured glyph quads.
@@ -27,7 +27,7 @@ public:
     void set_font(const IFont::Ptr& font) override;
 
     // IVisual
-    velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) override;
+    vector<DrawEntry> get_draw_entries(const rect& bounds) override;
 
     // ITextureProvider
     const uint8_t* get_pixels() const override;
@@ -38,7 +38,7 @@ public:
 
 protected:
     // Override to reshape when the text property changes
-    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override;
+    void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;
 
 private:
     void reshape();
@@ -46,11 +46,11 @@ private:
 
     IFont::Ptr font_;
     GlyphAtlas atlas_;
-    velk::vector<DrawEntry> cached_entries_;
+    vector<DrawEntry> cached_entries_;
     float text_width_{};
     float text_height_{};
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_TEXT_VISUAL_H

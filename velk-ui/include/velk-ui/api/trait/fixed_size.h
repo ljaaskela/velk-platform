@@ -7,7 +7,7 @@
 #include <velk-ui/interface/trait/intf_fixed_size.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IFixedSize.
@@ -25,10 +25,10 @@ public:
     FixedSize() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IFixedSize. */
-    explicit FixedSize(velk::IObject::Ptr obj) : Trait(check_object<IFixedSize>(obj)) {}
+    explicit FixedSize(IObject::Ptr obj) : Trait(check_object<IFixedSize>(obj)) {}
 
     /** @brief Wraps an existing IFixedSize pointer. */
-    explicit FixedSize(IFixedSize::Ptr f) : Trait(velk::as_object(f)) {}
+    explicit FixedSize(IFixedSize::Ptr f) : Trait(as_object(f)) {}
 
     /** @brief Implicit conversion to IFixedSize::Ptr. */
     operator IFixedSize::Ptr() const { return as_ptr<IFixedSize>(); }
@@ -48,7 +48,7 @@ public:
     /** @brief Sets the fixed width and height. Use dim::none() to leave unconstrained. */
     void set_size(dim w, dim h)
     {
-        ::velk::write_state<IFixedSize>(as<IFixedSize>(), [&](auto& s) {
+        ::write_state<IFixedSize>(as<IFixedSize>(), [&](auto& s) {
             s.width = w;
             s.height = h;
         });
@@ -60,11 +60,11 @@ namespace constraint {
 /** @brief Creates a new FixedSize constraint. */
 inline FixedSize create_fixed_size()
 {
-    return FixedSize(velk::instance().create<IFixedSize>(ClassId::Constraint::FixedSize));
+    return FixedSize(instance().create<IFixedSize>(ClassId::Constraint::FixedSize));
 }
 
 } // namespace constraint
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_TRAIT_FIXED_SIZE_H

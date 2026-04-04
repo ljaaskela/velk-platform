@@ -4,7 +4,7 @@
 #include <velk-ui/input_types.h>
 #include <velk-ui/interface/intf_trait.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Trait for elements that receive input events.
@@ -19,7 +19,7 @@ namespace velk_ui {
  * Return InputResult::Consumed to stop bubbling, or InputResult::Captured
  * to also capture all future pointer events until release.
  */
-class IInputTrait : public velk::Interface<IInputTrait, ITrait>
+class IInputTrait : public Interface<IInputTrait, ITrait>
 {
 public:
     /**
@@ -58,6 +58,6 @@ public:
     virtual InputResult on_key_event(KeyEvent& event) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_INPUT_TRAIT_H

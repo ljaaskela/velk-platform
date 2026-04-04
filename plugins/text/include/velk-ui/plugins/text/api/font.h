@@ -7,7 +7,7 @@
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IFont.
@@ -18,19 +18,19 @@ namespace velk_ui {
  *   font.init_default();
  *   font.set_size(32.f);
  */
-class Font : public velk::Object
+class Font : public Object
 {
 public:
     /** @brief Default-constructed Font wraps no object. */
     Font() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IFont. */
-    explicit Font(velk::IObject::Ptr obj)
-        : Object(obj && interface_cast<IFont>(obj) ? std::move(obj) : velk::IObject::Ptr{})
+    explicit Font(IObject::Ptr obj)
+        : Object(obj && interface_cast<IFont>(obj) ? std::move(obj) : IObject::Ptr{})
     {}
 
     /** @brief Wraps an existing IFont pointer. */
-    explicit Font(IFont::Ptr f) : Object(interface_pointer_cast<velk::IObject>(f)) {}
+    explicit Font(IFont::Ptr f) : Object(interface_pointer_cast<IObject>(f)) {}
 
     /** @brief Implicit conversion to IFont::Ptr. */
     operator IFont::Ptr() const { return as_ptr<IFont>(); }
@@ -57,9 +57,9 @@ public:
 /** @brief Creates a new Font. */
 inline Font create_font()
 {
-    return Font(velk::instance().create<velk::IObject>(ClassId::Font));
+    return Font(instance().create<IObject>(ClassId::Font));
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_TEXT_API_FONT_H

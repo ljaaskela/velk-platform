@@ -6,11 +6,11 @@
 #include <velk-ui/interface/intf_scene.h>
 #include <velk-ui/interface/intf_visual.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 void Element::on_attached(IScene& scene)
 {
-    auto s = interface_cast<velk::IObject>(&scene)->get_self<IScene>();
+    auto s = interface_cast<IObject>(&scene)->get_self<IScene>();
     scene_ = s;
     pending_dirty_ = DirtyFlags::All;
     s->notify_dirty(*this, pending_dirty_);
@@ -24,14 +24,14 @@ void Element::on_detached(IScene&)
     pending_dirty_ = DirtyFlags::None;
 }
 
-void Element::on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId)
+void Element::on_state_changed(string_view name, IMetadata& owner, Uid interfaceId)
 {
     auto scene = get_scene();
     if (!scene) {
         return;
     }
 
-    auto* meta = interface_cast<velk::IMetadata>(this);
+    auto* meta = interface_cast<IMetadata>(this);
     if (!meta) {
         return;
     }
@@ -64,7 +64,7 @@ DirtyFlags Element::consume_dirty()
 
 void Element::subscribe_visuals()
 {
-    auto* storage = interface_cast<velk::IObjectStorage>(this);
+    auto* storage = interface_cast<IObjectStorage>(this);
     if (!storage) {
         return;
     }
@@ -76,15 +76,15 @@ void Element::subscribe_visuals()
             continue;
         }
 
-        velk::Event evt = visual->on_visual_changed();
+        Event evt = visual->on_visual_changed();
         if (!evt) {
             continue;
         }
 
-        visual_subs_.emplace_back(evt, [this](velk::FnArgs) -> velk::ReturnValue {
+        visual_subs_.emplace_back(evt, [this](FnArgs) -> ReturnValue {
             auto scene = get_scene();
             if (!scene) {
-                return velk::ReturnValue::Fail;
+                return ReturnValue::Fail;
             }
 
             bool was_clean = (pending_dirty_ == DirtyFlags::None);
@@ -92,9 +92,9 @@ void Element::subscribe_visuals()
             if (was_clean) {
                 scene->notify_dirty(*this, DirtyFlags::Visual);
             }
-            return velk::ReturnValue::Success;
+            return ReturnValue::Success;
         });
     }
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

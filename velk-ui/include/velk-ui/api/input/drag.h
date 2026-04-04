@@ -8,7 +8,7 @@
 #include <velk-ui/interface/trait/intf_drag.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IDrag.
@@ -21,8 +21,8 @@ class Drag : public Trait
 {
 public:
     Drag() = default;
-    explicit Drag(velk::IObject::Ptr obj) : Trait(check_object<IDrag>(obj)) {}
-    explicit Drag(IDrag::Ptr d) : Trait(velk::as_object(d)) {}
+    explicit Drag(IObject::Ptr obj) : Trait(check_object<IDrag>(obj)) {}
+    explicit Drag(IDrag::Ptr d) : Trait(as_object(d)) {}
 
     operator IDrag::Ptr() const { return as_ptr<IDrag>(); }
 
@@ -53,11 +53,11 @@ namespace input {
 /** @brief Creates a new Drag input trait. */
 inline Drag create_drag()
 {
-    return Drag(velk::instance().create<IDrag>(ClassId::Input::Drag));
+    return Drag(instance().create<IDrag>(ClassId::Input::Drag));
 }
 
 } // namespace input
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_INPUT_DRAG_H

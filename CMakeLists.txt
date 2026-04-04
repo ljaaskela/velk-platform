@@ -48,8 +48,8 @@ add_subdirectory("${GLFW_EXTRACT_DIR}" "${CMAKE_BINARY_DIR}/_deps/glfw-build" EX
 # Subdirectories
 # =============================================================================
 add_subdirectory(test)
+add_subdirectory(velk-render)
+add_subdirectory(velk-render/plugins/vk)
 add_subdirectory(velk-ui)
-add_subdirectory(plugins/render/core)
-add_subdirectory(plugins/render/vk)
 add_subdirectory(plugins/text)
 add_subdirectory(app)

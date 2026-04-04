@@ -12,25 +12,25 @@
 #define LAYOUT_LOG(...) ((void)0)
 #endif
 
-namespace velk_ui {
+namespace velk::ui {
 
-void LayoutSolver::solve(velk::IHierarchy& hierarchy, const velk::aabb& viewport)
+void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport)
 {
     auto root = interface_pointer_cast<IElement>(hierarchy.root());
     if (!root) {
         return;
     }
 
-    solve_element(hierarchy, root, viewport, velk::mat4::identity());
+    solve_element(hierarchy, root, viewport, mat4::identity());
 }
 
-void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Ptr& element,
-                                 const velk::aabb& parent_bounds, const velk::mat4& parent_world)
+void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,
+                                 const aabb& parent_bounds, const mat4& parent_world)
 {
     // Collect layout and transform traits
-    velk::vector<ILayoutTrait*> layout_traits;
-    velk::vector<ITransformTrait*> transform_traits;
-    auto* storage = interface_cast<velk::IObjectStorage>(element);
+    vector<ILayoutTrait*> layout_traits;
+    vector<ITransformTrait*> transform_traits;
+    auto* storage = interface_cast<IObjectStorage>(element);
     if (storage) {
         for (size_t i = 0; i < storage->attachment_count(); ++i) {
             auto att = storage->get_attachment(i);
@@ -69,7 +69,7 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Pt
     }
 
     // Write size from constraint bounds
-    velk::write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
+    write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
 
     for (auto* lt : layout_traits) {
         if (has_phase(lt, TraitPhase::Constraint)) {
@@ -78,13 +78,13 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Pt
     }
 
     // Compute base world matrix from layout position
-    auto reader = velk::read_state<IElement>(element);
+    auto reader = read_state<IElement>(element);
     if (!reader) {
         return;
     }
 
-    velk::mat4 world = parent_world * velk::mat4::translate(reader->position);
-    velk::write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
+    mat4 world = parent_world * mat4::translate(reader->position);
+    write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
 
     // Run transform traits
     for (auto* tt : transform_traits) {
@@ -95,12 +95,12 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Pt
     world = reader->world_matrix;
 
     // Recurse: each child gets its own allocated bounds (set by this element's Stack)
-    auto children = hierarchy.children_of(velk::as_object(element));
+    auto children = hierarchy.children_of(as_object(element));
     for (auto& child : children) {
         auto child_elem = interface_pointer_cast<IElement>(child);
-        auto child_state = velk::read_state<IElement>(child_elem);
+        auto child_state = read_state<IElement>(child_elem);
         if (child_state) {
-            velk::aabb child_bounds;
+            aabb child_bounds;
             if (child_state && (child_state->size.width > 0.f || child_state->size.height > 0.f)) {
                 // Parent's Stack already allocated this child's bounds
                 child_bounds.extent.width = child_state->size.width;
@@ -116,4 +116,4 @@ void LayoutSolver::solve_element(velk::IHierarchy& hierarchy, const IElement::Pt
     }
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

@@ -7,7 +7,7 @@ target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_render velk_text glf
 # Include velk_vk public headers for VulkanInitParams and Vulkan headers for surface creation
 find_package(Vulkan REQUIRED)
 target_include_directories(velk_ui_app PRIVATE
-    ${CMAKE_SOURCE_DIR}/plugins/render/vk/include
+    ${CMAKE_SOURCE_DIR}/velk-render/plugins/vk/include
     ${Vulkan_INCLUDE_DIRS}
 )
 

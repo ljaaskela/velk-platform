@@ -4,7 +4,7 @@
 #include <velk-ui/ext/visual.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Rounded rectangle visual.
@@ -17,9 +17,9 @@ class RoundedRectVisual : public ext::Visual<RoundedRectVisual>
 public:
     VELK_CLASS_UID(ClassId::Visual::RoundedRect, "RoundedRectVisual");
 
-    velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) override;
+    vector<DrawEntry> get_draw_entries(const rect& bounds) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_ROUNDED_RECT_VISUAL_H

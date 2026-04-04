@@ -4,7 +4,7 @@
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_trait.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Trait that modifies the world matrix after layout.
@@ -13,13 +13,13 @@ namespace velk_ui {
  * from layout position. Transform traits read, modify, and write back
  * the element's world_matrix.
  */
-class ITransformTrait : public velk::Interface<ITransformTrait, ITrait>
+class ITransformTrait : public Interface<ITransformTrait, ITrait>
 {
 public:
     /** @brief Modifies the element's world matrix in place. */
     virtual void transform(IElement& element) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_TRANSFORM_TRAIT_H

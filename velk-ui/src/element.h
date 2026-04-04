@@ -10,19 +10,19 @@
 #include <velk-ui/plugin.h>
 #include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
-class Element : public velk::ext::Object<Element, IElement, velk::IMetadataObserver, ISceneObserver>
+class Element : public ::velk::ext::Object<Element, IElement, IMetadataObserver, ISceneObserver>
 {
 public:
     VELK_CLASS_UID(ClassId::Element, "Element");
 
-    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override;
+    void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;
 
     void on_attached(IScene& scene) override;
     void on_detached(IScene& scene) override;
 
-    velk::shared_ptr<IScene> get_scene() const override { return scene_.lock(); }
+    shared_ptr<IScene> get_scene() const override { return scene_.lock(); }
     DirtyFlags consume_dirty() override;
 
 private:
@@ -30,9 +30,9 @@ private:
 
     IScene::WeakPtr scene_;
     DirtyFlags pending_dirty_ = DirtyFlags::None;
-    velk::vector<velk::ScopedHandler> visual_subs_;
+    vector<ScopedHandler> visual_subs_;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_ELEMENT_H

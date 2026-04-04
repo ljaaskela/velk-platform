@@ -8,7 +8,7 @@
 #include <velk-ui/interface/trait/intf_hover.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IHover.
@@ -21,8 +21,8 @@ class Hover : public Trait
 {
 public:
     Hover() = default;
-    explicit Hover(velk::IObject::Ptr obj) : Trait(check_object<IHover>(obj)) {}
-    explicit Hover(IHover::Ptr h) : Trait(velk::as_object(h)) {}
+    explicit Hover(IObject::Ptr obj) : Trait(check_object<IHover>(obj)) {}
+    explicit Hover(IHover::Ptr h) : Trait(as_object(h)) {}
 
     operator IHover::Ptr() const { return as_ptr<IHover>(); }
 
@@ -41,11 +41,11 @@ namespace input {
 /** @brief Creates a new Hover input trait. */
 inline Hover create_hover()
 {
-    return Hover(velk::instance().create<IHover>(ClassId::Input::Hover));
+    return Hover(instance().create<IHover>(ClassId::Input::Hover));
 }
 
 } // namespace input
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_INPUT_HOVER_H

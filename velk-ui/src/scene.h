@@ -13,9 +13,9 @@
 #include <velk-ui/interface/intf_scene_observer.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
-class Scene : public velk::ext::Object<Scene, IScene>
+class Scene : public ::velk::ext::Object<Scene, IScene>
 {
 public:
     VELK_CLASS_UID(ClassId::Scene, "Scene");
@@ -24,64 +24,64 @@ public:
     ~Scene() override;
 
     // IScene
-    velk::IFuture::Ptr load_from(velk::string_view path) override;
-    void load(velk::IStore& store) override;
-    void set_geometry(velk::aabb geometry) override;
-    void update(const velk::UpdateInfo& info) override;
+    IFuture::Ptr load_from(string_view path) override;
+    void load(IStore& store) override;
+    void set_geometry(aabb geometry) override;
+    void update(const UpdateInfo& info) override;
     SceneState consume_state() override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
-    velk::array_view<IElement*> get_visual_list() override;
+    array_view<IElement*> get_visual_list() override;
 
     // IHierarchy forwarding
-    velk::ReturnValue set_root(const velk::IObject::Ptr& root) override;
-    velk::ReturnValue add(const velk::IObject::Ptr& parent, const velk::IObject::Ptr& child) override;
-    velk::ReturnValue insert(const velk::IObject::Ptr& parent, size_t index,
-                             const velk::IObject::Ptr& child) override;
-    velk::ReturnValue remove(const velk::IObject::Ptr& object) override;
-    velk::ReturnValue replace(const velk::IObject::Ptr& old_child,
-                              const velk::IObject::Ptr& new_child) override;
+    ReturnValue set_root(const IObject::Ptr& root) override;
+    ReturnValue add(const IObject::Ptr& parent, const IObject::Ptr& child) override;
+    ReturnValue insert(const IObject::Ptr& parent, size_t index,
+                             const IObject::Ptr& child) override;
+    ReturnValue remove(const IObject::Ptr& object) override;
+    ReturnValue replace(const IObject::Ptr& old_child,
+                              const IObject::Ptr& new_child) override;
     void clear() override;
-    velk::IObject::Ptr root() const override;
-    velk::IObject::Ptr parent_of(const velk::IObject::Ptr& object) const override;
-    velk::vector<velk::IObject::Ptr> children_of(const velk::IObject::Ptr& object) const override;
-    velk::IObject::Ptr child_at(const velk::IObject::Ptr& object, size_t index) const override;
-    size_t child_count(const velk::IObject::Ptr& object) const override;
-    void for_each_child(const velk::IObject::Ptr& object, void* context,
+    IObject::Ptr root() const override;
+    IObject::Ptr parent_of(const IObject::Ptr& object) const override;
+    vector<IObject::Ptr> children_of(const IObject::Ptr& object) const override;
+    IObject::Ptr child_at(const IObject::Ptr& object, size_t index) const override;
+    size_t child_count(const IObject::Ptr& object) const override;
+    void for_each_child(const IObject::Ptr& object, void* context,
                         ChildVisitorFn visitor) const override;
-    bool contains(const velk::IObject::Ptr& object) const override;
+    bool contains(const IObject::Ptr& object) const override;
     size_t size() const override;
-    Node node_of(const velk::IObject::Ptr& object) const override;
+    Node node_of(const IObject::Ptr& object) const override;
 
-    static velk::vector<Scene*>& live_scenes();
+    static vector<Scene*>& live_scenes();
 
 private:
     void ensure_hierarchy();
-    void attach_element(const velk::IObject::Ptr& obj);
-    void detach_element(const velk::IObject::Ptr& obj);
-    void detach_subtree(const velk::IObject::Ptr& obj);
-    void replicate_children(velk::IHierarchy& src, const velk::IObject::Ptr& parent);
+    void attach_element(const IObject::Ptr& obj);
+    void detach_element(const IObject::Ptr& obj);
+    void detach_subtree(const IObject::Ptr& obj);
+    void replicate_children(IHierarchy& src, const IObject::Ptr& parent);
     void rebuild_visual_list();
-    void collect_visual_list(const velk::IObject::Ptr& obj);
+    void collect_visual_list(const IObject::Ptr& obj);
 
-    velk::Hierarchy logical_;
+    Hierarchy logical_;
     LayoutSolver solver_;
-    velk::aabb geometry_{};
+    aabb geometry_{};
 
     void set_dirty(DirtyFlags flags) { dirty_ |= flags; }
 
-    velk::vector<IElement*> dirty_elements_;
-    velk::vector<IElement*> visual_list_;
-    velk::vector<IElement*> redraw_list_;
-    velk::vector<velk::IObject::Ptr> removed_list_;
+    vector<IElement*> dirty_elements_;
+    vector<IElement*> visual_list_;
+    vector<IElement*> redraw_list_;
+    vector<IObject::Ptr> removed_list_;
 
     // Double-buffered for consume_state(): returned views stay valid until next consume.
-    velk::vector<IElement*> consumed_redraw_;
-    velk::vector<velk::IObject::Ptr> consumed_removed_;
+    vector<IElement*> consumed_redraw_;
+    vector<IObject::Ptr> consumed_removed_;
     DirtyFlags dirty_ = DirtyFlags::All;
     bool initialized_ = false;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_SCENE_H

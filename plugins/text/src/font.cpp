@@ -6,7 +6,7 @@
 
 #include <cstring>
 
-namespace velk_ui {
+namespace velk::ui {
 
 Font::Font() = default;
 
@@ -85,7 +85,7 @@ bool Font::set_size(float size_px)
     }
 
     // Update metrics in state
-    auto writer = velk::write_state<IFont>(this);
+    auto writer = write_state<IFont>(this);
     if (writer) {
         float scale = 1.f / 64.f;
         writer->ascender = static_cast<float>(ft_face_->size->metrics.ascender) * scale;
@@ -97,7 +97,7 @@ bool Font::set_size(float size_px)
     return true;
 }
 
-float Font::shape_text(velk::string_view text, velk::vector<IFont::GlyphPosition>& out)
+float Font::shape_text(string_view text, vector<IFont::GlyphPosition>& out)
 {
     out.clear();
 
@@ -156,4 +156,4 @@ IFont::GlyphBitmap Font::rasterize_glyph(uint32_t glyph_id)
     return result;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

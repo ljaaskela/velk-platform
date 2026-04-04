@@ -4,7 +4,7 @@
 #include <velk-ui/ext/visual.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Solid color rectangle visual.
@@ -18,9 +18,9 @@ public:
     VELK_CLASS_UID(ClassId::Visual::Rect, "RectVisual");
 
     // IVisual
-    velk::vector<DrawEntry> get_draw_entries(const velk::rect& bounds) override;
+    vector<DrawEntry> get_draw_entries(const rect& bounds) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_RECT_VISUAL_H

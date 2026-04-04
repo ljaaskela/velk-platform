@@ -11,6 +11,7 @@
 #include "layout/stack.h"
 #include "material/gradient_material.h"
 #include "material/shader_material.h"
+#include "renderer/renderer.h"
 #include "scene.h"
 #include "transform/matrix.h"
 #include "transform/trs.h"
@@ -19,37 +20,38 @@
 
 #include <velk/ext/any.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
-velk::ReturnValue VelkUiPlugin::initialize(velk::IVelk& velk, velk::PluginConfig& config)
+ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
 {
     config.enableUpdate = true;
 
-    auto rv = velk::register_type<Element>(velk);
-    rv &= velk::register_type<Scene>(velk);
-    rv &= velk::register_type<Stack>(velk);
-    rv &= velk::register_type<FixedSize>(velk);
-    rv &= velk::register_type<RectVisual>(velk);
-    rv &= velk::register_type<RoundedRectVisual>(velk);
-    rv &= velk::register_type<ShaderMaterial>(velk);
-    rv &= velk::register_type<GradientMaterial>(velk);
-    rv &= velk::register_type<Trs>(velk);
-    rv &= velk::register_type<Matrix>(velk);
-    rv &= velk::register_type<impl::InputDispatcher>(velk);
-    rv &= velk::register_type<Click>(velk);
-    rv &= velk::register_type<Hover>(velk);
-    rv &= velk::register_type<Drag>(velk);
-    rv &= velk::register_type<DimTypeExtension>(velk);
-    rv &= velk::register_type<AlignTypeExtension>(velk);
-    rv &= velk::register_type<velk::ext::AnyValue<dim>>(velk);
-    rv &= velk::register_type<velk::ext::AnyValue<HAlign>>(velk);
-    rv &= velk::register_type<velk::ext::AnyValue<VAlign>>(velk);
+    auto rv = register_type<Element>(velk);
+    rv &= register_type<Scene>(velk);
+    rv &= register_type<Stack>(velk);
+    rv &= register_type<FixedSize>(velk);
+    rv &= register_type<RectVisual>(velk);
+    rv &= register_type<RoundedRectVisual>(velk);
+    rv &= register_type<ShaderMaterial>(velk);
+    rv &= register_type<GradientMaterial>(velk);
+    rv &= register_type<Renderer>(velk);
+    rv &= register_type<Trs>(velk);
+    rv &= register_type<Matrix>(velk);
+    rv &= register_type<impl::InputDispatcher>(velk);
+    rv &= register_type<Click>(velk);
+    rv &= register_type<Hover>(velk);
+    rv &= register_type<Drag>(velk);
+    rv &= register_type<DimTypeExtension>(velk);
+    rv &= register_type<AlignTypeExtension>(velk);
+    rv &= register_type<::velk::ext::AnyValue<dim>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<HAlign>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<VAlign>>(velk);
     return rv;
 }
 
-velk::ReturnValue VelkUiPlugin::shutdown(velk::IVelk&)
+ReturnValue VelkUiPlugin::shutdown(IVelk&)
 {
-    return velk::ReturnValue::Success;
+    return ReturnValue::Success;
 }
 
 void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo& info)
@@ -59,4 +61,4 @@ void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo& info)
     }
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
