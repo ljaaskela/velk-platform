@@ -9,12 +9,12 @@
 #include <velk-ui/interface/intf_scene.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IElement.
  *
- * Inherits velk::Node so elements carry hierarchy context (parent, children,
+ * Inherits Node so elements carry hierarchy context (parent, children,
  * scene). All Node methods (get_parent, get_children, for_each_child, etc.)
  * work directly.
  *
@@ -22,30 +22,30 @@ namespace velk_ui {
  *   elem.set_size({200.f, 100.f});
  *   auto parent = elem.get_parent();  // inherited from Node
  */
-class Element : public velk::Node
+class Element : public Node
 {
 public:
     Element() = default;
 
-    explicit Element(velk::IObject::Ptr obj)
+    explicit Element(IObject::Ptr obj)
         : Node(make_node(std::move(obj)))
     {}
 
     explicit Element(IElement::Ptr e)
-        : Node(make_node(e ? velk::as_object(e) : velk::IObject::Ptr{}))
+        : Node(make_node(e ? as_object(e) : IObject::Ptr{}))
     {}
 
-    explicit Element(velk::Node node)
-        : Node(interface_cast<IElement>(node.object()) ? std::move(node) : velk::Node{})
+    explicit Element(Node node)
+        : Node(interface_cast<IElement>(node.object()) ? std::move(node) : Node{})
     {}
 
     operator IElement::Ptr() const { return as_ptr<IElement>(); }
 
     auto get_position() const { return read_state_value<IElement>(&IElement::State::position); }
-    void set_position(const velk::vec3& v) { write_state_value<IElement>(&IElement::State::position, v); }
+    void set_position(const vec3& v) { write_state_value<IElement>(&IElement::State::position, v); }
 
     auto get_size() const { return read_state_value<IElement>(&IElement::State::size); }
-    void set_size(const velk::size& v) { write_state_value<IElement>(&IElement::State::size, v); }
+    void set_size(const size& v) { write_state_value<IElement>(&IElement::State::size, v); }
 
     auto get_world_matrix() const { return read_state_value<IElement>(&IElement::State::world_matrix); }
 
@@ -53,15 +53,15 @@ public:
     void set_z_index(int32_t v) { write_state_value<IElement>(&IElement::State::z_index, v); }
 
     /** @brief Attaches a trait (constraint, visual, etc.) to this element. */
-    velk::ReturnValue add_trait(const Trait& trait)
+    ReturnValue add_trait(const Trait& trait)
     {
-        return trait ? add_attachment(trait.get()) : velk::ReturnValue::InvalidArgument;
+        return trait ? add_attachment(trait.get()) : ReturnValue::InvalidArgument;
     }
 
     /** @brief Removes a previously attached trait from this element. */
-    velk::ReturnValue remove_trait(const Trait& trait)
+    ReturnValue remove_trait(const Trait& trait)
     {
-        return trait ? remove_attachment(trait.get()) : velk::ReturnValue::InvalidArgument;
+        return trait ? remove_attachment(trait.get()) : ReturnValue::InvalidArgument;
     }
 
     /** @brief Finds the first attached trait implementing interface T, or nullptr. */
@@ -70,7 +70,7 @@ public:
 
     auto get_traits() const
     {
-        velk::vector<Trait> t;
+        vector<Trait> t;
         for (auto&& a : find_attachments<ITrait>()) {
             t.push_back(Trait(a));
         }
@@ -78,12 +78,12 @@ public:
     }
 
 private:
-    static velk::HierarchyNode make_node(velk::IObject::Ptr obj)
+    static HierarchyNode make_node(IObject::Ptr obj)
     {
-        velk::HierarchyNode n;
+        HierarchyNode n;
         if (auto* element = interface_cast<IElement>(obj)) {
             n.object = std::move(obj);
-            n.hierarchy = interface_pointer_cast<velk::IHierarchy>(element->get_scene());
+            n.hierarchy = interface_pointer_cast<IHierarchy>(element->get_scene());
         }
         return n;
     }
@@ -92,9 +92,9 @@ private:
 /** @brief Creates a new empty element with no layout constraints or visual representation. */
 inline Element create_element()
 {
-    return Element(velk::instance().create<IElement>(ClassId::Element));
+    return Element(instance().create<IElement>(ClassId::Element));
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_ELEMENT_H

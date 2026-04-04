@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class IScene;
 
@@ -18,23 +18,23 @@ class IScene;
  * Visual appearance is defined by IVisual attachments (not by IElement itself).
  * The solver writes world_matrix; user code reads it.
  */
-class IElement : public velk::Interface<IElement>
+class IElement : public Interface<IElement>
 {
 public:
     VELK_INTERFACE(
-        (PROP, velk::vec3, position, {}),      ///< Position in parent-local space.
-        (PROP, velk::size, size, {}),          ///< Element size (width, height).
-        (RPROP, velk::mat4, world_matrix, {}), ///< Computed world-space transform. Written by solver.
+        (PROP, vec3, position, {}),      ///< Position in parent-local space.
+        (PROP, ::velk::size, size, {}),          ///< Element size (width, height).
+        (RPROP, mat4, world_matrix, {}), ///< Computed world-space transform. Written by solver.
         (PROP, int32_t, z_index, 0)            ///< Draw order among siblings. Higher draws on top.
     )
 
     /** @brief Returns the scene this element belongs to, or nullptr. */
-    virtual velk::shared_ptr<IScene> get_scene() const = 0;
+    virtual shared_ptr<IScene> get_scene() const = 0;
 
     /** @brief Atomically reads and clears accumulated dirty flags for this element. */
     virtual DirtyFlags consume_dirty() = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_ELEMENT_H

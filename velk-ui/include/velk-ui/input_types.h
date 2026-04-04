@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /** @brief Result returned by input event handlers to control dispatch. */
 enum class InputResult : uint8_t
@@ -66,8 +66,8 @@ enum class PointerButton : uint8_t
  */
 struct PointerEvent
 {
-    velk::vec2 position{};       ///< Scene-space pointer position.
-    velk::vec2 local_position{}; ///< Element-local position (filled by dispatcher).
+    vec2 position{};       ///< Scene-space pointer position.
+    vec2 local_position{}; ///< Element-local position (filled by dispatcher).
     PointerButton button{};
     PointerAction action{};
     Modifier modifiers{};
@@ -88,9 +88,9 @@ enum class ScrollUnit : uint8_t
  */
 struct ScrollEvent
 {
-    velk::vec2 position{};       ///< Scene-space pointer position.
-    velk::vec2 local_position{}; ///< Element-local position (filled by dispatcher).
-    velk::vec2 delta{};          ///< Scroll amount (x = horizontal, y = vertical).
+    vec2 position{};       ///< Scene-space pointer position.
+    vec2 local_position{}; ///< Element-local position (filled by dispatcher).
+    vec2 delta{};          ///< Scroll amount (x = horizontal, y = vertical).
     ScrollUnit unit{};
     Modifier modifiers{};
 };
@@ -117,6 +117,6 @@ struct KeyEvent
     char32_t codepoint{};  ///< Unicode character (0 if not a text input key).
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INPUT_TYPES_H

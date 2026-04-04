@@ -5,7 +5,7 @@
 
 #include <cstring>
 
-namespace velk_ui {
+namespace velk::ui {
 
 void TextVisual::set_font(const IFont::Ptr& font)
 {
@@ -14,7 +14,7 @@ void TextVisual::set_font(const IFont::Ptr& font)
     invoke_visual_changed();
 }
 
-void TextVisual::on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId)
+void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interfaceId)
 {
     if (interfaceId == ITextVisual::UID && name == "text") {
         reshape();
@@ -28,7 +28,7 @@ void TextVisual::ensure_default_font()
         return;
     }
 
-    auto obj = velk::instance().create<velk::IObject>(ClassId::Font);
+    auto obj = instance().create<IObject>(ClassId::Font);
     font_ = interface_pointer_cast<IFont>(obj);
     if (font_) {
         font_->init_default();
@@ -47,17 +47,17 @@ void TextVisual::reshape()
         return;
     }
 
-    auto state = velk::read_state<ITextVisual>(this);
+    auto state = read_state<ITextVisual>(this);
     if (!state || state->text.empty()) {
         return;
     }
 
-    velk::string_view text(state->text.data(), state->text.size());
+    string_view text(state->text.data(), state->text.size());
 
-    velk::vector<IFont::GlyphPosition> positions;
+    vector<IFont::GlyphPosition> positions;
     font_->shape_text(text, positions);
 
-    auto font_state = velk::read_state<IFont>(font_);
+    auto font_state = read_state<IFont>(font_);
     float ascender = font_state ? font_state->ascender : 0.f;
     float line_height = font_state ? font_state->line_height : 0.f;
 
@@ -103,12 +103,12 @@ void TextVisual::reshape()
     text_height_ = line_height;
 }
 
-velk::vector<DrawEntry> TextVisual::get_draw_entries(const velk::rect& bounds)
+vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
 {
-    auto visual_state = velk::read_state<IVisual>(this);
-    velk::color col = visual_state ? visual_state->color : velk::color::white();
+    auto visual_state = read_state<IVisual>(this);
+    ::velk::color col = visual_state ? visual_state->color : ::velk::color::white();
 
-    auto text_state = velk::read_state<ITextVisual>(this);
+    auto text_state = read_state<ITextVisual>(this);
     HAlign ha = text_state ? text_state->h_align : HAlign::Left;
     VAlign va = text_state ? text_state->v_align : VAlign::Top;
 
@@ -127,7 +127,7 @@ velk::vector<DrawEntry> TextVisual::get_draw_entries(const velk::rect& bounds)
     default: break;
     }
 
-    velk::vector<DrawEntry> result;
+    vector<DrawEntry> result;
     result.reserve(cached_entries_.size());
 
     for (auto& entry : cached_entries_) {
@@ -179,4 +179,4 @@ void TextVisual::clear_texture_dirty()
     atlas_.clear_dirty();
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

@@ -4,7 +4,7 @@
 #include <velk-ui/api/visual.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around a RoundedRectVisual.
@@ -18,8 +18,8 @@ class RoundedRectVisual : public Visual
 {
 public:
     RoundedRectVisual() = default;
-    explicit RoundedRectVisual(velk::IObject::Ptr obj) : Visual(std::move(obj)) {}
-    explicit RoundedRectVisual(IVisual::Ptr v) : Visual(velk::as_object(v)) {}
+    explicit RoundedRectVisual(IObject::Ptr obj) : Visual(std::move(obj)) {}
+    explicit RoundedRectVisual(IVisual::Ptr v) : Visual(as_object(v)) {}
 };
 
 namespace visual {
@@ -27,11 +27,11 @@ namespace visual {
 /** @brief Creates a new RoundedRectVisual. */
 inline RoundedRectVisual create_rounded_rect()
 {
-    return RoundedRectVisual(velk::instance().create<velk::IObject>(ClassId::Visual::RoundedRect));
+    return RoundedRectVisual(instance().create<IObject>(ClassId::Visual::RoundedRect));
 }
 
 } // namespace visual
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_VISUAL_ROUNDED_RECT_H

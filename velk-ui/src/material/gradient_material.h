@@ -3,12 +3,12 @@
 
 #include <velk/ext/object.h>
 
+#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/intf_render_context.h>
 #include <velk-ui/interface/intf_gradient.h>
-#include <velk-ui/interface/intf_material.h>
-#include <velk-ui/interface/intf_render_context.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Built-in linear gradient material.
@@ -17,7 +17,7 @@ namespace velk_ui {
  * Provides gradient parameters (start_color, end_color, angle) as GPU data
  * that the shader reads via buffer_reference.
  */
-class GradientMaterial : public velk::ext::Object<GradientMaterial, IMaterial, IGradient>
+class GradientMaterial : public ::velk::ext::Object<GradientMaterial, IMaterial, IGradient>
 {
 public:
     VELK_CLASS_UID(ClassId::Material::Gradient, "GradientMaterial");
@@ -30,6 +30,6 @@ private:
     IMaterial::Ptr shader_mat_;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_GRADIENT_MATERIAL_H

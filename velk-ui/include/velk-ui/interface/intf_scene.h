@@ -10,7 +10,7 @@
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Holds element and visual change information for one frame.
@@ -22,9 +22,9 @@ namespace velk_ui {
  */
 struct SceneState
 {
-    velk::array_view<IElement*> visual_list;
-    velk::array_view<IElement*> redraw_list;
-    velk::array_view<velk::IObject::Ptr> removed_list;
+    array_view<IElement*> visual_list;
+    array_view<IElement*> redraw_list;
+    array_view<IObject::Ptr> removed_list;
 };
 
 /**
@@ -37,23 +37,23 @@ struct SceneState
  *
  * The renderer pulls changes via consume_state() during render().
  */
-class IScene : public velk::Interface<IScene, velk::IHierarchy>
+class IScene : public Interface<IScene, IHierarchy>
 {
 public:
     /** @brief Loads a scene from a resource URI (e.g. "app://scenes/my_scene.json"). */
-    virtual velk::IFuture::Ptr load_from(velk::string_view path) = 0;
+    virtual IFuture::Ptr load_from(string_view path) = 0;
 
     /** @brief Imports elements from a store and replicates them into the scene hierarchy. */
-    virtual void load(velk::IStore& store) = 0;
+    virtual void load(IStore& store) = 0;
 
     /** @brief Sets the layout bounds for this scene. */
-    virtual void set_geometry(velk::aabb geometry) = 0;
+    virtual void set_geometry(aabb geometry) = 0;
 
     /**
      * @brief Processes one frame: runs layout solver, collects visual changes,
      *        and rebuilds the visual list if draw order changed.
      */
-    virtual void update(const velk::UpdateInfo& info) = 0;
+    virtual void update(const UpdateInfo& info) = 0;
 
     /**
      * @brief Returns the current scene state and clears change tracking.
@@ -68,9 +68,9 @@ public:
     virtual void notify_dirty(IElement& element, DirtyFlags flags) = 0;
 
     /** @brief Returns all elements in z-sorted draw order. Valid until the next update(). */
-    virtual velk::array_view<IElement*> get_visual_list() = 0;
+    virtual array_view<IElement*> get_visual_list() = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_SCENE_H

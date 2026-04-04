@@ -10,7 +10,7 @@
 #define INPUT_LOG(...) ((void)0)
 #endif
 
-namespace velk_ui::impl {
+namespace velk::ui::impl {
 
 namespace {
 
@@ -20,13 +20,13 @@ IElement::Ptr to_ptr(IElement* elem)
     if (!elem) {
         return {};
     }
-    auto* obj = interface_cast<velk::IObject>(elem);
+    auto* obj = interface_cast<IObject>(elem);
     return obj ? obj->get_self<IElement>() : IElement::Ptr{};
 }
 
 } // namespace
 
-void InputDispatcher::set_scene(const velk::shared_ptr<IScene>& scene)
+void InputDispatcher::set_scene(const shared_ptr<IScene>& scene)
 {
     INPUT_LOG("set_scene: %s", scene ? "valid" : "null");
     scene_ = scene;
@@ -131,7 +131,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
     KeyEvent ev = event;
     auto* focused_raw = focused_.get();
 
-    velk::vector<IElement*> chain;
+    vector<IElement*> chain;
     build_ancestor_chain(focused_raw, chain);
 
     // Bubble: focused element first, then ancestors
@@ -175,14 +175,14 @@ void InputDispatcher::set_focus(const IElement::Ptr& element)
         return;
     }
     focused_ = element;
-    velk::invoke_event(this->get_interface(velk::IInterface::UID), "on_focus_changed");
+    invoke_event(this->get_interface(IInterface::UID), "on_focus_changed");
 }
 
 // ============================================================================
 // Hit testing
 // ============================================================================
 
-IElement* InputDispatcher::hit_test(velk::vec2 point) const
+IElement* InputDispatcher::hit_test(vec2 point) const
 {
     auto scene = scene_.lock();
     if (!scene) {
@@ -197,7 +197,7 @@ IElement* InputDispatcher::hit_test(velk::vec2 point) const
             continue;
         }
 
-        velk::rect wr = get_world_rect(elem);
+        rect wr = get_world_rect(elem);
         if (point.x >= wr.x && point.x < wr.x + wr.width &&
             point.y >= wr.y && point.y < wr.y + wr.height) {
             return elem;
@@ -213,7 +213,7 @@ IInputTrait* InputDispatcher::get_input_trait(IElement* element)
         return nullptr;
     }
 
-    auto* storage = interface_cast<velk::IObjectStorage>(element);
+    auto* storage = interface_cast<IObjectStorage>(element);
     if (!storage) {
         return nullptr;
     }
@@ -229,9 +229,9 @@ IInputTrait* InputDispatcher::get_input_trait(IElement* element)
     return nullptr;
 }
 
-velk::rect InputDispatcher::get_world_rect(IElement* element)
+rect InputDispatcher::get_world_rect(IElement* element)
 {
-    auto reader = velk::read_state<IElement>(element);
+    auto reader = read_state<IElement>(element);
     if (!reader) {
         return {};
     }
@@ -244,9 +244,9 @@ velk::rect InputDispatcher::get_world_rect(IElement* element)
     return {wx, wy, reader->size.width, reader->size.height};
 }
 
-velk::vec2 InputDispatcher::to_local(IElement* element, velk::vec2 scene_point)
+vec2 InputDispatcher::to_local(IElement* element, vec2 scene_point)
 {
-    auto reader = velk::read_state<IElement>(element);
+    auto reader = read_state<IElement>(element);
     if (!reader) {
         return scene_point;
     }
@@ -260,7 +260,7 @@ velk::vec2 InputDispatcher::to_local(IElement* element, velk::vec2 scene_point)
 // Dispatch
 // ============================================================================
 
-void InputDispatcher::build_ancestor_chain(IElement* target, velk::vector<IElement*>& chain) const
+void InputDispatcher::build_ancestor_chain(IElement* target, vector<IElement*>& chain) const
 {
     auto scene = scene_.lock();
     if (!scene) {
@@ -270,7 +270,7 @@ void InputDispatcher::build_ancestor_chain(IElement* target, velk::vector<IEleme
     chain.clear();
 
     // Walk from target's parent to root, collecting ancestors with input traits
-    auto* obj = interface_cast<velk::IObject>(target);
+    auto* obj = interface_cast<IObject>(target);
     if (!obj) {
         return;
     }
@@ -293,7 +293,7 @@ void InputDispatcher::build_ancestor_chain(IElement* target, velk::vector<IEleme
 
 InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, IElement* hit)
 {
-    velk::vector<IElement*> ancestors;
+    vector<IElement*> ancestors;
     build_ancestor_chain(hit, ancestors);
 
     // Intercept pass: top-down (root to target)
@@ -336,7 +336,7 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, IElement* hit
 
 InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, IElement* hit)
 {
-    velk::vector<IElement*> ancestors;
+    vector<IElement*> ancestors;
     build_ancestor_chain(hit, ancestors);
 
     // Bubble pass: target first, then ancestors
@@ -393,4 +393,4 @@ void InputDispatcher::update_hover(IElement* new_hover, const PointerEvent& even
     }
 }
 
-} // namespace velk_ui::impl
+} // namespace velk::ui::impl

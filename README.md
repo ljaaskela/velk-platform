@@ -1,55 +1,45 @@
-# velk-ui
+# velk-platform
 
-UI framework built on the [Velk](https://github.com/ljaaskela/velk) component object model. Declarative scene loading from JSON, programmatic element creation, trait-based composition (constraints, visuals), and a plugin architecture for rendering and text.
+Application platform built on the [Velk](https://github.com/ljaaskela/velk) component object model. Provides GPU rendering, a UI framework, text rendering, and application infrastructure.
 
-## Pointer-based GPU backend
+## Modules
 
-velk-ui uses a [pointer-based render backend](docs/render-backend-architecture.md) that maps directly to how modern GPUs work, rather than abstracting over graphics API concepts. The entire GPU interface is 15 methods. Shaders access all data through GPU pointers (`buffer_reference`), textures are bindless indices, and geometry is procedurally generated or pulled from buffers by the shader. No vertex input descriptions, no uniform reflection, no descriptor management.
+### [velk-render](velk-render/) — Rendering foundation
 
-This design is inspired by the observation that modern GPU hardware has converged: buffer device addresses, bindless descriptors, and coherent caches are universally available. When the hardware is uniform, the abstraction layer can be radically simplified.
+Pointer-based GPU rendering abstraction:
+* 15-method backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls. No vertex input descriptions, uniform reflection, or descriptor management.
+* Includes a Vulkan 1.2 backend (`velk::vk`) with BDA and bindless descriptors.
+* See [Render Backend Architecture](velk-render/docs/render-backend-architecture.md) for the full technical writeup.
 
-See [Render Backend Architecture](docs/render-backend-architecture.md) for the full technical writeup.
+### [velk-ui](velk-ui/) — UI framework
+
+Declarative UI framework:
+* Scene graphs, element composition via traits (constraints, visuals, transforms, input), JSON scene loading.
+* A scene renderer using velk-render that walks the visual tree and submits draw calls to the render backend.
+* See [Getting Started](velk-ui/docs/getting-started.md) for an introduction.
+
+#### plugins/text — Text rendering
+
+FreeType + HarfBuzz text shaping and rendering. Glyph atlas management, bindless texture integration.
 
 ## Quick start
 
 ```cpp
-auto ctx = velk_ui::create_render_context(config);
-auto renderer = ctx.create_renderer();
-auto surface = ctx.create_surface(1280, 720);
+// Rendering setup
+auto ctx = velk::create_render_context(config);                     // Create a render context
+auto surface = ctx.create_surface(1280, 720);                       // Create a surface target surface 
 
-auto scene = velk_ui::create_scene("app://scenes/dashboard.json");
+// UI setup
+auto scene = velk::ui::create_scene("app://scenes/dashboard.json"); // Load a Scene from JSON
+auto renderer = velk::ui::create_renderer(*render_ctx);             // Create a Scene renderer and attach it to a target surfece
 renderer->attach(surface, scene);
 
+// Main loop
 while (running) {
     velk.update();
     renderer->render();
 }
 ```
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [Getting started](docs/getting-started.md) | Scene loading, programmatic API, and the two ways to build UI |
-| [Render backend](docs/render-backend-architecture.md) | Pointer-based GPU abstraction: architecture, data flow, shader model |
-| [Scene](docs/scene.md) | Scene hierarchy, elements, geometry, JSON format |
-| [Traits](docs/traits.md) | Trait system: phases, layout, transform, visual, and input traits |
-| [Input](docs/input.md) | Input dispatcher, hit testing, event dispatch, built-in input traits |
-| [Update cycle](docs/update-cycle.md) | Frame loop, dirty flags, layout solving, and rendering |
-| [Performance](docs/performance.md) | Design choices: single element type, flat hierarchy, traits, batched updates |
-
-## Project structure
-
-| Directory | Description |
-|-----------|-------------|
-| `velk-ui/` | Core UI library: elements, scene, layout solver, constraints, visuals |
-| `velk-ui/include/velk-ui/api/` | High-level API wrappers (Scene, Element, Trait, etc.) |
-| `velk-ui/include/velk-ui/interface/` | Pure virtual interfaces (IScene, IElement, IConstraint, IVisual, etc.) |
-| `plugins/render/core/` | Render core (`velk_render`): renderer, shader compiler, backend interface |
-| `plugins/render/vk/` | Vulkan backend (`velk_vk`): Vulkan 1.2, BDA, bindless textures |
-| `plugins/text/` | Text plugin (`velk_text`): FreeType + HarfBuzz font shaping and rendering |
-| `app/` | Test application: GLFW window, plugin loading, scene loading, render loop |
-| `test/scenes/` | Scene definitions in JSON |
 
 ## Building
 

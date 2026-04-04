@@ -8,16 +8,16 @@
 
 #include <cstdint>
 
-namespace velk_ui {
+namespace velk::ui {
 
-class IFont : public velk::Interface<IFont>
+class IFont : public Interface<IFont>
 {
 public:
     struct GlyphPosition
     {
         uint32_t glyph_id;
-        velk::vec2 offset;  // pixels, relative to pen position
-        velk::vec2 advance; // pixels, how far to move the pen
+        vec2 offset;  // pixels, relative to pen position
+        vec2 advance; // pixels, how far to move the pen
     };
 
     struct GlyphBitmap
@@ -25,7 +25,7 @@ public:
         const uint8_t* data; // alpha bitmap, valid until next rasterize call
         uint32_t width;
         uint32_t height;
-        velk::vec2 bearing; // left and top side bearing (pixels)
+        vec2 bearing; // left and top side bearing (pixels)
     };
 
     VELK_INTERFACE(
@@ -39,10 +39,10 @@ public:
     virtual bool init_default() = 0;
 
     virtual bool set_size(float size_px) = 0;
-    virtual float shape_text(velk::string_view text, velk::vector<GlyphPosition>& out) = 0;
+    virtual float shape_text(string_view text, vector<GlyphPosition>& out) = 0;
     virtual GlyphBitmap rasterize_glyph(uint32_t glyph_id) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_FONT_H

@@ -7,7 +7,7 @@
 #include <velk-ui/interface/trait/intf_trs.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around ITrs.
@@ -21,19 +21,19 @@ class Trs : public Trait
 {
 public:
     Trs() = default;
-    explicit Trs(velk::IObject::Ptr obj) : Trait(check_object<ITrs>(obj)) {}
-    explicit Trs(ITrs::Ptr t) : Trait(velk::as_object(t)) {}
+    explicit Trs(IObject::Ptr obj) : Trait(check_object<ITrs>(obj)) {}
+    explicit Trs(ITrs::Ptr t) : Trait(as_object(t)) {}
 
     operator ITrs::Ptr() const { return as_ptr<ITrs>(); }
 
     auto get_translate() const { return read_state_value<ITrs>(&ITrs::State::translate); }
-    void set_translate(const velk::vec3& v) { write_state_value<ITrs>(&ITrs::State::translate, v); }
+    void set_translate(const vec3& v) { write_state_value<ITrs>(&ITrs::State::translate, v); }
 
     auto get_rotation() const { return read_state_value<ITrs>(&ITrs::State::rotation); }
     void set_rotation(float v) { write_state_value<ITrs>(&ITrs::State::rotation, v); }
 
     auto get_scale() const { return read_state_value<ITrs>(&ITrs::State::scale); }
-    void set_scale(const velk::vec2& v) { write_state_value<ITrs>(&ITrs::State::scale, v); }
+    void set_scale(const vec2& v) { write_state_value<ITrs>(&ITrs::State::scale, v); }
 };
 
 namespace transform {
@@ -41,11 +41,11 @@ namespace transform {
 /** @brief Creates a new Trs transform trait. */
 inline Trs create_trs()
 {
-    return Trs(velk::instance().create<ITrs>(ClassId::Transform::Trs));
+    return Trs(instance().create<ITrs>(ClassId::Transform::Trs));
 }
 
 } // namespace transform
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_TRAIT_TRS_H

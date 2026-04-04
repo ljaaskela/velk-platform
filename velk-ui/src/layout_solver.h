@@ -6,18 +6,18 @@
 
 #include <velk-ui/interface/intf_element.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class LayoutSolver
 {
 public:
-    void solve(velk::IHierarchy& hierarchy, const velk::aabb& viewport);
+    void solve(IHierarchy& hierarchy, const aabb& viewport);
 
 private:
-    void solve_element(velk::IHierarchy& hierarchy, const IElement::Ptr& element,
-                       const velk::aabb& parent_bounds, const velk::mat4& parent_world);
+    void solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,
+                       const aabb& parent_bounds, const mat4& parent_world);
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_LAYOUT_SOLVER_H

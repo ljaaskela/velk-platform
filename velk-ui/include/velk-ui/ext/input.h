@@ -5,7 +5,7 @@
 
 #include <velk-ui/interface/intf_input_trait.h>
 
-namespace velk_ui::ext {
+namespace velk::ui::ext {
 
 /**
  * @brief CRTP base for IInputTrait implementations.
@@ -17,7 +17,7 @@ namespace velk_ui::ext {
  * @tparam Extra Additional interfaces the trait implements.
  */
 template <class T, class... Extra>
-class Input : public velk::ext::Object<T, IInputTrait, Extra...>
+class Input : public ::velk::ext::Object<T, IInputTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Input; }
@@ -29,6 +29,6 @@ public:
     InputResult on_key_event(KeyEvent&) override { return InputResult::Ignored; }
 };
 
-} // namespace velk_ui::ext
+} // namespace velk::ui::ext
 
 #endif // VELK_UI_EXT_INPUT_H

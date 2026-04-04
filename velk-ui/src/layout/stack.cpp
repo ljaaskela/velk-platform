@@ -7,27 +7,27 @@
 #include <algorithm>
 #include <velk-ui/interface/intf_element.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 namespace {
 
 struct ChildInfo
 {
-    velk::IObject::Ptr obj;
+    IObject::Ptr obj;
     IElement* element;
-    velk::vector<ILayoutTrait*> layout_traits;
+    vector<ILayoutTrait*> layout_traits;
     float measured_main = 0.f;
     bool fixed = false;
 };
 
-void collect_layout_traits(velk::IObject* obj, velk::vector<ILayoutTrait*>& out)
+void collect_layout_traits(IObject* obj, vector<ILayoutTrait*>& out)
 {
-    auto* storage = interface_cast<velk::IObjectStorage>(obj);
+    auto* storage = interface_cast<IObjectStorage>(obj);
     if (!storage) {
         return;
     }
 
-    static constexpr velk::AttachmentQuery query{ILayoutTrait::UID, {}};
+    static constexpr AttachmentQuery query{ILayoutTrait::UID, {}};
     auto matches = storage->find_attachments(query);
     for (auto& att : matches) {
         auto* lt = interface_cast<ILayoutTrait>(att);
@@ -39,15 +39,15 @@ void collect_layout_traits(velk::IObject* obj, velk::vector<ILayoutTrait*>& out)
 
 } // namespace
 
-Constraint Stack::measure(const Constraint& c, IElement& element, velk::IHierarchy& hierarchy)
+Constraint Stack::measure(const Constraint& c, IElement& element, IHierarchy& hierarchy)
 {
     // Stack fills its parent bounds
     return c;
 }
 
-void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hierarchy)
+void Stack::apply(const Constraint& c, IElement& element, IHierarchy& hierarchy)
 {
-    auto state = velk::read_state<IStack>(this);
+    auto state = read_state<IStack>(this);
     if (!state) {
         return;
     }
@@ -55,7 +55,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
     uint8_t axis = state->axis; // 0 = horizontal, 1 = vertical
     float spacing = state->spacing;
 
-    auto* obj = interface_cast<velk::IObject>(&element);
+    auto* obj = interface_cast<IObject>(&element);
     if (!obj) {
         return;
     }
@@ -71,7 +71,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
     float remaining = total_available - total_spacing;
 
     // Gather child info and run constraint-phase measure on each
-    velk::vector<ChildInfo> infos;
+    vector<ChildInfo> infos;
     infos.reserve(children.size());
 
     for (auto& child_ptr : children) {
@@ -131,7 +131,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
         float child_main = info.measured_main;
         float child_cross = cross_available;
 
-        velk::write_state<IElement>(info.element, [&](IElement::State& s) {
+        write_state<IElement>(info.element, [&](IElement::State& s) {
             if (axis == 1) {
                 s.position.x = c.bounds.position.x;
                 s.position.y = cursor;
@@ -147,7 +147,7 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
 
         // Apply constraint-phase traits on the child
         Constraint child_c;
-        child_c.bounds.position = velk::read_state<IElement>(info.element)->position;
+        child_c.bounds.position = read_state<IElement>(info.element)->position;
         child_c.bounds.extent.width = (axis == 1) ? child_cross : child_main;
         child_c.bounds.extent.height = (axis == 1) ? child_main : child_cross;
 
@@ -161,4 +161,4 @@ void Stack::apply(const Constraint& c, IElement& element, velk::IHierarchy& hier
     }
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

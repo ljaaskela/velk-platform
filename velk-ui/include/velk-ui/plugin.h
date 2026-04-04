@@ -3,79 +3,79 @@
 
 #include <velk/common.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 namespace ClassId {
 
 /** @brief UI element node. Holds position, size, transform, and z-index. */
-inline constexpr velk::Uid Element{"074fde67-68e0-43fb-b52d-265665f301ee"};
+inline constexpr Uid Element{"074fde67-68e0-43fb-b52d-265665f301ee"};
 
 /** @brief Scene graph. Owns the element hierarchy, runs layout, and pushes changes to the renderer. */
-inline constexpr velk::Uid Scene{"03779f51-3fb0-45d7-9a9e-a25ef0a42dce"};
+inline constexpr Uid Scene{"03779f51-3fb0-45d7-9a9e-a25ef0a42dce"};
 
 namespace Constraint {
 
 /** @brief Lays out children along a single axis with optional spacing. */
-inline constexpr velk::Uid Stack{"677eae5c-efde-4130-97f6-5a09e9087629"};
+inline constexpr Uid Stack{"677eae5c-efde-4130-97f6-5a09e9087629"};
 
 /** @brief Clamps an element to a fixed width and/or height. */
-inline constexpr velk::Uid FixedSize{"f237dfd2-1a17-4078-9741-e0a7afd7b6a4"};
+inline constexpr Uid FixedSize{"f237dfd2-1a17-4078-9741-e0a7afd7b6a4"};
 
 } // namespace Constraint
 
 namespace Transform {
 
 /** @brief Decomposed transform: translate, rotate (Z), scale. */
-inline constexpr velk::Uid Trs{"7c167a04-2d3e-41b9-8c42-6fd41be05794"};
+inline constexpr Uid Trs{"7c167a04-2d3e-41b9-8c42-6fd41be05794"};
 
 /** @brief Raw 4x4 matrix transform. */
-inline constexpr velk::Uid Matrix{"44c08a4c-83f9-40f8-b900-b00d5a8f3e55"};
+inline constexpr Uid Matrix{"44c08a4c-83f9-40f8-b900-b00d5a8f3e55"};
 
 } // namespace Transform
 
 namespace Visual {
 
 /** @brief Solid color rectangle filling the element bounds. */
-inline constexpr velk::Uid Rect{"8fc18f28-03e8-4e6e-9fa9-274445d9ef4c"};
+inline constexpr Uid Rect{"8fc18f28-03e8-4e6e-9fa9-274445d9ef4c"};
 
 /** @brief Rounded rectangle with SDF corners. */
-inline constexpr velk::Uid RoundedRect{"327eb630-63f9-4144-ab05-e97d6099e920"};
+inline constexpr Uid RoundedRect{"327eb630-63f9-4144-ab05-e97d6099e920"};
 
 } // namespace Visual
 
 namespace Material {
 
 /** @brief Custom fragment shader material. */
-inline constexpr velk::Uid Shader{"04a29568-7677-42ee-9858-83b87196057f"};
+inline constexpr Uid Shader{"04a29568-7677-42ee-9858-83b87196057f"};
 
 /** @brief Built-in linear gradient material. */
-inline constexpr velk::Uid Gradient{"9eb060cd-6050-4878-b817-d58571bf3174"};
+inline constexpr Uid Gradient{"9eb060cd-6050-4878-b817-d58571bf3174"};
 
 } // namespace Material
 
 namespace Input {
 
 /** @brief Scene-level input event coordinator. */
-inline constexpr velk::Uid Dispatcher{"4c51eabf-6f7a-455f-b34b-92e9bd3bab57"};
+inline constexpr Uid Dispatcher{"4c51eabf-6f7a-455f-b34b-92e9bd3bab57"};
 
 /** @brief Click gesture detection. Fires on_click on pointer down+up. */
-inline constexpr velk::Uid Click{"2906f6c0-055e-4b85-b2d9-2b58c89954a3"};
+inline constexpr Uid Click{"2906f6c0-055e-4b85-b2d9-2b58c89954a3"};
 
 /** @brief Hover state tracking. Exposes hovered property and on_hover_changed event. */
-inline constexpr velk::Uid Hover{"0cf025ae-8a07-4b76-9559-1b4afb14c1f0"};
+inline constexpr Uid Hover{"0cf025ae-8a07-4b76-9559-1b4afb14c1f0"};
 
 /** @brief Drag gesture tracking. Fires on_drag_start, on_drag_move, on_drag_end. */
-inline constexpr velk::Uid Drag{"e83b9c3e-36e5-4a45-b4e0-c72fcb8ed378"};
+inline constexpr Uid Drag{"e83b9c3e-36e5-4a45-b4e0-c72fcb8ed378"};
 
 } // namespace Input
 
 namespace Import {
 
 /** @brief Type extension for dim (px/pct) values in the importer. */
-inline constexpr velk::Uid DimTypeExtension{"a52a1f22-8dd3-46bd-ba6c-07512a226e63"};
+inline constexpr Uid DimTypeExtension{"a52a1f22-8dd3-46bd-ba6c-07512a226e63"};
 
 /** @brief Type extension for alignment enum values in the importer. */
-inline constexpr velk::Uid AlignTypeExtension{"0fce50cf-be04-430a-a617-5724ada76a30"};
+inline constexpr Uid AlignTypeExtension{"0fce50cf-be04-430a-a617-5724ada76a30"};
 
 } // namespace Import
 
@@ -83,10 +83,10 @@ inline constexpr velk::Uid AlignTypeExtension{"0fce50cf-be04-430a-a617-5724ada76
 
 namespace PluginId {
 
-inline constexpr velk::Uid VelkUiPlugin{"45c450a1-5f11-4869-8f72-3bafaeae0079"};
+inline constexpr Uid VelkUiPlugin{"45c450a1-5f11-4869-8f72-3bafaeae0079"};
 
 } // namespace PluginId
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_PLUGIN_H

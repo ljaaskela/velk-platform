@@ -6,7 +6,7 @@
 #include <velk-ui/input_types.h>
 #include <velk-ui/interface/intf_element.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Scene-level input coordinator.
@@ -17,7 +17,7 @@ namespace velk_ui {
  *
  * Tracks hover, press-capture, and keyboard focus state.
  */
-class IInputDispatcher : public velk::Interface<IInputDispatcher>
+class IInputDispatcher : public Interface<IInputDispatcher>
 {
 public:
     VELK_INTERFACE(
@@ -46,9 +46,9 @@ public:
     virtual void set_focus(const IElement::Ptr& element) = 0;
 
     /** @brief Binds this dispatcher to a scene for hit testing. */
-    virtual void set_scene(const velk::shared_ptr<IScene>& scene) = 0;
+    virtual void set_scene(const shared_ptr<IScene>& scene) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_INPUT_DISPATCHER_H

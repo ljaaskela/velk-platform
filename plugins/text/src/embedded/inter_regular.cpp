@@ -1,6 +1,6 @@
 #include "inter_regular.h"
 
-namespace velk_ui {
+namespace velk::ui {
 namespace embedded {
 
 const unsigned char inter_regular_ttf[] = {
@@ -5594,4 +5594,4 @@ const unsigned char inter_regular_ttf[] = {
 const uint32_t inter_regular_ttf_size = sizeof(inter_regular_ttf);
 
 } // namespace embedded
-} // namespace velk_ui
+} // namespace velk::ui

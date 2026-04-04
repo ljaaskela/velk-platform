@@ -6,18 +6,18 @@
 
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class AlignTypeExtension
-    : public velk::ext::ObjectCore<AlignTypeExtension, velk::IImporterTypeExtension>
+    : public ::velk::ext::ObjectCore<AlignTypeExtension, IImporterTypeExtension>
 {
 public:
     VELK_CLASS_UID(ClassId::Import::AlignTypeExtension, "AlignTypeExtension");
 
-    velk::array_view<velk::Uid> supported_types() const override;
-    velk::IAny::Ptr deserialize(velk::Uid type_uid, const velk::IImportData& data) const override;
+    array_view<Uid> supported_types() const override;
+    IAny::Ptr deserialize(Uid type_uid, const IImportData& data) const override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_ALIGN_TYPE_EXTENSION_H

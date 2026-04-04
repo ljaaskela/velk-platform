@@ -3,7 +3,7 @@
 
 #include <velk/interface/intf_metadata.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Input trait that tracks pointer drag gestures.
@@ -12,7 +12,7 @@ namespace velk_ui {
  * on the first move after press, on_drag_move on subsequent moves, and
  * on_drag_end on release.
  */
-class IDrag : public velk::Interface<IDrag>
+class IDrag : public Interface<IDrag>
 {
 public:
     VELK_INTERFACE(
@@ -23,6 +23,6 @@ public:
     )
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_DRAG_H

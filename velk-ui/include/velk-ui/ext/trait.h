@@ -8,7 +8,7 @@
 #include <velk-ui/interface/intf_transform_trait.h>
 #include <velk-ui/interface/intf_visual.h>
 
-namespace velk_ui::ext {
+namespace velk::ui::ext {
 
 /**
  * @brief CRTP base for ILayoutTrait implementations.
@@ -21,12 +21,12 @@ namespace velk_ui::ext {
  * @tparam Extra Additional interfaces the trait implements (e.g. IStack, IFixedSize).
  */
 template <class T, TraitPhase Phase, class... Extra>
-class Layout : public velk::ext::Object<T, ILayoutTrait, Extra...>
+class Layout : public ::velk::ext::Object<T, ILayoutTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return Phase; }
-    Constraint measure(const Constraint& c, IElement&, velk::IHierarchy&) override { return c; }
-    void apply(const Constraint&, IElement&, velk::IHierarchy&) override {}
+    Constraint measure(const Constraint& c, IElement&, IHierarchy&) override { return c; }
+    void apply(const Constraint&, IElement&, IHierarchy&) override {}
 };
 
 /**
@@ -36,7 +36,7 @@ public:
  * @tparam Extra Additional interfaces the trait implements (e.g. ITrs, IMatrix).
  */
 template <class T, class... Extra>
-class Transform : public velk::ext::Object<T, ITransformTrait, Extra...>
+class Transform : public ::velk::ext::Object<T, ITransformTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Transform; }
@@ -53,7 +53,7 @@ public:
  * @tparam Extra Additional interfaces the visual implements (e.g. ITextureProvider).
  */
 template <class T, class... Extra>
-class Visual : public velk::ext::Object<T, IVisual, velk::IMetadataObserver, Extra...>
+class Visual : public ::velk::ext::Object<T, IVisual, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Visual; }
@@ -62,16 +62,16 @@ protected:
     /** @brief Fires the on_visual_changed event. Call from subclasses when visual state changes. */
     void invoke_visual_changed()
     {
-        velk::invoke_event(this->get_interface(velk::IInterface::UID), "on_visual_changed");
+        invoke_event(this->get_interface(IInterface::UID), "on_visual_changed");
     }
 
     /** @brief Default: any property change fires on_visual_changed. Override to filter. */
-    void on_state_changed(velk::string_view name, velk::IMetadata& owner, velk::Uid interfaceId) override
+    void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override
     {
         invoke_visual_changed();
     }
 };
 
-} // namespace velk_ui::ext
+} // namespace velk::ui::ext
 
 #endif // VELK_UI_EXT_TRAIT_H

@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <velk-ui/interface/intf_font.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 struct AtlasRect
 {
@@ -34,7 +34,7 @@ public:
 private:
     uint32_t width_;
     uint32_t height_;
-    velk::vector<uint8_t> pixels_;
+    vector<uint8_t> pixels_;
     std::unordered_map<uint32_t, AtlasRect> glyphs_;
     bool dirty_ = false;
 
@@ -44,6 +44,6 @@ private:
     uint32_t row_height_ = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_TEXT_FONT_ATLAS_H

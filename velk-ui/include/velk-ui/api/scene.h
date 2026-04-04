@@ -8,7 +8,7 @@
 #include <velk-ui/interface/intf_scene.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IScene.
@@ -17,38 +17,38 @@ namespace velk_ui {
  * return safe defaults when the underlying object is null.
  *
  *   auto scene = create_scene("app://scenes/my_scene.json");
- *   scene.set_geometry(velk::aabb::from_size({800, 600}));
+ *   scene.set_geometry(aabb::from_size({800, 600}));
  */
-class Scene : public velk::Hierarchy
+class Scene : public Hierarchy
 {
 public:
     /** @brief Default-constructed Scene wraps no object. */
     Scene() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IScene. */
-    explicit Scene(velk::IObject::Ptr obj) : velk::Hierarchy(check_object<IScene>(obj)) {}
+    explicit Scene(IObject::Ptr obj) : Hierarchy(check_object<IScene>(obj)) {}
 
     /** @brief Wraps an existing IScene pointer. */
-    explicit Scene(IScene::Ptr scene) : velk::Hierarchy(velk::as_object(scene)) {}
+    explicit Scene(IScene::Ptr scene) : Hierarchy(as_object(scene)) {}
 
     /** @brief Implicit conversion to IScene::Ptr. */
     operator IScene::Ptr() const { return as_ptr<IScene>(); }
 
     /** @brief Implicit conversion to IHierarchy::Ptr. */
-    operator velk::IHierarchy::Ptr() const { return as_ptr<velk::IHierarchy>(); }
+    operator IHierarchy::Ptr() const { return as_ptr<IHierarchy>(); }
 
     /**
      * @brief Loads a scene from a resource URI (e.g. "app://scenes/my_scene.json").
      * @param path Resource URI to load from.
      * @return A future that resolves with the load result.
      */
-    velk::Future<velk::ReturnValue> load_from(velk::string_view path)
+    Future<ReturnValue> load_from(string_view path)
     {
-        return velk::Future<velk::ReturnValue>(with<IScene>([&](auto& s) { return s.load_from(path); }));
+        return Future<ReturnValue>(with<IScene>([&](auto& s) { return s.load_from(path); }));
     }
 
     /** @brief Sets the layout bounds for this scene. */
-    void set_geometry(velk::aabb geometry)
+    void set_geometry(aabb geometry)
     {
         with<IScene>([&](auto& s) { s.set_geometry(geometry); });
     }
@@ -62,30 +62,30 @@ public:
     }
 
     /** @brief Processes one frame: runs layout, collects changes. */
-    void update(const velk::UpdateInfo& info)
+    void update(const UpdateInfo& info)
     {
         with<IScene>([&](auto& s) { s.update(info); });
     }
 
     /** @brief Returns the root element, or empty. */
-    Element root() const { return Element(velk::Hierarchy::root()); }
+    Element root() const { return Element(Hierarchy::root()); }
 
     /** @brief Returns the Element wrapping the given object, or empty. */
-    Element node_of(const velk::IObject::Ptr& object) const
+    Element node_of(const IObject::Ptr& object) const
     {
-        return Element(velk::Hierarchy::node_of(object));
+        return Element(Hierarchy::node_of(object));
     }
 
     /** @brief Returns the parent element, or empty if root or not found. */
-    Element parent_of(const velk::IObject::Ptr& object) const
+    Element parent_of(const IObject::Ptr& object) const
     {
-        return Element(velk::Hierarchy::parent_of(object));
+        return Element(Hierarchy::parent_of(object));
     }
 
     /** @brief Returns the child element at the given index, or empty. */
-    Element child_at(const velk::IObject::Ptr& object, size_t index) const
+    Element child_at(const IObject::Ptr& object, size_t index) const
     {
-        return Element(velk::Hierarchy::child_at(object, index));
+        return Element(Hierarchy::child_at(object, index));
     }
 };
 
@@ -93,9 +93,9 @@ public:
  * @brief Creates a new scene, optionally loading from a resource URI.
  * @param path Resource URI (e.g. "app://scenes/my_scene.json"). Empty for an empty scene.
  */
-inline Scene create_scene(velk::string_view path = {})
+inline Scene create_scene(string_view path = {})
 {
-    auto obj = velk::instance().create<velk::IObject>(ClassId::Scene);
+    auto obj = instance().create<IObject>(ClassId::Scene);
     Scene s(std::move(obj));
     if (s && !path.empty()) {
         s.load_from(path).get_result();
@@ -103,6 +103,6 @@ inline Scene create_scene(velk::string_view path = {})
     return s;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_SCENE_H

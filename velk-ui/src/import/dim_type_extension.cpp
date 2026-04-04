@@ -4,9 +4,9 @@
 
 #include <string>
 
-namespace velk_ui {
+namespace velk::ui {
 
-dim parse_dim(velk::string_view str)
+dim parse_dim(string_view str)
 {
     std::string s(str.data(), str.size());
 
@@ -31,21 +31,21 @@ dim parse_dim(velk::string_view str)
     return dim::px(val);
 }
 
-velk::array_view<velk::Uid> DimTypeExtension::supported_types() const
+array_view<Uid> DimTypeExtension::supported_types() const
 {
-    static const velk::Uid types[] = { velk::type_uid<dim>() };
+    static const Uid types[] = { type_uid<dim>() };
     return { types, 1 };
 }
 
-velk::IAny::Ptr DimTypeExtension::deserialize(velk::Uid, const velk::IImportData& data) const
+IAny::Ptr DimTypeExtension::deserialize(Uid, const IImportData& data) const
 {
-    if (data.kind() == velk::IImportData::Kind::String) {
-        return velk::Any<dim>(parse_dim(data.as_string()));
+    if (data.kind() == IImportData::Kind::String) {
+        return Any<dim>(parse_dim(data.as_string()));
     }
-    if (data.kind() == velk::IImportData::Kind::Number) {
-        return velk::Any<dim>(dim::px(static_cast<float>(data.as_number())));
+    if (data.kind() == IImportData::Kind::Number) {
+        return Any<dim>(dim::px(static_cast<float>(data.as_number())));
     }
     return {};
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

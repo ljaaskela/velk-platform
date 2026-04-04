@@ -8,7 +8,7 @@
 #include <velk-ui/interface/trait/intf_click.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IClick.
@@ -21,8 +21,8 @@ class Click : public Trait
 {
 public:
     Click() = default;
-    explicit Click(velk::IObject::Ptr obj) : Trait(check_object<IClick>(obj)) {}
-    explicit Click(IClick::Ptr c) : Trait(velk::as_object(c)) {}
+    explicit Click(IObject::Ptr obj) : Trait(check_object<IClick>(obj)) {}
+    explicit Click(IClick::Ptr c) : Trait(as_object(c)) {}
 
     operator IClick::Ptr() const { return as_ptr<IClick>(); }
 
@@ -41,11 +41,11 @@ namespace input {
 /** @brief Creates a new Click input trait. */
 inline Click create_click()
 {
-    return Click(velk::instance().create<IClick>(ClassId::Input::Click));
+    return Click(instance().create<IClick>(ClassId::Input::Click));
 }
 
 } // namespace input
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_INPUT_CLICK_H

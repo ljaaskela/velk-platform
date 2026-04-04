@@ -16,20 +16,20 @@
 #define LAYOUT_LOG(...) ((void)0)
 #endif
 
-namespace velk_ui {
+namespace velk::ui {
 
 namespace {
 
-velk::IHierarchy* get_hierarchy(velk::Hierarchy& h)
+IHierarchy* get_hierarchy(Hierarchy& h)
 {
-    return interface_cast<velk::IHierarchy>(h.get());
+    return interface_cast<IHierarchy>(h.get());
 }
 
 } // namespace
 
-velk::vector<Scene*>& Scene::live_scenes()
+vector<Scene*>& Scene::live_scenes()
 {
-    static velk::vector<Scene*> scenes;
+    static vector<Scene*> scenes;
     return scenes;
 }
 
@@ -44,27 +44,27 @@ Scene::~Scene()
     scenes.erase(std::remove(scenes.begin(), scenes.end(), this), scenes.end());
 }
 
-velk::IFuture::Ptr Scene::load_from(velk::string_view path)
+IFuture::Ptr Scene::load_from(string_view path)
 {
-    auto promise = velk::make_promise();
+    auto promise = make_promise();
 
-    auto file = velk::instance().resource_store().get_resource<velk::IFile>(path);
+    auto file = instance().resource_store().get_resource<IFile>(path);
     if (!file) {
         VELK_LOG(E, "Scene::load_from: failed to resolve resource '%.*s'",
                  static_cast<int>(path.size()), path.data());
-        promise.set_value(velk::ReturnValue::Fail);
-        return promise.get_future<velk::ReturnValue>();
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
     }
 
-    velk::string json;
-    if (velk::failed(file->read_text(json))) {
+    string json;
+    if (failed(file->read_text(json))) {
         VELK_LOG(E, "Scene::load_from: failed to read '%.*s'",
                  static_cast<int>(path.size()), path.data());
-        promise.set_value(velk::ReturnValue::Fail);
-        return promise.get_future<velk::ReturnValue>();
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
     }
 
-    auto importer = velk::create_json_importer();
+    auto importer = create_json_importer();
     auto result = importer.import_from(json);
 
     for (auto& err : result.errors) {
@@ -72,23 +72,23 @@ velk::IFuture::Ptr Scene::load_from(velk::string_view path)
     }
 
     if (!result.store) {
-        promise.set_value(velk::ReturnValue::Fail);
-        return promise.get_future<velk::ReturnValue>();
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
     }
 
     load(*result.store);
 
-    promise.set_value(velk::ReturnValue::Success);
-    return promise.get_future<velk::ReturnValue>();
+    promise.set_value(ReturnValue::Success);
+    return promise.get_future<ReturnValue>();
 }
 
-void Scene::load(velk::IStore& store)
+void Scene::load(IStore& store)
 {
     ensure_hierarchy();
 
     // Find the first hierarchy in the store (convention: "hierarchy:<name>")
-    static const velk::string_view hierarchy_keys[] = {"hierarchy:scene", "hierarchy:main", "hierarchy:root"};
-    velk::IObject::Ptr hierarchy_obj;
+    static const string_view hierarchy_keys[] = {"hierarchy:scene", "hierarchy:main", "hierarchy:root"};
+    IObject::Ptr hierarchy_obj;
     for (auto& key : hierarchy_keys) {
         hierarchy_obj = store.find(key);
         if (hierarchy_obj) {
@@ -100,7 +100,7 @@ void Scene::load(velk::IStore& store)
         return;
     }
 
-    auto* src = interface_cast<velk::IHierarchy>(hierarchy_obj);
+    auto* src = interface_cast<IHierarchy>(hierarchy_obj);
     if (!src) {
         return;
     }
@@ -115,7 +115,7 @@ void Scene::load(velk::IStore& store)
     replicate_children(*src, src_root);
 }
 
-void Scene::set_geometry(velk::aabb geometry)
+void Scene::set_geometry(aabb geometry)
 {
     if (geometry_ != geometry) {
         geometry_ = geometry;
@@ -124,7 +124,7 @@ void Scene::set_geometry(velk::aabb geometry)
     }
 }
 
-void Scene::update(const velk::UpdateInfo& info)
+void Scene::update(const UpdateInfo& info)
 {
     auto* h = get_hierarchy(logical_);
     if (!h) {
@@ -178,7 +178,7 @@ void Scene::notify_dirty(IElement& element, DirtyFlags)
     dirty_elements_.push_back(&element);
 }
 
-velk::array_view<IElement*> Scene::get_visual_list()
+array_view<IElement*> Scene::get_visual_list()
 {
     return {visual_list_.data(), visual_list_.size()};
 }
@@ -186,12 +186,12 @@ velk::array_view<IElement*> Scene::get_visual_list()
 void Scene::ensure_hierarchy()
 {
     if (!initialized_) {
-        logical_ = velk::create_hierarchy();
+        logical_ = create_hierarchy();
         initialized_ = true;
     }
 }
 
-void Scene::attach_element(const velk::IObject::Ptr& obj)
+void Scene::attach_element(const IObject::Ptr& obj)
 {
     auto* observer = interface_cast<ISceneObserver>(obj);
     if (observer) {
@@ -201,7 +201,7 @@ void Scene::attach_element(const velk::IObject::Ptr& obj)
     set_dirty(DirtyFlags::DrawOrder);
 }
 
-void Scene::detach_element(const velk::IObject::Ptr& obj)
+void Scene::detach_element(const IObject::Ptr& obj)
 {
     auto* observer = interface_cast<ISceneObserver>(obj);
     if (observer) {
@@ -214,14 +214,14 @@ void Scene::detach_element(const velk::IObject::Ptr& obj)
     set_dirty(DirtyFlags::DrawOrder);
 }
 
-void Scene::detach_subtree(const velk::IObject::Ptr& obj)
+void Scene::detach_subtree(const IObject::Ptr& obj)
 {
     auto* h = get_hierarchy(logical_);
     if (!h) {
         return;
     }
 
-    velk::vector<velk::IObject::Ptr> stack;
+    vector<IObject::Ptr> stack;
     stack.push_back(obj);
     while (!stack.empty()) {
         auto node = stack.back();
@@ -234,7 +234,7 @@ void Scene::detach_subtree(const velk::IObject::Ptr& obj)
     }
 }
 
-void Scene::replicate_children(velk::IHierarchy& src, const velk::IObject::Ptr& parent)
+void Scene::replicate_children(IHierarchy& src, const IObject::Ptr& parent)
 {
     auto kids = src.children_of(parent);
     for (auto& kid : kids) {
@@ -245,7 +245,7 @@ void Scene::replicate_children(velk::IHierarchy& src, const velk::IObject::Ptr& 
 
 // IHierarchy forwarding
 
-velk::ReturnValue Scene::set_root(const velk::IObject::Ptr& root)
+ReturnValue Scene::set_root(const IObject::Ptr& root)
 {
     ensure_hierarchy();
 
@@ -256,48 +256,48 @@ velk::ReturnValue Scene::set_root(const velk::IObject::Ptr& root)
     }
 
     auto rv = logical_.set_root(root);
-    if (rv == velk::ReturnValue::Success && root) {
+    if (rv == ReturnValue::Success && root) {
         attach_element(root);
     }
     return rv;
 }
 
-velk::ReturnValue Scene::add(const velk::IObject::Ptr& parent, const velk::IObject::Ptr& child)
+ReturnValue Scene::add(const IObject::Ptr& parent, const IObject::Ptr& child)
 {
     ensure_hierarchy();
 
     auto rv = logical_.add(parent, child);
-    if (rv == velk::ReturnValue::Success) {
+    if (rv == ReturnValue::Success) {
         attach_element(child);
     }
     return rv;
 }
 
-velk::ReturnValue Scene::insert(const velk::IObject::Ptr& parent, size_t index,
-                                const velk::IObject::Ptr& child)
+ReturnValue Scene::insert(const IObject::Ptr& parent, size_t index,
+                                const IObject::Ptr& child)
 {
     ensure_hierarchy();
 
     auto rv = logical_.insert(parent, index, child);
-    if (rv == velk::ReturnValue::Success) {
+    if (rv == ReturnValue::Success) {
         attach_element(child);
     }
     return rv;
 }
 
-velk::ReturnValue Scene::remove(const velk::IObject::Ptr& object)
+ReturnValue Scene::remove(const IObject::Ptr& object)
 {
     auto rv = logical_.remove(object);
-    if (rv == velk::ReturnValue::Success) {
+    if (rv == ReturnValue::Success) {
         detach_subtree(object);
     }
     return rv;
 }
 
-velk::ReturnValue Scene::replace(const velk::IObject::Ptr& old_child, const velk::IObject::Ptr& new_child)
+ReturnValue Scene::replace(const IObject::Ptr& old_child, const IObject::Ptr& new_child)
 {
     auto rv = logical_.replace(old_child, new_child);
-    if (rv == velk::ReturnValue::Success) {
+    if (rv == ReturnValue::Success) {
         detach_element(old_child);
         attach_element(new_child);
     }
@@ -313,41 +313,41 @@ void Scene::clear()
     logical_.clear();
 }
 
-velk::IObject::Ptr Scene::root() const
+IObject::Ptr Scene::root() const
 {
     return logical_.root();
 }
 
-velk::IObject::Ptr Scene::parent_of(const velk::IObject::Ptr& object) const
+IObject::Ptr Scene::parent_of(const IObject::Ptr& object) const
 {
     return logical_.parent_of(object);
 }
 
-velk::vector<velk::IObject::Ptr> Scene::children_of(const velk::IObject::Ptr& object) const
+vector<IObject::Ptr> Scene::children_of(const IObject::Ptr& object) const
 {
-    auto h = logical_.operator velk::IHierarchy::Ptr();
-    return h ? h->children_of(object) : velk::vector<velk::IObject::Ptr>{};
+    auto h = logical_.operator IHierarchy::Ptr();
+    return h ? h->children_of(object) : vector<IObject::Ptr>{};
 }
 
-velk::IObject::Ptr Scene::child_at(const velk::IObject::Ptr& object, size_t index) const
+IObject::Ptr Scene::child_at(const IObject::Ptr& object, size_t index) const
 {
     return logical_.child_at(object, index);
 }
 
-size_t Scene::child_count(const velk::IObject::Ptr& object) const
+size_t Scene::child_count(const IObject::Ptr& object) const
 {
     return logical_.child_count(object);
 }
 
-void Scene::for_each_child(const velk::IObject::Ptr& object, void* context, ChildVisitorFn visitor) const
+void Scene::for_each_child(const IObject::Ptr& object, void* context, ChildVisitorFn visitor) const
 {
-    auto h = logical_.operator velk::IHierarchy::Ptr();
+    auto h = logical_.operator IHierarchy::Ptr();
     if (h) {
         h->for_each_child(object, context, visitor);
     }
 }
 
-bool Scene::contains(const velk::IObject::Ptr& object) const
+bool Scene::contains(const IObject::Ptr& object) const
 {
     return logical_.contains(object);
 }
@@ -357,7 +357,7 @@ size_t Scene::size() const
     return logical_.size();
 }
 
-velk::IHierarchy::Node Scene::node_of(const velk::IObject::Ptr& object) const
+IHierarchy::Node Scene::node_of(const IObject::Ptr& object) const
 {
     return logical_.node_of(object).hierarchy_node();
 }
@@ -370,7 +370,7 @@ void Scene::rebuild_visual_list()
     }
 }
 
-void Scene::collect_visual_list(const velk::IObject::Ptr& obj)
+void Scene::collect_visual_list(const IObject::Ptr& obj)
 {
     auto* element = interface_cast<IElement>(obj);
     if (element) {
@@ -383,9 +383,9 @@ void Scene::collect_visual_list(const velk::IObject::Ptr& obj)
     }
 
     auto kids = h->children_of(obj);
-    std::sort(kids.begin(), kids.end(), [](const velk::IObject::Ptr& a, const velk::IObject::Ptr& b) {
-        auto ra = velk::read_state<IElement>(a);
-        auto rb = velk::read_state<IElement>(b);
+    std::sort(kids.begin(), kids.end(), [](const IObject::Ptr& a, const IObject::Ptr& b) {
+        auto ra = read_state<IElement>(a);
+        auto rb = read_state<IElement>(b);
         int32_t za = ra ? ra->z_index : 0;
         int32_t zb = rb ? rb->z_index : 0;
         return za < zb;
@@ -396,4 +396,4 @@ void Scene::collect_visual_list(const velk::IObject::Ptr& obj)
     }
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

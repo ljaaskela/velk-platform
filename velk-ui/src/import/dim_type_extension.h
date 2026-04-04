@@ -8,20 +8,20 @@
 #include <velk-ui/plugin.h>
 #include <velk-ui/types.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
-dim parse_dim(velk::string_view str);
+dim parse_dim(string_view str);
 
 class DimTypeExtension
-    : public velk::ext::ObjectCore<DimTypeExtension, velk::IImporterTypeExtension>
+    : public ::velk::ext::ObjectCore<DimTypeExtension, IImporterTypeExtension>
 {
 public:
     VELK_CLASS_UID(ClassId::Import::DimTypeExtension, "DimTypeExtension");
 
-    velk::array_view<velk::Uid> supported_types() const override;
-    velk::IAny::Ptr deserialize(velk::Uid type_uid, const velk::IImportData& data) const override;
+    array_view<Uid> supported_types() const override;
+    IAny::Ptr deserialize(Uid type_uid, const IImportData& data) const override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_DIM_TYPE_EXTENSION_H

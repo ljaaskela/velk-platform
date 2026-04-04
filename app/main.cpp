@@ -9,19 +9,20 @@
 #include <velk-ui/api/input_dispatcher.h>
 #include <velk-ui/api/material/gradient.h>
 #include <velk-ui/api/material/shader.h>
-#include <velk-ui/api/render_context.h>
+#include <velk-render/api/render_context.h>
+#include <velk-ui/api/renderer.h>
 #include <velk-ui/api/scene.h>
 #include <velk-ui/api/visual/rect.h>
-#include <velk-ui/plugins/vk/plugin.h>
+#include <velk-render/plugins/vk/plugin.h>
 
 static void glfw_error_callback(int error, const char* description)
 {
     VELK_LOG(E, "GLFW error %d: %s", error, description);
 }
 
-static velk_ui::Scene* g_scene = nullptr;
-static velk_ui::ISurface::Ptr g_surface;
-static velk_ui::InputDispatcher* g_input = nullptr;
+static velk::ui::Scene* g_scene = nullptr;
+static velk::ISurface::Ptr g_surface;
+static velk::ui::InputDispatcher* g_input = nullptr;
 
 static void glfw_framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -29,7 +30,7 @@ static void glfw_framebuffer_size_callback(GLFWwindow* window, int width, int he
         g_scene->set_geometry(velk::aabb::from_size({static_cast<float>(width), static_cast<float>(height)}));
     }
     if (g_surface) {
-        velk::write_state<velk_ui::ISurface>(g_surface, [&](velk_ui::ISurface::State& s) {
+        velk::write_state<velk::ISurface>(g_surface, [&](velk::ISurface::State& s) {
             s.width = width;
             s.height = height;
         });
@@ -67,7 +68,7 @@ int main(int argc, char* argv[])
     velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 
     // Create render context, renderer, and surface
-    static velk_ui::VulkanInitParams vk_params;
+    static velk::vk::VulkanInitParams vk_params;
     vk_params.user_data = window;
     vk_params.create_surface = [](void* vk_instance, void* out_surface, void* user_data) -> bool {
         auto instance = static_cast<VkInstance>(vk_instance);
@@ -76,10 +77,10 @@ int main(int argc, char* argv[])
         return glfwCreateWindowSurface(instance, win, nullptr, surface) == VK_SUCCESS;
     };
 
-    velk_ui::RenderConfig render_config;
+    velk::RenderConfig render_config;
     render_config.backend_params = &vk_params;
 
-    auto ctx = velk_ui::create_render_context(render_config);
+    auto ctx = velk::create_render_context(render_config);
     if (!ctx) {
         VELK_LOG(E, "Failed to create render context");
         glfwDestroyWindow(window);
@@ -87,11 +88,12 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    auto renderer = ctx.create_renderer();
     auto surface = ctx.create_surface(kWidth, kHeight);
+    velk::IRenderContext::Ptr render_ctx = ctx;
+    auto renderer = velk::ui::create_renderer(*render_ctx);
 
     // Load scene
-    auto scene = velk_ui::create_scene("app://scenes/dashboard.json");
+    auto scene = velk::ui::create_scene("app://scenes/dashboard.json");
     scene.set_geometry(velk::aabb::from_size({static_cast<float>(kWidth), static_cast<float>(kHeight)}));
 
     renderer->attach(surface, scene);
@@ -101,14 +103,14 @@ int main(int argc, char* argv[])
     glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
 
     // Input dispatcher
-    auto input = velk_ui::create_input_dispatcher(scene);
+    auto input = velk::ui::create_input_dispatcher(scene);
     g_input = &input;
 
     glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
         if (g_input) {
-            velk_ui::PointerEvent ev;
+            velk::ui::PointerEvent ev;
             ev.position = {static_cast<float>(x), static_cast<float>(y)};
-            ev.action = velk_ui::PointerAction::Move;
+            ev.action = velk::ui::PointerAction::Move;
             g_input->pointer_event(ev);
         }
     });
@@ -117,18 +119,18 @@ int main(int argc, char* argv[])
         if (!g_input) {
             return;
         }
-        velk_ui::PointerEvent ev;
+        velk::ui::PointerEvent ev;
         double mx, my;
         glfwGetCursorPos(w, &mx, &my);
         ev.position = {static_cast<float>(mx), static_cast<float>(my)};
-        ev.action = (action == GLFW_PRESS) ? velk_ui::PointerAction::Down : velk_ui::PointerAction::Up;
-        ev.button = (button == GLFW_MOUSE_BUTTON_LEFT)    ? velk_ui::PointerButton::Left
-                    : (button == GLFW_MOUSE_BUTTON_RIGHT) ? velk_ui::PointerButton::Right
-                                                          : velk_ui::PointerButton::Middle;
-        if (mods & GLFW_MOD_SHIFT) ev.modifiers = ev.modifiers | velk_ui::Modifier::Shift;
-        if (mods & GLFW_MOD_CONTROL) ev.modifiers = ev.modifiers | velk_ui::Modifier::Ctrl;
-        if (mods & GLFW_MOD_ALT) ev.modifiers = ev.modifiers | velk_ui::Modifier::Alt;
-        if (mods & GLFW_MOD_SUPER) ev.modifiers = ev.modifiers | velk_ui::Modifier::Super;
+        ev.action = (action == GLFW_PRESS) ? velk::ui::PointerAction::Down : velk::ui::PointerAction::Up;
+        ev.button = (button == GLFW_MOUSE_BUTTON_LEFT)    ? velk::ui::PointerButton::Left
+                    : (button == GLFW_MOUSE_BUTTON_RIGHT) ? velk::ui::PointerButton::Right
+                                                          : velk::ui::PointerButton::Middle;
+        if (mods & GLFW_MOD_SHIFT) ev.modifiers = ev.modifiers | velk::ui::Modifier::Shift;
+        if (mods & GLFW_MOD_CONTROL) ev.modifiers = ev.modifiers | velk::ui::Modifier::Ctrl;
+        if (mods & GLFW_MOD_ALT) ev.modifiers = ev.modifiers | velk::ui::Modifier::Alt;
+        if (mods & GLFW_MOD_SUPER) ev.modifiers = ev.modifiers | velk::ui::Modifier::Super;
         g_input->pointer_event(ev);
     });
 
@@ -136,25 +138,25 @@ int main(int argc, char* argv[])
         if (!g_input) {
             return;
         }
-        velk_ui::ScrollEvent ev;
+        velk::ui::ScrollEvent ev;
         double mx, my;
         glfwGetCursorPos(w, &mx, &my);
         ev.position = {static_cast<float>(mx), static_cast<float>(my)};
         ev.delta = {static_cast<float>(xoffset), static_cast<float>(yoffset)};
-        ev.unit = velk_ui::ScrollUnit::Lines;
+        ev.unit = velk::ui::ScrollUnit::Lines;
         g_input->scroll_event(ev);
     });
 
     // Add gradient background to the root element
     {
         auto root = scene.root();
-        auto bg = velk_ui::visual::create_rect();
+        auto bg = velk::ui::visual::create_rect();
         bg.set_color(velk::color::red());
-        bg.set_paint(velk_ui::material::create_gradient(
+        bg.set_paint(velk::ui::material::create_gradient(
             velk::color{0.05f, 0.07f, 0.15f, 1.f}, velk::color{0.18f, 0.12f, 0.28f, 1.f}, 90.f));
 
         root.add_trait(bg);
-        auto click = velk_ui::input::create_click();
+        auto click = velk::ui::input::create_click();
         click.on_click().add_handler([]() { VELK_LOG(E, "Clicked!"); });
         root.add_trait(click);
     }
@@ -205,7 +207,7 @@ int main(int argc, char* argv[])
     g_scene = nullptr;
     g_surface = nullptr;
 
-    scene = velk_ui::Scene{};
+    scene = velk::ui::Scene{};
     renderer->shutdown();
     renderer = nullptr;
 

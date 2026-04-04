@@ -4,11 +4,11 @@
 
 #include <cstring>
 
-namespace velk_ui {
+namespace velk::ui {
 
-velk::vector<DrawEntry> RoundedRectVisual::get_draw_entries(const velk::rect& bounds)
+vector<DrawEntry> RoundedRectVisual::get_draw_entries(const rect& bounds)
 {
-    auto state = velk::read_state<IVisual>(this);
+    auto state = read_state<IVisual>(this);
     if (!state) {
         return {};
     }
@@ -25,4 +25,4 @@ velk::vector<DrawEntry> RoundedRectVisual::get_draw_entries(const velk::rect& bo
     return {entry};
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

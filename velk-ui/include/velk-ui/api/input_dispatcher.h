@@ -8,7 +8,7 @@
 #include <velk-ui/interface/intf_input_dispatcher.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around IInputDispatcher.
@@ -19,12 +19,12 @@ namespace velk_ui {
  *   auto input = create_input_dispatcher(scene);
  *   input.pointer_event({.position = {x, y}, .action = PointerAction::Move});
  */
-class InputDispatcher : public velk::Object
+class InputDispatcher : public Object
 {
 public:
     InputDispatcher() = default;
-    explicit InputDispatcher(velk::IObject::Ptr obj) : velk::Object(check_object<IInputDispatcher>(obj)) {}
-    explicit InputDispatcher(IInputDispatcher::Ptr d) : velk::Object(velk::as_object(d)) {}
+    explicit InputDispatcher(IObject::Ptr obj) : Object(check_object<IInputDispatcher>(obj)) {}
+    explicit InputDispatcher(IInputDispatcher::Ptr d) : Object(as_object(d)) {}
 
     operator IInputDispatcher::Ptr() const { return as_ptr<IInputDispatcher>(); }
 
@@ -77,13 +77,13 @@ public:
  */
 inline InputDispatcher create_input_dispatcher(Scene& scene)
 {
-    auto dispatcher = velk::instance().create<IInputDispatcher>(ClassId::Input::Dispatcher);
+    auto dispatcher = instance().create<IInputDispatcher>(ClassId::Input::Dispatcher);
     if (dispatcher) {
         dispatcher->set_scene(scene);
     }
     return InputDispatcher(std::move(dispatcher));
 }
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_API_INPUT_DISPATCHER_H

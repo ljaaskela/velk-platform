@@ -7,7 +7,7 @@
 #include <velk-ui/interface/trait/intf_drag.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class Drag : public ext::Input<Drag, IDrag>
 {
@@ -19,11 +19,11 @@ public:
 private:
     void set_dragging(bool v);
 
-    velk::vec2 start_position_{};
-    velk::vec2 last_position_{};
+    vec2 start_position_{};
+    vec2 last_position_{};
     bool active_ = false;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INPUT_DRAG_H

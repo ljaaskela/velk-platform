@@ -5,21 +5,21 @@
 
 #include <velk-ui/plugins/text/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
-class TextPlugin final : public velk::ext::Plugin<TextPlugin>
+class TextPlugin final : public ::velk::ext::Plugin<TextPlugin>
 {
 public:
     VELK_PLUGIN_UID(PluginId::TextPlugin);
     VELK_PLUGIN_NAME("velk_text");
     VELK_PLUGIN_VERSION(0, 1, 0);
 
-    velk::ReturnValue initialize(velk::IVelk& velk, velk::PluginConfig& config) override;
-    velk::ReturnValue shutdown(velk::IVelk& velk) override;
+    ReturnValue initialize(IVelk& velk, PluginConfig& config) override;
+    ReturnValue shutdown(IVelk& velk) override;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
-VELK_PLUGIN(velk_ui::TextPlugin)
+VELK_PLUGIN(velk::ui::TextPlugin)
 
 #endif // VELK_UI_TEXT_PLUGIN_IMPL_H

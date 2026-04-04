@@ -5,7 +5,7 @@
 
 #include <velk-ui/interface/intf_scene.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Callback interface for elements that need to know when they enter or leave a scene.
@@ -14,7 +14,7 @@ namespace velk_ui {
  * an element, it calls on_attached/on_detached. The element stores the IScene*
  * for dirty notifications.
  */
-class ISceneObserver : public velk::Interface<ISceneObserver>
+class ISceneObserver : public Interface<ISceneObserver>
 {
 public:
     /** @brief Called when the element is added to a scene. */
@@ -24,6 +24,6 @@ public:
     virtual void on_detached(IScene& scene) = 0;
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INTF_SCENE_OBSERVER_H

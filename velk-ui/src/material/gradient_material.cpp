@@ -1,11 +1,11 @@
 #include "gradient_material.h"
 
 #include <velk/api/state.h>
-#include <velk-ui/gpu_data.h>
+#include <velk-render/gpu_data.h>
 
 #include <cstring>
 
-namespace velk_ui {
+namespace velk::ui {
 
 namespace {
 
@@ -116,7 +116,7 @@ size_t GradientMaterial::gpu_data_size() const
 
 void GradientMaterial::write_gpu_data(void* out, size_t /*size*/) const
 {
-    auto state = velk::read_state<IGradient>(this);
+    auto state = read_state<IGradient>(this);
     if (!state) return;
 
     auto& p = *static_cast<GradientParams*>(out);
@@ -132,4 +132,4 @@ void GradientMaterial::write_gpu_data(void* out, size_t /*size*/) const
     p.angle = state->angle;
 }
 
-} // namespace velk_ui
+} // namespace velk::ui

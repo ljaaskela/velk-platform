@@ -5,7 +5,7 @@
 #include <velk-ui/interface/trait/intf_click.h>
 #include <velk-ui/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 class Click : public ext::Input<Click, IClick>
 {
@@ -19,6 +19,6 @@ private:
     void set_pressed(bool v);
 };
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_INPUT_CLICK_H

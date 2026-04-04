@@ -8,7 +8,7 @@
 #include <velk-ui/plugins/text/intf_text_visual.h>
 #include <velk-ui/plugins/text/plugin.h>
 
-namespace velk_ui {
+namespace velk::ui {
 
 /**
  * @brief Convenience wrapper around ITextVisual.
@@ -18,7 +18,7 @@ namespace velk_ui {
  *   auto tv = visual::create_text();
  *   tv.set_font(font);
  *   tv.set_text("Hello!");
- *   tv.set_color(velk::color::white());
+ *   tv.set_color(color::white());
  */
 class TextVisual : public Visual
 {
@@ -27,10 +27,10 @@ public:
     TextVisual() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement ITextVisual. */
-    explicit TextVisual(velk::IObject::Ptr obj) : Visual(check_object<IVisual>(obj)) {}
+    explicit TextVisual(IObject::Ptr obj) : Visual(check_object<IVisual>(obj)) {}
 
     /** @brief Wraps an existing ITextVisual pointer. */
-    explicit TextVisual(ITextVisual::Ptr t) : Visual(interface_pointer_cast<velk::IObject>(t)) {}
+    explicit TextVisual(ITextVisual::Ptr t) : Visual(interface_pointer_cast<IObject>(t)) {}
 
     /** @brief Implicit conversion to ITextVisual::Ptr. */
     operator ITextVisual::Ptr() const { return as_ptr<ITextVisual>(); }
@@ -45,9 +45,9 @@ public:
     auto get_text() const { return read_state_value<ITextVisual>(&ITextVisual::State::text); }
 
     /** @brief Sets the text content. */
-    void set_text(velk::string_view text)
+    void set_text(string_view text)
     {
-        write_state_value<ITextVisual>(&ITextVisual::State::text, velk::string(text));
+        write_state_value<ITextVisual>(&ITextVisual::State::text, string(text));
     }
 };
 
@@ -56,11 +56,11 @@ namespace visual {
 /** @brief Creates a new TextVisual. */
 inline TextVisual create_text()
 {
-    return TextVisual(velk::instance().create<velk::IObject>(ClassId::Visual::Text));
+    return TextVisual(instance().create<IObject>(ClassId::Visual::Text));
 }
 
 } // namespace visual
 
-} // namespace velk_ui
+} // namespace velk::ui
 
 #endif // VELK_UI_TEXT_API_TEXT_VISUAL_H
