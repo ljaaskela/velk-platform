@@ -174,7 +174,7 @@ int main(int argc, char* argv[])
 
     // Custom shader material: checkerboard pattern on the first card
     {
-        static const char* checker_vert = R"(
+        constexpr velk::string_view checker_vert = R"(
 #version 450
 #include "velk.glsl"
 #include "velk-ui.glsl"
@@ -205,7 +205,7 @@ void main()
 }
 )";
 
-        static const char* checker_frag = R"(
+        constexpr velk::string_view checker_frag = R"(
 #version 450
 #include "velk.glsl"
 

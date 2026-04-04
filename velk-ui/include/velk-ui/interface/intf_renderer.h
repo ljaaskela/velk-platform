@@ -19,9 +19,16 @@ namespace velk::ui {
 class IRenderer : public Interface<IRenderer>
 {
 public:
+    /** @brief Attaches a scene to a surface for rendering. */
     virtual void attach(const ISurface::Ptr& surface, const IScene::Ptr& scene) = 0;
+
+    /** @brief Detaches a surface, stopping rendering of its attached scene. */
     virtual void detach(const ISurface::Ptr& surface) = 0;
+
+    /** @brief Pulls state from attached scenes, rebuilds batches, and draws. */
     virtual void render() = 0;
+
+    /** @brief Releases all GPU resources. */
     virtual void shutdown() = 0;
 };
 

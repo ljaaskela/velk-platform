@@ -18,9 +18,8 @@ public:
 
     bool init(const RenderConfig& config) override;
     ISurface::Ptr create_surface(int width, int height) override;
-    IObject::Ptr create_shader_material(const char* fragment_source,
-                                        const char* vertex_source = nullptr) override;
-    uint64_t compile_pipeline(const char* fragment_source, const char* vertex_source,
+    IMaterial::Ptr create_shader_material(string_view fragment_source, string_view vertex_source) override;
+    uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                               uint64_t key = 0) override;
     void register_shader_include(string_view name, string_view content) override;
 

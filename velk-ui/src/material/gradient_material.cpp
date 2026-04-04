@@ -16,7 +16,7 @@ VELK_GPU_STRUCT GradientParams
     float angle;
 };
 
-const char* gradient_vertex_src = R"(
+constexpr string_view gradient_vertex_src = R"(
 #version 450
 #include "velk.glsl"
 #include "velk-ui.glsl"
@@ -47,7 +47,7 @@ void main()
 }
 )";
 
-const char* gradient_fragment_src = R"(
+constexpr string_view gradient_fragment_src = R"(
 #version 450
 #include "velk.glsl"
 

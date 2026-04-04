@@ -6,6 +6,7 @@
 #include <velk/vector.h>
 
 #include <cstdint>
+#include <velk-render/interface/intf_material.h>
 
 namespace velk {
 
@@ -17,7 +18,7 @@ struct ShaderParam;
  * Used by factory methods (e.g. IRenderContext::create_shader_material) to
  * inject the compiled pipeline handle and shader parameters.
  */
-class IMaterialInternal : public Interface<IMaterialInternal>
+class IMaterialInternal : public Interface<IMaterialInternal, IMaterial>
 {
 public:
     virtual void set_pipeline_handle(uint64_t handle) = 0;

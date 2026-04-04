@@ -140,7 +140,7 @@ Use `ShaderMaterial` when the shader comes from outside your application code: L
 ```cpp
 #include <velk-render/api/material/shader.h>
 
-const char* my_frag = R"(
+constexpr velk::string_view my_frag = R"(
 #version 450
 #include "velk.glsl"
 

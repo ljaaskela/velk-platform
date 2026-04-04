@@ -14,7 +14,7 @@ namespace velk {
 
 namespace {
 
-PipelineId compile_and_register(IRenderBackend& backend, const char* vert_glsl, const char* frag_glsl,
+PipelineId compile_and_register(IRenderBackend& backend, string_view vert_glsl, string_view frag_glsl,
                                 const ShaderIncludeMap* includes)
 {
     auto vert_spirv = compile_glsl_to_spirv(vert_glsl, ShaderStage::Vertex, includes);
@@ -95,10 +95,10 @@ ISurface::Ptr RenderContextImpl::create_surface(int width, int height)
     return surface;
 }
 
-uint64_t RenderContextImpl::compile_pipeline(const char* fragment_source, const char* vertex_source,
+uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
                                              uint64_t key)
 {
-    if (!initialized_ || !backend_ || !fragment_source || !vertex_source) {
+    if (!initialized_ || !backend_ || fragment_source.empty() || vertex_source.empty()) {
         return 0;
     }
 
@@ -117,12 +117,13 @@ uint64_t RenderContextImpl::compile_pipeline(const char* fragment_source, const 
 
 void RenderContextImpl::register_shader_include(string_view name, string_view content)
 {
-    shader_includes_[std::string(name.data(), name.size())] = std::string(content.data(), content.size());
+    shader_includes_[name] = content;
 }
 
-IObject::Ptr RenderContextImpl::create_shader_material(const char* fragment_source, const char* vertex_source)
+IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_source,
+                                                         string_view vertex_source)
 {
-    if (!vertex_source) {
+    if (vertex_source.empty()) {
         VELK_LOG(E, "create_shader_material: vertex_source is required");
         return nullptr;
     }
@@ -131,27 +132,24 @@ IObject::Ptr RenderContextImpl::create_shader_material(const char* fragment_sour
         return nullptr;
     }
 
-    auto obj = instance().create<IObject>(ClassId::ShaderMaterial);
-    if (!obj) {
+    auto mat = instance().create<IMaterialInternal>(ClassId::ShaderMaterial);
+    if (!mat) {
         return nullptr;
     }
 
-    auto* mat_internal = interface_cast<IMaterialInternal>(obj);
-    if (mat_internal) {
-        mat_internal->set_pipeline_handle(key);
-    }
+    mat->set_pipeline_handle(key);
 
     // Reflect material parameters from the vertex shader SPIR-V
     auto* includes = shader_includes_.empty() ? nullptr : &shader_includes_;
     auto vert_spirv = compile_glsl_to_spirv(vertex_source, ShaderStage::Vertex, includes);
     if (!vert_spirv.empty()) {
         auto params = reflect_material_params(vert_spirv.data(), vert_spirv.size());
-        if (!params.empty() && mat_internal) {
-            mat_internal->setup_inputs(params);
+        if (!params.empty()) {
+            mat->setup_inputs(params);
         }
     }
 
-    return obj;
+    return mat;
 }
 
 } // namespace velk

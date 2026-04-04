@@ -117,8 +117,8 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
     }
 
     // First pass: collect names, types, member decorations
-    std::unordered_map<uint32_t, std::string> id_names;
-    std::unordered_map<uint32_t, std::unordered_map<uint32_t, std::string>>
+    std::unordered_map<uint32_t, string> id_names;
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, string>>
         member_names; // id -> (member_idx -> name)
     std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>>
         member_offsets; // id -> (member_idx -> offset)
@@ -266,7 +266,7 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
             continue;
         }
 
-        const std::string& name = nit->second;
+        const string& name = nit->second;
 
         // Skip padding fields
         if (!name.empty() && name[0] == '_') {

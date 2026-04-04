@@ -3,7 +3,6 @@
 
 #include <velk/ext/object.h>
 
-#include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_material_internal.h>
 #include <velk-render/interface/intf_render_context.h>
 
@@ -29,15 +28,14 @@ namespace velk::ext {
  *   };
  */
 template <class T, class... Extra>
-class Material : public Object<T, IMaterial, IMaterialInternal, Extra...>
+class Material : public Object<T, IMaterialInternal, Extra...>
 {
 public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return handle_; }
     void set_pipeline_handle(uint64_t handle) override { handle_ = handle; }
 
 protected:
-    uint64_t ensure_pipeline(IRenderContext& ctx, const char* fragment_source,
-                             const char* vertex_source = nullptr)
+    uint64_t ensure_pipeline(IRenderContext& ctx, string_view fragment_source, string_view vertex_source = {})
     {
         if (has_pipeline_handle()) {
             return handle_;

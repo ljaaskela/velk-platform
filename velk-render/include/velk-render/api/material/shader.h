@@ -26,6 +26,7 @@ class ShaderMaterial : public Object
 public:
     ShaderMaterial() = default;
     explicit ShaderMaterial(IObject::Ptr obj) : Object(check_object<IShaderMaterial>(obj)) {}
+    explicit ShaderMaterial(IMaterial::Ptr m) : Object(as_object(m)) {}
 
     operator IMaterial::Ptr() const { return as_ptr<IMaterial>(); }
 
@@ -62,8 +63,8 @@ private:
  * The shader is compiled, the pipeline registered, and input properties
  * are created from shader reflection.
  */
-inline ShaderMaterial create_shader_material(IRenderContext& ctx, const char* fragment_source,
-                                             const char* vertex_source = nullptr)
+inline ShaderMaterial create_shader_material(IRenderContext& ctx, string_view fragment_source,
+                                             string_view vertex_source = {})
 {
     return ShaderMaterial(ctx.create_shader_material(fragment_source, vertex_source));
 }

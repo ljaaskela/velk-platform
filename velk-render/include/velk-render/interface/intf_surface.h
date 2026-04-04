@@ -5,12 +5,13 @@
 
 namespace velk {
 
+/** @brief A render target with dimensions. Represents a swapchain surface. */
 class ISurface : public Interface<ISurface>
 {
 public:
     VELK_INTERFACE(
-        (PROP, int, width, 0),
-        (PROP, int, height, 0)
+        (PROP, int, width, 0),  ///< Surface width in pixels.
+        (PROP, int, height, 0)  ///< Surface height in pixels.
     )
 };
 

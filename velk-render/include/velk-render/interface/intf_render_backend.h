@@ -9,61 +9,74 @@
 
 namespace velk {
 
-// Handle types. 0 = null/invalid for all.
-using GpuBuffer  = uint64_t;
-using TextureId  = uint32_t; // also the bindless shader index
+/// @name Handle types
+/// Opaque handles returned by the backend. 0 is null/invalid for all.
+/// @{
+using GpuBuffer = uint64_t;
+using TextureId = uint32_t; ///< Also the bindless shader index.
 using PipelineId = uint64_t;
+/// @}
 
+/// Pixel format for textures.
 enum class PixelFormat : uint8_t
 {
-    RGBA8, // 4 bpp, standard color
-    R8,    // 1 bpp, glyph atlases
+    RGBA8, ///< 4 bytes per pixel, standard color.
+    R8,    ///< 1 byte per pixel, glyph atlases.
 };
 
+/// Describes a GPU buffer to create.
 struct GpuBufferDesc
 {
-    size_t size{};
-    bool cpu_writable{true};
+    size_t size{};           ///< Buffer size in bytes.
+    bool cpu_writable{true}; ///< If false, the buffer is device-local only.
 };
 
+/// Describes a texture to create.
 struct TextureDesc
 {
-    int width{};
-    int height{};
-    PixelFormat format{PixelFormat::RGBA8};
+    int width{};                            ///< Texture width in pixels.
+    int height{};                           ///< Texture height in pixels.
+    PixelFormat format{PixelFormat::RGBA8}; ///< Pixel format.
 };
 
+/// Primitive topology for pipeline creation.
 enum class Topology : uint8_t
 {
-    TriangleStrip,
-    TriangleList,
+    TriangleStrip, ///< 4 vertices per quad (default for UI).
+    TriangleList,  ///< 3 vertices per triangle (meshes).
 };
 
+/// Describes a graphics pipeline to create.
 struct PipelineDesc
 {
-    const uint32_t* vertex_spirv{};
-    size_t vertex_spirv_size{};
-    const uint32_t* fragment_spirv{};
-    size_t fragment_spirv_size{};
-    Topology topology{Topology::TriangleStrip};
+    const uint32_t* vertex_spirv{};             ///< Vertex shader SPIR-V bytecode.
+    size_t vertex_spirv_size{};                 ///< Size in bytes.
+    const uint32_t* fragment_spirv{};           ///< Fragment shader SPIR-V bytecode.
+    size_t fragment_spirv_size{};               ///< Size in bytes.
+    Topology topology{Topology::TriangleStrip}; ///< Primitive assembly mode.
 };
 
+/// Maximum push constant size in bytes (Vulkan guaranteed minimum).
 inline constexpr size_t kMaxRootConstantsSize = 128;
 
+/// A single draw call submitted to the backend.
 struct DrawCall
 {
-    PipelineId pipeline{};
-    uint32_t vertex_count{};
-    uint32_t instance_count{1};
+    PipelineId pipeline{};      ///< Which pipeline to bind.
+    uint32_t vertex_count{};    ///< Vertices per instance (e.g. 4 for a quad strip).
+    uint32_t instance_count{1}; ///< Number of instances to draw.
+
+    /// Push constant data, typically an 8-byte GPU pointer to a DrawDataHeader.
     uint8_t root_constants[kMaxRootConstantsSize]{};
-    uint32_t root_constants_size{};
+    uint32_t root_constants_size{}; ///< Bytes used in root_constants.
 };
 
+/// Describes a render surface (swapchain target).
 struct SurfaceDesc
 {
-    void* window_handle{};
-    int width{};
-    int height{};
+    void* window_handle{}; ///< Platform window handle (HWND, ANativeWindow*, etc.), or nullptr for offscreen.
+    int width{};           ///< Initial surface width in pixels.
+    int height{};          ///< Initial surface height in pixels.
 };
 
 /**
@@ -72,33 +85,87 @@ struct SurfaceDesc
  * Designed around how modern GPUs work: buffer device addresses (pointers),
  * bindless textures, and push constants. No vertex input descriptions,
  * no uniform introspection, no descriptor set management.
+ *
+ * See render-backend-architecture.md for the full design.
  */
 class IRenderBackend : public Interface<IRenderBackend>
 {
 public:
+    /// @name Lifecycle
+    /// @{
+
+    /** @brief Initializes the backend with platform-specific parameters. */
     virtual bool init(void* params) = 0;
+
+    /** @brief Shuts down the backend and releases all GPU resources. */
     virtual void shutdown() = 0;
 
+    /// @}
+    /// @name Surfaces
+    /// @{
+
+    /** @brief Creates a swapchain surface. Returns the surface ID, or 0 on failure. */
     virtual uint64_t create_surface(const SurfaceDesc& desc) = 0;
+
+    /** @brief Destroys a surface and its swapchain. */
     virtual void destroy_surface(uint64_t surface_id) = 0;
+
+    /** @brief Recreates the swapchain for the given surface at the new dimensions. */
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
+    /// @}
+    /// @name GPU Memory
+    /// @{
+
+    /** @brief Allocates a GPU buffer. Returns a handle, or 0 on failure. */
     virtual GpuBuffer create_buffer(const GpuBufferDesc& desc) = 0;
+
+    /** @brief Frees a GPU buffer. */
     virtual void destroy_buffer(GpuBuffer buffer) = 0;
+
+    /** @brief Returns a persistently mapped CPU pointer to the buffer, or nullptr. */
     virtual void* map(GpuBuffer buffer) = 0;
+
+    /** @brief Returns the GPU virtual address for use in shaders via buffer_reference. */
     virtual uint64_t gpu_address(GpuBuffer buffer) = 0;
 
-    virtual TextureId create_texture(const TextureDesc& desc) = 0;
-    virtual void destroy_texture(TextureId texture) = 0;
-    virtual void upload_texture(TextureId texture,
-                                const uint8_t* pixels, int width, int height) = 0;
+    /// @}
+    /// @name Textures
+    /// @{
 
+    /** @brief Creates a texture and assigns a bindless index. Returns the TextureId. */
+    virtual TextureId create_texture(const TextureDesc& desc) = 0;
+
+    /** @brief Destroys a texture and frees its bindless slot. */
+    virtual void destroy_texture(TextureId texture) = 0;
+
+    /** @brief Uploads pixel data to a texture via a staging buffer. */
+    virtual void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) = 0;
+
+    /// @}
+    /// @name Pipelines
+    /// @{
+
+    /** @brief Creates a graphics pipeline from SPIR-V shaders. Returns a handle. */
     virtual PipelineId create_pipeline(const PipelineDesc& desc) = 0;
+
+    /** @brief Destroys a pipeline. */
     virtual void destroy_pipeline(PipelineId pipeline) = 0;
 
+    /// @}
+    /// @name Frame submission
+    /// @{
+
+    /** @brief Acquires a swapchain image and begins command recording. */
     virtual void begin_frame(uint64_t surface_id) = 0;
+
+    /** @brief Records draw calls into the current command buffer. */
     virtual void submit(array_view<const DrawCall> calls) = 0;
+
+    /** @brief Ends recording, submits to the GPU queue, and presents. */
     virtual void end_frame() = 0;
+
+    /// @}
 };
 
 } // namespace velk

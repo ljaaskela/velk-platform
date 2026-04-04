@@ -28,8 +28,7 @@ public:
         return with<IRenderContext>([&](auto& ctx) { return ctx.create_surface(width, height); });
     }
 
-    IObject::Ptr create_shader_material(const char* fragment_source,
-                                              const char* vertex_source = nullptr)
+    IMaterial::Ptr create_shader_material(string_view fragment_source, string_view vertex_source = {})
     {
         return with<IRenderContext>([&](auto& ctx) {
             return ctx.create_shader_material(fragment_source, vertex_source);

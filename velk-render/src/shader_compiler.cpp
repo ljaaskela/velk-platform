@@ -66,7 +66,7 @@ public:
 private:
     void set_error(shaderc_include_result* result, const char* name)
     {
-        error_msg_ = std::string("unknown include: ") + name;
+        error_msg_ = string("unknown include: ") + name;
         result->source_name = "";
         result->source_name_length = 0;
         result->content = error_msg_.c_str();
@@ -74,13 +74,13 @@ private:
     }
 
     const ShaderIncludeMap* user_includes_;
-    std::string cached_name_;
-    std::string error_msg_;
+    string cached_name_;
+    string error_msg_;
 };
 
 } // namespace
 
-vector<uint32_t> compile_glsl_to_spirv(const char* source, ShaderStage stage,
+vector<uint32_t> compile_glsl_to_spirv(string_view source, ShaderStage stage,
                                        const ShaderIncludeMap* user_includes)
 {
     shaderc::Compiler compiler;
@@ -96,7 +96,7 @@ vector<uint32_t> compile_glsl_to_spirv(const char* source, ShaderStage stage,
 
     const char* filename = (stage == ShaderStage::Vertex) ? "vertex.glsl" : "fragment.glsl";
 
-    auto result = compiler.CompileGlslToSpv(source, kind, filename, options);
+    auto result = compiler.CompileGlslToSpv(source.data(), kind, filename, options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
         VELK_LOG(E, "Shader compilation failed: %s", result.GetErrorMessage().c_str());

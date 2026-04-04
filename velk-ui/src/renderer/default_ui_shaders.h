@@ -1,6 +1,8 @@
 #ifndef VELK_RENDER_DEFAULT_SHADERS_H
 #define VELK_RENDER_DEFAULT_SHADERS_H
 
+#include <velk/string_view.h>
+
 namespace velk {
 
 // Built-in shaders use:
@@ -11,7 +13,7 @@ namespace velk {
 // Rect
 // ============================================================================
 
-inline const char* rect_vertex_src = R"(
+[[maybe_unused]] constexpr string_view rect_vertex_src = R"(
 #version 450
 #include "velk.glsl"
 #include "velk-ui.glsl"
@@ -37,7 +39,7 @@ void main()
 }
 )";
 
-inline const char* rect_fragment_src = R"(
+[[maybe_unused]] constexpr string_view rect_fragment_src = R"(
 #version 450
 
 layout(location = 0) in vec4 v_color;
@@ -53,7 +55,7 @@ void main()
 // Text
 // ============================================================================
 
-inline const char* text_vertex_src = R"(
+[[maybe_unused]] constexpr string_view text_vertex_src = R"(
 #version 450
 #include "velk.glsl"
 #include "velk-ui.glsl"
@@ -83,7 +85,7 @@ void main()
 }
 )";
 
-inline const char* text_fragment_src = R"(
+[[maybe_unused]] constexpr string_view text_fragment_src = R"(
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
 
@@ -105,7 +107,7 @@ void main()
 // Rounded rect
 // ============================================================================
 
-inline const char* rounded_rect_vertex_src = R"(
+[[maybe_unused]] constexpr string_view rounded_rect_vertex_src = R"(
 #version 450
 #include "velk.glsl"
 #include "velk-ui.glsl"
@@ -135,7 +137,7 @@ void main()
 }
 )";
 
-inline const char* rounded_rect_fragment_src = R"(
+[[maybe_unused]] constexpr string_view rounded_rect_fragment_src = R"(
 #version 450
 
 layout(location = 0) in vec4 v_color;

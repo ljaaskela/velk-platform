@@ -16,11 +16,11 @@ enum class ShaderStage : uint8_t
 };
 
 /// Registry of virtual shader include files (name -> content).
-using ShaderIncludeMap = std::unordered_map<std::string, std::string>;
+using ShaderIncludeMap = std::unordered_map<string, string>;
 
 /// Compiles GLSL to SPIR-V. Resolves #include directives against
 /// the built-in velk.glsl and any user-registered includes.
-vector<uint32_t> compile_glsl_to_spirv(const char* source, ShaderStage stage,
+vector<uint32_t> compile_glsl_to_spirv(string_view source, ShaderStage stage,
                                        const ShaderIncludeMap* user_includes = nullptr);
 
 } // namespace velk
