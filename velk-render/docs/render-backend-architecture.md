@@ -24,8 +24,8 @@ The system has three layers:
 ```mermaid
 graph TD
     App["App<br/><i>attach, render, shutdown</i>"]
-    Renderer["Renderer (velk_render)<br/><i>Batch DrawEntries, write GPU buffers, build DrawCalls</i>"]
-    Backend["IRenderBackend (velk_vk)<br/><i>create_buffer, map, gpu_address, create_texture,<br/>create_pipeline, begin_frame, submit, end_frame</i>"]
+    Renderer["Renderer (velk::ui)<br/><i>Batch DrawEntries, write GPU buffers, build DrawCalls</i>"]
+    Backend["IRenderBackend (velk::vk)<br/><i>create_buffer, map, gpu_address, create_texture,<br/>create_pipeline, begin_frame, submit, end_frame</i>"]
 
     App --> Renderer --> Backend
 ```
@@ -375,7 +375,7 @@ Compute shaders, mesh shaders, ray tracing: they all operate on the same GPU buf
 
 ## Vulkan Implementation Details
 
-The Vulkan backend (`velk_vk`) uses:
+The Vulkan backend (`velk::vk`) uses:
 
 - **Vulkan 1.2** with `bufferDeviceAddress`, `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`
 - **VMA** (Vulkan Memory Allocator) for all allocations, with `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT`

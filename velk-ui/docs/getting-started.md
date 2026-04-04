@@ -22,8 +22,8 @@ Create a render context, renderer, and surface. The render context loads the bac
 ```cpp
 #include <velk-ui/api/render_context.h>
 
-auto ctx = velk_ui::create_render_context(
-    {velk_ui::RenderBackendType::GL, reinterpret_cast<void*>(glfwGetProcAddress)});
+auto ctx = velk::create_render_context(
+    {velk::ui::RenderBackendType::GL, reinterpret_cast<void*>(glfwGetProcAddress)});
 auto renderer = ctx.create_renderer();
 auto surface = ctx.create_surface(800, 600);
 ```
@@ -55,7 +55,7 @@ Define a scene as a JSON file and load it with `create_scene`:
 ```cpp
 #include <velk-ui/api/scene.h>
 
-auto scene = velk_ui::create_scene("app://scenes/my_scene.json");
+auto scene = velk::ui::create_scene("app://scenes/my_scene.json");
 scene.set_geometry(velk::aabb::from_size({800.f, 600.f}));
 renderer->attach(surface, scene);
 ```
@@ -71,13 +71,13 @@ Build UI in code using the API wrappers:
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
 
-auto elem = velk_ui::create_element();
+auto elem = velk::ui::create_element();
 
-auto fs = velk_ui::constraint::create_fixed_size();
-fs.set_size(velk_ui::dim::px(300.f), velk_ui::dim::px(100.f));
+auto fs = velk::ui::constraint::create_fixed_size();
+fs.set_size(velk::ui::dim::px(300.f), velk::ui::dim::px(100.f));
 elem.add_trait(fs);
 
-auto rect = velk_ui::visual::create_rect();
+auto rect = velk::ui::visual::create_rect();
 rect.set_color({0.9f, 0.2f, 0.2f, 1.f});
 elem.add_trait(rect);
 
@@ -90,11 +90,11 @@ scene.add(scene.root(), elem);
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
-auto font = velk_ui::create_font();
+auto font = velk::ui::create_font();
 font.init_default();  // built-in Inter Regular
 font.set_size(32.f);
 
-auto tv = velk_ui::visual::create_text();
+auto tv = velk::ui::visual::create_text();
 tv.set_font(font);
 tv.set_text("Hello, Velk!");
 tv.set_color(velk::color::white());

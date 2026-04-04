@@ -29,11 +29,11 @@ The first three phases run inside the layout solver during `Scene::update()`. Vi
 Traits are managed via `add_trait()` / `remove_trait()` on the Element wrapper:
 
 ```cpp
-auto elem = velk_ui::create_element();
+auto elem = velk::ui::create_element();
 
-auto stack = velk_ui::constraint::create_stack();
-auto rect = velk_ui::visual::create_rect();
-auto click = velk_ui::input::create_click();
+auto stack = velk::ui::constraint::create_stack();
+auto rect = velk::ui::visual::create_rect();
+auto click = velk::ui::input::create_click();
 
 elem.add_trait(stack);
 elem.add_trait(rect);
@@ -47,7 +47,7 @@ An element can have multiple traits, including multiple traits of the same phase
 
 ## CRTP base classes
 
-Each trait category has a CRTP base in `velk_ui::ext` that provides sensible defaults:
+Each trait category has a CRTP base in `velk::ui::ext` that provides sensible defaults:
 
 | Base | Phase | Defaults |
 |------|-------|----------|
@@ -68,12 +68,12 @@ Layout traits implement `ILayoutTrait` and control how elements are sized and po
 | FixedSize | `IFixedSize` | Constraint | Clamps width and/or height to a fixed value |
 
 ```cpp
-auto stack = velk_ui::constraint::create_stack();
+auto stack = velk::ui::constraint::create_stack();
 stack.set_axis(1);       // vertical
 stack.set_spacing(10.f);
 
-auto fs = velk_ui::constraint::create_fixed_size();
-fs.set_size(velk_ui::dim::px(200.f), velk_ui::dim::px(100.f));
+auto fs = velk::ui::constraint::create_fixed_size();
+fs.set_size(velk::ui::dim::px(200.f), velk::ui::dim::px(100.f));
 ```
 
 Dimensions can be absolute (`dim::px(100.f)`) or relative to parent (`dim::pct(0.5f)`). Use `dim::none()` to leave an axis unconstrained.
@@ -88,7 +88,7 @@ Transform traits implement `ITransformTrait` and modify the element's world matr
 | Matrix | `IMatrix` | Raw 4x4 matrix multiply |
 
 ```cpp
-auto trs = velk_ui::transform::create_trs();
+auto trs = velk::ui::transform::create_trs();
 trs.set_rotation(45.f);         // degrees around Z
 trs.set_scale({0.5f, 0.5f});
 elem.add_trait(trs);
@@ -105,10 +105,10 @@ Visuals implement `IVisual` and define how an element appears on screen. The ren
 | TextVisual | `ITextVisual` | Shaped text rendered as glyph quads (text plugin) |
 
 ```cpp
-auto rect = velk_ui::visual::create_rect();
+auto rect = velk::ui::visual::create_rect();
 rect.set_color({0.9f, 0.2f, 0.2f, 1.f});
 
-auto text = velk_ui::visual::create_text();
+auto text = velk::ui::visual::create_text();
 text.set_font(font);
 text.set_text("Hello!");
 ```
@@ -126,11 +126,11 @@ Input traits implement `IInputTrait` and handle pointer, scroll, and keyboard ev
 | Drag | `IDrag` | Tracks drag gestures with start/move/end events |
 
 ```cpp
-auto click = velk_ui::input::create_click();
+auto click = velk::ui::input::create_click();
 click.on_click().add_handler([]() { /* clicked */ });
 elem.add_trait(click);
 
-auto hover = velk_ui::input::create_hover();
+auto hover = velk::ui::input::create_hover();
 hover.on_hover_changed().add_handler([&]() {
     bool over = hover.is_hovered();
 });
@@ -155,7 +155,7 @@ public:
 };
 
 // Implementation
-class MyTrait : public velk_ui::ext::Input<MyTrait, IMyTrait> {
+class MyTrait : public velk::ui::ext::Input<MyTrait, IMyTrait> {
 public:
     VELK_CLASS_UID(ClassId::MyTrait, "MyTrait");
 

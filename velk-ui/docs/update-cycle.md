@@ -129,7 +129,7 @@ static void on_resize(GLFWwindow* window, int width, int height)
 {
     scene->set_geometry(velk::aabb::from_size({
         static_cast<float>(width), static_cast<float>(height)}));
-    velk::write_state<velk_ui::ISurface>(surface, [&](velk_ui::ISurface::State& s) {
+    velk::write_state<velk::ISurface>(surface, [&](velk::ISurface::State& s) {
         s.width = width;
         s.height = height;
     });

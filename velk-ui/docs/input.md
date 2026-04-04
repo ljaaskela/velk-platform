@@ -7,7 +7,7 @@ velk-ui's input system dispatches platform events (mouse, keyboard, scroll) to e
 `InputDispatcher` is the scene-level coordinator. It is created with a reference to a scene and exposes three entry points for feeding platform events:
 
 ```cpp
-auto input = velk_ui::create_input_dispatcher(scene);
+auto input = velk::ui::create_input_dispatcher(scene);
 
 input.pointer_event(ev);  // PointerEvent (down, up, move, cancel)
 input.scroll_event(ev);   // ScrollEvent
@@ -114,7 +114,7 @@ public:
     )
 };
 
-class MyInput : public velk_ui::ext::Input<MyInput, IMyInput> {
+class MyInput : public velk::ui::ext::Input<MyInput, IMyInput> {
 public:
     VELK_CLASS_UID(ClassId::MyInput, "MyInput");
 
