@@ -8,20 +8,18 @@ Application platform built on the [Velk](https://github.com/ljaaskela/velk) comp
 
 ## Modules
 
-### [velk-render](velk-render/) — Rendering foundation
+### Rendering foundation ([velk-render](velk-render/))
 
 Pointer-based GPU rendering abstraction:
-* Minimal (currently 15 methods) backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls. This means no vertex input descriptions or descriptor management.
+* Minimal backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls.
 * Includes a Vulkan 1.2 backend (`velk::vk`) with BDA and bindless descriptors.
-* See [Render Backend Architecture](velk-render/docs/render-backend-architecture.md) for the full technical writeup.
 
-### [velk-ui](velk-ui/) — UI framework
+### UI framework ([velk-ui](velk-ui/))
 
 Declarative UI framework:
 * Scene graphs, element composition via traits (constraints, visuals, transforms, input), JSON scene loading.
 * A scene renderer using velk-render that walks the visual tree and submits draw calls to the render backend.
 * Text rendering plugin using FreeType + HarfBuzz text shaping and rendering. Glyph atlas management, bindless texture integration.
-* See [Getting Started](velk-ui/docs/getting-started.md) for an introduction.
 
 ## Quick start
 

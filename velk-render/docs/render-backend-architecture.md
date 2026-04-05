@@ -2,7 +2,7 @@
 
 A pointer-based GPU rendering abstraction that maps directly to how modern GPUs work, rather than abstracting over graphics API concepts.
 
-Inspired by [No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api) essay, which argues that modern GPU hardware (coherent caches, buffer device addresses, bindless descriptors) has converged enough that the traditional graphics API abstraction layer can be replaced by something much simpler. Velk has no legacy codepath to maintain, so we built the backend around this idea from scratch.
+Inspired by [No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api) essay, which argues that modern GPU hardware (coherent caches, buffer device addresses, bindless descriptors) has converged enough that the traditional graphics API abstraction layer can be replaced by something much simpler. Velk has no legacy codepath to maintain, so the backend could be built around this idea from the start.
 
 ## The Core Idea
 
@@ -15,7 +15,9 @@ Modern GPUs have converged. Every current GPU supports:
 - **Coherent caches**: CPU writes to mapped GPU memory are visible to shaders
 - **Programmable vertex fetch**: shaders can read vertex data from arbitrary buffers
 
-When all GPUs support these features, the abstraction layer collapses. Instead of translating between "uniform buffers" and "push constants" and "constant buffers", you just write a struct to a GPU buffer and give the shader a pointer to it. Instead of managing descriptor sets, you give the shader a texture index. Instead of describing vertex layouts, the shader reads what it needs from a buffer.
+When all GPUs support these features, the abstraction layer collapses. Instead of translating between "uniform buffers" and "push constants" and "constant buffers", you just write a struct to a GPU buffer and give the shader a pointer to it:
+* Instead of managing descriptor sets, you give the shader a texture index. 
+* Instead of describing vertex layouts, the shader reads what it needs from a buffer.
 
 ## Architecture Overview
 
@@ -30,34 +32,66 @@ graph TD
     App --> Renderer --> Backend
 ```
 
-**The app** calls `render()` each frame. It never touches GPU resources directly.
+| Layer | Task |
+|--|--|
+| App | Calls `render()` each frame. It never touches GPU resources directly. |
+| Renderer | Pulls scene state, groups draw entries by pipeline, writes instance data and draw headers into a mapped GPU buffer, and produces an array of `DrawCall` structs.<br>Current `ClassId::Renderer` implementation lives in velk-ui for the UI framework use cases. There could also be other IRenderer implementations optimized more e.g. for 3D. |
+| Backend | manages resources and executes draw calls. It owns the swapchain, synchronization, and all GPU objects. The renderer talks to it through IRenderbackend.<br>Several backend implementations can exist for different graphics APIs (e.g. Vulkan, D3D12 or Metal) |
 
-**The renderer** pulls scene state, groups draw entries by pipeline, writes instance data and draw headers into a mapped GPU buffer, and produces an array of `DrawCall` structs.
+## IRenderBackend interface
 
-**The backend** manages Vulkan (or Metal) resources and executes draw calls. It owns the swapchain, synchronization, and all GPU objects. The renderer talks to it through 15 methods.
+The following methods from `IRenderBackend` give the renderer everything it needs to put pixels on screen.
 
-## The Interface: 15 Methods
+| Method | Purpose |
+|--|--|
+| Lifecycle | `init`, `shutdown` |
+| Surfaces |  `create_surface`, `destroy_surface`, `resize_surface` |
+| Memory | `create_buffer`, `destroy_buffer`, `map`, `gpu_address` |
+| Textures | `create_texture`, `destroy_texture`, `upload_texture` |
+| Pipelines | `create_pipeline`, `destroy_pipeline` |
+| Frame | `begin_frame`, `submit`, `end_frame` |
 
-The following 15 methods give the renderer everything it needs to put pixels on screen.
+**Memory** is the foundation:
+* `create_buffer`: Allocate a GPU buffer
+* `destroy_buffer`: Deallocate a GPU buffer
+* `map`: Cet a CPU pointer to write into a buffer
+* `gpu_address`: Get the GPU address to pass to shaders
 
-```
-Lifecycle:  init, shutdown
-Surfaces:   create_surface, destroy_surface, resize_surface
-Memory:     create_buffer, destroy_buffer, map, gpu_address
-Textures:   create_texture, destroy_texture, upload_texture
-Pipelines:  create_pipeline, destroy_pipeline
-Frame:      begin_frame, submit, end_frame
-```
+This is the single mechanism for getting all data to the GPU: uniforms, instance data, vertex data, index data, material parameters.
 
-**Memory** (`create_buffer`, `destroy_buffer`, `map`, `gpu_address`) is the foundation. Allocate a GPU buffer, get a CPU pointer to write into it, get the GPU address to pass to shaders. This is the single mechanism for getting all data to the GPU: uniforms, instance data, vertex data, index data, material parameters. One path for everything.
+**Texture** handling:
+* `create_texture`: Create a texture and return a `TextureId`, a `uint32_t` that shaders use directly as an index into a global texture array.
+* `destroy_texture`: Destroy a texture.
+* `upload_texture`: Upload pixel data to the texture via a staging buffer. 
 
-**Textures** (`create_texture`, `destroy_texture`, `upload_texture`) handle image data. `create_texture` returns a `TextureId` which is a `uint32_t` that shaders use directly as an index into a global texture array. Create a texture, get an index, use it in any shader, any draw call. The backend manages the descriptor array internally.
+The texture id (or index) can be used in any shader and any draw call. The backend manages the descriptor array internally.
 
-**Pipelines** (`create_pipeline`, `destroy_pipeline`) compile shaders. SPIR-V bytecode and a topology (triangle strip or triangle list) in, opaque handle out. The pipeline is compiled shader code plus the primitive assembly mode. The shader itself defines what data it reads and how, so the pipeline doesn't need to describe vertex layouts, uniform bindings, or resource layouts.
+**Pipelines** compile shaders:
+* `create_pipeline`: Creates a pipeline, shader bytecode and a topology (triangle strip or triangle list) in, opaque handle out.
+* `destroy_pipeline`: Destroy a pipeline
 
-**Frame** (`begin_frame`, `submit`, `end_frame`) drives presentation. Acquire a swapchain image, submit an array of `DrawCall` structs, present. The backend handles command buffer recording, synchronization, and image transitions internally.
+The shader itself defines what data it reads and how (as everything is available through the memory buffers), so the pipeline doesn't need to describe vertex layouts, uniform bindings, or resource layouts.
 
-Notably absent: vertex input descriptions, uniform reflection, descriptor set layouts, pipeline layout objects, barrier management, resource state tracking. A typical Vulkan abstraction might expose 40+ methods for these. Here, they're either unnecessary (vertex input, uniform reflection) or hidden inside the backend (barriers, synchronization).
+Passing shaders as source is also supported, backend compiles the shaders during pipeline creation in this case.
+
+**Frame** drives presentation:
+* `begin_frame`: To acquire a swapchain image.
+* `submit`: An array of `DrawCall` structs.
+* `end_frame`: present.
+
+The backend handles command buffer recording, synchronization, and image transitions internally.
+
+### What is not there (on purpose)
+
+Notably absent: 
+* vertex input descriptions
+* descriptor set layouts
+* pipeline layout objects
+* barrier management
+* resource state tracking
+* uniform reflection (with the exception of [ShaderMaterial](./materials.md))
+
+A typical Vulkan abstraction might expose 40+ methods for these. Here, they're either unnecessary (vertex input, uniform reflection) or hidden inside the backend (barriers, synchronization).
 
 ## The DrawCall
 
@@ -74,7 +108,7 @@ struct DrawCall
 
 The `root_constants` field carries up to 128 bytes of data that gets pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 128 bytes is Vulkan's guaranteed minimum push constant size.
 
-In practice, we use 8 of those bytes: a single GPU pointer to a `DrawDataHeader` in the per-frame staging buffer. The shader dereferences this pointer to reach all its data.
+In practice only 8 of those bytes are used: a single GPU pointer to a `DrawDataHeader` in the per-frame staging buffer. The shader dereferences this pointer to reach all its data.
 
 Why 128 bytes and not just 8? For simple draws that need very little data (a fullscreen clear, a debug line), the shader can read everything directly from push constants without an extra indirection through a GPU buffer.
 
@@ -95,6 +129,14 @@ block-beta
 - **DrawDataHeader**: the root struct that the shader receives a pointer to. Contains GPU addresses pointing to the shader data and globals, plus a texture index. Material-specific parameters (if any) follow inline after the header.
 
 Each write returns the GPU address of what was written. The DrawDataHeader is written last (after shader data), and its address goes into the `DrawCall`'s push constants.
+
+#### Note
+
+The velk-ui `ClassId::Renderer` currently re-assembles the whole staging buffer every frame:
+* velk-ui Scene maintains a list of IVisuals in draw-order, iterating them is relatively cheap.
+* Visuals access their data through Velk object state access, offering nearly zero overhead access to object's property values, making draw call assembly cheap.
+
+That said, this can be improved in the future by caching parts of the staging buffer that has not changed at all since the previous frame.
 
 ### The DrawDataHeader
 
