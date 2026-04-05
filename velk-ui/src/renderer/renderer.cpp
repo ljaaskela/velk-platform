@@ -163,6 +163,7 @@ void Renderer::rebuild_commands(IElement* element)
 
     rect local_rect = {0, 0, state->size.width, state->size.height};
 
+    // Walk the element's attachments looking for visuals and texture providers
     for (size_t i = 0; i < storage->attachment_count(); ++i) {
         auto att = storage->get_attachment(i);
         auto* visual = interface_cast<IVisual>(att);
@@ -170,6 +171,7 @@ void Renderer::rebuild_commands(IElement* element)
             VisualCommands vc;
             vc.entries = visual->get_draw_entries(local_rect);
 
+            // If the visual has a paint (material), resolve its pipeline
             auto vstate = read_state<IVisual>(visual);
             if (render_ctx_ && vstate && vstate->paint) {
                 auto mat = vstate->paint.get<IMaterial>();
@@ -212,15 +214,17 @@ void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entr
             continue;
         }
 
+        // Extract world position from the element's transform matrix
         float wx = elem_state->world_matrix(0, 3);
         float wy = elem_state->world_matrix(1, 3);
 
         for (auto& vc : cache.visuals) {
             for (auto& de : vc.entries) {
+                // Use material pipeline if set, otherwise the visual's default
                 uint64_t pipeline = (vc.pipeline_override != 0) ? vc.pipeline_override : de.pipeline_key;
                 uint64_t texture = de.texture_key;
 
-                // Batch by material identity: same instance = same params = safe to batch.
+                // Group draw entries by (pipeline, texture/material) into batches
                 uint64_t bkey = make_batch_key(pipeline, resolve_texture(vc.material, texture));
 
                 auto bit = batch_index_.find(bkey);
@@ -238,12 +242,14 @@ void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entr
                     batches_.push_back(std::move(batch));
                 }
 
+                // Append instance data to the batch and apply world position offset
                 auto& batch = batches_[batch_idx];
 
                 auto data_offset = batch.instance_data.size();
                 batch.instance_data.resize(data_offset + de.instance_size);
                 std::memcpy(batch.instance_data.data() + data_offset, de.instance_data, de.instance_size);
 
+                // Convention: first two floats in instance data are element-local position
                 float* inst = reinterpret_cast<float*>(batch.instance_data.data() + data_offset);
                 inst[0] += wx;
                 inst[1] += wy;
@@ -316,12 +322,15 @@ void Renderer::build_draw_calls()
     draw_calls_.clear();
 
     for (auto& batch : batches_) {
+
+        // Write instance data into the staging buffer
         uint64_t instances_addr =
             write_to_frame_buffer(batch.instance_data.data(), batch.instance_data.size());
         if (!instances_addr) {
             continue;
         }
 
+        // Resolve bindless texture index from the texture key
         uint32_t texture_id = 0;
         if (batch.texture_key != 0) {
             auto tit = texture_map_.find(batch.texture_key);
@@ -330,12 +339,14 @@ void Renderer::build_draw_calls()
             }
         }
 
+        // Build the DrawDataHeader (root struct the shader receives via push constant)
         DrawDataHeader header{};
         header.globals_address = globals_gpu_addr_;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
+        // Determine material data size (follows the header in the staging buffer)
         size_t mat_size = batch.material ? batch.material->gpu_data_size() : 0;
         if (mat_size > 0 && (mat_size % 16) != 0) {
             VELK_LOG(E,
@@ -345,6 +356,7 @@ void Renderer::build_draw_calls()
         }
         size_t total_size = sizeof(DrawDataHeader) + mat_size;
 
+        // Align write offset and check capacity
         write_offset_ = (write_offset_ + 15) & ~size_t(15);
         if (write_offset_ + total_size > frame_buffer_size_) {
             continue;
@@ -353,6 +365,7 @@ void Renderer::build_draw_calls()
         auto* dst = static_cast<uint8_t*>(frame_ptr_[frame_index_]) + write_offset_;
         uint64_t draw_data_addr = frame_gpu_base_[frame_index_] + write_offset_;
 
+        // Write header, then material params (if any) immediately after
         std::memcpy(dst, &header, sizeof(header));
         if (mat_size > 0) {
             if (failed(batch.material->write_gpu_data(dst + sizeof(DrawDataHeader), mat_size))) {
@@ -366,6 +379,7 @@ void Renderer::build_draw_calls()
             peak_usage_ = write_offset_;
         }
 
+        // Look up the backend pipeline handle from the pipeline key
         if (!pipeline_map_) {
             continue;
         }
@@ -374,6 +388,7 @@ void Renderer::build_draw_calls()
             continue;
         }
 
+        // Emit a DrawCall with the GPU address of the DrawDataHeader as root constant
         DrawCall call{};
         call.pipeline = pit->second;
         call.vertex_count = 4;
@@ -397,6 +412,7 @@ void Renderer::render()
             continue;
         }
 
+        // Handle surface resize
         auto sstate = read_state<ISurface>(entry.surface);
         if (sstate) {
             if (sstate->width != entry.cached_width || sstate->height != entry.cached_height) {
@@ -408,10 +424,12 @@ void Renderer::render()
             }
         }
 
+        // Consume scene changes since last frame
         auto state = scene->consume_state();
 
         bool has_changes = !state.redraw_list.empty() || !state.removed_list.empty();
 
+        // Evict removed elements from the cache
         for (auto& removed : state.removed_list) {
             auto* elem = interface_cast<IElement>(removed);
             if (elem) {
@@ -419,10 +437,12 @@ void Renderer::render()
             }
         }
 
+        // Rebuild draw commands for elements that changed
         for (auto* element : state.redraw_list) {
             rebuild_commands(element);
         }
 
+        // Upload dirty textures (e.g. glyph atlas updates)
         bool textures_uploaded = false;
         if (has_changes) {
             for (auto& [elem, cache] : element_cache_) {
@@ -454,6 +474,7 @@ void Renderer::render()
             }
         }
 
+        // Rebuild batches if anything changed
         if (has_changes || textures_uploaded) {
             entry.batches_dirty = true;
         }
@@ -463,9 +484,11 @@ void Renderer::render()
             entry.batches_dirty = false;
         }
 
+        // Prepare the staging buffer for this frame
         ensure_frame_buffer_capacity();
         write_offset_ = 0;
 
+        // Update frame globals (projection matrix, viewport dimensions)
         if (globals_ptr_ && sstate) {
             build_ortho_projection(globals_ptr_->projection,
                                    static_cast<float>(sstate->width),
@@ -476,8 +499,10 @@ void Renderer::render()
             globals_ptr_->viewport[3] = 1.0f / static_cast<float>(sstate->height);
         }
 
+        // Write all batches to the staging buffer and produce DrawCall structs
         build_draw_calls();
 
+        // Submit to the backend
         RENDER_LOG("render: submitting %zu draw calls", draw_calls_.size());
 
         backend_->begin_frame(entry.surface_id);

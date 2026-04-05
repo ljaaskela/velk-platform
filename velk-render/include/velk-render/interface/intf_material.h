@@ -30,7 +30,12 @@ public:
     /** @brief Returns the size in bytes of this material's GPU data (after DrawDataHeader). */
     virtual size_t gpu_data_size() const = 0;
 
-    /** @brief Writes material GPU data into @p out. Returns Fail on error. */
+    /**
+     * @brief Writes material GPU data into the staging buffer.
+     * @param out  Destination buffer (immediately after DrawDataHeader).
+     * @param size Buffer size in bytes (equals gpu_data_size()).
+     * @return ReturnValue::Success on success, ReturnValue::Fail on error.
+     */
     virtual ReturnValue write_gpu_data(void* out, size_t size) const = 0;
 };
 

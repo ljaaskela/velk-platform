@@ -35,7 +35,11 @@ public:
     void set_pipeline_handle(uint64_t handle) override { handle_ = handle; }
 
 protected:
-    /// Compile from source on first call, cache the pipeline handle.
+    /**
+     * @brief Compiles shaders from source on first call and caches the pipeline handle.
+     * @param fragment_source Fragment shader GLSL source.
+     * @param vertex_source  Vertex shader GLSL source (empty = use registered default).
+     */
     uint64_t ensure_pipeline(IRenderContext& ctx, string_view fragment_source, string_view vertex_source = {})
     {
         if (!has_pipeline_handle()) {
@@ -44,7 +48,11 @@ protected:
         return handle_;
     }
 
-    /// Create from pre-compiled shaders. Nullptr uses the registered default.
+    /**
+     * @brief Creates a pipeline from pre-compiled shaders on first call and caches the handle.
+     * @param fragment Compiled fragment shader (nullptr = use registered default).
+     * @param vertex   Compiled vertex shader (nullptr = use registered default).
+     */
     uint64_t ensure_pipeline(IRenderContext& ctx, const IShader::Ptr& fragment,
                              const IShader::Ptr& vertex = {})
     {
@@ -54,21 +62,29 @@ protected:
         return handle_;
     }
 
-    /// Returns true if pipeline handle has already been created
+    /** @brief Returns true if the pipeline handle has already been created. */
     bool has_pipeline_handle() const { return handle_ != 0; }
 
-    /// Writes a typed material params struct into the GPU data buffer.
-    /// Zero-initializes the struct, then calls the provided function to fill it.
+    /**
+     * @brief Writes a typed material params struct into the GPU data buffer.
+     *
+     * Zero-initializes the struct, then calls @p fn to fill it.
+     * Returns ReturnValue::Fail if @p size does not match sizeof(Params).
+     *
+     * @param out  Destination buffer (after DrawDataHeader).
+     * @param size Buffer size in bytes.
+     * @param fn   Callable that receives Params& to populate.
+     */
     template <typename Params, typename Fn>
     static ReturnValue set_material(void* out, size_t size, Fn&& fn)
     {
-        if (size != sizeof(Params)) {
-            return ReturnValue::Fail;
+        if (size == sizeof(Params)) {
+            auto& p = *static_cast<Params*>(out);
+            p = {};
+            fn(p);
+            return ReturnValue::Success;
         }
-        auto& p = *static_cast<Params*>(out);
-        p = {};
-        fn(p);
-        return ReturnValue::Success;
+        return ReturnValue::Fail;
     }
 
 private:

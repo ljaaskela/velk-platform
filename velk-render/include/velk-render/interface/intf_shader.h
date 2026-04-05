@@ -9,25 +9,32 @@
 
 namespace velk {
 
-/// Shader compilation stage.
+/** @brief Shader compilation stage. */
 enum class ShaderStage : uint8_t
 {
     Vertex,
     Fragment,
 };
 
-/// A compiled shader handle. Owns the compiled bytecode and destroys it
-/// automatically when the last reference is released.
+/**
+ * @brief A compiled shader handle.
+ *
+ * Owns the compiled bytecode and destroys it automatically when the last
+ * reference is released. Created via IRenderContext::compile_shader().
+ */
 class IShader : public Interface<IShader>
 {
 public:
-    /// Initializes the shader with compiled bytecode. Takes ownership via move.
+    /**
+     * @brief Initializes the shader with compiled bytecode.
+     * @param bytecode Compiled shader data (moved into the shader).
+     */
     virtual void init(vector<uint32_t> bytecode) = 0;
 
-    /// Returns the compiled shader bytecode.
+    /** @brief Returns the compiled shader bytecode. */
     virtual array_view<const uint32_t> get_data() const = 0;
 
-    /// Returns the size of bytecode data.
+    /** @brief Returns the size of the bytecode in bytes. */
     virtual size_t get_data_size() const = 0;
 };
 

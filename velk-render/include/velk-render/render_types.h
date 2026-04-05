@@ -43,7 +43,10 @@ struct DrawEntry
     uint8_t instance_data[kMaxInstanceDataSize]{}; ///< Packed instance data for the GPU.
     uint32_t instance_size{};                      ///< Bytes used in instance_data.
 
-    /// Pack a typed instance struct into instance_data.
+    /**
+     * @brief Packs a typed instance struct into instance_data.
+     * @tparam T Instance struct type (e.g. RectInstance, TextInstance).
+     */
     template <typename T>
     void set_instance(const T& inst)
     {
@@ -52,10 +55,14 @@ struct DrawEntry
         instance_size = sizeof(T);
     }
 
-    /// Access instance_data as a typed struct.
+    /**
+     * @brief Accesses instance_data as a typed struct.
+     * @tparam T Instance struct type to interpret the data as.
+     */
     template <typename T>
     T& as_instance() { return *reinterpret_cast<T*>(instance_data); }
 
+    /** @brief Const overload of as_instance(). */
     template <typename T>
     const T& as_instance() const { return *reinterpret_cast<const T*>(instance_data); }
 };
