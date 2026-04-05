@@ -54,11 +54,11 @@ struct TextInstance {
     vec2 uv_max;
 };
 
-layout(buffer_reference, std430) readonly buffer RectInstances {
+layout(buffer_reference, std430) readonly buffer RectInstanceData {
     RectInstance data[];
 };
 
-layout(buffer_reference, std430) readonly buffer TextInstances {
+layout(buffer_reference, std430) readonly buffer TextInstanceData {
     TextInstance data[];
 };
 )";

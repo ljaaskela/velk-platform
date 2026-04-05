@@ -2,8 +2,7 @@
 
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
-
-#include <cstring>
+#include <velk-ui/instance_types.h>
 
 namespace velk::ui {
 
@@ -87,13 +86,13 @@ void TextVisual::reshape()
         entry.pipeline_key = PipelineKey::Text;
         entry.bounds = {glyph_x, glyph_y, glyph_w, glyph_h};
 
-        // Pack textured instance data: {x, y, w, h, r, g, b, a, u0, v0, u1, v1}
-        // Color is filled at draw time in get_draw_entries; store UVs here.
-        float data[] = {glyph_x, glyph_y, glyph_w, glyph_h,
-                        0.f, 0.f, 0.f, 0.f,
-                        u0, v0, u1, v1};
-        std::memcpy(entry.instance_data, data, sizeof(data));
-        entry.instance_size = sizeof(data);
+        // Color is filled at draw time in get_draw_entries.
+        entry.set_instance(TextInstance{
+            {glyph_x, glyph_y},
+            {glyph_w, glyph_h},
+            color::transparent(),
+            {u0, v0},
+            {u1, v1}});
 
         cached_entries_.push_back(entry);
         cursor_x += gp.advance.x;
@@ -136,14 +135,10 @@ vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
         out.bounds.x += offset_x;
         out.bounds.y += offset_y;
 
-        // Update instance data: offset position (first 2 floats) and fill color (floats 4-7)
-        float* inst = reinterpret_cast<float*>(out.instance_data);
-        inst[0] += offset_x;
-        inst[1] += offset_y;
-        inst[4] = col.r;
-        inst[5] = col.g;
-        inst[6] = col.b;
-        inst[7] = col.a;
+        auto& inst = out.as_instance<TextInstance>();
+        inst.pos.x += offset_x;
+        inst.pos.y += offset_y;
+        inst.col = col;
 
         // Texture key: use this TextureProvider's address as key (matches renderer's upload key)
         out.texture_key = reinterpret_cast<uint64_t>(static_cast<const ITextureProvider*>(this));

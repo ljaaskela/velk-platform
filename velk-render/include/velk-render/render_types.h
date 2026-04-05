@@ -4,6 +4,7 @@
 #include <velk/api/math_types.h>
 
 #include <cstdint>
+#include <cstring>
 
 namespace velk {
 
@@ -41,6 +42,22 @@ struct DrawEntry
     rect bounds{};                                 ///< Element-local bounds.
     uint8_t instance_data[kMaxInstanceDataSize]{}; ///< Packed instance data for the GPU.
     uint32_t instance_size{};                      ///< Bytes used in instance_data.
+
+    /// Pack a typed instance struct into instance_data.
+    template <typename T>
+    void set_instance(const T& inst)
+    {
+        static_assert(sizeof(T) <= kMaxInstanceDataSize, "Instance data exceeds DrawEntry capacity");
+        std::memcpy(instance_data, &inst, sizeof(T));
+        instance_size = sizeof(T);
+    }
+
+    /// Access instance_data as a typed struct.
+    template <typename T>
+    T& as_instance() { return *reinterpret_cast<T*>(instance_data); }
+
+    template <typename T>
+    const T& as_instance() const { return *reinterpret_cast<const T*>(instance_data); }
 };
 
 /// Selects the GPU backend.

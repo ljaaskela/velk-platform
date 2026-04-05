@@ -12,14 +12,15 @@ There are two ways to create materials:
 Shader includes are registered via `IRenderContext::register_shader_include()`. Any module can register its own include, and shaders reference them with `#include "name"`.
 
 **velk.glsl** (provided by velk-render):
-- `Globals` — frame globals (projection matrix, viewport)
+- `GlobalData` — frame globals (projection matrix, viewport)
 - `Ptr64` — dummy pointer type for skipping 8-byte fields in fragment shaders
 - `velk_unit_quad(vertex_index)` — unit quad position from triangle strip index
+- `VELK_DRAW_DATA(InstancesType)` — standard DrawData header fields with padding
 - Buffer reference extensions
 
 **velk-ui.glsl** (provided by velk-ui):
 - `RectInstance`, `TextInstance` — standard 2D UI instance data structs
-- `RectInstances`, `TextInstances` — buffer_reference arrays
+- `RectInstanceData`, `TextInstanceData` — buffer_reference arrays
 
 Other modules can register their own includes (e.g. a 3D module could register `velk-3d.glsl` with mesh instance types).
 
@@ -27,7 +28,7 @@ A shader typically needs to declare its `DrawData` struct (header + material fie
 
 ## Application-defined materials (ext::Material)
 
-Use `ext::Material<T>` when you write both the shader and the material class. You define the GPU data struct, implement `gpu_data_size()` and `write_gpu_data()`, and the framework passes your data straight to the shader. This should be the default option for any shader code.
+Use `ext::Material<T>` to write both the shader and the material class. Define the GPU data struct, implement `gpu_data_size()` and `write_gpu_data()`, and the framework passes the data straight to the shader. This should be the default option for any shader code.
 
 ### C++ side
 
@@ -77,12 +78,7 @@ The `ext::Material` base provides `ensure_pipeline()` which lazily compiles the 
 #include "velk.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    RectInstances instances;
-    uint texture_id;
-    uint instance_count;
-    uint _pad0;
-    uint _pad1;
+    VELK_DRAW_DATA(RectInstanceData)
     // Material data starts here (offset 32), matching MyParams
     vec4 color;
     float intensity;
@@ -95,9 +91,9 @@ layout(location = 0) out vec2 v_local_uv;
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
     v_local_uv = q;
 }
 ```
@@ -108,12 +104,7 @@ void main()
 #include "velk.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Ptr64 globals;
-    Ptr64 instances;
-    uint texture_id;
-    uint instance_count;
-    uint _pad0;
-    uint _pad1;
+    VELK_DRAW_DATA(Ptr64)
     vec4 color;
     float intensity;
 };
@@ -145,12 +136,7 @@ constexpr velk::string_view my_frag = R"(
 #include "velk.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Ptr64 globals;
-    Ptr64 instances;
-    uint texture_id;
-    uint instance_count;
-    uint _pad0;
-    uint _pad1;
+    VELK_DRAW_DATA(Ptr64)
     vec4 tint;
     float speed;
 };
@@ -204,8 +190,8 @@ Both material types follow the same GPU data layout. The shader receives a point
 
 | Offset | Field | Type | Size |
 |--------|-------|------|------|
-| 0 | globals | buffer_reference (pointer) | 8 |
-| 8 | instances | buffer_reference (pointer) | 8 |
+| 0 | global_data | buffer_reference (pointer) | 8 |
+| 8 | instance_data | buffer_reference (pointer) | 8 |
 | 16 | texture_id | uint | 4 |
 | 20 | instance_count | uint | 4 |
 | 24 | _pad0 | uint | 4 |

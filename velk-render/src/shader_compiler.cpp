@@ -17,7 +17,7 @@ const char* velk_glsl = R"(
 #extension GL_EXT_buffer_reference2 : require
 
 // Frame globals: projection matrix and viewport dimensions.
-layout(buffer_reference, std430) readonly buffer Globals {
+layout(buffer_reference, std430) readonly buffer GlobalData {
     mat4 projection;
     vec4 viewport; // width, height, 1/width, 1/height
 };
@@ -32,6 +32,20 @@ vec2 velk_unit_quad(int vertex_index)
 {
     return vec2(vertex_index & 1, vertex_index >> 1);
 }
+
+// Standard DrawData header fields. Use inside a buffer_reference block:
+//   layout(buffer_reference, std430) readonly buffer DrawData {
+//       VELK_DRAW_DATA(RectInstanceData)
+//       vec4 my_material_param;  // optional material fields follow
+//   };
+// Padding ensures material data starts at the correct std430 alignment.
+#define VELK_DRAW_DATA(InstancesType) \
+    GlobalData global_data;           \
+    InstancesType instance_data;      \
+    uint texture_id;                  \
+    uint instance_count;              \
+    uint _velk_pad0;                  \
+    uint _velk_pad1;
 )";
 
 class VelkIncluder : public shaderc::CompileOptions::IncluderInterface

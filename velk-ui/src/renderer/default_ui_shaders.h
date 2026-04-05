@@ -6,7 +6,7 @@
 namespace velk {
 
 // Built-in shaders use:
-//   #include "velk.glsl"    - framework types (Globals, Ptr64, velk_unit_quad)
+//   #include "velk.glsl"    - framework types (GlobalData, Ptr64, velk_unit_quad, VELK_DRAW_DATA)
 //   #include "velk-ui.glsl" - UI instance types (RectInstance, TextInstance)
 
 // ============================================================================
@@ -19,10 +19,7 @@ namespace velk {
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    RectInstances instances;
-    uint texture_id;
-    uint instance_count;
+    VELK_DRAW_DATA(RectInstanceData)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -32,9 +29,9 @@ layout(location = 0) out vec4 v_color;
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
 }
 )";
@@ -61,10 +58,7 @@ void main()
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    TextInstances instances;
-    uint texture_id;
-    uint instance_count;
+    VELK_DRAW_DATA(TextInstanceData)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -76,9 +70,9 @@ layout(location = 2) flat out uint v_texture_id;
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    TextInstance inst = root.instances.data[gl_InstanceIndex];
+    TextInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
     v_uv = mix(inst.uv_min, inst.uv_max, q);
     v_texture_id = root.texture_id;
@@ -113,10 +107,7 @@ void main()
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    RectInstances instances;
-    uint texture_id;
-    uint instance_count;
+    VELK_DRAW_DATA(RectInstanceData)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -128,9 +119,9 @@ layout(location = 2) flat out vec2 v_size;
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
     v_local_uv = q;
     v_size = inst.size;

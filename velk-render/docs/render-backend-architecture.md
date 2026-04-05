@@ -166,19 +166,68 @@ VELK_GPU_STRUCT DrawDataHeader
 ```
 
 ```glsl
-// GLSL (shader declares this per draw type)
+// GLSL (velk.glsl provides the VELK_DRAW_DATA macro)
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;              // buffer_reference, 8 bytes -> globals_address
-    RectInstances instances;      // buffer_reference, 8 bytes -> instances_address
-    uint texture_id;              // 4 bytes
-    uint instance_count;          // 4 bytes
+    VELK_DRAW_DATA(RectInstanceData)       // globals, instances, texture_id, count, padding
+    vec4 start_color;                   // optional material params follow
 };
 
 layout(push_constant) uniform PC { DrawData root; };
 ```
 
-The C++ side writes addresses and indices. The GLSL side declares the same fields as `buffer_reference` types, so dereferencing `root.globals` follows the GPU pointer to `FrameGlobals`. One pointer dereference for globals, one for instance data. No descriptor binding, no uniform uploads, no vertex input.
+The `VELK_DRAW_DATA` macro expands to the standard header fields (globals pointer, instances pointer, texture id, instance count, and padding to 32 bytes). Material-specific fields follow after the macro. The C++ side writes addresses and indices; the GLSL side declares the same fields as `buffer_reference` types, so dereferencing `root.global_data` follows the GPU pointer to `FrameGlobals`. No descriptor binding, no uniform uploads, no vertex input.
+
+For fragment shaders that only read material parameters, use `Ptr64` as the instances type to skip over the pointer fields without declaring instance types:
+
+```glsl
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(Ptr64)
+    vec4 start_color;
+};
+```
+
+### Instance data
+
+The `instances_address` in the header points to an array of per-instance structs. Each visual type defines a C++ struct (in `instance_types.h`) that mirrors the GLSL layout:
+
+```cpp
+// C++ (instance_types.h)
+
+struct RectInstance
+{
+    vec2 pos;
+    vec2 size;
+    color col;
+};
+```
+
+```glsl
+// GLSL (declared by the shader or provided by velk-ui.glsl)
+
+struct RectInstance {
+    vec2 pos;
+    vec2 size;
+    vec4 color;
+};
+
+layout(buffer_reference, std430) readonly buffer RectInstanceData {
+    RectInstance data[];
+};
+```
+
+Visuals pack instance data using the C++ struct via `DrawEntry::set_instance()`:
+
+```cpp
+entry.set_instance(RectInstance{
+    {bounds.x, bounds.y},
+    {bounds.width, bounds.height},
+    state->color});
+```
+
+The renderer concatenates these structs into a GPU buffer and writes the buffer's address into `DrawDataHeader::instances_address`. The shader reads them back through the matching GLSL struct. The `static_assert` on each C++ struct's size ensures the layouts stay in sync.
+
+Material parameters use the same pattern: a C++ struct (`VELK_GPU_STRUCT`) mirrors the GLSL layout and is written via `write_gpu_data()`. See [Materials](./materials.md) for details.
 
 ### Shader includes
 
@@ -186,8 +235,8 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 
 | Include | Source | Provides |
 |--|--|--|
-| `velk.glsl` | velk-render (always available) | `Globals` buffer reference, `Ptr64` dummy pointer, `velk_unit_quad()`, buffer_reference extensions |
-| `velk-ui.glsl` | velk-ui (registered by the UI renderer) | `RectInstance`, `TextInstance`, `RectInstances`, `TextInstances` |
+| `velk.glsl` | velk-render (always available) | `GlobalData` buffer reference, `Ptr64` dummy pointer, `velk_unit_quad()`, `VELK_DRAW_DATA()`, buffer_reference extensions |
+| `velk-ui.glsl` | velk-ui (registered by the UI renderer) | `RectInstance`, `TextInstance`, `RectInstanceData`, `TextInstanceData` |
 
 Modules can register additional includes via `IRenderContext::register_shader_include()`.
 
@@ -199,10 +248,7 @@ With these includes, a complete UI vertex shader only needs its `DrawData` layou
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    RectInstances instances;
-    uint texture_id;
-    uint instance_count;
+    VELK_DRAW_DATA(RectInstanceData)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -210,8 +256,8 @@ layout(push_constant) uniform PC { DrawData root; };
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instances.data[gl_InstanceIndex];
-    gl_Position = root.globals.projection * vec4(inst.pos + q * inst.size, 0, 1);
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
+    gl_Position = root.global_data.projection * vec4(inst.pos + q * inst.size, 0, 1);
 }
 ```
 
@@ -250,7 +296,7 @@ The shader fetches vertices by index:
 void main() {
     uint idx = root.indices.i[gl_VertexIndex];
     Vertex v = root.vertices.v[idx];
-    gl_Position = root.globals.projection * inst.transform * vec4(v.position, 1);
+    gl_Position = root.global_data.projection * inst.transform * vec4(v.position, 1);
 }
 ```
 
@@ -355,7 +401,7 @@ struct RectInstance {  // value type, 32 bytes
 };
 ```
 
-The rule: use `buffer_reference` only for types that represent actual GPU pointers (DrawData, Globals, instance buffer containers). Data that lives inside those buffers is plain structs.
+The rule: use `buffer_reference` only for types that represent actual GPU pointers (DrawData, GlobalData, instance buffer containers). Data that lives inside those buffers is plain structs.
 
 ### std430 alignment and the DrawDataHeader
 

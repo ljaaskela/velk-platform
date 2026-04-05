@@ -22,12 +22,7 @@ constexpr string_view gradient_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Globals globals;
-    RectInstances instances;
-    uint texture_id;
-    uint instance_count;
-    uint _pad0;
-    uint _pad1;
+    VELK_DRAW_DATA(RectInstanceData)
     vec4 start_color;
     vec4 end_color;
     float angle;
@@ -40,9 +35,9 @@ layout(location = 0) out vec2 v_local_uv;
 void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instances.data[gl_InstanceIndex];
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
     v_local_uv = q;
 }
 )";
@@ -52,12 +47,7 @@ constexpr string_view gradient_fragment_src = R"(
 #include "velk.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    Ptr64 globals;
-    Ptr64 instances;
-    uint texture_id;
-    uint instance_count;
-    uint _pad0;
-    uint _pad1;
+    VELK_DRAW_DATA(Ptr64)
     vec4 start_color;
     vec4 end_color;
     float angle;
