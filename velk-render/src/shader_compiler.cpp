@@ -25,6 +25,13 @@ layout(buffer_reference, std430) readonly buffer Globals {
 // Dummy pointer type for fragment shaders that need to skip over
 // 8-byte buffer_reference fields in the DrawData header.
 layout(buffer_reference, std430) readonly buffer Ptr64 { uint _dummy; };
+
+// Unit quad vertex position from a triangle strip vertex index.
+// Returns (0,0), (1,0), (0,1), (1,1) for indices 0..3.
+vec2 velk_unit_quad(int vertex_index)
+{
+    return vec2(vertex_index & 1, vertex_index >> 1);
+}
 )";
 
 class VelkIncluder : public shaderc::CompileOptions::IncluderInterface

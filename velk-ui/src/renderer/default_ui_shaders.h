@@ -6,8 +6,8 @@
 namespace velk {
 
 // Built-in shaders use:
-//   #include "velk.glsl"    - framework types (Globals, Ptr64)
-//   #include "velk-ui.glsl" - UI instance types (RectInstance, TextInstance, kQuad)
+//   #include "velk.glsl"    - framework types (Globals, Ptr64, velk_unit_quad)
+//   #include "velk-ui.glsl" - UI instance types (RectInstance, TextInstance)
 
 // ============================================================================
 // Rect
@@ -31,7 +31,7 @@ layout(location = 0) out vec4 v_color;
 
 void main()
 {
-    vec2 q = kQuad[gl_VertexIndex];
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instances.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
     gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
@@ -75,7 +75,7 @@ layout(location = 2) flat out uint v_texture_id;
 
 void main()
 {
-    vec2 q = kQuad[gl_VertexIndex];
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     TextInstance inst = root.instances.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
     gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
@@ -127,7 +127,7 @@ layout(location = 2) flat out vec2 v_size;
 
 void main()
 {
-    vec2 q = kQuad[gl_VertexIndex];
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instances.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
     gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);

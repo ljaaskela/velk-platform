@@ -14,12 +14,12 @@ Shader includes are registered via `IRenderContext::register_shader_include()`. 
 **velk.glsl** (provided by velk-render):
 - `Globals` — frame globals (projection matrix, viewport)
 - `Ptr64` — dummy pointer type for skipping 8-byte fields in fragment shaders
+- `velk_unit_quad(vertex_index)` — unit quad position from triangle strip index
 - Buffer reference extensions
 
 **velk-ui.glsl** (provided by velk-ui):
 - `RectInstance`, `TextInstance` — standard 2D UI instance data structs
 - `RectInstances`, `TextInstances` — buffer_reference arrays
-- `kQuad[4]` — triangle strip quad positions
 
 Other modules can register their own includes (e.g. a 3D module could register `velk-3d.glsl` with mesh instance types).
 
@@ -94,7 +94,7 @@ layout(location = 0) out vec2 v_local_uv;
 
 void main()
 {
-    vec2 q = kQuad[gl_VertexIndex];
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instances.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
     gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);

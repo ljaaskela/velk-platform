@@ -140,18 +140,7 @@ That said, this can be improved in the future by caching parts of the staging bu
 
 ### The DrawDataHeader
 
-```cpp
-struct DrawDataHeader
-{
-    uint64_t globals_address;     // GPU pointer to FrameGlobals
-    uint64_t instances_address;   // GPU pointer to instance array
-    uint32_t texture_id;          // bindless texture index (0 = none)
-    uint32_t instance_count;
-    uint32_t _pad[2];             // pad to 32 bytes for std430 alignment
-};
-```
-
-This is the root of the shader's data graph:
+The DrawDataHeader is the root of the shader's data graph. The push constant carries a single GPU pointer to it, and from there the shader can reach everything it needs:
 
 ```mermaid
 graph LR
@@ -162,32 +151,52 @@ graph LR
     DDH -->|inline| M["Material Params<br/><i>optional</i>"]
 ```
 
-From this single pointer, the shader can reach:
+The C++ struct and the shader's `buffer_reference` layout mirror each other:
 
-1. **Frame globals** (projection matrix, viewport size) via `globals_address`
-2. **Instance data** (per-instance position, size, color) via `instances_address`
-3. **Texture** via `texture_id` (index into the bindless array)
-4. **Material parameters** (if any) which follow inline after the header
+```cpp
+// C++ (gpu_data.h)
 
-### Shader side
-
-The shader declares a matching layout using `buffer_reference`:
+VELK_GPU_STRUCT DrawDataHeader
+{
+    uint64_t globals_address;
+    uint64_t instances_address;
+    uint32_t texture_id;
+    uint32_t instance_count;
+};
+```
 
 ```glsl
-layout(buffer_reference, std430) readonly buffer Globals {
-    mat4 projection;
-    vec4 viewport;
+// GLSL (shader declares this per draw type)
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    Globals globals;              // buffer_reference, 8 bytes -> globals_address
+    RectInstances instances;      // buffer_reference, 8 bytes -> instances_address
+    uint texture_id;              // 4 bytes
+    uint instance_count;          // 4 bytes
 };
 
-struct RectInstance {
-    vec2 pos;
-    vec2 size;
-    vec4 color;
-};
+layout(push_constant) uniform PC { DrawData root; };
+```
 
-layout(buffer_reference, std430) readonly buffer RectInstances {
-    RectInstance data[];
-};
+The C++ side writes addresses and indices. The GLSL side declares the same fields as `buffer_reference` types, so dereferencing `root.globals` follows the GPU pointer to `FrameGlobals`. One pointer dereference for globals, one for instance data. No descriptor binding, no uniform uploads, no vertex input.
+
+### Shader includes
+
+The shader compiler resolves `#include` directives against built-in virtual include files. Two are provided:
+
+| Include | Source | Provides |
+|--|--|--|
+| `velk.glsl` | velk-render (always available) | `Globals` buffer reference, `Ptr64` dummy pointer, `velk_unit_quad()`, buffer_reference extensions |
+| `velk-ui.glsl` | velk-ui (registered by the UI renderer) | `RectInstance`, `TextInstance`, `RectInstances`, `TextInstances` |
+
+Modules can register additional includes via `IRenderContext::register_shader_include()`.
+
+With these includes, a complete UI vertex shader only needs its `DrawData` layout and `main()`:
+
+```glsl
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
     Globals globals;
@@ -197,19 +206,14 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 };
 
 layout(push_constant) uniform PC { DrawData root; };
-```
 
-The push constant is a single `DrawData` value, which is a `buffer_reference` type (8 bytes, a GPU pointer). The shader dereferences it:
-
-```glsl
-void main() {
-    vec2 q = kQuad[gl_VertexIndex];
+void main()
+{
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instances.data[gl_InstanceIndex];
     gl_Position = root.globals.projection * vec4(inst.pos + q * inst.size, 0, 1);
 }
 ```
-
-One pointer dereference for globals, one for instance data. No descriptor binding, no uniform uploads, no vertex input. The shader reads what it needs from where it needs it.
 
 ## Geometry Without Geometry Objects
 
@@ -217,12 +221,10 @@ There is no geometry API. Vertex data, index data, instance data, and uniform da
 
 ### 2D UI: Procedural quads
 
-Built-in UI visuals don't use geometry buffers at all. The vertex shader generates a quad from `gl_VertexIndex`:
+Built-in UI visuals don't use geometry buffers at all. The vertex shader generates a unit quad from `gl_VertexIndex` using `velk_unit_quad()` (provided by `velk.glsl`):
 
 ```glsl
-const vec2 kQuad[4] = vec2[4](
-    vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 1)
-);
+vec2 q = velk_unit_quad(gl_VertexIndex); // (0,0), (1,0), (0,1), (1,1)
 ```
 
 Four vertices for one quad. Instance data provides position and size. The draw call is `vertex_count=4, instance_count=N`.
@@ -369,20 +371,20 @@ When writing custom materials or draw data, the CPU-side struct layout must matc
 
 The `DrawDataHeader` contains two 8-byte pointers and two 4-byte uints, totaling 24 bytes. If material data containing a `vec4` follows immediately, the shader pads the `vec4` to offset 32 (16-byte alignment), but the CPU would write it at offset 24.
 
-To prevent this mismatch, `DrawDataHeader` is padded to 32 bytes:
+To prevent this mismatch, `DrawDataHeader` uses `VELK_GPU_STRUCT` (which applies `alignas(16)`) to pad the struct to 32 bytes:
 
 ```cpp
-struct DrawDataHeader
+VELK_GPU_STRUCT DrawDataHeader
 {
     uint64_t globals_address;     // 8 bytes, offset 0
     uint64_t instances_address;   // 8 bytes, offset 8
     uint32_t texture_id;          // 4 bytes, offset 16
     uint32_t instance_count;      // 4 bytes, offset 20
-    uint32_t _pad[2];             // 8 bytes, offset 24 (pad to 32)
+                                  // 8 bytes padding (compiler-inserted)
 };
 ```
 
-This ensures any material data that follows starts at a 16-byte boundary. When writing custom draw data, keep this alignment in mind: if your data follows a `DrawDataHeader`, your first field is at offset 32.
+This ensures any material data that follows starts at a 16-byte boundary. Custom material structs should also use `VELK_GPU_STRUCT` so the compiler handles padding automatically. If your data follows a `DrawDataHeader`, your first field is at offset 32.
 
 ### Color space
 

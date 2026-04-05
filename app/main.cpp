@@ -197,7 +197,7 @@ layout(location = 0) out vec2 v_local_uv;
 
 void main()
 {
-    vec2 q = kQuad[gl_VertexIndex];
+    vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instances.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
     gl_Position = root.globals.projection * vec4(world_pos, 0.0, 1.0);
