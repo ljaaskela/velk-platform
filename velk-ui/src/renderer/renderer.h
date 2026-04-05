@@ -43,7 +43,7 @@ private:
     struct ElementCache
     {
         vector<VisualCommands> visuals;
-        ITextureProvider::Ptr texture_provider;
+        vector<ITextureProvider::Ptr> texture_providers;
     };
 
     struct ViewEntry
@@ -96,7 +96,6 @@ private:
 
     std::unordered_map<uint64_t, TextureId> texture_map_;
 
-    std::unordered_map<uint64_t, size_t> batch_index_;
     vector<Batch> batches_;
     vector<DrawCall> draw_calls_;
 };

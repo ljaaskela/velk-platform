@@ -17,12 +17,9 @@ namespace velk::ui {
 
 void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport)
 {
-    auto root = interface_pointer_cast<IElement>(hierarchy.root());
-    if (!root) {
-        return;
+    if (auto root = interface_pointer_cast<IElement>(hierarchy.root())) {
+        solve_element(hierarchy, root, viewport, mat4::identity());
     }
-
-    solve_element(hierarchy, root, viewport, mat4::identity());
 }
 
 void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,

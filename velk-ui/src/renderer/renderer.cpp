@@ -143,7 +143,7 @@ void Renderer::rebuild_commands(IElement* element)
 {
     auto& cache = element_cache_[element];
     cache.visuals.clear();
-    cache.texture_provider = nullptr;
+    cache.texture_providers.clear();
 
     auto* storage = interface_cast<IObjectStorage>(element);
     if (!storage) {
@@ -157,94 +157,112 @@ void Renderer::rebuild_commands(IElement* element)
 
     rect local_rect = {0, 0, state->size.width, state->size.height};
 
-    // Walk the element's attachments looking for visuals and texture providers
+    // Walk the element's attachments looking for visuals
     for (size_t i = 0; i < storage->attachment_count(); ++i) {
         auto att = storage->get_attachment(i);
         auto* visual = interface_cast<IVisual>(att);
-        if (visual) {
-            VisualCommands vc;
-            vc.entries = visual->get_draw_entries(local_rect);
+        if (!visual) {
+            continue;
+        }
 
-            // If the visual has a paint (material), resolve its pipeline
-            auto vstate = read_state<IVisual>(visual);
-            if (render_ctx_ && vstate && vstate->paint) {
-                auto mat = vstate->paint.get<IMaterial>();
-                if (mat) {
-                    uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
-                    if (handle) {
-                        vc.pipeline_override = handle;
-                        vc.material = std::move(mat);
-                    }
+        VisualCommands vc;
+        vc.entries = visual->get_draw_entries(local_rect);
+
+        // If the visual has a paint (material), resolve its pipeline
+        auto vstate = read_state<IVisual>(visual);
+        if (render_ctx_ && vstate && vstate->paint) {
+            auto mat = vstate->paint.get<IMaterial>();
+            if (mat) {
+                uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
+                if (handle) {
+                    vc.pipeline_override = handle;
+                    vc.material = std::move(mat);
                 }
             }
+        }
 
-            cache.visuals.push_back(std::move(vc));
-        }
-        auto tp = interface_pointer_cast<ITextureProvider>(att);
+        // If the visual provides a texture (e.g. text visual with a font atlas)
+        auto tp = visual->get_texture_provider();
         if (tp) {
-            cache.texture_provider = std::move(tp);
+            cache.texture_providers.push_back(std::move(tp));
         }
+
+        cache.visuals.push_back(std::move(vc));
     }
 }
 
 void Renderer::rebuild_batches(const SceneState& state, const ViewEntry& entry)
 {
     batches_.clear();
-    batch_index_.clear();
 
     auto resolve_texture = [](const IMaterial::Ptr& material, uint64_t fallback) -> uint64_t {
         return material ? reinterpret_cast<uintptr_t>(material.get()) : fallback;
     };
 
+    // Multi-pass batching: emit visual[0] from all elements in depth-first order,
+    // then visual[1], etc. This groups same-pipeline draws together for batching.
+    //
+    // Correctness:
+    //   All of a parent's visuals draw before any child's visuals (depth-first).
+    //   Siblings don't overlap (layout guarantees it), so their order is free.
+    //   Within each pass, depth-first order is preserved, so parent before child holds.
+    //
+    // Within each pass, consecutive entries with the same batch key are merged.
+
+    size_t max_visuals = 0;
     for (auto& element : state.visual_list) {
-        auto* elem = element.get();
-        auto it = element_cache_.find(elem);
-        if (it == element_cache_.end()) {
-            continue;
+        auto it = element_cache_.find(element.get());
+        if (it != element_cache_.end()) {
+            max_visuals = std::max(max_visuals, it->second.visuals.size());
         }
+    }
 
-        auto& cache = it->second;
-        auto elem_state = read_state<IElement>(elem);
-        if (!elem_state) {
-            continue;
-        }
+    uint64_t last_bkey = 0;
 
-        // Extract world position from the element's transform matrix
-        float wx = elem_state->world_matrix(0, 3);
-        float wy = elem_state->world_matrix(1, 3);
+    for (size_t pass = 0; pass < max_visuals; ++pass) {
+        for (auto& element : state.visual_list) {
+            auto* elem = element.get();
+            auto it = element_cache_.find(elem);
+            if (it == element_cache_.end()) {
+                continue;
+            }
 
-        for (auto& vc : cache.visuals) {
+            auto& cache = it->second;
+            if (pass >= cache.visuals.size()) {
+                continue;
+            }
+
+            auto elem_state = read_state<IElement>(elem);
+            if (!elem_state) {
+                continue;
+            }
+
+            float wx = elem_state->world_matrix(0, 3);
+            float wy = elem_state->world_matrix(1, 3);
+
+            auto& vc = cache.visuals[pass];
             for (auto& de : vc.entries) {
-                // Use material pipeline if set, otherwise the visual's default
                 uint64_t pipeline = (vc.pipeline_override != 0) ? vc.pipeline_override : de.pipeline_key;
                 uint64_t texture = de.texture_key;
 
-                // Group draw entries by (pipeline, texture/material) into batches
                 uint64_t bkey = make_batch_key(pipeline, resolve_texture(vc.material, texture));
 
-                auto bit = batch_index_.find(bkey);
-                size_t batch_idx;
-                if (bit != batch_index_.end()) {
-                    batch_idx = bit->second;
-                } else {
-                    batch_idx = batches_.size();
-                    batch_index_[bkey] = batch_idx;
+                if (batches_.empty() || bkey != last_bkey) {
                     Batch batch;
                     batch.pipeline_key = pipeline;
                     batch.texture_key = texture;
                     batch.instance_stride = de.instance_size;
                     batch.material = vc.material;
                     batches_.push_back(std::move(batch));
+                    last_bkey = bkey;
                 }
 
-                // Append instance data to the batch and apply world position offset
-                auto& batch = batches_[batch_idx];
+                auto& batch = batches_.back();
 
                 auto data_offset = batch.instance_data.size();
                 batch.instance_data.resize(data_offset + de.instance_size);
                 std::memcpy(batch.instance_data.data() + data_offset, de.instance_data, de.instance_size);
 
-                // Convention: first two floats in instance data are element-local position
                 float* inst = reinterpret_cast<float*>(batch.instance_data.data() + data_offset);
                 inst[0] += wx;
                 inst[1] += wy;
@@ -449,8 +467,10 @@ void Renderer::render()
         bool textures_uploaded = false;
         if (has_changes) {
             for (auto& [elem, cache] : element_cache_) {
-                if (cache.texture_provider && cache.texture_provider->is_texture_dirty()) {
-                    auto& tp = cache.texture_provider;
+                for (auto& tp : cache.texture_providers) {
+                    if (!tp || !tp->is_texture_dirty()) {
+                        continue;
+                    }
                     uint32_t tw = tp->get_texture_width();
                     uint32_t th = tp->get_texture_height();
                     const uint8_t* pixels = tp->get_pixels();
@@ -551,7 +571,6 @@ void Renderer::shutdown()
 
     views_.clear();
     element_cache_.clear();
-    batch_index_.clear();
     batches_.clear();
     draw_calls_.clear();
     pipeline_map_ = nullptr;
