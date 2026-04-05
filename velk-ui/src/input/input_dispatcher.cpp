@@ -4,6 +4,8 @@
 #include <velk/interface/intf_object.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-ui/api/element.h>
+
 #ifdef VELK_INPUT_DEBUG
 #define INPUT_LOG(...) VELK_LOG(I, __VA_ARGS__)
 #else
@@ -15,26 +17,9 @@ namespace velk::ui::impl {
 namespace {
 
 /** @brief Returns the IInputTrait attached to an element, or nullptr. */
-IInputTrait* get_input_trait(const IElement::Ptr& element)
+IInputTrait::Ptr get_input_trait(const IElement::Ptr& element)
 {
-    if (!element) {
-        return nullptr;
-    }
-
-    auto* storage = interface_cast<IObjectStorage>(element);
-    if (!storage) {
-        return nullptr;
-    }
-
-    for (size_t i = 0; i < storage->attachment_count(); ++i) {
-        auto att = storage->get_attachment(i);
-        auto* trait = interface_cast<IInputTrait>(att);
-        if (trait) {
-            return trait;
-        }
-    }
-
-    return nullptr;
+    return Element(element).find_trait<IInputTrait>();
 }
 
 } // namespace
@@ -63,7 +48,7 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
     if (captured_ && pressed_) {
         ev.local_position = to_local(pressed_, ev.position);
 
-        auto* trait = get_input_trait(pressed_);
+        auto trait = get_input_trait(pressed_);
         if (trait) {
             trait->on_pointer_event(ev);
         }
@@ -140,7 +125,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
     build_ancestor_chain(focused_raw, chain);
 
     // Bubble: focused element first, then ancestors
-    auto* trait = get_input_trait(focused_raw);
+    auto trait = get_input_trait(focused_raw);
     if (trait) {
         InputResult r = trait->on_key_event(ev);
         if (r != InputResult::Ignored) {
@@ -149,7 +134,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
     }
 
     for (auto&& ancestor : chain) {
-        auto* at = get_input_trait(ancestor);
+        auto at = get_input_trait(ancestor);
         if (at) {
             InputResult r = at->on_key_event(ev);
             if (r != InputResult::Ignored) {
@@ -247,7 +232,7 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, const IElemen
         auto ancestor = ancestors[i - 1];
         event.local_position = to_local(ancestor, event.position);
 
-        auto* trait = get_input_trait(ancestor);
+        auto trait = get_input_trait(ancestor);
         InputResult r = trait->on_intercept(event);
         if (r != InputResult::Ignored) {
             // Ancestor stole the event; it becomes the new target
@@ -259,7 +244,7 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, const IElemen
 
     // Bubble pass: target first, then ancestors (parent to root)
     event.local_position = to_local(hit, event.position);
-    auto* hit_trait = get_input_trait(hit);
+    auto hit_trait = get_input_trait(hit);
     if (hit_trait) {
         InputResult r = hit_trait->on_pointer_event(event);
         if (r != InputResult::Ignored) {
@@ -269,7 +254,7 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, const IElemen
 
     for (auto&& ancestor : ancestors) {
         event.local_position = to_local(ancestor, event.position);
-        auto* trait = get_input_trait(ancestor);
+        auto trait = get_input_trait(ancestor);
         InputResult r = trait->on_pointer_event(event);
         if (r != InputResult::Ignored) {
             return r;
@@ -286,7 +271,7 @@ InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, const IElement:
 
     // Bubble pass: target first, then ancestors
     event.local_position = to_local(hit, event.position);
-    auto* hit_trait = get_input_trait(hit);
+    auto hit_trait = get_input_trait(hit);
     if (hit_trait) {
         InputResult r = hit_trait->on_scroll_event(event);
         if (r != InputResult::Ignored) {
@@ -296,7 +281,7 @@ InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, const IElement:
 
     for (auto&& ancestor : ancestors) {
         event.local_position = to_local(ancestor, event.position);
-        auto* trait = get_input_trait(ancestor);
+        auto trait = get_input_trait(ancestor);
         InputResult r = trait->on_scroll_event(event);
         if (r != InputResult::Ignored) {
             return r;
@@ -320,7 +305,7 @@ void InputDispatcher::update_hover(const IElement::Ptr& new_hover, const Pointer
     hovered_ = new_hover;
 
     if (old_hover) {
-        auto* trait = get_input_trait(old_hover);
+        auto trait = get_input_trait(old_hover);
         if (trait) {
             PointerEvent leave_ev = event;
             leave_ev.local_position = to_local(old_hover, event.position);
@@ -329,7 +314,7 @@ void InputDispatcher::update_hover(const IElement::Ptr& new_hover, const Pointer
     }
 
     if (new_hover) {
-        auto* trait = get_input_trait(new_hover);
+        auto trait = get_input_trait(new_hover);
         if (trait) {
             PointerEvent enter_ev = event;
             enter_ev.local_position = to_local(new_hover, event.position);
