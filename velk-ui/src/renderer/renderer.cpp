@@ -202,14 +202,15 @@ void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entr
         return material ? reinterpret_cast<uintptr_t>(material.get()) : fallback;
     };
 
-    for (auto* element : state.visual_list) {
-        auto it = element_cache_.find(element);
+    for (auto& element : state.visual_list) {
+        auto* elem = element.get();
+        auto it = element_cache_.find(elem);
         if (it == element_cache_.end()) {
             continue;
         }
 
         auto& cache = it->second;
-        auto elem_state = read_state<IElement>(element);
+        auto elem_state = read_state<IElement>(elem);
         if (!elem_state) {
             continue;
         }
@@ -431,10 +432,7 @@ void Renderer::render()
 
         // Evict removed elements from the cache
         for (auto& removed : state.removed_list) {
-            auto* elem = interface_cast<IElement>(removed);
-            if (elem) {
-                element_cache_.erase(elem);
-            }
+            element_cache_.erase(removed.get());
         }
 
         // Rebuild draw commands for elements that changed

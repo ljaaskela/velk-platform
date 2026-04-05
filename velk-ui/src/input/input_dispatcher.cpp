@@ -14,14 +14,27 @@ namespace velk::ui::impl {
 
 namespace {
 
-/** @brief Returns an IElement::Ptr from a raw IElement*, or empty if null. */
-IElement::Ptr to_ptr(IElement* elem)
+/** @brief Returns the IInputTrait attached to an element, or nullptr. */
+IInputTrait* get_input_trait(const IElement::Ptr& element)
 {
-    if (!elem) {
-        return {};
+    if (!element) {
+        return nullptr;
     }
-    auto* obj = interface_cast<IObject>(elem);
-    return obj ? obj->get_self<IElement>() : IElement::Ptr{};
+
+    auto* storage = interface_cast<IObjectStorage>(element);
+    if (!storage) {
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < storage->attachment_count(); ++i) {
+        auto att = storage->get_attachment(i);
+        auto* trait = interface_cast<IInputTrait>(att);
+        if (trait) {
+            return trait;
+        }
+    }
+
+    return nullptr;
 }
 
 } // namespace
@@ -48,10 +61,9 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
 
     // If we have a captured element, route directly to it
     if (captured_ && pressed_) {
-        auto* pressed_raw = pressed_.get();
-        ev.local_position = to_local(pressed_raw, ev.position);
+        ev.local_position = to_local(pressed_, ev.position);
 
-        auto* trait = get_input_trait(pressed_raw);
+        auto* trait = get_input_trait(pressed_);
         if (trait) {
             trait->on_pointer_event(ev);
         }
@@ -63,12 +75,12 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
         }
 
         // Update hover even while captured
-        IElement* current_hover = hit_test(ev.position);
+        auto current_hover = hit_test(ev.position);
         update_hover(current_hover, ev);
         return;
     }
 
-    IElement* hit = hit_test(ev.position);
+    auto hit = hit_test(ev.position);
 
     if (ev.action == PointerAction::Down) {
         INPUT_LOG("pointer down at (%.0f, %.0f), hit=%s", ev.position.x, ev.position.y,
@@ -96,7 +108,7 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
 
     // Track press/capture state
     if (ev.action == PointerAction::Down) {
-        pressed_ = to_ptr(hit);
+        pressed_ = hit;
         captured_ = (result == InputResult::Captured);
     } else if (ev.action == PointerAction::Up || ev.action == PointerAction::Cancel) {
         pressed_ = {};
@@ -106,18 +118,11 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
 
 void InputDispatcher::scroll_event(const ScrollEvent& event)
 {
-    auto scene = scene_.lock();
-    if (!scene) {
-        return;
-    }
-
     ScrollEvent ev = event;
-    IElement* hit = hit_test(ev.position);
-    if (!hit) {
-        return;
+    auto hit = hit_test(ev.position);
+    if (hit) {
+        dispatch_scroll(ev, hit);
     }
-
-    dispatch_scroll(ev, hit);
 }
 
 void InputDispatcher::key_event(const KeyEvent& event)
@@ -129,9 +134,9 @@ void InputDispatcher::key_event(const KeyEvent& event)
     }
 
     KeyEvent ev = event;
-    auto* focused_raw = focused_.get();
+    auto focused_raw = focused_;
 
-    vector<IElement*> chain;
+    vector<IElement::Ptr> chain;
     build_ancestor_chain(focused_raw, chain);
 
     // Bubble: focused element first, then ancestors
@@ -143,7 +148,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
         }
     }
 
-    for (auto* ancestor : chain) {
+    for (auto&& ancestor : chain) {
         auto* at = get_input_trait(ancestor);
         if (at) {
             InputResult r = at->on_key_event(ev);
@@ -182,69 +187,15 @@ void InputDispatcher::set_focus(const IElement::Ptr& element)
 // Hit testing
 // ============================================================================
 
-IElement* InputDispatcher::hit_test(vec2 point) const
+IElement::Ptr InputDispatcher::hit_test(vec2 point) const
 {
     auto scene = scene_.lock();
-    if (!scene) {
-        return nullptr;
-    }
-
-    // Walk the visual list in reverse z-order (topmost first)
-    auto list = scene->get_visual_list();
-    for (size_t i = list.size(); i > 0; --i) {
-        IElement* elem = list[i - 1];
-        if (!get_input_trait(elem)) {
-            continue;
-        }
-
-        rect wr = get_world_rect(elem);
-        if (point.x >= wr.x && point.x < wr.x + wr.width &&
-            point.y >= wr.y && point.y < wr.y + wr.height) {
-            return elem;
-        }
-    }
-
-    return nullptr;
+    auto hits =
+        scene ? scene->ray_cast({point.x, point.y, 0.f}, {0.f, 0.f, 1.f}, 1) : vector<IElement::Ptr>{};
+    return hits.empty() ? nullptr : hits.front();
 }
 
-IInputTrait* InputDispatcher::get_input_trait(IElement* element)
-{
-    if (!element) {
-        return nullptr;
-    }
-
-    auto* storage = interface_cast<IObjectStorage>(element);
-    if (!storage) {
-        return nullptr;
-    }
-
-    for (size_t i = 0; i < storage->attachment_count(); ++i) {
-        auto att = storage->get_attachment(i);
-        auto* trait = interface_cast<IInputTrait>(att);
-        if (trait) {
-            return trait;
-        }
-    }
-
-    return nullptr;
-}
-
-rect InputDispatcher::get_world_rect(IElement* element)
-{
-    auto reader = read_state<IElement>(element);
-    if (!reader) {
-        return {};
-    }
-
-    // Extract translation from world matrix (columns 12, 13)
-    const auto& wm = reader->world_matrix;
-    float wx = wm.m[12];
-    float wy = wm.m[13];
-
-    return {wx, wy, reader->size.width, reader->size.height};
-}
-
-vec2 InputDispatcher::to_local(IElement* element, vec2 scene_point)
+vec2 InputDispatcher::to_local(const IElement::Ptr& element, vec2 scene_point)
 {
     auto reader = read_state<IElement>(element);
     if (!reader) {
@@ -260,7 +211,7 @@ vec2 InputDispatcher::to_local(IElement* element, vec2 scene_point)
 // Dispatch
 // ============================================================================
 
-void InputDispatcher::build_ancestor_chain(IElement* target, vector<IElement*>& chain) const
+void InputDispatcher::build_ancestor_chain(const IElement::Ptr& target, vector<IElement::Ptr>& chain) const
 {
     auto scene = scene_.lock();
     if (!scene) {
@@ -270,36 +221,30 @@ void InputDispatcher::build_ancestor_chain(IElement* target, vector<IElement*>& 
     chain.clear();
 
     // Walk from target's parent to root, collecting ancestors with input traits
-    auto* obj = interface_cast<IObject>(target);
-    if (!obj) {
-        return;
-    }
-
-    auto current = obj->get_self();
+    auto current = target;
     while (true) {
-        auto parent = scene->parent_of(current);
+        auto parent = interface_pointer_cast<IElement>(scene->parent_of(::velk::as_object(current)));
         if (!parent) {
             break;
         }
 
-        auto* parent_elem = interface_cast<IElement>(parent);
-        if (parent_elem && get_input_trait(parent_elem)) {
-            chain.push_back(parent_elem);
+        if (parent && get_input_trait(parent)) {
+            chain.push_back(parent);
         }
 
         current = parent;
     }
 }
 
-InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, IElement* hit)
+InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, const IElement::Ptr& hit)
 {
-    vector<IElement*> ancestors;
+    vector<IElement::Ptr> ancestors;
     build_ancestor_chain(hit, ancestors);
 
     // Intercept pass: top-down (root to target)
     // ancestors are ordered from parent to root, so walk in reverse
     for (size_t i = ancestors.size(); i > 0; --i) {
-        IElement* ancestor = ancestors[i - 1];
+        auto ancestor = ancestors[i - 1];
         event.local_position = to_local(ancestor, event.position);
 
         auto* trait = get_input_trait(ancestor);
@@ -322,7 +267,7 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, IElement* hit
         }
     }
 
-    for (auto* ancestor : ancestors) {
+    for (auto&& ancestor : ancestors) {
         event.local_position = to_local(ancestor, event.position);
         auto* trait = get_input_trait(ancestor);
         InputResult r = trait->on_pointer_event(event);
@@ -334,9 +279,9 @@ InputResult InputDispatcher::dispatch_pointer(PointerEvent& event, IElement* hit
     return InputResult::Ignored;
 }
 
-InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, IElement* hit)
+InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, const IElement::Ptr& hit)
 {
-    vector<IElement*> ancestors;
+    vector<IElement::Ptr> ancestors;
     build_ancestor_chain(hit, ancestors);
 
     // Bubble pass: target first, then ancestors
@@ -349,7 +294,7 @@ InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, IElement* hit)
         }
     }
 
-    for (auto* ancestor : ancestors) {
+    for (auto&& ancestor : ancestors) {
         event.local_position = to_local(ancestor, event.position);
         auto* trait = get_input_trait(ancestor);
         InputResult r = trait->on_scroll_event(event);
@@ -365,14 +310,14 @@ InputResult InputDispatcher::dispatch_scroll(ScrollEvent& event, IElement* hit)
 // Hover
 // ============================================================================
 
-void InputDispatcher::update_hover(IElement* new_hover, const PointerEvent& event)
+void InputDispatcher::update_hover(const IElement::Ptr& new_hover, const PointerEvent& event)
 {
-    if (new_hover == hovered_.get()) {
+    if (new_hover == hovered_) {
         return;
     }
 
-    auto* old_hover = hovered_.get();
-    hovered_ = to_ptr(new_hover);
+    auto old_hover = hovered_;
+    hovered_ = new_hover;
 
     if (old_hover) {
         auto* trait = get_input_trait(old_hover);

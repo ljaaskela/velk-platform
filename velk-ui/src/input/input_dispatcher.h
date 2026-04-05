@@ -28,17 +28,11 @@ public:
     void set_focus(const IElement::Ptr& element) override;
 
 private:
-    /** @brief Finds the deepest element with an IInputTrait under the given point. */
-    IElement* hit_test(vec2 point) const;
-
-    /** @brief Returns the IInputTrait attached to an element, or nullptr. */
-    static IInputTrait* get_input_trait(IElement* element);
-
-    /** @brief Computes the element's world-space AABB from world_matrix + size. */
-    static rect get_world_rect(IElement* element);
+    /** @brief Finds the topmost element with an IInputTrait under the given point. */
+    IElement::Ptr hit_test(vec2 point) const;
 
     /** @brief Converts a scene-space point to element-local space. */
-    static vec2 to_local(IElement* element, vec2 scene_point);
+    static vec2 to_local(const IElement::Ptr& element, vec2 scene_point);
 
     /**
      * @brief Builds the ancestor chain from root to the target element.
@@ -46,16 +40,16 @@ private:
      * Used for intercept (top-down) and bubble (bottom-up) passes.
      * Only includes ancestors that have an IInputTrait.
      */
-    void build_ancestor_chain(IElement* target, vector<IElement*>& chain) const;
+    void build_ancestor_chain(const IElement::Ptr& target, vector<IElement::Ptr>& chain) const;
 
     /** @brief Dispatches a pointer event through the intercept + bubble pipeline. */
-    InputResult dispatch_pointer(PointerEvent& event, IElement* hit);
+    InputResult dispatch_pointer(PointerEvent& event, const IElement::Ptr& hit);
 
     /** @brief Dispatches a scroll event through the intercept + bubble pipeline. */
-    InputResult dispatch_scroll(ScrollEvent& event, IElement* hit);
+    InputResult dispatch_scroll(ScrollEvent& event, const IElement::Ptr& hit);
 
     /** @brief Updates hover state and fires enter/leave. */
-    void update_hover(IElement* new_hover, const PointerEvent& event);
+    void update_hover(const IElement::Ptr& new_hover, const PointerEvent& event);
 
     weak_ptr<IScene> scene_;
     IElement::Ptr hovered_;

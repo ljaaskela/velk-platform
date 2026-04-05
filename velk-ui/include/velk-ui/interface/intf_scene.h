@@ -4,6 +4,7 @@
 #include <velk/api/math_types.h>
 #include <velk/array_view.h>
 #include <velk/interface/intf_future.h>
+#include <velk/vector.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_store.h>
 
@@ -15,16 +16,19 @@ namespace velk::ui {
 /**
  * @brief Holds element and visual change information for one frame.
  *
- * Returned by IScene::consume_state(). visual_list is the full z-sorted
- * draw order. redraw_list contains elements whose visuals changed since
- * the last consume. removed_list contains elements that were detached;
- * the scene keeps them alive until consumed, then releases them.
+ * Returned by IScene::consume_state(). Owns strong references to all
+ * elements, ensuring they stay alive for the duration of the frame
+ * regardless of scene mutations.
  */
 struct SceneState
 {
-    array_view<IElement*> visual_list;
-    array_view<IElement*> redraw_list;
-    array_view<IObject::Ptr> removed_list;
+    /** @brief Full z-sorted draw order. */
+    vector<IElement::Ptr> visual_list;
+    /** @brief Elements whose visual state has changed since the last update. Elements on this list are
+     *         guaranteed to be either on visual_list or removed_list. */
+    vector<IElement*> redraw_list;
+    /** @brief Elements that were detached from the scene since last update. */
+    vector<IElement::Ptr> removed_list;
 };
 
 /**
@@ -56,7 +60,7 @@ public:
     virtual void update(const UpdateInfo& info) = 0;
 
     /**
-     * @brief Returns the current scene state and clears change tracking.
+     * @brief Returns a snapshot of the current scene state and clears change tracking.
      *
      * On the first call (or after draw order changes), redraw_list contains
      * all elements. After that, it contains only elements that changed since
@@ -67,8 +71,18 @@ public:
     /** @brief Called by elements when a property changes. Accumulates dirty flags. */
     virtual void notify_dirty(IElement& element, DirtyFlags flags) = 0;
 
-    /** @brief Returns all elements in z-sorted draw order. Valid until the next update(). */
-    virtual array_view<IElement*> get_visual_list() = 0;
+    /**
+     * @brief Returns elements hit by a ray, in hit order (front to back).
+     *
+     * Only elements with an IInputTrait attachment participate in hit testing.
+     * Coordinates are in world space.
+     *
+     * @param origin    Ray origin in world space.
+     * @param direction Ray direction in world space.
+     * @param max_count Maximum number of hits to return (0 = unlimited).
+     */
+    virtual vector<IElement::Ptr> ray_cast(vec3 origin, vec3 direction,
+                                           size_t max_count = 0) const = 0;
 };
 
 } // namespace velk::ui

@@ -3,7 +3,10 @@
 #include <velk/api/future.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk/interface/intf_object_storage.h>
 #include <velk/interface/intf_store.h>
+
+#include <velk-ui/interface/intf_input_trait.h>
 #include <velk/interface/resource/intf_resource.h>
 #include <velk/interface/resource/intf_resource_store.h>
 #include <velk/plugins/importer/api/importer.h>
@@ -119,6 +122,7 @@ void Scene::set_geometry(aabb geometry)
 {
     if (geometry_ != geometry) {
         geometry_ = geometry;
+        std::unique_lock lock(state_mutex_);
         set_dirty(DirtyFlags::Layout);
         LAYOUT_LOG("Scene::set_geometry: %.0fx%.0f", geometry.extent.width, geometry.extent.height);
     }
@@ -130,6 +134,8 @@ void Scene::update(const UpdateInfo& info)
     if (!h) {
         return;
     }
+
+    std::unique_lock lock(state_mutex_);
 
     // Merge per-element dirty flags into scene-level flags
     for (auto* elem : dirty_elements_) {
@@ -149,8 +155,8 @@ void Scene::update(const UpdateInfo& info)
         solver_.solve(*h, geometry_);
         // Layout changed, all elements need redraw
         redraw_list_.clear();
-        for (auto* elem : visual_list_) {
-            redraw_list_.push_back(elem);
+        for (auto& elem : visual_list_) {
+            redraw_list_.push_back(elem.get());
         }
     }
 
@@ -159,28 +165,67 @@ void Scene::update(const UpdateInfo& info)
 
 SceneState Scene::consume_state()
 {
-    // Swap into local buffers so the returned array_views stay valid
-    // until the next consume_state() call.
-    consumed_redraw_.swap(redraw_list_);
-    consumed_removed_.swap(removed_list_);
-    redraw_list_.clear();
-    removed_list_.clear();
+    std::unique_lock lock(state_mutex_);
 
     SceneState state;
-    state.visual_list = {visual_list_.data(), visual_list_.size()};
-    state.redraw_list = {consumed_redraw_.data(), consumed_redraw_.size()};
-    state.removed_list = {consumed_removed_.data(), consumed_removed_.size()};
+    state.visual_list = visual_list_;
+    state.redraw_list = std::move(redraw_list_);
+    state.removed_list = std::move(removed_list_);
     return state;
 }
 
 void Scene::notify_dirty(IElement& element, DirtyFlags)
 {
+    std::unique_lock lock(state_mutex_);
     dirty_elements_.push_back(&element);
 }
 
-array_view<IElement*> Scene::get_visual_list()
+vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t max_count) const
 {
-    return {visual_list_.data(), visual_list_.size()};
+    std::shared_lock lock(state_mutex_);
+
+    vector<IElement::Ptr> hits;
+
+    // Walk in reverse z-order (topmost first)
+    for (size_t i = visual_list_.size(); i > 0; --i) {
+        auto& elem = visual_list_[i - 1];
+
+        // Only elements with an input trait participate in hit testing
+        auto* storage = interface_cast<IObjectStorage>(elem);
+        if (!storage) {
+            continue;
+        }
+        bool has_trait = false;
+        for (size_t j = 0; j < storage->attachment_count(); ++j) {
+            if (interface_cast<IInputTrait>(storage->get_attachment(j))) {
+                has_trait = true;
+                break;
+            }
+        }
+        if (!has_trait) {
+            continue;
+        }
+
+        // 2D AABB test against the ray origin (x, y)
+        auto reader = read_state<IElement>(elem);
+        if (!reader) {
+            continue;
+        }
+        float wx = reader->world_matrix.m[12];
+        float wy = reader->world_matrix.m[13];
+        float w = reader->size.width;
+        float h = reader->size.height;
+
+        if (origin.x >= wx && origin.x < wx + w &&
+            origin.y >= wy && origin.y < wy + h) {
+            hits.push_back(elem);
+            if (max_count > 0 && hits.size() >= max_count) {
+                break;
+            }
+        }
+    }
+
+    return hits;
 }
 
 void Scene::ensure_hierarchy()
@@ -198,7 +243,10 @@ void Scene::attach_element(const IObject::Ptr& obj)
         observer->on_attached(*this);
     }
 
-    set_dirty(DirtyFlags::DrawOrder);
+    {
+        std::unique_lock lock(state_mutex_);
+        set_dirty(DirtyFlags::DrawOrder);
+    }
 }
 
 void Scene::detach_element(const IObject::Ptr& obj)
@@ -208,10 +256,11 @@ void Scene::detach_element(const IObject::Ptr& obj)
         observer->on_detached(*this);
     }
 
-    // Keep removed elements alive until the renderer consumes them
-    removed_list_.push_back(obj);
-
-    set_dirty(DirtyFlags::DrawOrder);
+    {
+        std::unique_lock lock(state_mutex_);
+        removed_list_.push_back(interface_pointer_cast<IElement>(obj));
+        set_dirty(DirtyFlags::DrawOrder);
+    }
 }
 
 void Scene::detach_subtree(const IObject::Ptr& obj)
@@ -372,9 +421,9 @@ void Scene::rebuild_visual_list()
 
 void Scene::collect_visual_list(const IObject::Ptr& obj)
 {
-    auto* element = interface_cast<IElement>(obj);
-    if (element) {
-        visual_list_.push_back(element);
+    auto elem = interface_pointer_cast<IElement>(obj);
+    if (elem) {
+        visual_list_.push_back(elem);
     }
 
     auto* h = get_hierarchy(logical_);

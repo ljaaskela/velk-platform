@@ -13,6 +13,8 @@
 #include <velk-ui/interface/intf_scene_observer.h>
 #include <velk-ui/plugin.h>
 
+#include <shared_mutex>
+
 namespace velk::ui {
 
 class Scene : public ::velk::ext::Object<Scene, IScene>
@@ -31,7 +33,8 @@ public:
     SceneState consume_state() override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
-    array_view<IElement*> get_visual_list() override;
+    vector<IElement::Ptr> ray_cast(vec3 origin, vec3 direction,
+                                   size_t max_count = 0) const override;
 
     // IHierarchy forwarding
     ReturnValue set_root(const IObject::Ptr& root) override;
@@ -70,14 +73,12 @@ private:
 
     void set_dirty(DirtyFlags flags) { dirty_ |= flags; }
 
+    mutable std::shared_mutex state_mutex_;  ///< Protects the lists below.
     vector<IElement*> dirty_elements_;
-    vector<IElement*> visual_list_;
+    vector<IElement::Ptr> visual_list_;
     vector<IElement*> redraw_list_;
-    vector<IObject::Ptr> removed_list_;
+    vector<IElement::Ptr> removed_list_;
 
-    // Double-buffered for consume_state(): returned views stay valid until next consume.
-    vector<IElement*> consumed_redraw_;
-    vector<IObject::Ptr> consumed_removed_;
     DirtyFlags dirty_ = DirtyFlags::All;
     bool initialized_ = false;
 };
