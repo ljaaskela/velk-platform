@@ -151,7 +151,7 @@ The DrawDataHeader is the root of the shader's data graph. The push constant car
 ```mermaid
 graph LR
     PC["Push Constant<br/><i>8 bytes</i>"] -->|GPU ptr| DDH["DrawDataHeader"]
-    DDH -->|globals_address| G["FrameGlobals<br/>projection, viewport"]
+    DDH -->|globals_address| G["FrameGlobals<br/>view_projection, viewport"]
     DDH -->|instances_address| I["Instance[]<br/>pos, size, color, ..."]
     DDH -->|texture_id| T["Bindless Array<br/>sampler2D[]"]
     DDH -->|inline| M["Material Params<br/><i>optional</i>"]
@@ -263,7 +263,7 @@ void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    gl_Position = root.global_data.projection * vec4(inst.pos + q * inst.size, 0, 1);
+    gl_Position = root.global_data.view_projection * vec4(inst.pos + q * inst.size, 0, 1);
 }
 ```
 
@@ -302,7 +302,7 @@ The shader fetches vertices by index:
 void main() {
     uint idx = root.indices.i[gl_VertexIndex];
     Vertex v = root.vertices.v[idx];
-    gl_Position = root.global_data.projection * inst.transform * vec4(v.position, 1);
+    gl_Position = root.global_data.view_projection * inst.transform * vec4(v.position, 1);
 }
 ```
 

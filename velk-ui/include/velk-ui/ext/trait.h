@@ -4,6 +4,7 @@
 #include <velk/ext/object.h>
 #include <velk/interface/intf_metadata_observer.h>
 
+#include <velk-ui/interface/intf_camera.h>
 #include <velk-ui/interface/intf_layout_trait.h>
 #include <velk-ui/interface/intf_transform_trait.h>
 #include <velk-ui/interface/intf_visual.h>
@@ -70,6 +71,19 @@ protected:
     {
         invoke_visual_changed();
     }
+};
+
+/**
+ * @brief CRTP base for ICamera implementations.
+ *
+ * @tparam T     The concrete camera class (CRTP parameter).
+ * @tparam Extra Additional interfaces.
+ */
+template <class T, class... Extra>
+class Camera : public ::velk::ext::Object<T, ICamera, Extra...>
+{
+public:
+    TraitPhase get_phase() const override { return TraitPhase::Render; }
 };
 
 } // namespace velk::ui::ext

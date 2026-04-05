@@ -50,6 +50,13 @@ inline constexpr Uid Gradient{"9eb060cd-6050-4878-b817-d58571bf3174"};
 
 } // namespace Material
 
+namespace Render {
+
+/** @brief Camera trait. Defines how the scene is observed (projection, zoom, scale). */
+inline constexpr Uid Camera{"3cd4d525-fc81-4e27-a9c5-ac231036e474"};
+
+} // namespace Render
+
 namespace Input {
 
 /** @brief Scene-level input event coordinator. */
@@ -73,6 +80,9 @@ inline constexpr Uid DimTypeExtension{"a52a1f22-8dd3-46bd-ba6c-07512a226e63"};
 
 /** @brief Type extension for alignment enum values in the importer. */
 inline constexpr Uid AlignTypeExtension{"0fce50cf-be04-430a-a617-5724ada76a30"};
+
+/** @brief Type extension for Projection enum values in the importer. */
+inline constexpr Uid ProjectionTypeExtension{"9dc1211c-70f1-41ea-a19f-099e2e7d66ef"};
 
 } // namespace Import
 

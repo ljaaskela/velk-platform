@@ -1,6 +1,8 @@
 add_library(velk_ui SHARED
     src/plugin.h
     src/plugin.cpp
+    src/camera.h
+    src/camera.cpp
     src/element.h
     src/element.cpp
     src/scene.h
@@ -28,6 +30,8 @@ add_library(velk_ui SHARED
     src/import/align_type_extension.cpp
     src/import/dim_type_extension.h
     src/import/dim_type_extension.cpp
+    src/import/projection_type_extension.h
+    src/import/projection_type_extension.cpp
     src/input/input_dispatcher.h
     src/input/input_dispatcher.cpp
     src/input/click.h
@@ -47,6 +51,7 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/trait/intf_click.h
     include/velk-ui/interface/trait/intf_hover.h
     include/velk-ui/interface/trait/intf_drag.h
+    include/velk-ui/interface/intf_camera.h
     include/velk-ui/interface/intf_element.h
     include/velk-ui/interface/intf_font.h
     include/velk-ui/interface/intf_renderer.h
@@ -68,8 +73,10 @@ add_library(velk_ui SHARED
     include/velk-ui/api/element.h
     include/velk-ui/api/material/gradient.h
     include/velk-ui/api/scene.h
+    include/velk-ui/api/camera.h
     include/velk-ui/api/trait.h
     include/velk-ui/api/visual.h
+    include/velk-ui/api/visual/visual.h
     include/velk-ui/api/visual/rect.h
     include/velk-ui/api/visual/rounded_rect.h
     include/velk-ui/interface/intf_gradient.h

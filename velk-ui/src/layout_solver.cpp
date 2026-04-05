@@ -3,6 +3,7 @@
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-ui/api/element.h>
 #include <velk-ui/interface/intf_layout_trait.h>
 #include <velk-ui/interface/intf_transform_trait.h>
 
@@ -27,21 +28,19 @@ void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport)
 void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,
                                  const aabb& parent_bounds, const mat4& parent_world)
 {
-    // Collect layout and transform traits
-    vector<ILayoutTrait*> layout_traits;
-    vector<ITransformTrait*> transform_traits;
-    auto* storage = interface_cast<IObjectStorage>(element);
-    if (storage) {
-        for (size_t i = 0; i < storage->attachment_count(); ++i) {
-            auto att = storage->get_attachment(i);
-            auto* lt = interface_cast<ILayoutTrait>(att);
-            if (lt) {
-                layout_traits.push_back(lt);
-            }
-            auto* tt = interface_cast<ITransformTrait>(att);
-            if (tt) {
-                transform_traits.push_back(tt);
-            }
+    // Collect layout and transform traits, split by phase
+    Element e(element);
+    auto layouts = e.find_attachments<ILayoutTrait>();
+    auto transform_traits = e.find_attachments<ITransformTrait>();
+    vector<ILayoutTrait*> layout_traits;     // TraitPhase::Layout (e.g. Stack)
+    vector<ILayoutTrait*> constraint_traits; // TraitPhase::Constraint (e.g. FixedSize)
+    for (auto&& l : layouts) {
+        auto* lt = l.get();
+        if (has_phase(lt, TraitPhase::Layout)) {
+            layout_traits.push_back(lt);
+        }
+        if (has_phase(lt, TraitPhase::Constraint)) {
+            constraint_traits.push_back(lt);
         }
     }
 
@@ -51,30 +50,22 @@ void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& ele
 
     // Layout phase: measure + apply
     for (auto* lt : layout_traits) {
-        if (has_phase(lt, TraitPhase::Layout)) {
-            c = lt->measure(c, *element, hierarchy);
-        }
+        c = lt->measure(c, *element, hierarchy);
     }
     for (auto* lt : layout_traits) {
-        if (has_phase(lt, TraitPhase::Layout)) {
-            lt->apply(c, *element, hierarchy);
-        }
+        lt->apply(c, *element, hierarchy);
     }
 
     // Constraint phase: measure + apply
-    for (auto* lt : layout_traits) {
-        if (has_phase(lt, TraitPhase::Constraint)) {
-            c = lt->measure(c, *element, hierarchy);
-        }
+    for (auto* lt : constraint_traits) {
+        c = lt->measure(c, *element, hierarchy);
     }
 
     // Write size from constraint bounds
     write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
 
-    for (auto* lt : layout_traits) {
-        if (has_phase(lt, TraitPhase::Constraint)) {
-            lt->apply(c, *element, hierarchy);
-        }
+    for (auto* lt : constraint_traits) {
+        lt->apply(c, *element, hierarchy);
     }
 
     // Compute base world matrix from layout position
@@ -87,32 +78,36 @@ void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& ele
     write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
 
     // Run transform traits
-    for (auto* tt : transform_traits) {
+    for (auto&& tt : transform_traits) {
         tt->transform(*element);
     }
 
     // Re-read world matrix after transforms
     world = reader->world_matrix;
 
-    // Recurse: each child gets its own allocated bounds (set by this element's Stack)
+    // Recurse into children
     auto children = hierarchy.children_of(as_object(element));
     for (auto& child : children) {
         auto child_elem = interface_pointer_cast<IElement>(child);
-        auto child_state = read_state<IElement>(child_elem);
-        if (child_state) {
-            aabb child_bounds;
-            if (child_state && (child_state->size.width > 0.f || child_state->size.height > 0.f)) {
-                // Parent's Stack already allocated this child's bounds
+        if (!child_elem) {
+            continue;
+        }
+
+        aabb child_bounds;
+        if (!layout_traits.empty()) {
+            // A Layout trait (e.g. Stack) positioned this child; use the size it assigned
+            auto child_state = read_state<IElement>(child_elem);
+            if (child_state) {
                 child_bounds.extent.width = child_state->size.width;
                 child_bounds.extent.height = child_state->size.height;
-            } else {
-                // No Stack positioned this child, it fills the parent
-                child_bounds.extent.width = reader->size.width;
-                child_bounds.extent.height = reader->size.height;
             }
-
-            solve_element(hierarchy, child_elem, child_bounds, world);
+        } else {
+            // No layout trait on parent; child fills the parent bounds
+            child_bounds.extent.width = reader->size.width;
+            child_bounds.extent.height = reader->size.height;
         }
+
+        solve_element(hierarchy, child_elem, child_bounds, world);
     }
 }
 

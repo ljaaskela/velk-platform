@@ -18,7 +18,7 @@ const char* velk_glsl = R"(
 
 // Frame globals: projection matrix and viewport dimensions.
 layout(buffer_reference, std430) readonly buffer GlobalData {
-    mat4 projection;
+    mat4 view_projection;
     vec4 viewport; // width, height, 1/width, 1/height
 };
 

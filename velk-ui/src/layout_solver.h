@@ -14,8 +14,8 @@ public:
     void solve(IHierarchy& hierarchy, const aabb& viewport);
 
 private:
-    void solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,
-                       const aabb& parent_bounds, const mat4& parent_world);
+    void solve_element(IHierarchy& hierarchy, const IElement::Ptr& element, const aabb& parent_bounds,
+                       const mat4& parent_world);
 };
 
 } // namespace velk::ui

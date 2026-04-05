@@ -12,8 +12,8 @@ namespace velk::ui {
 /**
  * @brief Creates a scene renderer connected to the given render context.
  *
- * The renderer walks scenes attached via attach(), collects draw entries
- * from visuals, and submits draw calls to the render backend.
+ * The renderer draws views added via add_view(camera_element, surface).
+ * Each view uses a camera trait to determine the projection.
  */
 inline IRenderer::Ptr create_renderer(IRenderContext& ctx)
 {

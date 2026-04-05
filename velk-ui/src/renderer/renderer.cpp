@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <velk-render/interface/intf_material.h>
+#include <velk-ui/interface/intf_camera.h>
 #include <velk-ui/interface/intf_visual.h>
 
 #ifdef VELK_RENDER_DEBUG
@@ -107,18 +108,11 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     globals_gpu_addr_ = backend_->gpu_address(globals_buffer_);
 }
 
-void Renderer::attach(const ISurface::Ptr& surface, const IScene::Ptr& scene)
+void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface)
 {
-    if (!(surface && scene)) {
-        VELK_LOG(E, "Renderer::attach: surface and scene must be valid objects");
+    if (!(camera_element && surface)) {
+        VELK_LOG(E, "Renderer::add_view: camera_element and surface must be valid");
         return;
-    }
-
-    for (auto& entry : surfaces_) {
-        if (entry.surface == surface) {
-            entry.scene = scene;
-            return;
-        }
     }
 
     auto state = read_state<ISurface>(surface);
@@ -129,17 +123,17 @@ void Renderer::attach(const ISurface::Ptr& surface, const IScene::Ptr& scene)
         desc.height = state->height;
         sid = backend_->create_surface(desc);
     }
-    surfaces_.push_back({surface, scene, sid});
+    views_.push_back({camera_element, surface, sid});
 }
 
-void Renderer::detach(const ISurface::Ptr& surface)
+void Renderer::remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface)
 {
-    for (auto it = surfaces_.begin(); it != surfaces_.end(); ++it) {
-        if (it->surface == surface) {
+    for (auto it = views_.begin(); it != views_.end(); ++it) {
+        if (it->camera_element == camera_element && it->surface == surface) {
             if (backend_) {
                 backend_->destroy_surface(it->surface_id);
             }
-            surfaces_.erase(it);
+            views_.erase(it);
             return;
         }
     }
@@ -193,7 +187,7 @@ void Renderer::rebuild_commands(IElement* element)
     }
 }
 
-void Renderer::rebuild_batches(const SceneState& state, const SurfaceEntry& entry)
+void Renderer::rebuild_batches(const SceneState& state, const ViewEntry& entry)
 {
     batches_.clear();
     batch_index_.clear();
@@ -407,10 +401,21 @@ void Renderer::render()
         return;
     }
 
-    for (auto& entry : surfaces_) {
-        auto* scene = interface_cast<IScene>(entry.scene);
+    for (auto& entry : views_) {
+        // Get the scene from the camera element
+        auto scene_ptr = entry.camera_element->get_scene();
+        auto* scene = interface_cast<IScene>(scene_ptr);
         if (!scene) {
             continue;
+        }
+
+        // Find the camera trait on the element
+        ICamera* camera = nullptr;
+        if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
+            for (size_t i = 0; i < storage->attachment_count(); ++i) {
+                camera = interface_cast<ICamera>(storage->get_attachment(i));
+                if (camera) break;
+            }
         }
 
         // Handle surface resize
@@ -486,15 +491,22 @@ void Renderer::render()
         ensure_frame_buffer_capacity();
         write_offset_ = 0;
 
-        // Update frame globals (projection matrix, viewport dimensions)
+        // Update frame globals from camera
         if (globals_ptr_ && sstate) {
-            build_ortho_projection(globals_ptr_->projection,
-                                   static_cast<float>(sstate->width),
-                                   static_cast<float>(sstate->height));
-            globals_ptr_->viewport[0] = static_cast<float>(sstate->width);
-            globals_ptr_->viewport[1] = static_cast<float>(sstate->height);
-            globals_ptr_->viewport[2] = 1.0f / static_cast<float>(sstate->width);
-            globals_ptr_->viewport[3] = 1.0f / static_cast<float>(sstate->height);
+            float w = static_cast<float>(sstate->width);
+            float h = static_cast<float>(sstate->height);
+
+            if (camera) {
+                auto vp = camera->get_view_projection(*entry.camera_element, w, h);
+                std::memcpy(globals_ptr_->view_projection, vp.m, sizeof(vp.m));
+            } else {
+                build_ortho_projection(globals_ptr_->view_projection, w, h);
+            }
+
+            globals_ptr_->viewport[0] = w;
+            globals_ptr_->viewport[1] = h;
+            globals_ptr_->viewport[2] = 1.0f / w;
+            globals_ptr_->viewport[3] = 1.0f / h;
         }
 
         // Write all batches to the staging buffer and produce DrawCall structs
@@ -514,7 +526,7 @@ void Renderer::render()
 void Renderer::shutdown()
 {
     if (backend_) {
-        for (auto& entry : surfaces_) {
+        for (auto& entry : views_) {
             backend_->destroy_surface(entry.surface_id);
         }
 
@@ -537,7 +549,7 @@ void Renderer::shutdown()
         backend_ = nullptr;
     }
 
-    surfaces_.clear();
+    views_.clear();
     element_cache_.clear();
     batch_index_.clear();
     batches_.clear();

@@ -1,6 +1,8 @@
 {
   "version": 1,
   "objects": [
+    { "id": "scene_root", "class": "velk-ui.Element" },
+    { "id": "camera", "class": "velk-ui.Element" },
     { "id": "root", "class": "velk-ui.Element" },
     { "id": "header", "class": "velk-ui.Element" },
     { "id": "body", "class": "velk-ui.Element" },
@@ -16,6 +18,7 @@
   ],
   "hierarchies": {
     "scene": {
+      "scene_root": ["root", "camera"],
       "root": ["header", "body"],
       "body": ["sidebar", "content"],
       "sidebar": ["nav1", "nav2", "nav3"],
@@ -23,6 +26,7 @@
     }
   },
   "attachments": [
+    { "targets": ["camera"],  "class": "velk-ui.Camera" },
     { "targets": ["root"],    "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 0 } },
     { "targets": ["body"],    "class": "velk-ui.Stack", "properties": { "axis": 0, "spacing": 0 } },
     { "targets": ["sidebar"], "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 4 } },

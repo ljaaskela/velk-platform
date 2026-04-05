@@ -31,7 +31,7 @@ void main()
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
 }
 )";
@@ -72,7 +72,7 @@ void main()
     vec2 q = velk_unit_quad(gl_VertexIndex);
     TextInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
     v_uv = mix(inst.uv_min, inst.uv_max, q);
     v_texture_id = root.texture_id;
@@ -121,7 +121,7 @@ void main()
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
     v_local_uv = q;
     v_size = inst.size;
@@ -182,7 +182,7 @@ void main()
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
     v_color = inst.color;
     v_local_uv = q;
 }

@@ -17,6 +17,7 @@ namespace velk::ui {
  * 2. Constraint: touches self only, refines size (e.g. FixedSize)
  * 3. Transform: modifies the world matrix after layout (e.g. Trs)
  * 4. Visual: produces draw commands for rendering (e.g. RectVisual)
+ * 5. Render: defines how the scene is observed (e.g. Camera)
  */
 enum class TraitPhase : uint8_t
 {
@@ -25,7 +26,8 @@ enum class TraitPhase : uint8_t
     Constraint = 1 << 1, ///< Runs second. Touches only the element itself.
     Transform  = 1 << 2, ///< Runs third. Modifies the world matrix.
     Visual     = 1 << 3, ///< Runs last. Produces draw commands for rendering.
-    Input      = 1 << 4  ///< Input handling. Does not participate in the layout solver.
+    Input      = 1 << 4, ///< Input handling. Does not participate in the layout solver.
+    Render     = 1 << 5  ///< Render observation. Defines a view into the scene (e.g. Camera).
 };
 
 inline constexpr TraitPhase operator|(TraitPhase a, TraitPhase b)

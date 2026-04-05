@@ -5,6 +5,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/interface/intf_shader.h>
+#include <velk-render/plugin.h>
 
 namespace velk {
 
@@ -12,7 +13,7 @@ namespace velk {
 class Shader : public ext::ObjectCore<Shader, IShader>
 {
 public:
-    VELK_CLASS_UID("b3e8f1a2-7c4d-4e9b-a5f6-1d2e3c4b5a68", "Shader");
+    VELK_CLASS_UID(ClassId::Shader, "Shader");
 
     void init(vector<uint32_t> bytecode) override
     {

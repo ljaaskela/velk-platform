@@ -27,8 +27,8 @@ public:
     void set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx) override;
 
     // IRenderer
-    void attach(const ISurface::Ptr& surface, const IScene::Ptr& scene) override;
-    void detach(const ISurface::Ptr& surface) override;
+    void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
+    void remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
     void render() override;
     void shutdown() override;
 
@@ -46,10 +46,10 @@ private:
         ITextureProvider::Ptr texture_provider;
     };
 
-    struct SurfaceEntry
+    struct ViewEntry
     {
+        IElement::Ptr camera_element;
         ISurface::Ptr surface;
-        IScene::Ptr scene;
         uint64_t surface_id = 0;
         bool batches_dirty = true;
         int cached_width = 0;
@@ -67,14 +67,14 @@ private:
     };
 
     void rebuild_commands(IElement* element);
-    void rebuild_batches(const SceneState& state, const SurfaceEntry& entry);
+    void rebuild_batches(const SceneState& state, const ViewEntry& entry);
     void build_draw_calls();
 
     uint64_t write_to_frame_buffer(const void* data, size_t size, size_t alignment = 16);
 
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
-    vector<SurfaceEntry> surfaces_;
+    vector<ViewEntry> views_;
     std::unordered_map<IElement*, ElementCache> element_cache_;
 
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;

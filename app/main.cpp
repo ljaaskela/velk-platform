@@ -10,13 +10,15 @@
 #include <velk-render/api/material/shader.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/plugins/vk/plugin.h>
+#include <velk-ui/api/element.h>
 #include <velk-ui/api/input/click.h>
 #include <velk-ui/api/input_dispatcher.h>
 #include <velk-ui/api/material/gradient.h>
 #include <velk-ui/api/renderer.h>
 #include <velk-ui/api/scene.h>
-#include <velk-ui/api/visual.h>
 #include <velk-ui/api/visual/rect.h>
+#include <velk-ui/api/visual/visual.h>
+#include <velk-ui/interface/intf_camera.h>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -99,7 +101,10 @@ int main(int argc, char* argv[])
     auto scene = velk::ui::create_scene("app://scenes/dashboard.json");
     scene.set_geometry(velk::aabb::from_size({static_cast<float>(kWidth), static_cast<float>(kHeight)}));
 
-    renderer->attach(surface, scene);
+    auto camera = scene.child_at(scene.root(), 1); // Camera is the second child of root in dashboard.json
+    if (camera) {
+        renderer->add_view(camera, surface);
+    }
 
     g_scene = &scene;
     g_surface = surface;
@@ -195,7 +200,7 @@ void main()
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.projection * vec4(world_pos, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
     v_local_uv = q;
 }
 )";

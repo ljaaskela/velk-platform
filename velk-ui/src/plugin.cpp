@@ -1,9 +1,11 @@
 #include "plugin.h"
 
+#include "camera.h"
 #include "constraint/fixed_size.h"
 #include "element.h"
 #include "import/align_type_extension.h"
 #include "import/dim_type_extension.h"
+#include "import/projection_type_extension.h"
 #include "input/click.h"
 #include "input/drag.h"
 #include "input/hover.h"
@@ -32,6 +34,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
     rv &= register_type<GradientMaterial>(velk);
+    rv &= register_type<CameraImpl>(velk);
     rv &= register_type<Renderer>(velk);
     rv &= register_type<Trs>(velk);
     rv &= register_type<Matrix>(velk);
@@ -41,9 +44,11 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Drag>(velk);
     rv &= register_type<DimTypeExtension>(velk);
     rv &= register_type<AlignTypeExtension>(velk);
+    rv &= register_type<ProjectionTypeExtension>(velk);
     rv &= register_type<::velk::ext::AnyValue<dim>>(velk);
     rv &= register_type<::velk::ext::AnyValue<HAlign>>(velk);
     rv &= register_type<::velk::ext::AnyValue<VAlign>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<Projection>>(velk);
     return rv;
 }
 
