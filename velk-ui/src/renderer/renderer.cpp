@@ -92,13 +92,8 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     }
 
     frame_buffer_size_ = kInitialFrameBufferSize;
-    for (int i = 0; i < 2; ++i) {
-        GpuBufferDesc desc;
-        desc.size = frame_buffer_size_;
-        desc.cpu_writable = true;
-        frame_buffer_[i] = backend_->create_buffer(desc);
-        frame_ptr_[i] = backend_->map(frame_buffer_[i]);
-        frame_gpu_base_[i] = backend_->gpu_address(frame_buffer_[i]);
+    for (auto& slot : frame_slots_) {
+        init_slot_buffers(slot);
     }
 
     GpuBufferDesc globals_desc;
@@ -311,10 +306,10 @@ uint64_t Renderer::write_to_frame_buffer(const void* data, size_t size, size_t a
         return 0;
     }
 
-    auto* dst = static_cast<uint8_t*>(frame_ptr_[frame_index_]) + write_offset_;
+    auto* dst = static_cast<uint8_t*>(active_slot_->frame_ptr) + write_offset_;
     std::memcpy(dst, data, size);
 
-    uint64_t gpu_addr = frame_gpu_base_[frame_index_] + write_offset_;
+    uint64_t gpu_addr = active_slot_->frame_gpu_base + write_offset_;
     write_offset_ += size;
 
     if (write_offset_ > peak_usage_) {
@@ -341,18 +336,33 @@ void Renderer::ensure_frame_buffer_capacity()
              new_size / 1024,
              peak_usage_ / 1024);
 
-    for (int i = 0; i < 2; ++i) {
-        backend_->destroy_buffer(frame_buffer_[i]);
+    for (auto& slot : frame_slots_) {
+        if (slot.frame_buffer) {
+            backend_->destroy_buffer(slot.frame_buffer);
+        }
         GpuBufferDesc desc;
         desc.size = new_size;
         desc.cpu_writable = true;
-        frame_buffer_[i] = backend_->create_buffer(desc);
-        frame_ptr_[i] = backend_->map(frame_buffer_[i]);
-        frame_gpu_base_[i] = backend_->gpu_address(frame_buffer_[i]);
+        slot.frame_buffer = backend_->create_buffer(desc);
+        slot.frame_ptr = backend_->map(slot.frame_buffer);
+        slot.frame_gpu_base = backend_->gpu_address(slot.frame_buffer);
     }
 
     frame_buffer_size_ = new_size;
     peak_usage_ = 0;
+}
+
+void Renderer::init_slot_buffers(FrameSlot& slot)
+{
+    if (!backend_ || frame_buffer_size_ == 0) {
+        return;
+    }
+    GpuBufferDesc desc;
+    desc.size = frame_buffer_size_;
+    desc.cpu_writable = true;
+    slot.frame_buffer = backend_->create_buffer(desc);
+    slot.frame_ptr = backend_->map(slot.frame_buffer);
+    slot.frame_gpu_base = backend_->gpu_address(slot.frame_buffer);
 }
 
 void Renderer::build_draw_calls()
@@ -401,8 +411,8 @@ void Renderer::build_draw_calls()
             continue;
         }
 
-        auto* dst = static_cast<uint8_t*>(frame_ptr_[frame_index_]) + write_offset_;
-        uint64_t draw_data_addr = frame_gpu_base_[frame_index_] + write_offset_;
+        auto* dst = static_cast<uint8_t*>(active_slot_->frame_ptr) + write_offset_;
+        uint64_t draw_data_addr = active_slot_->frame_gpu_base + write_offset_;
 
         // Write header, then material params (if any) immediately after
         std::memcpy(dst, &header, sizeof(header));
@@ -489,6 +499,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
     slot->id = next_frame_id_++;
     slot->surface_submits.clear();
+    active_slot_ = slot;
 
     for (auto& entry : views_) {
         if (!view_matches(entry, desc)) {
@@ -612,10 +623,9 @@ Frame Renderer::prepare(const FrameDesc& desc)
         submit.surface_id = entry.surface_id;
         submit.draw_calls = draw_calls_;
         slot->surface_submits.push_back(std::move(submit));
-
-        frame_index_ = 1 - frame_index_;
     }
 
+    active_slot_ = nullptr;
     slot->ready = true;
     return Frame{slot->id};
 }
@@ -702,7 +712,11 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
         count = 1;
     }
     std::lock_guard<std::mutex> lock(slot_mutex_);
+    auto old_size = frame_slots_.size();
     frame_slots_.resize(count);
+    for (auto i = old_size; i < count; ++i) {
+        init_slot_buffers(frame_slots_[i]);
+    }
     slot_cv_.notify_all();
 }
 
@@ -718,10 +732,10 @@ void Renderer::shutdown()
         }
         texture_map_.clear();
 
-        for (int i = 0; i < 2; ++i) {
-            if (frame_buffer_[i]) {
-                backend_->destroy_buffer(frame_buffer_[i]);
-                frame_buffer_[i] = 0;
+        for (auto& slot : frame_slots_) {
+            if (slot.frame_buffer) {
+                backend_->destroy_buffer(slot.frame_buffer);
+                slot.frame_buffer = 0;
             }
         }
         if (globals_buffer_) {

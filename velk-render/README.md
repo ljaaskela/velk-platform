@@ -30,4 +30,5 @@ See [Render Backend Architecture](docs/render-backend-architecture.md) for the f
 | Document | Description |
 |----------|-------------|
 | [Render Backend Architecture](docs/render-backend-architecture.md) | Design, data flow, shader model, technical details, Vulkan implementation |
+| [Rendering](docs/rendering.md) | Frame lifecycle: prepare/present split, threading, frame slots, multi-rate rendering |
 | [Materials](docs/materials.md) | Built-in materials and shader materials with dynamic inputs |

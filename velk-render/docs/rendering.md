@@ -13,6 +13,19 @@ Rendering is split into two phases:
 
 The convenience method `renderer->render()` calls `present(prepare({}))` for the simple single-threaded case.
 
+### Per-frame GPU buffers
+
+Each frame slot owns its own GPU staging buffer. When `prepare()` writes instance data, draw headers, and material params, it writes into the slot's buffer, not a shared one. This means a prepared frame's GPU data is never overwritten by a subsequent `prepare()` call. The buffer remains valid and untouched until `present()` submits its draw calls and recycles the slot.
+
+The staging buffers are small (starting at 256 KB, growing on demand) because they only hold per-frame metadata: 
+* `DrawDataHeader` structs (32 bytes each)
+* inline instance data (32-48 bytes per quad) and 
+* material parameters. 
+
+Heavy data like textures and persistent mesh buffers lives in separate GPU allocations outside the frame buffer. Even a complex frame with thousands of draw entries typically uses under 1 MB.
+
+Globals (view-projection matrix, viewport) are written to a separate persistent buffer that is updated in-place during `prepare()`. This is safe because the values are only read by the GPU during `submit()`, which happens after `prepare()` completes.
+
 ### Threading model
 
 `present()` blocks on vsync (typically 16-17ms at 60Hz). During that time the main thread could be running the next `velk::instance().update()` and `prepare()`.

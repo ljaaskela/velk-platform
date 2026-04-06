@@ -85,8 +85,11 @@ private:
     {
         uint64_t id = 0;
         vector<SurfaceSubmit> surface_submits;
-        int frame_buffer_index = 0;
         bool ready = false;
+
+        GpuBuffer frame_buffer{};
+        void* frame_ptr = nullptr;
+        uint64_t frame_gpu_base = 0;
     };
 
     void rebuild_commands(IElement* element);
@@ -106,15 +109,13 @@ private:
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;
 
     static constexpr size_t kInitialFrameBufferSize = 256 * 1024;
-    GpuBuffer frame_buffer_[2]{};
-    void* frame_ptr_[2]{};
-    uint64_t frame_gpu_base_[2]{};
     size_t frame_buffer_size_ = 0;
     size_t write_offset_ = 0;
     size_t peak_usage_ = 0;
-    int frame_index_ = 0;
+    FrameSlot* active_slot_ = nullptr;  ///< Slot being filled by prepare().
 
     void ensure_frame_buffer_capacity();
+    void init_slot_buffers(FrameSlot& slot);
 
     GpuBuffer globals_buffer_ = 0;
     FrameGlobals* globals_ptr_ = nullptr;
