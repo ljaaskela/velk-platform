@@ -3,6 +3,7 @@
 #include "default_ui_shaders.h"
 
 #include <velk/api/any.h>
+#include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
@@ -141,6 +142,7 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const ISurface::
 
 void Renderer::rebuild_commands(IElement* element)
 {
+    VELK_PERF_SCOPE("renderer.rebuild_commands");
     auto& cache = element_cache_[element];
     cache.before_visuals.clear();
     cache.after_visuals.clear();
@@ -167,17 +169,24 @@ void Renderer::rebuild_commands(IElement* element)
         }
 
         VisualCommands vc;
-        vc.entries = visual->get_draw_entries(local_rect);
+        {
+            VELK_PERF_SCOPE("renderer.get_draw_entries");
+            vc.entries = visual->get_draw_entries(local_rect);
+        }
+
+        auto vstate = read_state<IVisual>(visual);
 
         // If the visual has a paint (material), resolve its pipeline
-        auto vstate = read_state<IVisual>(visual);
-        if (render_ctx_ && vstate && vstate->paint) {
-            auto mat = vstate->paint.get<IMaterial>();
-            if (mat) {
-                uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
-                if (handle) {
-                    vc.pipeline_override = handle;
-                    vc.material = std::move(mat);
+        {
+            VELK_PERF_SCOPE("renderer.resolve_material");
+            if (render_ctx_ && vstate && vstate->paint) {
+                auto mat = vstate->paint.get<IMaterial>();
+                if (mat) {
+                    uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
+                    if (handle) {
+                        vc.pipeline_override = handle;
+                        vc.material = std::move(mat);
+                    }
                 }
             }
         }
@@ -200,6 +209,7 @@ void Renderer::rebuild_commands(IElement* element)
 
 void Renderer::rebuild_batches(const SceneState& state, const ViewEntry& entry)
 {
+    VELK_PERF_SCOPE("renderer.rebuild_batches");
     batches_.clear();
 
     auto resolve_texture = [](const IMaterial::Ptr& material, uint64_t fallback) -> uint64_t {
@@ -347,6 +357,7 @@ void Renderer::ensure_frame_buffer_capacity()
 
 void Renderer::build_draw_calls()
 {
+    VELK_PERF_SCOPE("renderer.build_draw_calls");
     draw_calls_.clear();
 
     for (auto& batch : batches_) {
@@ -433,6 +444,7 @@ void Renderer::render()
     if (!backend_) {
         return;
     }
+    VELK_PERF_SCOPE("renderer.render");
 
     for (auto& entry : views_) {
         // Get the scene from the camera element
@@ -550,9 +562,18 @@ void Renderer::render()
         // Submit to the backend
         RENDER_LOG("render: submitting %zu draw calls", draw_calls_.size());
 
-        backend_->begin_frame(entry.surface_id);
-        backend_->submit({draw_calls_.data(), draw_calls_.size()});
-        backend_->end_frame();
+        {
+            VELK_PERF_SCOPE("renderer.begin_frame");
+            backend_->begin_frame(entry.surface_id);
+        }
+        {
+            VELK_PERF_SCOPE("renderer.submit");
+            backend_->submit({draw_calls_.data(), draw_calls_.size()});
+        }
+        {
+            VELK_PERF_SCOPE("renderer.end_frame");
+            backend_->end_frame();
+        }
 
         frame_index_ = 1 - frame_index_;
     }

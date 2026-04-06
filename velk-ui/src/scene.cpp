@@ -1,6 +1,7 @@
 #include "scene.h"
 
 #include <velk/api/future.h>
+#include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
@@ -130,6 +131,7 @@ void Scene::set_geometry(aabb geometry)
 
 void Scene::update(const UpdateInfo& info)
 {
+    VELK_PERF_SCOPE("scene.update");
     auto* h = get_hierarchy(logical_);
     if (!h) {
         return;
@@ -414,6 +416,7 @@ IHierarchy::Node Scene::node_of(const IObject::Ptr& object) const
 
 void Scene::rebuild_visual_list()
 {
+    VELK_PERF_SCOPE("scene.rebuild_visual_list");
     visual_list_.clear();
     after_visual_list_.clear();
     if (auto r = root()) {

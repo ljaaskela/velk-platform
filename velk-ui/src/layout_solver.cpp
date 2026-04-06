@@ -1,5 +1,6 @@
 #include "layout_solver.h"
 
+#include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 
@@ -17,6 +18,7 @@ namespace velk::ui {
 
 void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport)
 {
+    VELK_PERF_SCOPE("layout.solve");
     if (auto root = interface_pointer_cast<IElement>(hierarchy.root())) {
         solve_element(hierarchy, root, viewport, mat4::identity());
     }
