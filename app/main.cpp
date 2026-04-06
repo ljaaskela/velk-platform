@@ -1,5 +1,6 @@
 #include <velk/api/object_ref.h>
 #include <velk/api/velk.h>
+
 #include <velk/interface/intf_plugin_registry.h>
 
 // clang-format off
@@ -101,9 +102,14 @@ int main(int argc, char* argv[])
     auto scene = velk::ui::create_scene("app://scenes/dashboard.json");
     scene.set_geometry(velk::aabb::from_size({static_cast<float>(kWidth), static_cast<float>(kHeight)}));
 
-    auto camera = scene.child_at(scene.root(), 1); // Camera is the second child of root in dashboard.json
+    auto camera = scene.child_at(scene.root(), 1);      // Ortho camera
+    auto camera_3d = scene.child_at(scene.root(), 2);  // Perspective camera
+
     if (camera) {
-        renderer->add_view(camera, surface);
+        renderer->add_view(camera, surface, {0, 0, 0.5f, 1.0f});
+    }
+    if (camera_3d) {
+        renderer->add_view(camera_3d, surface, {0.5f, 0, 0.5f, 1.0f});
     }
 
     g_scene = &scene;

@@ -1157,17 +1157,6 @@ void VkBackend::begin_frame(uint64_t surface_id)
     vkCmdBeginRenderPass(
         frame_sync_[frame_sync_index_].command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Set viewport and scissor
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(sd.width);
-    viewport.height = static_cast<float>(sd.height);
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(frame_sync_[frame_sync_index_].command_buffer, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = {static_cast<uint32_t>(sd.width), static_cast<uint32_t>(sd.height)};
-    vkCmdSetScissor(frame_sync_[frame_sync_index_].command_buffer, 0, 1, &scissor);
-
     // Bind bindless descriptor set
     vkCmdBindDescriptorSets(frame_sync_[frame_sync_index_].command_buffer,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1179,8 +1168,27 @@ void VkBackend::begin_frame(uint64_t surface_id)
                             nullptr);
 }
 
-void VkBackend::submit(array_view<const DrawCall> calls)
+void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
 {
+    auto sit = surfaces_.find(current_surface_);
+    if (sit != surfaces_.end()) {
+        auto& sd = sit->second;
+        float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(sd.width);
+        float vp_h = (vp.height > 0) ? vp.height : static_cast<float>(sd.height);
+
+        VkViewport viewport{};
+        viewport.x = vp.x;
+        viewport.y = vp.y;
+        viewport.width = vp_w;
+        viewport.height = vp_h;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(frame_sync_[frame_sync_index_].command_buffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.offset = {static_cast<int32_t>(vp.x), static_cast<int32_t>(vp.y)};
+        scissor.extent = {static_cast<uint32_t>(vp_w), static_cast<uint32_t>(vp_h)};
+        vkCmdSetScissor(frame_sync_[frame_sync_index_].command_buffer, 0, 1, &scissor);
+    }
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
 

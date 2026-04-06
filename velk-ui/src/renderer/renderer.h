@@ -30,7 +30,8 @@ public:
     void set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx) override;
 
     // IRenderer
-    void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
+    void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface,
+                  const rect& viewport) override;
     void remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
     Frame prepare(const FrameDesc& desc) override;
     void present(Frame frame) override;
@@ -57,6 +58,7 @@ private:
     {
         IElement::Ptr camera_element;
         ISurface::Ptr surface;
+        rect viewport;
         uint64_t surface_id = 0;
         bool batches_dirty = true;
         int cached_width = 0;
@@ -77,6 +79,7 @@ private:
     struct SurfaceSubmit
     {
         uint64_t surface_id = 0;
+        rect viewport;
         vector<DrawCall> draw_calls;
     };
 
@@ -117,9 +120,7 @@ private:
     void ensure_frame_buffer_capacity();
     void init_slot_buffers(FrameSlot& slot);
 
-    GpuBuffer globals_buffer_ = 0;
-    FrameGlobals* globals_ptr_ = nullptr;
-    uint64_t globals_gpu_addr_ = 0;
+    uint64_t globals_gpu_addr_ = 0;  ///< Per-view, written into the staging buffer during prepare().
 
     std::unordered_map<uint64_t, TextureId> texture_map_;
 

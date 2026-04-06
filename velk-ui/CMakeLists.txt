@@ -19,8 +19,12 @@ add_library(velk_ui SHARED
     src/visual/rounded_rect_visual.cpp
     src/transform/trs.h
     src/transform/trs.cpp
+    src/transform/look_at.h
+    src/transform/look_at.cpp
     src/transform/matrix.h
     src/transform/matrix.cpp
+    src/transform/orbit.h
+    src/transform/orbit.cpp
     src/material/gradient_material.h
     src/material/gradient_material.cpp
     src/renderer/default_ui_shaders.h
@@ -65,8 +69,12 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/trait/intf_fixed_size.h
     include/velk-ui/interface/trait/intf_trs.h
     include/velk-ui/interface/trait/intf_matrix.h
+    include/velk-ui/interface/trait/intf_look_at.h
+    include/velk-ui/interface/trait/intf_orbit.h
     include/velk-ui/api/trait/trs.h
     include/velk-ui/api/trait/matrix.h
+    include/velk-ui/api/trait/look_at.h
+    include/velk-ui/api/trait/orbit.h
     include/velk-ui/interface/intf_visual.h
     include/velk-ui/ext/trait.h
     include/velk-ui/api/trait/fixed_size.h

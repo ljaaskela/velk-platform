@@ -1,6 +1,7 @@
 #ifndef VELK_RENDER_INTF_RENDER_BACKEND_H
 #define VELK_RENDER_INTF_RENDER_BACKEND_H
 
+#include <velk/api/math_types.h>
 #include <velk/array_view.h>
 #include <velk/interface/intf_metadata.h>
 
@@ -173,8 +174,12 @@ public:
     /** @brief Acquires a swapchain image and begins command recording. */
     virtual void begin_frame(uint64_t surface_id) = 0;
 
-    /** @brief Records draw calls into the current command buffer. */
-    virtual void submit(array_view<const DrawCall> calls) = 0;
+    /**
+     * @brief Records draw calls into the current command buffer.
+     * @param calls    Draw calls to record.
+     * @param viewport Viewport and scissor rect. Zero width/height means full surface.
+     */
+    virtual void submit(array_view<const DrawCall> calls, rect viewport = {}) = 0;
 
     /** @brief Ends recording, submits to the GPU queue, and presents. */
     virtual void end_frame() = 0;

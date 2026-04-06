@@ -19,10 +19,15 @@ mat4 Camera::get_view_projection(const IElement& element,
     // View matrix: inverse of camera's world transform
     mat4 view = mat4::identity();
     if (elem_state) {
-        float cx = elem_state->world_matrix(0, 3);
-        float cy = elem_state->world_matrix(1, 3);
-        view(0, 3) = -cx;
-        view(1, 3) = -cy;
+        auto& w = elem_state->world_matrix;
+        // Affine inverse: transpose 3x3 rotation, negate rotated translation
+        view(0, 0) = w(0, 0); view(0, 1) = w(1, 0); view(0, 2) = w(2, 0);
+        view(1, 0) = w(0, 1); view(1, 1) = w(1, 1); view(1, 2) = w(2, 1);
+        view(2, 0) = w(0, 2); view(2, 1) = w(1, 2); view(2, 2) = w(2, 2);
+        float tx = w(0, 3), ty = w(1, 3), tz = w(2, 3);
+        view(0, 3) = -(view(0, 0) * tx + view(0, 1) * ty + view(0, 2) * tz);
+        view(1, 3) = -(view(1, 0) * tx + view(1, 1) * ty + view(1, 2) * tz);
+        view(2, 3) = -(view(2, 0) * tx + view(2, 1) * ty + view(2, 2) * tz);
     }
 
     // Projection matrix
@@ -51,6 +56,7 @@ mat4 Camera::get_view_projection(const IElement& element,
         proj(2, 2) = -(fa + n) / (fa - n);
         proj(3, 2) = -1.f;
         proj(2, 3) = -(2.f * fa * n) / (fa - n);
+
     }
 
     return proj * view;

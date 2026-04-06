@@ -1,6 +1,7 @@
 #ifndef VELK_UI_INTF_RENDERER_H
 #define VELK_UI_INTF_RENDERER_H
 
+#include <velk/api/math_types.h>
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
@@ -56,9 +57,11 @@ public:
      * @brief Adds a view: renders the camera element's scene onto the surface.
      * @param camera_element Element with an ICamera trait attached.
      * @param surface        Render target surface.
+     * @param viewport       Normalized viewport (0..1). Default (all zeros) = full surface.
      */
     virtual void add_view(const IElement::Ptr& camera_element,
-                          const ISurface::Ptr& surface) = 0;
+                          const ISurface::Ptr& surface,
+                          const rect& viewport = {}) = 0;
 
     /**
      * @brief Removes a previously added view.

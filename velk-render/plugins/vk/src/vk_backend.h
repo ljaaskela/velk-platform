@@ -40,7 +40,7 @@ public:
     void destroy_pipeline(PipelineId pipeline) override;
 
     void begin_frame(uint64_t surface_id) override;
-    void submit(array_view<const DrawCall> calls) override;
+    void submit(array_view<const DrawCall> calls, rect viewport) override;
     void end_frame() override;
 
 private:

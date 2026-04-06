@@ -95,31 +95,34 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     for (auto& slot : frame_slots_) {
         init_slot_buffers(slot);
     }
-
-    GpuBufferDesc globals_desc;
-    globals_desc.size = sizeof(FrameGlobals);
-    globals_desc.cpu_writable = true;
-    globals_buffer_ = backend_->create_buffer(globals_desc);
-    globals_ptr_ = static_cast<FrameGlobals*>(backend_->map(globals_buffer_));
-    globals_gpu_addr_ = backend_->gpu_address(globals_buffer_);
 }
 
-void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface)
+void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface,
+                        const rect& viewport)
 {
     if (!(camera_element && surface)) {
         VELK_LOG(E, "Renderer::add_view: camera_element and surface must be valid");
         return;
     }
 
-    auto state = read_state<ISurface>(surface);
+    // Reuse existing surface_id if another view already uses this surface
     uint64_t sid = 0;
-    if (backend_ && state) {
-        SurfaceDesc desc{};
-        desc.width = state->width;
-        desc.height = state->height;
-        sid = backend_->create_surface(desc);
+    for (auto& v : views_) {
+        if (v.surface == surface) {
+            sid = v.surface_id;
+            break;
+        }
     }
-    views_.push_back({camera_element, surface, sid});
+    if (sid == 0 && backend_) {
+        auto state = read_state<ISurface>(surface);
+        if (state) {
+            SurfaceDesc desc{};
+            desc.width = state->width;
+            desc.height = state->height;
+            sid = backend_->create_surface(desc);
+        }
+    }
+    views_.push_back({camera_element, surface, viewport, sid});
 }
 
 void Renderer::remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface)
@@ -501,25 +504,21 @@ Frame Renderer::prepare(const FrameDesc& desc)
     slot->surface_submits.clear();
     active_slot_ = slot;
 
+    // Prepare the staging buffer once for all views
+    ensure_frame_buffer_capacity();
+    write_offset_ = 0;
+
+    // Consume scene state once per unique scene and process changes
+    std::unordered_map<IScene*, SceneState> consumed_scenes;
     for (auto& entry : views_) {
         if (!view_matches(entry, desc)) {
             continue;
         }
 
-        // Get the scene from the camera element
         auto scene_ptr = entry.camera_element->get_scene();
         auto* scene = interface_cast<IScene>(scene_ptr);
-        if (!scene) {
+        if (!scene || consumed_scenes.count(scene)) {
             continue;
-        }
-
-        // Find the camera trait on the element
-        ICamera* camera = nullptr;
-        if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
-            for (size_t i = 0; i < storage->attachment_count(); ++i) {
-                camera = interface_cast<ICamera>(storage->get_attachment(i));
-                if (camera) break;
-            }
         }
 
         // Handle surface resize
@@ -534,9 +533,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
             }
         }
 
-        // Consume scene changes since last frame
         auto state = scene->consume_state();
-
         bool has_changes = !state.redraw_list.empty() || !state.removed_list.empty();
 
         // Evict removed elements from the cache
@@ -583,36 +580,73 @@ Frame Renderer::prepare(const FrameDesc& desc)
             }
         }
 
-        // Rebuild batches if anything changed
         if (has_changes || textures_uploaded) {
-            entry.batches_dirty = true;
+            // Mark all views sharing this scene as batches dirty
+            for (auto& v : views_) {
+                auto sp = v.camera_element->get_scene();
+                if (interface_cast<IScene>(sp) == scene) {
+                    v.batches_dirty = true;
+                }
+            }
+        }
+
+        consumed_scenes[scene] = std::move(state);
+    }
+
+    // Build draw calls per view
+    for (auto& entry : views_) {
+        if (!view_matches(entry, desc)) {
+            continue;
+        }
+
+        auto scene_ptr = entry.camera_element->get_scene();
+        auto* scene = interface_cast<IScene>(scene_ptr);
+        if (!scene) {
+            continue;
+        }
+
+        auto sit = consumed_scenes.find(scene);
+        if (sit == consumed_scenes.end()) {
+            continue;
+        }
+
+        // Find the camera trait on the element
+        ICamera* camera = nullptr;
+        if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
+            for (size_t i = 0; i < storage->attachment_count(); ++i) {
+                camera = interface_cast<ICamera>(storage->get_attachment(i));
+                if (camera) break;
+            }
         }
 
         if (entry.batches_dirty) {
-            rebuild_batches(state, entry);
+            rebuild_batches(sit->second, entry);
             entry.batches_dirty = false;
         }
 
-        // Prepare the staging buffer for this frame
-        ensure_frame_buffer_capacity();
-        write_offset_ = 0;
+        // Resolve effective viewport dimensions
+        auto sstate = read_state<ISurface>(entry.surface);
+        // Resolve normalized viewport (0..1) to pixel coordinates
+        float sw = static_cast<float>(sstate ? sstate->width : 0);
+        float sh = static_cast<float>(sstate ? sstate->height : 0);
+        bool has_viewport = entry.viewport.width > 0 && entry.viewport.height > 0;
+        float vp_w = has_viewport ? entry.viewport.width * sw : sw;
+        float vp_h = has_viewport ? entry.viewport.height * sh : sh;
 
-        // Update frame globals from camera
-        if (globals_ptr_ && sstate) {
-            float w = static_cast<float>(sstate->width);
-            float h = static_cast<float>(sstate->height);
-
+        // Write per-view globals into the staging buffer
+        if (vp_w > 0 && vp_h > 0) {
+            FrameGlobals globals{};
             if (camera) {
-                auto vp = camera->get_view_projection(*entry.camera_element, w, h);
-                std::memcpy(globals_ptr_->view_projection, vp.m, sizeof(vp.m));
+                auto vp = camera->get_view_projection(*entry.camera_element, vp_w, vp_h);
+                std::memcpy(globals.view_projection, vp.m, sizeof(vp.m));
             } else {
-                build_ortho_projection(globals_ptr_->view_projection, w, h);
+                build_ortho_projection(globals.view_projection, vp_w, vp_h);
             }
-
-            globals_ptr_->viewport[0] = w;
-            globals_ptr_->viewport[1] = h;
-            globals_ptr_->viewport[2] = 1.0f / w;
-            globals_ptr_->viewport[3] = 1.0f / h;
+            globals.viewport[0] = vp_w;
+            globals.viewport[1] = vp_h;
+            globals.viewport[2] = 1.0f / vp_w;
+            globals.viewport[3] = 1.0f / vp_h;
+            globals_gpu_addr_ = write_to_frame_buffer(&globals, sizeof(globals));
         }
 
         // Write all batches to the staging buffer and produce DrawCall structs
@@ -621,6 +655,9 @@ Frame Renderer::prepare(const FrameDesc& desc)
         // Capture draw calls for this surface into the frame slot
         SurfaceSubmit submit;
         submit.surface_id = entry.surface_id;
+        float vp_x = has_viewport ? entry.viewport.x * sw : 0;
+        float vp_y = has_viewport ? entry.viewport.y * sh : 0;
+        submit.viewport = {vp_x, vp_y, vp_w, vp_h};
         submit.draw_calls = draw_calls_;
         slot->surface_submits.push_back(std::move(submit));
     }
@@ -678,22 +715,31 @@ void Renderer::present(Frame frame)
         }
     }
 
-    // Present the frame
-    for (auto& submit : target->surface_submits) {
-        RENDER_LOG("present: submitting %zu draw calls to surface %llu",
-                   submit.draw_calls.size(), submit.surface_id);
-        {
+    // Present the frame, grouping submits by surface
+    uint64_t current_surface = 0;
+    for (size_t i = 0; i < target->surface_submits.size(); ++i) {
+        auto& submit = target->surface_submits[i];
+
+        if (submit.surface_id != current_surface) {
+            if (current_surface != 0) {
+                VELK_PERF_SCOPE("renderer.end_frame");
+                backend_->end_frame();
+            }
+            current_surface = submit.surface_id;
             VELK_PERF_SCOPE("renderer.begin_frame");
             backend_->begin_frame(submit.surface_id);
         }
+
+        RENDER_LOG("present: submitting %zu draw calls to surface %llu",
+                   submit.draw_calls.size(), submit.surface_id);
         {
             VELK_PERF_SCOPE("renderer.submit");
-            backend_->submit({submit.draw_calls.data(), submit.draw_calls.size()});
+            backend_->submit({submit.draw_calls.data(), submit.draw_calls.size()}, submit.viewport);
         }
-        {
-            VELK_PERF_SCOPE("renderer.end_frame");
-            backend_->end_frame();
-        }
+    }
+    if (current_surface != 0) {
+        VELK_PERF_SCOPE("renderer.end_frame");
+        backend_->end_frame();
     }
     target->ready = false;
     target->surface_submits.clear();
@@ -737,10 +783,6 @@ void Renderer::shutdown()
                 backend_->destroy_buffer(slot.frame_buffer);
                 slot.frame_buffer = 0;
             }
-        }
-        if (globals_buffer_) {
-            backend_->destroy_buffer(globals_buffer_);
-            globals_buffer_ = 0;
         }
 
         backend_ = nullptr;

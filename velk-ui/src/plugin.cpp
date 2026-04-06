@@ -15,7 +15,9 @@
 #include "material/gradient_material.h"
 #include "renderer/renderer.h"
 #include "scene.h"
+#include "transform/look_at.h"
 #include "transform/matrix.h"
+#include "transform/orbit.h"
 #include "transform/trs.h"
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
@@ -39,6 +41,8 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Renderer>(velk);
     rv &= register_type<Trs>(velk);
     rv &= register_type<Matrix>(velk);
+    rv &= register_type<LookAt>(velk);
+    rv &= register_type<Orbit>(velk);
     rv &= register_type<impl::InputDispatcher>(velk);
     rv &= register_type<Click>(velk);
     rv &= register_type<Hover>(velk);

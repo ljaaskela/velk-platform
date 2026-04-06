@@ -31,6 +31,12 @@ inline constexpr Uid Trs{"7c167a04-2d3e-41b9-8c42-6fd41be05794"};
 /** @brief Raw 4x4 matrix transform. */
 inline constexpr Uid Matrix{"44c08a4c-83f9-40f8-b900-b00d5a8f3e55"};
 
+/** @brief Orients an element to face a target element. */
+inline constexpr Uid LookAt{"aa7cb3fd-f93c-4929-855e-210661a019ad"};
+
+/** @brief Positions and orients an element on a sphere around a target. */
+inline constexpr Uid Orbit{"88ae2321-87dd-4c9f-8195-e50b5ad690dd"};
+
 } // namespace Transform
 
 namespace Visual {
