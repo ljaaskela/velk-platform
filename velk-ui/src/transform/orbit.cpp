@@ -1,7 +1,6 @@
 #include "orbit.h"
 
 #include <velk/api/state.h>
-#include <velk/api/velk.h>
 #include <velk-ui/interface/intf_element.h>
 
 #include <cmath>
@@ -14,17 +13,8 @@ void Orbit::transform(IElement& element)
     if (!state) {
         return;
     }
-    auto r = state->target;
-    auto t = state->target.get();
-
-    auto target_raw = state->target.get<IObject>();
-    if (!target_raw) {
-        VELK_LOG(W, "Orbit: target ref is null");
-        return;
-    }
-    auto target_obj = interface_pointer_cast<IElement>(target_raw);
+    auto target_obj = state->target.get<IElement>();
     if (!target_obj) {
-        VELK_LOG(W, "Orbit: target is not an IElement");
         return;
     }
 
@@ -32,6 +22,8 @@ void Orbit::transform(IElement& element)
     if (!target_state) {
         return;
     }
+
+    // TODO: cache transform and only recalculate when local or target state has changed.
 
     // Target position (center of target element)
     float tx = target_state->world_matrix(0, 3) + target_state->size.width * 0.5f;

@@ -26,11 +26,11 @@ public:
     DirtyFlags consume_dirty() override;
 
 private:
-    void subscribe_visuals();
+    void subscribe_traits();
 
     IScene::WeakPtr scene_;
     DirtyFlags pending_dirty_ = DirtyFlags::None;
-    vector<ScopedHandler> visual_subs_;
+    vector<ScopedHandler> trait_subs_;
 };
 
 } // namespace velk::ui

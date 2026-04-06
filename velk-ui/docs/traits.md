@@ -92,6 +92,8 @@ Transform traits implement `ITransformTrait` and modify the element's world matr
 |-------|-----------|-------------|
 | Trs | `ITrs` | Decomposed translate, rotate (Z), scale |
 | Matrix | `IMatrix` | Raw 4x4 matrix multiply |
+| LookAt | `ILookAt` | Orients the element to face a target element |
+| Orbit | `IOrbit` | Positions and orients the element on a sphere around a target |
 
 ```cpp
 auto trs = velk::ui::transform::create_trs();
@@ -99,6 +101,26 @@ trs.set_rotation(45.f);         // degrees around Z
 trs.set_scale({0.5f, 0.5f});
 elem.add_trait(trs);
 ```
+
+LookAt and Orbit are particularly useful for cameras. Orbit positions the element at a given distance, yaw (horizontal angle), and pitch (vertical angle) from the target element's center, and orients it to face the target:
+
+```cpp
+auto orbit = velk::ui::transform::create_orbit();
+orbit.set_target(scene.root());
+orbit.set_distance(1200.f);
+orbit.set_yaw(30.f);    // degrees
+orbit.set_pitch(15.f);  // degrees
+camera_element.add_trait(orbit);
+```
+
+In JSON:
+
+```json
+{ "targets": ["camera_3d"], "class": "velk-ui.Orbit",
+  "properties": { "target": { "ref": "root", "type": "weak" }, "distance": 1200, "yaw": 30, "pitch": 15 } }
+```
+
+LookAt only orients the element (keeping its current position), while Orbit both positions and orients. Both reference their target via an ObjectRef property, which should use `"type": "weak"` to avoid keeping the target alive.
 
 ## Visual traits
 

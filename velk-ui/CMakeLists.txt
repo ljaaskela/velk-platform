@@ -61,6 +61,7 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/intf_element.h
     include/velk-ui/interface/intf_font.h
     include/velk-ui/interface/intf_renderer.h
+    include/velk-ui/interface/intf_layout_notify.h
     include/velk-ui/interface/intf_layout_trait.h
     include/velk-ui/interface/intf_transform_trait.h
     include/velk-ui/interface/intf_scene.h

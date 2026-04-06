@@ -5,6 +5,7 @@
 #include <velk/interface/intf_metadata_observer.h>
 
 #include <velk-ui/interface/intf_camera.h>
+#include <velk-ui/interface/intf_layout_notify.h>
 #include <velk-ui/interface/intf_layout_trait.h>
 #include <velk-ui/interface/intf_transform_trait.h>
 #include <velk-ui/interface/intf_visual.h>
@@ -15,33 +16,54 @@ namespace velk::ui::ext {
  * @brief CRTP base for ILayoutTrait implementations.
  *
  * Provides default no-op measure/apply and a compile-time phase.
- * Subclasses override only what they need.
+ * Includes ILayoutNotify and IMetadataObserver: any property change
+ * fires on_layout_changed so the owning element triggers a re-solve.
  *
  * @tparam T     The concrete trait class (CRTP parameter).
  * @tparam Phase The layout phase (Layout or Constraint).
  * @tparam Extra Additional interfaces the trait implements (e.g. IStack, IFixedSize).
  */
 template <class T, TraitPhase Phase, class... Extra>
-class Layout : public ::velk::ext::Object<T, ILayoutTrait, Extra...>
+class Layout : public ::velk::ext::Object<T, ILayoutTrait, ILayoutNotify, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return Phase; }
     Constraint measure(const Constraint& c, IElement&, IHierarchy&) override { return c; }
     void apply(const Constraint&, IElement&, IHierarchy&) override {}
+
+protected:
+    void invoke_layout_changed()
+    {
+        invoke_event(this->get_interface(IInterface::UID), "on_layout_changed");
+    }
+
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_layout_changed(); }
 };
 
 /**
  * @brief CRTP base for ITransformTrait implementations.
  *
+ * Includes ILayoutNotify and IMetadataObserver: any property change
+ * fires on_layout_changed so the owning element triggers a re-solve
+ * (transforms run during layout).
+ *
  * @tparam T     The concrete trait class (CRTP parameter).
  * @tparam Extra Additional interfaces the trait implements (e.g. ITrs, IMatrix).
  */
 template <class T, class... Extra>
-class Transform : public ::velk::ext::Object<T, ITransformTrait, Extra...>
+class Transform : public ::velk::ext::Object<T, ITransformTrait, ILayoutNotify, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Transform; }
     void transform(IElement&) override {}
+
+protected:
+    void invoke_layout_changed()
+    {
+        invoke_event(this->get_interface(IInterface::UID), "on_layout_changed");
+    }
+
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_layout_changed(); }
 };
 
 /**
