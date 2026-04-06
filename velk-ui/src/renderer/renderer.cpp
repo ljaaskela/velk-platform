@@ -439,14 +439,62 @@ void Renderer::build_draw_calls()
     }
 }
 
-void Renderer::render()
+bool Renderer::view_matches(const ViewEntry& entry, const FrameDesc& desc) const
+{
+    if (desc.views.empty()) {
+        return true;
+    }
+    for (auto& vd : desc.views) {
+        if (vd.surface != entry.surface) {
+            continue;
+        }
+        if (vd.cameras.empty()) {
+            return true;
+        }
+        for (auto& cam : vd.cameras) {
+            if (cam == entry.camera_element) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+Frame Renderer::prepare(const FrameDesc& desc)
 {
     if (!backend_) {
-        return;
+        return {};
     }
-    VELK_PERF_SCOPE("renderer.render");
+    VELK_PERF_SCOPE("renderer.prepare");
+
+    // Claim a frame slot
+    FrameSlot* slot = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(slot_mutex_);
+        slot_cv_.wait(lock, [&] {
+            for (auto& s : frame_slots_) {
+                if (!s.ready) {
+                    return true;
+                }
+            }
+            return false;
+        });
+        for (auto& s : frame_slots_) {
+            if (!s.ready) {
+                slot = &s;
+                break;
+            }
+        }
+    }
+
+    slot->id = next_frame_id_++;
+    slot->surface_submits.clear();
 
     for (auto& entry : views_) {
+        if (!view_matches(entry, desc)) {
+            continue;
+        }
+
         // Get the scene from the camera element
         auto scene_ptr = entry.camera_element->get_scene();
         auto* scene = interface_cast<IScene>(scene_ptr);
@@ -559,24 +607,103 @@ void Renderer::render()
         // Write all batches to the staging buffer and produce DrawCall structs
         build_draw_calls();
 
-        // Submit to the backend
-        RENDER_LOG("render: submitting %zu draw calls", draw_calls_.size());
+        // Capture draw calls for this surface into the frame slot
+        SurfaceSubmit submit;
+        submit.surface_id = entry.surface_id;
+        submit.draw_calls = draw_calls_;
+        slot->surface_submits.push_back(std::move(submit));
 
+        frame_index_ = 1 - frame_index_;
+    }
+
+    slot->ready = true;
+    return Frame{slot->id};
+}
+
+void Renderer::present(Frame frame)
+{
+    if (!backend_ || frame.id == 0) {
+        return;
+    }
+    VELK_PERF_SCOPE("renderer.present");
+
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+
+    // Find the frame being presented to determine which surfaces it targets
+    FrameSlot* target = nullptr;
+    for (auto& s : frame_slots_) {
+        if (s.ready && s.id == frame.id) {
+            target = &s;
+            break;
+        }
+    }
+    if (!target) {
+        slot_cv_.notify_one();
+        return;
+    }
+
+    // Discard older unpresented frames that target overlapping surfaces
+    for (auto& s : frame_slots_) {
+        if (!s.ready || s.id >= frame.id) {
+            continue;
+        }
+        // Remove surface submits that overlap with the frame being presented
+        for (auto it = s.surface_submits.begin(); it != s.surface_submits.end();) {
+            bool overlaps = false;
+            for (auto& ts : target->surface_submits) {
+                if (it->surface_id == ts.surface_id) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps) {
+                it = s.surface_submits.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        // If all submits were removed, recycle the slot
+        if (s.surface_submits.empty()) {
+            s.ready = false;
+        }
+    }
+
+    // Present the frame
+    for (auto& submit : target->surface_submits) {
+        RENDER_LOG("present: submitting %zu draw calls to surface %llu",
+                   submit.draw_calls.size(), submit.surface_id);
         {
             VELK_PERF_SCOPE("renderer.begin_frame");
-            backend_->begin_frame(entry.surface_id);
+            backend_->begin_frame(submit.surface_id);
         }
         {
             VELK_PERF_SCOPE("renderer.submit");
-            backend_->submit({draw_calls_.data(), draw_calls_.size()});
+            backend_->submit({submit.draw_calls.data(), submit.draw_calls.size()});
         }
         {
             VELK_PERF_SCOPE("renderer.end_frame");
             backend_->end_frame();
         }
-
-        frame_index_ = 1 - frame_index_;
     }
+    target->ready = false;
+    target->surface_submits.clear();
+
+    slot_cv_.notify_one();
+}
+
+void Renderer::render()
+{
+    present(prepare({}));
+}
+
+void Renderer::set_max_frames_in_flight(uint32_t count)
+{
+    if (count < 1) {
+        count = 1;
+    }
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+    frame_slots_.resize(count);
+    slot_cv_.notify_all();
 }
 
 void Renderer::shutdown()

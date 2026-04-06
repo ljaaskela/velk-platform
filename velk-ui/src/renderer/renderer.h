@@ -16,6 +16,9 @@
 #include <velk-ui/interface/intf_renderer.h>
 #include <velk-ui/interface/intf_scene.h>
 
+#include <condition_variable>
+#include <mutex>
+
 namespace velk::ui {
 
 class Renderer : public ::velk::ext::Object<Renderer, IRendererInternal, IRenderer>
@@ -29,7 +32,10 @@ public:
     // IRenderer
     void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
     void remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
+    Frame prepare(const FrameDesc& desc) override;
+    void present(Frame frame) override;
     void render() override;
+    void set_max_frames_in_flight(uint32_t count) override;
     void shutdown() override;
 
 private:
@@ -67,11 +73,30 @@ private:
         IMaterial::Ptr material;
     };
 
+    /** @brief Per-surface data captured by prepare() for present(). */
+    struct SurfaceSubmit
+    {
+        uint64_t surface_id = 0;
+        vector<DrawCall> draw_calls;
+    };
+
+    /** @brief A prepared frame waiting to be presented. */
+    struct FrameSlot
+    {
+        uint64_t id = 0;
+        vector<SurfaceSubmit> surface_submits;
+        int frame_buffer_index = 0;
+        bool ready = false;
+    };
+
     void rebuild_commands(IElement* element);
     void rebuild_batches(const SceneState& state, const ViewEntry& entry);
     void build_draw_calls();
 
     uint64_t write_to_frame_buffer(const void* data, size_t size, size_t alignment = 16);
+
+    /** @brief Checks if a view matches the FrameDesc filter. */
+    bool view_matches(const ViewEntry& entry, const FrameDesc& desc) const;
 
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
@@ -99,6 +124,12 @@ private:
 
     vector<Batch> batches_;
     vector<DrawCall> draw_calls_;
+
+    static constexpr uint32_t kDefaultMaxFramesInFlight = 3;
+    vector<FrameSlot> frame_slots_{kDefaultMaxFramesInFlight};
+    uint64_t next_frame_id_ = 1;
+    std::mutex slot_mutex_;
+    std::condition_variable slot_cv_;
 };
 
 } // namespace velk::ui
