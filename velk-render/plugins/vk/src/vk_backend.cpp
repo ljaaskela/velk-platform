@@ -230,9 +230,11 @@ void VkBackend::shutdown()
     vkDestroySampler(device_, linear_sampler_, nullptr);
 
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
-        vkDestroySemaphore(device_, frame_sync_[i].image_available, nullptr);
-        vkDestroySemaphore(device_, frame_sync_[i].render_finished, nullptr);
         vkDestroyFence(device_, frame_sync_[i].fence, nullptr);
+    }
+    for (uint32_t i = 0; i < kMaxSwapchainImages; ++i) {
+        vkDestroySemaphore(device_, image_available_[i], nullptr);
+        vkDestroySemaphore(device_, render_finished_[i], nullptr);
     }
     vkDestroyCommandPool(device_, command_pool_, nullptr);
 
@@ -460,10 +462,14 @@ bool VkBackend::create_sync_objects()
         if (vkCreateFence(device_, &fence_ci, nullptr, &frame_sync_[i].fence) != VK_SUCCESS) {
             return false;
         }
-        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].image_available) != VK_SUCCESS) {
+    }
+
+    // Per-image semaphores: acquire and present semaphores indexed by swapchain image
+    for (uint32_t i = 0; i < kMaxSwapchainImages; ++i) {
+        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &image_available_[i]) != VK_SUCCESS) {
             return false;
         }
-        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &frame_sync_[i].render_finished) != VK_SUCCESS) {
+        if (vkCreateSemaphore(device_, &sem_ci, nullptr, &render_finished_[i]) != VK_SUCCESS) {
             return false;
         }
     }
@@ -1128,8 +1134,12 @@ void VkBackend::begin_frame(uint64_t surface_id)
     auto& sync = frame_sync_[frame_sync_index_];
     vkWaitForFences(device_, 1, &sync.fence, VK_TRUE, UINT64_MAX);
 
+    // Use a rotating acquire semaphore to avoid conflicts with the present engine
+    VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+    acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+
     VkResult result = vkAcquireNextImageKHR(
-        device_, sd.swapchain, UINT64_MAX, sync.image_available, VK_NULL_HANDLE, &sd.image_index);
+        device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         // Swapchain needs recreation; caller should resize_surface
         return;
@@ -1228,24 +1238,30 @@ void VkBackend::end_frame()
 
     auto& sync = frame_sync_[frame_sync_index_];
 
+    // Use per-image semaphores: the acquire semaphore is the one used in begin_frame
+    // (one behind the current acquire_semaphore_index_ since it was advanced after acquire).
+    uint32_t acq_idx = (acquire_semaphore_index_ + kMaxSwapchainImages - 1) % kMaxSwapchainImages;
+    VkSemaphore wait_sem = image_available_[acq_idx];
+    VkSemaphore signal_sem = render_finished_[sd.image_index];
+
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     VkSubmitInfo submit_info{};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &sync.image_available;
+    submit_info.pWaitSemaphores = &wait_sem;
     submit_info.pWaitDstStageMask = &wait_stage;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &frame_sync_[frame_sync_index_].command_buffer;
+    submit_info.pCommandBuffers = &sync.command_buffer;
     submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &sync.render_finished;
+    submit_info.pSignalSemaphores = &signal_sem;
 
     vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
 
     VkPresentInfoKHR present_info{};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &sync.render_finished;
+    present_info.pWaitSemaphores = &signal_sem;
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &sd.swapchain;
     present_info.pImageIndices = &sd.image_index;

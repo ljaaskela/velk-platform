@@ -59,15 +59,22 @@ private:
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
     static constexpr uint32_t kFrameOverlap = 3;
+
+    // Per-frame-in-flight sync: fence + command buffer.
     struct FrameSync
     {
         VkFence fence = VK_NULL_HANDLE;
-        VkSemaphore image_available = VK_NULL_HANDLE;
-        VkSemaphore render_finished = VK_NULL_HANDLE;
         VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     };
     FrameSync frame_sync_[kFrameOverlap]{};
     uint32_t frame_sync_index_ = 0;
+
+    // Per-swapchain-image semaphores to avoid present engine conflicts.
+    // Indexed by the acquired image index, not the frame sync index.
+    static constexpr uint32_t kMaxSwapchainImages = 4;
+    VkSemaphore image_available_[kMaxSwapchainImages]{};
+    VkSemaphore render_finished_[kMaxSwapchainImages]{};
+    uint32_t acquire_semaphore_index_ = 0;
 
     // Bindless textures
     static constexpr uint32_t kMaxBindlessTextures = 1024;
