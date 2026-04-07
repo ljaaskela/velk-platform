@@ -5,7 +5,8 @@
 #include <velk/vector.h>
 
 #include <ft2build.h>
-#include <velk-render/interface/intf_texture_provider.h>
+#include <velk-render/ext/gpu_resource_mixin.h>
+#include <velk-render/interface/intf_texture.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/plugin.h>
 #include FT_FREETYPE_H
@@ -17,7 +18,7 @@
 
 namespace velk::ui {
 
-class Font : public ::velk::ext::Object<Font, IFont, ITextureProvider>
+class Font : public ::velk::ext::Object<Font, IFont, ITexture>, public ::velk::ext::GpuResourceMixin
 {
 public:
     VELK_CLASS_UID(ClassId::Font, "Font");
@@ -36,12 +37,23 @@ public:
     uint32_t get_atlas_width() const override;
     uint32_t get_atlas_height() const override;
 
-    // ITextureProvider
-    const uint8_t* get_pixels() const override;
-    uint32_t get_texture_width() const override;
-    uint32_t get_texture_height() const override;
-    bool is_texture_dirty() const override;
-    void clear_texture_dirty() override;
+    // ITexture
+    int width() const override { return static_cast<int>(atlas_.get_width()); }
+    int height() const override { return static_cast<int>(atlas_.get_height()); }
+    PixelFormat format() const override { return PixelFormat::R8; }
+    const uint8_t* get_pixels() const override { return atlas_.get_pixels(); }
+    bool is_dirty() const override { return atlas_.is_dirty(); }
+    void clear_dirty() override { atlas_.clear_dirty(); }
+
+    // IGpuResource
+    void add_gpu_resource_observer(IGpuResourceObserver* obs) override
+    {
+        GpuResourceMixin::add_observer(obs);
+    }
+    void remove_gpu_resource_observer(IGpuResourceObserver* obs) override
+    {
+        GpuResourceMixin::remove_observer(obs);
+    }
 
 private:
     vector<uint8_t> font_data_;

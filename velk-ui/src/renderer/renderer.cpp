@@ -144,7 +144,7 @@ void Renderer::rebuild_commands(IElement* element)
     auto& cache = element_cache_[element];
     cache.before_visuals.clear();
     cache.after_visuals.clear();
-    cache.texture_providers.clear();
+    cache.textures.clear();
 
     auto* storage = interface_cast<IObjectStorage>(element);
     if (!storage) {
@@ -190,9 +190,13 @@ void Renderer::rebuild_commands(IElement* element)
         }
 
         // If the visual provides a texture (e.g. text visual with a font atlas)
-        auto tp = visual->get_texture_provider();
-        if (tp) {
-            cache.texture_providers.push_back(std::move(tp));
+        auto tex = visual->get_texture();
+        if (tex) {
+            ITexture* raw = tex.get();
+            cache.textures.push_back(raw);
+            // Observe the texture so we can defer-destroy its GPU handle
+            // when its last strong reference drops on any thread.
+            raw->add_gpu_resource_observer(this);
         }
 
         // Sort into before/after based on visual phase
@@ -382,10 +386,11 @@ void Renderer::build_draw_calls()
             continue;
         }
 
-        // Resolve bindless texture index from the texture key
+        // Resolve bindless texture index from the texture key (= ITexture pointer)
         uint32_t texture_id = 0;
         if (batch.texture_key != 0) {
-            auto tit = texture_map_.find(batch.texture_key);
+            auto* tex = reinterpret_cast<ITexture*>(batch.texture_key);
+            auto tit = texture_map_.find(tex);
             if (tit != texture_map_.end()) {
                 texture_id = tit->second;
             }
@@ -480,6 +485,9 @@ Frame Renderer::prepare(const FrameDesc& desc)
     }
     VELK_PERF_SCOPE("renderer.prepare");
 
+    // Drain any GPU resources whose safe window has elapsed.
+    drain_deferred_destroy();
+
     // Claim a frame slot that is not ready (awaiting prepare) and whose GPU buffer
     // is safe to reuse (enough frames have elapsed since it was last presented).
     FrameSlot* slot = nullptr;
@@ -552,34 +560,31 @@ Frame Renderer::prepare(const FrameDesc& desc)
             rebuild_commands(element);
         }
 
-        // Upload dirty textures (e.g. glyph atlas updates)
+        // Upload dirty textures (e.g. glyph atlas updates, decoded images)
         bool textures_uploaded = false;
         if (has_changes) {
             for (auto& [elem, cache] : element_cache_) {
-                for (auto& tp : cache.texture_providers) {
-                    if (!tp || !tp->is_texture_dirty()) {
+                for (auto* tex : cache.textures) {
+                    if (!tex || !tex->is_dirty()) {
                         continue;
                     }
-                    uint32_t tw = tp->get_texture_width();
-                    uint32_t th = tp->get_texture_height();
-                    const uint8_t* pixels = tp->get_pixels();
+                    int tw = tex->width();
+                    int th = tex->height();
+                    const uint8_t* pixels = tex->get_pixels();
                     if (pixels && tw > 0 && th > 0) {
-                        uint64_t tex_key = reinterpret_cast<uint64_t>(tp.get());
-
-                        auto tit = texture_map_.find(tex_key);
+                        auto tit = texture_map_.find(tex);
                         if (tit == texture_map_.end()) {
                             TextureDesc desc{};
-                            desc.width = static_cast<int>(tw);
-                            desc.height = static_cast<int>(th);
-                            desc.format = PixelFormat::R8;
+                            desc.width = tw;
+                            desc.height = th;
+                            desc.format = tex->format();
                             TextureId tid = backend_->create_texture(desc);
-                            texture_map_[tex_key] = tid;
-                            tit = texture_map_.find(tex_key);
+                            texture_map_[tex] = tid;
+                            tit = texture_map_.find(tex);
                         }
 
-                        backend_->upload_texture(
-                            tit->second, pixels, static_cast<int>(tw), static_cast<int>(th));
-                        tp->clear_texture_dirty();
+                        backend_->upload_texture(tit->second, pixels, tw, th);
+                        tex->clear_dirty();
                         textures_uploaded = true;
                     }
                 }
@@ -776,9 +781,56 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
     slot_cv_.notify_all();
 }
 
+void Renderer::on_gpu_resource_destroyed(IGpuResource* resource)
+{
+    auto* tex = static_cast<ITexture*>(resource);
+    std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+    auto it = texture_map_.find(tex);
+    if (it == texture_map_.end()) {
+        return;
+    }
+    deferred_destroy_.push_back({it->second, present_counter_ + kGpuLatencyFrames});
+    texture_map_.erase(it);
+}
+
+void Renderer::drain_deferred_destroy()
+{
+    if (!backend_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+    size_t kept = 0;
+    for (size_t i = 0; i < deferred_destroy_.size(); ++i) {
+        auto& d = deferred_destroy_[i];
+        if (present_counter_ >= d.safe_after_frame) {
+            backend_->destroy_texture(d.tid);
+        } else {
+            deferred_destroy_[kept++] = d;
+        }
+    }
+    deferred_destroy_.resize(kept);
+}
+
 void Renderer::shutdown()
 {
     if (backend_) {
+        // Detach from any textures we are still observing so their dtors
+        // (which may run later, on any thread) cannot reach a dead renderer.
+        for (auto& [elem, cache] : element_cache_) {
+            for (auto* tex : cache.textures) {
+                if (tex) {
+                    tex->remove_gpu_resource_observer(this);
+                }
+            }
+        }
+
+        // Drop any deferred destroys outright; the backend will be torn
+        // down so all GPU resources die anyway.
+        {
+            std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+            deferred_destroy_.clear();
+        }
+
         for (auto& entry : views_) {
             backend_->destroy_surface(entry.surface_id);
         }

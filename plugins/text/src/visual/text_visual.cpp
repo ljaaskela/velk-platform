@@ -125,9 +125,9 @@ vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
     default: break;
     }
 
-    // Texture key: font's ITextureProvider address (shared across text visuals using the same font)
-    auto font_tp = interface_pointer_cast<ITextureProvider>(font_);
-    uint64_t tex_key = font_tp ? reinterpret_cast<uint64_t>(font_tp.get()) : 0;
+    // Texture key: font's ITexture address (shared across text visuals using the same font)
+    auto font_tex = interface_pointer_cast<ITexture>(font_);
+    uint64_t tex_key = font_tex ? reinterpret_cast<uint64_t>(font_tex.get()) : 0;
 
     vector<DrawEntry> result;
     result.reserve(cached_entries_.size());
@@ -150,9 +150,9 @@ vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
     return result;
 }
 
-ITextureProvider::Ptr TextVisual::get_texture_provider() const
+ITexture::Ptr TextVisual::get_texture() const
 {
-    return interface_pointer_cast<ITextureProvider>(font_);
+    return interface_pointer_cast<ITexture>(font_);
 }
 
 } // namespace velk::ui

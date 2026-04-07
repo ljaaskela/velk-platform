@@ -22,8 +22,9 @@ using PipelineId = uint64_t;
 /// Pixel format for textures.
 enum class PixelFormat : uint8_t
 {
-    RGBA8, ///< 4 bytes per pixel, standard color.
-    R8,    ///< 1 byte per pixel, glyph atlases.
+    RGBA8,      ///< 4 bytes per pixel, linear color.
+    RGBA8_SRGB, ///< 4 bytes per pixel, sRGB-tagged (auto-linearised on sample).
+    R8,         ///< 1 byte per pixel, glyph atlases.
 };
 
 /// Describes a GPU buffer to create.

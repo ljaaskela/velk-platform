@@ -7,10 +7,11 @@
 #include <unordered_map>
 #include <velk-render/detail/intf_renderer_internal.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_texture_provider.h>
+#include <velk-render/interface/intf_texture.h>
 #include <velk-render/plugin.h>
 #include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_renderer.h>
@@ -21,13 +22,16 @@
 
 namespace velk::ui {
 
-class Renderer : public ::velk::ext::Object<Renderer, IRendererInternal, IRenderer>
+class Renderer : public ::velk::ext::Object<Renderer, IRendererInternal, IRenderer, IGpuResourceObserver>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::Renderer, "Renderer");
 
     // IRendererInternal
     void set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx) override;
+
+    // IGpuResourceObserver
+    void on_gpu_resource_destroyed(IGpuResource* resource) override;
 
     // IRenderer
     void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface,
@@ -51,7 +55,11 @@ private:
     {
         vector<VisualCommands> before_visuals;  ///< VisualPhase::BeforeChildren
         vector<VisualCommands> after_visuals;   ///< VisualPhase::AfterChildren
-        vector<ITextureProvider::Ptr> texture_providers;
+        /// Raw pointers; the texture's owner (font, image, etc.) holds the
+        /// strong ref. Each entry is observed by the renderer; on
+        /// destruction the entry is removed from texture_map_ and the GPU
+        /// handle is enqueued for deferred destruction.
+        vector<ITexture*> textures;
     };
 
     struct ViewEntry
@@ -123,7 +131,23 @@ private:
 
     uint64_t globals_gpu_addr_ = 0;  ///< Per-view, written into the staging buffer during prepare().
 
-    std::unordered_map<uint64_t, TextureId> texture_map_;
+    /// Per-texture state. Keyed by ITexture*. The renderer observes each
+    /// key via add_gpu_resource_observer; on destruction notification, the
+    /// entry is removed and the TextureId is enqueued in deferred_destroy_.
+    std::unordered_map<ITexture*, TextureId> texture_map_;
+
+    struct DeferredTextureDestroy
+    {
+        TextureId tid;
+        uint64_t safe_after_frame; ///< destroy when present_counter_ > this
+    };
+    /// Cross-thread safe queue of GPU handles waiting for the safe window
+    /// before destruction. Pushed by on_gpu_resource_destroyed (any thread),
+    /// drained on the renderer thread at frame start.
+    vector<DeferredTextureDestroy> deferred_destroy_;
+    std::mutex deferred_destroy_mutex_;
+
+    void drain_deferred_destroy();
 
     vector<Batch> batches_;
     vector<DrawCall> draw_calls_;
