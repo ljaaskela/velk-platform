@@ -71,6 +71,7 @@ int main(int argc, char* argv[])
     velk.plugin_registry().load_plugin_from_path("velk_render.dll");
     velk.plugin_registry().load_plugin_from_path("velk_vk.dll");
     velk.plugin_registry().load_plugin_from_path("velk_text.dll");
+    velk.plugin_registry().load_plugin_from_path("velk_image.dll");
     velk.plugin_registry().load_plugin_from_path("velk_importer.dll");
 
     // Create render context, renderer, and surface

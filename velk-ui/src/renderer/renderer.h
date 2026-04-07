@@ -55,11 +55,14 @@ private:
     {
         vector<VisualCommands> before_visuals;  ///< VisualPhase::BeforeChildren
         vector<VisualCommands> after_visuals;   ///< VisualPhase::AfterChildren
-        /// Raw pointers; the texture's owner (font, image, etc.) holds the
-        /// strong ref. Each entry is observed by the renderer; on
-        /// destruction the entry is removed from texture_map_ and the GPU
-        /// handle is enqueued for deferred destruction.
-        vector<ITexture*> textures;
+        /// Weak references to textures used by visuals on this element.
+        /// The renderer does NOT extend texture lifetimes: the texture's
+        /// real owner (visual, image cache, etc.) decides when it dies.
+        /// At use time the upload loop locks each weak_ptr to a temporary
+        /// strong ref so the texture cannot vanish mid-call. When a texture
+        /// dies (on any thread), the observer callback removes it from
+        /// texture_map_ and enqueues its handle for deferred destruction.
+        vector<ITexture::WeakPtr> textures;
     };
 
     struct ViewEntry

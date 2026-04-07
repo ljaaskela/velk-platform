@@ -6,6 +6,7 @@
     { "id": "camera_3d", "class": "velk-ui.Element" },
     { "id": "root", "class": "velk-ui.Element" },
     { "id": "header", "class": "velk-ui.Element" },
+    { "id": "logo", "class": "velk-ui.Element" },
     { "id": "body", "class": "velk-ui.Element" },
     { "id": "sidebar", "class": "velk-ui.Element" },
     { "id": "nav1", "class": "velk-ui.Element" },
@@ -22,7 +23,7 @@
       "scene_root": ["root", "camera", "camera_3d"],
       "root": ["header", "body"],
       "body": ["sidebar", "content"],
-      "sidebar": ["nav1", "nav2", "nav3"],
+      "sidebar": ["nav1", "nav2", "nav3", "logo"],
       "content": ["card1", "card2", "card3", "card4"]
     }
   },
@@ -36,6 +37,8 @@
     { "targets": ["content"], "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 16 } },
 
     { "targets": ["header"],  "class": "velk-ui.FixedSize", "properties": { "height": "48px" } },
+    { "targets": ["logo"],    "class": "velk-ui.FixedSize", "properties": { "width": "64px", "height": "64px" } },
+    { "targets": ["logo"],    "class": "velk_image.ImageVisual", "properties": { "uri": "image:app://scenes/images/velk-icon.png" } },
     { "targets": ["sidebar"], "class": "velk-ui.FixedSize", "properties": { "width": "180px" } },
     { "targets": ["nav1", "nav2", "nav3"], "class": "velk-ui.FixedSize", "properties": { "height": "40px" } },
     { "targets": ["card1", "card2", "card3", "card4"], "class": "velk-ui.FixedSize", "properties": { "height": "120px" } },

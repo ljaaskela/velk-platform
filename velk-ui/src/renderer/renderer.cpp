@@ -192,11 +192,10 @@ void Renderer::rebuild_commands(IElement* element)
         // If the visual provides a texture (e.g. text visual with a font atlas)
         auto tex = visual->get_texture();
         if (tex) {
-            ITexture* raw = tex.get();
-            cache.textures.push_back(raw);
             // Observe the texture so we can defer-destroy its GPU handle
-            // when its last strong reference drops on any thread.
-            raw->add_gpu_resource_observer(this);
+            // when its last strong reference drops (on any thread).
+            tex->add_gpu_resource_observer(this);
+            cache.textures.push_back(ITexture::WeakPtr(tex));
         }
 
         // Sort into before/after based on visual phase
@@ -564,7 +563,11 @@ Frame Renderer::prepare(const FrameDesc& desc)
         bool textures_uploaded = false;
         if (has_changes) {
             for (auto& [elem, cache] : element_cache_) {
-                for (auto* tex : cache.textures) {
+                for (auto& weak : cache.textures) {
+                    // Promote to a temporary strong ref so the texture
+                    // cannot die between is_dirty() and upload_texture().
+                    auto tex_ptr = weak.lock();
+                    auto* tex = tex_ptr.get();
                     if (!tex || !tex->is_dirty()) {
                         continue;
                     }
@@ -817,8 +820,8 @@ void Renderer::shutdown()
         // Detach from any textures we are still observing so their dtors
         // (which may run later, on any thread) cannot reach a dead renderer.
         for (auto& [elem, cache] : element_cache_) {
-            for (auto* tex : cache.textures) {
-                if (tex) {
+            for (auto& weak : cache.textures) {
+                if (auto tex = weak.lock()) {
                     tex->remove_gpu_resource_observer(this);
                 }
             }

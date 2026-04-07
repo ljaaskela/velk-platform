@@ -2,7 +2,7 @@ add_executable(velk_ui_app
     main.cpp
 )
 
-target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_render velk_text glfw)
+target_link_libraries(velk_ui_app PRIVATE velk velk_ui velk_render velk_text velk_image glfw)
 
 # Include velk_vk public headers for VulkanInitParams and Vulkan headers for surface creation
 find_package(Vulkan REQUIRED)
@@ -23,5 +23,9 @@ add_custom_command(TARGET velk_ui_app POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/test/scenes/dashboard.json"
         "$<TARGET_FILE_DIR:velk_ui_app>/scenes/dashboard.json"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:velk_ui_app>/scenes/images"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/test/scenes/images/velk-icon.png"
+        "$<TARGET_FILE_DIR:velk_ui_app>/scenes/images/velk-icon.png"
     COMMENT "Copying scene files to output directory"
 )
