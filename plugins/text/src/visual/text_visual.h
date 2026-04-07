@@ -25,7 +25,7 @@ public:
 
     // IVisual
     vector<DrawEntry> get_draw_entries(const rect& bounds) override;
-    ITextureProvider::Ptr get_texture_provider() const override;
+    ITexture::Ptr get_texture() const override;
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;

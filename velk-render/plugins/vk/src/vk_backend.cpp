@@ -849,7 +849,12 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     td.format = desc.format;
     td.bindless_index = next_bindless_index_++;
 
-    VkFormat vk_format = (desc.format == PixelFormat::R8) ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat vk_format = VK_FORMAT_R8G8B8A8_UNORM;
+    switch (desc.format) {
+        case PixelFormat::R8:         vk_format = VK_FORMAT_R8_UNORM; break;
+        case PixelFormat::RGBA8:      vk_format = VK_FORMAT_R8G8B8A8_UNORM; break;
+        case PixelFormat::RGBA8_SRGB: vk_format = VK_FORMAT_R8G8B8A8_SRGB; break;
+    }
 
     VkImageCreateInfo img_ci{};
     img_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;

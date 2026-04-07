@@ -11,6 +11,7 @@ velk-ui bundles or links the following third-party software:
 | [FreeType](https://freetype.org/) | 2.13.3 | FreeType License (BSD-style) | `plugins/text/third_party/freetype-2.13.3.zip` |
 | [HarfBuzz](https://harfbuzz.github.io/) | 10.2.0 | MIT | `plugins/text/third_party/harfbuzz-10.2.0.zip` |
 | [Inter](https://rsms.me/inter/) | 4.x | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
+| [stb_image](https://github.com/nothings/stb) | latest (single header) | MIT or Public Domain (dual) | `plugins/image/third_party/stb/stb_image.h` |
 
 ## Inter font
 
@@ -39,3 +40,7 @@ VMA is distributed under the MIT license by AMD GPUOpen.
 ## shaderc
 
 shaderc is Google's GLSL to SPIR-V compiler, distributed under the Apache 2.0 license. Used as a shared library from the Vulkan SDK for runtime shader compilation.
+
+## stb_image
+
+`stb_image.h` is a single-header public domain (or MIT) image loader by Sean Barrett, vendored as `plugins/image/third_party/stb/stb_image.h`. Used by the image plugin (`velk_image`) to decode png/jpg/bmp/tga/gif/hdr/psd images into RGBA8 pixel data. The full dual license text is at the bottom of the header file itself.
