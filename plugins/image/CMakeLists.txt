@@ -16,6 +16,9 @@ add_library(velk_image SHARED
     include/velk-ui/plugins/image/plugin.h
     include/velk-ui/plugins/image/intf_image_material.h
     include/velk-ui/plugins/image/intf_image_visual.h
+    include/velk-ui/plugins/image/api/image.h
+    include/velk-ui/plugins/image/api/image_material.h
+    include/velk-ui/plugins/image/api/image_visual.h
 )
 
 target_link_libraries(velk_image PRIVATE velk velk_ui velk_render)
