@@ -2,18 +2,9 @@
 
 The text plugin (`velk_text`) renders text using **analytic Bezier glyph coverage**, adapted from Eric Lengyel's public-domain [Slug](https://github.com/EricLengyel/Slug) reference shaders. There is no glyph atlas. Glyph outlines are extracted once with FreeType, packed into GPU-resident curve and band buffers, and shaded per-pixel by a fragment shader that computes exact analytic coverage of every Bezier inside the sample's footprint.
 
-## Why this matters
-
-The standard way to render text on a GPU is to rasterize each glyph at a target size into an atlas texture and sample it at draw time. That gives sharp text at the bake size and progressively worse text everywhere else: zoom in and you see filtered pixels, zoom out and you see aliasing or need mipmaps. Atlases also tie the font to a specific pixel size: the same font at three different sizes is three different bakes.
-
-Analytic Bezier coverage avoids all of this. The shader knows the exact mathematical outline of every glyph at any zoom level. There is no bake resolution to choose, no mip selection, no atlas packing, no resampling, and no LOD logic. The same font instance can render at any pixel size without re-baking, with sub-pixel anti-aliasing computed from the curve geometry directly.
-
-The trade-off is shader cost: every text pixel runs an inside-test that walks a small list of Bezier curves and computes a polynomial root. The band acceleration structure keeps that list short (typically 6 to 16 curves per pixel for typical Latin glyphs), so cost stays bounded and predictable. For UI text quantities the total cost is well within budget.
-
-The same coverage function is callable from both fragment shaders (for the rasterization path) and any-hit shaders (for ray-traced rendering), so the analytic representation also serves the future RT direction without a parallel codepath.
-
 ## Contents
 
+- [Why this matters](#why-this-matters)
 - [Usage](#usage)
 - [Drawing text](#drawing-text)
   - [TextVisual](#textvisual)
@@ -29,6 +20,17 @@ The same coverage function is callable from both fragment shaders (for the raste
   - [IFont](#ifont)
   - [ITextVisual](#itextvisual)
   - [ITextPlugin](#itextplugin)
+
+
+## Why this matters
+
+The standard way to render text on a GPU is to rasterize each glyph at a target size into an atlas texture and sample it at draw time. That gives sharp text at the bake size and progressively worse text everywhere else: zoom in and you see filtered pixels, zoom out and you see aliasing or need mipmaps. Atlases also tie the font to a specific pixel size: the same font at three different sizes is three different bakes.
+
+Analytic Bezier coverage avoids all of this. The shader knows the exact mathematical outline of every glyph at any zoom level. There is no bake resolution to choose, no mip selection, no atlas packing, no resampling, and no LOD logic. The same font instance can render at any pixel size without re-baking, with sub-pixel anti-aliasing computed from the curve geometry directly.
+
+The trade-off is shader cost: every text pixel runs an inside-test that walks a small list of Bezier curves and computes a polynomial root. The band acceleration structure keeps that list short (typically 6 to 16 curves per pixel for typical Latin glyphs), so cost stays bounded and predictable. For UI text quantities the total cost is well within budget.
+
+The same coverage function is callable from both fragment shaders (for the rasterization path) and any-hit shaders (for ray-traced rendering), so the analytic representation also serves the future RT direction without a parallel codepath.
 
 ## Usage
 
@@ -79,25 +81,17 @@ Practical consequences:
 
 ### Pipeline
 
-```
-FreeType outline (FT_LOAD_NO_SCALE)
-  -> GlyphBaker
-       quadratic Bezier extraction
-       bbox normalization to [0, 1]^2
-       8x8 band assignment, sorted within each band by max orthogonal coord
-  -> FontBuffers (CPU side)
-       three flat append-only buffers: curves, bands, glyph table
-       per-section dirty flags
-  -> FontGpuBuffer (one per section, implements IBuffer)
-       observable GPU resource: dirty/upload/regrow/deferred-destroy
-  -> Renderer upload path
-       backend create_buffer + map + memcpy, per section
-       publishes GPU virtual address back to IBuffer via set_gpu_address
-  -> TextMaterial
-       fragment+vertex pipeline, lazy-compiled with velk_text.glsl include
-       write_gpu_data emits the three buffer GPU addresses per draw
-  -> Slug fragment shader
-       reads glyph record, walks h+v band curves, computes analytic coverage
+```mermaid
+flowchart TD
+    A["FreeType outline<br/><i>FT_LOAD_NO_SCALE</i>"]
+    B["<b>GlyphBaker</b><br/>quadratic Bezier extraction<br/>bbox normalization to [0, 1]²<br/>8×8 band assignment, sorted by max orthogonal coord"]
+    C["<b>FontBuffers</b> (CPU side)<br/>three flat append-only buffers: curves, bands, glyph table<br/>per-section dirty flags"]
+    D["<b>FontGpuBuffer</b> (one per section, implements IBuffer)<br/>observable GPU resource: dirty / upload / regrow / deferred-destroy"]
+    E["<b>Renderer upload path</b><br/>backend create_buffer + map + memcpy, per section<br/>publishes GPU virtual address back to IBuffer via set_gpu_address"]
+    F["<b>TextMaterial</b><br/>fragment+vertex pipeline, lazy-compiled with velk_text.glsl include<br/>write_gpu_data emits the three buffer GPU addresses per draw"]
+    G["<b>Slug fragment shader</b><br/>reads glyph record, walks h+v band curves<br/>computes analytic coverage"]
+
+    A --> B --> C --> D --> E --> F --> G
 ```
 
 Glyph baking is **lazy and append-only**: the first time a glyph_id is referenced, the font extracts its outline, packs the curves and bands, and appends the data to the GPU buffers. Subsequent references return the cached entry.

@@ -11,6 +11,7 @@ velk-ui bundles or links the following third-party software:
 | [FreeType](https://freetype.org/) | 2.13.3 | FreeType License (BSD-style) | `plugins/text/third_party/freetype-2.13.3.zip` |
 | [HarfBuzz](https://harfbuzz.github.io/) | 10.2.0 | MIT | `plugins/text/third_party/harfbuzz-10.2.0.zip` |
 | [Inter](https://rsms.me/inter/) | 4.x | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
+| [Slug reference shaders](https://github.com/EricLengyel/Slug) | 2017 reference | MIT / Apache 2.0 / public domain (multi) | Translated to GLSL in `plugins/text/src/embedded/velk_text_glsl.h` |
 | [stb_image](https://github.com/nothings/stb) | latest (single header) | MIT or Public Domain (dual) | `plugins/image/third_party/stb/stb_image.h` |
 
 ## Inter font
@@ -44,3 +45,7 @@ shaderc is Google's GLSL to SPIR-V compiler, distributed under the Apache 2.0 li
 ## stb_image
 
 `stb_image.h` is a single-header public domain (or MIT) image loader by Sean Barrett, vendored as `plugins/image/third_party/stb/stb_image.h`. Used by the image plugin (`velk_image`) to decode png/jpg/bmp/tga/gif/hdr/psd images into RGBA8 pixel data. The full dual license text is at the bottom of the header file itself.
+
+## Slug reference shaders
+
+The text plugin (`velk_text`) uses analytic Bezier glyph coverage adapted from Eric Lengyel's [Slug](https://github.com/EricLengyel/Slug) reference shaders. The original HLSL pixel and vertex shaders were published by Lengyel in 2017 under a permissive multi-license (MIT, Apache 2.0, and a public-domain dedication: "The code in this repository may be freely used by anyone for any purpose"). We have **translated the pixel-shader algorithm to GLSL** and adapted it from Lengyel's curve+band texture layout to our `std430` buffer-reference layout. The translated shader lives in `plugins/text/src/embedded/velk_text_glsl.h` and is documented as derived work from Lengyel's reference. The CPU-side glyph baker, band assignment, GPU buffer management, and material/visual integration are original code.
