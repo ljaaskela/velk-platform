@@ -97,9 +97,15 @@ vector<DrawEntry> ImageVisual::get_draw_entries(const rect& bounds)
     return {entry};
 }
 
-ITexture::Ptr ImageVisual::get_texture() const
+vector<IBuffer::Ptr> ImageVisual::get_gpu_resources() const
 {
-    return interface_pointer_cast<ITexture>(image_);
+    auto buf = interface_pointer_cast<IBuffer>(image_);
+    if (!buf) {
+        return {};
+    }
+    vector<IBuffer::Ptr> out;
+    out.push_back(std::move(buf));
+    return out;
 }
 
 } // namespace velk::ui::impl

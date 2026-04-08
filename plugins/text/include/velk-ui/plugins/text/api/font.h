@@ -38,9 +38,6 @@ public:
     /** @brief Initializes with the built-in default font (Inter Regular). */
     bool init_default() { return with<IFont>([](auto& f) { return f.init_default(); }); }
 
-    /** @brief Sets the font size in pixels. */
-    bool set_size(float size_px) { return with<IFont>([&](auto& f) { return f.set_size(size_px); }); }
-
     /** @brief Returns the font ascender in pixels. */
     auto get_ascender() const { return read_state_value<IFont>(&IFont::State::ascender); }
 
@@ -49,9 +46,6 @@ public:
 
     /** @brief Returns the line height in pixels. */
     auto get_line_height() const { return read_state_value<IFont>(&IFont::State::line_height); }
-
-    /** @brief Returns the current font size in pixels. */
-    auto get_size_px() const { return read_state_value<IFont>(&IFont::State::size_px); }
 };
 
 /** @brief Creates a new Font. */

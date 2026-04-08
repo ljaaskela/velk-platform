@@ -53,9 +53,9 @@
     { "targets": ["nav1"],    "class": "velk_text.TextVisual", "properties": { "text": "Overview", "v_align": "center", "color": { "r": 0.9, "g": 0.9, "b": 0.95, "a": 1.0 } } },
     { "targets": ["nav2"],    "class": "velk_text.TextVisual", "properties": { "text": "Analytics", "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
     { "targets": ["nav3"],    "class": "velk_text.TextVisual", "properties": { "text": "Settings", "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
-    { "targets": ["card1"],   "class": "velk_text.TextVisual", "properties": { "text": "Total Users", "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
-    { "targets": ["card2"],   "class": "velk_text.TextVisual", "properties": { "text": "Revenue", "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
-    { "targets": ["card3"],   "class": "velk_text.TextVisual", "properties": { "text": "Active Sessions", "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
-    { "targets": ["card4"],   "class": "velk_text.TextVisual", "properties": { "text": "Uptime", "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } }
+    { "targets": ["card1"],   "class": "velk_text.TextVisual", "properties": { "text": "Total Users",     "font_size": 16.0,  "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
+    { "targets": ["card2"],   "class": "velk_text.TextVisual", "properties": { "text": "Revenue",         "font_size": 32.0,  "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
+    { "targets": ["card3"],   "class": "velk_text.TextVisual", "properties": { "text": "Active Sessions", "font_size": 64.0,  "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
+    { "targets": ["card4"],   "class": "velk_text.TextVisual", "properties": { "text": "Uptime",          "font_size": 128.0, "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } }
   ]
 }

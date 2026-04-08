@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <velk-render/detail/intf_renderer_internal.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -55,14 +56,17 @@ private:
     {
         vector<VisualCommands> before_visuals;  ///< VisualPhase::BeforeChildren
         vector<VisualCommands> after_visuals;   ///< VisualPhase::AfterChildren
-        /// Weak references to textures used by visuals on this element.
-        /// The renderer does NOT extend texture lifetimes: the texture's
-        /// real owner (visual, image cache, etc.) decides when it dies.
-        /// At use time the upload loop locks each weak_ptr to a temporary
-        /// strong ref so the texture cannot vanish mid-call. When a texture
-        /// dies (on any thread), the observer callback removes it from
-        /// texture_map_ and enqueues its handle for deferred destruction.
-        vector<ITexture::WeakPtr> textures;
+        /// Weak references to GPU resources used by visuals on this element.
+        /// IBuffer is the common base for anything uploadable: textures
+        /// (which inherit IBuffer via ITexture) and plain shader-readable
+        /// byte buffers. The renderer does NOT extend resource lifetimes:
+        /// the resource's real owner (visual, image cache, font, etc.)
+        /// decides when it dies. At use time the upload loop locks each
+        /// weak_ptr to a temporary strong ref so the resource cannot vanish
+        /// mid-call. When a resource dies (on any thread), the observer
+        /// callback removes it from texture_map_ / buffer_map_ and enqueues
+        /// its GPU handle for deferred destruction.
+        vector<IBuffer::WeakPtr> gpu_resources;
     };
 
     struct ViewEntry
@@ -139,15 +143,35 @@ private:
     /// entry is removed and the TextureId is enqueued in deferred_destroy_.
     std::unordered_map<ITexture*, TextureId> texture_map_;
 
+    /// Per-buffer state for non-texture IBuffer resources (e.g. font curve
+    /// buffers). Keyed by IBuffer*. Holds renderer-internal bookkeeping that
+    /// doesn't belong on IBuffer itself: the backend GpuBuffer handle (used
+    /// to map and to destroy) and the last-uploaded size (used to detect a
+    /// CPU-side regrow that requires reallocating the GPU buffer). The GPU
+    /// virtual address lives on the IBuffer itself via set_gpu_address.
+    struct BufferEntry
+    {
+        GpuBuffer handle{};
+        size_t size = 0;
+    };
+    std::unordered_map<IBuffer*, BufferEntry> buffer_map_;
+
     struct DeferredTextureDestroy
     {
         TextureId tid;
         uint64_t safe_after_frame; ///< destroy when present_counter_ > this
     };
-    /// Cross-thread safe queue of GPU handles waiting for the safe window
-    /// before destruction. Pushed by on_gpu_resource_destroyed (any thread),
-    /// drained on the renderer thread at frame start.
+    struct DeferredBufferDestroy
+    {
+        GpuBuffer handle;
+        uint64_t safe_after_frame;
+    };
+    /// Cross-thread safe queues of GPU handles waiting for the safe window
+    /// before destruction. Pushed by on_gpu_resource_destroyed (any thread)
+    /// or by the upload path when a buffer is regrown, drained on the
+    /// renderer thread at frame start.
     vector<DeferredTextureDestroy> deferred_destroy_;
+    vector<DeferredBufferDestroy> deferred_buffer_destroy_;
     std::mutex deferred_destroy_mutex_;
 
     void drain_deferred_destroy();

@@ -49,6 +49,15 @@ public:
     {
         write_state_value<ITextVisual>(&ITextVisual::State::text, string(text));
     }
+
+    /** @brief Sets the font size. */
+    void set_font_size(float font_size)
+    {
+        write_state_value<ITextVisual>(&ITextVisual::State::font_size, font_size);
+    }
+
+    /** @brief Returns the font size. */
+    auto get_font_size() const { return read_state_value<ITextVisual>(&ITextVisual::State::font_size); }
 };
 
 namespace visual {

@@ -19,7 +19,24 @@ Pointer-based GPU rendering abstraction:
 Declarative UI framework:
 * Scene graphs, element composition via traits (constraints, visuals, transforms, input), JSON scene loading.
 * A scene renderer using velk-render that walks the visual tree and submits draw calls to the render backend.
-* Text rendering plugin using FreeType + HarfBuzz text shaping and rendering. Glyph atlas management, bindless texture integration.
+* Text rendering plugin (`velk_text`) using analytic Bezier glyph coverage adapted from Eric Lengyel's [Slug](https://github.com/EricLengyel/Slug) reference shaders. No glyph atlas: outlines are baked once with FreeType, packed into GPU curve and band buffers, and shaded per-pixel with exact analytic coverage. Scale-independent: one font instance renders at any pixel size with no re-baking.
+* Image plugin (`velk_image`) decoding raster images via stb_image into bindless GPU textures.
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Getting started](velk-ui/docs/getting-started.md) | Build, run the demo, walk through a minimal scene |
+| [Scene](velk-ui/docs/scene.md) | Element trees, traits, hierarchies, the visual graph |
+| [Traits](velk-ui/docs/traits.md) | Built-in traits: layout, visuals, transforms, input |
+| [Update cycle](velk-ui/docs/update-cycle.md) | The frame loop, dirty tracking, scene state consumption |
+| [Input](velk-ui/docs/input.md) | Hit testing, event dispatch, focus |
+| [Performance](velk-ui/docs/performance.md) | Renderer cost, batching, hot paths |
+| [Font rendering](docs/font_rendering.md) | Architecture and design notes for the analytic Bezier text pipeline |
+| [Ray tracing](docs/ray_tracing.md) | Plan and motivation for the ray-traced rendering direction |
+| **Built-in plugins** | |
+| [Text](velk-ui/docs/plugins/text.md) | Analytic Bezier text rendering, scale-independent fonts |
+| [Image](velk-ui/docs/plugins/image.md) | Image decoding and bindless texture binding |
 
 ## Quick start
 

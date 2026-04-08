@@ -1,6 +1,8 @@
 #ifndef VELK_UI_TEXT_VISUAL_H
 #define VELK_UI_TEXT_VISUAL_H
 
+#include <velk/api/object.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/intf_text_visual.h>
@@ -25,7 +27,7 @@ public:
 
     // IVisual
     vector<DrawEntry> get_draw_entries(const rect& bounds) override;
-    ITexture::Ptr get_texture() const override;
+    vector<IBuffer::Ptr> get_gpu_resources() const override;
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;
@@ -33,8 +35,10 @@ protected:
 private:
     void reshape();
     void ensure_default_font();
+    void rebind_font_material();
 
     IFont::Ptr font_;
+    IObject::Ptr text_material_; ///< TextMaterial bound to font_'s buffers; set as paint.
     vector<DrawEntry> cached_entries_;
     float text_width_{};
     float text_height_{};

@@ -20,8 +20,6 @@ Image decoding is done with [stb_image](https://github.com/nothings/stb) (single
   - [IImage](#iimage)
   - [Image](#image)
   - [ImageDecoder](#imagedecoder)
-  - [IImageMaterial / ImageMaterial](#iimagematerial--imagematerial)
-  - [IImageVisual / ImageVisual](#iimagevisual--imagevisual)
 
 ## Usage
 

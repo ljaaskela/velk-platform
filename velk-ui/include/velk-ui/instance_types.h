@@ -1,6 +1,8 @@
 #ifndef VELK_UI_INSTANCE_TYPES_H
 #define VELK_UI_INSTANCE_TYPES_H
 
+#include "velk-render/gpu_data.h"
+
 #include <velk/api/math_types.h>
 
 namespace velk {
@@ -19,7 +21,7 @@ namespace velk {
  *
  * Matches GLSL: struct RectInstance { vec2 pos; vec2 size; vec4 color; };
  */
-struct RectInstance
+VELK_GPU_STRUCT RectInstance
 {
     vec2 pos;
     vec2 size;
@@ -28,19 +30,30 @@ struct RectInstance
 static_assert(sizeof(RectInstance) == 32, "RectInstance must be 32 bytes (matches GLSL std430)");
 
 /**
- * @brief Instance data for the text pipeline.
+ * @brief Instance data for the analytic-Bezier text pipeline.
  *
- * Matches GLSL: struct TextInstance { vec2 pos; vec2 size; vec4 color; vec2 uv_min; vec2 uv_max; };
+ * One instance per laid-out glyph quad. The shader uses `glyph_index` to
+ * look up the glyph's curve and band data via the per-batch buffer
+ * references emitted by the text material; uv is derived from the unit
+ * quad with a Y flip in the vertex shader (the curves use FreeType's Y-up
+ * convention).
+ *
+ * Padded to 48 bytes because the GLSL struct contains a vec4 (color),
+ * which forces a 16-byte struct alignment in std430. An array of such
+ * structs has stride ceil(40/16)*16 = 48, so the C++ struct must match
+ * that stride or the GPU and CPU disagree on instance offsets.
+ *
+ * Matches GLSL: struct TextInstance { vec2 pos; vec2 size; vec4 color;
+ * uint glyph_index; uint _pad0; uint _pad1; uint _pad2; };
  */
-struct TextInstance
+VELK_GPU_STRUCT TextInstance
 {
     vec2 pos;
     vec2 size;
     color col;
-    vec2 uv_min;
-    vec2 uv_max;
+    uint32_t glyph_index;
 };
-static_assert(sizeof(TextInstance) == 48, "TextInstance must be 48 bytes (matches GLSL std430)");
+static_assert(sizeof(TextInstance) == 48, "TextInstance must be 48 bytes (std430 array stride)");
 
 } // namespace velk
 

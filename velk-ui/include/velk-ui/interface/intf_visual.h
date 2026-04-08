@@ -6,7 +6,7 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_trait.h>
 
@@ -42,8 +42,19 @@ public:
     /** @brief Returns draw entries for this visual within the given bounds. */
     virtual vector<DrawEntry> get_draw_entries(const rect& bounds) = 0;
 
-    /** @brief Returns the texture used by this visual, or nullptr if none. */
-    virtual ITexture::Ptr get_texture() const { return nullptr; }
+    /**
+     * @brief Returns GPU resources used by this visual that need uploading
+     *        and lifetime tracking by the renderer.
+     *
+     * Returned by value (not array_view) so the visual is free to construct
+     * the list however it likes (member, fresh allocation, conditional
+     * inclusion) without committing to backing storage, and so the renderer
+     * sees a stable snapshot with no aliasing into visual-internal state.
+     *
+     * The default returns an empty vector for visuals that have no GPU
+     * resources (rect, rounded rect, gradient, etc.).
+     */
+    virtual vector<IBuffer::Ptr> get_gpu_resources() const { return {}; }
 };
 
 } // namespace velk::ui

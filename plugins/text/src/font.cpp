@@ -12,7 +12,6 @@ Font::Font() = default;
 
 Font::~Font()
 {
-    notify_gpu_resource_destroyed(this);
     if (hb_buffer_) {
         hb_buffer_destroy(hb_buffer_);
         hb_buffer_ = nullptr;
@@ -31,6 +30,13 @@ Font::~Font()
     }
 }
 
+void Font::init_buffers()
+{
+    curve_buffer_ = FontGpuBuffer::make(&font_buffers_, FontGpuBuffer::Role::Curves);
+    band_buffer_  = FontGpuBuffer::make(&font_buffers_, FontGpuBuffer::Role::Bands);
+    glyph_buffer_ = FontGpuBuffer::make(&font_buffers_, FontGpuBuffer::Role::Glyphs);
+}
+
 bool Font::init_from_memory(const uint8_t* data, uint32_t size)
 {
     // Keep a copy: FreeType requires font data to stay alive
@@ -46,6 +52,19 @@ bool Font::init_from_memory(const uint8_t* data, uint32_t size)
         return false;
     }
 
+    // Configure FreeType so that ppem == units_per_em. With dpi = 72,
+    // ppem = char_size_pts, so char_size_pts = units_per_em. The 26.6 fixed
+    // value is units_per_em * 64. This makes hb_ft_font_create set up the
+    // HarfBuzz font with a scale that returns shaping advances in font
+    // units (specifically in 1/64 of font units, which we then divide by
+    // 64 in shape_text). Glyph baking still uses FT_LOAD_NO_SCALE so it
+    // ignores this setting and reads raw outline coordinates.
+    const FT_Long upem = ft_face_->units_per_EM;
+    const FT_F26Dot6 reference_char_size = static_cast<FT_F26Dot6>(upem * 64);
+    if (FT_Set_Char_Size(ft_face_, 0, reference_char_size, 72, 72) != 0) {
+        return false;
+    }
+
     hb_font_ = hb_ft_font_create(ft_face_, nullptr);
     if (!hb_font_) {
         return false;
@@ -56,46 +75,23 @@ bool Font::init_from_memory(const uint8_t* data, uint32_t size)
         return false;
     }
 
+    init_buffers();
+
+    // Read design-unit metrics directly from the face. These are constants
+    // for the lifetime of the font; the visual scales them per-call.
+    if (auto writer = write_state<IFont>(this)) {
+        writer->units_per_em = static_cast<float>(upem);
+        writer->ascender    = static_cast<float>(ft_face_->ascender);
+        writer->descender   = static_cast<float>(ft_face_->descender);
+        writer->line_height = static_cast<float>(ft_face_->height);
+    }
+
     return true;
 }
 
 bool Font::init_default()
 {
     return init_from_memory(embedded::inter_regular_ttf, embedded::inter_regular_ttf_size);
-}
-
-bool Font::set_size(float size_px)
-{
-    if (!ft_face_) {
-        return false;
-    }
-
-    // FreeType uses 1/64th of a point; at 72 DPI, 1pt = 1px
-    FT_F26Dot6 size_26_6 = static_cast<FT_F26Dot6>(size_px * 64.f);
-    if (FT_Set_Char_Size(ft_face_, 0, size_26_6, 72, 72) != 0) {
-        return false;
-    }
-
-    // Recreate HarfBuzz font to pick up the new size
-    if (hb_font_) {
-        hb_font_destroy(hb_font_);
-    }
-    hb_font_ = hb_ft_font_create(ft_face_, nullptr);
-    if (!hb_font_) {
-        return false;
-    }
-
-    // Update metrics in state
-    auto writer = write_state<IFont>(this);
-    if (writer) {
-        float scale = 1.f / 64.f;
-        writer->ascender = static_cast<float>(ft_face_->size->metrics.ascender) * scale;
-        writer->descender = static_cast<float>(ft_face_->size->metrics.descender) * scale;
-        writer->line_height = static_cast<float>(ft_face_->size->metrics.height) * scale;
-        writer->size_px = size_px;
-    }
-
-    return true;
 }
 
 float Font::shape_text(string_view text, vector<IFont::GlyphPosition>& out)
@@ -135,35 +131,30 @@ float Font::shape_text(string_view text, vector<IFont::GlyphPosition>& out)
     return total_advance;
 }
 
-IFont::GlyphBitmap Font::rasterize_glyph(uint32_t glyph_id)
+IFont::GlyphInfo Font::ensure_glyph(uint32_t glyph_id)
 {
-    GlyphBitmap result{};
+    GlyphInfo info{};
+    info.internal_index = FontBuffers::INVALID_INDEX;
 
     if (!ft_face_) {
-        return result;
+        return info;
     }
 
-    if (FT_Load_Glyph(ft_face_, glyph_id, FT_LOAD_RENDER) != 0) {
-        return result;
+    uint32_t idx = font_buffers_.ensure_glyph(ft_face_, glyph_id);
+    if (idx == FontBuffers::INVALID_INDEX) {
+        return info;
     }
 
-    FT_GlyphSlot slot = ft_face_->glyph;
-    result.data = slot->bitmap.buffer;
-    result.width = slot->bitmap.width;
-    result.height = slot->bitmap.rows;
-    result.bearing.x = static_cast<float>(slot->bitmap_left);
-    result.bearing.y = static_cast<float>(slot->bitmap_top);
+    const GlyphRecord* rec = font_buffers_.glyph_record(idx);
+    if (!rec) {
+        return info;
+    }
 
-    return result;
+    info.internal_index = idx;
+    info.bbox_min = rec->bbox_min;
+    info.bbox_max = rec->bbox_max;
+    info.empty = (rec->curve_count == 0);
+    return info;
 }
-
-const IFont::GlyphRect* Font::ensure_glyph(uint32_t glyph_id)
-{
-    return atlas_.ensure_glyph(*this, glyph_id);
-}
-
-uint32_t Font::get_atlas_width() const { return atlas_.get_width(); }
-uint32_t Font::get_atlas_height() const { return atlas_.get_height(); }
-
 
 } // namespace velk::ui

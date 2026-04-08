@@ -52,8 +52,10 @@ struct TextInstance {
     vec2 pos;
     vec2 size;
     vec4 color;
-    vec2 uv_min;
-    vec2 uv_max;
+    uint glyph_index;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 };
 
 layout(buffer_reference, std430) readonly buffer RectInstanceData {
@@ -84,10 +86,11 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     ctx->set_default_vertex_shader(ctx->compile_shader(material_vertex_src, ShaderStage::Vertex));
     ctx->set_default_fragment_shader(ctx->compile_shader(material_fragment_src, ShaderStage::Fragment));
 
-    // Compile built-in UI pipelines under well-known keys
+    // Compile built-in UI pipelines under well-known keys. Text is no
+    // longer registered here: the text plugin owns its rendering and
+    // creates the analytic-Bezier text pipeline lazily via TextMaterial.
     if (pipeline_map_->find(PipelineKey::Rect) == pipeline_map_->end()) {
         ctx->compile_pipeline(rect_fragment_src, rect_vertex_src, PipelineKey::Rect);
-        ctx->compile_pipeline(text_fragment_src, text_vertex_src, PipelineKey::Text);
         ctx->compile_pipeline(rounded_rect_fragment_src, rounded_rect_vertex_src, PipelineKey::RoundedRect);
     }
 
@@ -144,7 +147,7 @@ void Renderer::rebuild_commands(IElement* element)
     auto& cache = element_cache_[element];
     cache.before_visuals.clear();
     cache.after_visuals.clear();
-    cache.textures.clear();
+    cache.gpu_resources.clear();
 
     auto* storage = interface_cast<IObjectStorage>(element);
     if (!storage) {
@@ -189,13 +192,15 @@ void Renderer::rebuild_commands(IElement* element)
             }
         }
 
-        // If the visual provides a texture (e.g. text visual with a font atlas)
-        auto tex = visual->get_texture();
-        if (tex) {
-            // Observe the texture so we can defer-destroy its GPU handle
-            // when its last strong reference drops (on any thread).
-            tex->add_gpu_resource_observer(this);
-            cache.textures.push_back(ITexture::WeakPtr(tex));
+        // Collect GPU resources used by the visual (textures, plain buffers,
+        // etc). We observe each so we can defer-destroy its GPU handle when
+        // its last strong reference drops (on any thread).
+        for (auto& res : visual->get_gpu_resources()) {
+            if (!res) {
+                continue;
+            }
+            res->add_gpu_resource_observer(this);
+            cache.gpu_resources.push_back(IBuffer::WeakPtr(res));
         }
 
         // Sort into before/after based on visual phase
@@ -559,42 +564,97 @@ Frame Renderer::prepare(const FrameDesc& desc)
             rebuild_commands(element);
         }
 
-        // Upload dirty textures (e.g. glyph atlas updates, decoded images)
-        bool textures_uploaded = false;
+        // Upload dirty GPU resources (e.g. glyph atlas updates, decoded
+        // images, font curve buffers). Each resource is an IBuffer; if it
+        // is also an ITexture we take the image upload path, otherwise we
+        // take the plain-buffer path.
+        bool resources_uploaded = false;
         if (has_changes) {
             for (auto& [elem, cache] : element_cache_) {
-                for (auto& weak : cache.textures) {
-                    // Promote to a temporary strong ref so the texture
-                    // cannot die between is_dirty() and upload_texture().
-                    auto tex_ptr = weak.lock();
-                    auto* tex = tex_ptr.get();
-                    if (!tex || !tex->is_dirty()) {
+                for (auto& weak : cache.gpu_resources) {
+                    // Promote to a temporary strong ref so the resource
+                    // cannot die between is_dirty() and upload.
+                    auto buf_ptr = weak.lock();
+                    auto* buf = buf_ptr.get();
+                    if (!buf || !buf->is_dirty()) {
                         continue;
                     }
-                    int tw = tex->width();
-                    int th = tex->height();
-                    const uint8_t* pixels = tex->get_pixels();
-                    if (pixels && tw > 0 && th > 0) {
-                        auto tit = texture_map_.find(tex);
-                        if (tit == texture_map_.end()) {
-                            TextureDesc desc{};
-                            desc.width = tw;
-                            desc.height = th;
-                            desc.format = tex->format();
-                            TextureId tid = backend_->create_texture(desc);
-                            texture_map_[tex] = tid;
-                            tit = texture_map_.find(tex);
+
+                    if (auto* tex = interface_cast<ITexture>(buf)) {
+                        // Texture path: bindless image upload via the
+                        // backend's upload_texture.
+                        int tw = tex->width();
+                        int th = tex->height();
+                        const uint8_t* pixels = tex->get_data();
+                        if (pixels && tw > 0 && th > 0) {
+                            auto tit = texture_map_.find(tex);
+                            if (tit == texture_map_.end()) {
+                                TextureDesc desc{};
+                                desc.width = tw;
+                                desc.height = th;
+                                desc.format = tex->format();
+                                TextureId tid = backend_->create_texture(desc);
+                                texture_map_[tex] = tid;
+                                tit = texture_map_.find(tex);
+                            }
+
+                            backend_->upload_texture(tit->second, pixels, tw, th);
+                            tex->clear_dirty();
+                            resources_uploaded = true;
+                        }
+                    } else {
+                        // Plain buffer path: cpu-writable GpuBuffer + memcpy.
+                        // The backend hands out a persistently-mapped pointer
+                        // and a stable GPU virtual address that the shader
+                        // reaches via buffer_reference.
+                        size_t bsize = buf->get_size();
+                        const uint8_t* bytes = buf->get_data();
+                        if (!bytes || bsize == 0) {
+                            continue;
                         }
 
-                        backend_->upload_texture(tit->second, pixels, tw, th);
-                        tex->clear_dirty();
-                        textures_uploaded = true;
+                        auto bit = buffer_map_.find(buf);
+                        bool need_alloc = (bit == buffer_map_.end());
+                        if (!need_alloc && bit->second.size != bsize) {
+                            // Size changed: defer-destroy the old buffer and
+                            // reallocate. The new GPU address will be picked
+                            // up by the next frame's draw call assembly.
+                            {
+                                std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+                                deferred_buffer_destroy_.push_back(
+                                    {bit->second.handle, present_counter_ + kGpuLatencyFrames});
+                            }
+                            buffer_map_.erase(bit);
+                            need_alloc = true;
+                        }
+
+                        if (need_alloc) {
+                            GpuBufferDesc desc{};
+                            desc.size = bsize;
+                            desc.cpu_writable = true;
+                            BufferEntry entry{};
+                            entry.handle = backend_->create_buffer(desc);
+                            entry.size = bsize;
+                            buffer_map_[buf] = entry;
+                            bit = buffer_map_.find(buf);
+                            // Publish the GPU address back to the buffer so
+                            // materials reading it via get_gpu_address() see
+                            // the new value (this also handles regrow, since
+                            // the previous entry was just erased).
+                            buf->set_gpu_address(backend_->gpu_address(entry.handle));
+                        }
+
+                        if (auto* dst = backend_->map(bit->second.handle)) {
+                            std::memcpy(dst, bytes, bsize);
+                        }
+                        buf->clear_dirty();
+                        resources_uploaded = true;
                     }
                 }
             }
         }
 
-        if (has_changes || textures_uploaded) {
+        if (has_changes || resources_uploaded) {
             // Mark all views sharing this scene as batches dirty
             for (auto& v : views_) {
                 auto sp = v.camera_element->get_scene();
@@ -786,14 +846,31 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
 
 void Renderer::on_gpu_resource_destroyed(IGpuResource* resource)
 {
-    auto* tex = static_cast<ITexture*>(resource);
+    // The notification gives us a base IGpuResource* and the underlying
+    // object may be either an ITexture or a plain IBuffer. We don't know
+    // which without a cross-cast, so just probe both maps; the cast back
+    // to the concrete pointer types is safe because we keyed the maps by
+    // those pointer values when the entries were created.
     std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-    auto it = texture_map_.find(tex);
-    if (it == texture_map_.end()) {
-        return;
+
+    if (auto* tex = interface_cast<ITexture>(resource)) {
+        auto it = texture_map_.find(tex);
+        if (it != texture_map_.end()) {
+            deferred_destroy_.push_back({it->second, present_counter_ + kGpuLatencyFrames});
+            texture_map_.erase(it);
+            return;
+        }
     }
-    deferred_destroy_.push_back({it->second, present_counter_ + kGpuLatencyFrames});
-    texture_map_.erase(it);
+
+    if (auto* buf = interface_cast<IBuffer>(resource)) {
+        auto it = buffer_map_.find(buf);
+        if (it != buffer_map_.end()) {
+            deferred_buffer_destroy_.push_back(
+                {it->second.handle, present_counter_ + kGpuLatencyFrames});
+            buffer_map_.erase(it);
+            return;
+        }
+    }
 }
 
 void Renderer::drain_deferred_destroy()
@@ -802,6 +879,7 @@ void Renderer::drain_deferred_destroy()
         return;
     }
     std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+
     size_t kept = 0;
     for (size_t i = 0; i < deferred_destroy_.size(); ++i) {
         auto& d = deferred_destroy_[i];
@@ -812,17 +890,29 @@ void Renderer::drain_deferred_destroy()
         }
     }
     deferred_destroy_.resize(kept);
+
+    kept = 0;
+    for (size_t i = 0; i < deferred_buffer_destroy_.size(); ++i) {
+        auto& d = deferred_buffer_destroy_[i];
+        if (present_counter_ >= d.safe_after_frame) {
+            backend_->destroy_buffer(d.handle);
+        } else {
+            deferred_buffer_destroy_[kept++] = d;
+        }
+    }
+    deferred_buffer_destroy_.resize(kept);
 }
 
 void Renderer::shutdown()
 {
     if (backend_) {
-        // Detach from any textures we are still observing so their dtors
-        // (which may run later, on any thread) cannot reach a dead renderer.
+        // Detach from any GPU resources we are still observing so their
+        // dtors (which may run later, on any thread) cannot reach a dead
+        // renderer.
         for (auto& [elem, cache] : element_cache_) {
-            for (auto& weak : cache.textures) {
-                if (auto tex = weak.lock()) {
-                    tex->remove_gpu_resource_observer(this);
+            for (auto& weak : cache.gpu_resources) {
+                if (auto res = weak.lock()) {
+                    res->remove_gpu_resource_observer(this);
                 }
             }
         }
@@ -832,6 +922,7 @@ void Renderer::shutdown()
         {
             std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
             deferred_destroy_.clear();
+            deferred_buffer_destroy_.clear();
         }
 
         for (auto& entry : views_) {
@@ -842,6 +933,11 @@ void Renderer::shutdown()
             backend_->destroy_texture(tid);
         }
         texture_map_.clear();
+
+        for (auto& [key, entry] : buffer_map_) {
+            backend_->destroy_buffer(entry.handle);
+        }
+        buffer_map_.clear();
 
         for (auto& slot : frame_slots_) {
             if (slot.frame_buffer) {

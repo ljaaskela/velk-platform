@@ -53,12 +53,19 @@ add_library(velk_text SHARED
     src/text_plugin.cpp
     src/font.h
     src/font.cpp
-    src/font_atlas.h
-    src/font_atlas.cpp
+    src/glyph_baker.h
+    src/glyph_baker.cpp
+    src/font_buffers.h
+    src/font_buffers.cpp
+    src/font_gpu_buffer.h
+    src/font_gpu_buffer.cpp
     src/visual/text_visual.h
     src/visual/text_visual.cpp
+    src/visual/text_material.h
+    src/visual/text_material.cpp
     src/embedded/inter_regular.h
     src/embedded/inter_regular.cpp
+    src/embedded/velk_text_glsl.h
     include/velk-ui/plugins/text/api/font.h
     include/velk-ui/plugins/text/api/text_visual.h
     include/velk-ui/plugins/text/plugin.h
@@ -73,3 +80,20 @@ target_include_directories(velk_text
 )
 
 target_compile_definitions(velk_text PRIVATE VELK_EXPORTS)
+
+# =============================================================================
+# glyph_dump: standalone tool that bakes glyphs from the embedded Inter font
+# and prints stats. Useful for validating GlyphBaker output and tuning band
+# count. Not part of the runtime; intentionally a separate executable.
+# =============================================================================
+add_executable(glyph_dump
+    tools/glyph_dump.cpp
+    src/glyph_baker.h
+    src/glyph_baker.cpp
+    src/font_buffers.h
+    src/font_buffers.cpp
+    src/embedded/inter_regular.h
+    src/embedded/inter_regular.cpp
+)
+target_link_libraries(glyph_dump PRIVATE velk freetype)
+target_include_directories(glyph_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

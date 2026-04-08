@@ -1,7 +1,12 @@
 #include "text_visual.h"
 
+#include "text_material.h"
+
+#include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk/ext/core_object.h>
+#include <velk-render/interface/intf_material.h>
 #include <velk-ui/instance_types.h>
 #include <velk-ui/plugins/text/intf_text_plugin.h>
 
@@ -10,13 +15,14 @@ namespace velk::ui {
 void TextVisual::set_font(const IFont::Ptr& font)
 {
     font_ = font;
+    rebind_font_material();
     reshape();
     invoke_visual_changed();
 }
 
 void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interfaceId)
 {
-    if (interfaceId == ITextVisual::UID && name == "text") {
+    if (interfaceId == ITextVisual::UID && (name == "text" || name == "font_size")) {
         reshape();
     }
     invoke_visual_changed();
@@ -31,6 +37,35 @@ void TextVisual::ensure_default_font()
     auto plugin = get_or_load_plugin<ITextPlugin>(PluginId::TextPlugin);
     if (plugin) {
         font_ = plugin->default_font();
+        rebind_font_material();
+    }
+}
+
+void TextVisual::rebind_font_material()
+{
+    if (!font_) {
+        return;
+    }
+
+    // Lazily create one TextMaterial per visual. The material holds the
+    // font's three buffer pointers and emits their GPU addresses each
+    // frame as the per-draw GPU data the slug fragment shader binds.
+    if (!text_material_) {
+        text_material_ = ::velk::ext::make_object<TextMaterial>();
+    }
+    if (text_material_) {
+        auto* tm = static_cast<TextMaterial*>(static_cast<void*>(text_material_.get()));
+        tm->set_font_buffers(
+            font_->get_curve_buffer(),
+            font_->get_band_buffer(),
+            font_->get_glyph_buffer());
+
+        // Wire the material as the visual's paint so the renderer picks
+        // up its pipeline at draw time.
+        auto mat_ptr = interface_pointer_cast<IMaterial>(text_material_);
+        write_state<IVisual>(this, [&](IVisual::State& s) {
+            set_object_ref(s.paint, mat_ptr);
+        });
     }
 }
 
@@ -56,49 +91,57 @@ void TextVisual::reshape()
     font_->shape_text(text, positions);
 
     auto font_state = read_state<IFont>(font_);
-    float ascender = font_state ? font_state->ascender : 0.f;
-    float line_height = font_state ? font_state->line_height : 0.f;
+    float ascender_units    = font_state ? font_state->ascender    : 0.f;
+    float line_height_units = font_state ? font_state->line_height : 0.f;
+    float upem              = font_state ? font_state->units_per_em : 0.f;
+    float size_px           = state->font_size;
 
-    float atlas_w = static_cast<float>(font_->get_atlas_width());
-    float atlas_h = static_cast<float>(font_->get_atlas_height());
+    if (upem <= 0.f || size_px <= 0.f) {
+        return;
+    }
+    // Single scale factor converts every font-unit measurement (advances,
+    // bbox extents, ascender, line height, gp.offset) to pixels.
+    const float scale = size_px / upem;
+    const float ascender_px = ascender_units * scale;
 
     float cursor_x = 0.f;
 
     for (auto& gp : positions) {
-        auto* rect = font_->ensure_glyph(gp.glyph_id);
-        if (!rect || (rect->w == 0 && rect->h == 0)) {
-            cursor_x += gp.advance.x;
+        IFont::GlyphInfo info = font_->ensure_glyph(gp.glyph_id);
+        if (info.empty) {
+            cursor_x += gp.advance.x * scale;
             continue;
         }
 
-        float glyph_x = cursor_x + gp.offset.x + rect->bearing_x;
-        float glyph_y = ascender - rect->bearing_y + gp.offset.y;
-        float glyph_w = static_cast<float>(rect->w);
-        float glyph_h = static_cast<float>(rect->h);
+        // Convert font-unit bbox to pixel-space quad position and size.
+        // bbox_min.x acts as the left side bearing; bbox_max.y is the
+        // height from the baseline to the top of the glyph (Y-up).
+        const float bearing_x_px = info.bbox_min.x * scale;
+        const float bearing_y_px = info.bbox_max.y * scale;
+        const float glyph_w_px = (info.bbox_max.x - info.bbox_min.x) * scale;
+        const float glyph_h_px = (info.bbox_max.y - info.bbox_min.y) * scale;
 
-        float u0 = static_cast<float>(rect->x) / atlas_w;
-        float v0 = static_cast<float>(rect->y) / atlas_h;
-        float u1 = static_cast<float>(rect->x + rect->w) / atlas_w;
-        float v1 = static_cast<float>(rect->y + rect->h) / atlas_h;
+        const float glyph_x = cursor_x + gp.offset.x * scale + bearing_x_px;
+        const float glyph_y = ascender_px - bearing_y_px + gp.offset.y * scale;
 
         DrawEntry entry{};
-        entry.pipeline_key = PipelineKey::Text;
-        entry.bounds = {glyph_x, glyph_y, glyph_w, glyph_h};
+        entry.pipeline_key = 0; // material override supplies the pipeline
+        entry.bounds = {glyph_x, glyph_y, glyph_w_px, glyph_h_px};
 
         // Color is filled at draw time in get_draw_entries.
-        entry.set_instance(TextInstance{
-            {glyph_x, glyph_y},
-            {glyph_w, glyph_h},
-            color::transparent(),
-            {u0, v0},
-            {u1, v1}});
+        TextInstance inst{};
+        inst.pos = {glyph_x, glyph_y};
+        inst.size = {glyph_w_px, glyph_h_px};
+        inst.col = color::transparent();
+        inst.glyph_index = info.internal_index;
+        entry.set_instance(inst);
 
         cached_entries_.push_back(entry);
-        cursor_x += gp.advance.x;
+        cursor_x += gp.advance.x * scale;
     }
 
     text_width_ = cursor_x;
-    text_height_ = line_height;
+    text_height_ = line_height_units * scale;
 }
 
 vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
@@ -125,10 +168,6 @@ vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
     default: break;
     }
 
-    // Texture key: font's ITexture address (shared across text visuals using the same font)
-    auto font_tex = interface_pointer_cast<ITexture>(font_);
-    uint64_t tex_key = font_tex ? reinterpret_cast<uint64_t>(font_tex.get()) : 0;
-
     vector<DrawEntry> result;
     result.reserve(cached_entries_.size());
 
@@ -142,17 +181,22 @@ vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
         inst.pos.y += offset_y;
         inst.col = col;
 
-        out.texture_key = tex_key;
-
         result.push_back(out);
     }
 
     return result;
 }
 
-ITexture::Ptr TextVisual::get_texture() const
+vector<IBuffer::Ptr> TextVisual::get_gpu_resources() const
 {
-    return interface_pointer_cast<ITexture>(font_);
+    if (!font_) {
+        return {};
+    }
+    vector<IBuffer::Ptr> out;
+    if (auto b = font_->get_curve_buffer()) out.push_back(std::move(b));
+    if (auto b = font_->get_band_buffer())  out.push_back(std::move(b));
+    if (auto b = font_->get_glyph_buffer()) out.push_back(std::move(b));
+    return out;
 }
 
 } // namespace velk::ui

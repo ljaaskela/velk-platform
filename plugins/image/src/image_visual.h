@@ -1,6 +1,7 @@
 #ifndef VELK_UI_IMAGE_VISUAL_H
 #define VELK_UI_IMAGE_VISUAL_H
 
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_texture.h>
 #include <velk-ui/ext/trait.h>
@@ -28,7 +29,7 @@ public:
     ImageVisual();
 
     vector<DrawEntry> get_draw_entries(const rect& bounds) override;
-    ITexture::Ptr get_texture() const override;
+    vector<IBuffer::Ptr> get_gpu_resources() const override;
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;

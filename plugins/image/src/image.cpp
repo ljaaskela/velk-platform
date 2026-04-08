@@ -4,11 +4,6 @@ namespace velk::ui::impl {
 
 Image::Image() = default;
 
-Image::~Image()
-{
-    notify_gpu_resource_destroyed(this);
-}
-
 void Image::init(string_view uri, int width, int height, PixelFormat format,
                  vector<uint8_t> pixels)
 {

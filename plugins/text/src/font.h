@@ -1,12 +1,13 @@
 #ifndef VELK_UI_TEXT_FONT_H
 #define VELK_UI_TEXT_FONT_H
 
+#include "font_buffers.h"
+#include "font_gpu_buffer.h"
+
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
 #include <ft2build.h>
-#include <velk-render/ext/gpu_resource_mixin.h>
-#include <velk-render/interface/intf_texture.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/plugin.h>
 #include FT_FREETYPE_H
@@ -14,11 +15,22 @@
 #include <hb-ft.h>
 #include <hb.h>
 
-#include "font_atlas.h"
-
 namespace velk::ui {
 
-class Font : public ::velk::ext::Object<Font, IFont, ITexture>, public ::velk::ext::GpuResourceMixin
+/**
+ * @brief Font implementation: FreeType outline source + HarfBuzz shaper +
+ *        FontBuffers + three FontGpuBuffer wrappers.
+ *
+ * No glyph atlas. Glyph outlines are extracted lazily by the GlyphBaker
+ * (via FontBuffers::ensure_glyph) and packed into three GPU buffers
+ * (curves, bands, glyph table) that the renderer uploads via the
+ * IBuffer path. The text material reads each buffer's GPU address inside
+ * `write_gpu_data` and emits them as buffer references the slug shader
+ * can dereference.
+ *
+ * Font is no longer an ITexture: there are no pixels to bind.
+ */
+class Font : public ::velk::ext::Object<Font, IFont>
 {
 public:
     VELK_CLASS_UID(ClassId::Font, "Font");
@@ -30,38 +42,26 @@ public:
 
     // IFont
     bool init_default() override;
-    bool set_size(float size_px) override;
     float shape_text(string_view text, vector<IFont::GlyphPosition>& out) override;
-    GlyphBitmap rasterize_glyph(uint32_t glyph_id) override;
-    const GlyphRect* ensure_glyph(uint32_t glyph_id) override;
-    uint32_t get_atlas_width() const override;
-    uint32_t get_atlas_height() const override;
+    GlyphInfo ensure_glyph(uint32_t glyph_id) override;
 
-    // ITexture
-    int width() const override { return static_cast<int>(atlas_.get_width()); }
-    int height() const override { return static_cast<int>(atlas_.get_height()); }
-    PixelFormat format() const override { return PixelFormat::R8; }
-    const uint8_t* get_pixels() const override { return atlas_.get_pixels(); }
-    bool is_dirty() const override { return atlas_.is_dirty(); }
-    void clear_dirty() override { atlas_.clear_dirty(); }
-
-    // IGpuResource
-    void add_gpu_resource_observer(IGpuResourceObserver* obs) override
-    {
-        GpuResourceMixin::add_observer(obs);
-    }
-    void remove_gpu_resource_observer(IGpuResourceObserver* obs) override
-    {
-        GpuResourceMixin::remove_observer(obs);
-    }
+    IBuffer::Ptr get_curve_buffer() const override { return curve_buffer_; }
+    IBuffer::Ptr get_band_buffer()  const override { return band_buffer_; }
+    IBuffer::Ptr get_glyph_buffer() const override { return glyph_buffer_; }
 
 private:
+    void init_buffers();
+
     vector<uint8_t> font_data_;
     FT_Library ft_library_ = nullptr;
     FT_Face ft_face_ = nullptr;
     hb_font_t* hb_font_ = nullptr;
     hb_buffer_t* hb_buffer_ = nullptr;
-    GlyphAtlas atlas_;
+
+    FontBuffers font_buffers_;
+    IBuffer::Ptr curve_buffer_;
+    IBuffer::Ptr band_buffer_;
+    IBuffer::Ptr glyph_buffer_;
 };
 
 } // namespace velk::ui
