@@ -47,6 +47,7 @@ public:
     IBuffer::Ptr get_curve_buffer() const override { return curve_buffer_; }
     IBuffer::Ptr get_band_buffer()  const override { return band_buffer_; }
     IBuffer::Ptr get_glyph_buffer() const override { return glyph_buffer_; }
+    IMaterial::Ptr get_material()   const override { return text_material_; }
 
 private:
     void init_buffers();
@@ -61,6 +62,7 @@ private:
     IBuffer::Ptr curve_buffer_;
     IBuffer::Ptr band_buffer_;
     IBuffer::Ptr glyph_buffer_;
+    IMaterial::Ptr text_material_;
 };
 
 } // namespace velk::ui::impl

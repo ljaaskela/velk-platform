@@ -88,7 +88,7 @@ flowchart TD
     C["<b>FontBuffers</b> (CPU side)<br/>three flat append-only buffers:<br>curves, bands, glyph table<br>per-section dirty flags"]
     D["<b>FontGpuBuffer</b><br>(one per section, implements IBuffer)<br/>observable GPU resource: dirty / upload / regrow / deferred-destroy"]
     E["<b>Renderer upload path</b><br/>backend create_buffer + map + memcpy, per section<br/>publishes GPU virtual address back to IBuffer via set_gpu_address"]
-    F["<b>TextMaterial</b><br/>fragment+vertex pipeline, lazy-compiled with velk_text.glsl include<br/>write_gpu_data emits the three buffer GPU addresses per draw"]
+    F["<b>TextMaterial</b> (owned by Font, shared by all visuals using it)<br/>fragment+vertex pipeline, lazy-compiled with velk_text.glsl include<br/>write_gpu_data emits the three buffer GPU addresses per draw"]
     G["<b>Slug fragment shader</b><br/>reads glyph record, walks h+v band curves<br/>computes analytic coverage"]
 
     A --> B --> C --> D --> E --> F --> G
@@ -161,7 +161,7 @@ The tool also exercises `FontBuffers` end-to-end (bake, upload-size report, idem
   * Optical weight boost (Lengyel's `SLUG_WEIGHT`)
   * Subpixel hinting / LCD AA
   * CJK / very large glyph sets
-  * Multi-font batching
+  * Multi-font batching: visuals sharing a font already share a draw call (the Font owns one `TextMaterial` and visuals consume it), but mixing *different* fonts in one draw call is not supported.
   * Any-hit shader path for ray tracing
 
 ## Reference
@@ -200,13 +200,16 @@ public:
     virtual float shape_text(string_view text, vector<GlyphPosition>& out) = 0;
     virtual GlyphInfo ensure_glyph(uint32_t glyph_id) = 0;
 
-    virtual IBuffer::Ptr get_curve_buffer() const = 0;
-    virtual IBuffer::Ptr get_band_buffer()  const = 0;
-    virtual IBuffer::Ptr get_glyph_buffer() const = 0;
+    virtual IBuffer::Ptr   get_curve_buffer() const = 0;
+    virtual IBuffer::Ptr   get_band_buffer()  const = 0;
+    virtual IBuffer::Ptr   get_glyph_buffer() const = 0;
+    virtual IMaterial::Ptr get_material()     const = 0;
 };
 ```
 
 Notably absent: `set_size`, `size_px`, `get_pixels`, `get_atlas_*`. The font has no notion of pixel size and no glyph atlas. Pixel size is a property of the consuming visual.
+
+`get_material()` returns the single `TextMaterial` instance the font owns, bound to its three GPU buffers. Every `TextVisual` using this font consumes the same material instance, which is what lets the renderer batch them into a single draw call.
 
 ### ITextVisual
 

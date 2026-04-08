@@ -2,8 +2,10 @@
 
 #include "embedded/inter_regular.h"
 #include "font_gpu_buffer.h"
+#include "visual/text_material.h"
 
 #include <velk/api/state.h>
+#include <velk/api/velk.h>
 
 #include <cstring>
 
@@ -35,7 +37,7 @@ void Font::init_buffers()
 {
     auto& instance = ::velk::instance();
     curve_buffer_ = instance.create<IBuffer>(ClassId::FontGpuBuffer);
-    band_buffer_ = instance.create<IBuffer>(ClassId::FontGpuBuffer);
+    band_buffer_  = instance.create<IBuffer>(ClassId::FontGpuBuffer);
     glyph_buffer_ = instance.create<IBuffer>(ClassId::FontGpuBuffer);
     if (auto i = interface_cast<IFontGpuBufferInternal>(curve_buffer_)) {
         i->init(&font_buffers_, FontGpuBufferRole::Curves);
@@ -45,6 +47,14 @@ void Font::init_buffers()
     }
     if (auto i = interface_cast<IFontGpuBufferInternal>(glyph_buffer_)) {
         i->init(&font_buffers_, FontGpuBufferRole::Glyphs);
+    }
+
+    // The font owns one TextMaterial bound to its three GPU buffers. Every
+    // text visual using this font shares this material instance, which is
+    // what lets the renderer batch them into a single draw call.
+    text_material_ = instance.create<IMaterial>(ClassId::TextMaterial);
+    if (auto m = interface_cast<ITextMaterialInternal>(text_material_)) {
+        m->set_font_buffers(curve_buffer_, band_buffer_, glyph_buffer_);
     }
 }
 

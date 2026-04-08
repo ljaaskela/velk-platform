@@ -7,6 +7,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_material.h>
 
 #include <cstdint>
 
@@ -97,6 +98,16 @@ public:
     virtual IBuffer::Ptr get_band_buffer() const = 0;
     virtual IBuffer::Ptr get_glyph_buffer() const = 0;
     /// @}
+
+    /**
+     * @brief Returns the rendering material for this font.
+     *
+     * The Font owns one IMaterial instance bound to its three GPU buffers.
+     * Visuals consume the same material instance, which means visuals
+     * sharing a font also share a draw call (the renderer batches by
+     * material identity).
+     */
+    virtual IMaterial::Ptr get_material() const = 0;
 };
 
 } // namespace velk::ui

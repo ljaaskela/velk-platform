@@ -37,10 +37,9 @@ protected:
 private:
     void reshape();
     void ensure_default_font();
-    void rebind_font_material();
+    void bind_font_material();
 
     Font font_;
-    IObject::Ptr text_material_; ///< TextMaterial bound to font_'s buffers; set as paint.
     vector<DrawEntry> cached_entries_;
     float text_width_{};
     float text_height_{};

@@ -1,11 +1,8 @@
 #include "text_visual.h"
 
-#include "text_material.h"
-
 #include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
-#include <velk/ext/core_object.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-ui/instance_types.h>
 #include <velk-ui/plugins/text/intf_text_plugin.h>
@@ -15,7 +12,7 @@ namespace velk::ui {
 void TextVisual::set_font(const IFont::Ptr& font)
 {
     font_ = Font(font);
-    rebind_font_material();
+    bind_font_material();
     reshape();
     invoke_visual_changed();
 }
@@ -35,34 +32,27 @@ void TextVisual::ensure_default_font()
     }
     font_ = get_default_font();
     if (font_) {
-        rebind_font_material();
+        bind_font_material();
     }
 }
 
-void TextVisual::rebind_font_material()
+void TextVisual::bind_font_material()
 {
+    // The Font owns one TextMaterial bound to its three GPU buffers and
+    // every text visual using the same font shares that single instance.
+    // The renderer batches by material identity, so all text visuals on
+    // one font collapse into a single draw call.
     auto font = font_.as_ptr<IFont>();
     if (!font) {
         return;
     }
-
-    // Lazily create one TextMaterial per visual. The material holds the
-    // font's three buffer pointers and emits their GPU addresses each
-    // frame as the per-draw GPU data the slug fragment shader binds.
-    if (!text_material_) {
-        text_material_ = ::velk::ext::make_object<TextMaterial>();
+    auto material = font->get_material();
+    if (!material) {
+        return;
     }
-    if (text_material_) {
-        auto* tm = static_cast<TextMaterial*>(static_cast<void*>(text_material_.get()));
-        tm->set_font_buffers(font->get_curve_buffer(), font->get_band_buffer(), font->get_glyph_buffer());
-
-        // Wire the material as the visual's paint so the renderer picks
-        // up its pipeline at draw time.
-        auto mat_ptr = interface_pointer_cast<IMaterial>(text_material_);
-        write_state<IVisual>(this, [&](IVisual::State& s) {
-            set_object_ref(s.paint, mat_ptr);
-        });
-    }
+    write_state<IVisual>(this, [&](IVisual::State& s) {
+        set_object_ref(s.paint, material);
+    });
 }
 
 void TextVisual::reshape()

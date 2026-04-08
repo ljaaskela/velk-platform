@@ -9,28 +9,46 @@
 namespace velk::ui {
 
 /**
+ * @brief Internal interface for binding a TextMaterial to a font's three
+ *        GPU buffers (curves, bands, glyph table).
+ *
+ * The Font creates one TextMaterial via the type registry and casts to this
+ * interface to wire its own buffers in. Visuals never call this directly:
+ * they consume the bound material via `IFont::get_material()`.
+ */
+class ITextMaterialInternal : public Interface<ITextMaterialInternal>
+{
+public:
+    virtual void set_font_buffers(IBuffer::Ptr curves,
+                                  IBuffer::Ptr bands,
+                                  IBuffer::Ptr glyphs) = 0;
+};
+
+/**
  * @brief Material for analytic-Bezier text rendering (Slug-style coverage).
  *
- * One TextMaterial instance per font (a TextVisual that switches fonts
- * gets a fresh material). Holds the font's three GPU buffers (curves,
- * bands, glyph table) and emits their GPU virtual addresses as the
- * material's per-draw GPU data. The slug fragment shader binds them via
- * `buffer_reference` and walks them to compute coverage.
+ * One instance per font, owned by the Font itself. Holds the font's three
+ * GPU buffers (curves, bands, glyph table) and emits their GPU virtual
+ * addresses as the material's per-draw GPU data. The slug fragment shader
+ * binds them via `buffer_reference` and walks them to compute coverage.
+ *
+ * Because the material is shared across every text visual using the same
+ * font, those visuals naturally batch into a single draw call.
  *
  * The pipeline (vertex + fragment shader) is compiled lazily on the first
  * call to `get_pipeline_handle`. The text-specific GLSL include
  * (`velk_text.glsl`, defining the slug coverage function) is registered
  * with the render context just before compilation.
  */
-class TextMaterial : public ::velk::ext::Material<TextMaterial>
+class TextMaterial : public ::velk::ext::Material<TextMaterial, ITextMaterialInternal>
 {
 public:
-    VELK_CLASS_UID("e0d0f4f6-0c4b-4a8b-b7e4-7e2d6e1a0002", "TextMaterial");
+    VELK_CLASS_UID(::velk::ui::ClassId::TextMaterial, "TextMaterial");
 
-    /// Bind the material to a font's three GPU buffers. Called once after
-    /// creation. The buffers' lifetimes are extended for as long as this
-    /// material is alive.
-    void set_font_buffers(IBuffer::Ptr curves, IBuffer::Ptr bands, IBuffer::Ptr glyphs);
+    // ITextMaterialInternal
+    void set_font_buffers(IBuffer::Ptr curves,
+                          IBuffer::Ptr bands,
+                          IBuffer::Ptr glyphs) override;
 
     // IMaterial
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
