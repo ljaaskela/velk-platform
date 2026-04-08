@@ -6,6 +6,7 @@ The text plugin (`velk_text`) renders text using **analytic Bezier glyph coverag
 
 - [Why this matters](#why-this-matters)
 - [Usage](#usage)
+- [JSON declaration](#json-declaration)
 - [Drawing text](#drawing-text)
   - [TextVisual](#textvisual)
   - [Font size](#font-size)
@@ -13,7 +14,6 @@ The text plugin (`velk_text`) renders text using **analytic Bezier glyph coverag
   - [Pipeline](#pipeline)
   - [GPU data layout](#gpu-data-layout)
   - [Coordinate convention](#coordinate-convention)
-- [JSON declaration](#json-declaration)
 - [Validation tool](#validation-tool)
 - [Open items](#open-items)
 - [Reference](#reference)
@@ -65,6 +65,28 @@ element.add_trait(text);
 ```
 
 The visual shapes the text with HarfBuzz on every change to `text` or `font_size`, lazy-bakes any glyphs it hasn't seen before, and emits one quad per laid-out glyph. All quads in one text element share a single draw call.
+
+## JSON declaration
+
+A `TextVisual` trait can be added as an attachment to one or more `Element` to render text:
+
+```json
+{
+  "targets": ["card_title"],
+  "class": "velk_text.TextVisual",
+  "properties": {
+    "text": "Total Users",
+    "font_size": 32.0,
+    "h_align": "left",
+    "v_align": "center",
+    "color": { "r": 0.85, "g": 0.85, "b": 0.9, "a": 1.0 }
+  }
+}
+```
+
+`text`, `font_size`, `h_align`, and `v_align` are all standard properties. `color` lives on the base `IVisual` interface.
+
+The default font is created automatically by the plugin and used unless the visual's `set_font` method is called explicitly with a different font. There is no need to declare the font in the scene file.
 
 ### Font size
 
@@ -121,28 +143,6 @@ For printable ASCII rendered with Inter, the entire per-font upload is about 92 
 ### Coordinate convention
 
 The baker normalizes curves to `[0, 1]^2` over the bbox in **FreeType's Y-up convention** (descender at y = 0, ascender at y = 1). The vertex shader flips quad uv to match: `v_uv = vec2(q.x, 1.0 - q.y)`. The fragment shader and `velk_text_coverage` operate in this Y-up glyph normalized space.
-
-## JSON declaration
-
-A `TextVisual` trait can be added as an attachment to one or more `Element` to render text:
-
-```json
-{
-  "targets": ["card_title"],
-  "class": "velk_text.TextVisual",
-  "properties": {
-    "text": "Total Users",
-    "font_size": 32.0,
-    "h_align": "left",
-    "v_align": "center",
-    "color": { "r": 0.85, "g": 0.85, "b": 0.9, "a": 1.0 }
-  }
-}
-```
-
-`text`, `font_size`, `h_align`, and `v_align` are all standard properties. `color` lives on the base `IVisual` interface.
-
-The default font is created automatically by the plugin and used unless the visual's `set_font` method is called explicitly with a different font. There is no need to declare the font in the scene file.
 
 ## Validation tool
 
