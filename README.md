@@ -32,8 +32,6 @@ Declarative UI framework:
 | [Update cycle](velk-ui/docs/update-cycle.md) | The frame loop, dirty tracking, scene state consumption |
 | [Input](velk-ui/docs/input.md) | Hit testing, event dispatch, focus |
 | [Performance](velk-ui/docs/performance.md) | Renderer cost, batching, hot paths |
-| [Font rendering](docs/font_rendering.md) | Architecture and design notes for the analytic Bezier text pipeline |
-| [Ray tracing](docs/ray_tracing.md) | Plan and motivation for the ray-traced rendering direction |
 | **Built-in plugins** | |
 | [Text](velk-ui/docs/plugins/text.md) | Analytic Bezier text rendering, scale-independent fonts |
 | [Image](velk-ui/docs/plugins/image.md) | Image decoding and bindless texture binding |
