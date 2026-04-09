@@ -1,7 +1,7 @@
 #ifndef VELK_UI_IMAGE_API_IMAGE_H
 #define VELK_UI_IMAGE_API_IMAGE_H
 
-#include <velk/api/object.h>
+#include <velk/api/resource.h>
 #include <velk/api/velk.h>
 #include <velk/string_view.h>
 
@@ -15,23 +15,27 @@ namespace velk::ui {
  * @brief Convenience wrapper around an IImage produced by the image
  *        decoder and cached in the resource store.
  *
- * Hides the `instance().resource_store().get_resource<IImage>(uri)` call
- * and provides accessors for status, dimensions, and persistence.
+ * Inherits Resource for URI, existence, size, and persistence accessors.
  *
+ * @code
  *   auto img = Image::load("image:app://images/logo.png");
  *   if (img && img.is_loaded()) {
  *       img.set_persistent(true);
  *   }
- *
- *   // Bind into a material:
  *   mat.set_texture(img.as_texture());
+ * @endcode
  */
-class Image : public Object
+class Image : public Resource
 {
 public:
+    /** @brief Default-constructed Image wraps no object. */
     Image() = default;
-    explicit Image(IObject::Ptr obj) : Object(check_object<IImage>(obj)) {}
-    explicit Image(IImage::Ptr ptr) : Object(as_object(ptr)) {}
+
+    /** @brief Wraps an existing IObject pointer, rejected if it does not implement IImage. */
+    explicit Image(IObject::Ptr obj) : Resource(check_object<IImage>(obj)) {}
+
+    /** @brief Wraps an existing IImage pointer. */
+    explicit Image(IImage::Ptr ptr) : Resource(as_object(ptr)) {}
 
     /**
      * @brief Loads (or fetches from cache) an image by URI.
@@ -69,42 +73,22 @@ public:
 
     /** @brief True if status() == Failed. */
     bool is_failed() const { return status() == ImageStatus::Failed; }
-
-    /** @brief Returns the URI this image was loaded from, or empty. */
-    string_view uri() const
-    {
-        return with<IImage>([](auto& i) { return i.uri(); });
-    }
-
-    /** @brief Returns true if the image is pinned in the resource store cache. */
-    bool is_persistent() const
-    {
-        return with<IImage>([](auto& i) { return i.is_persistent(); });
-    }
-
-    /**
-     * @brief Pins or unpins the image in the cache.
-     *
-     * Persistent images survive even when no consumer holds a reference;
-     * the resource store keeps a strong ref. Takes effect on the next
-     * resource store access.
-     */
-    void set_persistent(bool value)
-    {
-        with<IImage>([&](auto& i) { return i.set_persistent(value); });
-    }
 };
 
 namespace image {
 
 /**
- *  @brief Loads (or fetches from cache) an image by URI. Equivalent to `Image::load`.
- *  @param uri Uri of the image.
- *  @param persistent If true, the image will not be destroyed when the last reference to it dies.
+ * @brief Loads (or fetches from cache) an image by URI. Equivalent to `Image::load`.
+ * @param uri URI of the image.
+ * @param persistent If true, the image will not be destroyed when the last reference to it dies.
  */
 inline Image load_image(string_view uri, bool persistent = false)
 {
-    return Image::load(uri);
+    auto img = Image::load(uri);
+    if (persistent && img) {
+        img.set_persistent(true);
+    }
+    return img;
 }
 
 } // namespace image

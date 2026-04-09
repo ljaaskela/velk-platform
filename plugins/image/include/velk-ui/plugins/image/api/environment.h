@@ -1,7 +1,7 @@
 #ifndef VELK_UI_ENV_API_ENVIRONMENT_H
 #define VELK_UI_ENV_API_ENVIRONMENT_H
 
-#include <velk/api/object.h>
+#include <velk/api/resource.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/resource/intf_resource_store.h>
@@ -14,7 +14,7 @@ namespace velk::ui {
 /**
  * @brief Convenience wrapper around IEnvironment.
  *
- * Provides null-safe typed accessors for environment properties.
+ * Inherits Resource for URI, existence, size, and persistence accessors.
  *
  * @code
  *   auto env = load_environment("env:app://hdri/sky.hdr");
@@ -22,26 +22,20 @@ namespace velk::ui {
  *   env.set_rotation(45.f);
  * @endcode
  */
-class Environment : public Object
+class Environment : public Resource
 {
 public:
     /** @brief Default-constructed Environment wraps no object. */
     Environment() = default;
 
     /** @brief Wraps an existing IObject pointer, rejected if it does not implement IEnvironment. */
-    explicit Environment(IObject::Ptr obj) : Object(check_object<IEnvironment>(obj)) {}
+    explicit Environment(IObject::Ptr obj) : Resource(check_object<IEnvironment>(obj)) {}
 
     /** @brief Wraps an existing IEnvironment pointer. */
-    explicit Environment(IEnvironment::Ptr e) : Object(as_object(e)) {}
+    explicit Environment(IEnvironment::Ptr e) : Resource(as_object(e)) {}
 
     /** @brief Implicit conversion to IEnvironment::Ptr. */
     operator IEnvironment::Ptr() const { return as_ptr<IEnvironment>(); }
-
-    /** @brief Returns the source URI (from IResource). */
-    auto get_uri() const
-    {
-        return with<IResource>([](auto& r) { return r.uri(); });
-    }
 
     /** @brief Sets the exposure multiplier. */
     void set_intensity(float v)
