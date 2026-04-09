@@ -13,12 +13,19 @@ add_library(velk_image SHARED
     src/image_material.cpp
     src/image_visual.h
     src/image_visual.cpp
+    src/environment.h
+    src/environment.cpp
+    src/env_decoder.h
+    src/env_decoder.cpp
+    src/env_material.h
+    src/env_material.cpp
     include/velk-ui/plugins/image/plugin.h
     include/velk-ui/plugins/image/intf_image_material.h
     include/velk-ui/plugins/image/intf_image_visual.h
     include/velk-ui/plugins/image/api/image.h
     include/velk-ui/plugins/image/api/image_material.h
     include/velk-ui/plugins/image/api/image_visual.h
+    include/velk-ui/plugins/image/api/environment.h
 )
 
 target_link_libraries(velk_image PRIVATE velk velk_ui velk_render)

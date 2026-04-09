@@ -16,9 +16,10 @@ const char* velk_glsl = R"(
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
 
-// Frame globals: projection matrix and viewport dimensions.
+// Frame globals: projection matrix, its inverse, and viewport dimensions.
 layout(buffer_reference, std430) readonly buffer GlobalData {
     mat4 view_projection;
+    mat4 inverse_view_projection;
     vec4 viewport; // width, height, 1/width, 1/height
 };
 

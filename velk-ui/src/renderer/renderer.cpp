@@ -11,6 +11,7 @@
 #include <cstring>
 #include <velk-render/interface/intf_material.h>
 #include <velk-ui/interface/intf_camera.h>
+#include <velk-ui/interface/intf_environment.h>
 #include <velk-ui/interface/intf_visual.h>
 
 #ifdef VELK_RENDER_DEBUG
@@ -347,20 +348,25 @@ void Renderer::ensure_frame_buffer_capacity()
              new_size / 1024,
              peak_usage_ / 1024);
 
-    for (auto& slot : frame_slots_) {
-        if (slot.frame_buffer) {
-            backend_->destroy_buffer(slot.frame_buffer);
+    // Update the target size. Only the active slot is regrown here (it
+    // hasn't been submitted yet, so it's safe to destroy). Other slots
+    // may be in-flight on the GPU; they keep their old buffer and get
+    // regrown lazily when they become active (see prepare()).
+    frame_buffer_size_ = new_size;
+    peak_usage_ = 0;
+
+    if (active_slot_ && active_slot_->buffer_size < new_size) {
+        if (active_slot_->frame_buffer) {
+            backend_->destroy_buffer(active_slot_->frame_buffer);
         }
         GpuBufferDesc desc;
         desc.size = new_size;
         desc.cpu_writable = true;
-        slot.frame_buffer = backend_->create_buffer(desc);
-        slot.frame_ptr = backend_->map(slot.frame_buffer);
-        slot.frame_gpu_base = backend_->gpu_address(slot.frame_buffer);
+        active_slot_->frame_buffer = backend_->create_buffer(desc);
+        active_slot_->frame_ptr = backend_->map(active_slot_->frame_buffer);
+        active_slot_->frame_gpu_base = backend_->gpu_address(active_slot_->frame_buffer);
+        active_slot_->buffer_size = new_size;
     }
-
-    frame_buffer_size_ = new_size;
-    peak_usage_ = 0;
 }
 
 void Renderer::init_slot_buffers(FrameSlot& slot)
@@ -374,12 +380,12 @@ void Renderer::init_slot_buffers(FrameSlot& slot)
     slot.frame_buffer = backend_->create_buffer(desc);
     slot.frame_ptr = backend_->map(slot.frame_buffer);
     slot.frame_gpu_base = backend_->gpu_address(slot.frame_buffer);
+    slot.buffer_size = frame_buffer_size_;
 }
 
 void Renderer::build_draw_calls()
 {
     VELK_PERF_SCOPE("renderer.build_draw_calls");
-    draw_calls_.clear();
 
     for (auto& batch : batches_) {
 
@@ -440,11 +446,17 @@ void Renderer::build_draw_calls()
             peak_usage_ = write_offset_;
         }
 
-        // Look up the backend pipeline handle from the pipeline key
+        // Look up the backend pipeline handle. If the batch has a material,
+        // ask the material for its pipeline (it may have been lazily compiled).
+        // Otherwise fall back to the batch's pipeline_key.
         if (!pipeline_map_) {
             continue;
         }
-        auto pit = pipeline_map_->find(batch.pipeline_key);
+        uint64_t effective_pipeline_key = batch.pipeline_key;
+        if (effective_pipeline_key == 0 && batch.material && render_ctx_) {
+            effective_pipeline_key = batch.material->get_pipeline_handle(*render_ctx_);
+        }
+        auto pit = pipeline_map_->find(effective_pipeline_key);
         if (pit == pipeline_map_->end()) {
             continue;
         }
@@ -522,8 +534,31 @@ Frame Renderer::prepare(const FrameDesc& desc)
     slot->surface_submits.clear();
     active_slot_ = slot;
 
+    // If this slot's buffer is undersized (it was in-flight during a
+    // previous regrow and was skipped), grow it now that it's safe.
+    if (slot->buffer_size < frame_buffer_size_) {
+        if (slot->frame_buffer) {
+            backend_->destroy_buffer(slot->frame_buffer);
+        }
+        GpuBufferDesc desc;
+        desc.size = frame_buffer_size_;
+        desc.cpu_writable = true;
+        slot->frame_buffer = backend_->create_buffer(desc);
+        slot->frame_ptr = backend_->map(slot->frame_buffer);
+        slot->frame_gpu_base = backend_->gpu_address(slot->frame_buffer);
+        slot->buffer_size = frame_buffer_size_;
+    }
+
     // Prepare the staging buffer once for all views
     ensure_frame_buffer_capacity();
+
+    if ((slot->id % 10000) == 0) {
+        VELK_LOG(I, "Renderer: frame %llu, frame buffer %zu KB, peak usage %zu KB",
+                 static_cast<unsigned long long>(slot->id),
+                 frame_buffer_size_ / 1024,
+                 peak_usage_ / 1024);
+    }
+
     write_offset_ = 0;
 
     // Consume scene state once per unique scene and process changes
@@ -695,6 +730,13 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
         if (entry.batches_dirty) {
             rebuild_batches(sit->second, entry);
+            // Prepend environment batch right after rebuild so it's part
+            // of the cached batch list. It only needs re-inserting when
+            // batches are rebuilt (on scene changes); on static frames
+            // the env batch from the previous rebuild is still there.
+            if (camera) {
+                prepend_environment_batch(camera);
+            }
             entry.batches_dirty = false;
         }
 
@@ -710,12 +752,17 @@ Frame Renderer::prepare(const FrameDesc& desc)
         // Write per-view globals into the staging buffer
         if (vp_w > 0 && vp_h > 0) {
             FrameGlobals globals{};
+            mat4 vp_mat;
             if (camera) {
-                auto vp = camera->get_view_projection(*entry.camera_element, vp_w, vp_h);
-                std::memcpy(globals.view_projection, vp.m, sizeof(vp.m));
+                vp_mat = camera->get_view_projection(*entry.camera_element, vp_w, vp_h);
             } else {
                 build_ortho_projection(globals.view_projection, vp_w, vp_h);
+                // Parse the ortho VP back into a mat4 for inversion.
+                std::memcpy(vp_mat.m, globals.view_projection, sizeof(vp_mat.m));
             }
+            std::memcpy(globals.view_projection, vp_mat.m, sizeof(vp_mat.m));
+            auto inv_vp = mat4::inverse(vp_mat);
+            std::memcpy(globals.inverse_view_projection, inv_vp.m, sizeof(inv_vp.m));
             globals.viewport[0] = vp_w;
             globals.viewport[1] = vp_h;
             globals.viewport[2] = 1.0f / vp_w;
@@ -723,7 +770,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
             globals_gpu_addr_ = write_to_frame_buffer(&globals, sizeof(globals));
         }
 
-        // Write all batches to the staging buffer and produce DrawCall structs
+        draw_calls_.clear();
         build_draw_calls();
 
         // Capture draw calls for this surface into the frame slot
@@ -916,6 +963,13 @@ void Renderer::shutdown()
                 }
             }
         }
+        // Unregister from environment textures (not tracked via element cache).
+        for (auto& weak : observed_env_resources_) {
+            if (auto res = weak.lock()) {
+                res->remove_gpu_resource_observer(this);
+            }
+        }
+        observed_env_resources_.clear();
 
         // Drop any deferred destroys outright; the backend will be torn
         // down so all GPU resources die anyway.
@@ -954,6 +1008,76 @@ void Renderer::shutdown()
     batches_.clear();
     draw_calls_.clear();
     pipeline_map_ = nullptr;
+}
+
+void Renderer::prepend_environment_batch(ICamera& camera)
+{
+    if (!backend_) {
+        return;
+    }
+
+    auto cam_state = read_state<ICamera>(&camera);
+    if (!(cam_state && cam_state->environment)) {
+        return;
+    }
+    auto env_ptr = cam_state->environment.get<IEnvironment>();
+    if (!env_ptr) {
+        return;
+    }
+    auto* tex = interface_cast<ITexture>(env_ptr);
+    if (!tex) {
+        return;
+    }
+
+    // Upload the environment texture if dirty.
+    if (tex->is_dirty()) {
+        const uint8_t* pixels = tex->get_data();
+        int tw = tex->width();
+        int th = tex->height();
+        if (pixels && tw > 0 && th > 0) {
+            auto tit = texture_map_.find(tex);
+            if (tit == texture_map_.end()) {
+                TextureDesc desc{};
+                desc.width = tw;
+                desc.height = th;
+                desc.format = tex->format();
+                TextureId tid = backend_->create_texture(desc);
+                texture_map_[tex] = tid;
+                tex->add_gpu_resource_observer(this);
+                auto buf = interface_pointer_cast<IBuffer>(env_ptr);
+                if (buf) {
+                    observed_env_resources_.push_back(buf);
+                }
+            }
+            auto tit2 = texture_map_.find(tex);
+            if (tit2 != texture_map_.end()) {
+                backend_->upload_texture(tit2->second, pixels, tw, th);
+            }
+            tex->clear_dirty();
+        }
+    }
+
+    // Get the material from the environment (owned by the environment,
+    // like Font owns TextMaterial).
+    auto material = env_ptr->get_material();
+    if (!material) {
+        return;
+    }
+
+    // Insert a synthetic batch at the front of batches_ so the environment
+    // renders before all scene geometry. The batch flows through the
+    // normal build_draw_calls path. The env vertex shader generates a
+    // fullscreen quad from vertex index; no instance data is needed, but
+    // the batch must have instance_count = 1 to produce a draw call.
+    Batch env_batch;
+    env_batch.pipeline_key = 0; // material override supplies the pipeline
+    env_batch.texture_key = reinterpret_cast<uint64_t>(tex);
+    env_batch.instance_stride = 4;
+    env_batch.instance_count = 1;
+    env_batch.instance_data.resize(4, 0); // dummy, shader ignores it
+    env_batch.material = std::move(material);
+
+    batches_.insert(batches_.begin(), std::move(env_batch));
 }
 
 } // namespace velk::ui

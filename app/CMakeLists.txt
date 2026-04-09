@@ -23,6 +23,9 @@ add_custom_command(TARGET velk_ui_app POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/test/scenes/dashboard.json"
         "$<TARGET_FILE_DIR:velk_ui_app>/scenes/dashboard.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/test/assets"
+        "$<TARGET_FILE_DIR:velk_ui_app>/assets"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:velk_ui_app>/scenes/images"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/test/scenes/images/velk-icon.png"

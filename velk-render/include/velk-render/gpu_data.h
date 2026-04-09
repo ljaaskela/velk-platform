@@ -19,8 +19,9 @@ namespace velk {
 /// Per-frame global data written by the renderer, read by all shaders.
 struct FrameGlobals
 {
-    float view_projection[16]; ///< Combined view-projection matrix from the camera.
-    float viewport[4];    ///< width, height, 1/width, 1/height.
+    float view_projection[16];         ///< Combined view-projection matrix from the camera.
+    float inverse_view_projection[16]; ///< Inverse of view_projection (for reconstructing world-space directions).
+    float viewport[4];                 ///< width, height, 1/width, 1/height.
 };
 
 /**

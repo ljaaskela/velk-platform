@@ -19,6 +19,7 @@
 #include <velk-ui/api/scene.h>
 #include <velk-ui/api/visual/rect.h>
 #include <velk-ui/api/visual/visual.h>
+#include <velk-ui/api/trait/orbit.h>
 #include <velk-ui/interface/intf_camera.h>
 
 static void glfw_error_callback(int error, const char* description)
@@ -29,6 +30,10 @@ static void glfw_error_callback(int error, const char* description)
 static velk::ui::Scene* g_scene = nullptr;
 static velk::ISurface::Ptr g_surface;
 static velk::ui::InputDispatcher* g_input = nullptr;
+static velk::ui::OrbitTrait g_orbit;
+static bool g_orbit_dragging = false;
+static double g_orbit_last_x = 0.0;
+static double g_orbit_last_y = 0.0;
 
 static void glfw_framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -110,7 +115,9 @@ int main(int argc, char* argv[])
         renderer->add_view(camera, surface, {0, 0, 0.5f, 1.0f});
     }
     if (camera_3d) {
-        renderer->add_view(camera_3d, surface, {0.5f, 0, 0.5f, 1.0f});
+        renderer->add_view(camera_3d, surface, {0.f, 0, 1.f, 1.0f});
+        // Grab the orbit trait for mouse-driven rotation.
+        g_orbit = velk::ui::OrbitTrait(camera_3d.find_trait<velk::ui::IOrbit>());
     }
 
     g_scene = &scene;
@@ -122,6 +129,19 @@ int main(int argc, char* argv[])
     g_input = &input;
 
     glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
+        // Orbit: right-drag rotates the 3D camera.
+        if (g_orbit_dragging && g_orbit) {
+            float dx = static_cast<float>(x - g_orbit_last_x);
+            float dy = static_cast<float>(y - g_orbit_last_y);
+            auto state = velk::read_state<velk::ui::IOrbit>(static_cast<velk::ui::IOrbit::Ptr>(g_orbit));
+            if (state) {
+                g_orbit.set_yaw(state->yaw + dx * 0.3f);
+                g_orbit.set_pitch(state->pitch + dy * 0.3f);
+            }
+            g_orbit_last_x = x;
+            g_orbit_last_y = y;
+        }
+
         if (g_input) {
             velk::ui::PointerEvent ev;
             ev.position = {static_cast<float>(x), static_cast<float>(y)};
@@ -131,6 +151,16 @@ int main(int argc, char* argv[])
     });
 
     glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
+        // Orbit: right mouse button starts/stops drag rotation.
+        if (button == GLFW_MOUSE_BUTTON_RIGHT && g_orbit) {
+            if (action == GLFW_PRESS) {
+                g_orbit_dragging = true;
+                glfwGetCursorPos(w, &g_orbit_last_x, &g_orbit_last_y);
+            } else {
+                g_orbit_dragging = false;
+            }
+        }
+
         if (!g_input) {
             return;
         }
@@ -158,6 +188,15 @@ int main(int argc, char* argv[])
     });
 
     glfwSetScrollCallback(window, [](GLFWwindow* w, double xoffset, double yoffset) {
+        // Orbit: scroll wheel adjusts camera distance.
+        if (g_orbit) {
+            auto state = velk::read_state<velk::ui::IOrbit>(static_cast<velk::ui::IOrbit::Ptr>(g_orbit));
+            if (state) {
+                float factor = (yoffset > 0) ? 0.9f : 1.1f;
+                g_orbit.set_distance(state->distance * factor);
+            }
+        }
+
         if (!g_input) {
             return;
         }

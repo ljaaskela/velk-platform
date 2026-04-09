@@ -18,7 +18,8 @@ public:
     ReturnValue shutdown(IVelk& velk) override;
 
 private:
-    IResourceDecoder::Ptr decoder_;
+    IResourceDecoder::Ptr image_decoder_;
+    IResourceDecoder::Ptr env_decoder_;
 };
 
 } // namespace velk::ui::impl

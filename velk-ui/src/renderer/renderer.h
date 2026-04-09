@@ -15,6 +15,7 @@
 #include <velk-render/interface/intf_texture.h>
 #include <velk-render/plugin.h>
 #include <velk-render/render_types.h>
+#include <velk-ui/interface/intf_camera.h>
 #include <velk-ui/interface/intf_renderer.h>
 #include <velk-ui/interface/intf_scene.h>
 
@@ -109,11 +110,13 @@ private:
         GpuBuffer frame_buffer{};
         void* frame_ptr = nullptr;
         uint64_t frame_gpu_base = 0;
+        size_t buffer_size = 0;  ///< Current size of frame_buffer in bytes.
     };
 
     void rebuild_commands(IElement* element);
     void rebuild_batches(const SceneState& state, const ViewEntry& entry);
     void build_draw_calls();
+    void prepend_environment_batch(ICamera& camera);
 
     uint64_t write_to_frame_buffer(const void* data, size_t size, size_t alignment = 16);
 
@@ -178,6 +181,10 @@ private:
 
     vector<Batch> batches_;
     vector<DrawCall> draw_calls_;
+    /// Environment textures we've observed (not tracked via element_cache_).
+    /// Unregistered in shutdown() to prevent the GpuResource dtor from
+    /// calling back into a dead renderer during resource store teardown.
+    vector<IBuffer::WeakPtr> observed_env_resources_;
 
     static constexpr uint64_t kGpuLatencyFrames = 3;  ///< Frames to wait before reusing a slot's GPU buffer.
     static constexpr uint32_t kDefaultMaxFramesInFlight = kGpuLatencyFrames + 1;

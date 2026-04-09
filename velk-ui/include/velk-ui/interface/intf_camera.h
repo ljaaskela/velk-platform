@@ -1,6 +1,7 @@
 #ifndef VELK_UI_INTF_CAMERA_H
 #define VELK_UI_INTF_CAMERA_H
 
+#include <velk/api/object_ref.h>
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_trait.h>
 
@@ -29,7 +30,8 @@ public:
         (PROP, float, scale, 1.f),
         (PROP, float, fov, 60.f),
         (PROP, float, near_clip, 0.1f),
-        (PROP, float, far_clip, 1000.f)
+        (PROP, float, far_clip, 1000.f),
+        (PROP, ObjectRef, environment, {}) ///< Optional IEnvironment for skybox/background.
     )
 
     /**
