@@ -123,6 +123,8 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr
             SurfaceDesc desc{};
             desc.width = state->width;
             desc.height = state->height;
+            desc.update_rate = state->update_rate;
+            desc.target_fps = state->target_fps;
             sid = backend_->create_surface(desc);
         }
     }

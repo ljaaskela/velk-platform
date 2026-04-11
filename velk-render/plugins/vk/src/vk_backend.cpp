@@ -23,15 +23,28 @@ VkFormat choose_surface_format(VkPhysicalDevice device, VkSurfaceKHR surface)
     return formats.empty() ? VK_FORMAT_B8G8R8A8_UNORM : formats[0].format;
 }
 
-VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKHR surface)
+VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKHR surface, UpdateRate rate)
 {
+    // VSync (default): always FIFO. Always supported, capped to display refresh.
+    if (rate == UpdateRate::VSync) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    // Unlimited / Targeted: prefer IMMEDIATE (no vsync, may tear),
+    // fall back to MAILBOX (triple-buffered, no tearing), then FIFO.
+    // Targeted mode relies on software pacing (Application sleeps between frames).
     uint32_t count = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &count, nullptr);
     vector<VkPresentModeKHR> modes(count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &count, modes.data());
 
     for (auto m : modes) {
-        if (m == VK_PRESENT_MODE_FIFO_KHR) {
+        if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+            return m;
+        }
+    }
+    for (auto m : modes) {
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
             return m;
         }
     }
@@ -583,6 +596,7 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
         if (sd.surface && sd.swapchain == VK_NULL_HANDLE) {
             sd.width = desc.width;
             sd.height = desc.height;
+            sd.update_rate = desc.update_rate;
             if (!create_swapchain(sd)) {
                 return 0;
             }
@@ -630,7 +644,7 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device_, sd.surface, &caps);
 
     sd.image_format = choose_surface_format(physical_device_, sd.surface);
-    VkPresentModeKHR present_mode = choose_present_mode(physical_device_, sd.surface);
+    VkPresentModeKHR present_mode = choose_present_mode(physical_device_, sd.surface, sd.update_rate);
 
     VkExtent2D extent;
     if (caps.currentExtent.width != UINT32_MAX) {

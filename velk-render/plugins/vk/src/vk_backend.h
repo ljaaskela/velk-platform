@@ -105,6 +105,7 @@ private:
         int width = 0;
         int height = 0;
         uint32_t image_index = 0;
+        UpdateRate update_rate = UpdateRate::VSync;
     };
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;

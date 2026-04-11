@@ -67,18 +67,49 @@ struct DrawEntry
     const T& as_instance() const { return *reinterpret_cast<const T*>(instance_data); }
 };
 
-/// Selects the GPU backend.
+/** @brief Selects the GPU backend used by the render context. */
 enum class RenderBackendType : uint8_t
 {
     Default, ///< Platform best: Vulkan on Windows/Linux/Android, Metal on Apple.
     Vulkan,  ///< Explicit Vulkan backend.
 };
 
-/// Configuration for creating a render context.
+/**
+ * @brief Configuration for creating a render context.
+ *
+ * Passed to velk::create_render_context() / IRenderContext::init().
+ */
 struct RenderConfig
 {
-    RenderBackendType backend = RenderBackendType::Default;
-    void* backend_params = nullptr; ///< Backend-specific init params (e.g. VulkanInitParams*).
+    RenderBackendType backend = RenderBackendType::Default; ///< GPU backend selection.
+    void* backend_params = nullptr;                         ///< Backend-specific init params (e.g. VulkanInitParams*).
+};
+
+/**
+ * @brief Controls how often a surface is presented.
+ *
+ * Affects the swapchain present mode chosen by the backend, plus optional
+ * software pacing in the runtime layer.
+ */
+enum class UpdateRate : uint8_t
+{
+    VSync,     ///< Cap to display refresh (FIFO present mode). Default. No tearing.
+    Unlimited, ///< Render as fast as possible (IMMEDIATE/MAILBOX). May tear.
+    Targeted   ///< Software-paced to @c target_fps via std::this_thread::sleep_until.
+};
+
+/**
+ * @brief User-facing configuration for creating a render surface.
+ *
+ * Passed to IRenderContext::create_surface() to describe the desired surface.
+ * Mirrored later into SurfaceDesc for the backend.
+ */
+struct SurfaceConfig
+{
+    int width{};                                ///< Surface width in pixels.
+    int height{};                               ///< Surface height in pixels.
+    UpdateRate update_rate{UpdateRate::VSync};  ///< Pacing mode (VSync, Unlimited, Targeted).
+    int target_fps{60};                         ///< Target framerate for UpdateRate::Targeted (ignored otherwise).
 };
 
 } // namespace velk

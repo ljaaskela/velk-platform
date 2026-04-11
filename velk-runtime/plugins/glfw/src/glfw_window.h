@@ -26,9 +26,13 @@ public:
     void set_surface(ISurface::Ptr surface);
     void set_render_context(const IRenderContext::Ptr& ctx);
     void set_input_dispatcher(ui::IInputDispatcher::Ptr dispatcher);
+    void set_pending_update_rate(UpdateRate r) { pending_update_rate_ = r; }
+    void set_pending_target_fps(int fps) { pending_target_fps_ = fps; }
 
     GLFWwindow* glfw_handle() const { return window_; }
     void* external_handle() const { return external_handle_; }
+    UpdateRate pending_update_rate() const { return pending_update_rate_; }
+    int pending_target_fps() const { return pending_target_fps_; }
 
     ISurface::Ptr surface() const override;
     ui::IInputDispatcher& input() const override;
@@ -46,6 +50,8 @@ private:
     ISurface::Ptr surface_;
     IRenderContext::WeakPtr render_ctx_;
     ui::IInputDispatcher::Ptr input_;
+    UpdateRate pending_update_rate_ = UpdateRate::VSync;
+    int pending_target_fps_ = 60;
 };
 
 } // namespace velk::impl

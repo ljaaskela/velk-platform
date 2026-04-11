@@ -14,6 +14,7 @@
 #include <velk-ui/plugins/text/api/text_visual.h>
 
 #include <cstdio>
+#include <thread>
 
 namespace velk::impl {
 
@@ -98,6 +99,14 @@ IWindow::Ptr Application::create_window(const WindowConfig& config)
             return {};
         }
         window_provider_->finalize_window(win, render_ctx_);
+    }
+
+    // Track the most restrictive target frame time across all Targeted windows.
+    if (config.update_rate == UpdateRate::Targeted && config.target_fps > 0) {
+        auto interval = std::chrono::nanoseconds(1'000'000'000LL / config.target_fps);
+        if (target_frame_time_ == std::chrono::nanoseconds::zero() || interval < target_frame_time_) {
+            target_frame_time_ = interval;
+        }
     }
 
     windows_.emplace_back(as_object(win));
@@ -218,6 +227,21 @@ void Application::submit(ui::Frame frame)
     }
     renderer_->present(frame);
     auto frame_end = std::chrono::steady_clock::now();
+
+    // Software pacing for UpdateRate::Targeted: sleep until the next frame deadline.
+    if (target_frame_time_ > std::chrono::nanoseconds::zero()) {
+        if (next_present_deadline_.time_since_epoch().count() == 0) {
+            next_present_deadline_ = frame_end + target_frame_time_;
+        } else {
+            next_present_deadline_ += target_frame_time_;
+            // If we fell badly behind, snap forward instead of trying to catch up.
+            if (next_present_deadline_ < frame_end) {
+                next_present_deadline_ = frame_end + target_frame_time_;
+            }
+            std::this_thread::sleep_until(next_present_deadline_);
+            frame_end = std::chrono::steady_clock::now();
+        }
+    }
 
     double cpu_time = std::chrono::duration<double>(last_prepare_end_ - last_prepare_start_).count();
     double frame_time = std::chrono::duration<double>(frame_end - last_prepare_start_).count();

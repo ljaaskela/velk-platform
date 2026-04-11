@@ -79,8 +79,16 @@ IWindow::Ptr GlfwPlugin::create_window(const WindowConfig& config,
     auto dispatcher = instance().create<ui::IInputDispatcher>(ui::ClassId::Input::Dispatcher);
     win->set_input_dispatcher(std::move(dispatcher));
 
+    win->set_pending_update_rate(config.update_rate);
+    win->set_pending_target_fps(config.target_fps);
+
     if (ctx) {
-        auto surface = ctx->create_surface(config.width, config.height);
+        SurfaceConfig sc;
+        sc.width = config.width;
+        sc.height = config.height;
+        sc.update_rate = config.update_rate;
+        sc.target_fps = config.target_fps;
+        auto surface = ctx->create_surface(sc);
         win->set_surface(std::move(surface));
         win->set_render_context(ctx);
     } else {
@@ -133,7 +141,11 @@ IWindow::Ptr GlfwPlugin::wrap_native_surface(void* native_handle,
     win->set_input_dispatcher(std::move(dispatcher));
 
     if (ctx) {
-        auto surface = ctx->create_surface(w, h);
+        SurfaceConfig sc;
+        sc.width = w;
+        sc.height = h;
+        // Wrapped native surfaces default to VSync; framework usually controls pacing.
+        auto surface = ctx->create_surface(sc);
         win->set_surface(std::move(surface));
         win->set_render_context(ctx);
     } else {
@@ -175,10 +187,14 @@ void GlfwPlugin::finalize_window(const IWindow::Ptr& window,
 
     auto* win = get_glfw_window(window);
     auto state = read_state<IWindow>(win);
-    int w = static_cast<int>(state->size.width);
-    int h = static_cast<int>(state->size.height);
 
-    auto surface = ctx->create_surface(w, h);
+    SurfaceConfig sc;
+    sc.width = static_cast<int>(state->size.width);
+    sc.height = static_cast<int>(state->size.height);
+    sc.update_rate = win->pending_update_rate();
+    sc.target_fps = win->pending_target_fps();
+
+    auto surface = ctx->create_surface(sc);
     win->set_surface(std::move(surface));
     win->set_render_context(ctx);
 }

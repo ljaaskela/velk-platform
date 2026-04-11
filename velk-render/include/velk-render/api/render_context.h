@@ -12,7 +12,7 @@ namespace velk {
  * @brief Convenience wrapper around IRenderContext.
  *
  *   auto ctx = velk::create_render_context(config);
- *   auto surface = ctx.create_surface(800, 600);
+ *   auto surface = ctx.create_surface({.width = 800, .height = 600});
  */
 class RenderContext : public Object
 {
@@ -23,9 +23,9 @@ public:
 
     operator IRenderContext::Ptr() const { return as_ptr<IRenderContext>(); }
 
-    ISurface::Ptr create_surface(int width, int height)
+    ISurface::Ptr create_surface(const SurfaceConfig& config)
     {
-        return with<IRenderContext>([&](auto& ctx) { return ctx.create_surface(width, height); });
+        return with<IRenderContext>([&](auto& ctx) { return ctx.create_surface(config); });
     }
 
     IMaterial::Ptr create_shader_material(string_view fragment_source, string_view vertex_source = {})

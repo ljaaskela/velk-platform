@@ -25,8 +25,8 @@ public:
     /** @brief Initializes the backend. Must be called before any other method. */
     virtual bool init(const RenderConfig& config) = 0;
 
-    /** @brief Creates a render target surface with the given dimensions. */
-    virtual ISurface::Ptr create_surface(int width, int height) = 0;
+    /** @brief Creates a render target surface with the given configuration. */
+    virtual ISurface::Ptr create_surface(const SurfaceConfig& config) = 0;
 
     /**
      * @brief Creates a shader material from GLSL source.

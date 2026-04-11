@@ -57,7 +57,7 @@ bool RenderContextImpl::init(const RenderConfig& config)
     return true;
 }
 
-ISurface::Ptr RenderContextImpl::create_surface(int width, int height)
+ISurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& config)
 {
     auto obj = instance().create<IObject>(Surface::static_class_id());
     auto surface = interface_pointer_cast<ISurface>(obj);
@@ -66,8 +66,10 @@ ISurface::Ptr RenderContextImpl::create_surface(int width, int height)
     }
 
     write_state<ISurface>(surface, [&](ISurface::State& s) {
-        s.width = width;
-        s.height = height;
+        s.width = config.width;
+        s.height = config.height;
+        s.update_rate = config.update_rate;
+        s.target_fps = config.target_fps;
     });
 
     return surface;

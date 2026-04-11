@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <velk-render/interface/intf_shader.h>
+#include <velk-render/render_types.h>
 
 namespace velk {
 
@@ -88,12 +89,14 @@ struct DrawCall
     uint32_t root_constants_size{}; ///< Bytes used in root_constants.
 };
 
-/// Describes a render surface (swapchain target).
+/// Describes a render surface (swapchain target). Backend-facing.
 struct SurfaceDesc
 {
-    void* window_handle{}; ///< Platform window handle (HWND, ANativeWindow*, etc.), or nullptr for offscreen.
-    int width{};           ///< Initial surface width in pixels.
-    int height{};          ///< Initial surface height in pixels.
+    void* window_handle{};                              ///< Native (HWND, ANativeWindow*)
+    int width{};                                        ///< Initial surface width in pixels.
+    int height{};                                       ///< Initial surface height in pixels.
+    UpdateRate update_rate{UpdateRate::VSync};          ///< Swapchain pacing mode.
+    int target_fps{60};                                 ///< Target framerate for UpdateRate::Targeted.
 };
 
 /**

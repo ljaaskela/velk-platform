@@ -17,7 +17,7 @@ public:
     VELK_CLASS_UID(ClassId::RenderContext, "RenderContext");
 
     bool init(const RenderConfig& config) override;
-    ISurface::Ptr create_surface(int width, int height) override;
+    ISurface::Ptr create_surface(const SurfaceConfig& config) override;
     IMaterial::Ptr create_shader_material(string_view fragment_source, string_view vertex_source) override;
 
     IShader::Ptr compile_shader(string_view source, ShaderStage stage) override;

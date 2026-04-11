@@ -83,6 +83,8 @@ private:
     vector<PerformanceOverlay> overlays_;
     std::chrono::steady_clock::time_point last_prepare_start_;
     std::chrono::steady_clock::time_point last_prepare_end_;
+    std::chrono::steady_clock::time_point next_present_deadline_;
+    std::chrono::nanoseconds target_frame_time_{0}; ///< Non-zero when at least one window uses UpdateRate::Targeted.
 };
 
 } // namespace velk::impl
