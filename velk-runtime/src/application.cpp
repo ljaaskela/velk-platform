@@ -4,18 +4,19 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
 
+#include <cstdio>
+#include <thread>
 #include <velk-render/api/render_context.h>
 #include <velk-runtime/interface/intf_window.h>
 #include <velk-ui/api/camera.h>
 #include <velk-ui/api/element.h>
 #include <velk-ui/api/renderer.h>
 #include <velk-ui/api/scene.h>
+#include <velk-ui/api/trait/fixed_size.h>
+#include <velk-ui/api/visual/rect.h>
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
-
-#include <cstdio>
-#include <thread>
 
 namespace velk::impl {
 
@@ -272,8 +273,8 @@ void Application::tick_overlays(double cpu_time, double frame_time,
             double avg_cpu_ms = ov.cpu_time_accum / static_cast<double>(ov.frame_count) * 1000.0;
             double avg_frame_ms = ov.frame_time_accum / static_cast<double>(ov.frame_count) * 1000.0;
             char buf[96];
-            std::snprintf(buf, sizeof(buf), "%.0f fps  cpu %.3f ms  frame %.3f ms",
-                          fps, avg_cpu_ms, avg_frame_ms);
+            std::snprintf(
+                buf, sizeof(buf), "%.0f fps\ncpu %.3f ms\ngpu %.3f ms", fps, avg_cpu_ms, avg_frame_ms);
             ov.text_visual.set_text(string(buf));
             ov.frame_count = 0;
             ov.cpu_time_accum = 0.0;
@@ -330,11 +331,23 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
     auto text_elem = ui::create_element();
     scene.add(root, text_elem);
 
+    auto text_sz = ui::trait::layout::create_fixed_size(ui::dim::px(112), ui::dim::px(64));
+    text_elem.add_trait(text_sz);
+
+    auto text_bg = ui::trait::visual::create_rect();
+    text_bg.set_color({0.f, 0.f, 0.f, .4f});
+    text_elem.add_trait(text_bg);
+
     auto text_visual = ui::trait::visual::create_text();
     text_visual.set_font(ui::get_default_font());
     text_visual.set_text("FPS: ...");
     text_visual.set_font_size(config.font_size);
     text_visual.set_color(config.text_color);
+    text_visual.set_layout(ui::TextLayout::MultiLine);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "- fps\ncpu - ms\ngpu - ms");
+    text_visual.set_text(string(buf));
+
     text_elem.add_trait(text_visual);
 
     // Set initial scene geometry from window size.

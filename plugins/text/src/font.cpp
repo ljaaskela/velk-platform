@@ -178,4 +178,293 @@ IFont::GlyphInfo Font::ensure_glyph(uint32_t glyph_id)
     return info;
 }
 
+void Font::layout_line_glyphs(string_view text, float scale, float ascender_px,
+                              float baseline_y, TextLayoutResult& out)
+{
+    if (text.empty()) {
+        return;
+    }
+
+    vector<GlyphPosition> positions;
+    shape_text(text, positions);
+
+    float cursor_x = 0.f;
+    uint32_t first = static_cast<uint32_t>(out.glyphs.size());
+
+    for (auto& gp : positions) {
+        GlyphInfo info = ensure_glyph(gp.glyph_id);
+        if (info.empty) {
+            cursor_x += gp.advance.x * scale;
+            continue;
+        }
+
+        const float bearing_x_px = info.bbox_min.x * scale;
+        const float bearing_y_px = info.bbox_max.y * scale;
+        const float glyph_w_px = (info.bbox_max.x - info.bbox_min.x) * scale;
+        const float glyph_h_px = (info.bbox_max.y - info.bbox_min.y) * scale;
+
+        PositionedGlyph pg{};
+        pg.pos.x = cursor_x + gp.offset.x * scale + bearing_x_px;
+        pg.pos.y = baseline_y + ascender_px - bearing_y_px + gp.offset.y * scale;
+        pg.size = {glyph_w_px, glyph_h_px};
+        pg.glyph_index = info.internal_index;
+        out.glyphs.push_back(pg);
+
+        cursor_x += gp.advance.x * scale;
+    }
+
+    LayoutLine line{};
+    line.first_glyph = first;
+    line.glyph_count = static_cast<uint32_t>(out.glyphs.size()) - first;
+    line.width = cursor_x;
+    out.lines.push_back(line);
+
+    if (cursor_x > out.total_width) {
+        out.total_width = cursor_x;
+    }
+}
+
+void Font::layout_single_line(string_view text, float scale, float ascender_px,
+                               float line_height_px, float available_width,
+                               TextLayoutResult& out)
+{
+    vector<GlyphPosition> positions;
+    shape_text(text, positions);
+
+    // Ellipsis glyph for truncation.
+    bool truncate = available_width > 0.f;
+    float ellipsis_advance_px = 0.f;
+    GlyphInfo ellipsis_info{};
+    if (truncate) {
+        vector<GlyphPosition> ellipsis_pos;
+        shape_text(u8"\u2026", ellipsis_pos);
+        if (!ellipsis_pos.empty()) {
+            ellipsis_info = ensure_glyph(ellipsis_pos[0].glyph_id);
+            ellipsis_advance_px = ellipsis_pos[0].advance.x * scale;
+        }
+    }
+
+    float cursor_x = 0.f;
+    bool did_truncate = false;
+
+    for (size_t i = 0; i < positions.size(); ++i) {
+        auto& gp = positions[i];
+        float next_advance = gp.advance.x * scale;
+
+        if (truncate && cursor_x + next_advance + ellipsis_advance_px > available_width) {
+            did_truncate = true;
+            break;
+        }
+
+        GlyphInfo info = ensure_glyph(gp.glyph_id);
+        if (info.empty) {
+            cursor_x += next_advance;
+            continue;
+        }
+
+        const float bearing_x_px = info.bbox_min.x * scale;
+        const float bearing_y_px = info.bbox_max.y * scale;
+        const float glyph_w_px = (info.bbox_max.x - info.bbox_min.x) * scale;
+        const float glyph_h_px = (info.bbox_max.y - info.bbox_min.y) * scale;
+
+        PositionedGlyph pg{};
+        pg.pos.x = cursor_x + gp.offset.x * scale + bearing_x_px;
+        pg.pos.y = ascender_px - bearing_y_px + gp.offset.y * scale;
+        pg.size = {glyph_w_px, glyph_h_px};
+        pg.glyph_index = info.internal_index;
+        out.glyphs.push_back(pg);
+
+        cursor_x += next_advance;
+    }
+
+    if (did_truncate && !ellipsis_info.empty) {
+        const float bearing_x_px = ellipsis_info.bbox_min.x * scale;
+        const float bearing_y_px = ellipsis_info.bbox_max.y * scale;
+        const float glyph_w_px = (ellipsis_info.bbox_max.x - ellipsis_info.bbox_min.x) * scale;
+        const float glyph_h_px = (ellipsis_info.bbox_max.y - ellipsis_info.bbox_min.y) * scale;
+
+        PositionedGlyph pg{};
+        pg.pos.x = cursor_x + bearing_x_px;
+        pg.pos.y = ascender_px - bearing_y_px;
+        pg.size = {glyph_w_px, glyph_h_px};
+        pg.glyph_index = ellipsis_info.internal_index;
+        out.glyphs.push_back(pg);
+
+        cursor_x += ellipsis_advance_px;
+    }
+
+    LayoutLine line{};
+    line.first_glyph = 0;
+    line.glyph_count = static_cast<uint32_t>(out.glyphs.size());
+    line.width = cursor_x;
+    out.lines.push_back(line);
+
+    out.total_width = cursor_x;
+    out.total_height = line_height_px;
+}
+
+void Font::layout_multi_line(string_view text, float scale, float ascender_px,
+                              float line_height_px, TextLayoutResult& out)
+{
+    float baseline_y = 0.f;
+    size_t start = 0;
+
+    while (start <= text.size()) {
+        size_t nl = text.find('\n', start);
+        size_t end = (nl == string_view::npos) ? text.size() : nl;
+        string_view line = text.substr(start, end - start);
+
+        layout_line_glyphs(line, scale, ascender_px, baseline_y, out);
+
+        // Empty lines still get a LayoutLine so blank lines have height.
+        if (line.empty()) {
+            LayoutLine ll{};
+            ll.first_glyph = static_cast<uint32_t>(out.glyphs.size());
+            ll.glyph_count = 0;
+            ll.width = 0.f;
+            out.lines.push_back(ll);
+        }
+
+        baseline_y += line_height_px;
+        start = end + 1;
+        if (nl == string_view::npos) {
+            break;
+        }
+    }
+
+    out.total_height = static_cast<float>(out.lines.size()) * line_height_px;
+}
+
+void Font::layout_word_wrap(string_view text, float scale, float ascender_px,
+                             float line_height_px, float available_width,
+                             TextLayoutResult& out)
+{
+    float baseline_y = 0.f;
+    size_t para_start = 0;
+
+    while (para_start <= text.size()) {
+        size_t nl = text.find('\n', para_start);
+        size_t para_end = (nl == string_view::npos) ? text.size() : nl;
+        string_view paragraph = text.substr(para_start, para_end - para_start);
+
+        if (paragraph.empty()) {
+            LayoutLine ll{};
+            ll.first_glyph = static_cast<uint32_t>(out.glyphs.size());
+            ll.glyph_count = 0;
+            ll.width = 0.f;
+            out.lines.push_back(ll);
+            baseline_y += line_height_px;
+        } else if (available_width <= 0.f) {
+            layout_line_glyphs(paragraph, scale, ascender_px, baseline_y, out);
+            baseline_y += line_height_px;
+        } else {
+            vector<GlyphPosition> positions;
+            shape_text(paragraph, positions);
+
+            float line_cursor = 0.f;
+            size_t line_start_glyph = 0;
+            size_t line_start_char = 0;
+            size_t last_space_glyph = 0;
+            size_t last_space_char = 0;
+            bool has_space = false;
+
+            size_t char_idx = 0;
+            for (size_t gi = 0; gi < positions.size(); ++gi) {
+                float advance_px = positions[gi].advance.x * scale;
+
+                if (char_idx < paragraph.size()
+                    && (paragraph[char_idx] == ' ' || paragraph[char_idx] == '\t')) {
+                    last_space_glyph = gi;
+                    last_space_char = char_idx;
+                    has_space = true;
+                }
+
+                if (line_cursor + advance_px > available_width && gi > line_start_glyph) {
+                    size_t break_char;
+                    if (has_space && last_space_glyph > line_start_glyph) {
+                        break_char = last_space_char;
+                    } else {
+                        break_char = char_idx;
+                    }
+
+                    string_view seg = paragraph.substr(line_start_char, break_char - line_start_char);
+                    layout_line_glyphs(seg, scale, ascender_px, baseline_y, out);
+                    baseline_y += line_height_px;
+
+                    size_t resume_char = break_char;
+                    while (resume_char < paragraph.size()
+                           && (paragraph[resume_char] == ' ' || paragraph[resume_char] == '\t')) {
+                        ++resume_char;
+                    }
+
+                    paragraph = paragraph.substr(resume_char);
+                    positions.clear();
+                    if (!paragraph.empty()) {
+                        shape_text(paragraph, positions);
+                    }
+                    gi = static_cast<size_t>(-1);
+                    char_idx = static_cast<size_t>(-1);
+                    line_cursor = 0.f;
+                    line_start_glyph = 0;
+                    line_start_char = 0;
+                    has_space = false;
+                    continue;
+                }
+
+                line_cursor += advance_px;
+                ++char_idx;
+            }
+
+            if (!paragraph.empty()) {
+                layout_line_glyphs(paragraph, scale, ascender_px, baseline_y, out);
+                baseline_y += line_height_px;
+            }
+        }
+
+        para_start = para_end + 1;
+        if (nl == string_view::npos) {
+            break;
+        }
+    }
+
+    out.total_height = static_cast<float>(out.lines.size()) * line_height_px;
+}
+
+void Font::layout_text(string_view text, float font_size, TextLayout mode,
+                        float available_width, TextLayoutResult& out)
+{
+    out.glyphs.clear();
+    out.lines.clear();
+    out.total_width = 0.f;
+    out.total_height = 0.f;
+    out.line_height = 0.f;
+
+    if (text.empty() || !ft_face_) {
+        return;
+    }
+
+    auto state = read_state<IFont>(this);
+    float upem = state ? state->units_per_em : 0.f;
+    if (upem <= 0.f || font_size <= 0.f) {
+        return;
+    }
+
+    const float scale = font_size / upem;
+    const float ascender_px = (state ? state->ascender : 0.f) * scale;
+    const float line_height_px = (state ? state->line_height : 0.f) * scale;
+    out.line_height = line_height_px;
+
+    switch (mode) {
+    case TextLayout::SingleLine:
+        layout_single_line(text, scale, ascender_px, line_height_px, available_width, out);
+        break;
+    case TextLayout::MultiLine:
+        layout_multi_line(text, scale, ascender_px, line_height_px, out);
+        break;
+    case TextLayout::WordWrap:
+        layout_word_wrap(text, scale, ascender_px, line_height_px, available_width, out);
+        break;
+    }
+}
+
 } // namespace velk::ui::impl

@@ -13,14 +13,14 @@ void TextVisual::set_font(const IFont::Ptr& font)
 {
     font_ = Font(font);
     bind_font_material();
-    reshape();
+    cache_.invalidate();
     invoke_visual_changed();
 }
 
 void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interfaceId)
 {
-    if (name.empty() || name == "text" || name == "font_size") {
-        reshape();
+    if (name.empty() || name == "text" || name == "font_size" || name == "layout") {
+        cache_.invalidate();
     }
     invoke_visual_changed();
 }
@@ -38,10 +38,6 @@ void TextVisual::ensure_default_font()
 
 void TextVisual::bind_font_material()
 {
-    // The Font owns one TextMaterial bound to its three GPU buffers and
-    // every text visual using the same font shares that single instance.
-    // The renderer batches by material identity, so all text visuals on
-    // one font collapse into a single draw call.
     auto font = font_.as_ptr<IFont>();
     if (!font) {
         return;
@@ -55,121 +51,76 @@ void TextVisual::bind_font_material()
     });
 }
 
-void TextVisual::reshape()
+vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
 {
-    cached_entries_.clear();
-    text_width_ = 0.f;
-    text_height_ = 0.f;
-
     ensure_default_font();
     auto font = font_.as_ptr<IFont>();
     if (!font) {
-        return;
+        return {};
     }
 
-    auto state = read_state<ITextVisual>(this);
-    if (!state || state->text.empty()) {
-        return;
+    auto text_state = read_state<ITextVisual>(this);
+
+    CacheKey key{};
+    if (text_state) {
+        key.text_data = text_state->text.data();
+        key.text_size = static_cast<uint32_t>(text_state->text.size());
+        key.font_size = text_state->font_size;
+        key.layout = text_state->layout;
     }
+    key.bounds_width = bounds.width;
 
-
-    string_view text(state->text.data(), state->text.size());
-
-    vector<IFont::GlyphPosition> positions;
-    font->shape_text(text, positions);
-
-    auto font_state = read_state<IFont>(font);
-    float ascender_units    = font_state ? font_state->ascender    : 0.f;
-    float line_height_units = font_state ? font_state->line_height : 0.f;
-    float upem              = font_state ? font_state->units_per_em : 0.f;
-    float size_px           = state->font_size;
-
-    if (upem <= 0.f || size_px <= 0.f) {
-        return;
-    }
-    // Single scale factor converts every font-unit measurement (advances,
-    // bbox extents, ascender, line height, gp.offset) to pixels.
-    const float scale = size_px / upem;
-    const float ascender_px = ascender_units * scale;
-
-    float cursor_x = 0.f;
-
-    for (auto& gp : positions) {
-        IFont::GlyphInfo info = font->ensure_glyph(gp.glyph_id);
-        if (info.empty) {
-            cursor_x += gp.advance.x * scale;
-            continue;
+    if (cache_.changed(key)) {
+        if (text_state && !text_state->text.empty()) {
+            string_view text(text_state->text.data(), text_state->text.size());
+            font->layout_text(text, text_state->font_size, text_state->layout,
+                              bounds.width, layout_result_);
+        } else {
+            layout_result_ = {};
         }
-
-        // Convert font-unit bbox to pixel-space quad position and size.
-        // bbox_min.x acts as the left side bearing; bbox_max.y is the
-        // height from the baseline to the top of the glyph (Y-up).
-        const float bearing_x_px = info.bbox_min.x * scale;
-        const float bearing_y_px = info.bbox_max.y * scale;
-        const float glyph_w_px = (info.bbox_max.x - info.bbox_min.x) * scale;
-        const float glyph_h_px = (info.bbox_max.y - info.bbox_min.y) * scale;
-
-        const float glyph_x = cursor_x + gp.offset.x * scale + bearing_x_px;
-        const float glyph_y = ascender_px - bearing_y_px + gp.offset.y * scale;
-
-        DrawEntry entry{};
-        entry.pipeline_key = 0; // material override supplies the pipeline
-        entry.bounds = {glyph_x, glyph_y, glyph_w_px, glyph_h_px};
-
-        // Color is filled at draw time in get_draw_entries.
-        TextInstance inst{};
-        inst.pos = {glyph_x, glyph_y};
-        inst.size = {glyph_w_px, glyph_h_px};
-        inst.col = color::transparent();
-        inst.glyph_index = info.internal_index;
-        entry.set_instance(inst);
-
-        cached_entries_.push_back(entry);
-        cursor_x += gp.advance.x * scale;
     }
 
-    text_width_ = cursor_x;
-    text_height_ = line_height_units * scale;
-}
-
-vector<DrawEntry> TextVisual::get_draw_entries(const rect& bounds)
-{
     auto visual_state = read_state<IVisual>(this);
     ::velk::color col = visual_state ? visual_state->color : ::velk::color::white();
 
-    auto text_state = read_state<ITextVisual>(this);
     HAlign ha = text_state ? text_state->h_align : HAlign::Left;
     VAlign va = text_state ? text_state->v_align : VAlign::Top;
 
-    float offset_x = bounds.x;
     float offset_y = bounds.y;
-
-    switch (ha) {
-    case HAlign::Center: offset_x += (bounds.width - text_width_) * 0.5f; break;
-    case HAlign::Right:  offset_x += bounds.width - text_width_; break;
-    default: break;
-    }
-
     switch (va) {
-    case VAlign::Center: offset_y += (bounds.height - text_height_) * 0.5f; break;
-    case VAlign::Bottom: offset_y += bounds.height - text_height_; break;
+    case VAlign::Center: offset_y += (bounds.height - layout_result_.total_height) * 0.5f; break;
+    case VAlign::Bottom: offset_y += bounds.height - layout_result_.total_height; break;
     default: break;
     }
 
     vector<DrawEntry> result;
-    result.reserve(cached_entries_.size());
+    result.reserve(layout_result_.glyphs.size());
 
-    for (auto& entry : cached_entries_) {
-        DrawEntry out = entry;
-        out.bounds.x += offset_x;
-        out.bounds.y += offset_y;
+    for (auto& line : layout_result_.lines) {
+        float offset_x = bounds.x;
+        switch (ha) {
+        case HAlign::Center: offset_x += (bounds.width - line.width) * 0.5f; break;
+        case HAlign::Right:  offset_x += bounds.width - line.width; break;
+        default: break;
+        }
 
-        auto& inst = out.as_instance<TextInstance>();
-        inst.pos.x += offset_x;
-        inst.pos.y += offset_y;
-        inst.col = col;
+        for (uint32_t i = 0; i < line.glyph_count; ++i) {
+            auto& pg = layout_result_.glyphs[line.first_glyph + i];
 
-        result.push_back(out);
+            DrawEntry entry{};
+            entry.pipeline_key = 0;
+            entry.bounds = {pg.pos.x + offset_x, pg.pos.y + offset_y,
+                            pg.size.x, pg.size.y};
+
+            TextInstance inst{};
+            inst.pos = {pg.pos.x + offset_x, pg.pos.y + offset_y};
+            inst.size = pg.size;
+            inst.col = col;
+            inst.glyph_index = pg.glyph_index;
+            entry.set_instance(inst);
+
+            result.push_back(entry);
+        }
     }
 
     return result;

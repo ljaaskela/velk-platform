@@ -313,11 +313,13 @@ uint64_t Renderer::write_to_frame_buffer(const void* data, size_t size, size_t a
     write_offset_ = (write_offset_ + alignment - 1) & ~(alignment - 1);
 
     if (write_offset_ + size > frame_buffer_size_) {
-        VELK_LOG(E,
-                 "Renderer: frame buffer overflow (%zu + %zu > %zu), will grow next frame",
-                 write_offset_,
-                 size,
-                 frame_buffer_size_);
+        size_t required = write_offset_ + size;
+        if (required > peak_usage_) {
+            peak_usage_ = required;
+        }
+        RENDER_LOG("frame buffer overflow (%zu + %zu > %zu), will retry",
+                   write_offset_, size, frame_buffer_size_);
+        frame_overflow_ = true;
         return 0;
     }
 
@@ -370,6 +372,35 @@ void Renderer::ensure_frame_buffer_capacity()
         active_slot_->frame_gpu_base = backend_->gpu_address(active_slot_->frame_buffer);
         active_slot_->buffer_size = new_size;
     }
+}
+
+void Renderer::grow_frame_buffer()
+{
+    // Grow aggressively: 4x current size, or enough for peak usage (whichever is larger).
+    size_t new_size = frame_buffer_size_ * 4;
+    while (new_size < peak_usage_ * 2) {
+        new_size *= 2;
+    }
+
+    VELK_LOG(I,
+             "Renderer: frame buffer overflow, growing %zu -> %zu KB (need %zu KB)",
+             frame_buffer_size_ / 1024,
+             new_size / 1024,
+             peak_usage_ / 1024);
+
+    frame_buffer_size_ = new_size;
+    peak_usage_ = 0;
+
+    if (active_slot_->frame_buffer) {
+        backend_->destroy_buffer(active_slot_->frame_buffer);
+    }
+    GpuBufferDesc desc;
+    desc.size = new_size;
+    desc.cpu_writable = true;
+    active_slot_->frame_buffer = backend_->create_buffer(desc);
+    active_slot_->frame_ptr = backend_->map(active_slot_->frame_buffer);
+    active_slot_->frame_gpu_base = backend_->gpu_address(active_slot_->frame_buffer);
+    active_slot_->buffer_size = new_size;
 }
 
 void Renderer::init_slot_buffers(FrameSlot& slot)
@@ -429,6 +460,11 @@ void Renderer::build_draw_calls(const ViewEntry& entry)
         // Align write offset and check capacity
         write_offset_ = (write_offset_ + 15) & ~size_t(15);
         if (write_offset_ + total_size > frame_buffer_size_) {
+            size_t required = write_offset_ + total_size;
+            if (required > peak_usage_) {
+                peak_usage_ = required;
+            }
+            frame_overflow_ = true;
             continue;
         }
 
@@ -561,8 +597,6 @@ Frame Renderer::prepare(const FrameDesc& desc)
                  frame_buffer_size_ / 1024,
                  peak_usage_ / 1024);
     }
-
-    write_offset_ = 0;
 
     // Consume scene state once per unique scene and process changes
     std::unordered_map<IScene*, SceneState> consumed_scenes;
@@ -705,7 +739,14 @@ Frame Renderer::prepare(const FrameDesc& desc)
         consumed_scenes[scene] = std::move(state);
     }
 
-    // Build draw calls per view
+    // Build draw calls per view. If the frame buffer overflows during
+    // recording, grow it aggressively and re-record from the start.
+    static constexpr int kMaxRecordRetries = 3;
+    for (int attempt = 0;; ++attempt) {
+    frame_overflow_ = false;
+    write_offset_ = 0;
+    slot->surface_submits.clear();
+
     for (auto& entry : views_) {
         if (!view_matches(entry, desc)) {
             continue;
@@ -785,6 +826,16 @@ Frame Renderer::prepare(const FrameDesc& desc)
         submit.draw_calls = draw_calls_;
         slot->surface_submits.push_back(std::move(submit));
     }
+
+    if (!frame_overflow_) {
+        break;
+    }
+    if (attempt >= kMaxRecordRetries) {
+        VELK_LOG(E, "Renderer: frame buffer overflow after %d retries, dropping frame", kMaxRecordRetries);
+        break;
+    }
+    grow_frame_buffer();
+    } // retry loop
 
     active_slot_ = nullptr;
     slot->ready = true;

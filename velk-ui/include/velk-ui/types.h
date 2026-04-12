@@ -96,6 +96,13 @@ enum class VAlign : uint8_t
     Bottom
 };
 
+enum class TextLayout : uint8_t
+{
+    SingleLine, ///< Everything on one line; ellipsis truncation at bounds width.
+    MultiLine,  ///< Respects \n line breaks.
+    WordWrap    ///< Wraps at bounds width at word boundaries; also respects \n.
+};
+
 } // namespace velk::ui
 
 #endif // VELK_UI_TYPES_H

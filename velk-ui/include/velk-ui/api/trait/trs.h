@@ -30,7 +30,7 @@ public:
     void set_translate(const vec3& v) { write_state_value<ITrs>(&ITrs::State::translate, v); }
 
     auto get_rotation() const { return read_state_value<ITrs>(&ITrs::State::rotation); }
-    void set_rotation(float v) { write_state_value<ITrs>(&ITrs::State::rotation, v); }
+    void set_rotation(const vec3& v) { write_state_value<ITrs>(&ITrs::State::rotation, v); }
 
     auto get_scale() const { return read_state_value<ITrs>(&ITrs::State::scale); }
     void set_scale(const vec2& v) { write_state_value<ITrs>(&ITrs::State::scale, v); }

@@ -9,6 +9,8 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_material.h>
 
+#include <velk-ui/types.h>
+
 #include <cstdint>
 
 namespace velk::ui {
@@ -59,6 +61,32 @@ public:
         bool empty;
     };
 
+    /// A glyph positioned in pixel space, ready for rendering.
+    struct PositionedGlyph
+    {
+        vec2 pos;              ///< Pixel position of the glyph quad.
+        vec2 size;             ///< Pixel size of the glyph quad.
+        uint32_t glyph_index;  ///< Index into the glyph table buffer (for the shader).
+    };
+
+    /// One line within a laid-out text block.
+    struct LayoutLine
+    {
+        uint32_t first_glyph;  ///< Index into TextLayoutResult::glyphs.
+        uint32_t glyph_count;
+        float width;           ///< Pixel width of this line.
+    };
+
+    /// Result of layout_text: fully positioned glyphs organized into lines.
+    struct TextLayoutResult
+    {
+        vector<PositionedGlyph> glyphs;
+        vector<LayoutLine> lines;
+        float total_width;   ///< Max line width across all lines.
+        float total_height;  ///< Total height of all lines.
+        float line_height;   ///< Pixel line height (for vertical spacing).
+    };
+
     /// Font is scale-independent. All metrics are in raw font units (the
     /// FreeType face's design units). Consumers (text visuals) multiply by
     /// `requested_size_px / units_per_em` to convert to pixel space, so the
@@ -98,6 +126,22 @@ public:
     virtual IBuffer::Ptr get_band_buffer() const = 0;
     virtual IBuffer::Ptr get_glyph_buffer() const = 0;
     /// @}
+
+    /**
+     * @brief Lays out text into positioned glyphs organized into lines.
+     *
+     * Handles shaping, glyph baking, line splitting, word wrapping, and
+     * ellipsis truncation. The result is in pixel space, ready for the
+     * visual to apply alignment and color.
+     *
+     * @param text            The text to lay out.
+     * @param font_size       Font size in pixels.
+     * @param mode            Layout mode (SingleLine, MultiLine, WordWrap).
+     * @param available_width Available width in pixels (0 = unconstrained).
+     * @param out             Receives the positioned glyphs and line info.
+     */
+    virtual void layout_text(string_view text, float font_size, TextLayout mode,
+                             float available_width, TextLayoutResult& out) = 0;
 
     /**
      * @brief Returns the rendering material for this font.

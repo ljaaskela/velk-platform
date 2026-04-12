@@ -104,7 +104,9 @@ int main(int argc, char* argv[])
 
         root.add_trait(bg);
         auto click = velk::ui::trait::input::create_click();
-        click.on_click().add_handler([]() { VELK_LOG(E, "Clicked!"); });
+        click.on_click().add_handler([&](const velk::ui::PointerEvent& ev) {
+            VELK_LOG(E, "Clicked %f %f", ev.local_position.x, ev.local_position.y);
+        });
         root.add_trait(click);
     }
 

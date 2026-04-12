@@ -24,7 +24,7 @@ InputResult Click::on_pointer_event(PointerEvent& event)
         if (reader && reader->pressed) {
             set_pressed(false);
             INPUT_LOG("Click: firing on_click");
-            invoke_event(get_interface(IInterface::UID), "on_click");
+            invoke_event(get_interface(IInterface::UID), "on_click", event);
             return InputResult::Consumed;
         }
     }

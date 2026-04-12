@@ -3,6 +3,8 @@
 
 #include <velk/interface/intf_metadata.h>
 
+#include <velk-ui/input_types.h>
+
 namespace velk::ui {
 
 /**
@@ -16,7 +18,7 @@ class IClick : public Interface<IClick>
 public:
     VELK_INTERFACE(
         (RPROP, bool, pressed, false), ///< True while the pointer is down on this element.
-        (EVT, on_click)                ///< Fired on pointer up after a successful press.
+        (EVT, on_click, (PointerEvent, event))  ///< Fired on pointer up after a successful press.
     )
 };
 

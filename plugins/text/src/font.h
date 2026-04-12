@@ -43,6 +43,8 @@ public:
     bool init_default() override;
     float shape_text(string_view text, vector<IFont::GlyphPosition>& out) override;
     GlyphInfo ensure_glyph(uint32_t glyph_id) override;
+    void layout_text(string_view text, float font_size, TextLayout mode,
+                     float available_width, TextLayoutResult& out) override;
 
     IBuffer::Ptr get_curve_buffer() const override { return curve_buffer_; }
     IBuffer::Ptr get_band_buffer()  const override { return band_buffer_; }
@@ -51,6 +53,17 @@ public:
 
 private:
     void init_buffers();
+
+    void layout_line_glyphs(string_view text, float scale, float ascender_px,
+                            float baseline_y, TextLayoutResult& out);
+    void layout_single_line(string_view text, float scale, float ascender_px,
+                            float line_height_px, float available_width,
+                            TextLayoutResult& out);
+    void layout_multi_line(string_view text, float scale, float ascender_px,
+                           float line_height_px, TextLayoutResult& out);
+    void layout_word_wrap(string_view text, float scale, float ascender_px,
+                          float line_height_px, float available_width,
+                          TextLayoutResult& out);
 
     vector<uint8_t> font_data_;
     FT_Library ft_library_ = nullptr;

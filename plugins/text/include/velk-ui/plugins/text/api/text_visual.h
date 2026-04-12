@@ -58,6 +58,33 @@ public:
 
     /** @brief Returns the font size. */
     auto get_font_size() const { return read_state_value<ITextVisual>(&ITextVisual::State::font_size); }
+
+    /** @brief Sets the horizontal text alignment. */
+    void set_h_align(HAlign align)
+    {
+        write_state_value<ITextVisual>(&ITextVisual::State::h_align, align);
+    }
+
+    /** @brief Returns the horizontal text alignment. */
+    auto get_h_align() const { return read_state_value<ITextVisual>(&ITextVisual::State::h_align); }
+
+    /** @brief Sets the vertical text alignment. */
+    void set_v_align(VAlign align)
+    {
+        write_state_value<ITextVisual>(&ITextVisual::State::v_align, align);
+    }
+
+    /** @brief Returns the vertical text alignment. */
+    auto get_v_align() const { return read_state_value<ITextVisual>(&ITextVisual::State::v_align); }
+
+    /** @brief Sets the text layout mode (SingleLine, MultiLine, WordWrap). */
+    void set_layout(TextLayout layout)
+    {
+        write_state_value<ITextVisual>(&ITextVisual::State::layout, layout);
+    }
+
+    /** @brief Returns the text layout mode. */
+    auto get_layout() const { return read_state_value<ITextVisual>(&ITextVisual::State::layout); }
 };
 
 namespace trait::visual {

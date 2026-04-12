@@ -1,6 +1,7 @@
 #ifndef VELK_UI_TEXT_VISUAL_H
 #define VELK_UI_TEXT_VISUAL_H
 
+#include <velk/api/change.h>
 #include <velk/api/object.h>
 
 #include <velk-render/interface/intf_buffer.h>
@@ -13,11 +14,14 @@
 namespace velk::ui {
 
 /**
- * @brief Renders shaped text as textured glyph quads.
+ * @brief Renders shaped text as glyph quads with multiline support.
  *
- * Holds a reference to an IFont which owns the glyph atlas.
- * Multiple TextVisuals sharing the same font share one atlas,
- * enabling draw call batching across text elements.
+ * Delegates text layout (shaping, line breaking, word wrapping, ellipsis)
+ * to IFont::layout_text(). Converts the positioned glyphs into DrawEntries
+ * with alignment and color applied.
+ *
+ * Layout is performed lazily in get_draw_entries() and cached via
+ * ChangeCache so it only re-runs when inputs change.
  */
 class TextVisual : public ext::Visual<TextVisual, ITextVisual>
 {
@@ -35,14 +39,31 @@ protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;
 
 private:
-    void reshape();
+    struct CacheKey
+    {
+        const char* text_data{};
+        uint32_t text_size{};
+        float font_size{};
+        TextLayout layout{};
+        float bounds_width{};
+
+        bool operator==(const CacheKey& o) const
+        {
+            return text_data == o.text_data
+                && text_size == o.text_size
+                && font_size == o.font_size
+                && layout == o.layout
+                && bounds_width == o.bounds_width;
+        }
+        bool operator!=(const CacheKey& o) const { return !(*this == o); }
+    };
+
     void ensure_default_font();
     void bind_font_material();
 
     Font font_;
-    vector<DrawEntry> cached_entries_;
-    float text_width_{};
-    float text_height_{};
+    IFont::TextLayoutResult layout_result_;
+    ChangeCache<CacheKey> cache_;
 };
 
 } // namespace velk::ui

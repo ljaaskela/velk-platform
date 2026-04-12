@@ -131,13 +131,15 @@ private:
 
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;
 
-    static constexpr size_t kInitialFrameBufferSize = 256 * 1024;
+    static constexpr size_t kInitialFrameBufferSize = 1024 * 1024;
     size_t frame_buffer_size_ = 0;
     size_t write_offset_ = 0;
     size_t peak_usage_ = 0;
+    bool frame_overflow_ = false;       ///< Set when a write overflows; triggers retry with larger buffer.
     FrameSlot* active_slot_ = nullptr;  ///< Slot being filled by prepare().
 
     void ensure_frame_buffer_capacity();
+    void grow_frame_buffer();
     void init_slot_buffers(FrameSlot& slot);
 
     uint64_t globals_gpu_addr_ = 0;  ///< Per-view, written into the staging buffer during prepare().
