@@ -43,6 +43,7 @@ public:
     void begin_pass(uint64_t target_id) override;
     void submit(array_view<const DrawCall> calls, rect viewport) override;
     void end_pass() override;
+    void barrier(PipelineStage src, PipelineStage dst) override;
     void end_frame() override;
 
 private:
@@ -113,11 +114,14 @@ private:
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
     uint64_t next_surface_id_ = 1;
-    uint64_t current_surface_ = 0;          ///< Surface active in the current render pass.
+    uint64_t current_surface_ = 0;          ///< Surface active in the current render pass (0 if texture target).
     uint64_t present_surface_id_ = 0;     ///< Surface to present in end_frame (0 = headless).
     uint32_t present_acquire_sem_idx_ = 0; ///< Acquire semaphore index used for the surface pass.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame.
     bool surface_has_clear_ = false;       ///< True after first pass on a surface (subsequent passes use LOAD).
+    int current_target_width_ = 0;         ///< Width of the current render pass target.
+    int current_target_height_ = 0;        ///< Height of the current render pass target.
+    vector<TextureId> cleared_textures_;   ///< Textures that have been cleared this frame.
 
     // Buffers
     struct BufferData
@@ -141,6 +145,10 @@ private:
         int width = 0;
         int height = 0;
         PixelFormat format = PixelFormat::RGBA8;
+        bool is_renderable = false;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VkRenderPass render_pass = VK_NULL_HANDLE;
+        VkRenderPass load_render_pass = VK_NULL_HANDLE;
     };
 
     std::unordered_map<TextureId, TextureData> textures_;

@@ -893,6 +893,10 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     img_ci.samples = VK_SAMPLE_COUNT_1_BIT;
     img_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     img_ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (desc.usage == TextureUsage::RenderTarget) {
+        img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        td.is_renderable = true;
+    }
 
     VmaAllocationCreateInfo alloc_ci{};
     alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -937,6 +941,63 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
 
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
+    // Create render pass and framebuffer for render target textures
+    if (td.is_renderable) {
+        VkAttachmentDescription color_att{};
+        color_att.format = vk_format;
+        color_att.samples = VK_SAMPLE_COUNT_1_BIT;
+        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        color_att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference color_ref{};
+        color_ref.attachment = 0;
+        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_ref;
+
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rp_ci{};
+        rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        rp_ci.attachmentCount = 1;
+        rp_ci.pAttachments = &color_att;
+        rp_ci.subpassCount = 1;
+        rp_ci.pSubpasses = &subpass;
+        rp_ci.dependencyCount = 1;
+        rp_ci.pDependencies = &dep;
+
+        vkCreateRenderPass(device_, &rp_ci, nullptr, &td.render_pass);
+
+        // Load render pass (subsequent passes on the same texture within a frame)
+        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_att.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        vkCreateRenderPass(device_, &rp_ci, nullptr, &td.load_render_pass);
+
+        // Framebuffer
+        VkFramebufferCreateInfo fb_ci{};
+        fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fb_ci.renderPass = td.render_pass;
+        fb_ci.attachmentCount = 1;
+        fb_ci.pAttachments = &td.view;
+        fb_ci.width = static_cast<uint32_t>(desc.width);
+        fb_ci.height = static_cast<uint32_t>(desc.height);
+        fb_ci.layers = 1;
+
+        vkCreateFramebuffer(device_, &fb_ci, nullptr, &td.framebuffer);
+    }
+
     TextureId id = td.bindless_index;
     textures_[id] = td;
     return id;
@@ -949,8 +1010,14 @@ void VkBackend::destroy_texture(TextureId texture)
         return;
     }
 
-    vkDestroyImageView(device_, it->second.view, nullptr);
-    vmaDestroyImage(allocator_, it->second.image, it->second.allocation);
+    auto& td = it->second;
+    if (td.is_renderable) {
+        vkDestroyFramebuffer(device_, td.framebuffer, nullptr);
+        vkDestroyRenderPass(device_, td.render_pass, nullptr);
+        vkDestroyRenderPass(device_, td.load_render_pass, nullptr);
+    }
+    vkDestroyImageView(device_, td.view, nullptr);
+    vmaDestroyImage(allocator_, td.image, td.allocation);
     textures_.erase(it);
 }
 
@@ -1176,48 +1243,82 @@ void VkBackend::begin_frame()
     frame_open_ = true;
     present_surface_id_ = 0;
     surface_has_clear_ = false;
+    cleared_textures_.clear();
 }
 
 void VkBackend::begin_pass(uint64_t target_id)
 {
-    auto it = surfaces_.find(target_id);
-    if (it == surfaces_.end()) {
-        return;
-    }
-    auto& sd = it->second;
-    current_surface_ = target_id;
+    auto& sync = frame_sync_[frame_sync_index_];
+    VkRenderPass rp = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
 
-    // Only acquire the swapchain image once per frame per surface
-    if (present_surface_id_ != target_id) {
-        present_surface_id_ = target_id;
+    // Try surface
+    auto sit = surfaces_.find(target_id);
+    if (sit != surfaces_.end()) {
+        auto& sd = sit->second;
+        current_surface_ = target_id;
 
-        present_acquire_sem_idx_ = acquire_semaphore_index_;
-        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+        // Only acquire the swapchain image once per frame per surface
+        if (present_surface_id_ != target_id) {
+            present_surface_id_ = target_id;
 
-        VkResult result = vkAcquireNextImageKHR(
-            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            current_surface_ = 0;
+            present_acquire_sem_idx_ = acquire_semaphore_index_;
+            VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+            acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+
+            VkResult result = vkAcquireNextImageKHR(
+                device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+                current_surface_ = 0;
+                return;
+            }
+        }
+
+        rp = surface_has_clear_ ? sd.load_render_pass : sd.render_pass;
+        fb = sd.framebuffers[sd.image_index];
+        current_target_width_ = sd.width;
+        current_target_height_ = sd.height;
+        surface_has_clear_ = true;
+    } else {
+        // Try texture render target
+        auto tit = textures_.find(static_cast<TextureId>(target_id));
+        if (tit == textures_.end() || !tit->second.is_renderable) {
             return;
+        }
+        auto& td = tit->second;
+        current_surface_ = 0;
+
+        bool already_cleared = false;
+        for (auto id : cleared_textures_) {
+            if (id == static_cast<TextureId>(target_id)) {
+                already_cleared = true;
+                break;
+            }
+        }
+
+        rp = already_cleared ? td.load_render_pass : td.render_pass;
+        fb = td.framebuffer;
+        current_target_width_ = td.width;
+        current_target_height_ = td.height;
+
+        if (!already_cleared) {
+            cleared_textures_.push_back(static_cast<TextureId>(target_id));
         }
     }
 
-    auto& sync = frame_sync_[frame_sync_index_];
-
     VkRenderPassBeginInfo rp_begin{};
     rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderPass = surface_has_clear_ ? sd.load_render_pass : sd.render_pass;
-    rp_begin.framebuffer = sd.framebuffers[sd.image_index];
-    rp_begin.renderArea.extent = {static_cast<uint32_t>(sd.width), static_cast<uint32_t>(sd.height)};
+    rp_begin.renderPass = rp;
+    rp_begin.framebuffer = fb;
+    rp_begin.renderArea.extent = {static_cast<uint32_t>(current_target_width_),
+                                  static_cast<uint32_t>(current_target_height_)};
 
     VkClearValue clear_value{};
-    clear_value.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clear_value.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
     rp_begin.clearValueCount = 1;
     rp_begin.pClearValues = &clear_value;
 
     vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-    surface_has_clear_ = true;
 
     // Bind bindless descriptor set
     vkCmdBindDescriptorSets(sync.command_buffer,
@@ -1234,11 +1335,9 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
 {
     auto& sync = frame_sync_[frame_sync_index_];
 
-    auto sit = surfaces_.find(current_surface_);
-    if (sit != surfaces_.end()) {
-        auto& sd = sit->second;
-        float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(sd.width);
-        float vp_h = (vp.height > 0) ? vp.height : static_cast<float>(sd.height);
+    {
+        float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(current_target_width_);
+        float vp_h = (vp.height > 0) ? vp.height : static_cast<float>(current_target_height_);
 
         VkViewport viewport{};
         viewport.x = vp.x;
@@ -1281,6 +1380,46 @@ void VkBackend::end_pass()
     auto& sync = frame_sync_[frame_sync_index_];
     vkCmdEndRenderPass(sync.command_buffer);
     current_surface_ = 0;
+}
+
+static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
+{
+    switch (stage) {
+    case PipelineStage::ColorOutput:    return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    case PipelineStage::FragmentShader: return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    case PipelineStage::ComputeShader:  return VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    case PipelineStage::Transfer:       return VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+}
+
+static VkAccessFlags to_vk_access(PipelineStage stage)
+{
+    switch (stage) {
+    case PipelineStage::ColorOutput:    return VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    case PipelineStage::FragmentShader: return VK_ACCESS_SHADER_READ_BIT;
+    case PipelineStage::ComputeShader:  return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    case PipelineStage::Transfer:       return VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+    return VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+}
+
+void VkBackend::barrier(PipelineStage src, PipelineStage dst)
+{
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    VkMemoryBarrier mem_barrier{};
+    mem_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mem_barrier.srcAccessMask = to_vk_access(src);
+    mem_barrier.dstAccessMask = to_vk_access(dst);
+
+    vkCmdPipelineBarrier(
+        sync.command_buffer,
+        to_vk_stage(src), to_vk_stage(dst),
+        0,
+        1, &mem_barrier,
+        0, nullptr,
+        0, nullptr);
 }
 
 void VkBackend::end_frame()

@@ -36,12 +36,20 @@ struct GpuBufferDesc
     bool cpu_writable{true}; ///< If false, the buffer is device-local only.
 };
 
+/// Texture usage hint.
+enum class TextureUsage : uint8_t
+{
+    Sampled,      ///< Uploadable and samplable in shaders (default).
+    RenderTarget  ///< Renderable via begin_pass() and samplable in shaders.
+};
+
 /// Describes a texture to create.
 struct TextureDesc
 {
-    int width{};                            ///< Texture width in pixels.
-    int height{};                           ///< Texture height in pixels.
-    PixelFormat format{PixelFormat::RGBA8}; ///< Pixel format.
+    int width{};                                    ///< Texture width in pixels.
+    int height{};                                   ///< Texture height in pixels.
+    PixelFormat format{PixelFormat::RGBA8};          ///< Pixel format.
+    TextureUsage usage{TextureUsage::Sampled};       ///< Usage hint.
 };
 
 /// Primitive topology for pipeline creation.
@@ -97,6 +105,15 @@ struct SurfaceDesc
     int height{};                                       ///< Initial surface height in pixels.
     UpdateRate update_rate{UpdateRate::VSync};          ///< Swapchain pacing mode.
     int target_fps{60};                                 ///< Target framerate for UpdateRate::Targeted.
+};
+
+/// Pipeline stage for barrier synchronization.
+enum class PipelineStage : uint32_t
+{
+    ColorOutput,    ///< Color attachment writes.
+    FragmentShader, ///< Fragment shader reads.
+    ComputeShader,  ///< Compute shader reads/writes.
+    Transfer        ///< Transfer (copy) operations.
 };
 
 /**
@@ -196,6 +213,14 @@ public:
 
     /** @brief Ends the current render pass. */
     virtual void end_pass() = 0;
+
+    /**
+     * @brief Inserts a pipeline barrier between passes.
+     *
+     * Call between end_pass() and the next begin_pass() to synchronize
+     * GPU work (e.g. after rendering to a texture and before sampling it).
+     */
+    virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
     /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
     virtual void end_frame() = 0;
