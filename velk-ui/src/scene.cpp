@@ -159,8 +159,10 @@ void Scene::update(const UpdateInfo& info)
         solver_.solve(*h, geometry_);
         // Layout changed, all elements need redraw
         redraw_list_.clear();
-        for (auto& elem : visual_list_) {
-            redraw_list_.push_back(elem.get());
+        for (auto& entry : visual_list_) {
+            if (entry.type == VisualEntry::Element) {
+                redraw_list_.push_back(entry.element.get());
+            }
         }
     }
 
@@ -193,7 +195,11 @@ vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t ma
 
     // Walk in reverse z-order (topmost first)
     for (size_t i = visual_list_.size(); i > 0; --i) {
-        auto& elem = visual_list_[i - 1];
+        auto& entry = visual_list_[i - 1];
+        if (entry.type != VisualEntry::Element) {
+            continue;
+        }
+        auto& elem = entry.element;
 
         // Only elements with an input trait participate in hit testing
         auto* storage = interface_cast<IObjectStorage>(elem);
@@ -472,8 +478,14 @@ void Scene::rebuild_visual_list()
 void Scene::collect_visual_list(const IObject::Ptr& obj)
 {
     auto elem = interface_pointer_cast<IElement>(obj);
+    auto elem_state = read_state<IElement>(elem);
+    bool cached = elem_state && elem_state->cache_mode == CacheMode::Cached;
+
+    if (cached) {
+        visual_list_.push_back({VisualEntry::PushCache, elem});
+    }
     if (elem) {
-        visual_list_.push_back(elem);  // pre-order: before children
+        visual_list_.push_back({VisualEntry::Element, elem});
     }
 
     auto* h = get_hierarchy(logical_);
@@ -495,7 +507,10 @@ void Scene::collect_visual_list(const IObject::Ptr& obj)
     }
 
     if (elem) {
-        after_visual_list_.push_back(elem);  // post-order: after children
+        after_visual_list_.push_back({VisualEntry::Element, elem});
+    }
+    if (cached) {
+        after_visual_list_.push_back({VisualEntry::PopCache, elem});
     }
 }
 

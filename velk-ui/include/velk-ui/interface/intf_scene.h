@@ -25,6 +25,13 @@ struct ElementQuery
     vector<Uid> traits; ///< Interface UIDs the element's attachments must implement (AND).
 };
 
+/** @brief A single entry in the visual list stream. */
+struct VisualListEntry
+{
+    VisualEntry type{VisualEntry::Element};
+    IElement::Ptr element;
+};
+
 /**
  * @brief Holds element and visual change information for one frame.
  *
@@ -34,10 +41,10 @@ struct ElementQuery
  */
 struct SceneState
 {
-    /** @brief Pre-order (depth-first) element list for BeforeChildren visuals. */
-    vector<IElement::Ptr> visual_list;
-    /** @brief Post-order element list for AfterChildren visuals. */
-    vector<IElement::Ptr> after_visual_list;
+    /** @brief Pre-order (depth-first) visual list for BeforeChildren visuals. */
+    vector<VisualListEntry> visual_list;
+    /** @brief Post-order visual list for AfterChildren visuals. */
+    vector<VisualListEntry> after_visual_list;
     /** @brief Elements whose visual state has changed since the last update. Elements on this list are
      *         guaranteed to be either on visual_list or removed_list. */
     vector<IElement*> redraw_list;

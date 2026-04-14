@@ -745,7 +745,7 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
 
     // Load render pass (for subsequent passes on the same surface within a frame)
     color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    color_att.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_att.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.load_render_pass);
 
     // Framebuffers

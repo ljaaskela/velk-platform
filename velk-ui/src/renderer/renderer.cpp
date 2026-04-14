@@ -234,18 +234,25 @@ void Renderer::rebuild_batches(const SceneState& state, ViewEntry& entry)
         return phase == VisualPhase::AfterChildren ? cache.after_visuals : cache.before_visuals;
     };
 
-    auto emit_visuals = [&](const vector<IElement::Ptr>& elements, VisualPhase phase) {
+    auto emit_visuals = [&](const vector<VisualListEntry>& entries, VisualPhase phase) {
         size_t max_visuals = 0;
-        for (auto& element : elements) {
-            auto it = element_cache_.find(element.get());
+        for (auto& entry : entries) {
+            if (entry.type != VisualEntry::Element) {
+                continue;
+            }
+            auto it = element_cache_.find(entry.element.get());
             if (it != element_cache_.end()) {
                 max_visuals = std::max(max_visuals, get_visuals(it->second, phase).size());
             }
         }
 
         for (size_t pass = 0; pass < max_visuals; ++pass) {
-            for (auto& element : elements) {
-                auto* elem = element.get();
+            for (auto& entry : entries) {
+                if (entry.type != VisualEntry::Element) {
+                    continue;
+                }
+
+                auto* elem = entry.element.get();
                 auto it = element_cache_.find(elem);
                 if (it == element_cache_.end()) {
                     continue;

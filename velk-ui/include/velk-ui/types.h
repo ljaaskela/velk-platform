@@ -82,6 +82,26 @@ inline float resolve_dim(dim d, float available)
     }
 }
 
+enum class CacheMode : uint8_t
+{
+    None,    ///< Render directly (default).
+    Cached   ///< Render subtree to texture, composite result.
+};
+
+/** @brief Entry type in the visual list stream. */
+enum class VisualEntry : uint8_t
+{
+    Element,   ///< Regular element to draw.
+    PushCache, ///< Begin cached subtree (element has cache_mode == Cached).
+    PopCache   ///< End cached subtree.
+};
+
+enum class BlendMode : uint8_t
+{
+    Opaque,    ///< No blending, overwrite destination.
+    SrcAlpha   ///< Standard alpha blending: srcAlpha, oneMinusSrcAlpha (default).
+};
+
 enum class HAlign : uint8_t
 {
     Left,
