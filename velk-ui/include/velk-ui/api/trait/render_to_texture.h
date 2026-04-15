@@ -1,5 +1,5 @@
-#ifndef VELK_UI_API_TRAIT_RENDER_TO_TEXTURE_H
-#define VELK_UI_API_TRAIT_RENDER_TO_TEXTURE_H
+#ifndef VELK_UI_API_TRAIT_RENDER_CACHE_H
+#define VELK_UI_API_TRAIT_RENDER_CACHE_H
 
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
@@ -10,20 +10,19 @@
 namespace velk::ui {
 
 /**
- * @brief Convenience wrapper for a RenderToTexture trait.
+ * @brief Convenience wrapper for a RenderCache trait.
  *
- *   auto rtt = trait::render::create_render_to_texture();
- *   element.add_trait(rtt);
+ * Caches the element's rendered subtree into a RenderTexture.
+ * The texture can be displayed via a TextureVisual on another element.
  *
- *   // Use the texture on another element
- *   auto state = read_state<IRenderToTexture>(rtt.ptr());
- *   auto tex = state->render_target.get<ITexture>();
+ *   auto rc = trait::render::create_render_cache();
+ *   element.add_trait(rc);
  */
-class RenderToTextureTrait : public Trait
+class RenderCacheTrait : public Trait
 {
 public:
-    RenderToTextureTrait() = default;
-    explicit RenderToTextureTrait(IObject::Ptr obj) : Trait(std::move(obj)) {}
+    RenderCacheTrait() = default;
+    explicit RenderCacheTrait(IObject::Ptr obj) : Trait(std::move(obj)) {}
 
     /** @brief Sets the texture resolution. (0,0) matches the element's layout size. */
     void set_texture_size(uint32_t w, uint32_t h)
@@ -43,14 +42,14 @@ public:
 
 namespace trait::render {
 
-/** @brief Creates a new RenderToTexture trait. */
-inline RenderToTextureTrait create_render_to_texture()
+/** @brief Creates a new RenderCache trait. */
+inline RenderCacheTrait create_render_cache()
 {
-    return RenderToTextureTrait(instance().create<IObject>(ClassId::Render::RenderToTexture));
+    return RenderCacheTrait(instance().create<IObject>(ClassId::Render::RenderCache));
 }
 
 } // namespace trait::render
 
 } // namespace velk::ui
 
-#endif // VELK_UI_API_TRAIT_RENDER_TO_TEXTURE_H
+#endif // VELK_UI_API_TRAIT_RENDER_CACHE_H

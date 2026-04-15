@@ -67,8 +67,8 @@ namespace Render {
 /** @brief Camera trait. Defines how the scene is observed (projection, zoom, scale). */
 inline constexpr Uid Camera{"3cd4d525-fc81-4e27-a9c5-ac231036e474"};
 
-/** @brief Renders an element's subtree into a RenderTexture. */
-inline constexpr Uid RenderToTexture{"d8a3aed1-cda4-4046-a69c-409ed7edc5c2"};
+/** @brief Caches an element's rendered subtree into a RenderTexture. */
+inline constexpr Uid RenderCache{"d8a3aed1-cda4-4046-a69c-409ed7edc5c2"};
 
 } // namespace Render
 

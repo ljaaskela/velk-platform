@@ -47,7 +47,7 @@
     { "targets": ["sidebar"], "class": "velk-ui.FixedSize", "properties": { "width": "180px" } },
     { "targets": ["nav1", "nav2", "nav3"], "class": "velk-ui.FixedSize", "properties": { "height": "40px" } },
     { "targets": ["card1", "card2", "card3", "card4"], "class": "velk-ui.FixedSize", "properties": { "height": "120px" } },
-    { "targets": ["content"], "class": "velk-ui.RenderToTexture", "properties": { "render_target": { "ref": "content_texture" } } },
+    { "targets": ["content"], "class": "velk-ui.RenderCache", "properties": { "render_target": { "ref": "content_texture" } } },
 
     { "targets": ["header"],  "class": "velk-ui.RectVisual",        "properties": { "color": { "r": 0.1, "g": 0.1, "b": 0.15, "a": 0.7 } } },
     { "targets": ["sidebar"], "class": "velk-ui.RectVisual",        "properties": { "color": { "r": 0.06, "g": 0.06, "b": 0.10, "a": 0.6 } } },

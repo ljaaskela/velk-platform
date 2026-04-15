@@ -1,5 +1,5 @@
-#ifndef VELK_UI_RENDER_TO_TEXTURE_H
-#define VELK_UI_RENDER_TO_TEXTURE_H
+#ifndef VELK_UI_RENDER_CACHE_H
+#define VELK_UI_RENDER_CACHE_H
 
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/interface/intf_render_to_texture.h>
@@ -8,18 +8,18 @@
 namespace velk::ui::impl {
 
 /**
- * @brief Trait that renders an element's subtree into a RenderTexture.
+ * @brief Caches an element's rendered subtree into a RenderTexture.
  *
- * Creates a RenderTexture on construction and exposes it via the
- * render_target ObjectRef property. The renderer detects this trait
- * and redirects the subtree's rendering into the texture.
+ * When attached to an element, the renderer captures the subtree's
+ * visual output into a texture. The texture can be displayed elsewhere
+ * via a TextureVisual bound to the render_target ObjectRef.
  */
-class RenderToTexture : public ::velk::ui::ext::Render<RenderToTexture, IRenderToTexture, IMetadataObserver>
+class RenderCache : public ::velk::ui::ext::Render<RenderCache, IRenderToTexture, IMetadataObserver>
 {
 public:
-    VELK_CLASS_UID(::velk::ui::ClassId::Render::RenderToTexture, "RenderToTexture");
+    VELK_CLASS_UID(::velk::ui::ClassId::Render::RenderCache, "RenderCache");
 
-    RenderToTexture();
+    RenderCache();
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;
@@ -27,4 +27,4 @@ protected:
 
 } // namespace velk::ui::impl
 
-#endif // VELK_UI_RENDER_TO_TEXTURE_H
+#endif // VELK_UI_RENDER_CACHE_H

@@ -8,15 +8,13 @@
 
 namespace velk::ui::impl {
 
-RenderToTexture::RenderToTexture() = default;
+RenderCache::RenderCache() = default;
 
-void RenderToTexture::on_state_changed(string_view name, IMetadata&, Uid interfaceId)
+void RenderCache::on_state_changed(string_view name, IMetadata&, Uid interfaceId)
 {
     if (interfaceId != IRenderToTexture::UID) {
         return;
     }
-    // texture_size changes are handled by the renderer when it
-    // checks the trait's size against the current GPU texture dimensions.
 }
 
 } // namespace velk::ui::impl
