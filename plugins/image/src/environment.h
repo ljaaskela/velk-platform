@@ -24,7 +24,7 @@ public:
  * @brief Decoded equirectangular HDR environment map.
  *
  * Implements both `IEnvironment` (resource metadata + env properties)
- * and `ITexture` (the GPU-uploadable HDR image). Pixel data is stored
+ * and `ISurface` + `IBuffer` (the GPU-uploadable HDR image). Pixel data is stored
  * as RGBA16F (half-float) for GPU efficiency.
  */
 class Environment final : public ::velk::ext::GpuResource<Environment, IEnvironmentInternal, ISurface, IBuffer>

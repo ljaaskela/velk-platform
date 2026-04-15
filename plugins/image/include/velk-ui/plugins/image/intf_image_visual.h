@@ -11,7 +11,7 @@ namespace velk::ui {
  * @brief Properties for the image visual.
  *
  * `uri` is fetched lazily on change via the resource store. The result is
- * an `IImage`/`ITexture` that the visual binds to its internal `ImageMaterial`.
+ * an `IImage`/`ISurface` that the visual binds to its internal `ImageMaterial`.
  *
  * `tint` is forwarded to the material and multiplies the sampled texel.
  */

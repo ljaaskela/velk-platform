@@ -23,16 +23,16 @@ namespace ext {
  * observers before the object's memory is reclaimed.
  *
  * The interface chain must include something that derives from
- * `IGpuResource` (e.g. `ITexture`, `IBuffer`); otherwise the compiler
- * rejects the implicit cast in the destructor's notify call.
+ * `IGpuResource` (e.g. `ISurface`, `IBuffer`, `IRenderTarget`); otherwise
+ * the compiler rejects the cast in the destructor's notify call.
  *
  * Usage:
  * ```cpp
- * class MyTexture : public ext::GpuResource<MyTexture, ITexture, IMyExtra>
+ * class MyImage : public ext::GpuResource<MyImage, ISurface, IBuffer>
  * {
  *     // No need to declare add_/remove_gpu_resource_observer or a
  *     // destructor: the GpuResource base handles both.
- *     int width() const override { ... }
+ *     uvec2 get_dimensions() const override { ... }
  *     // ...
  * };
  * ```
@@ -58,11 +58,10 @@ public:
             snapshot = gpu_observers_;
             gpu_observers_.clear();
         }
-        // The implicit upcast from `this` to IGpuResource* requires that
-        // FinalClass's interface chain includes IGpuResource (typically via
-        // ITexture or IBuffer). If you see a compile error here, your
-        // class is using GpuResource without inheriting an IGpuResource
-        // interface, which is a misuse.
+        // Resolve the IGpuResource pointer via get_interface to handle
+        // diamond inheritance (e.g. ISurface + IBuffer both inherit
+        // IGpuResource). If you see a compile error here, your class is
+        // using GpuResource without inheriting an IGpuResource interface.
         IGpuResource* self = this->template get_interface<IGpuResource>();
         for (auto* obs : snapshot) {
             obs->on_gpu_resource_destroyed(self);

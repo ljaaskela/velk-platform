@@ -21,8 +21,8 @@ add_library(velk_ui SHARED
     src/visual/texture_visual.cpp
     src/visual/texture_material.h
     src/visual/texture_material.cpp
-    src/render_to_texture.h
-    src/render_to_texture.cpp
+    src/render_cache.h
+    src/render_cache.cpp
     src/transform/trs.h
     src/transform/trs.cpp
     src/transform/look_at.h

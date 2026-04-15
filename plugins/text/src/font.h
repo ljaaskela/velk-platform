@@ -27,7 +27,7 @@ namespace velk::ui::impl {
  * `write_gpu_data` and emits them as buffer references the slug shader
  * can dereference.
  *
- * Font is no longer an ITexture: there are no pixels to bind.
+ * Font is not an ISurface: there are no pixels to bind.
  */
 class Font : public ::velk::ext::Object<Font, IFont>
 {

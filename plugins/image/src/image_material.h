@@ -9,7 +9,7 @@
 namespace velk::ui::impl {
 
 /**
- * @brief Material that samples a bound `ITexture` and multiplies by a tint.
+ * @brief Material that samples a bound `ISurface` and multiplies by a tint.
  *
  * The texture is bound via the `texture` property as an `ObjectRef`. The
  * draw call's `texture_key` is set by `ImageVisual` to the texture pointer

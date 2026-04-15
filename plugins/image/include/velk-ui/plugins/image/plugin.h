@@ -7,13 +7,13 @@ namespace velk::ui {
 
 namespace ClassId {
 
-/** @brief Decoded raster image; implements both IImage and ITexture. */
+/** @brief Decoded raster image; implements IImage, ISurface, and IBuffer. */
 inline constexpr Uid Image{"1933a69f-eb6e-438d-becb-2d9923ee84a6"};
 
 /** @brief Decoder turning raw image bytes into Image objects. Registered as "image". */
 inline constexpr Uid ImageDecoder{"d595679f-ed96-4af3-b208-83eb3e2d26b3"};
 
-/** @brief Equirectangular HDR environment map; implements IEnvironment and ITexture. */
+/** @brief Equirectangular HDR environment map; implements IEnvironment, ISurface, and IBuffer. */
 inline constexpr Uid Environment{"c8531002-51c3-4b7c-abb7-5d89586d6696"};
 
 /** @brief Decoder turning raw HDR bytes into Environment objects. Registered as "env". */
@@ -28,7 +28,7 @@ inline constexpr Uid Image{"e72f6424-bd52-4ceb-9f27-2ae95a32297b"};
 
 namespace Material {
 
-/** @brief Material sampling an ITexture and multiplying by a tint. */
+/** @brief Material sampling an ISurface and multiplying by a tint. */
 inline constexpr Uid Image{"95b06fa1-fc1a-4e26-adb0-2eecdd39c641"};
 
 /** @brief Material rendering an equirectangular environment as a skybox. */

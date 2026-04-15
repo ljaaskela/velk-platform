@@ -6,7 +6,7 @@
 #include <velk/string_view.h>
 
 #include <velk-render/interface/intf_image.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 namespace velk::ui {

@@ -16,16 +16,10 @@ namespace velk {
  * are interpreted on the GPU side: a size, a CPU-resident pointer, a dirty
  * flag, and the IGpuResource observer hooks.
  *
- * Subtypes specialize on the GPU representation:
- *
- * - `ITexture` adds image-shaped metadata (width, height, pixel format) and
- *   is uploaded via the backend's texture path (`upload_texture`), which
- *   produces a bindless image binding.
- * - Future subtypes (vertex buffers, index buffers, BVH nodes, etc.) can
- *   live in this hierarchy without inventing parallel resource interfaces.
- * - A plain IBuffer with no specialization is the right shape for "raw
- *   shader-readable bytes," uploaded via `create_buffer` + `map` + memcpy
- *   and bound via `buffer_reference` (GPU virtual address).
+ * Objects that also implement `ISurface` (images, environment maps) are
+ * uploaded via the backend's texture path (`upload_texture`). Plain IBuffer
+ * objects are uploaded via `create_buffer` + `map` + memcpy and bound via
+ * `buffer_reference` (GPU virtual address).
  *
  * Two lifecycles fit the same interface:
  *

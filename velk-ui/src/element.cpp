@@ -3,10 +3,9 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/interface/intf_object_storage.h>
 
-#include <velk-ui/interface/intf_layout_notify.h>
 #include <velk-ui/interface/intf_render_to_texture.h>
 #include <velk-ui/interface/intf_scene.h>
-#include <velk-ui/interface/intf_visual.h>
+#include <velk-ui/interface/intf_trait.h>
 
 namespace velk::ui {
 
@@ -90,38 +89,26 @@ ReturnValue Element::remove_attachment(const IInterface::Ptr& attachment)
 
 void Element::subscribe_trait(const IInterface::Ptr& attachment)
 {
-    auto notify = [this](DirtyFlags flag) {
-        return [this, flag](FnArgs) -> ReturnValue {
-            auto scene = get_scene();
-            if (!scene) {
-                return ReturnValue::Fail;
-            }
-            bool was_clean = (pending_dirty_ == DirtyFlags::None);
-            pending_dirty_ |= flag;
-            if (was_clean) {
-                scene->notify_dirty(*this, flag);
-            }
-            return ReturnValue::Success;
-        };
-    };
-
     if (interface_cast<IRenderToTexture>(attachment)) {
         render_trait_count++;
     }
 
-    // Visual traits: on_visual_changed -> DirtyFlags::Visual
-    if (auto* visual = interface_cast<IVisual>(attachment)) {
-        Event evt = visual->on_visual_changed();
+    // Subscribe to ITraitNotify for any trait that fires dirty notifications.
+    if (auto* notifier = interface_cast<ITraitNotify>(attachment)) {
+        Event evt = notifier->on_trait_dirty();
         if (evt) {
-            trait_subs_.emplace_back(evt, notify(DirtyFlags::Visual));
-        }
-    }
-
-    // Layout/transform traits: on_layout_changed -> DirtyFlags::Layout
-    if (auto* layout_notify = interface_cast<ILayoutNotify>(attachment)) {
-        Event evt = layout_notify->on_layout_changed();
-        if (evt) {
-            trait_subs_.emplace_back(evt, notify(DirtyFlags::Layout));
+            trait_subs_.emplace_back(evt, [this](const DirtyFlags& flags) -> ReturnValue {
+                auto scene = get_scene();
+                if (!scene) {
+                    return ReturnValue::NothingToDo;
+                }
+                bool was_clean = (pending_dirty_ == DirtyFlags::None);
+                pending_dirty_ |= flags;
+                if (was_clean) {
+                    scene->notify_dirty(*this, flags);
+                }
+                return ReturnValue::Success;
+            });
         }
     }
 }

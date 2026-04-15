@@ -2,6 +2,8 @@
 #define VELK_UI_INTF_RENDER_TO_TEXTURE_H
 
 #include <velk/api/math_types.h>
+#include <velk/interface/intf_metadata.h>
+
 #include <velk-ui/interface/intf_trait.h>
 
 namespace velk::ui {

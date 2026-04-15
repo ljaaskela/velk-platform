@@ -52,7 +52,7 @@ public:
  * runs, observers are notified synchronously and can enqueue their handles
  * for deferred destruction.
  *
- * Concrete subtypes (`ITexture`, future `IBuffer`, etc.) inherit from this
+ * Concrete subtypes (`ISurface`, `IBuffer`, etc.) inherit from this
  * interface and rely on a small mixin (`ext::GpuResourceMixin`) to manage
  * the observer list and notify in their dtor.
  *

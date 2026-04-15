@@ -4,9 +4,8 @@
 #include <velk/ext/object.h>
 #include <velk/interface/intf_metadata_observer.h>
 
-#include <velk-ui/interface/intf_camera.h>
-#include <velk-ui/interface/intf_layout_notify.h>
 #include <velk-ui/interface/intf_layout_trait.h>
+#include <velk-ui/interface/intf_trait.h>
 #include <velk-ui/interface/intf_transform_trait.h>
 #include <velk-ui/interface/intf_visual.h>
 
@@ -16,15 +15,11 @@ namespace velk::ui::ext {
  * @brief CRTP base for ILayoutTrait implementations.
  *
  * Provides default no-op measure/apply and a compile-time phase.
- * Includes ILayoutNotify and IMetadataObserver: any property change
- * fires on_layout_changed so the owning element triggers a re-solve.
- *
- * @tparam T     The concrete trait class (CRTP parameter).
- * @tparam Phase The layout phase (Layout or Constraint).
- * @tparam Extra Additional interfaces the trait implements (e.g. IStack, IFixedSize).
+ * Includes ITraitNotify and IMetadataObserver: any property change
+ * fires on_trait_dirty(Layout) so the owning element triggers a re-solve.
  */
 template <class T, TraitPhase Phase, class... Extra>
-class Layout : public ::velk::ext::Object<T, ILayoutTrait, ILayoutNotify, IMetadataObserver, Extra...>
+class Layout : public ::velk::ext::Object<T, ILayoutTrait, ITraitNotify, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return Phase; }
@@ -32,80 +27,81 @@ public:
     void apply(const Constraint&, IElement&, IHierarchy&) override {}
 
 protected:
-    void invoke_layout_changed()
+    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Layout)
     {
-        invoke_event(this->get_interface(IInterface::UID), "on_layout_changed");
+        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
     }
 
-    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_layout_changed(); }
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
 };
 
 /**
  * @brief CRTP base for ITransformTrait implementations.
  *
- * Includes ILayoutNotify and IMetadataObserver: any property change
- * fires on_layout_changed so the owning element triggers a re-solve
+ * Includes ITraitNotify and IMetadataObserver: any property change
+ * fires on_trait_dirty(Layout) so the owning element triggers a re-solve
  * (transforms run during layout).
- *
- * @tparam T     The concrete trait class (CRTP parameter).
- * @tparam Extra Additional interfaces the trait implements (e.g. ITrs, IMatrix).
  */
 template <class T, class... Extra>
-class Transform : public ::velk::ext::Object<T, ITransformTrait, ILayoutNotify, IMetadataObserver, Extra...>
+class Transform : public ::velk::ext::Object<T, ITransformTrait, ITraitNotify, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Transform; }
     void transform(IElement&) override {}
 
 protected:
-    void invoke_layout_changed()
+    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Layout)
     {
-        invoke_event(this->get_interface(IInterface::UID), "on_layout_changed");
+        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
     }
 
-    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_layout_changed(); }
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
 };
 
 /**
  * @brief CRTP base for IVisual implementations.
  *
- * Bakes in IVisual and IMetadataObserver. Provides invoke_visual_changed()
- * and a default on_state_changed that fires the event automatically.
+ * Bakes in IVisual, ITraitNotify, and IMetadataObserver. Provides
+ * invoke_trait_dirty() and a default on_state_changed that fires Visual.
  *
  * @tparam T     The concrete visual class (CRTP parameter).
- * @tparam Extra Additional interfaces the visual implements (e.g. ITextureProvider).
+ * @tparam Extra Additional interfaces the visual implements.
  */
 template <class T, class... Extra>
-class Visual : public ::velk::ext::Object<T, IVisual, IMetadataObserver, Extra...>
+class Visual : public ::velk::ext::Object<T, IVisual, ITraitNotify, IMetadataObserver, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Visual; }
 
 protected:
-    /** @brief Fires the on_visual_changed event. Call from subclasses when visual state changes. */
-    void invoke_visual_changed()
+    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Visual)
     {
-        invoke_event(this->get_interface(IInterface::UID), "on_visual_changed");
+        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
     }
 
-    /** @brief Default: any property change fires on_visual_changed. Override to filter. */
-    void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override
-    {
-        invoke_visual_changed();
-    }
+    /** @brief Backward compat: fires on_trait_dirty(Visual). */
+    void invoke_visual_changed() { invoke_trait_dirty(DirtyFlags::Visual); }
+
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
 };
 
 /**
- * @brief CRTP base for Render-phase traits (e.g. Camera).
+ * @brief CRTP base for Render-phase traits (e.g. Camera, RenderCache).
  *
  * @tparam T     The concrete class (CRTP parameter).
- * @tparam Extra Additional interfaces (e.g. ICamera).
+ * @tparam Extra Additional interfaces (e.g. IRenderToTexture).
  */
 template <class T, class... Extra>
-class Render : public ::velk::ext::Object<T, Extra...>
+class Render : public ::velk::ext::Object<T, ITraitNotify, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Render; }
+
+protected:
+    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Visual)
+    {
+        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
+    }
 };
 
 } // namespace velk::ui::ext
