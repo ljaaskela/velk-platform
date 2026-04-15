@@ -11,7 +11,7 @@ class RuntimePlugin final : public ::velk::ext::Plugin<RuntimePlugin>
 {
 public:
     VELK_PLUGIN_UID(PluginId::RuntimePlugin);
-    VELK_PLUGIN_NAME("velk_runtime");
+    VELK_PLUGIN_NAME("velk-runtime");
     VELK_PLUGIN_VERSION(0, 1, 0);
 
     ReturnValue initialize(IVelk& velk, PluginConfig& config) override;

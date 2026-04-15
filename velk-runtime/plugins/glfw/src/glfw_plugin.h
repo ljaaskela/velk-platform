@@ -19,7 +19,7 @@ class GlfwPlugin final : public ::velk::ext::Plugin<GlfwPlugin, IWindowProvider>
 {
 public:
     VELK_PLUGIN_UID(PluginId::RuntimeGlfwPlugin);
-    VELK_PLUGIN_NAME("velk_runtime_glfw");
+    VELK_PLUGIN_NAME("velk-runtime-glfw");
     VELK_PLUGIN_VERSION(0, 1, 0);
 
     ReturnValue initialize(IVelk& velk, PluginConfig& config) override;

@@ -11,7 +11,7 @@ class ImagePlugin final : public ::velk::ext::Plugin<ImagePlugin>
 {
 public:
     VELK_PLUGIN_UID(::velk::ui::PluginId::ImagePlugin);
-    VELK_PLUGIN_NAME("velk_image");
+    VELK_PLUGIN_NAME("velk-image");
     VELK_PLUGIN_VERSION(0, 1, 0);
 
     ReturnValue initialize(IVelk& velk, PluginConfig& config) override;

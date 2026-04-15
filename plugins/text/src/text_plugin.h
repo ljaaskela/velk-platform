@@ -12,7 +12,7 @@ class TextPlugin final : public ::velk::ext::Plugin<TextPlugin, ITextPlugin>
 {
 public:
     VELK_PLUGIN_UID(PluginId::TextPlugin);
-    VELK_PLUGIN_NAME("velk_text");
+    VELK_PLUGIN_NAME("velk-text");
     VELK_PLUGIN_VERSION(0, 1, 0);
 
     ReturnValue initialize(IVelk& velk, PluginConfig& config) override;
