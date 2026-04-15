@@ -35,8 +35,7 @@ public:
     VELK_INTERFACE(
         (PROP, ::velk::color, color, {}),
         (PROP, ObjectRef, paint, {}),
-        (PROP, VisualPhase, visual_phase, VisualPhase::BeforeChildren),
-        (EVT, on_visual_changed)
+        (PROP, VisualPhase, visual_phase, VisualPhase::BeforeChildren)
     )
 
     /** @brief Returns draw entries for this visual within the given bounds. */

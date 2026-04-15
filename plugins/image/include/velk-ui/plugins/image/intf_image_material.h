@@ -10,9 +10,9 @@ namespace velk::ui {
 /**
  * @brief Properties for the image material.
  *
- * `texture` is an `ObjectRef<ITexture>`. Any object that implements
- * `ITexture` works: a decoded `Image` (which implements both `IImage` and
- * `ITexture`), a glyph atlas (`Font`), a future render target.
+ * `texture` is an ObjectRef. Any object that implements `ISurface` works:
+ * a decoded `Image` (which implements both `IImage` and `ISurface`),
+ * a render target texture, etc.
  *
  * `tint` is multiplied with the sampled texel. Defaults to white (no tint).
  */

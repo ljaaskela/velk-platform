@@ -19,7 +19,7 @@ class RenderCache : public ::velk::ui::ext::Render<RenderCache, IRenderToTexture
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Render::RenderCache, "RenderCache");
 
-    RenderCache();
+    RenderCache() = default;
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;

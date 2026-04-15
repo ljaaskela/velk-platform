@@ -2,6 +2,7 @@
 #define VELK_UI_CAMERA_H
 
 #include <velk-ui/ext/trait.h>
+#include <velk-ui/interface/intf_camera.h>
 #include <velk-ui/plugin.h>
 
 namespace velk::ui::impl {

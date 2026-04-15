@@ -13,7 +13,7 @@ namespace velk::ui {
  * @brief Convenience wrapper around a TextureVisual.
  *
  * Displays a texture on the element bounds. The texture is set via ObjectRef,
- * allowing it to reference any ITexture including RenderTexture outputs.
+ * allowing it to reference any ISurface including RenderTexture outputs.
  *
  *   auto tv = trait::visual::create_texture_visual();
  *   tv.set_texture(my_texture);

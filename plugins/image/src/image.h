@@ -20,7 +20,7 @@ namespace velk::ui::impl {
  *        them, after which the pixel buffer is freed.
  *
  * Implements both `IImage` (the URI-resource view used by the resource
- * store and apps) and `ITexture` (the GPU binding view used by materials
+ * store and apps) and `ISurface` + `IBuffer` (the GPU binding view used by materials
  * and the renderer). The same object serves both roles.
  */
 class Image final : public ::velk::ext::GpuResource<Image, IImage, ISurface, IBuffer>

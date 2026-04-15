@@ -12,7 +12,7 @@ namespace velk::ui::impl {
 /**
  * @brief Visual trait that displays a texture on the element bounds.
  *
- * References a texture via ObjectRef. The texture can be any ITexture,
+ * References a texture via ObjectRef. The texture can be any ISurface,
  * including a RenderTexture from a RenderToTexture trait.
  */
 class TextureVisual : public ::velk::ui::ext::Visual<TextureVisual, ITextureVisual>

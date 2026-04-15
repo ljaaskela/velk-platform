@@ -21,12 +21,12 @@ enum class ImageStatus : uint8_t
  *
  * `IImage` is the resource concept: an image known by URI, cached and
  * deduplicated by the resource store, optionally pinned via the persistence
- * flag inherited from `IResource`. It is intentionally minimal: width,
- * height, format, GPU handle and pixel data live on `ITexture`.
+ * flag inherited from `IResource`. It is intentionally minimal: dimensions
+ * and format live on `ISurface`, pixel data on `IBuffer`.
  *
  * The concrete `Image` class produced by the image plugin's decoder
- * implements **both** `IImage` and `ITexture`. Apps holding an
- * `IImage::Ptr` can `interface_cast<ITexture>(image)` to get the binding
+ * implements `IImage`, `ISurface`, and `IBuffer`. Apps holding an
+ * `IImage::Ptr` can `interface_cast<ISurface>(image)` to get the binding
  * surface for materials.
  *
  * Sync v1 only ever produces `Loaded` or `Failed` status. `Unloaded` and

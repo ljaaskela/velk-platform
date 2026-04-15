@@ -8,14 +8,14 @@ namespace velk::ui {
 /**
  * @brief Visual trait that displays a texture on the element bounds.
  *
- * The texture is referenced via ObjectRef, allowing binding to any ITexture
+ * The texture is referenced via ObjectRef, allowing binding to any ISurface
  * including RenderTexture outputs. The tint color multiplies the sampled texel.
  */
 class ITextureVisual : public Interface<ITextureVisual>
 {
 public:
     VELK_INTERFACE(
-        (PROP, ObjectRef, texture, {}),                  ///< Reference to an ITexture to display.
+        (PROP, ObjectRef, texture, {}),                  ///< Reference to an ISurface to display.
         (PROP, ::velk::color, tint, (::velk::color::white())) ///< Tint color multiplied with sampled texel.
     )
 };

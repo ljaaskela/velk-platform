@@ -11,7 +11,7 @@ namespace velk::ui {
  * @brief An equirectangular HDR environment map for skybox rendering.
  *
  * Loaded via the `env:` resource decoder (e.g. `env:app://hdri/sky.hdr`).
- * The concrete Environment class also implements `ITexture`, so the
+ * The concrete Environment class also implements `ISurface` and `IBuffer`, so the
  * renderer can bind it as a GPU texture for sampling in the skybox
  * shader. The `IResource` base provides URI, existence, and persistence.
  *

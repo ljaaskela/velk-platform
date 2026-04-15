@@ -60,8 +60,8 @@ private:
         vector<VisualCommands> before_visuals;  ///< VisualPhase::BeforeChildren
         vector<VisualCommands> after_visuals;   ///< VisualPhase::AfterChildren
         /// Weak references to GPU resources used by visuals on this element.
-        /// IBuffer is the common base for anything uploadable: textures
-        /// (which inherit IBuffer via ITexture) and plain shader-readable
+        /// IBuffer is the common base for anything uploadable: images
+        /// (which implement both ISurface and IBuffer) and plain shader-readable
         /// byte buffers. The renderer does NOT extend resource lifetimes:
         /// the resource's real owner (visual, image cache, font, etc.)
         /// decides when it dies. At use time the upload loop locks each

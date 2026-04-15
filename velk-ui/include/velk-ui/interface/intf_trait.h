@@ -1,9 +1,10 @@
 #ifndef VELK_UI_INTF_TRAIT_H
 #define VELK_UI_INTF_TRAIT_H
 
-#include <velk/interface/intf_interface.h>
+#include <velk/interface/intf_metadata.h>
 
 #include <cstdint>
+#include <velk-ui/types.h>
 
 namespace velk::ui {
 
@@ -64,6 +65,21 @@ inline bool has_phase(const ITrait* trait, TraitPhase phase)
 {
     return trait && static_cast<uint8_t>(trait->get_phase() & phase) != 0;
 }
+
+/**
+ * @brief Common notification interface for traits that affect element state.
+ *
+ * Traits fire on_trait_dirty with the appropriate DirtyFlags when their
+ * properties change. The owning element subscribes once and forwards
+ * the flags to the scene.
+ */
+class ITraitNotify : public Interface<ITraitNotify>
+{
+public:
+    VELK_INTERFACE(
+        (EVT, on_trait_dirty, (DirtyFlags, flags))
+    )
+};
 
 } // namespace velk::ui
 

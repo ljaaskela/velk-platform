@@ -21,7 +21,7 @@
 #include "transform/trs.h"
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
-#include "render_to_texture.h"
+#include "render_cache.h"
 #include "visual/texture_material.h"
 #include "visual/texture_visual.h"
 
@@ -62,6 +62,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<VisualPhaseTypeExtension>(velk, alloc);
     // Value type registrations
     rv &= register_type<::velk::ext::AnyValue<dim>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<DirtyFlags>>(velk);
     rv &= register_type<::velk::ext::AnyValue<HAlign>>(velk);
     rv &= register_type<::velk::ext::AnyValue<VAlign>>(velk);
     rv &= register_type<::velk::ext::AnyValue<Projection>>(velk);
