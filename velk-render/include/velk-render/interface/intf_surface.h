@@ -1,30 +1,30 @@
 #ifndef VELK_RENDER_INTF_SURFACE_H
 #define VELK_RENDER_INTF_SURFACE_H
 
+#include <velk/api/math_types.h>
 #include <velk/interface/intf_metadata.h>
 
-#include <velk-render/interface/intf_render_target.h>
-#include <velk-render/render_types.h>
+#include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/interface/intf_render_backend.h>
 
 namespace velk {
 
 /**
- * @brief A render target with dimensions and pacing settings.
+ * @brief Base interface for all 2D pixel surfaces (images, textures, windows).
  *
- * Represents a swapchain surface. Created via IRenderContext::create_surface()
- * from a SurfaceConfig. Width and height are mutable properties (updated by
- * the platform layer on resize); update_rate and target_fps are read-only and
- * fixed at creation time.
+ * Provides dimensions and pixel format. Concrete subtypes include renderable
+ * targets (IRenderTarget) and uploadable images (ISurface + IBuffer).
+ *
+ * Chain: IInterface -> IGpuResource -> ISurface
  */
-class ISurface : public Interface<ISurface, IRenderTarget>
+class ISurface : public Interface<ISurface, IGpuResource>
 {
 public:
-    VELK_INTERFACE(
-        (PROP, int, width, 0),                                ///< Surface width in pixels (updated on resize).
-        (PROP, int, height, 0),                               ///< Surface height in pixels (updated on resize).
-        (RPROP, UpdateRate, update_rate, UpdateRate::VSync),  ///< Swapchain pacing mode (fixed at create time).
-        (RPROP, int, target_fps, 60)                          ///< Target framerate for UpdateRate::Targeted.
-    )
+    /** @brief Returns the surface dimensions in pixels. */
+    virtual uvec2 get_dimensions() const = 0;
+
+    /** @brief Returns the pixel format. */
+    virtual PixelFormat format() const = 0;
 };
 
 } // namespace velk

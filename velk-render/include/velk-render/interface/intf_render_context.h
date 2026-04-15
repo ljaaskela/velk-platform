@@ -7,7 +7,7 @@
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_shader.h>
-#include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/render_types.h>
 
 namespace velk {
@@ -26,7 +26,7 @@ public:
     virtual bool init(const RenderConfig& config) = 0;
 
     /** @brief Creates a render target surface with the given configuration. */
-    virtual ISurface::Ptr create_surface(const SurfaceConfig& config) = 0;
+    virtual IWindowSurface::Ptr create_surface(const SurfaceConfig& config) = 0;
 
     /**
      * @brief Creates a shader material from GLSL source.

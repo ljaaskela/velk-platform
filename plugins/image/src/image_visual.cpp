@@ -79,7 +79,7 @@ vector<DrawEntry> ImageVisual::get_draw_entries(const rect& bounds)
         return {};
     }
 
-    auto* tex = interface_cast<ITexture>(image_);
+    auto* tex = interface_cast<ISurface>(image_);
     if (!tex) {
         return {};
     }

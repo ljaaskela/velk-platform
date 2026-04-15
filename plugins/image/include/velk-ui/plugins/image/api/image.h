@@ -59,8 +59,8 @@ public:
     /** @brief Implicit conversion to IImage::Ptr. */
     operator IImage::Ptr() const { return as_ptr<IImage>(); }
 
-    /** @brief Returns this image as an ITexture::Ptr (the same object). */
-    ITexture::Ptr as_texture() const { return as_ptr<ITexture>(); }
+    /** @brief Returns this image as an ISurface::Ptr (the same object). */
+    ISurface::Ptr as_surface() const { return as_ptr<ISurface>(); }
 
     /** @brief Returns the image's load status. */
     ImageStatus status() const

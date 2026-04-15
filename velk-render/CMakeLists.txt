@@ -25,6 +25,7 @@ add_library(velk_render SHARED
     include/velk-render/platform.h
     include/velk-render/render_types.h
     include/velk-render/gpu_data.h
+    include/velk-render/interface/intf_buffer.h
     include/velk-render/interface/intf_render_backend.h
     include/velk-render/interface/intf_render_context.h
     include/velk-render/interface/intf_surface.h
@@ -32,6 +33,7 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_material_internal.h
     include/velk-render/interface/intf_shader.h
     include/velk-render/interface/intf_shader_material.h
+    include/velk-render/interface/intf_window_surface.h
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h
     include/velk-render/interface/intf_gpu_resource.h

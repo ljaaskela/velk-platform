@@ -15,7 +15,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
 {
     auto rv = register_type<RenderContextImpl>(velk);
     rv &= register_type<Shader>(velk);
-    rv &= register_type<Surface>(velk);
+    rv &= register_type<WindowSurface>(velk);
     rv &= register_type<RenderTexture>(velk);
     rv &= register_type<impl::ShaderMaterial>(velk);
     rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk);

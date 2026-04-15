@@ -7,7 +7,7 @@
 #include <velk/ext/object.h>
 
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/intf_window_surface.h>
 #include <velk-runtime/interface/intf_window.h>
 #include <velk-runtime/plugins/glfw/plugin.h>
 #include <velk-ui/interface/intf_input_dispatcher.h>
@@ -23,7 +23,7 @@ public:
 
     void set_glfw_handle(GLFWwindow* window);
     void set_external_handle(void* handle);
-    void set_surface(ISurface::Ptr surface);
+    void set_surface(IWindowSurface::Ptr surface);
     void set_render_context(const IRenderContext::Ptr& ctx);
     void set_input_dispatcher(ui::IInputDispatcher::Ptr dispatcher);
     void set_pending_update_rate(UpdateRate r) { pending_update_rate_ = r; }
@@ -34,7 +34,7 @@ public:
     UpdateRate pending_update_rate() const { return pending_update_rate_; }
     int pending_target_fps() const { return pending_target_fps_; }
 
-    ISurface::Ptr surface() const override;
+    IWindowSurface::Ptr surface() const override;
     ui::IInputDispatcher& input() const override;
     IRenderContext::Ptr render_context() const override;
     bool should_close() const override;
@@ -47,7 +47,7 @@ private:
 
     GLFWwindow* window_ = nullptr;
     void* external_handle_ = nullptr;
-    ISurface::Ptr surface_;
+    IWindowSurface::Ptr surface_;
     IRenderContext::WeakPtr render_ctx_;
     ui::IInputDispatcher::Ptr input_;
     UpdateRate pending_update_rate_ = UpdateRate::VSync;

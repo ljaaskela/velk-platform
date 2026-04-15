@@ -63,17 +63,16 @@ bool RenderContextImpl::init(const RenderConfig& config)
     return true;
 }
 
-ISurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& config)
+IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& config)
 {
-    auto obj = instance().create<IObject>(Surface::static_class_id());
-    auto surface = interface_pointer_cast<ISurface>(obj);
+    auto obj = instance().create<IObject>(WindowSurface::static_class_id());
+    auto surface = interface_pointer_cast<IWindowSurface>(obj);
     if (!surface) {
         return nullptr;
     }
 
-    write_state<ISurface>(surface, [&](ISurface::State& s) {
-        s.width = config.width;
-        s.height = config.height;
+    write_state<IWindowSurface>(surface, [&](IWindowSurface::State& s) {
+        s.size = {static_cast<uint32_t>(config.width), static_cast<uint32_t>(config.height)};
         s.update_rate = config.update_rate;
         s.target_fps = config.target_fps;
     });

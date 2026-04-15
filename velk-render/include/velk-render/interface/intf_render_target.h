@@ -1,25 +1,25 @@
 #ifndef VELK_RENDER_INTF_RENDER_TARGET_H
 #define VELK_RENDER_INTF_RENDER_TARGET_H
 
-#include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/interface/intf_surface.h>
 
 namespace velk {
 
 /**
- * @brief Interface for GPU resources that can be used as render targets.
+ * @brief A surface that can be rendered into.
  *
- * Both swapchain surfaces and renderable textures implement this interface.
+ * Both swapchain windows and renderable textures implement this interface.
  * The render target id is the backend handle passed to begin_pass().
  *
- * Chain: IInterface -> IGpuResource -> IRenderTarget
+ * Chain: IInterface -> IGpuResource -> ISurface -> IRenderTarget
  */
-class IRenderTarget : public Interface<IRenderTarget, IGpuResource>
+class IRenderTarget : public Interface<IRenderTarget, ISurface>
 {
 public:
     /**
      * @brief Returns the backend handle for this render target.
      *
-     * For surfaces, this is the surface_id from create_surface().
+     * For window surfaces, this is the surface_id from create_surface().
      * For renderable textures, this is the TextureId (bindless index).
      * Passed to the backend's begin_pass() to select the target.
      */

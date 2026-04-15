@@ -8,7 +8,7 @@ void FontGpuBuffer::init(FontBuffers* fb, FontGpuBufferRole role)
     role_ = role;
 }
 
-size_t FontGpuBuffer::get_size() const
+size_t FontGpuBuffer::get_data_size() const
 {
     if (fb_) {
         switch (role_) {

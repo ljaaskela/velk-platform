@@ -5,7 +5,7 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
-#include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/intf_window_surface.h>
 #include <velk-ui/interface/intf_element.h>
 
 #include <cstdint>
@@ -15,7 +15,7 @@ namespace velk::ui {
 /** @brief Describes which cameras to render for a given surface. */
 struct ViewDesc
 {
-    ISurface::Ptr surface;          ///< Target surface.
+    IWindowSurface::Ptr surface;          ///< Target surface.
     vector<IElement::Ptr> cameras;  ///< Cameras to render. Empty = all cameras for this surface.
 };
 
@@ -60,7 +60,7 @@ public:
      * @param viewport       Normalized viewport (0..1). Default (all zeros) = full surface.
      */
     virtual void add_view(const IElement::Ptr& camera_element,
-                          const ISurface::Ptr& surface,
+                          const IWindowSurface::Ptr& surface,
                           const rect& viewport = {}) = 0;
 
     /**
@@ -69,7 +69,7 @@ public:
      * @param surface        The surface used in add_view.
      */
     virtual void remove_view(const IElement::Ptr& camera_element,
-                             const ISurface::Ptr& surface) = 0;
+                             const IWindowSurface::Ptr& surface) = 0;
 
     /**
      * @brief Prepares a frame for presentation.

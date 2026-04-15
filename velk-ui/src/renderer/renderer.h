@@ -13,7 +13,7 @@
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/plugin.h>
 #include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_camera.h>
@@ -38,9 +38,9 @@ public:
     void on_gpu_resource_destroyed(IGpuResource* resource) override;
 
     // IRenderer
-    void add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface,
+    void add_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface,
                   const rect& viewport) override;
-    void remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface) override;
+    void remove_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface) override;
     Frame prepare(const FrameDesc& desc) override;
     void present(Frame frame) override;
     void render() override;
@@ -85,7 +85,7 @@ private:
     struct ViewEntry
     {
         IElement::Ptr camera_element;
-        ISurface::Ptr surface;
+        IWindowSurface::Ptr surface;
         rect viewport;
         bool batches_dirty = true;
         int cached_width = 0;
@@ -151,10 +151,10 @@ private:
 
     uint64_t globals_gpu_addr_ = 0;  ///< Per-view, written into the staging buffer during prepare().
 
-    /// Per-texture state. Keyed by ITexture*. The renderer observes each
+    /// Per-texture state. Keyed by ISurface*. The renderer observes each
     /// key via add_gpu_resource_observer; on destruction notification, the
     /// entry is removed and the TextureId is enqueued in deferred_destroy_.
-    std::unordered_map<ITexture*, TextureId> texture_map_;
+    std::unordered_map<ISurface*, TextureId> texture_map_;
 
     /// Per-buffer state for non-texture IBuffer resources (e.g. font curve
     /// buffers). Keyed by IBuffer*. Holds renderer-internal bookkeeping that

@@ -42,7 +42,7 @@ public:
     ::velk::size get_size() const { return read_state_value<IWindow>(&IWindow::State::size); }
 
     /** @brief Returns the render surface for this window, or null if not yet created. */
-    ISurface::Ptr surface() const
+    IWindowSurface::Ptr surface() const
     {
         return with<IWindow>([](auto& w) { return w.surface(); });
     }

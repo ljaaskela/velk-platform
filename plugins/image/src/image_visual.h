@@ -3,7 +3,7 @@
 
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_image.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/plugins/image/intf_image_visual.h>
 #include <velk-ui/plugins/image/plugin.h>

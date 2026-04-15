@@ -7,7 +7,8 @@
 
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_image.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 #include <cstdint>
@@ -22,7 +23,7 @@ namespace velk::ui::impl {
  * store and apps) and `ITexture` (the GPU binding view used by materials
  * and the renderer). The same object serves both roles.
  */
-class Image final : public ::velk::ext::GpuResource<Image, IImage, ITexture>
+class Image final : public ::velk::ext::GpuResource<Image, IImage, ISurface, IBuffer>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Image, "Image");
@@ -53,7 +54,7 @@ public:
     ImageStatus status() const override { return status_; }
 
     // IBuffer
-    size_t get_size() const override { return pixels_.size(); }
+    size_t get_data_size() const override { return pixels_.size(); }
     const uint8_t* get_data() const override
     {
         return pixels_.empty() ? nullptr : pixels_.data();
@@ -67,9 +68,8 @@ public:
         pixels_ = vector<uint8_t>{};
     }
 
-    // ITexture
-    int width() const override { return width_; }
-    int height() const override { return height_; }
+    // ISurface
+    uvec2 get_dimensions() const override { return {static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)}; }
     PixelFormat format() const override { return format_; }
 
 private:

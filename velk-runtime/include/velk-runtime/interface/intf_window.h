@@ -4,7 +4,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/intf_window_surface.h>
 #include <velk-ui/interface/intf_input_dispatcher.h>
 
 namespace velk {
@@ -36,7 +36,7 @@ public:
     )
 
     /** @brief Returns the render surface (swapchain target) for this window. */
-    virtual ISurface::Ptr surface() const = 0;
+    virtual IWindowSurface::Ptr surface() const = 0;
 
     /**
      * @brief Returns the input dispatcher bound to this window.

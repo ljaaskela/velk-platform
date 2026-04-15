@@ -31,7 +31,7 @@ void GlfwWindow::set_external_handle(void* handle)
     external_handle_ = handle;
 }
 
-void GlfwWindow::set_surface(ISurface::Ptr surface)
+void GlfwWindow::set_surface(IWindowSurface::Ptr surface)
 {
     surface_ = std::move(surface);
 }
@@ -46,7 +46,7 @@ void GlfwWindow::set_input_dispatcher(ui::IInputDispatcher::Ptr dispatcher)
     input_ = std::move(dispatcher);
 }
 
-ISurface::Ptr GlfwWindow::surface() const
+IWindowSurface::Ptr GlfwWindow::surface() const
 {
     return surface_;
 }
@@ -86,9 +86,8 @@ void GlfwWindow::framebuffer_size_callback(GLFWwindow* window, int width, int he
 
     // Update surface dimensions.
     if (self->surface_) {
-        write_state<ISurface>(self->surface_, [&](ISurface::State& s) {
-            s.width = width;
-            s.height = height;
+        write_state<IWindowSurface>(self->surface_, [&](IWindowSurface::State& s) {
+            s.size = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
         });
     }
 

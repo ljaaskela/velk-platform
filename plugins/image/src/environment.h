@@ -5,7 +5,8 @@
 #include <velk/vector.h>
 
 #include <velk-render/ext/gpu_resource.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/interface/intf_environment.h>
 #include <velk-ui/plugins/image/plugin.h>
 
@@ -26,7 +27,7 @@ public:
  * and `ITexture` (the GPU-uploadable HDR image). Pixel data is stored
  * as RGBA16F (half-float) for GPU efficiency.
  */
-class Environment final : public ::velk::ext::GpuResource<Environment, IEnvironmentInternal, ITexture>
+class Environment final : public ::velk::ext::GpuResource<Environment, IEnvironmentInternal, ISurface, IBuffer>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Environment, "Environment");
@@ -46,7 +47,7 @@ public:
     void set_persistent(bool value) override { persistent_ = value; }
 
     // IBuffer
-    size_t get_size() const override { return pixels_.size(); }
+    size_t get_data_size() const override { return pixels_.size(); }
     const uint8_t* get_data() const override
     {
         return pixels_.empty() ? nullptr : pixels_.data();
@@ -54,9 +55,8 @@ public:
     bool is_dirty() const override { return dirty_; }
     void clear_dirty() override { dirty_ = false; }
 
-    // ITexture
-    int width() const override { return width_; }
-    int height() const override { return height_; }
+    // ISurface
+    uvec2 get_dimensions() const override { return {static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)}; }
     PixelFormat format() const override { return PixelFormat::RGBA16F; }
 
     // IEnvironment

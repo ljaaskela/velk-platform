@@ -2,7 +2,7 @@
 #define VELK_UI_TEXTURE_VISUAL_H
 
 #include <velk-render/interface/intf_buffer.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/interface/intf_texture_visual.h>
 #include <velk-ui/plugin.h>

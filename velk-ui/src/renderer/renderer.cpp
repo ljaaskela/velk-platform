@@ -101,7 +101,7 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     }
 }
 
-void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface,
+void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface,
                         const rect& viewport)
 {
     if (!(camera_element && surface)) {
@@ -111,11 +111,11 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr
 
     // Create the backend surface if this is the first view using it
     if (get_render_target_id(surface) == 0 && backend_) {
-        auto state = read_state<ISurface>(surface);
+        auto state = read_state<IWindowSurface>(surface);
         if (state) {
             SurfaceDesc desc{};
-            desc.width = state->width;
-            desc.height = state->height;
+            desc.width = state->size.x;
+            desc.height = state->size.y;
             desc.update_rate = state->update_rate;
             desc.target_fps = state->target_fps;
             uint64_t sid = backend_->create_surface(desc);
@@ -127,7 +127,7 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const ISurface::Ptr
     views_.push_back({camera_element, surface, viewport});
 }
 
-void Renderer::remove_view(const IElement::Ptr& camera_element, const ISurface::Ptr& surface)
+void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface)
 {
     for (auto it = views_.begin(); it != views_.end(); ++it) {
         if (it->camera_element == camera_element && it->surface == surface) {
@@ -493,10 +493,10 @@ void Renderer::build_draw_calls(const ViewEntry& entry)
             continue;
         }
 
-        // Resolve bindless texture index from the texture key (= ITexture pointer)
+        // Resolve bindless texture index from the texture key (= ISurface pointer)
         uint32_t texture_id = 0;
         if (batch.texture_key != 0) {
-            auto* tex = reinterpret_cast<ITexture*>(batch.texture_key);
+            auto* tex = reinterpret_cast<ISurface*>(batch.texture_key);
             auto tit = texture_map_.find(tex);
             if (tit != texture_map_.end()) {
                 texture_id = tit->second;
@@ -683,14 +683,14 @@ Frame Renderer::prepare(const FrameDesc& desc)
         }
 
         // Handle surface resize
-        auto sstate = read_state<ISurface>(entry.surface);
+        auto sstate = read_state<IWindowSurface>(entry.surface);
         if (sstate) {
-            if (sstate->width != entry.cached_width || sstate->height != entry.cached_height) {
-                entry.cached_width = sstate->width;
-                entry.cached_height = sstate->height;
-                backend_->resize_surface(get_render_target_id(entry.surface), sstate->width, sstate->height);
+            if (sstate->size.x != entry.cached_width || sstate->size.y != entry.cached_height) {
+                entry.cached_width = sstate->size.x;
+                entry.cached_height = sstate->size.y;
+                backend_->resize_surface(get_render_target_id(entry.surface), sstate->size.x, sstate->size.y);
                 entry.batches_dirty = true;
-                RENDER_LOG("render: surface resized to %dx%d", sstate->width, sstate->height);
+                RENDER_LOG("render: surface resized to %dx%d", sstate->size.x, sstate->size.y);
             }
         }
 
@@ -718,7 +718,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
         // Upload dirty GPU resources (e.g. glyph atlas updates, decoded
         // images, font curve buffers). Each resource is an IBuffer; if it
-        // is also an ITexture we take the image upload path, otherwise we
+        // is also an ISurface we take the image upload path, otherwise we
         // take the plain-buffer path.
         bool resources_uploaded = false;
         if (has_changes) {
@@ -732,26 +732,27 @@ Frame Renderer::prepare(const FrameDesc& desc)
                         continue;
                     }
 
-                    if (auto* tex = interface_cast<ITexture>(buf)) {
+                    if (auto* surf = interface_cast<ISurface>(buf)) {
                         // Texture path: bindless image upload via the
                         // backend's upload_texture.
-                        int tw = tex->width();
-                        int th = tex->height();
-                        const uint8_t* pixels = tex->get_data();
+                        auto sz = surf->get_dimensions();
+                        int tw = static_cast<int>(sz.x);
+                        int th = static_cast<int>(sz.y);
+                        const uint8_t* pixels = buf->get_data();
                         if (pixels && tw > 0 && th > 0) {
-                            auto tit = texture_map_.find(tex);
+                            auto tit = texture_map_.find(surf);
                             if (tit == texture_map_.end()) {
                                 TextureDesc desc{};
                                 desc.width = tw;
                                 desc.height = th;
-                                desc.format = tex->format();
+                                desc.format = surf->format();
                                 TextureId tid = backend_->create_texture(desc);
-                                texture_map_[tex] = tid;
-                                tit = texture_map_.find(tex);
+                                texture_map_[surf] = tid;
+                                tit = texture_map_.find(surf);
                             }
 
                             backend_->upload_texture(tit->second, pixels, tw, th);
-                            tex->clear_dirty();
+                            buf->clear_dirty();
                             resources_uploaded = true;
                         }
                     } else {
@@ -759,7 +760,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
                         // The backend hands out a persistently-mapped pointer
                         // and a stable GPU virtual address that the shader
                         // reaches via buffer_reference.
-                        size_t bsize = buf->get_size();
+                        size_t bsize = buf->get_data_size();
                         const uint8_t* bytes = buf->get_data();
                         if (!bytes || bsize == 0) {
                             continue;
@@ -865,10 +866,10 @@ Frame Renderer::prepare(const FrameDesc& desc)
         }
 
         // Resolve effective viewport dimensions
-        auto sstate = read_state<ISurface>(entry.surface);
+        auto sstate = read_state<IWindowSurface>(entry.surface);
         // Resolve normalized viewport (0..1) to pixel coordinates
-        float sw = static_cast<float>(sstate ? sstate->width : 0);
-        float sh = static_cast<float>(sstate ? sstate->height : 0);
+        float sw = static_cast<float>(sstate ? sstate->size.x : 0);
+        float sh = static_cast<float>(sstate ? sstate->size.y : 0);
         bool has_viewport = entry.viewport.width > 0 && entry.viewport.height > 0;
         float vp_w = has_viewport ? entry.viewport.width * sw : sw;
         float vp_h = has_viewport ? entry.viewport.height * sh : sh;
@@ -1130,13 +1131,13 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
 void Renderer::on_gpu_resource_destroyed(IGpuResource* resource)
 {
     // The notification gives us a base IGpuResource* and the underlying
-    // object may be either an ITexture or a plain IBuffer. We don't know
+    // object may be either an ISurface or a plain IBuffer. We don't know
     // which without a cross-cast, so just probe both maps; the cast back
     // to the concrete pointer types is safe because we keyed the maps by
     // those pointer values when the entries were created.
     std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
 
-    if (auto* tex = interface_cast<ITexture>(resource)) {
+    if (auto* tex = interface_cast<ISurface>(resource)) {
         auto it = texture_map_.find(tex);
         if (it != texture_map_.end()) {
             deferred_destroy_.push_back({it->second, present_counter_ + kGpuLatencyFrames});
@@ -1266,36 +1267,38 @@ void Renderer::prepend_environment_batch(ICamera& camera, ViewEntry& entry)
     if (!env_ptr) {
         return;
     }
-    auto* tex = interface_cast<ITexture>(env_ptr);
-    if (!tex) {
+    auto* surf = interface_cast<ISurface>(env_ptr);
+    auto* buf = interface_cast<IBuffer>(env_ptr);
+    if (!surf || !buf) {
         return;
     }
 
     // Upload the environment texture if dirty.
-    if (tex->is_dirty()) {
-        const uint8_t* pixels = tex->get_data();
-        int tw = tex->width();
-        int th = tex->height();
+    if (buf->is_dirty()) {
+        const uint8_t* pixels = buf->get_data();
+        auto sz = surf->get_dimensions();
+        int tw = static_cast<int>(sz.x);
+        int th = static_cast<int>(sz.y);
         if (pixels && tw > 0 && th > 0) {
-            auto tit = texture_map_.find(tex);
+            auto tit = texture_map_.find(surf);
             if (tit == texture_map_.end()) {
                 TextureDesc desc{};
                 desc.width = tw;
                 desc.height = th;
-                desc.format = tex->format();
+                desc.format = surf->format();
                 TextureId tid = backend_->create_texture(desc);
-                texture_map_[tex] = tid;
-                tex->add_gpu_resource_observer(this);
-                auto buf = interface_pointer_cast<IBuffer>(env_ptr);
-                if (buf) {
-                    observed_env_resources_.push_back(buf);
+                texture_map_[surf] = tid;
+                surf->add_gpu_resource_observer(this);
+                auto buf_ptr = interface_pointer_cast<IBuffer>(env_ptr);
+                if (buf_ptr) {
+                    observed_env_resources_.push_back(buf_ptr);
                 }
             }
-            auto tit2 = texture_map_.find(tex);
+            auto tit2 = texture_map_.find(surf);
             if (tit2 != texture_map_.end()) {
                 backend_->upload_texture(tit2->second, pixels, tw, th);
             }
-            tex->clear_dirty();
+            buf->clear_dirty();
         }
     }
 
@@ -1313,7 +1316,7 @@ void Renderer::prepend_environment_batch(ICamera& camera, ViewEntry& entry)
     // the batch must have instance_count = 1 to produce a draw call.
     Batch env_batch;
     env_batch.pipeline_key = 0; // material override supplies the pipeline
-    env_batch.texture_key = reinterpret_cast<uint64_t>(tex);
+    env_batch.texture_key = reinterpret_cast<uint64_t>(surf);
     env_batch.instance_stride = 4;
     env_batch.instance_count = 1;
     env_batch.instance_data.resize(4, 0); // dummy, shader ignores it

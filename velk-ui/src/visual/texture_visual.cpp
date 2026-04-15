@@ -50,7 +50,7 @@ vector<DrawEntry> TextureVisual::get_draw_entries(const rect& bounds)
         return {};
     }
 
-    auto tex = state->texture.get<ITexture>();
+    auto tex = state->texture.get<ISurface>();
     if (!tex) {
         return {};
     }
@@ -74,7 +74,7 @@ vector<IBuffer::Ptr> TextureVisual::get_gpu_resources() const
         return {};
     }
 
-    auto tex = state->texture.get<ITexture>();
+    auto tex = state->texture.get<ISurface>();
     auto buf = interface_pointer_cast<IBuffer>(tex);
     if (!buf) {
         return {};

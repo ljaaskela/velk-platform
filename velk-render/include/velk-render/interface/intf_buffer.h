@@ -44,7 +44,7 @@ class IBuffer : public Interface<IBuffer, IGpuResource>
 {
 public:
     /** @brief Returns the size of the CPU-resident byte block, in bytes. */
-    virtual size_t get_size() const = 0;
+    virtual size_t get_data_size() const = 0;
 
     /**
      * @brief Returns the CPU-resident bytes, or nullptr if not available

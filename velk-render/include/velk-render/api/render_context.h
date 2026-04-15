@@ -23,7 +23,7 @@ public:
 
     operator IRenderContext::Ptr() const { return as_ptr<IRenderContext>(); }
 
-    ISurface::Ptr create_surface(const SurfaceConfig& config)
+    IWindowSurface::Ptr create_surface(const SurfaceConfig& config)
     {
         return with<IRenderContext>([&](auto& ctx) { return ctx.create_surface(config); });
     }

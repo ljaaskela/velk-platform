@@ -7,7 +7,7 @@
 
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_material.h>
-#include <velk-render/interface/intf_texture.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-ui/plugins/image/intf_image_material.h>
 #include <velk-ui/plugins/image/plugin.h>
 
@@ -25,9 +25,9 @@ namespace velk::ui {
  *   mat.set_tint(color::white());
  *   rect_visual.set_paint(mat);
  *
- * The texture property is `ObjectRef<ITexture>`, so any object that
- * implements `ITexture` works: a decoded `Image` (which implements both
- * `IImage` and `ITexture`), a glyph atlas, a future render target.
+ * The texture property is `ObjectRef<ISurface>`, so any object that
+ * implements `ISurface` works: a decoded `Image` (which implements both
+ * `IImage` and `ISurface`), a glyph atlas, a future render target.
  */
 class ImageMaterial : public Object
 {
@@ -38,24 +38,24 @@ public:
     operator IMaterial::Ptr() const { return as_ptr<IMaterial>(); }
 
     /** @brief Sets the bound texture. */
-    void set_texture(const ITexture::Ptr& tex)
+    void set_texture(const ISurface::Ptr& tex)
     {
         write_state<IImageMaterial>([&](IImageMaterial::State& s) {
             set_object_ref(s.texture, tex);
         });
     }
 
-    /** @brief Convenience: bind an IImage (which also implements ITexture). */
+    /** @brief Convenience: bind an IImage (which also implements ISurface). */
     void set_texture(const IImage::Ptr& img)
     {
-        set_texture(interface_pointer_cast<ITexture>(img));
+        set_texture(interface_pointer_cast<ISurface>(img));
     }
 
     /** @brief Returns the bound texture, or nullptr. */
-    ITexture::Ptr get_texture() const
+    ISurface::Ptr get_texture() const
     {
         if (auto state = read_state<IImageMaterial>()) {
-            return state->texture.template get<ITexture>();
+            return state->texture.template get<ISurface>();
         }
         return nullptr;
     }
@@ -76,7 +76,7 @@ inline ImageMaterial create_image()
 }
 
 /** @brief Creates a new ImageMaterial bound to @p texture. */
-inline ImageMaterial create_image(const ITexture::Ptr& texture)
+inline ImageMaterial create_image(const ISurface::Ptr& texture)
 {
     auto m = create_image();
     m.set_texture(texture);

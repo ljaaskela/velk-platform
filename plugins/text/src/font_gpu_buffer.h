@@ -54,7 +54,7 @@ public:
     void init(FontBuffers* fb, FontGpuBufferRole role) override;
 
     // IBuffer
-    size_t get_size() const override;
+    size_t get_data_size() const override;
     const uint8_t* get_data() const override;
     bool is_dirty() const override;
     void clear_dirty() override;
