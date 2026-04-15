@@ -44,7 +44,6 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::RenderCache>(velk);
     rv &= register_type<GradientMaterial>(velk);
     rv &= register_type<impl::Camera>(velk);
-    rv &= register_type<Renderer>(velk);
     rv &= register_type<Trs>(velk);
     rv &= register_type<Matrix>(velk);
     rv &= register_type<LookAt>(velk);
@@ -53,9 +52,10 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Click>(velk);
     rv &= register_type<Hover>(velk);
     rv &= register_type<Drag>(velk);
-    // We're never going to have more than ~1 type extension instance so just alloc as needed.
+    // Low instance count types, alloc as needed.
     ::velk::TypeOptions alloc;
     alloc.policy = ::velk::CreationPolicy::Alloc;
+    rv &= register_type<Renderer>(velk, alloc);
     rv &= register_type<DimTypeExtension>(velk, alloc);
     rv &= register_type<AlignTypeExtension>(velk, alloc);
     rv &= register_type<ProjectionTypeExtension>(velk, alloc);

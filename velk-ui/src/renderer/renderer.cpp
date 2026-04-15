@@ -24,11 +24,6 @@ namespace velk::ui {
 
 namespace {
 
-uint64_t make_batch_key(uint64_t pipeline, uint64_t texture)
-{
-    return pipeline * 31 + texture;
-}
-
 void build_ortho_projection(float* out, float width, float height)
 {
     std::memset(out, 0, 16 * sizeof(float));
@@ -95,9 +90,9 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         ctx->compile_pipeline(rounded_rect_fragment_src, rounded_rect_vertex_src, PipelineKey::RoundedRect);
     }
 
-    frame_buffer_size_ = kInitialFrameBufferSize;
+    frame_buffer_.init();
     for (auto& slot : frame_slots_) {
-        init_slot_buffers(slot);
+        frame_buffer_.init_slot(slot.buffer, *backend_);
     }
 }
 
@@ -140,448 +135,6 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
     }
 }
 
-void Renderer::rebuild_commands(IElement* element)
-{
-    VELK_PERF_SCOPE("renderer.rebuild_commands");
-    auto& cache = element_cache_[element];
-    cache.before_visuals.clear();
-    cache.after_visuals.clear();
-    cache.gpu_resources.clear();
-
-    auto* storage = interface_cast<IObjectStorage>(element);
-    if (!storage) {
-        return;
-    }
-
-    auto state = read_state<IElement>(element);
-    if (!state) {
-        return;
-    }
-
-    rect local_rect = {0, 0, state->size.width, state->size.height};
-
-    // Walk the element's attachments looking for visuals
-    for (size_t i = 0; i < storage->attachment_count(); ++i) {
-        auto att = storage->get_attachment(i);
-        auto* visual = interface_cast<IVisual>(att);
-        if (!visual) {
-            continue;
-        }
-
-        VisualCommands vc;
-        {
-            VELK_PERF_SCOPE("renderer.get_draw_entries");
-            vc.entries = visual->get_draw_entries(local_rect);
-        }
-
-        auto vstate = read_state<IVisual>(visual);
-
-        // If the visual has a paint (material), resolve its pipeline
-        {
-            VELK_PERF_SCOPE("renderer.resolve_material");
-            if (render_ctx_ && vstate && vstate->paint) {
-                auto mat = vstate->paint.get<IMaterial>();
-                if (mat) {
-                    uint64_t handle = mat->get_pipeline_handle(*render_ctx_);
-                    if (handle) {
-                        vc.pipeline_override = handle;
-                        vc.material = std::move(mat);
-                    }
-                }
-            }
-        }
-
-        // Collect GPU resources used by the visual (textures, plain buffers,
-        // etc). We observe each so we can defer-destroy its GPU handle when
-        // its last strong reference drops (on any thread).
-        for (auto& res : visual->get_gpu_resources()) {
-            if (!res) {
-                continue;
-            }
-            res->add_gpu_resource_observer(this);
-            cache.gpu_resources.push_back(IBuffer::WeakPtr(res));
-        }
-
-        // Sort into before/after based on visual phase
-        VisualPhase phase = vstate ? vstate->visual_phase : VisualPhase::BeforeChildren;
-        if (phase == VisualPhase::AfterChildren) {
-            cache.after_visuals.push_back(std::move(vc));
-        } else {
-            cache.before_visuals.push_back(std::move(vc));
-        }
-    }
-}
-
-void Renderer::rebuild_batches(const SceneState& state, ViewEntry& entry)
-{
-    VELK_PERF_SCOPE("renderer.rebuild_batches");
-    auto& batches_ = entry.batches;
-    batches_.clear();
-    render_target_passes_.clear();
-
-    auto resolve_texture = [](const IMaterial::Ptr& material, uint64_t fallback) -> uint64_t {
-        return material ? reinterpret_cast<uintptr_t>(material.get()) : fallback;
-    };
-
-    auto get_visuals = [](const ElementCache& cache, VisualPhase phase) -> const vector<VisualCommands>& {
-        return phase == VisualPhase::AfterChildren ? cache.after_visuals : cache.before_visuals;
-    };
-
-    auto emit_visuals = [&](const vector<VisualListEntry>& entries, VisualPhase phase,
-                            vector<Batch>& target_batches,
-                            float offset_x = 0.f, float offset_y = 0.f) {
-        uint64_t last_bkey = 0;
-        size_t max_visuals = 0;
-        for (auto& ve : entries) {
-            if (ve.type != VisualEntry::Element) {
-                continue;
-            }
-            auto it = element_cache_.find(ve.element.get());
-            if (it != element_cache_.end()) {
-                max_visuals = std::max(max_visuals, get_visuals(it->second, phase).size());
-            }
-        }
-
-        for (size_t pass = 0; pass < max_visuals; ++pass) {
-            for (auto& ve : entries) {
-                if (ve.type != VisualEntry::Element) {
-                    continue;
-                }
-
-                auto* elem = ve.element.get();
-                auto it = element_cache_.find(elem);
-                if (it == element_cache_.end()) {
-                    continue;
-                }
-
-                auto& visuals = get_visuals(it->second, phase);
-                if (pass >= visuals.size()) {
-                    continue;
-                }
-
-                auto elem_state = read_state<IElement>(elem);
-                if (!elem_state) {
-                    continue;
-                }
-
-                float wx = elem_state->world_matrix(0, 3) - offset_x;
-                float wy = elem_state->world_matrix(1, 3) - offset_y;
-
-                auto& vc = visuals[pass];
-                for (auto& de : vc.entries) {
-                    uint64_t pipeline = (vc.pipeline_override != 0) ? vc.pipeline_override : de.pipeline_key;
-                    uint64_t texture = de.texture_key;
-
-                    uint64_t bkey = make_batch_key(pipeline, resolve_texture(vc.material, texture));
-
-                    if (target_batches.empty() || bkey != last_bkey) {
-                        Batch batch;
-                        batch.pipeline_key = pipeline;
-                        batch.texture_key = texture;
-                        batch.instance_stride = de.instance_size;
-                        batch.material = vc.material;
-                        target_batches.push_back(std::move(batch));
-                        last_bkey = bkey;
-                    }
-
-                    auto& batch = target_batches.back();
-
-                    auto data_offset = batch.instance_data.size();
-                    batch.instance_data.resize(data_offset + de.instance_size);
-                    std::memcpy(batch.instance_data.data() + data_offset, de.instance_data,
-                                de.instance_size);
-
-                    float* inst = reinterpret_cast<float*>(batch.instance_data.data() + data_offset);
-                    inst[0] += wx;
-                    inst[1] += wy;
-
-                    batch.instance_count++;
-                }
-            }
-        }
-    };
-
-    // Pre-filter: partition visual list entries into main and render target lists.
-    auto filter_render_targets = [&](const vector<VisualListEntry>& entries,
-                                     vector<VisualListEntry>& main_out,
-                                     VisualPhase phase) {
-        int depth = 0;
-        IElement* active_rt_elem = nullptr;
-        RenderTargetPassData* active_pass = nullptr;
-
-        for (auto& ve : entries) {
-            if (ve.type == VisualEntry::PushRenderTarget) {
-                if (depth == 0) {
-                    active_rt_elem = ve.element.get();
-
-                    active_pass = nullptr;
-                    for (auto& rtp : render_target_passes_) {
-                        if (rtp.element == active_rt_elem) {
-                            active_pass = &rtp;
-                            break;
-                        }
-                    }
-                    if (!active_pass) {
-                        render_target_passes_.push_back({active_rt_elem, {}, {}, {}});
-                        active_pass = &render_target_passes_.back();
-                    }
-                }
-                depth++;
-                continue;
-            }
-
-            if (ve.type == VisualEntry::PopRenderTarget) {
-                depth--;
-                if (depth == 0) {
-                    active_rt_elem = nullptr;
-                    active_pass = nullptr;
-                }
-                continue;
-            }
-
-            // VisualEntry::Element
-            if (depth > 0 && active_pass) {
-                // Inside a render target subtree: add to render target pass
-                auto& list = (phase == VisualPhase::BeforeChildren)
-                                 ? active_pass->before_entries
-                                 : active_pass->after_entries;
-                list.push_back(ve);
-            }
-            // Always add to main list (Default render mode renders to both)
-            main_out.push_back(ve);
-        }
-    };
-
-    vector<VisualListEntry> main_before;
-    vector<VisualListEntry> main_after;
-    filter_render_targets(state.visual_list, main_before, VisualPhase::BeforeChildren);
-    filter_render_targets(state.after_visual_list, main_after, VisualPhase::AfterChildren);
-
-    // Batch render target passes (offset by the element's world position)
-    for (auto& rtp : render_target_passes_) {
-        auto es = read_state<IElement>(rtp.element);
-        float ox = es ? es->world_matrix(0, 3) : 0.f;
-        float oy = es ? es->world_matrix(1, 3) : 0.f;
-        emit_visuals(rtp.before_entries, VisualPhase::BeforeChildren, rtp.batches, ox, oy);
-        emit_visuals(rtp.after_entries, VisualPhase::AfterChildren, rtp.batches, ox, oy);
-    }
-
-    // Batch the main surface visual lists
-    emit_visuals(main_before, VisualPhase::BeforeChildren, batches_);
-    emit_visuals(main_after, VisualPhase::AfterChildren, batches_);
-}
-
-uint64_t Renderer::write_to_frame_buffer(const void* data, size_t size, size_t alignment)
-{
-    write_offset_ = (write_offset_ + alignment - 1) & ~(alignment - 1);
-
-    if (write_offset_ + size > frame_buffer_size_) {
-        size_t required = write_offset_ + size;
-        if (required > peak_usage_) {
-            peak_usage_ = required;
-        }
-        RENDER_LOG("frame buffer overflow (%zu + %zu > %zu), will retry",
-                   write_offset_, size, frame_buffer_size_);
-        frame_overflow_ = true;
-        return 0;
-    }
-
-    auto* dst = static_cast<uint8_t*>(active_slot_->frame_ptr) + write_offset_;
-    std::memcpy(dst, data, size);
-
-    uint64_t gpu_addr = active_slot_->frame_gpu_base + write_offset_;
-    write_offset_ += size;
-
-    if (write_offset_ > peak_usage_) {
-        peak_usage_ = write_offset_;
-    }
-
-    return gpu_addr;
-}
-
-void Renderer::ensure_frame_buffer_capacity()
-{
-    if (peak_usage_ <= frame_buffer_size_ * 3 / 4) {
-        return;
-    }
-
-    size_t new_size = frame_buffer_size_;
-    while (new_size < peak_usage_ * 2) {
-        new_size *= 2;
-    }
-
-    VELK_LOG(I,
-             "Renderer: growing frame buffers %zu -> %zu KB (peak usage: %zu KB)",
-             frame_buffer_size_ / 1024,
-             new_size / 1024,
-             peak_usage_ / 1024);
-
-    // Update the target size. Only the active slot is regrown here (it
-    // hasn't been submitted yet, so it's safe to destroy). Other slots
-    // may be in-flight on the GPU; they keep their old buffer and get
-    // regrown lazily when they become active (see prepare()).
-    frame_buffer_size_ = new_size;
-    peak_usage_ = 0;
-
-    if (active_slot_ && active_slot_->buffer_size < new_size) {
-        if (active_slot_->frame_buffer) {
-            backend_->destroy_buffer(active_slot_->frame_buffer);
-        }
-        GpuBufferDesc desc;
-        desc.size = new_size;
-        desc.cpu_writable = true;
-        active_slot_->frame_buffer = backend_->create_buffer(desc);
-        active_slot_->frame_ptr = backend_->map(active_slot_->frame_buffer);
-        active_slot_->frame_gpu_base = backend_->gpu_address(active_slot_->frame_buffer);
-        active_slot_->buffer_size = new_size;
-    }
-}
-
-void Renderer::grow_frame_buffer()
-{
-    // Grow aggressively: 4x current size, or enough for peak usage (whichever is larger).
-    size_t new_size = frame_buffer_size_ * 4;
-    while (new_size < peak_usage_ * 2) {
-        new_size *= 2;
-    }
-
-    VELK_LOG(I,
-             "Renderer: frame buffer overflow, growing %zu -> %zu KB (need %zu KB)",
-             frame_buffer_size_ / 1024,
-             new_size / 1024,
-             peak_usage_ / 1024);
-
-    frame_buffer_size_ = new_size;
-    peak_usage_ = 0;
-
-    if (active_slot_->frame_buffer) {
-        backend_->destroy_buffer(active_slot_->frame_buffer);
-    }
-    GpuBufferDesc desc;
-    desc.size = new_size;
-    desc.cpu_writable = true;
-    active_slot_->frame_buffer = backend_->create_buffer(desc);
-    active_slot_->frame_ptr = backend_->map(active_slot_->frame_buffer);
-    active_slot_->frame_gpu_base = backend_->gpu_address(active_slot_->frame_buffer);
-    active_slot_->buffer_size = new_size;
-}
-
-void Renderer::init_slot_buffers(FrameSlot& slot)
-{
-    if (!backend_ || frame_buffer_size_ == 0) {
-        return;
-    }
-    GpuBufferDesc desc;
-    desc.size = frame_buffer_size_;
-    desc.cpu_writable = true;
-    slot.frame_buffer = backend_->create_buffer(desc);
-    slot.frame_ptr = backend_->map(slot.frame_buffer);
-    slot.frame_gpu_base = backend_->gpu_address(slot.frame_buffer);
-    slot.buffer_size = frame_buffer_size_;
-}
-
-void Renderer::build_draw_calls(const ViewEntry& entry)
-{
-    VELK_PERF_SCOPE("renderer.build_draw_calls");
-
-    for (auto& batch : entry.batches) {
-
-        // Write instance data into the staging buffer
-        uint64_t instances_addr =
-            write_to_frame_buffer(batch.instance_data.data(), batch.instance_data.size());
-        if (!instances_addr) {
-            continue;
-        }
-
-        // Resolve bindless texture index from the texture key (= ISurface pointer)
-        uint32_t texture_id = 0;
-        if (batch.texture_key != 0) {
-            auto* tex = reinterpret_cast<ISurface*>(batch.texture_key);
-            auto tit = texture_map_.find(tex);
-            if (tit != texture_map_.end()) {
-                texture_id = tit->second;
-            } else {
-                // Render target textures have their id via IRenderTarget
-                uint64_t rt_id = get_render_target_id(tex);
-                if (rt_id != 0) {
-                    texture_id = static_cast<uint32_t>(rt_id);
-                }
-            }
-        }
-
-        // Build the DrawDataHeader (root struct the shader receives via push constant)
-        DrawDataHeader header{};
-        header.globals_address = globals_gpu_addr_;
-        header.instances_address = instances_addr;
-        header.texture_id = texture_id;
-        header.instance_count = batch.instance_count;
-
-        // Determine material data size (follows the header in the staging buffer)
-        size_t mat_size = batch.material ? batch.material->gpu_data_size() : 0;
-        if (mat_size > 0 && (mat_size % 16) != 0) {
-            VELK_LOG(E,
-                     "Renderer: material gpu_data_size (%zu) is not 16-byte aligned. "
-                     "Use VELK_GPU_STRUCT for your material data.",
-                     mat_size);
-        }
-        size_t total_size = sizeof(DrawDataHeader) + mat_size;
-
-        // Align write offset and check capacity
-        write_offset_ = (write_offset_ + 15) & ~size_t(15);
-        if (write_offset_ + total_size > frame_buffer_size_) {
-            size_t required = write_offset_ + total_size;
-            if (required > peak_usage_) {
-                peak_usage_ = required;
-            }
-            frame_overflow_ = true;
-            continue;
-        }
-
-        auto* dst = static_cast<uint8_t*>(active_slot_->frame_ptr) + write_offset_;
-        uint64_t draw_data_addr = active_slot_->frame_gpu_base + write_offset_;
-
-        // Write header, then material params (if any) immediately after
-        std::memcpy(dst, &header, sizeof(header));
-        if (mat_size > 0) {
-            if (failed(batch.material->write_gpu_data(dst + sizeof(DrawDataHeader), mat_size))) {
-                VELK_LOG(E, "Renderer: material write_gpu_data failed");
-                continue;
-            }
-        }
-
-        write_offset_ += total_size;
-        if (write_offset_ > peak_usage_) {
-            peak_usage_ = write_offset_;
-        }
-
-        // Look up the backend pipeline handle. If the batch has a material,
-        // ask the material for its pipeline (it may have been lazily compiled).
-        // Otherwise fall back to the batch's pipeline_key.
-        if (!pipeline_map_) {
-            continue;
-        }
-        uint64_t effective_pipeline_key = batch.pipeline_key;
-        if (effective_pipeline_key == 0 && batch.material && render_ctx_) {
-            effective_pipeline_key = batch.material->get_pipeline_handle(*render_ctx_);
-        }
-        auto pit = pipeline_map_->find(effective_pipeline_key);
-        if (pit == pipeline_map_->end()) {
-            VELK_LOG(W, "Renderer: pipeline %llu not found (mat=%p)", effective_pipeline_key, batch.material.get());
-            continue;
-        }
-
-        // Emit a DrawCall with the GPU address of the DrawDataHeader as root constant
-        DrawCall call{};
-        call.pipeline = pit->second;
-        call.vertex_count = 4;
-        call.instance_count = batch.instance_count;
-        call.root_constants_size = sizeof(uint64_t);
-        std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
-
-        draw_calls_.push_back(call);
-    }
-}
-
 bool Renderer::view_matches(const ViewEntry& entry, const FrameDesc& desc) const
 {
     if (desc.views.empty()) {
@@ -603,26 +156,15 @@ bool Renderer::view_matches(const ViewEntry& entry, const FrameDesc& desc) const
     return false;
 }
 
-Frame Renderer::prepare(const FrameDesc& desc)
+Renderer::FrameSlot* Renderer::claim_frame_slot()
 {
-    if (!backend_) {
-        return {};
-    }
-    VELK_PERF_EVENT(Render);
-    VELK_PERF_SCOPE("renderer.prepare");
+    auto is_slot_free = [&](const FrameSlot& s) {
+        return !s.ready && (s.presented_at == 0 ||
+                            present_counter_ - s.presented_at >= kGpuLatencyFrames);
+    };
 
-    // Drain any GPU resources whose safe window has elapsed.
-    drain_deferred_destroy();
-
-    // Claim a frame slot that is not ready (awaiting prepare) and whose GPU buffer
-    // is safe to reuse (enough frames have elapsed since it was last presented).
     FrameSlot* slot = nullptr;
     {
-        auto is_slot_free = [&](const FrameSlot& s) {
-            return !s.ready && (s.presented_at == 0 ||
-                                present_counter_ - s.presented_at >= kGpuLatencyFrames);
-        };
-
         std::unique_lock<std::mutex> lock(slot_mutex_);
         slot_cv_.wait(lock, [&] {
             for (auto& s : frame_slots_) {
@@ -642,35 +184,12 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
     slot->id = next_frame_id_++;
     slot->passes.clear();
-    active_slot_ = slot;
+    return slot;
+}
 
-    // If this slot's buffer is undersized (it was in-flight during a
-    // previous regrow and was skipped), grow it now that it's safe.
-    if (slot->buffer_size < frame_buffer_size_) {
-        if (slot->frame_buffer) {
-            backend_->destroy_buffer(slot->frame_buffer);
-        }
-        GpuBufferDesc desc;
-        desc.size = frame_buffer_size_;
-        desc.cpu_writable = true;
-        slot->frame_buffer = backend_->create_buffer(desc);
-        slot->frame_ptr = backend_->map(slot->frame_buffer);
-        slot->frame_gpu_base = backend_->gpu_address(slot->frame_buffer);
-        slot->buffer_size = frame_buffer_size_;
-    }
-
-    // Prepare the staging buffer once for all views
-    ensure_frame_buffer_capacity();
-
-    if ((slot->id % 10000) == 0) {
-        VELK_LOG(I, "Renderer: frame %llu, frame buffer %zu KB, peak usage %zu KB",
-                 static_cast<unsigned long long>(slot->id),
-                 frame_buffer_size_ / 1024,
-                 peak_usage_ / 1024);
-    }
-
-    // Consume scene state once per unique scene and process changes
-    std::unordered_map<IScene*, SceneState> consumed_scenes;
+std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc& desc)
+{
+    std::unordered_map<IScene*, SceneState> consumed;
     for (auto& entry : views_) {
         if (!view_matches(entry, desc)) {
             continue;
@@ -678,7 +197,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
         auto scene_ptr = entry.camera_element->get_scene();
         auto* scene = interface_cast<IScene>(scene_ptr);
-        if (!scene || consumed_scenes.count(scene)) {
+        if (!scene || consumed.count(scene)) {
             continue;
         }
 
@@ -697,35 +216,29 @@ Frame Renderer::prepare(const FrameDesc& desc)
         auto state = scene->consume_state();
         bool has_changes = !state.redraw_list.empty() || !state.removed_list.empty();
 
-        // Evict removed elements from the cache
+        // Evict removed elements
         for (auto& removed : state.removed_list) {
-            element_cache_.erase(removed.get());
+            batch_builder_.evict(removed.get());
             auto rit = render_target_entries_.find(removed.get());
             if (rit != render_target_entries_.end()) {
                 if (rit->second.texture_id != 0 && backend_) {
-                    std::lock_guard<std::mutex> dlock(deferred_destroy_mutex_);
-                    deferred_destroy_.push_back({rit->second.texture_id,
-                                                 present_counter_ + kGpuLatencyFrames});
+                    resources_.defer_texture_destroy(rit->second.texture_id,
+                                                    present_counter_ + kGpuLatencyFrames);
                 }
                 render_target_entries_.erase(rit);
             }
         }
 
-        // Rebuild draw commands for elements that changed
+        // Rebuild draw commands for changed elements
         for (auto* element : state.redraw_list) {
-            rebuild_commands(element);
+            batch_builder_.rebuild_commands(element, this, render_ctx_);
         }
 
-        // Upload dirty GPU resources (e.g. glyph atlas updates, decoded
-        // images, font curve buffers). Each resource is an IBuffer; if it
-        // is also an ISurface we take the image upload path, otherwise we
-        // take the plain-buffer path.
+        // Upload dirty GPU resources
         bool resources_uploaded = false;
         if (has_changes) {
-            for (auto& [elem, cache] : element_cache_) {
+            for (auto& [elem, cache] : batch_builder_.element_cache()) {
                 for (auto& weak : cache.gpu_resources) {
-                    // Promote to a temporary strong ref so the resource
-                    // cannot die between is_dirty() and upload.
                     auto buf_ptr = weak.lock();
                     auto* buf = buf_ptr.get();
                     if (!buf || !buf->is_dirty()) {
@@ -733,71 +246,51 @@ Frame Renderer::prepare(const FrameDesc& desc)
                     }
 
                     if (auto* surf = interface_cast<ISurface>(buf)) {
-                        // Texture path: bindless image upload via the
-                        // backend's upload_texture.
                         auto sz = surf->get_dimensions();
                         int tw = static_cast<int>(sz.x);
                         int th = static_cast<int>(sz.y);
                         const uint8_t* pixels = buf->get_data();
                         if (pixels && tw > 0 && th > 0) {
-                            auto tit = texture_map_.find(surf);
-                            if (tit == texture_map_.end()) {
-                                TextureDesc desc{};
-                                desc.width = tw;
-                                desc.height = th;
-                                desc.format = surf->format();
-                                TextureId tid = backend_->create_texture(desc);
-                                texture_map_[surf] = tid;
-                                tit = texture_map_.find(surf);
+                            TextureId tid = resources_.find_texture(surf);
+                            if (tid == 0) {
+                                TextureDesc tdesc{};
+                                tdesc.width = tw;
+                                tdesc.height = th;
+                                tdesc.format = surf->format();
+                                tid = backend_->create_texture(tdesc);
+                                resources_.register_texture(surf, tid);
                             }
-
-                            backend_->upload_texture(tit->second, pixels, tw, th);
+                            backend_->upload_texture(tid, pixels, tw, th);
                             buf->clear_dirty();
                             resources_uploaded = true;
                         }
                     } else {
-                        // Plain buffer path: cpu-writable GpuBuffer + memcpy.
-                        // The backend hands out a persistently-mapped pointer
-                        // and a stable GPU virtual address that the shader
-                        // reaches via buffer_reference.
                         size_t bsize = buf->get_data_size();
                         const uint8_t* bytes = buf->get_data();
                         if (!bytes || bsize == 0) {
                             continue;
                         }
-
-                        auto bit = buffer_map_.find(buf);
-                        bool need_alloc = (bit == buffer_map_.end());
-                        if (!need_alloc && bit->second.size != bsize) {
-                            // Size changed: defer-destroy the old buffer and
-                            // reallocate. The new GPU address will be picked
-                            // up by the next frame's draw call assembly.
-                            {
-                                std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-                                deferred_buffer_destroy_.push_back(
-                                    {bit->second.handle, present_counter_ + kGpuLatencyFrames});
-                            }
-                            buffer_map_.erase(bit);
+                        auto* be = resources_.find_buffer(buf);
+                        bool need_alloc = (be == nullptr);
+                        if (!need_alloc && be->size != bsize) {
+                            resources_.defer_buffer_destroy(be->handle,
+                                                            present_counter_ + kGpuLatencyFrames);
+                            resources_.unregister_buffer(buf);
+                            be = nullptr;
                             need_alloc = true;
                         }
-
                         if (need_alloc) {
-                            GpuBufferDesc desc{};
-                            desc.size = bsize;
-                            desc.cpu_writable = true;
-                            BufferEntry entry{};
-                            entry.handle = backend_->create_buffer(desc);
-                            entry.size = bsize;
-                            buffer_map_[buf] = entry;
-                            bit = buffer_map_.find(buf);
-                            // Publish the GPU address back to the buffer so
-                            // materials reading it via get_gpu_address() see
-                            // the new value (this also handles regrow, since
-                            // the previous entry was just erased).
-                            buf->set_gpu_address(backend_->gpu_address(entry.handle));
+                            GpuBufferDesc bdesc{};
+                            bdesc.size = bsize;
+                            bdesc.cpu_writable = true;
+                            GpuResourceManager::BufferEntry bentry{};
+                            bentry.handle = backend_->create_buffer(bdesc);
+                            bentry.size = bsize;
+                            resources_.register_buffer(buf, bentry);
+                            be = resources_.find_buffer(buf);
+                            buf->set_gpu_address(backend_->gpu_address(bentry.handle));
                         }
-
-                        if (auto* dst = backend_->map(bit->second.handle)) {
+                        if (auto* dst = backend_->map(be->handle)) {
                             std::memcpy(dst, bytes, bsize);
                         }
                         buf->clear_dirty();
@@ -808,7 +301,6 @@ Frame Renderer::prepare(const FrameDesc& desc)
         }
 
         if (has_changes || resources_uploaded) {
-            // Mark all views sharing this scene as batches dirty
             for (auto& v : views_) {
                 auto sp = v.camera_element->get_scene();
                 if (interface_cast<IScene>(sp) == scene) {
@@ -817,16 +309,19 @@ Frame Renderer::prepare(const FrameDesc& desc)
             }
         }
 
-        consumed_scenes[scene] = std::move(state);
+        consumed[scene] = std::move(state);
     }
+    return consumed;
+}
 
-    // Build draw calls per view. If the frame buffer overflows during
-    // recording, grow it aggressively and re-record from the start.
+void Renderer::build_frame_passes(const FrameDesc& desc,
+                                  std::unordered_map<IScene*, SceneState>& consumed_scenes,
+                                  FrameSlot& slot)
+{
     static constexpr int kMaxRecordRetries = 3;
     for (int attempt = 0;; ++attempt) {
-    frame_overflow_ = false;
-    write_offset_ = 0;
-    slot->passes.clear();
+    frame_buffer_.begin_frame(slot.buffer);
+    slot.passes.clear();
 
     for (auto& entry : views_) {
         if (!view_matches(entry, desc)) {
@@ -844,37 +339,26 @@ Frame Renderer::prepare(const FrameDesc& desc)
             continue;
         }
 
-        // Find the camera trait on the element
         ICamera* camera = nullptr;
         if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
-            for (size_t i = 0; i < storage->attachment_count(); ++i) {
-                camera = interface_cast<ICamera>(storage->get_attachment(i));
-                if (camera) break;
-            }
+            camera = interface_cast<ICamera>(storage->find_attachment<ICamera>());
         }
 
         if (entry.batches_dirty) {
-            rebuild_batches(sit->second, entry);
-            // Prepend environment batch right after rebuild so it's part
-            // of the cached batch list. It only needs re-inserting when
-            // batches are rebuilt (on scene changes); on static frames
-            // the env batch from the previous rebuild is still there.
+            batch_builder_.rebuild_batches(sit->second, entry.batches);
             if (camera) {
                 prepend_environment_batch(*camera, entry);
             }
             entry.batches_dirty = false;
         }
 
-        // Resolve effective viewport dimensions
         auto sstate = read_state<IWindowSurface>(entry.surface);
-        // Resolve normalized viewport (0..1) to pixel coordinates
         float sw = static_cast<float>(sstate ? sstate->size.x : 0);
         float sh = static_cast<float>(sstate ? sstate->size.y : 0);
         bool has_viewport = entry.viewport.width > 0 && entry.viewport.height > 0;
         float vp_w = has_viewport ? entry.viewport.width * sw : sw;
         float vp_h = has_viewport ? entry.viewport.height * sh : sh;
 
-        // Write per-view globals into the staging buffer
         if (vp_w > 0 && vp_h > 0) {
             FrameGlobals globals{};
             mat4 vp_mat;
@@ -882,7 +366,6 @@ Frame Renderer::prepare(const FrameDesc& desc)
                 vp_mat = camera->get_view_projection(*entry.camera_element, vp_w, vp_h);
             } else {
                 build_ortho_projection(globals.view_projection, vp_w, vp_h);
-                // Parse the ortho VP back into a mat4 for inversion.
                 std::memcpy(vp_mat.m, globals.view_projection, sizeof(vp_mat.m));
             }
             std::memcpy(globals.view_projection, vp_mat.m, sizeof(vp_mat.m));
@@ -892,26 +375,22 @@ Frame Renderer::prepare(const FrameDesc& desc)
             globals.viewport[1] = vp_h;
             globals.viewport[2] = 1.0f / vp_w;
             globals.viewport[3] = 1.0f / vp_h;
-            globals_gpu_addr_ = write_to_frame_buffer(&globals, sizeof(globals));
+            globals_gpu_addr_ = frame_buffer_.write(&globals, sizeof(globals));
         }
 
         draw_calls_.clear();
-        build_draw_calls(entry);
+        batch_builder_.build_draw_calls(entry.batches, draw_calls_, frame_buffer_, resources_,
+                                        globals_gpu_addr_, pipeline_map_, render_ctx_);
 
         // Create GPU resources for render target passes
-        for (auto& rtp : render_target_passes_) {
+        for (auto& rtp : batch_builder_.render_target_passes()) {
             auto& rte = render_target_entries_[rtp.element];
             if (!rte.target) {
-                auto* storage = interface_cast<IObjectStorage>(rtp.element);
-                if (storage) {
-                    for (size_t ti = 0; ti < storage->attachment_count(); ++ti) {
-                        auto* rtt = interface_cast<IRenderToTexture>(storage->get_attachment(ti));
-                        if (rtt) {
-                            auto rtt_state = read_state<IRenderToTexture>(rtt);
-                            if (rtt_state) {
-                                rte.target = rtt_state->render_target.get<IRenderTarget>();
-                            }
-                            break;
+                if (auto* storage = interface_cast<IObjectStorage>(rtp.element)) {
+                    if (auto rtt = storage->find_attachment<IRenderToTexture>()) {
+                        auto rtt_state = read_state<IRenderToTexture>(rtt);
+                        if (rtt_state) {
+                            rte.target = rtt_state->render_target.get<IRenderTarget>();
                         }
                     }
                 }
@@ -927,8 +406,8 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
             if (rte.texture_id != 0 && (rte.width != w || rte.height != h)) {
                 if (backend_) {
-                    std::lock_guard<std::mutex> dlock(deferred_destroy_mutex_);
-                    deferred_destroy_.push_back({rte.texture_id, present_counter_ + kGpuLatencyFrames});
+                    resources_.defer_texture_destroy(rte.texture_id,
+                                                    present_counter_ + kGpuLatencyFrames);
                 }
                 rte.texture_id = 0;
             }
@@ -945,8 +424,8 @@ Frame Renderer::prepare(const FrameDesc& desc)
             }
         }
 
-        // Build render target passes (submitted before the main surface pass)
-        for (auto& rtp : render_target_passes_) {
+        // Build render target passes
+        for (auto& rtp : batch_builder_.render_target_passes()) {
             auto rit = render_target_entries_.find(rtp.element);
             if (rit == render_target_entries_.end() || rit->second.texture_id == 0) {
                 continue;
@@ -961,24 +440,21 @@ Frame Renderer::prepare(const FrameDesc& desc)
             rt_globals.viewport[2] = 1.0f / static_cast<float>(rte.width);
             rt_globals.viewport[3] = 1.0f / static_cast<float>(rte.height);
             uint64_t saved_globals = globals_gpu_addr_;
-            globals_gpu_addr_ = write_to_frame_buffer(&rt_globals, sizeof(rt_globals));
-
-            ViewEntry rt_view{};
-            rt_view.batches = rtp.batches;
+            globals_gpu_addr_ = frame_buffer_.write(&rt_globals, sizeof(rt_globals));
 
             vector<DrawCall> saved_calls;
             std::swap(draw_calls_, saved_calls);
-            build_draw_calls(rt_view);
+            batch_builder_.build_draw_calls(rtp.batches, draw_calls_, frame_buffer_, resources_,
+                                            globals_gpu_addr_, pipeline_map_, render_ctx_);
 
             RenderPass rt_pass{};
             rt_pass.target.target = rte.target;
             rt_pass.viewport = {0, 0, static_cast<float>(rte.width), static_cast<float>(rte.height)};
             rt_pass.draw_calls = draw_calls_;
-            slot->passes.push_back(std::move(rt_pass));
+            slot.passes.push_back(std::move(rt_pass));
 
             std::swap(draw_calls_, saved_calls);
             globals_gpu_addr_ = saved_globals;
-
             rte.dirty = false;
         }
 
@@ -989,18 +465,51 @@ Frame Renderer::prepare(const FrameDesc& desc)
         float vp_y = has_viewport ? entry.viewport.y * sh : 0;
         pass.viewport = {vp_x, vp_y, vp_w, vp_h};
         pass.draw_calls = draw_calls_;
-        slot->passes.push_back(std::move(pass));
+        slot.passes.push_back(std::move(pass));
     }
 
-    if (!frame_overflow_) {
+    if (!frame_buffer_.overflowed()) {
         break;
     }
     if (attempt >= kMaxRecordRetries) {
         VELK_LOG(E, "Renderer: frame buffer overflow after %d retries, dropping frame", kMaxRecordRetries);
         break;
     }
-    grow_frame_buffer();
+    frame_buffer_.grow(*backend_);
     } // retry loop
+}
+
+Frame Renderer::prepare(const FrameDesc& desc)
+{
+    if (!backend_) {
+        return {};
+    }
+    VELK_PERF_EVENT(Render);
+    VELK_PERF_SCOPE("renderer.prepare");
+
+    // Drain any GPU resources whose safe window has elapsed.
+    resources_.drain_deferred(*backend_, present_counter_);
+
+    auto* slot = claim_frame_slot();
+    active_slot_ = slot;
+
+    // If this slot's buffer is undersized (it was in-flight during a
+    // previous regrow and was skipped), grow it now that it's safe.
+    frame_buffer_.ensure_slot(slot->buffer, *backend_);
+
+    // Prepare the staging buffer once for all views
+    frame_buffer_.ensure_capacity(*backend_);
+
+    if ((slot->id % 10000) == 0) {
+        VELK_LOG(I, "Renderer: frame %llu, frame buffer %zu KB, peak usage %zu KB",
+                 static_cast<unsigned long long>(slot->id),
+                 frame_buffer_.get_buffer_size() / 1024,
+                 frame_buffer_.get_peak_usage() / 1024);
+    }
+
+    auto consumed_scenes = consume_scenes(desc);
+
+    build_frame_passes(desc, consumed_scenes, *slot);
 
     active_slot_ = nullptr;
     slot->ready = true;
@@ -1123,68 +632,14 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
     auto old_size = frame_slots_.size();
     frame_slots_.resize(count);
     for (auto i = old_size; i < count; ++i) {
-        init_slot_buffers(frame_slots_[i]);
+        frame_buffer_.init_slot(frame_slots_[i].buffer, *backend_);
     }
     slot_cv_.notify_all();
 }
 
 void Renderer::on_gpu_resource_destroyed(IGpuResource* resource)
 {
-    // The notification gives us a base IGpuResource* and the underlying
-    // object may be either an ISurface or a plain IBuffer. We don't know
-    // which without a cross-cast, so just probe both maps; the cast back
-    // to the concrete pointer types is safe because we keyed the maps by
-    // those pointer values when the entries were created.
-    std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-
-    if (auto* tex = interface_cast<ISurface>(resource)) {
-        auto it = texture_map_.find(tex);
-        if (it != texture_map_.end()) {
-            deferred_destroy_.push_back({it->second, present_counter_ + kGpuLatencyFrames});
-            texture_map_.erase(it);
-            return;
-        }
-    }
-
-    if (auto* buf = interface_cast<IBuffer>(resource)) {
-        auto it = buffer_map_.find(buf);
-        if (it != buffer_map_.end()) {
-            deferred_buffer_destroy_.push_back(
-                {it->second.handle, present_counter_ + kGpuLatencyFrames});
-            buffer_map_.erase(it);
-            return;
-        }
-    }
-}
-
-void Renderer::drain_deferred_destroy()
-{
-    if (!backend_) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-
-    size_t kept = 0;
-    for (size_t i = 0; i < deferred_destroy_.size(); ++i) {
-        auto& d = deferred_destroy_[i];
-        if (present_counter_ >= d.safe_after_frame) {
-            backend_->destroy_texture(d.tid);
-        } else {
-            deferred_destroy_[kept++] = d;
-        }
-    }
-    deferred_destroy_.resize(kept);
-
-    kept = 0;
-    for (size_t i = 0; i < deferred_buffer_destroy_.size(); ++i) {
-        auto& d = deferred_buffer_destroy_[i];
-        if (present_counter_ >= d.safe_after_frame) {
-            backend_->destroy_buffer(d.handle);
-        } else {
-            deferred_buffer_destroy_[kept++] = d;
-        }
-    }
-    deferred_buffer_destroy_.resize(kept);
+    resources_.on_resource_destroyed(resource, present_counter_, kGpuLatencyFrames);
 }
 
 void Renderer::shutdown()
@@ -1193,7 +648,7 @@ void Renderer::shutdown()
         // Detach from any GPU resources we are still observing so their
         // dtors (which may run later, on any thread) cannot reach a dead
         // renderer.
-        for (auto& [elem, cache] : element_cache_) {
+        for (auto& [elem, cache] : batch_builder_.element_cache()) {
             for (auto& weak : cache.gpu_resources) {
                 if (auto res = weak.lock()) {
                     res->remove_gpu_resource_observer(this);
@@ -1201,29 +656,13 @@ void Renderer::shutdown()
             }
         }
         // Unregister from environment textures (not tracked via element cache).
-        for (auto& weak : observed_env_resources_) {
-            if (auto res = weak.lock()) {
-                res->remove_gpu_resource_observer(this);
-            }
-        }
-        observed_env_resources_.clear();
+        resources_.unregister_env_observers(this);
 
-        // Drop any deferred destroys outright; the backend will be torn
-        // down so all GPU resources die anyway.
-        {
-            std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-            deferred_destroy_.clear();
-            deferred_buffer_destroy_.clear();
-        }
+        resources_.shutdown(*backend_);
 
         for (auto& entry : views_) {
             backend_->destroy_surface(get_render_target_id(entry.surface));
         }
-
-        for (auto& [key, tid] : texture_map_) {
-            backend_->destroy_texture(tid);
-        }
-        texture_map_.clear();
 
         for (auto& [key, rte] : render_target_entries_) {
             if (rte.texture_id != 0) {
@@ -1232,15 +671,10 @@ void Renderer::shutdown()
         }
         render_target_entries_.clear();
 
-        for (auto& [key, entry] : buffer_map_) {
-            backend_->destroy_buffer(entry.handle);
-        }
-        buffer_map_.clear();
-
         for (auto& slot : frame_slots_) {
-            if (slot.frame_buffer) {
-                backend_->destroy_buffer(slot.frame_buffer);
-                slot.frame_buffer = 0;
+            if (slot.buffer.handle) {
+                backend_->destroy_buffer(slot.buffer.handle);
+                slot.buffer.handle = 0;
             }
         }
 
@@ -1248,7 +682,7 @@ void Renderer::shutdown()
     }
 
     views_.clear();
-    element_cache_.clear();
+    batch_builder_.clear();
     draw_calls_.clear();
     pipeline_map_ = nullptr;
 }
@@ -1280,23 +714,22 @@ void Renderer::prepend_environment_batch(ICamera& camera, ViewEntry& entry)
         int tw = static_cast<int>(sz.x);
         int th = static_cast<int>(sz.y);
         if (pixels && tw > 0 && th > 0) {
-            auto tit = texture_map_.find(surf);
-            if (tit == texture_map_.end()) {
+            TextureId tid = resources_.find_texture(surf);
+            if (tid == 0) {
                 TextureDesc desc{};
                 desc.width = tw;
                 desc.height = th;
                 desc.format = surf->format();
-                TextureId tid = backend_->create_texture(desc);
-                texture_map_[surf] = tid;
+                tid = backend_->create_texture(desc);
+                resources_.register_texture(surf, tid);
                 surf->add_gpu_resource_observer(this);
                 auto buf_ptr = interface_pointer_cast<IBuffer>(env_ptr);
                 if (buf_ptr) {
-                    observed_env_resources_.push_back(buf_ptr);
+                    resources_.add_env_observer(buf_ptr);
                 }
             }
-            auto tit2 = texture_map_.find(surf);
-            if (tit2 != texture_map_.end()) {
-                backend_->upload_texture(tit2->second, pixels, tw, th);
+            if (tid != 0) {
+                backend_->upload_texture(tid, pixels, tw, th);
             }
             buf->clear_dirty();
         }
@@ -1314,7 +747,7 @@ void Renderer::prepend_environment_batch(ICamera& camera, ViewEntry& entry)
     // normal build_draw_calls path. The env vertex shader generates a
     // fullscreen quad from vertex index; no instance data is needed, but
     // the batch must have instance_count = 1 to produce a draw call.
-    Batch env_batch;
+    BatchBuilder::Batch env_batch;
     env_batch.pipeline_key = 0; // material override supplies the pipeline
     env_batch.texture_key = reinterpret_cast<uint64_t>(surf);
     env_batch.instance_stride = 4;

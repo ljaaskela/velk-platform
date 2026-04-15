@@ -13,7 +13,9 @@ namespace velk {
 
 ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
 {
-    auto rv = register_type<RenderContextImpl>(velk);
+    ::velk::TypeOptions alloc;
+    alloc.policy = ::velk::CreationPolicy::Alloc;
+    auto rv = register_type<RenderContextImpl>(velk, alloc);
     rv &= register_type<Shader>(velk);
     rv &= register_type<WindowSurface>(velk);
     rv &= register_type<RenderTexture>(velk);

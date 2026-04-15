@@ -6,7 +6,9 @@ namespace velk::vk {
 
 ReturnValue VkPlugin::initialize(IVelk& velk, PluginConfig&)
 {
-    return register_type<VkBackend>(velk);
+    ::velk::TypeOptions alloc;
+    alloc.policy = ::velk::CreationPolicy::Alloc;
+    return register_type<VkBackend>(velk, alloc);
 }
 
 ReturnValue VkPlugin::shutdown(IVelk&)
