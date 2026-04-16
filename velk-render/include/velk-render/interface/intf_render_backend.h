@@ -40,7 +40,8 @@ struct GpuBufferDesc
 enum class TextureUsage : uint8_t
 {
     Sampled,      ///< Uploadable and samplable in shaders (default).
-    RenderTarget  ///< Renderable via begin_pass() and samplable in shaders.
+    RenderTarget, ///< Renderable via begin_pass() and samplable in shaders.
+    Storage       ///< Writable from compute (imageStore) and samplable in shaders.
 };
 
 /// Describes a texture to create.
@@ -82,6 +83,12 @@ struct PipelineDesc
     }
 };
 
+/// Describes a compute pipeline to create.
+struct ComputePipelineDesc
+{
+    IShader::Ptr compute; ///< Compute shader (SPIR-V).
+};
+
 /// Maximum push constant size in bytes (Vulkan guaranteed minimum).
 inline constexpr size_t kMaxRootConstantsSize = 128;
 
@@ -95,6 +102,17 @@ struct DrawCall
     /// Push constant data, typically an 8-byte GPU pointer to a DrawDataHeader.
     uint8_t root_constants[kMaxRootConstantsSize]{};
     uint32_t root_constants_size{}; ///< Bytes used in root_constants.
+};
+
+/// A single compute dispatch submitted to the backend.
+struct DispatchCall
+{
+    PipelineId pipeline{};           ///< Which compute pipeline to bind.
+    uint32_t groups_x{1};            ///< Work group count in X.
+    uint32_t groups_y{1};            ///< Work group count in Y.
+    uint32_t groups_z{1};            ///< Work group count in Z.
+    uint32_t root_constants_size{};  ///< Push constant bytes used.
+    uint8_t root_constants[kMaxRootConstantsSize]{}; ///< Push constant bytes (compute stage).
 };
 
 /// Describes a render surface (swapchain target). Backend-facing.
@@ -186,7 +204,10 @@ public:
     /** @brief Creates a graphics pipeline from SPIR-V shaders. Returns a handle. */
     virtual PipelineId create_pipeline(const PipelineDesc& desc) = 0;
 
-    /** @brief Destroys a pipeline. */
+    /** @brief Creates a compute pipeline from a compute shader. Returns a handle. */
+    virtual PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
+
+    /** @brief Destroys a pipeline (graphics or compute). */
     virtual void destroy_pipeline(PipelineId pipeline) = 0;
 
     /// @}
@@ -213,6 +234,15 @@ public:
 
     /** @brief Ends the current render pass. */
     virtual void end_pass() = 0;
+
+    /**
+     * @brief Records compute dispatches outside of any render pass.
+     *
+     * Call between frames (after begin_frame, outside any begin_pass/end_pass
+     * window). Emits a memory barrier before sampled reads of storage-image
+     * outputs in subsequent graphics passes.
+     */
+    virtual void dispatch(array_view<const DispatchCall> calls) = 0;
 
     /**
      * @brief Inserts a pipeline barrier between passes.

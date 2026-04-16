@@ -99,7 +99,13 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
     // content become orphans rather than corrupt cache hits.
     constexpr uint64_t kStageVertexMix = 0x68f3df8b8e0c8b8dULL;
     constexpr uint64_t kStageFragmentMix = 0xa24baed4963ee407ULL;
-    uint64_t stage_mix = (stage == ShaderStage::Vertex) ? kStageVertexMix : kStageFragmentMix;
+    constexpr uint64_t kStageComputeMix = 0x5a3b1d2f6e9c8411ULL;
+    uint64_t stage_mix = kStageFragmentMix;
+    switch (stage) {
+    case ShaderStage::Vertex:   stage_mix = kStageVertexMix;   break;
+    case ShaderStage::Fragment: stage_mix = kStageFragmentMix; break;
+    case ShaderStage::Compute:  stage_mix = kStageComputeMix;  break;
+    }
     uint64_t include_hash = hash_shader_includes(shader_includes_);
     uint64_t cache_key = key ^ stage_mix ^ include_hash;
 
@@ -175,6 +181,39 @@ uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string
     auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
     auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
     return create_pipeline(vert, frag, key);
+}
+
+uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute, uint64_t key)
+{
+    if (!initialized_ || !backend_ || !compute) {
+        return 0;
+    }
+
+    ComputePipelineDesc desc;
+    desc.compute = compute;
+
+    PipelineId pid = backend_->create_compute_pipeline(desc);
+    if (!pid) {
+        return 0;
+    }
+
+    if (key == 0) {
+        key = next_pipeline_key_++;
+    }
+    pipeline_map_[key] = pid;
+    return key;
+}
+
+uint64_t RenderContextImpl::compile_compute_pipeline(string_view compute_source, uint64_t key)
+{
+    if (compute_source.empty()) {
+        return 0;
+    }
+    auto compute = compile_shader(compute_source, ShaderStage::Compute);
+    if (!compute) {
+        return 0;
+    }
+    return create_compute_pipeline(compute, key);
 }
 
 void RenderContextImpl::set_default_vertex_shader(const IShader::Ptr& shader)

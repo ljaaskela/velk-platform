@@ -6,10 +6,6 @@
 
 namespace velk::ui {
 
-namespace {
-constexpr uint64_t kPipelineKey = make_hash64("RectVisual");
-}
-
 vector<DrawEntry> RectVisual::get_draw_entries(const rect& bounds)
 {
     auto state = read_state<IVisual>(this);
@@ -18,7 +14,7 @@ vector<DrawEntry> RectVisual::get_draw_entries(const rect& bounds)
     }
 
     DrawEntry entry{};
-    entry.pipeline_key = kPipelineKey;
+    entry.pipeline_key = get_pipeline_key();
     entry.bounds = bounds;
     entry.set_instance(RectInstance{
         {bounds.x, bounds.y},
@@ -26,11 +22,6 @@ vector<DrawEntry> RectVisual::get_draw_entries(const rect& bounds)
         state->color});
 
     return {entry};
-}
-
-uint64_t RectVisual::get_pipeline_key() const
-{
-    return kPipelineKey;
 }
 
 } // namespace velk::ui

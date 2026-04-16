@@ -12,13 +12,9 @@ namespace velk {
 /// Visuals that own a built-in pipeline provide their own stable key
 /// (typically via make_hash64 on the class name).
 namespace PipelineKey {
+inline constexpr uint64_t Default = 1;       ///< Filled rect
 inline constexpr uint64_t CustomBase = 1000; ///< Auto-assigned keys start here.
 } // namespace PipelineKey
-
-/// Well-known texture keys.
-namespace TextureKey {
-inline constexpr uint64_t Atlas = 1;
-} // namespace TextureKey
 
 /// Maximum inline instance data size in a DrawEntry.
 inline constexpr uint32_t kMaxInstanceDataSize = 64;

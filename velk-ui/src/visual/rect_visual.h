@@ -19,7 +19,6 @@ public:
 
     // IVisual
     vector<DrawEntry> get_draw_entries(const rect& bounds) override;
-    uint64_t get_pipeline_key() const override;
 };
 
 } // namespace velk::ui

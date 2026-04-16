@@ -83,6 +83,18 @@ protected:
     void invoke_visual_changed() { invoke_trait_dirty(DirtyFlags::Visual); }
 
     void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
+
+    /** @brief Default pipeline key 1 = "filled rect". */
+    uint64_t get_pipeline_key() const override { return PipelineKey::Default; }
+
+    /** @brief Empty vertex shader = rect */
+    string_view get_vertex_src() const override { return {}; }
+
+    /** @brief Empty fragment shader = fill with IVisual::color */
+    string_view get_fragment_src() const override { return {}; }
+
+    /** @brief Empty intersect shader = intersect AABB. */
+    string_view get_intersect_src() const override { return {}; }
 };
 
 /**

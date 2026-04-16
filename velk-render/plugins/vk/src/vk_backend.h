@@ -37,12 +37,14 @@ public:
     void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) override;
 
     PipelineId create_pipeline(const PipelineDesc& desc) override;
+    PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) override;
     void destroy_pipeline(PipelineId pipeline) override;
 
     void begin_frame() override;
     void begin_pass(uint64_t target_id) override;
     void submit(array_view<const DrawCall> calls, rect viewport) override;
     void end_pass() override;
+    void dispatch(array_view<const DispatchCall> calls) override;
     void barrier(PipelineStage src, PipelineStage dst) override;
     void end_frame() override;
 
@@ -157,6 +159,7 @@ private:
     struct PipelineEntry
     {
         VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
     };
 
     std::unordered_map<PipelineId, PipelineEntry> pipelines_;

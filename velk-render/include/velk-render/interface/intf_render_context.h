@@ -70,6 +70,21 @@ public:
     virtual uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                                       uint64_t key = 0) = 0;
 
+    /**
+     * @brief Creates a compute pipeline from a compiled compute shader.
+     *
+     * If @p key is 0, a new key is auto-assigned. Otherwise the given key is
+     * used. Returns the pipeline key, or 0 on failure. Compute pipelines
+     * share the pipeline_map() with graphics pipelines and the same backend
+     * destroy_pipeline() path.
+     */
+    virtual uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) = 0;
+
+    /**
+     * @brief Convenience: compiles a compute GLSL shader and creates the pipeline.
+     */
+    virtual uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) = 0;
+
     /** @brief Registers a default vertex shader used when create_pipeline receives nullptr. */
     virtual void set_default_vertex_shader(const IShader::Ptr& shader) = 0;
 

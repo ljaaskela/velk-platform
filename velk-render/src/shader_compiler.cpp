@@ -111,10 +111,22 @@ vector<uint32_t> compile_glsl_to_spirv(string_view source, ShaderStage stage,
     options.SetGenerateDebugInfo();
     options.SetIncluder(std::make_unique<VelkIncluder>(user_includes));
 
-    shaderc_shader_kind kind =
-        (stage == ShaderStage::Vertex) ? shaderc_vertex_shader : shaderc_fragment_shader;
-
-    const char* filename = (stage == ShaderStage::Vertex) ? "vertex.glsl" : "fragment.glsl";
+    shaderc_shader_kind kind = shaderc_fragment_shader;
+    const char* filename = "fragment.glsl";
+    switch (stage) {
+    case ShaderStage::Vertex:
+        kind = shaderc_vertex_shader;
+        filename = "vertex.glsl";
+        break;
+    case ShaderStage::Fragment:
+        kind = shaderc_fragment_shader;
+        filename = "fragment.glsl";
+        break;
+    case ShaderStage::Compute:
+        kind = shaderc_compute_shader;
+        filename = "compute.glsl";
+        break;
+    }
 
     auto result = compiler.CompileGlslToSpv(source.data(), kind, filename, options);
 

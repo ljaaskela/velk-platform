@@ -512,44 +512,59 @@ bool VkBackend::create_bindless_descriptor()
         return false;
     }
 
-    // Descriptor set layout: one variable-length sampler array
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = kMaxBindlessTextures;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Descriptor set layout: two bindings
+    //   0: variable-length sampler array (combined image+sampler) for sampled reads
+    //   1: variable-length storage-image array for compute imageStore writes
+    // Only the LAST binding may use VARIABLE_DESCRIPTOR_COUNT, so binding 1
+    // carries that flag; binding 0 uses a fixed count.
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = kMaxBindlessTextures;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
 
-    VkDescriptorBindingFlags binding_flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-                                             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                                             VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount = kMaxBindlessTextures;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorBindingFlags binding_flags[2] = {
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+            VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
+    };
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flags_ci.bindingCount = 1;
-    flags_ci.pBindingFlags = &binding_flags;
+    flags_ci.bindingCount = 2;
+    flags_ci.pBindingFlags = binding_flags;
 
     VkDescriptorSetLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layout_ci.pNext = &flags_ci;
     layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    layout_ci.bindingCount = 1;
-    layout_ci.pBindings = &binding;
+    layout_ci.bindingCount = 2;
+    layout_ci.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &descriptor_layout_) != VK_SUCCESS) {
         return false;
     }
 
     // Pool
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = kMaxBindlessTextures;
+    VkDescriptorPoolSize pool_sizes[2]{};
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes[0].descriptorCount = kMaxBindlessTextures;
+    pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    pool_sizes[1].descriptorCount = kMaxBindlessTextures;
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_ci.maxSets = 1;
-    pool_ci.poolSizeCount = 1;
-    pool_ci.pPoolSizes = &pool_size;
+    pool_ci.poolSizeCount = 2;
+    pool_ci.pPoolSizes = pool_sizes;
 
     if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_) != VK_SUCCESS) {
         return false;
@@ -907,6 +922,9 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         td.is_renderable = true;
     }
+    if (desc.usage == TextureUsage::Storage) {
+        img_ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
 
     VmaAllocationCreateInfo alloc_ci{};
     alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -928,28 +946,51 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
 
     vkCreateImageView(device_, &view_ci, nullptr, &td.view);
 
-    // Transition to shader read layout (will be transferred into when upload_texture is called)
+    // Initial layout: GENERAL for storage textures (compute writes them in
+    // that layout and the bindless sampler can still read them there);
+    // SHADER_READ_ONLY_OPTIMAL for everything else.
+    VkImageLayout initial_layout = (desc.usage == TextureUsage::Storage)
+        ? VK_IMAGE_LAYOUT_GENERAL
+        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     auto cb = begin_one_shot_commands();
-    transition_image_layout(
-        cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition_image_layout(cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout);
     end_one_shot_commands(cb);
 
-    // Update bindless descriptor
-    VkDescriptorImageInfo img_info{};
-    img_info.sampler = linear_sampler_;
-    img_info.imageView = td.view;
-    img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // Update bindless sampler descriptor (binding 0)
+    VkDescriptorImageInfo sampler_info{};
+    sampler_info.sampler = linear_sampler_;
+    sampler_info.imageView = td.view;
+    sampler_info.imageLayout = initial_layout;
 
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptor_set_;
-    write.dstBinding = 0;
-    write.dstArrayElement = td.bindless_index;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &img_info;
+    VkWriteDescriptorSet sampler_write{};
+    sampler_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sampler_write.dstSet = descriptor_set_;
+    sampler_write.dstBinding = 0;
+    sampler_write.dstArrayElement = td.bindless_index;
+    sampler_write.descriptorCount = 1;
+    sampler_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler_write.pImageInfo = &sampler_info;
 
-    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    vkUpdateDescriptorSets(device_, 1, &sampler_write, 0, nullptr);
+
+    // For storage textures, also register as a storage image (binding 1) so
+    // compute shaders can imageStore via the same bindless_index.
+    if (desc.usage == TextureUsage::Storage) {
+        VkDescriptorImageInfo storage_info{};
+        storage_info.imageView = td.view;
+        storage_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet storage_write{};
+        storage_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        storage_write.dstSet = descriptor_set_;
+        storage_write.dstBinding = 1;
+        storage_write.dstArrayElement = td.bindless_index;
+        storage_write.descriptorCount = 1;
+        storage_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        storage_write.pImageInfo = &storage_info;
+
+        vkUpdateDescriptorSets(device_, 1, &storage_write, 0, nullptr);
+    }
 
     // Create render pass and framebuffer for render target textures
     if (td.is_renderable) {
@@ -1223,6 +1264,63 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc)
     return id;
 }
 
+PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
+{
+    if (!desc.compute) {
+        VELK_LOG(E, "VkBackend: create_compute_pipeline requires a compute shader");
+        return 0;
+    }
+    VELK_PERF_SCOPE("vk.create_compute_pipeline");
+
+    auto code = desc.compute->get_data();
+    if (code.empty()) {
+        VELK_LOG(E, "VkBackend: create_compute_pipeline got empty SPIR-V");
+        return 0;
+    }
+
+    VkShaderModuleCreateInfo sm_ci{};
+    sm_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    sm_ci.codeSize = desc.compute->get_data_size();
+    sm_ci.pCode = code.begin();
+
+    VkShaderModule cs_module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device_, &sm_ci, nullptr, &cs_module) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create compute shader module");
+        return 0;
+    }
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = cs_module;
+    stage.pName = "main";
+
+    VkComputePipelineCreateInfo pipeline_ci{};
+    pipeline_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_ci.stage = stage;
+    pipeline_ci.layout = pipeline_layout_;
+
+    PipelineEntry pe{};
+    pe.bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+    VkResult pipeline_result;
+    {
+        VELK_PERF_SCOPE("vk.vkCreateComputePipelines");
+        pipeline_result = vkCreateComputePipelines(
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline);
+    }
+
+    vkDestroyShaderModule(device_, cs_module, nullptr);
+
+    if (pipeline_result != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create compute pipeline");
+        return 0;
+    }
+
+    PipelineId id = next_pipeline_id_++;
+    pipelines_[id] = pe;
+    return id;
+}
+
 void VkBackend::destroy_pipeline(PipelineId pipeline)
 {
     auto it = pipelines_.find(pipeline);
@@ -1390,6 +1488,52 @@ void VkBackend::end_pass()
     auto& sync = frame_sync_[frame_sync_index_];
     vkCmdEndRenderPass(sync.command_buffer);
     current_surface_ = 0;
+}
+
+void VkBackend::dispatch(array_view<const DispatchCall> calls)
+{
+    if (calls.empty()) {
+        return;
+    }
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    // Bind the bindless descriptor set for the compute bind point so the
+    // shader can sample textures / read the global texture array.
+    vkCmdBindDescriptorSets(sync.command_buffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline_layout_,
+                            0, 1, &descriptor_set_,
+                            0, nullptr);
+
+    for (size_t i = 0; i < calls.size(); ++i) {
+        const auto& call = calls[i];
+
+        auto pit = pipelines_.find(call.pipeline);
+        if (pit == pipelines_.end()) {
+            continue;
+        }
+        if (pit->second.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
+            continue;
+        }
+
+        vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
+
+        if (call.root_constants_size > 0) {
+            vkCmdPushConstants(sync.command_buffer,
+                               pipeline_layout_,
+                               VK_SHADER_STAGE_ALL,
+                               0,
+                               call.root_constants_size,
+                               call.root_constants);
+        }
+
+        vkCmdDispatch(sync.command_buffer, call.groups_x, call.groups_y, call.groups_z);
+    }
+
+    // Ensure storage-image writes from compute are visible to subsequent
+    // sampled reads in graphics passes. Over-synchronizes if callers want
+    // to chain multiple dispatch batches, but safe as a default.
+    barrier(PipelineStage::ComputeShader, PipelineStage::FragmentShader);
 }
 
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)

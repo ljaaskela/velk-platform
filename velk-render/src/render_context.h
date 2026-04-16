@@ -27,6 +27,8 @@ public:
                              uint64_t key = 0) override;
     uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                               uint64_t key = 0) override;
+    uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
+    uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 
     void set_default_vertex_shader(const IShader::Ptr& shader) override;
     void set_default_fragment_shader(const IShader::Ptr& shader) override;

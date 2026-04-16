@@ -65,19 +65,34 @@ public:
      * (typically a constexpr hash of a class-level name). The renderer
      * compiles a pipeline per unique key on first sight.
      */
-    virtual uint64_t get_pipeline_key() const { return 0; }
+    virtual uint64_t get_pipeline_key() const = 0;
 
     /**
      * @brief Returns the vertex shader source for this visual's pipeline.
      *        An empty string means "use the registered default vertex shader".
      */
-    virtual string_view get_vertex_src() const { return {}; }
+    virtual string_view get_vertex_src() const = 0;
 
     /**
      * @brief Returns the fragment shader source for this visual's pipeline.
      *        An empty string means "use the registered default fragment shader".
      */
-    virtual string_view get_fragment_src() const { return {}; }
+    virtual string_view get_fragment_src() const = 0;
+
+    /**
+     * @brief Returns a GLSL snippet that intersects a ray with this visual's
+     *        shape, for use by the ray-traced render backend.
+     *
+     * The snippet is a function definition (not a whole shader). The compute
+     * ray tracer composes it into a template and dispatches. An empty string
+     * means "use the default intersect" (rect within the element's local
+     * bounds, i.e. an AABB hit on the element's plane) which is the correct
+     * answer for every rectangular visual.
+     *
+     * See docs/ray-tracing.md (when it lands) for the expected function
+     * signature, ray / hit types, and coordinate convention.
+     */
+    virtual string_view get_intersect_src() const = 0;
 };
 
 } // namespace velk::ui

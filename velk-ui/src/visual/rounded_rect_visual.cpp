@@ -10,6 +10,33 @@ namespace {
 
 constexpr uint64_t kPipelineKey = make_hash64("RoundedRectVisual");
 
+// Ray-intersect snippet for the compute ray tracer. Provisional signature:
+// the ray tracer composes this into a template that declares the Ray and
+// Hit types plus any common helpers. Function name is the convention the
+// generator will splice in via a macro or include.
+constexpr string_view kIntersectSrc = R"(
+bool velk_intersect(Ray ray, vec2 size, out Hit hit)
+{
+    if (abs(ray.direction.z) < 1e-6) return false;
+    float t = -ray.origin.z / ray.direction.z;
+    if (t < ray.tmin || t > ray.tmax) return false;
+
+    vec2 p = ray.origin.xy + t * ray.direction.xy;
+
+    float radius = min(min(size.x, size.y) * 0.5, 12.0);
+    vec2 half_size = size * 0.5;
+    vec2 centered = p - half_size;
+    vec2 d = abs(centered) - half_size + radius;
+    float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+    if (sdf > 0.0) return false;
+
+    hit.t = t;
+    hit.uv = p / size;
+    hit.normal = vec3(0.0, 0.0, ray.direction.z > 0.0 ? -1.0 : 1.0);
+    return true;
+}
+)";
+
 constexpr string_view kFragmentSrc = R"(
 #version 450
 
@@ -66,6 +93,11 @@ uint64_t RoundedRectVisual::get_pipeline_key() const
 string_view RoundedRectVisual::get_fragment_src() const
 {
     return kFragmentSrc;
+}
+
+string_view RoundedRectVisual::get_intersect_src() const
+{
+    return kIntersectSrc;
 }
 
 } // namespace velk::ui
