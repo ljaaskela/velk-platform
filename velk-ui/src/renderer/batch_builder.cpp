@@ -58,12 +58,12 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         {
             VELK_PERF_SCOPE("renderer.resolve_material");
             if (render_ctx && vstate && vstate->paint) {
-                auto mat = vstate->paint.get<IMaterial>();
-                if (mat) {
-                    uint64_t handle = mat->get_pipeline_handle(*render_ctx);
+                auto prog = vstate->paint.get<IProgram>();
+                if (prog) {
+                    uint64_t handle = prog->get_pipeline_handle(*render_ctx);
                     if (handle) {
                         vc.pipeline_override = handle;
-                        vc.material = std::move(mat);
+                        vc.material = std::move(prog);
                     }
                 }
             }
@@ -94,7 +94,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
     out_batches.clear();
     render_target_passes_.clear();
 
-    auto resolve_texture = [](const IMaterial::Ptr& material, uint64_t fallback) -> uint64_t {
+    auto resolve_texture = [](const IProgram::Ptr& material, uint64_t fallback) -> uint64_t {
         return material ? reinterpret_cast<uintptr_t>(material.get()) : fallback;
     };
 
@@ -245,7 +245,8 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
                                     FrameDataManager& frame_data, GpuResourceManager& resources,
                                     uint64_t globals_gpu_addr,
                                     const std::unordered_map<uint64_t, PipelineId>* pipeline_map,
-                                    IRenderContext* render_ctx)
+                                    IRenderContext* render_ctx,
+                                    IGpuResourceObserver* observer)
 {
     VELK_PERF_SCOPE("renderer.build_draw_calls");
 
@@ -309,6 +310,14 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         auto pit = pipeline_map->find(effective_pipeline_key);
         if (pit == pipeline_map->end()) {
             continue;
+        }
+
+        // Lazy-register the program's pipeline for deferred destruction on
+        // program destruction. Idempotent; subscribes observer only once.
+        if (batch.material) {
+            if (resources.register_pipeline(batch.material.get(), pit->second) && observer) {
+                batch.material->add_gpu_resource_observer(observer);
+            }
         }
 
         DrawCall call{};

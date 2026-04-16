@@ -382,7 +382,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                                             resources_,
                                             globals_gpu_addr_,
                                             pipeline_map_,
-                                            render_ctx_);
+                                            render_ctx_,
+                                            this);
 
             // Main surface pass
             RenderPass pass;
@@ -455,7 +456,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                                             resources_,
                                             globals_gpu_addr_,
                                             pipeline_map_,
-                                            render_ctx_);
+                                            render_ctx_,
+                                            this);
 
             // Insert render target pass before surface passes
             RenderPass rt_pass{};

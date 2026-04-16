@@ -7,6 +7,7 @@
 #include <mutex>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_surface.h>
 
@@ -42,6 +43,15 @@ public:
     /** @brief Unregisters a buffer. */
     void unregister_buffer(IBuffer* buf);
 
+    /**
+     * @brief Registers a program -> PipelineId mapping if not already tracked.
+     *
+     * Idempotent. Returns true if the program was newly registered (the
+     * caller should subscribe as observer in that case), false if it was
+     * already tracked.
+     */
+    bool register_pipeline(IProgram* prog, PipelineId pid);
+
     /** @brief Adds a weak reference to an environment resource for shutdown cleanup. */
     void add_env_observer(const IBuffer::WeakPtr& res);
 
@@ -53,6 +63,9 @@ public:
 
     /** @brief Defers a buffer for destruction after the safe window. */
     void defer_buffer_destroy(GpuBuffer handle, uint64_t safe_after);
+
+    /** @brief Defers a pipeline for destruction after the safe window. */
+    void defer_pipeline_destroy(PipelineId pid, uint64_t safe_after);
 
     /** @brief Drains deferred destruction queues for handles past the safe window. */
     void drain_deferred(IRenderBackend& backend, uint64_t present_counter);
@@ -74,11 +87,18 @@ private:
         GpuBuffer handle;
         uint64_t safe_after_frame;
     };
+    struct DeferredPipelineDestroy
+    {
+        PipelineId pid;
+        uint64_t safe_after_frame;
+    };
 
     std::unordered_map<ISurface*, TextureId> texture_map_;
     std::unordered_map<IBuffer*, BufferEntry> buffer_map_;
+    std::unordered_map<IProgram*, PipelineId> pipeline_map_;
     vector<DeferredTextureDestroy> deferred_textures_;
     vector<DeferredBufferDestroy> deferred_buffers_;
+    vector<DeferredPipelineDestroy> deferred_pipelines_;
     std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
 };

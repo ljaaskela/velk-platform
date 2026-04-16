@@ -100,12 +100,17 @@ private:
 
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
+
+    // resources_ must outlive any member that holds IProgram::Ptr refs
+    // (views_, batch_builder_): material dtors invoke on_gpu_resource_destroyed
+    // which calls into resources_.
+    GpuResourceManager resources_;
+
     vector<ViewEntry> views_;
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;
 
     BatchBuilder batch_builder_;
     FrameDataManager frame_buffer_;
-    GpuResourceManager resources_;
 
     FrameSlot* active_slot_ = nullptr;
     uint64_t globals_gpu_addr_ = 0;

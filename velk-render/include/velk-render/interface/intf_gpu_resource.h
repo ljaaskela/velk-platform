@@ -10,7 +10,8 @@ enum class GpuResourceType : uint8_t
 {
     Surface,
     Texture,
-    Buffer
+    Buffer,
+    Program
 };
 
 class IGpuResource;

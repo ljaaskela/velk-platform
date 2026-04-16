@@ -31,6 +31,15 @@ void GpuResourceManager::unregister_buffer(IBuffer* buf)
     buffer_map_.erase(buf);
 }
 
+bool GpuResourceManager::register_pipeline(IProgram* prog, PipelineId pid)
+{
+    if (!prog || !pid) {
+        return false;
+    }
+    auto [it, inserted] = pipeline_map_.emplace(prog, pid);
+    return inserted;
+}
+
 void GpuResourceManager::add_env_observer(const IBuffer::WeakPtr& res)
 {
     observed_env_resources_.push_back(res);
@@ -58,6 +67,12 @@ void GpuResourceManager::defer_buffer_destroy(GpuBuffer handle, uint64_t safe_af
     deferred_buffers_.push_back({handle, safe_after});
 }
 
+void GpuResourceManager::defer_pipeline_destroy(PipelineId pid, uint64_t safe_after)
+{
+    std::lock_guard<std::mutex> lock(deferred_mutex_);
+    deferred_pipelines_.push_back({pid, safe_after});
+}
+
 void GpuResourceManager::drain_deferred(IRenderBackend& backend, uint64_t present_counter)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
@@ -75,6 +90,15 @@ void GpuResourceManager::drain_deferred(IRenderBackend& backend, uint64_t presen
         if (present_counter > it->safe_after_frame) {
             backend.destroy_buffer(it->handle);
             it = deferred_buffers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = deferred_pipelines_.begin(); it != deferred_pipelines_.end();) {
+        if (present_counter > it->safe_after_frame) {
+            backend.destroy_pipeline(it->pid);
+            it = deferred_pipelines_.erase(it);
         } else {
             ++it;
         }
@@ -103,6 +127,14 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource, uint64_t 
             buffer_map_.erase(it);
         }
     }
+
+    if (auto* prog = interface_cast<IProgram>(resource)) {
+        auto it = pipeline_map_.find(prog);
+        if (it != pipeline_map_.end()) {
+            deferred_pipelines_.push_back({it->second, safe_after});
+            pipeline_map_.erase(it);
+        }
+    }
 }
 
 void GpuResourceManager::shutdown(IRenderBackend& backend)
@@ -117,6 +149,10 @@ void GpuResourceManager::shutdown(IRenderBackend& backend)
             backend.destroy_buffer(d.handle);
         }
         deferred_buffers_.clear();
+        for (auto& d : deferred_pipelines_) {
+            backend.destroy_pipeline(d.pid);
+        }
+        deferred_pipelines_.clear();
     }
 
     for (auto& [key, tid] : texture_map_) {
@@ -128,6 +164,11 @@ void GpuResourceManager::shutdown(IRenderBackend& backend)
         backend.destroy_buffer(entry.handle);
     }
     buffer_map_.clear();
+
+    for (auto& [key, pid] : pipeline_map_) {
+        backend.destroy_pipeline(pid);
+    }
+    pipeline_map_.clear();
 }
 
 } // namespace velk::ui

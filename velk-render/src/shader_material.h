@@ -3,15 +3,14 @@
 
 #include "spirv_material_reflect.h"
 
-#include <velk/ext/object.h>
-
+#include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_material_internal.h>
 #include <velk-render/interface/intf_shader_material.h>
 #include <velk-render/plugin.h>
 
 namespace velk::impl {
 
-class ShaderMaterial : public ext::Object<ShaderMaterial, IShaderMaterial, IMaterialInternal>
+class ShaderMaterial : public ext::GpuResource<ShaderMaterial, IShaderMaterial, IMaterialInternal>
 {
 public:
     VELK_CLASS_UID(ClassId::ShaderMaterial, "ShaderMaterial");

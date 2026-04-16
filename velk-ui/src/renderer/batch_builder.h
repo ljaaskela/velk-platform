@@ -5,7 +5,7 @@
 
 #include <unordered_map>
 #include <velk-render/interface/intf_buffer.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_target.h>
@@ -31,7 +31,7 @@ public:
     {
         vector<DrawEntry> entries;
         uint64_t pipeline_override = 0;
-        IMaterial::Ptr material;
+        IProgram::Ptr material;
     };
 
     struct ElementCache
@@ -48,7 +48,7 @@ public:
         vector<uint8_t> instance_data;
         uint32_t instance_stride = 0;
         uint32_t instance_count = 0;
-        IMaterial::Ptr material;
+        IProgram::Ptr material;
     };
 
     struct RenderTargetPassData
@@ -70,7 +70,8 @@ public:
                           FrameDataManager& frame_data, GpuResourceManager& resources,
                           uint64_t globals_gpu_addr,
                           const std::unordered_map<uint64_t, PipelineId>* pipeline_map,
-                          IRenderContext* render_ctx);
+                          IRenderContext* render_ctx,
+                          IGpuResourceObserver* observer);
 
     /** @brief Removes an element from the cache. */
     void evict(IElement* element) { element_cache_.erase(element); }

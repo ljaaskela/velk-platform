@@ -1,42 +1,23 @@
 #ifndef VELK_RENDER_INTF_MATERIAL_H
 #define VELK_RENDER_INTF_MATERIAL_H
 
-#include <velk/interface/intf_metadata.h>
-
-#include <cstddef>
-#include <cstdint>
+#include <velk-render/interface/intf_program.h>
 
 namespace velk {
 
-class IRenderContext; // forward declaration
-
 /**
- * @brief Interface for custom materials that override the default color fill.
+ * @brief Marker interface for a renderable material.
  *
- * A material defines how a visual's geometry is shaded. When a visual's paint
- * property references an IMaterial, the renderer uses the material's pipeline
- * instead of the visual's color property.
+ * A material today is exactly a GPU program (pipeline + per-draw data);
+ * all behaviour lives on `IProgram`. `IMaterial` exists as a named subtype
+ * so visuals can reference "a material" via property and so future
+ * material semantics (PBR surface description: albedo, roughness,
+ * metalness) have a natural home without renaming the property type.
  *
- * Every material provides a pipeline handle and GPU data. The renderer writes
- * the GPU data after the DrawDataHeader in the staging buffer. The material's
- * shader reads it via buffer_reference from the draw data pointer.
+ * Chain: IInterface -> IGpuResource -> IProgram -> IMaterial
  */
-class IMaterial : public Interface<IMaterial>
+class IMaterial : public Interface<IMaterial, IProgram>
 {
-public:
-    /** @brief Returns the pipeline key for this material, compiling lazily if needed. */
-    virtual uint64_t get_pipeline_handle(IRenderContext& ctx) = 0;
-
-    /** @brief Returns the size in bytes of this material's GPU data (after DrawDataHeader). */
-    virtual size_t gpu_data_size() const = 0;
-
-    /**
-     * @brief Writes material GPU data into the staging buffer.
-     * @param out  Destination buffer (immediately after DrawDataHeader).
-     * @param size Buffer size in bytes (equals gpu_data_size()).
-     * @return ReturnValue::Success on success, ReturnValue::Fail on error.
-     */
-    virtual ReturnValue write_gpu_data(void* out, size_t size) const = 0;
 };
 
 } // namespace velk
