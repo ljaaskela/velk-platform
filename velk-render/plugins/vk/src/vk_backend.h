@@ -45,6 +45,7 @@ public:
     void submit(array_view<const DrawCall> calls, rect viewport) override;
     void end_pass() override;
     void dispatch(array_view<const DispatchCall> calls) override;
+    void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect) override;
     void barrier(PipelineStage src, PipelineStage dst) override;
     void end_frame() override;
 

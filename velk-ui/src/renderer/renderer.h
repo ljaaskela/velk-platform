@@ -58,6 +58,12 @@ private:
         int cached_width = 0;
         int cached_height = 0;
         vector<BatchBuilder::Batch> batches;
+
+        // Ray-traced output texture (only allocated when camera is in RayTrace
+        // path). Sized to the surface; reallocated on size change.
+        TextureId rt_output_tex = 0;
+        int rt_width = 0;
+        int rt_height = 0;
     };
 
     struct RenderTarget
@@ -65,11 +71,28 @@ private:
         IRenderTarget::Ptr target;
     };
 
+    enum class PassKind
+    {
+        Raster,
+        ComputeBlit,
+    };
+
     struct RenderPass
     {
+        PassKind kind = PassKind::Raster;
+
+        // Raster fields
         RenderTarget target;
         rect viewport;
         vector<DrawCall> draw_calls;
+
+        // ComputeBlit fields: compute writes to blit_source, then blit
+        // copies it into blit_dst_rect of the swapchain image for
+        // blit_surface_id.
+        DispatchCall compute{};
+        uint64_t blit_surface_id = 0;
+        TextureId blit_source = 0;
+        rect blit_dst_rect{};
     };
 
     struct FrameSlot
@@ -117,6 +140,10 @@ private:
     vector<DrawCall> draw_calls_;
 
     std::unordered_map<IElement*, RenderTargetEntry> render_target_entries_;
+
+    // Compute pipeline key for the phase-1.1 RT test shader. Compiled lazily
+    // on first RT view.
+    uint64_t rt_test_pipeline_key_ = 0;
 
     static constexpr uint64_t kGpuLatencyFrames = 3;
     static constexpr uint32_t kDefaultMaxFramesInFlight = kGpuLatencyFrames + 1;

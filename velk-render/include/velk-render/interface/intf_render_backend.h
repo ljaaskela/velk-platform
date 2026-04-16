@@ -245,6 +245,20 @@ public:
     virtual void dispatch(array_view<const DispatchCall> calls) = 0;
 
     /**
+     * @brief Blits a source texture onto the swapchain image of @p surface_id.
+     *
+     * Acquires the swapchain image if not already acquired this frame, records
+     * a vkCmdBlitImage that scales @p source into the destination rect, and
+     * transitions the swapchain image to PRESENT_SRC_KHR. The source texture
+     * must have been created with TextureUsage::Storage. Mutually exclusive
+     * with begin_pass on the same surface within a frame.
+     *
+     * @param dst_rect Destination rect in surface pixels. Zero width/height
+     *                 means "full surface".
+     */
+    virtual void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect = {}) = 0;
+
+    /**
      * @brief Inserts a pipeline barrier between passes.
      *
      * Call between end_pass() and the next begin_pass() to synchronize

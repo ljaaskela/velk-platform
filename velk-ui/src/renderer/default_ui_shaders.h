@@ -56,6 +56,35 @@ void main()
 }
 )";
 
+// Phase 1.1 test compute shader. Writes a UV gradient to the bindless
+// storage image whose index is passed via push constants. Proves the
+// dispatch + imageStore + blit-to-surface plumbing end-to-end.
+[[maybe_unused]] constexpr string_view rt_test_compute_src = R"(
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
+
+layout(push_constant) uniform PC {
+    uint image_index;
+    uint width;
+    uint height;
+    uint _pad;
+} pc;
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+
+    vec2 uv = vec2(coord) / vec2(float(pc.width), float(pc.height));
+    vec4 color = vec4(uv.x, uv.y, 0.5, 1.0);
+    imageStore(gStorageImages[nonuniformEXT(pc.image_index)], coord, color);
+}
+)";
+
 } // namespace velk
 
 #endif // VELK_RENDER_DEFAULT_SHADERS_H

@@ -692,7 +692,9 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     ci.imageExtent = extent;
     ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // TRANSFER_DST_BIT allows compute-RT views to blit into the swapchain
+    // image via vkCmdBlitImage (the blit_to_surface path).
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -923,7 +925,9 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         td.is_renderable = true;
     }
     if (desc.usage == TextureUsage::Storage) {
-        img_ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        // TRANSFER_SRC_BIT allows this texture to be blitted onto a surface
+        // by blit_to_surface (the compute-RT output path).
+        img_ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
 
     VmaAllocationCreateInfo alloc_ci{};
@@ -1536,6 +1540,134 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
     barrier(PipelineStage::ComputeShader, PipelineStage::FragmentShader);
 }
 
+void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect)
+{
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    auto sit = surfaces_.find(surface_id);
+    if (sit == surfaces_.end()) {
+        return;
+    }
+    auto& sd = sit->second;
+
+    auto tit = textures_.find(source);
+    if (tit == textures_.end()) {
+        return;
+    }
+    auto& td = tit->second;
+
+    // Acquire swapchain image once per frame per surface (mirrors begin_pass).
+    if (present_surface_id_ != surface_id) {
+        present_surface_id_ = surface_id;
+        present_acquire_sem_idx_ = acquire_semaphore_index_;
+        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+
+        VkResult result = vkAcquireNextImageKHR(
+            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            present_surface_id_ = 0;
+            return;
+        }
+    }
+
+    VkImage swap_image = sd.images[sd.image_index];
+
+    // Swapchain: UNDEFINED -> TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = swap_image;
+    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_dst.subresourceRange.levelCount = 1;
+    to_dst.subresourceRange.layerCount = 1;
+    to_dst.srcAccessMask = 0;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    // Storage texture: GENERAL -> TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier to_src{};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = td.image;
+    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_src.subresourceRange.levelCount = 1;
+    to_src.subresourceRange.layerCount = 1;
+    to_src.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    VkImageMemoryBarrier pre[2] = {to_dst, to_src};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, pre);
+
+    // Resolve destination rect; default (zero size) means full surface.
+    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
+    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
+    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
+    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
+    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
+        dx0 = 0;
+        dy0 = 0;
+        dx1 = sd.width;
+        dy1 = sd.height;
+    }
+
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[1] = {td.width, td.height, 1};
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[0] = {dx0, dy0, 0};
+    blit.dstOffsets[1] = {dx1, dy1, 1};
+
+    vkCmdBlitImage(sync.command_buffer,
+                   td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   swap_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_LINEAR);
+
+    // Swapchain: TRANSFER_DST_OPTIMAL -> PRESENT_SRC_KHR
+    VkImageMemoryBarrier to_present{};
+    to_present.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_present.image = swap_image;
+    to_present.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_present.subresourceRange.levelCount = 1;
+    to_present.subresourceRange.layerCount = 1;
+    to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_present.dstAccessMask = 0;
+
+    // Storage texture: TRANSFER_SRC_OPTIMAL -> GENERAL (ready for next compute)
+    VkImageMemoryBarrier to_general{};
+    to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.image = td.image;
+    to_general.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_general.subresourceRange.levelCount = 1;
+    to_general.subresourceRange.layerCount = 1;
+    to_general.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_general.dstAccessMask = 0;
+
+    VkImageMemoryBarrier post[2] = {to_present, to_general};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, post);
+}
+
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
 {
     switch (stage) {
@@ -1590,7 +1722,10 @@ void VkBackend::end_frame()
             VkSemaphore wait_sem = image_available_[present_acquire_sem_idx_];
             VkSemaphore signal_sem = render_finished_[sd.image_index];
 
-            VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            // Cover both the raster path (COLOR_ATTACHMENT_OUTPUT) and the
+            // RT blit path (TRANSFER) on acquire-semaphore wait.
+            VkPipelineStageFlags wait_stage =
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
 
             VkSubmitInfo submit_info{};
             submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;

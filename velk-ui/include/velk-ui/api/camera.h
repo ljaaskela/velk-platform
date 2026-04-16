@@ -27,6 +27,9 @@ public:
     auto get_projection() const { return read_state_value<ICamera>(&ICamera::State::projection); }
     void set_projection(Projection v) { write_state_value<ICamera>(&ICamera::State::projection, v); }
 
+    auto get_render_path() const { return read_state_value<ICamera>(&ICamera::State::render_path); }
+    void set_render_path(RenderPath v) { write_state_value<ICamera>(&ICamera::State::render_path, v); }
+
     auto get_zoom() const { return read_state_value<ICamera>(&ICamera::State::zoom); }
     void set_zoom(float v) { write_state_value<ICamera>(&ICamera::State::zoom, v); }
 

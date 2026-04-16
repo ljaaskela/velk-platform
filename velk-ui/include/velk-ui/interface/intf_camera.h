@@ -14,6 +14,13 @@ enum class Projection : uint8_t
     Perspective,
 };
 
+/** @brief How the renderer produces pixels for a view driven by this camera. */
+enum class RenderPath : uint8_t
+{
+    Raster,   ///< Conventional rasterization pass (default).
+    RayTrace, ///< Compute-dispatch ray tracer writing to a storage image.
+};
+
 /**
  * @brief Camera trait that defines how a scene is observed.
  *
@@ -26,6 +33,7 @@ class ICamera : public Interface<ICamera, ITrait>
 public:
     VELK_INTERFACE(
         (PROP, Projection, projection, Projection::Ortho),
+        (PROP, RenderPath, render_path, RenderPath::Raster),
         (PROP, float, zoom, 1.f),
         (PROP, float, scale, 1.f),
         (PROP, float, fov, 60.f),

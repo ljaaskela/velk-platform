@@ -122,6 +122,10 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
     for (auto it = views_.begin(); it != views_.end(); ++it) {
         if (it->camera_element == camera_element && it->surface == surface) {
             if (backend_) {
+                if (it->rt_output_tex != 0) {
+                    resources_.defer_texture_destroy(
+                        it->rt_output_tex, present_counter_ + kGpuLatencyFrames);
+                }
                 backend_->destroy_surface(get_render_target_id(it->surface));
             }
             views_.erase(it);
@@ -334,6 +338,84 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             ICamera* camera = nullptr;
             if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
                 camera = interface_cast<ICamera>(storage->find_attachment<ICamera>());
+            }
+
+            // Ray-traced view: skip raster batch work, build a compute+blit
+            // pass targeting the surface. The camera's render_path drives
+            // this; raster is the default when no camera or path=Raster.
+            RenderPath render_path = RenderPath::Raster;
+            if (camera) {
+                auto cam_state = read_state<ICamera>(camera);
+                if (cam_state) {
+                    render_path = cam_state->render_path;
+                }
+            }
+
+            if (render_path == RenderPath::RayTrace) {
+                auto sstate_rt = read_state<IWindowSurface>(entry.surface);
+                float sw_full = static_cast<float>(sstate_rt ? sstate_rt->size.x : 0);
+                float sh_full = static_cast<float>(sstate_rt ? sstate_rt->size.y : 0);
+                bool has_vp = entry.viewport.width > 0 && entry.viewport.height > 0;
+                // View's pixel rect on the surface.
+                float vp_x_f = has_vp ? entry.viewport.x * sw_full : 0.f;
+                float vp_y_f = has_vp ? entry.viewport.y * sh_full : 0.f;
+                float vp_w_f = has_vp ? entry.viewport.width * sw_full : sw_full;
+                float vp_h_f = has_vp ? entry.viewport.height * sh_full : sh_full;
+                int vp_w = static_cast<int>(vp_w_f);
+                int vp_h = static_cast<int>(vp_h_f);
+                if (vp_w <= 0 || vp_h <= 0 || !backend_ || !render_ctx_) {
+                    continue;
+                }
+
+                // (Re)create storage output texture sized to the viewport
+                // (not the full surface). Blit scales to the viewport rect.
+                if (entry.rt_output_tex != 0 &&
+                    (entry.rt_width != vp_w || entry.rt_height != vp_h)) {
+                    resources_.defer_texture_destroy(
+                        entry.rt_output_tex, present_counter_ + kGpuLatencyFrames);
+                    entry.rt_output_tex = 0;
+                }
+                if (entry.rt_output_tex == 0) {
+                    TextureDesc td{};
+                    td.width = vp_w;
+                    td.height = vp_h;
+                    td.format = PixelFormat::RGBA8;
+                    td.usage = TextureUsage::Storage;
+                    entry.rt_output_tex = backend_->create_texture(td);
+                    entry.rt_width = vp_w;
+                    entry.rt_height = vp_h;
+                }
+
+                // Compile the RT test compute pipeline once.
+                if (rt_test_pipeline_key_ == 0) {
+                    rt_test_pipeline_key_ =
+                        render_ctx_->compile_compute_pipeline(rt_test_compute_src);
+                }
+
+                auto pit = pipeline_map_->find(rt_test_pipeline_key_);
+                if (entry.rt_output_tex == 0 ||
+                    rt_test_pipeline_key_ == 0 ||
+                    pit == pipeline_map_->end()) {
+                    continue;
+                }
+
+                struct PushC { uint32_t image_index; uint32_t width; uint32_t height; uint32_t pad; };
+                PushC pc{entry.rt_output_tex, static_cast<uint32_t>(vp_w),
+                         static_cast<uint32_t>(vp_h), 0};
+
+                RenderPass pass;
+                pass.kind = PassKind::ComputeBlit;
+                pass.compute.pipeline = pit->second;
+                pass.compute.groups_x = (vp_w + 7) / 8;
+                pass.compute.groups_y = (vp_h + 7) / 8;
+                pass.compute.groups_z = 1;
+                pass.compute.root_constants_size = sizeof(PushC);
+                std::memcpy(pass.compute.root_constants, &pc, sizeof(PushC));
+                pass.blit_source = entry.rt_output_tex;
+                pass.blit_surface_id = get_render_target_id(entry.surface);
+                pass.blit_dst_rect = {vp_x_f, vp_y_f, vp_w_f, vp_h_f};
+                slot.passes.push_back(std::move(pass));
+                continue;
             }
 
             if (entry.batches_dirty) {
@@ -578,6 +660,19 @@ void Renderer::present(Frame frame)
         bool had_texture_pass = false;
         for (size_t i = 0; i < target->passes.size(); ++i) {
             auto& pass = target->passes[i];
+
+            if (pass.kind == PassKind::ComputeBlit) {
+                // Ray-traced view: dispatch compute then blit output texture
+                // onto the swapchain image for the surface.
+                if (had_texture_pass) {
+                    backend_->barrier(PipelineStage::ColorOutput, PipelineStage::FragmentShader);
+                    had_texture_pass = false;
+                }
+                backend_->dispatch({&pass.compute, 1});
+                backend_->blit_to_surface(pass.blit_source, pass.blit_surface_id, pass.blit_dst_rect);
+                continue;
+            }
+
             auto* rt = pass.target.target.get();
             uint64_t pass_target_id = rt ? rt->get_render_target_id() : 0;
             bool is_texture = rt && rt->get_type() == GpuResourceType::Texture;
@@ -660,6 +755,10 @@ void Renderer::shutdown()
         resources_.shutdown(*backend_);
 
         for (auto& entry : views_) {
+            if (entry.rt_output_tex != 0) {
+                backend_->destroy_texture(entry.rt_output_tex);
+                entry.rt_output_tex = 0;
+            }
             backend_->destroy_surface(get_render_target_id(entry.surface));
         }
 
