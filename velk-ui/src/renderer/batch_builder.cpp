@@ -151,8 +151,15 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                     continue;
                 }
 
-                float wx = elem_state->world_matrix(0, 3) - offset_x;
-                float wy = elem_state->world_matrix(1, 3) - offset_y;
+                // Every instance layout begins with a mat4 world_matrix
+                // (see instance_types.h). We copy the element's transform
+                // here and — for RTT sub-passes — subtract the RTT root's
+                // world translation so children render in target-local
+                // space. Everything downstream (rotation, 3D z) comes for
+                // free because the full matrix is passed through.
+                mat4 world = elem_state->world_matrix;
+                world(0, 3) -= offset_x;
+                world(1, 3) -= offset_y;
 
                 auto& vc = visuals[pass];
                 for (auto& de : vc.entries) {
@@ -178,9 +185,10 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                     std::memcpy(batch.instance_data.data() + data_offset, de.instance_data,
                                 de.instance_size);
 
-                    float* inst = reinterpret_cast<float*>(batch.instance_data.data() + data_offset);
-                    inst[0] += wx;
-                    inst[1] += wy;
+                    // Overwrite the leading mat4 world_matrix slot. The
+                    // visual leaves it zero-initialised; we fill it per
+                    // instance so shaders get the correct transform.
+                    std::memcpy(batch.instance_data.data() + data_offset, world.m, sizeof(world.m));
 
                     batch.instance_count++;
                 }

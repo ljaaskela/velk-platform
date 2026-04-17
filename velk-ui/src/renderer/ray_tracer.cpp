@@ -16,6 +16,7 @@
 #include <velk-ui/interface/intf_visual.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -106,9 +107,7 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids, FrameC
         src += string_view(s, std::strlen(s));
     };
 
-    append_literal(
-        "vec4 velk_resolve_fill(uint mid, uint64_t addr, uint tex_id, uint shape_param,"
-        " vec2 uv, vec4 base, vec3 ray_dir) {\n");
+    append_literal("BrdfSample velk_resolve_fill(uint mid, FillContext ctx) {\n");
     append_literal("    switch (mid) {\n");
     char buf[128];
     for (auto id : material_ids) {
@@ -119,9 +118,9 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids, FrameC
             src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
         }
         src += mi.fill_fn_name;
-        append_literal("(addr, tex_id, shape_param, uv, base, ray_dir);\n");
+        append_literal("(ctx);\n");
     }
-    append_literal("        default: return base;\n");
+    append_literal("        default: { BrdfSample bs; bs.emission = ctx.base; bs.throughput = vec3(0.0); bs.next_dir = vec3(0.0); bs.terminate = true; return bs; }\n");
     append_literal("    }\n");
     append_literal("}\n");
     src += rt_compute_main_src;
@@ -206,19 +205,20 @@ void RayTracer::build_passes(ViewEntry& entry,
     }
 
     struct RtShape {
-        float origin[4];
-        float u_axis[4];
-        float v_axis[4];
+        float origin[4];     // xyz world corner
+        float u_axis[4];     // xyz = local x dir * width
+        float v_axis[4];     // xyz = local y dir * height
+        float w_axis[4];     // xyz = local z dir * depth (cube only)
         float color[4];
-        float params[4];
+        float params[4];     // x = corner radius (rect) or sphere radius
         uint32_t material_id;
         uint32_t texture_id;
         uint32_t shape_param;
-        uint32_t _pad;
+        uint32_t shape_kind; // 0 = rect, 1 = cube, 2 = sphere
         uint64_t material_data_addr;
         uint64_t _tail_pad;
     };
-    static_assert(sizeof(RtShape) == 112, "RtShape layout mismatch");
+    static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 
     vector<RtShape> shapes;
     shapes.reserve(scene_state.visual_list.size());
@@ -239,8 +239,12 @@ void RayTracer::build_passes(ViewEntry& entry,
         float vx = es->world_matrix(0, 1);
         float vy = es->world_matrix(1, 1);
         float vz = es->world_matrix(2, 1);
+        float wx = es->world_matrix(0, 2);
+        float wy = es->world_matrix(1, 2);
+        float wz = es->world_matrix(2, 2);
         float ew = es->size.width;
         float eh = es->size.height;
+        float ed = es->size.depth;
         for (size_t j = 0; j < storage->attachment_count(); ++j) {
             auto* visual = interface_cast<IVisual>(storage->get_attachment(j));
             if (!visual) continue;
@@ -274,6 +278,32 @@ void RayTracer::build_passes(ViewEntry& entry,
                 if (!seen) frame_materials_.push_back(mat_id);
             }
 
+            uint32_t shape_kind = visual->get_shape_kind();
+
+            // Cube and sphere have no raster draw entries; we emit a single
+            // shape directly from the element's 3D transform + size.
+            if (shape_kind != 0) {
+                RtShape s{};
+                s.origin[0] = ox; s.origin[1] = oy; s.origin[2] = oz;
+                s.u_axis[0] = ux * ew; s.u_axis[1] = uy * ew; s.u_axis[2] = uz * ew;
+                s.v_axis[0] = vx * eh; s.v_axis[1] = vy * eh; s.v_axis[2] = vz * eh;
+                s.w_axis[0] = wx * ed; s.w_axis[1] = wy * ed; s.w_axis[2] = wz * ed;
+                s.color[0] = vs->color.r;
+                s.color[1] = vs->color.g;
+                s.color[2] = vs->color.b;
+                s.color[3] = vs->color.a;
+                if (shape_kind == 2) {
+                    // Sphere inscribed in AABB: radius = half of min extent.
+                    s.params[0] = std::min({ew, eh, ed}) * 0.5f;
+                }
+                s.material_id = mat_id;
+                s.material_data_addr = mat_addr;
+                s.shape_kind = shape_kind;
+                shapes.push_back(s);
+                continue;
+            }
+
+            // Rect path: iterate draw entries (one shape per entry).
             float radius = 0.f;
             if (!visual->get_intersect_src().empty()) {
                 radius = std::min(std::min(ew, eh) * 0.5f, 12.f);
@@ -282,27 +312,39 @@ void RayTracer::build_passes(ViewEntry& entry,
             rect local_rect{0, 0, ew, eh};
             auto entries = visual->get_draw_entries(local_rect);
             for (auto& dentry : entries) {
-                if (dentry.instance_size < 16) continue;
+                // Instance layout (instance_types.h):
+                //   [ 0..63 ] mat4 world_matrix (raster only; ignored here
+                //             because RT already has world axes from the
+                //             element's world_matrix above)
+                //   [64..71] vec2 pos
+                //   [72..79] vec2 size
+                //   [80..95] vec4 color
+                //   [96..99] uint glyph_index   (TextInstance only)
+                constexpr size_t kPosOff = 64;
+                constexpr size_t kSizeOff = 72;
+                constexpr size_t kColorOff = 80;
+                constexpr size_t kGlyphIdxOff = 96;
+                if (dentry.instance_size < kSizeOff + 8) continue;
                 float local_px = 0, local_py = 0, sz_w = 0, sz_h = 0;
-                std::memcpy(&local_px, dentry.instance_data + 0, 4);
-                std::memcpy(&local_py, dentry.instance_data + 4, 4);
-                std::memcpy(&sz_w, dentry.instance_data + 8, 4);
-                std::memcpy(&sz_h, dentry.instance_data + 12, 4);
+                std::memcpy(&local_px, dentry.instance_data + kPosOff, 4);
+                std::memcpy(&local_py, dentry.instance_data + kPosOff + 4, 4);
+                std::memcpy(&sz_w, dentry.instance_data + kSizeOff, 4);
+                std::memcpy(&sz_h, dentry.instance_data + kSizeOff + 4, 4);
 
                 float cr = 0, cg = 0, cb = 0, ca = 1;
-                if (dentry.instance_size >= 32) {
-                    std::memcpy(&cr, dentry.instance_data + 16, 4);
-                    std::memcpy(&cg, dentry.instance_data + 20, 4);
-                    std::memcpy(&cb, dentry.instance_data + 24, 4);
-                    std::memcpy(&ca, dentry.instance_data + 28, 4);
+                if (dentry.instance_size >= kColorOff + 16) {
+                    std::memcpy(&cr, dentry.instance_data + kColorOff, 4);
+                    std::memcpy(&cg, dentry.instance_data + kColorOff + 4, 4);
+                    std::memcpy(&cb, dentry.instance_data + kColorOff + 8, 4);
+                    std::memcpy(&ca, dentry.instance_data + kColorOff + 12, 4);
                 } else {
                     cr = vs->color.r; cg = vs->color.g;
                     cb = vs->color.b; ca = vs->color.a;
                 }
 
                 uint32_t shape_param = 0;
-                if (dentry.instance_size >= 36) {
-                    std::memcpy(&shape_param, dentry.instance_data + 32, 4);
+                if (dentry.instance_size >= kGlyphIdxOff + 4) {
+                    std::memcpy(&shape_param, dentry.instance_data + kGlyphIdxOff, 4);
                 }
 
                 uint32_t tex_id = 0;
@@ -377,6 +419,67 @@ void RayTracer::build_passes(ViewEntry& entry,
         return;
     }
 
+    // Plane-grouped back-to-front sort for alpha compositing. Shapes that
+    // share a plane (same normal + same offset, up to a quantisation
+    // tolerance) stay in enumeration order via stable_sort, preserving
+    // authored layering on a flat UI panel regardless of camera angle.
+    // Shapes on different planes sort by NDC depth of a representative
+    // origin, so stacked 3D panels composite back-to-front.
+    if (shapes.size() > 1) {
+        auto plane_key = [](const RtShape& s) -> uint64_t {
+            float ux = s.u_axis[0], uy = s.u_axis[1], uz = s.u_axis[2];
+            float vx = s.v_axis[0], vy = s.v_axis[1], vz = s.v_axis[2];
+            float nx_r = uy * vz - uz * vy;
+            float ny_r = uz * vx - ux * vz;
+            float nz_r = ux * vy - uy * vx;
+            float nlen = std::sqrt(nx_r * nx_r + ny_r * ny_r + nz_r * nz_r);
+            if (nlen < 1e-6f) nlen = 1.f;
+            float nx = nx_r / nlen;
+            float ny = ny_r / nlen;
+            float nz = nz_r / nlen;
+            float offset = s.origin[0] * nx + s.origin[1] * ny + s.origin[2] * nz;
+            int32_t qnx = static_cast<int32_t>(std::round(nx * 1000.f));
+            int32_t qny = static_cast<int32_t>(std::round(ny * 1000.f));
+            int32_t qnz = static_cast<int32_t>(std::round(nz * 1000.f));
+            int32_t qo  = static_cast<int32_t>(std::round(offset * 100.f));
+            uint64_t h = 0xcbf29ce484222325ULL;
+            auto mix = [&h](uint32_t v) { h = (h ^ v) * 0x100000001b3ULL; };
+            mix(static_cast<uint32_t>(qnx));
+            mix(static_cast<uint32_t>(qny));
+            mix(static_cast<uint32_t>(qnz));
+            mix(static_cast<uint32_t>(qo));
+            return h;
+        };
+
+        // Per-shape plane key and per-plane depth (NDC z of the first
+        // shape encountered on that plane).
+        vector<uint64_t> keys(shapes.size());
+        std::unordered_map<uint64_t, float> plane_depth;
+        for (size_t i = 0; i < shapes.size(); ++i) {
+            keys[i] = plane_key(shapes[i]);
+            if (plane_depth.count(keys[i])) continue;
+            const auto& s = shapes[i];
+            float x = s.origin[0], y = s.origin[1], z = s.origin[2];
+            float cz = vp_mat(2, 0) * x + vp_mat(2, 1) * y + vp_mat(2, 2) * z + vp_mat(2, 3);
+            float cw = vp_mat(3, 0) * x + vp_mat(3, 1) * y + vp_mat(3, 2) * z + vp_mat(3, 3);
+            plane_depth[keys[i]] = (cw != 0.f) ? (cz / cw) : 0.f;
+        }
+
+        vector<size_t> order(shapes.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+            [&](size_t a, size_t b) {
+                uint64_t ka = keys[a];
+                uint64_t kb = keys[b];
+                if (ka == kb) return false;
+                return plane_depth[ka] > plane_depth[kb]; // farther first
+            });
+
+        vector<RtShape> sorted_shapes(shapes.size());
+        for (size_t i = 0; i < order.size(); ++i) sorted_shapes[i] = shapes[order[i]];
+        shapes = std::move(sorted_shapes);
+    }
+
     uint64_t shapes_addr = 0;
     if (!shapes.empty()) {
         shapes_addr = ctx.frame_buffer->write(
@@ -392,7 +495,7 @@ void RayTracer::build_passes(ViewEntry& entry,
         uint32_t shape_count;
         uint32_t env_material_id;
         uint32_t env_texture_id;
-        uint32_t _env_pad0;
+        uint32_t frame_counter;
         uint32_t _env_pad1;
         uint64_t shapes_addr;
         uint64_t env_data_addr;
@@ -411,6 +514,7 @@ void RayTracer::build_passes(ViewEntry& entry,
     pc.shape_count = static_cast<uint32_t>(shapes.size());
     pc.env_material_id = env_mat_id;
     pc.env_texture_id = env_tex_id;
+    pc.frame_counter = static_cast<uint32_t>(ctx.present_counter);
     pc.shapes_addr = shapes_addr;
     pc.env_data_addr = env_data_addr;
 

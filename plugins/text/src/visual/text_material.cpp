@@ -40,8 +40,8 @@ void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
     TextInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
     v_color = inst.color;
     // Quad uv has y=0 at top; glyph curves use FreeType's Y-up convention,
     // so we want uv.y=1 at the top of the glyph quad.
@@ -163,12 +163,17 @@ layout(buffer_reference, std430) buffer TextMaterialData {
     VelkTextGlyphBuffer glyphs;
 };
 
-vec4 velk_fill_text(uint64_t data_addr, uint texture_id, uint shape_param, vec2 uv, vec4 base, vec3 ray_dir)
+BrdfSample velk_fill_text(FillContext ctx)
 {
-    TextMaterialData d = TextMaterialData(data_addr);
-    vec2 glyph_uv = vec2(uv.x, 1.0 - uv.y);
-    float coverage = velk_text_coverage(glyph_uv, shape_param, d.curves, d.bands, d.glyphs);
-    return vec4(base.rgb, base.a * coverage);
+    TextMaterialData d = TextMaterialData(ctx.data_addr);
+    vec2 glyph_uv = vec2(ctx.uv.x, 1.0 - ctx.uv.y);
+    float coverage = velk_text_coverage(glyph_uv, ctx.shape_param, d.curves, d.bands, d.glyphs);
+    BrdfSample bs;
+    bs.emission = vec4(ctx.base.rgb, ctx.base.a * coverage);
+    bs.throughput = vec3(0.0);
+    bs.next_dir = vec3(0.0);
+    bs.terminate = true;
+    return bs;
 }
 )";
 } // namespace

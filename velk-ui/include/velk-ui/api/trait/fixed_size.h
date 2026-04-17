@@ -45,6 +45,12 @@ public:
     /** @brief Sets the fixed height. Use dim::none() to leave unconstrained. */
     void set_height(dim v) { write_state_value<IFixedSize>(&IFixedSize::State::height, v); }
 
+    /** @brief Returns the fixed depth. None = leaves element depth at 0. */
+    auto get_depth() const { return read_state_value<IFixedSize>(&IFixedSize::State::depth); }
+
+    /** @brief Sets the fixed depth (used by 3D shape visuals such as cube/sphere). */
+    void set_depth(dim v) { write_state_value<IFixedSize>(&IFixedSize::State::depth, v); }
+
     /** @brief Sets the fixed width and height. Use dim::none() to leave unconstrained. */
     void set_size(dim w, dim h)
     {
@@ -53,16 +59,27 @@ public:
             s.height = h;
         });
     }
+
+    /** @brief Sets width, height, and depth in one call. */
+    void set_size(dim w, dim h, dim d)
+    {
+        write_state<IFixedSize>([&](auto& s) {
+            s.width = w;
+            s.height = h;
+            s.depth = d;
+        });
+    }
 };
 
 namespace trait::layout {
 
 /** @brief Creates a new FixedSize constraint. */
-inline FixedSize create_fixed_size(dim w = dim::none(), dim h = dim::none())
+inline FixedSize create_fixed_size(dim w = dim::none(), dim h = dim::none(),
+                                   dim d = dim::none())
 {
     auto fs = FixedSize(instance().create<IFixedSize>(ClassId::Constraint::FixedSize));
-    if (w != dim::none() || h != dim::none()) {
-        fs.set_size(w, h);
+    if (w != dim::none() || h != dim::none() || d != dim::none()) {
+        fs.set_size(w, h, d);
     }
     return fs;
 }

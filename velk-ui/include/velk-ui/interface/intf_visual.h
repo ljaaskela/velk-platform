@@ -83,16 +83,25 @@ public:
      * @brief Returns a GLSL snippet that intersects a ray with this visual's
      *        shape, for use by the ray-traced render backend.
      *
-     * The snippet is a function definition (not a whole shader). The compute
-     * ray tracer composes it into a template and dispatches. An empty string
-     * means "use the default intersect" (rect within the element's local
-     * bounds, i.e. an AABB hit on the element's plane) which is the correct
-     * answer for every rectangular visual.
-     *
-     * See docs/ray-tracing.md (when it lands) for the expected function
-     * signature, ray / hit types, and coordinate convention.
+     * The snippet is a function definition (not a whole shader). Currently
+     * unused by the RT path — rect / cube / sphere intersects live in the
+     * compute shader prelude and dispatch on get_shape_kind(). Reserved for
+     * visuals with a genuinely one-off primitive (rounded box, capsule, SDF
+     * blob, etc.) that would bloat the prelude with a single-use function.
      */
     virtual string_view get_intersect_src() const = 0;
+
+    /**
+     * @brief Returns this visual's shape kind for the RT dispatch.
+     *
+     *   0 = rect (planar quad, u_axis x v_axis)
+     *   1 = cube (oriented box, u_axis x v_axis x w_axis)
+     *   2 = sphere (centered in the element's bounding box, radius from size)
+     *
+     * The RT compute shader switches on this per-shape value to call the
+     * right intersect routine in the prelude. Default is rect.
+     */
+    virtual uint32_t get_shape_kind() const { return 0; }
 };
 
 } // namespace velk::ui

@@ -25,13 +25,18 @@
 namespace velk::ui {
 
 constexpr string_view velk_ui_glsl = R"(
+// world_matrix is the element's full 4x4 world transform, filled in by
+// the batch builder. (pos, size) is the rect's local-space footprint;
+// vertex shaders compute gl_Position = vp * world_matrix * vec4(pos + q*size, 0, 1).
 struct RectInstance {
+    mat4 world_matrix;
     vec2 pos;
     vec2 size;
     vec4 color;
 };
 
 struct TextInstance {
+    mat4 world_matrix;
     vec2 pos;
     vec2 size;
     vec4 color;

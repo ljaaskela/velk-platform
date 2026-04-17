@@ -105,8 +105,21 @@ struct ViewEntry
  * ray tracer) and dispatches each view to the right one based on the
  * camera's `render_path` property.
  *
- * Plugins may provide additional IViewRenderer implementations for custom
- * render paths (e.g. hybrid or hardware-RT variants).
+ * TODO(plugin-view-renderers): today this is an in-DLL-only split. For a
+ * plugin to provide its own render path, the following would have to move:
+ *   - Promote this interface to a public `IViewRenderer` under
+ *     velk-ui/include with VELK_CLASS_UID + `Interface<>` CRTP.
+ *   - Move `GpuResourceManager` and `FrameDataManager` to velk-render as
+ *     stable public interfaces (they are generic GPU plumbing that also
+ *     doesn't really belong in velk-ui), and replace the concrete pointers
+ *     in FrameContext with those interfaces.
+ *   - Decide whether `BatchBuilder` stays private (rasterizer-specific) or
+ *     gets a narrow public slice (the gpu_resources tracking used by
+ *     consume_scenes).
+ *   - Replace the hard-wired rasterizer_/ray_tracer_ members on Renderer
+ *     with a registry keyed by the camera's render_path value.
+ * Deferred until a plugin actually wants a custom path; the shape of that
+ * request will dictate the right public types.
  */
 class IViewRenderer
 {

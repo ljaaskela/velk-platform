@@ -34,8 +34,8 @@ void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
     v_uv = q;
     v_texture_id = root.texture_id;
     v_tint = root.tint;

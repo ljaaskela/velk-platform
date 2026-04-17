@@ -9,12 +9,6 @@ target_link_libraries(velk_ui_simple PRIVATE velk velk_ui velk_render velk_runti
 add_custom_command(TARGET velk_ui_simple POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:velk_ui_simple>/scenes"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/scenes/hello.json"
-        "$<TARGET_FILE_DIR:velk_ui_simple>/scenes/hello.json"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/scenes/stack_test.json"
-        "$<TARGET_FILE_DIR:velk_ui_simple>/scenes/stack_test.json"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/scenes/dashboard.json"
         "$<TARGET_FILE_DIR:velk_ui_simple>/scenes/dashboard.json"
     COMMAND ${CMAKE_COMMAND} -E copy_directory

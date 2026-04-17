@@ -50,6 +50,12 @@ inline constexpr Uid RoundedRect{"327eb630-63f9-4144-ab05-e97d6099e920"};
 /** @brief Displays a texture on the element bounds. */
 inline constexpr Uid Texture{"84b11445-5f14-41f8-b949-d79aab19115d"};
 
+/** @brief 3D axis-aligned box in the element's local frame. RT-only today. */
+inline constexpr Uid Cube{"957908b0-41b3-4b0e-9b15-49f5c478af3c"};
+
+/** @brief 3D sphere inscribed in the element's bounding box. RT-only today. */
+inline constexpr Uid Sphere{"18072f38-60dd-436a-80b4-942bbca36b52"};
+
 } // namespace Visual
 
 namespace Material {

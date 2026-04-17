@@ -17,7 +17,9 @@ inline constexpr uint64_t CustomBase = 1000; ///< Auto-assigned keys start here.
 } // namespace PipelineKey
 
 /// Maximum inline instance data size in a DrawEntry.
-inline constexpr uint32_t kMaxInstanceDataSize = 64;
+// Large enough for the current biggest instance (TextInstance = 112 bytes,
+// which carries a mat4 world_matrix + pos/size/color + glyph_index).
+inline constexpr uint32_t kMaxInstanceDataSize = 128;
 
 /**
  * @brief Generic draw entry produced by visuals.

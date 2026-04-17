@@ -60,6 +60,7 @@ vector<DrawEntry> TextureVisual::get_draw_entries(const rect& bounds)
     entry.bounds = bounds;
     entry.texture_key = reinterpret_cast<uint64_t>(tex.get());
     entry.set_instance(RectInstance{
+        {},  // world_matrix: written by batch_builder per-instance
         {bounds.x, bounds.y},
         {bounds.width, bounds.height},
         ::velk::color::white()});

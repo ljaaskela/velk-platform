@@ -19,8 +19,10 @@
 #include "transform/matrix.h"
 #include "transform/orbit.h"
 #include "transform/trs.h"
+#include "visual/cube_visual.h"
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
+#include "visual/sphere_visual.h"
 #include "render_cache.h"
 #include "visual/texture_material.h"
 #include "visual/texture_visual.h"
@@ -39,6 +41,8 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<FixedSize>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
+    rv &= register_type<CubeVisual>(velk);
+    rv &= register_type<SphereVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);
     rv &= register_type<impl::TextureMaterial>(velk);
     rv &= register_type<impl::RenderCache>(velk);

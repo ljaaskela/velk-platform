@@ -1,0 +1,40 @@
+#ifndef VELK_RENDER_STANDARD_MATERIAL_H
+#define VELK_RENDER_STANDARD_MATERIAL_H
+
+#include <velk-render/ext/material.h>
+#include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_standard.h>
+#include <velk-render/plugin.h>
+
+namespace velk::impl {
+
+/**
+ * @brief First-cut glTF metallic-roughness material.
+ *
+ * Raster path: a solid base-colour fill (PBR shading requires environment
+ * sampling and reflection rays we only have in the RT path).
+ *
+ * RT path: full stochastic shading via the composed compute shader.
+ *   diffuse  = base * (1 - metallic) * env(normal)
+ *   specular = GGX-sampled reflection ray traced back into the scene
+ *              (falls back to env on miss or depth exhaustion)
+ *   final    = kD * diffuse + F * specular
+ * Fresnel-Schlick blends between them.
+ */
+class StandardMaterial : public ::velk::ext::Material<StandardMaterial, IStandard>
+{
+public:
+    VELK_CLASS_UID(::velk::ClassId::StandardMaterial, "StandardMaterial");
+
+    uint64_t get_pipeline_handle(IRenderContext& ctx) override;
+    size_t gpu_data_size() const override;
+    ReturnValue write_gpu_data(void* out, size_t size) const override;
+
+    string_view get_fill_src() const override;
+    string_view get_fill_fn_name() const override;
+    string_view get_fill_include_name() const override;
+};
+
+} // namespace velk::impl
+
+#endif // VELK_RENDER_STANDARD_MATERIAL_H

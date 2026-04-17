@@ -123,19 +123,24 @@ layout(buffer_reference, std430) readonly buffer EnvMaterialData {
     vec4 params; // x = intensity, y = rotation_rad
 };
 
-vec4 velk_fill_env(uint64_t data_addr, uint texture_id, uint shape_param, vec2 uv, vec4 base, vec3 ray_dir)
+BrdfSample velk_fill_env(FillContext ctx)
 {
     const float PI = 3.14159265358979323846;
-    EnvMaterialData d = EnvMaterialData(data_addr);
+    EnvMaterialData d = EnvMaterialData(ctx.data_addr);
     float c = cos(d.params.y);
     float s = sin(d.params.y);
-    vec3 dir = vec3(c * ray_dir.x + s * ray_dir.z,
-                    ray_dir.y,
-                    -s * ray_dir.x + c * ray_dir.z);
+    vec3 dir = vec3(c * ctx.ray_dir.x + s * ctx.ray_dir.z,
+                    ctx.ray_dir.y,
+                    -s * ctx.ray_dir.x + c * ctx.ray_dir.z);
     float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
-    vec3 rgb = texture(velk_textures[nonuniformEXT(texture_id)], vec2(u, v)).rgb;
-    return vec4(rgb * d.params.x, 1.0);
+    vec3 rgb = texture(velk_textures[nonuniformEXT(ctx.texture_id)], vec2(u, v)).rgb;
+    BrdfSample bs;
+    bs.emission = vec4(rgb * d.params.x, 1.0);
+    bs.throughput = vec3(0.0);
+    bs.next_dir = vec3(0.0);
+    bs.terminate = true;
+    return bs;
 }
 )";
 } // namespace

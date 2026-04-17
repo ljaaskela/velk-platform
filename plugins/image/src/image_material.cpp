@@ -34,8 +34,8 @@ void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
     v_uv = q;
     v_texture_id = root.texture_id;
     v_tint = root.tint;
@@ -96,11 +96,16 @@ layout(buffer_reference, std430) readonly buffer ImageMaterialData {
     vec4 tint;
 };
 
-vec4 velk_fill_image(uint64_t data_addr, uint texture_id, uint shape_param, vec2 uv, vec4 base, vec3 ray_dir)
+BrdfSample velk_fill_image(FillContext ctx)
 {
-    ImageMaterialData d = ImageMaterialData(data_addr);
-    vec4 sampled = texture(velk_textures[nonuniformEXT(texture_id)], uv);
-    return sampled * d.tint;
+    ImageMaterialData d = ImageMaterialData(ctx.data_addr);
+    vec4 sampled = texture(velk_textures[nonuniformEXT(ctx.texture_id)], ctx.uv);
+    BrdfSample bs;
+    bs.emission = sampled * d.tint;
+    bs.throughput = vec3(0.0);
+    bs.next_dir = vec3(0.0);
+    bs.terminate = true;
+    return bs;
 }
 )";
 } // namespace

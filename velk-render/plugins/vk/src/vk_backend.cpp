@@ -1669,6 +1669,12 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                          0, 0, nullptr, 0, nullptr, 2, post);
+
+    // The blit fully populates the swap image. Mark the surface as
+    // "already cleared" so any subsequent begin_pass (e.g. a performance
+    // overlay view rendered on top) uses the load render pass and
+    // preserves our pixels instead of clearing over them.
+    surface_has_clear_ = true;
 }
 
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)

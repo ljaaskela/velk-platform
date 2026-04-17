@@ -18,6 +18,8 @@ add_library(velk_render SHARED
     src/shader_compiler.cpp
     src/shader_material.h
     src/shader_material.cpp
+    src/standard_material.h
+    src/standard_material.cpp
     src/spirv_material_reflect.h
     src/spirv_material_reflect.cpp
     src/surface.h
@@ -33,6 +35,8 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_material_internal.h
     include/velk-render/interface/intf_shader.h
     include/velk-render/interface/intf_shader_material.h
+    include/velk-render/interface/intf_standard.h
+    include/velk-render/api/material/standard.h
     include/velk-render/interface/intf_window_surface.h
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h

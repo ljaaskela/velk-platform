@@ -18,7 +18,8 @@ class IFixedSize : public Interface<IFixedSize>
 public:
     VELK_INTERFACE(
         (PROP, dim, width, dim::none()),  ///< Fixed width. None = use parent's width.
-        (PROP, dim, height, dim::none())  ///< Fixed height. None = use parent's height.
+        (PROP, dim, height, dim::none()), ///< Fixed height. None = use parent's height.
+        (PROP, dim, depth, dim::none())   ///< Fixed depth (3D shapes only). None = leaves element depth at 0.
     )
 };
 

@@ -36,8 +36,8 @@ void main()
 {
     vec2 q = velk_unit_quad(gl_VertexIndex);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec2 world_pos = inst.pos + q * inst.size;
-    gl_Position = root.global_data.view_projection * vec4(world_pos, 0.0, 1.0);
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
     v_local_uv = q;
 }
 )";
@@ -102,13 +102,18 @@ layout(buffer_reference, std430) readonly buffer GradientMaterialData {
     vec4 angle_pad; // x = angle in degrees; yzw unused
 };
 
-vec4 velk_fill_gradient(uint64_t data_addr, uint texture_id, uint shape_param, vec2 uv, vec4 base, vec3 ray_dir)
+BrdfSample velk_fill_gradient(FillContext ctx)
 {
-    GradientMaterialData d = GradientMaterialData(data_addr);
+    GradientMaterialData d = GradientMaterialData(ctx.data_addr);
     float rad = radians(d.angle_pad.x);
     vec2 dir = vec2(cos(rad), sin(rad));
-    float t = clamp(dot(uv - 0.5, dir) + 0.5, 0.0, 1.0);
-    return mix(d.start_color, d.end_color, t);
+    float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);
+    BrdfSample bs;
+    bs.emission = mix(d.start_color, d.end_color, t);
+    bs.throughput = vec3(0.0);
+    bs.next_dir = vec3(0.0);
+    bs.terminate = true;
+    return bs;
 }
 )";
 } // namespace

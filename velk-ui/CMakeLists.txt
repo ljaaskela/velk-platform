@@ -17,6 +17,10 @@ add_library(velk_ui SHARED
     src/visual/rect_visual.cpp
     src/visual/rounded_rect_visual.h
     src/visual/rounded_rect_visual.cpp
+    src/visual/cube_visual.h
+    src/visual/cube_visual.cpp
+    src/visual/sphere_visual.h
+    src/visual/sphere_visual.cpp
     src/visual/texture_visual.h
     src/visual/texture_visual.cpp
     src/visual/texture_material.h
@@ -106,6 +110,8 @@ add_library(velk_ui SHARED
     include/velk-ui/api/visual/visual.h
     include/velk-ui/api/visual/rect.h
     include/velk-ui/api/visual/rounded_rect.h
+    include/velk-ui/api/visual/cube.h
+    include/velk-ui/api/visual/sphere.h
     include/velk-ui/interface/intf_gradient.h
     include/velk-ui/interface/intf_trait.h
     include/velk-ui/plugin.h
