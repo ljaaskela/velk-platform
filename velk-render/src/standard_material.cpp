@@ -26,13 +26,17 @@ constexpr string_view standard_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+layout(buffer_reference, std430) readonly buffer StandardParams {
     vec4 base_color;
     float metallic;
     float roughness;
     float _pad0;
     float _pad1;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(RectInstanceData)
+    StandardParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -47,9 +51,84 @@ void main()
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
     gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
-    v_color = root.base_color;
+    v_color = root.material.base_color;
     v_local_uv = q;
     v_size = inst.size;
+}
+)";
+
+constexpr string_view standard_deferred_vertex_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+layout(buffer_reference, std430) readonly buffer StandardParams {
+    vec4 base_color;
+    float metallic;
+    float roughness;
+    float _pad0;
+    float _pad1;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(RectInstanceData)
+    StandardParams material;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) out vec3 v_world_pos;
+layout(location = 1) out vec3 v_world_normal;
+
+void main()
+{
+    vec2 q = velk_unit_quad(gl_VertexIndex);
+    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    vec4 world_pos_h = inst.world_matrix * local_pos;
+    gl_Position = root.global_data.view_projection * world_pos_h;
+    v_world_pos = world_pos_h.xyz;
+    v_world_normal = normalize(vec3(inst.world_matrix[2]));
+}
+)";
+
+// Deferred fragment: writes all four G-buffer attachments. Reads the
+// per-draw material values (base_color, metallic, roughness) straight
+// from the DrawData buffer, matching the convention the RT path uses.
+constexpr string_view standard_deferred_fragment_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+layout(buffer_reference, std430) readonly buffer StandardParams {
+    vec4 base_color;
+    float metallic;
+    float roughness;
+    float _pad0;
+    float _pad1;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(RectInstanceData)
+    StandardParams material;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec3 v_world_pos;
+layout(location = 1) in vec3 v_world_normal;
+
+layout(location = 0) out vec4 g_albedo;
+layout(location = 1) out vec4 g_normal;
+layout(location = 2) out vec4 g_world_pos;
+layout(location = 3) out vec4 g_material;
+
+void main()
+{
+    g_albedo    = root.material.base_color;
+    g_normal    = vec4(normalize(v_world_normal), 0.0);
+    g_world_pos = vec4(v_world_pos, 0.0);
+    g_material  = vec4(root.material.metallic, root.material.roughness, 1.0 / 255.0 /*Standard*/, 0.0);
 }
 )";
 
@@ -168,5 +247,18 @@ ReturnValue StandardMaterial::write_draw_data(void* out, size_t size) const
 
 string_view StandardMaterial::get_snippet_fn_name() const { return "velk_fill_standard"; }
 string_view StandardMaterial::get_snippet_source() const  { return standard_fill_src; }
+
+ShaderSource StandardMaterial::get_raster_source(IRasterShader::Target t) const
+{
+    switch (t) {
+    case IRasterShader::Target::Deferred:
+        return {standard_deferred_vertex_src, standard_deferred_fragment_src};
+    case IRasterShader::Target::Forward:
+    default:
+        // Forward pipeline is already compiled by get_pipeline_handle
+        // (default fragment + standard_vertex_src); no override needed.
+        return {};
+    }
+}
 
 } // namespace velk::impl

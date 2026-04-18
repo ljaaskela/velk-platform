@@ -14,7 +14,7 @@ namespace velk {
 // Fragments that do not read v_local_uv / v_size simply ignore them.
 //
 // Built-in shaders use:
-//   #include "velk.glsl"    - framework types (GlobalData, Ptr64, velk_unit_quad, VELK_DRAW_DATA)
+//   #include "velk.glsl"    - framework types (GlobalData, OpaquePtr, velk_unit_quad, VELK_DRAW_DATA)
 //   #include "velk-ui.glsl" - UI instance types (RectInstance, TextInstance)
 
 [[maybe_unused]] constexpr string_view default_vertex_src = R"(
@@ -104,8 +104,6 @@ void main()
 #version 450
 
 layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
 layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 
@@ -120,7 +118,7 @@ void main()
     g_albedo      = v_color;
     g_normal      = vec4(normalize(v_world_normal), 0.0);
     g_world_pos   = vec4(v_world_pos, 0.0);
-    g_material    = vec4(0.0, 0.5, 0.0 /*Unlit*/, 0.0);
+    g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
 }
 )";
 
@@ -136,14 +134,11 @@ void main()
 //     shared `velk_eval_shadow` composer.
 [[maybe_unused]] constexpr string_view default_deferred_compute_src = R"(
 #version 450
-#extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
-#extension GL_EXT_buffer_reference : require
-#extension GL_EXT_buffer_reference2 : require
+#include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
@@ -157,17 +152,244 @@ struct Light {
 
 layout(buffer_reference, std430) readonly buffer LightList { Light data[]; };
 
+layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
+    vec4 params; // x = intensity, y = rotation_rad, zw = _
+};
+
+layout(buffer_reference, std430) readonly buffer _InvVpBuf {
+    mat4 inv_vp;
+};
+
+// Mirrors the RT prelude's RtShape (128 bytes). Only geometric fields
+// are populated by DeferredLighter; material_id / _data_addr / texture_id
+// stay zero because shadow rays don't consult them.
+struct RtShape {
+    vec4 origin;
+    vec4 u_axis;
+    vec4 v_axis;
+    vec4 w_axis;
+    vec4 color;
+    vec4 params;
+    uint material_id;
+    uint texture_id;
+    uint shape_param;
+    uint shape_kind;
+    uint64_t material_data_addr;
+    uint64_t _tail_pad;
+};
+
+layout(buffer_reference, std430) readonly buffer ShapeList { RtShape data[]; };
+
 layout(push_constant) uniform PC {
-    uint output_image_id;
-    uint albedo_tex_id;
-    uint normal_tex_id;
-    uint worldpos_tex_id;
-    uint material_tex_id;
-    uint width;
-    uint height;
-    uint light_count;
-    LightList lights;
+    vec4 cam_pos;              // offset 0
+    uint output_image_id;      // 16
+    uint albedo_tex_id;        // 20
+    uint normal_tex_id;        // 24
+    uint worldpos_tex_id;      // 28
+    uint material_tex_id;      // 32
+    uint width;                // 36
+    uint height;               // 40
+    uint light_count;          // 44
+    uint env_texture_id;       // 48
+    uint _env_pad;             // 52
+    uint shape_count;          // 56
+    uint _shape_pad;           // 60
+    LightList lights;          // 64
+    _EnvParamsBuf env_params;  // 72
+    _InvVpBuf inv_vp_buf;      // 80
+    ShapeList shapes;          // 88
 } pc;
+
+// ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
+// Extract to a shared include when a second shadow technique arrives
+// and deferred needs composed dispatch.
+struct Ray { vec3 origin; vec3 dir; };
+struct RayHit { float t; vec2 uv; vec3 normal; uint shape_index; };
+
+bool intersect_rect_d(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 u_axis = shape.u_axis.xyz;
+    vec3 v_axis = shape.v_axis.xyz;
+    vec3 origin = shape.origin.xyz;
+    float radius = shape.params.x;
+    vec3 normal = cross(u_axis, v_axis);
+    float nlen2 = dot(normal, normal);
+    if (nlen2 < 1e-12) return false;
+    float inv_nlen = inversesqrt(nlen2);
+    vec3 n = normal * inv_nlen;
+    float denom = dot(ray.dir, n);
+    if (abs(denom) < 1e-6) return false;
+    float t = dot(origin - ray.origin, n) / denom;
+    if (t <= 0.0) return false;
+    vec3 p = ray.origin + t * ray.dir;
+    vec3 local = p - origin;
+    float u_len2 = dot(u_axis, u_axis);
+    float v_len2 = dot(v_axis, v_axis);
+    float s = dot(local, u_axis) / u_len2;
+    float tt = dot(local, v_axis) / v_len2;
+    if (s < 0.0 || s > 1.0 || tt < 0.0 || tt > 1.0) return false;
+    if (radius > 0.0) {
+        float u_len = sqrt(u_len2);
+        float v_len = sqrt(v_len2);
+        vec2 size_w = vec2(u_len, v_len);
+        vec2 p_w = vec2(s * u_len, tt * v_len);
+        vec2 half_size = size_w * 0.5;
+        vec2 centered = p_w - half_size;
+        vec2 d = abs(centered) - half_size + radius;
+        float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+        if (sdf > 0.0) return false;
+    }
+    hit.t = t;
+    hit.uv = vec2(s, tt);
+    hit.normal = n;
+    return true;
+}
+
+bool intersect_cube_d(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 U = shape.u_axis.xyz;
+    vec3 V = shape.v_axis.xyz;
+    vec3 W = shape.w_axis.xyz;
+    float u_len2 = dot(U, U);
+    float v_len2 = dot(V, V);
+    float w_len2 = dot(W, W);
+    if (u_len2 < 1e-12 || v_len2 < 1e-12 || w_len2 < 1e-12) return false;
+    vec3 rel = ray.origin - shape.origin.xyz;
+    vec3 ro_l = vec3(dot(rel, U) / u_len2, dot(rel, V) / v_len2, dot(rel, W) / w_len2);
+    vec3 rd_l = vec3(dot(ray.dir, U) / u_len2, dot(ray.dir, V) / v_len2, dot(ray.dir, W) / w_len2);
+    vec3 inv_d = 1.0 / rd_l;
+    vec3 t0 = (vec3(0.0) - ro_l) * inv_d;
+    vec3 t1 = (vec3(1.0) - ro_l) * inv_d;
+    vec3 tmin_v = min(t0, t1);
+    vec3 tmax_v = max(t0, t1);
+    float tmin = max(max(tmin_v.x, tmin_v.y), tmin_v.z);
+    float tmax = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
+    if (tmax < max(tmin, 0.0)) return false;
+    float t = tmin > 0.0 ? tmin : tmax;
+    if (t <= 0.0) return false;
+    hit.t = t;
+    hit.uv = vec2(0.0);
+    hit.normal = vec3(0.0, 0.0, 1.0);
+    return true;
+}
+
+bool intersect_sphere_d(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 center = shape.origin.xyz
+                + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
+    float radius = shape.params.x;
+    if (radius <= 0.0) return false;
+    vec3 oc = ray.origin - center;
+    float a = dot(ray.dir, ray.dir);
+    float b = dot(oc, ray.dir);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - a * c;
+    if (disc < 0.0) return false;
+    float sq = sqrt(disc);
+    float t1 = (-b - sq) / a;
+    float t2 = (-b + sq) / a;
+    float t = t1 > 0.0 ? t1 : t2;
+    if (t <= 0.0) return false;
+    hit.t = t;
+    hit.uv = vec2(0.0);
+    hit.normal = normalize((ray.origin + t * ray.dir) - center);
+    return true;
+}
+
+bool intersect_shape_d(Ray ray, RtShape shape, out RayHit hit)
+{
+    if (shape.shape_kind == 1u) return intersect_cube_d(ray, shape, hit);
+    if (shape.shape_kind == 2u) return intersect_sphere_d(ray, shape, hit);
+    return intersect_rect_d(ray, shape, hit);
+}
+
+bool trace_closest_hit_d(Ray ray, out RayHit hit)
+{
+    hit.t = 1e30;
+    hit.shape_index = 0xffffffffu;
+    for (uint i = 0u; i < pc.shape_count; ++i) {
+        RtShape s = pc.shapes.data[i];
+        RayHit h;
+        if (intersect_shape_d(ray, s, h)) {
+            if (h.t < hit.t) { hit = h; hit.shape_index = i; }
+        }
+    }
+    return hit.shape_index != 0xffffffffu;
+}
+
+// RT shadow: one occlusion ray against the scene's shape buffer.
+// Mirrors rt_shadow.cpp's velk_shadow_rt.
+float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
+{
+    Light light = pc.lights.data[light_idx];
+    vec3 L;
+    float t_max;
+    if (light.flags.x == 0u) {
+        L = -light.direction.xyz;
+        t_max = 1e30;
+    } else {
+        vec3 to_light = light.position.xyz - world_pos;
+        t_max = length(to_light);
+        if (t_max < 1e-6) return 1.0;
+        L = to_light / t_max;
+    }
+    vec3 n = normalize(world_normal);
+    Ray r;
+    r.origin = world_pos + n * 0.5;
+    r.dir    = L;
+    RayHit hit;
+    if (!trace_closest_hit_d(r, hit)) return 1.0;
+    return (hit.t >= t_max) ? 1.0 : 0.0;
+}
+
+// Shadow dispatch. Currently only tech_id = 1 (rt_shadow) is wired; any
+// other tech falls through to fully-lit. Extend via composition when
+// more techniques land.
+float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_normal)
+{
+    if (tech_id == 1u) return velk_shadow_rt(light_idx, world_pos, world_normal);
+    return 1.0;
+}
+
+// Equirect env sample along rd, applying rotation and intensity.
+// Returns vec3(0) when the view has no environment.
+vec3 env_miss_color(vec3 rd)
+{
+    if (pc.env_texture_id == 0u) return vec3(0.0);
+    const float PI = 3.14159265358979323846;
+    vec4 params = pc.env_params.params;
+    float c = cos(params.y);
+    float s = sin(params.y);
+    vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
+    float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
+    float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
+    return velk_texture(pc.env_texture_id, vec2(u, v)).rgb * params.x;
+}
+
+// GGX normal distribution, Smith geometry, Schlick Fresnel. Same forms
+// used by the RT path's velk_fill_standard.
+float ggx_d(float NdotH, float a)
+{
+    float a2 = a * a;
+    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / max(3.14159265358979323846 * denom * denom, 1e-6);
+}
+
+float smith_g1(float NdotX, float a)
+{
+    float k = (a + 1.0); k = k * k * 0.125; // (a+1)^2 / 8, Schlick-GGX for direct
+    return NdotX / max(NdotX * (1.0 - k) + k, 1e-6);
+}
+
+float smith_g(float NdotV, float NdotL, float a)
+{
+    return smith_g1(NdotV, a) * smith_g1(NdotL, a);
+}
+
+vec3 fresnel_schlick(float cos_theta, vec3 F0)
+{
+    return F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
 
 void main()
 {
@@ -175,14 +397,31 @@ void main()
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-    vec4 albedo    = texture(velk_textures[nonuniformEXT(pc.albedo_tex_id)], uv);
-    vec3 world_n   = texture(velk_textures[nonuniformEXT(pc.normal_tex_id)], uv).xyz;
-    vec3 world_pos = texture(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], uv).xyz;
-    vec4 mat       = texture(velk_textures[nonuniformEXT(pc.material_tex_id)], uv);
+    vec4 albedo    = velk_texture(pc.albedo_tex_id, uv);
+    vec3 world_n   = velk_texture(pc.normal_tex_id, uv).xyz;
+    vec3 world_pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
+    vec4 mat       = velk_texture(pc.material_tex_id, uv);
+
+    // Sky path: pixels with no G-buffer coverage (cleared to zero,
+    // including normal) reconstruct a world-space view ray and sample
+    // the environment. Falls back to black when the view has no env.
+    if (dot(world_n, world_n) < 1e-6) {
+        vec2 ndc = uv * 2.0 - 1.0;
+        mat4 inv_vp = pc.inv_vp_buf.inv_vp;
+        vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
+        vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
+        vec3 near_w = near_h.xyz / near_h.w;
+        vec3 far_w  = far_h.xyz  / far_h.w;
+        vec3 rd = normalize(far_w - near_w);
+        vec3 sky = env_miss_color(rd);
+        imageStore(gStorageImages[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
+        return;
+    }
 
     // LightingMode encoded in mat.b (0 = Unlit, 1 = Standard, ...).
     uint lighting_mode = uint(mat.b * 255.0 + 0.5);
-    float metallic  = mat.r;
+    float metallic  = clamp(mat.r, 0.0, 1.0);
+    float roughness = clamp(mat.g, 0.04, 1.0);
 
     vec3 rgb;
     if (lighting_mode == 0u) {
@@ -190,13 +429,21 @@ void main()
         rgb = albedo.rgb;
     } else {
         vec3 N = normalize(world_n);
-        vec3 direct = vec3(0.0);
+        vec3 V = normalize(pc.cam_pos.xyz - world_pos);
+        float NdotV = max(dot(N, V), 0.0);
+
+        vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
+        float a = roughness * roughness;
+
+        // Direct lighting: sum Lambertian diffuse + analytic GGX specular
+        // per light. Fresnel evaluated at the half-vector.
+        vec3 direct_diffuse  = vec3(0.0);
+        vec3 direct_specular = vec3(0.0);
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = pc.lights.data[i];
             vec3 L;
             float atten = 1.0;
             if (light.flags.x == 0u) {
-                // Directional
                 L = -light.direction.xyz;
             } else {
                 vec3 to_light = light.position.xyz - world_pos;
@@ -206,17 +453,41 @@ void main()
                 float t = clamp(1.0 - dist / range, 0.0, 1.0);
                 atten = t * t;
                 if (light.flags.x == 2u) {
-                    // Spot cone falloff.
                     float cos_a = dot(-L, light.direction.xyz);
                     atten *= smoothstep(light.params.z, light.params.y, cos_a);
                 }
             }
             float NdotL = max(dot(N, L), 0.0);
             if (NdotL <= 0.0 || atten <= 0.0) continue;
-            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
-            direct += albedo.rgb * (1.0 - metallic) * NdotL * radiance;
+            float shadow = velk_eval_shadow(light.flags.y, i, world_pos, N);
+            if (shadow <= 0.0) continue;
+            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
+
+            direct_diffuse += albedo.rgb * NdotL * radiance;
+
+            vec3 H = normalize(L + V);
+            float NdotH = max(dot(N, H), 0.0);
+            float VdotH = max(dot(V, H), 0.0);
+            float D = ggx_d(NdotH, a);
+            float G = smith_g(NdotV, NdotL, roughness);
+            vec3  F = fresnel_schlick(VdotH, F0);
+            vec3 spec = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6);
+            direct_specular += spec * NdotL * radiance;
         }
-        rgb = direct;
+
+        // Env lighting: single-sample approximation. Diffuse reads along
+        // N; specular reads along the mirror reflection (no roughness
+        // prefilter yet, so rough surfaces get a sharper reflection than
+        // physically correct).
+        vec3 env_diffuse  = env_miss_color(N);
+        vec3 env_specular = env_miss_color(reflect(-V, N));
+        vec3 F_env = fresnel_schlick(NdotV, F0);
+        vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
+
+        rgb = direct_diffuse * (1.0 - metallic)
+            + direct_specular
+            + kD_env * albedo.rgb * env_diffuse
+            + F_env * env_specular;
     }
 
     imageStore(gStorageImages[nonuniformEXT(pc.output_image_id)], coord, vec4(rgb, albedo.a));
@@ -244,9 +515,7 @@ void main()
 
 [[maybe_unused]] constexpr string_view deferred_composite_fragment_src = R"(
 #version 450
-#extension GL_EXT_nonuniform_qualifier : require
-
-layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
+#include "velk.glsl"
 
 layout(push_constant) uniform PC {
     uint src_tex_id;
@@ -257,7 +526,7 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    frag_color = texture(velk_textures[nonuniformEXT(pc.src_tex_id)], v_uv);
+    frag_color = velk_texture(pc.src_tex_id, v_uv);
 }
 )";
 
@@ -269,13 +538,11 @@ void main()
 // all material snippets and before main.
 [[maybe_unused]] constexpr string_view rt_compute_prelude_src = R"(
 #version 450
-#extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
 
 struct RtShape {
@@ -627,7 +894,7 @@ vec3 env_miss_color(vec3 rd) {
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
     float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
-    return texture(velk_textures[nonuniformEXT(pc.env.y)], vec2(u, v)).rgb * d.params.x;
+    return velk_texture(pc.env.y, vec2(u, v)).rgb * d.params.x;
 }
 )";
 

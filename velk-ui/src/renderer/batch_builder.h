@@ -96,6 +96,14 @@ public:
     /** @brief Clears all cached data. */
     void clear() { element_cache_.clear(); render_target_passes_.clear(); }
 
+    /**
+     * @brief Resets per-frame state. Currently clears the material
+     *        address cache used by build_draw_calls so each frame
+     *        uploads material params once regardless of how many
+     *        batches reference the same material.
+     */
+    void reset_frame_state() { frame_material_addrs_.clear(); }
+
     /** @brief Returns the element cache (for resource upload iteration). */
     const std::unordered_map<IElement*, ElementCache>& element_cache() const { return element_cache_; }
 
@@ -106,8 +114,15 @@ public:
     vector<RenderTargetPassData>& render_target_passes() { return render_target_passes_; }
 
 private:
+    // Writes a material's params block to the frame buffer on first
+    // sight this frame and returns its GPU address. Subsequent calls
+    // for the same IProgram return the cached address, so a material
+    // shared by N batches only pays one upload.
+    uint64_t write_material_once(IProgram* prog, FrameDataManager& frame_data);
+
     std::unordered_map<IElement*, ElementCache> element_cache_;
     vector<RenderTargetPassData> render_target_passes_;
+    std::unordered_map<IProgram*, uint64_t> frame_material_addrs_;
 };
 
 } // namespace velk::ui

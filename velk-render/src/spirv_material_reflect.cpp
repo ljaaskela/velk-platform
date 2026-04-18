@@ -34,6 +34,9 @@ constexpr uint32_t SpvDecorationOffset = 35;
 //   instance_count (uint, 4 bytes)
 //   _pad0 (uint, 4 bytes)
 //   _pad1 (uint, 4 bytes)
+// After the header a single `material` buffer_reference slot points at
+// the per-material params struct; reflection descends into that struct
+// to enumerate the user-facing inputs.
 constexpr uint32_t kHeaderFieldCount = 6;
 constexpr uint32_t kHeaderSize = 32;
 
@@ -124,6 +127,7 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
         member_offsets; // id -> (member_idx -> offset)
     std::unordered_map<uint32_t, TypeInfo> type_infos;
     std::unordered_map<uint32_t, std::vector<uint32_t>> struct_members; // struct_id -> member type ids
+    std::unordered_map<uint32_t, uint32_t> pointer_targets;           // pointer_id -> pointee_id
 
     size_t pos = 5; // skip header
     while (pos < word_count) {
@@ -228,6 +232,15 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
             }
             break;
         }
+        case SpvOpTypePointer: {
+            // id, storage_class, pointee_type_id
+            if (length >= 4) {
+                uint32_t id = spirv[pos + 1];
+                uint32_t pointee = spirv[pos + 3];
+                pointer_targets[id] = pointee;
+            }
+            break;
+        }
         default:
             break;
         }
@@ -253,38 +266,52 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
         return {};
     }
 
-    auto& members = sit->second;
-    auto& names = member_names[draw_data_id];
-    auto& offsets = member_offsets[draw_data_id];
+    auto& dd_members = sit->second;
+    auto& dd_names = member_names[draw_data_id];
 
-    // Skip header fields and extract material parameters
+    // After the header there must be a single buffer_reference pointer
+    // field (conventionally named `material`) that points at the
+    // per-material params struct. Find it, follow the pointer, and
+    // enumerate that struct's members as the shader inputs.
+    uint32_t params_struct_id = 0;
+    for (uint32_t i = kHeaderFieldCount; i < static_cast<uint32_t>(dd_members.size()); ++i) {
+        auto nit = dd_names.find(i);
+        if (nit == dd_names.end()) continue;
+        const string& name = nit->second;
+        if (!name.empty() && name[0] == '_') continue; // padding
+        auto pit = pointer_targets.find(dd_members[i]);
+        if (pit == pointer_targets.end()) continue;
+        if (struct_members.find(pit->second) == struct_members.end()) continue;
+        params_struct_id = pit->second;
+        break;
+    }
+
     vector<ShaderParam> params;
+    if (params_struct_id == 0) {
+        return params;
+    }
 
-    for (uint32_t i = kHeaderFieldCount; i < static_cast<uint32_t>(members.size()); ++i) {
-        auto nit = names.find(i);
-        if (nit == names.end()) {
+    auto& mat_members = struct_members[params_struct_id];
+    auto& mat_names = member_names[params_struct_id];
+    auto& mat_offsets = member_offsets[params_struct_id];
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(mat_members.size()); ++i) {
+        auto nit = mat_names.find(i);
+        if (nit == mat_names.end()) {
             continue;
         }
 
         const string& name = nit->second;
-
-        // Skip padding fields
         if (!name.empty() && name[0] == '_') {
+            continue; // padding
+        }
+
+        auto oit = mat_offsets.find(i);
+        if (oit == mat_offsets.end()) {
             continue;
         }
 
-        auto oit = offsets.find(i);
-        if (oit == offsets.end()) {
-            continue;
-        }
-
-        uint32_t member_offset = oit->second;
-        if (member_offset < kHeaderSize) {
-            continue;
-        }
-
-        // Resolve the member type (may be a pointer type for buffer_reference)
-        uint32_t member_type_id = members[i];
+        uint32_t member_type_id = mat_members[i];
         auto tit = type_infos.find(member_type_id);
         if (tit == type_infos.end()) {
             continue;
@@ -299,7 +326,7 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
         ShaderParam param;
         param.name = string(name.c_str(), name.size());
         param.type_uid = uid;
-        param.offset = member_offset - kHeaderSize;
+        param.offset = oit->second;
         param.size = type_info_size(ti.kind);
         params.push_back(std::move(param));
     }

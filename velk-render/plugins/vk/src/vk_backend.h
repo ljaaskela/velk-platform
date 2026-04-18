@@ -157,6 +157,12 @@ private:
         int height = 0;
         PixelFormat format = PixelFormat::RGBA8;
         bool is_renderable = false;
+        // Current image layout for cross-pass operations (e.g. blits).
+        // Storage textures land at GENERAL after their initial transition;
+        // render-target attachments sit at SHADER_READ_ONLY_OPTIMAL between
+        // passes via the render pass finalLayout. blit_to_surface saves,
+        // uses, and restores this value so it works for both kinds.
+        VkImageLayout current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         VkRenderPass render_pass = VK_NULL_HANDLE;
         VkRenderPass load_render_pass = VK_NULL_HANDLE;

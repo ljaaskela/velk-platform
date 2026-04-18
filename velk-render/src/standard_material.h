@@ -2,6 +2,7 @@
 #define VELK_RENDER_STANDARD_MATERIAL_H
 
 #include <velk-render/ext/material.h>
+#include <velk-render/interface/intf_raster_shader.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-render/interface/intf_standard.h>
@@ -22,7 +23,7 @@ namespace velk::impl {
  *   final    = kD * diffuse + F * specular
  * Fresnel-Schlick blends between them.
  */
-class StandardMaterial : public ::velk::ext::Material<StandardMaterial, IStandard, IShaderSnippet>
+class StandardMaterial : public ::velk::ext::Material<StandardMaterial, IStandard, IShaderSnippet, IRasterShader>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::StandardMaterial, "StandardMaterial");
@@ -33,6 +34,8 @@ public:
 
     string_view get_snippet_fn_name() const override;
     string_view get_snippet_source() const override;
+
+    ShaderSource get_raster_source(IRasterShader::Target t) const override;
 };
 
 } // namespace velk::impl

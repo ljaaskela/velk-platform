@@ -119,7 +119,7 @@ int main(int /*argc*/, char* /*argv*/[])
     velk::ui::OrbitTrait orbit;
     if (camera_3d) {
         velk::ui::Camera(camera_3d.find_trait<velk::ICamera>())
-            .set_render_path(velk::RenderPath::RayTrace);
+            .set_render_path(velk::RenderPath::Deferred);
         app.add_view(window, camera_3d, {0, 0, 1.f, 1.f});
         orbit = velk::ui::OrbitTrait(camera_3d.find_trait<velk::ui::IOrbit>());
     } else {
@@ -254,6 +254,27 @@ int main(int /*argc*/, char* /*argv*/[])
     tick();
     app.update();
     app.present();
+
+    // First frame has rendered: G-buffer is allocated and its bindless
+    // ids are stable. Register a column of debug overlays on the right
+    // edge, one per attachment (albedo / normal / worldpos / material).
+    if (auto renderer = app.renderer()) {
+        if (camera_3d) {
+            auto window_surface = window.surface();
+            constexpr float kThumbW = 220.f;
+            const float col_x = static_cast<float>(kWidth) - kThumbW;
+            const float thumb_h = static_cast<float>(kHeight) / 4.f;
+            for (uint32_t i = 0; i < 4; ++i) {
+                velk::TextureId tid =
+                    renderer->get_gbuffer_attachment(camera_3d, window_surface, i);
+                if (tid != 0) {
+                    renderer->add_debug_overlay(
+                        window_surface, tid,
+                        {col_x, i * thumb_h, kThumbW, thumb_h});
+                }
+            }
+        }
+    }
 
     while (app.poll()) {
         tick();

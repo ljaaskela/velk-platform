@@ -2,13 +2,13 @@
 
 #include "default_ui_shaders.h"
 #include "env_helper.h"
+#include "scene_collector.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 #include <velk/string.h>
 
-#include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_program.h>
@@ -16,9 +16,7 @@
 #include <velk-render/interface/intf_shadow_technique.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_camera.h>
-#include <velk-render/interface/intf_light.h>
 #include <velk-ui/interface/intf_environment.h>
-#include <velk-ui/interface/intf_visual.h>
 
 #include <algorithm>
 #include <cmath>
@@ -276,262 +274,95 @@ void RayTracer::build_passes(ViewEntry& entry,
         cam_pz = es->world_matrix(2, 3);
     }
 
-    struct RtShape {
-        float origin[4];     // xyz world corner
-        float u_axis[4];     // xyz = local x dir * width
-        float v_axis[4];     // xyz = local y dir * height
-        float w_axis[4];     // xyz = local z dir * depth (cube only)
-        float color[4];
-        float params[4];     // x = corner radius (rect) or sphere radius
-        uint32_t material_id;
-        uint32_t texture_id;
-        uint32_t shape_param;
-        uint32_t shape_kind; // 0 = rect, 1 = cube, 2 = sphere
-        uint64_t material_data_addr;
-        uint64_t _tail_pad;
-    };
-    static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
-
     vector<RtShape> shapes;
     shapes.reserve(scene_state.visual_list.size());
     frame_materials_.clear();
 
-    for (auto& ve : scene_state.visual_list) {
-        if (ve.type != VisualEntry::Element || !ve.element) continue;
-        auto es = read_state<IElement>(ve.element);
-        if (!es) continue;
-        auto* storage = interface_cast<IObjectStorage>(ve.element);
-        if (!storage) continue;
-        float ox = es->world_matrix(0, 3);
-        float oy = es->world_matrix(1, 3);
-        float oz = es->world_matrix(2, 3);
-        float ux = es->world_matrix(0, 0);
-        float uy = es->world_matrix(1, 0);
-        float uz = es->world_matrix(2, 0);
-        float vx = es->world_matrix(0, 1);
-        float vy = es->world_matrix(1, 1);
-        float vz = es->world_matrix(2, 1);
-        float wx = es->world_matrix(0, 2);
-        float wy = es->world_matrix(1, 2);
-        float wz = es->world_matrix(2, 2);
-        float ew = es->size.width;
-        float eh = es->size.height;
-        float ed = es->size.depth;
-        for (size_t j = 0; j < storage->attachment_count(); ++j) {
-            auto* visual = interface_cast<IVisual>(storage->get_attachment(j));
-            if (!visual) continue;
-            auto vs = read_state<IVisual>(visual);
-            if (!vs) continue;
+    // Cache of paint-program -> (material_id, material_data_addr). The
+    // same visual may emit multiple rect draw entries; we only want to
+    // register + write each material once per frame.
+    struct MaterialEntry {
+        IProgram* prog;
+        uint32_t mat_id;
+        uint64_t mat_addr;
+    };
+    vector<MaterialEntry> material_cache;
 
-            uint32_t mat_id = 0;
-            uint64_t mat_addr = 0;
-            if (vs->paint) {
-                auto prog_ptr = vs->paint.get<IProgram>();
-                IProgram* prog = prog_ptr.get();
-                mat_id = register_material(prog, ctx);
-                if (mat_id == 0) {
-                    continue;
-                }
-                auto* dd = interface_cast<IDrawData>(prog);
-                size_t sz = dd ? dd->get_draw_data_size() : 0;
-                if (sz > 0) {
-                    void* scratch = std::malloc(sz);
-                    if (scratch) {
-                        std::memset(scratch, 0, sz);
-                        if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
-                            mat_addr = ctx.frame_buffer->write(scratch, sz);
+    enumerate_scene_shapes(scene_state, [&](ShapeSite& site) {
+        uint32_t mat_id = 0;
+        uint64_t mat_addr = 0;
+        if (site.paint) {
+            MaterialEntry* entry = nullptr;
+            for (auto& me : material_cache) {
+                if (me.prog == site.paint) { entry = &me; break; }
+            }
+            if (!entry) {
+                uint32_t id = register_material(site.paint, ctx);
+                if (id == 0) return;
+                uint64_t addr = 0;
+                if (auto* dd = interface_cast<IDrawData>(site.paint)) {
+                    size_t sz = dd->get_draw_data_size();
+                    if (sz > 0) {
+                        void* scratch = std::malloc(sz);
+                        if (scratch) {
+                            std::memset(scratch, 0, sz);
+                            if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                                addr = ctx.frame_buffer->write(scratch, sz);
+                            }
+                            std::free(scratch);
                         }
-                        std::free(scratch);
                     }
                 }
+                material_cache.push_back({site.paint, id, addr});
+                entry = &material_cache.back();
                 bool seen = false;
-                for (auto id : frame_materials_) {
-                    if (id == mat_id) { seen = true; break; }
+                for (auto fm : frame_materials_) {
+                    if (fm == id) { seen = true; break; }
                 }
-                if (!seen) frame_materials_.push_back(mat_id);
+                if (!seen) frame_materials_.push_back(id);
             }
+            mat_id = entry->mat_id;
+            mat_addr = entry->mat_addr;
+        }
 
-            auto* analytic_shape = interface_cast<IAnalyticShape>(visual);
-            uint32_t shape_kind = analytic_shape ? analytic_shape->get_shape_kind() : 0;
-
-            // Cube and sphere have no raster draw entries; we emit a single
-            // shape directly from the element's 3D transform + size.
-            if (shape_kind != 0) {
-                RtShape s{};
-                s.origin[0] = ox; s.origin[1] = oy; s.origin[2] = oz;
-                s.u_axis[0] = ux * ew; s.u_axis[1] = uy * ew; s.u_axis[2] = uz * ew;
-                s.v_axis[0] = vx * eh; s.v_axis[1] = vy * eh; s.v_axis[2] = vz * eh;
-                s.w_axis[0] = wx * ed; s.w_axis[1] = wy * ed; s.w_axis[2] = wz * ed;
-                s.color[0] = vs->color.r;
-                s.color[1] = vs->color.g;
-                s.color[2] = vs->color.b;
-                s.color[3] = vs->color.a;
-                if (shape_kind == 2) {
-                    // Sphere inscribed in AABB: radius = half of min extent.
-                    s.params[0] = std::min({ew, eh, ed}) * 0.5f;
+        uint32_t tex_id = 0;
+        if (site.draw_entry && site.draw_entry->texture_key != 0) {
+            auto* surf = reinterpret_cast<ISurface*>(
+                static_cast<uintptr_t>(site.draw_entry->texture_key));
+            tex_id = ctx.resources->find_texture(surf);
+            // RTT textures aren't tracked in resources_; their bindless
+            // id lives on the IRenderTarget. Fall back to that, mirroring
+            // what batch_builder does for the raster path.
+            if (tex_id == 0) {
+                uint64_t rt_id = get_render_target_id(surf);
+                if (rt_id != 0) {
+                    tex_id = static_cast<uint32_t>(rt_id);
                 }
-                s.material_id = mat_id;
-                s.material_data_addr = mat_addr;
-                s.shape_kind = shape_kind;
-                shapes.push_back(s);
-                continue;
-            }
-
-            // Rect path: iterate draw entries (one shape per entry).
-            float radius = 0.f;
-            if (analytic_shape &&
-                !analytic_shape->get_shape_intersect_source().empty()) {
-                radius = std::min(std::min(ew, eh) * 0.5f, 12.f);
-            }
-
-            rect local_rect{0, 0, ew, eh};
-            auto entries = visual->get_draw_entries(local_rect);
-            for (auto& dentry : entries) {
-                // Instance layout (instance_types.h):
-                //   [ 0..63 ] mat4 world_matrix (raster only; ignored here
-                //             because RT already has world axes from the
-                //             element's world_matrix above)
-                //   [64..71] vec2 pos
-                //   [72..79] vec2 size
-                //   [80..95] vec4 color
-                //   [96..99] uint glyph_index   (TextInstance only)
-                constexpr size_t kPosOff = 64;
-                constexpr size_t kSizeOff = 72;
-                constexpr size_t kColorOff = 80;
-                constexpr size_t kGlyphIdxOff = 96;
-                if (dentry.instance_size < kSizeOff + 8) continue;
-                float local_px = 0, local_py = 0, sz_w = 0, sz_h = 0;
-                std::memcpy(&local_px, dentry.instance_data + kPosOff, 4);
-                std::memcpy(&local_py, dentry.instance_data + kPosOff + 4, 4);
-                std::memcpy(&sz_w, dentry.instance_data + kSizeOff, 4);
-                std::memcpy(&sz_h, dentry.instance_data + kSizeOff + 4, 4);
-
-                float cr = 0, cg = 0, cb = 0, ca = 1;
-                if (dentry.instance_size >= kColorOff + 16) {
-                    std::memcpy(&cr, dentry.instance_data + kColorOff, 4);
-                    std::memcpy(&cg, dentry.instance_data + kColorOff + 4, 4);
-                    std::memcpy(&cb, dentry.instance_data + kColorOff + 8, 4);
-                    std::memcpy(&ca, dentry.instance_data + kColorOff + 12, 4);
-                } else {
-                    cr = vs->color.r; cg = vs->color.g;
-                    cb = vs->color.b; ca = vs->color.a;
-                }
-
-                uint32_t shape_param = 0;
-                if (dentry.instance_size >= kGlyphIdxOff + 4) {
-                    std::memcpy(&shape_param, dentry.instance_data + kGlyphIdxOff, 4);
-                }
-
-                uint32_t tex_id = 0;
-                if (dentry.texture_key != 0) {
-                    auto* surf = reinterpret_cast<ISurface*>(
-                        static_cast<uintptr_t>(dentry.texture_key));
-                    tex_id = ctx.resources->find_texture(surf);
-                }
-
-                float sx = ox + ux * local_px + vx * local_py;
-                float sy = oy + uy * local_px + vy * local_py;
-                float sz = oz + uz * local_px + vz * local_py;
-
-                RtShape s{};
-                s.origin[0] = sx;  s.origin[1] = sy;  s.origin[2] = sz;
-                s.u_axis[0] = ux * sz_w; s.u_axis[1] = uy * sz_w; s.u_axis[2] = uz * sz_w;
-                s.v_axis[0] = vx * sz_h; s.v_axis[1] = vy * sz_h; s.v_axis[2] = vz * sz_h;
-                s.color[0] = cr; s.color[1] = cg; s.color[2] = cb; s.color[3] = ca;
-                s.params[0] = radius;
-                s.material_id = mat_id;
-                s.texture_id = tex_id;
-                s.shape_param = shape_param;
-                s.material_data_addr = mat_addr;
-                shapes.push_back(s);
             }
         }
-    }
 
-    // Enumerate scene lights. Structure mirrors GLSL `struct Light` in
-    // the compute prelude:
-    //   uvec4 flags          x = LightType, y = shadow_tech_id, zw = _
-    //   vec4  position       xyz = world position (point / spot)
-    //   vec4  direction      xyz = world forward axis (dir / spot)
-    //   vec4  color_intensity rgb = colour, a = intensity
-    //   vec4  params         x = range, y = cos(inner), z = cos(outer), w = _
-    struct GpuLight {
-        uint32_t flags[4];
-        float    position[4];
-        float    direction[4];
-        float    color_intensity[4];
-        float    params[4];
-    };
-    static_assert(sizeof(GpuLight) == 80, "GpuLight layout mismatch");
+        site.geometry.material_id = mat_id;
+        site.geometry.material_data_addr = mat_addr;
+        site.geometry.texture_id = tex_id;
+        shapes.push_back(site.geometry);
+    });
 
     vector<GpuLight> lights;
     frame_shadow_techs_.clear();
-
-    for (auto& ve : scene_state.visual_list) {
-        if (ve.type != VisualEntry::Element || !ve.element) continue;
-        auto es = read_state<IElement>(ve.element);
-        if (!es) continue;
-        auto* storage = interface_cast<IObjectStorage>(ve.element);
-        if (!storage) continue;
-
-        for (size_t j = 0; j < storage->attachment_count(); ++j) {
-            auto* light = interface_cast<ILight>(storage->get_attachment(j));
-            if (!light) continue;
-            auto ls = read_state<ILight>(light);
-            if (!ls) continue;
-
-            // Find a shadow technique attached to this light (first wins).
-            IShadowTechnique* shadow_tech = nullptr;
-            auto* light_obj = interface_cast<IObject>(light);
-            if (auto* light_storage = interface_cast<IObjectStorage>(light_obj)) {
-                for (size_t k = 0; k < light_storage->attachment_count(); ++k) {
-                    if (auto* st = interface_cast<IShadowTechnique>(
-                            light_storage->get_attachment(k))) {
-                        shadow_tech = st;
-                        break;
-                    }
+    enumerate_scene_lights(scene_state, [&](LightSite& site) {
+        if (auto* tech = find_shadow_technique(site.light)) {
+            uint32_t id = register_shadow_tech(tech, ctx);
+            site.base.flags[1] = id;
+            if (id != 0) {
+                bool seen = false;
+                for (auto fs : frame_shadow_techs_) {
+                    if (fs == id) { seen = true; break; }
                 }
+                if (!seen) frame_shadow_techs_.push_back(id);
             }
-            uint32_t shadow_tech_id = 0;
-            if (shadow_tech) {
-                shadow_tech_id = register_shadow_tech(shadow_tech, ctx);
-                if (shadow_tech_id != 0) {
-                    bool seen = false;
-                    for (auto id : frame_shadow_techs_) {
-                        if (id == shadow_tech_id) { seen = true; break; }
-                    }
-                    if (!seen) frame_shadow_techs_.push_back(shadow_tech_id);
-                }
-            }
-
-            GpuLight g{};
-            g.flags[0] = static_cast<uint32_t>(ls->type);
-            g.flags[1] = shadow_tech_id;
-            // Position = element world translation.
-            g.position[0] = es->world_matrix(0, 3);
-            g.position[1] = es->world_matrix(1, 3);
-            g.position[2] = es->world_matrix(2, 3);
-            // Forward = -Z column of the element's world matrix (same
-            // convention as camera forward); normalise to drop scale.
-            float fx = -es->world_matrix(0, 2);
-            float fy = -es->world_matrix(1, 2);
-            float fz = -es->world_matrix(2, 2);
-            float flen = std::sqrt(fx * fx + fy * fy + fz * fz);
-            if (flen > 1e-6f) { fx /= flen; fy /= flen; fz /= flen; }
-            g.direction[0] = fx;
-            g.direction[1] = fy;
-            g.direction[2] = fz;
-            g.color_intensity[0] = ls->color.r;
-            g.color_intensity[1] = ls->color.g;
-            g.color_intensity[2] = ls->color.b;
-            g.color_intensity[3] = ls->intensity;
-            g.params[0] = ls->range;
-            constexpr float kDegToRad = 0.017453292519943295f;
-            g.params[1] = std::cos(ls->cone_inner_deg * kDegToRad);
-            g.params[2] = std::cos(ls->cone_outer_deg * kDegToRad);
-            lights.push_back(g);
         }
-    }
+        lights.push_back(site.base);
+    });
 
     uint64_t lights_addr = 0;
     if (!lights.empty()) {

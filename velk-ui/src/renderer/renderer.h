@@ -50,6 +50,13 @@ public:
     void present(Frame frame) override;
     void render() override;
     void set_max_frames_in_flight(uint32_t count) override;
+    void add_debug_overlay(const IWindowSurface::Ptr& surface,
+                           TextureId texture_id,
+                           const rect& dst_rect) override;
+    void clear_debug_overlays() override;
+    TextureId get_gbuffer_attachment(const IElement::Ptr& camera_element,
+                                     const IWindowSurface::Ptr& surface,
+                                     uint32_t attachment_index) const override;
     void shutdown() override;
 
 private:
@@ -80,6 +87,13 @@ private:
 
     vector<ViewEntry> views_;
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map_ = nullptr;
+
+    struct DebugOverlay {
+        IWindowSurface::Ptr surface;
+        TextureId texture_id = 0;
+        rect dst_rect{};
+    };
+    vector<DebugOverlay> debug_overlays_;
 
     // Shared visual-command / gpu-resource cache. Both the dirty-resource
     // upload in consume_scenes and the Rasterizer path read from it, so it

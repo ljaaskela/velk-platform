@@ -1,18 +1,22 @@
 #include "deferred_lighter.h"
 
 #include "default_ui_shaders.h"
+#include "env_helper.h"
+#include "scene_collector.h"
 
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <velk-render/gbuffer.h>
+#include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/interface/intf_camera.h>
-#include <velk-render/interface/intf_light.h>
+#include <velk-ui/interface/intf_environment.h>
 
-#include <algorithm>
-#include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace velk::ui {
@@ -38,12 +42,14 @@ void DeferredLighter::build_passes(ViewEntry& entry,
     // Only run for Deferred views. Forward views skip the deferred
     // pipeline entirely; RT views produce their final image through
     // the ray-tracer's compute+blit pipeline.
-    bool is_deferred = false;
+    ICamera* camera = nullptr;
     if (auto* storage = interface_cast<IObjectStorage>(entry.camera_element)) {
-        if (auto* cam = interface_cast<ICamera>(storage->find_attachment<ICamera>())) {
-            if (auto cs = read_state<ICamera>(cam)) {
-                is_deferred = (cs->render_path == RenderPath::Deferred);
-            }
+        camera = interface_cast<ICamera>(storage->find_attachment<ICamera>());
+    }
+    bool is_deferred = false;
+    if (camera) {
+        if (auto cs = read_state<ICamera>(camera)) {
+            is_deferred = (cs->render_path == RenderPath::Deferred);
         }
     }
     if (!is_deferred) return;
@@ -93,75 +99,115 @@ void DeferredLighter::build_passes(ViewEntry& entry,
     auto material_id = ctx.backend->get_render_target_group_attachment(
         entry.gbuffer_group, static_cast<uint32_t>(GBufferAttachment::MaterialParams));
 
-    // Enumerate scene lights into the frame's GPU scratch. Same layout
-    // as RayTracer's GpuLight so the shader's Light struct is shared.
-    // TODO: refactor this walk into a shared helper used by both
-    // RayTracer and DeferredLighter.
-    struct GpuLight {
-        uint32_t flags[4];
-        float    position[4];
-        float    direction[4];
-        float    color_intensity[4];
-        float    params[4];
-    };
-    static_assert(sizeof(GpuLight) == 80, "GpuLight layout mismatch");
-
-    vector<GpuLight> lights;
-    for (auto& ve : scene_state.visual_list) {
-        if (ve.type != VisualEntry::Element || !ve.element) continue;
-        auto es = read_state<IElement>(ve.element);
-        if (!es) continue;
-        auto* storage = interface_cast<IObjectStorage>(ve.element);
-        if (!storage) continue;
-        for (size_t j = 0; j < storage->attachment_count(); ++j) {
-            auto* light = interface_cast<ILight>(storage->get_attachment(j));
-            if (!light) continue;
-            auto ls = read_state<ILight>(light);
-            if (!ls) continue;
-            GpuLight g{};
-            g.flags[0] = static_cast<uint32_t>(ls->type);
-            g.flags[1] = 0; // shadow_tech_id: deferred shadow composer is B.3.d
-            g.position[0] = es->world_matrix(0, 3);
-            g.position[1] = es->world_matrix(1, 3);
-            g.position[2] = es->world_matrix(2, 3);
-            float fx = -es->world_matrix(0, 2);
-            float fy = -es->world_matrix(1, 2);
-            float fz = -es->world_matrix(2, 2);
-            float flen = std::sqrt(fx * fx + fy * fy + fz * fz);
-            if (flen > 1e-6f) { fx /= flen; fy /= flen; fz /= flen; }
-            g.direction[0] = fx;
-            g.direction[1] = fy;
-            g.direction[2] = fz;
-            g.color_intensity[0] = ls->color.r;
-            g.color_intensity[1] = ls->color.g;
-            g.color_intensity[2] = ls->color.b;
-            g.color_intensity[3] = ls->intensity;
-            g.params[0] = ls->range;
-            constexpr float kDegToRad = 0.017453292519943295f;
-            g.params[1] = std::cos(ls->cone_inner_deg * kDegToRad);
-            g.params[2] = std::cos(ls->cone_outer_deg * kDegToRad);
-            lights.push_back(g);
-        }
+    // Shadow-caster geometry: mirror the RT shape buffer so the shadow
+    // ray cast can reuse the intersect_* helpers. Material fields stay
+    // zero because shadow rays don't consult them.
+    vector<RtShape> shapes;
+    shapes.reserve(scene_state.visual_list.size());
+    enumerate_scene_shapes(scene_state, [&](ShapeSite& site) {
+        shapes.push_back(site.geometry);
+    });
+    uint64_t shapes_addr = 0;
+    if (!shapes.empty() && ctx.frame_buffer) {
+        shapes_addr = ctx.frame_buffer->write(shapes.data(), shapes.size() * sizeof(RtShape));
     }
+
+    // Scene lights. Deferred compute only hardcodes rt_shadow (tech
+    // id 1); any other technique maps to 0 (no shadow) rather than
+    // silently calling the wrong function. When a second technique
+    // lands we'll switch to composed dispatch like RayTracer.
+    vector<GpuLight> lights;
+    enumerate_scene_lights(scene_state, [&](LightSite& site) {
+        if (auto* tech = find_shadow_technique(site.light)) {
+            if (tech->get_snippet_fn_name() == string_view("velk_shadow_rt")) {
+                site.base.flags[1] = 1;
+            }
+        }
+        lights.push_back(site.base);
+    });
     uint64_t lights_addr = 0;
     if (!lights.empty() && ctx.frame_buffer) {
         lights_addr = ctx.frame_buffer->write(lights.data(), lights.size() * sizeof(GpuLight));
     }
 
-    struct PushC {
-        uint32_t output_image_id;
-        uint32_t albedo_tex_id;
-        uint32_t normal_tex_id;
-        uint32_t worldpos_tex_id;
-        uint32_t material_tex_id;
-        uint32_t width;
-        uint32_t height;
-        uint32_t light_count;
-        uint64_t lights_addr;
+    // Resolve the environment (equirect HDR + intensity/rotation params).
+    // 0 texture_id means "no environment" — shader's env_miss_color
+    // returns vec3(0) and env terms drop out.
+    uint32_t env_texture_id = 0;
+    uint64_t env_data_addr  = 0;
+    if (camera) {
+        auto resolved = ensure_env_ready(*camera, ctx);
+        if (resolved.env) {
+            env_texture_id = resolved.texture_id;
+            if (auto env_mat = resolved.env->get_material()) {
+                auto env_prog = interface_pointer_cast<IProgram>(env_mat);
+                if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
+                    size_t sz = dd->get_draw_data_size();
+                    if (sz > 0 && ctx.frame_buffer) {
+                        void* scratch = std::malloc(sz);
+                        if (scratch) {
+                            std::memset(scratch, 0, sz);
+                            if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                                env_data_addr = ctx.frame_buffer->write(scratch, sz);
+                            }
+                            std::free(scratch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Camera world position for view direction V in PBR shading.
+    float cam_px = 0.f, cam_py = 0.f, cam_pz = 0.f;
+    mat4 cam_world = mat4::identity();
+    if (auto es = read_state<IElement>(entry.camera_element)) {
+        cam_px = es->world_matrix(0, 3);
+        cam_py = es->world_matrix(1, 3);
+        cam_pz = es->world_matrix(2, 3);
+        cam_world = es->world_matrix;
+    }
+
+    // Inverse view-projection: needed by the compute shader to reconstruct
+    // world-space ray directions for pixels with no G-buffer coverage
+    // (sky path). Written into the frame buffer and referenced by the
+    // shader via buffer_reference to keep push-constant footprint small.
+    uint64_t inv_vp_addr = 0;
+    if (camera && ctx.frame_buffer) {
+        mat4 vp_mat = camera->get_view_projection(
+            cam_world, static_cast<float>(w), static_cast<float>(h));
+        mat4 inv_vp = mat4::inverse(vp_mat);
+        inv_vp_addr = ctx.frame_buffer->write(inv_vp.m, sizeof(inv_vp.m));
+    }
+
+    // Layout mirrors std430 in the shader: vec4 first for 16-byte
+    // alignment, uint64 buffer_references at the tail at 8-byte offsets.
+    VELK_GPU_STRUCT PushC {
+        float    cam_pos[4];       // offset 0
+        uint32_t output_image_id;  // 16
+        uint32_t albedo_tex_id;    // 20
+        uint32_t normal_tex_id;    // 24
+        uint32_t worldpos_tex_id;  // 28
+        uint32_t material_tex_id;  // 32
+        uint32_t width;            // 36
+        uint32_t height;           // 40
+        uint32_t light_count;      // 44
+        uint32_t env_texture_id;   // 48
+        uint32_t _env_pad;         // 52
+        uint32_t shape_count;      // 56
+        uint32_t _shape_pad;       // 60
+        uint64_t lights_addr;      // 64
+        uint64_t env_data_addr;    // 72
+        uint64_t inv_vp_addr;      // 80
+        uint64_t shapes_addr;      // 88
     };
-    static_assert(sizeof(PushC) == 40, "Deferred PushC layout mismatch");
+    static_assert(sizeof(PushC) == 96, "Deferred PushC layout mismatch");
 
     PushC pc{};
+    pc.cam_pos[0] = cam_px;
+    pc.cam_pos[1] = cam_py;
+    pc.cam_pos[2] = cam_pz;
+    pc.cam_pos[3] = 0.f;
     pc.output_image_id = entry.deferred_output_tex;
     pc.albedo_tex_id   = albedo_id;
     pc.normal_tex_id   = normal_id;
@@ -170,25 +216,41 @@ void DeferredLighter::build_passes(ViewEntry& entry,
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
     pc.light_count = static_cast<uint32_t>(lights.size());
+    pc.env_texture_id = env_texture_id;
+    pc.shape_count = static_cast<uint32_t>(shapes.size());
     pc.lights_addr = lights_addr;
+    pc.env_data_addr = env_data_addr;
+    pc.inv_vp_addr = inv_vp_addr;
+    pc.shapes_addr = shapes_addr;
 
-    // Compute pass: read G-buffer, write shaded color to deferred_output_tex.
-    // The composite-to-surface pass is intentionally not emitted here;
-    // the forward raster pass remains the visible output path until
-    // every material ships a proper G-buffer fragment variant (SDF
-    // corners, glyph coverage, gradient math). Re-enabling the
-    // composite then becomes a one-line change; the pipeline source
-    // (deferred_composite_{vertex,fragment}_src) and the cache slot
-    // (composite_pipeline_key_) stay in place for that future switch.
-    RenderPass compute_pass;
-    compute_pass.kind = PassKind::Compute;
-    compute_pass.compute.pipeline = pit->second;
-    compute_pass.compute.groups_x = (w + 7) / 8;
-    compute_pass.compute.groups_y = (h + 7) / 8;
-    compute_pass.compute.groups_z = 1;
-    compute_pass.compute.root_constants_size = sizeof(PushC);
-    std::memcpy(compute_pass.compute.root_constants, &pc, sizeof(PushC));
-    out_passes.push_back(std::move(compute_pass));
+    // Compute + blit: evaluate lighting into deferred_output_tex, then
+    // blit to the surface subrect. Same pattern as RayTracer — a single
+    // ComputeBlit pass keeps the path simple for now. A dedicated
+    // composite render pass (shader source
+    // deferred_composite_{vertex,fragment}_src, key slot
+    // composite_pipeline_key_) stays compiled-out; we'd switch to it
+    // only when multi-view alpha compositing is needed.
+    auto sstate = read_state<IWindowSurface>(entry.surface);
+    float sw = static_cast<float>(sstate ? sstate->size.x : 0);
+    float sh = static_cast<float>(sstate ? sstate->size.y : 0);
+    bool has_vp = entry.viewport.width > 0 && entry.viewport.height > 0;
+    float vp_x = has_vp ? entry.viewport.x * sw : 0.f;
+    float vp_y = has_vp ? entry.viewport.y * sh : 0.f;
+    float vp_w = has_vp ? entry.viewport.width * sw : sw;
+    float vp_h = has_vp ? entry.viewport.height * sh : sh;
+
+    RenderPass pass;
+    pass.kind = PassKind::ComputeBlit;
+    pass.compute.pipeline = pit->second;
+    pass.compute.groups_x = (w + 7) / 8;
+    pass.compute.groups_y = (h + 7) / 8;
+    pass.compute.groups_z = 1;
+    pass.compute.root_constants_size = sizeof(PushC);
+    std::memcpy(pass.compute.root_constants, &pc, sizeof(PushC));
+    pass.blit_source = entry.deferred_output_tex;
+    pass.blit_surface_id = entry.surface ? entry.surface->get_render_target_id() : 0;
+    pass.blit_dst_rect = {vp_x, vp_y, vp_w, vp_h};
+    out_passes.push_back(std::move(pass));
 }
 
 void DeferredLighter::on_view_removed(ViewEntry& entry, FrameContext& ctx)

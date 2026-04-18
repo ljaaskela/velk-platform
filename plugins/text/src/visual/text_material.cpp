@@ -15,7 +15,7 @@ namespace {
 // expands a unit quad to glyph bbox size, passes through (uv with Y flip,
 // glyph index, color) to the fragment stage. The three buffer references
 // for curves/bands/glyphs sit in the DrawData material slot but the vertex
-// shader doesn't dereference them, so it uses Ptr64 placeholders to keep
+// shader doesn't dereference them, so it uses OpaquePtr placeholders to keep
 // the layout consistent without pulling in the (fragment-only) function
 // definitions.
 constexpr string_view text_vertex_src = R"(
@@ -23,11 +23,15 @@ constexpr string_view text_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
+layout(buffer_reference, std430) readonly buffer TextParams {
+    OpaquePtr curves;
+    OpaquePtr bands;
+    OpaquePtr glyphs;
+};
+
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(TextInstanceData)
-    Ptr64 curves;
-    Ptr64 bands;
-    Ptr64 glyphs;
+    TextParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -67,11 +71,15 @@ constexpr string_view text_fragment_src = R"(
 // because spirv-val rejects NonWritable on PhysicalStorageBuffer pointer
 // parameters.) The buffers are still effectively read-only because nothing
 // in this shader writes to them.
-layout(buffer_reference, std430) buffer DrawData {
-    VELK_DRAW_DATA(Ptr64)
+layout(buffer_reference, std430) buffer TextParams {
     VelkTextCurveBuffer curves;
     VelkTextBandBuffer bands;
     VelkTextGlyphBuffer glyphs;
+};
+
+layout(buffer_reference, std430) buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    TextParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -83,7 +91,7 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float coverage = velk_text_coverage(v_uv, v_glyph_index, root.curves, root.bands, root.glyphs);
+    float coverage = velk_text_coverage(v_uv, v_glyph_index, root.material.curves, root.material.bands, root.material.glyphs);
     frag_color = vec4(v_color.rgb, v_color.a * coverage);
 }
 )";

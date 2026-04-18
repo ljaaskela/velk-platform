@@ -15,6 +15,7 @@ namespace velk {
 const char* kVelkGlsl = R"(
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 // Frame globals: projection matrix, its inverse, and viewport dimensions.
 layout(buffer_reference, std430) readonly buffer GlobalData {
@@ -23,9 +24,24 @@ layout(buffer_reference, std430) readonly buffer GlobalData {
     vec4 viewport; // width, height, 1/width, 1/height
 };
 
-// Dummy pointer type for fragment shaders that need to skip over
-// 8-byte buffer_reference fields in the DrawData header.
-layout(buffer_reference, std430) readonly buffer Ptr64 { uint _dummy; };
+// Generic 8-byte buffer_reference placeholder. Use it wherever the
+// shader needs to preserve the layout of a typed pointer field without
+// caring about the target's contents (e.g. fragment shaders that skip
+// the instance_data slot, or vertex shaders that don't dereference
+// typed sub-pointers inside a material block).
+layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
+
+// Framework-level bindless texture array. Every pipeline in the engine
+// shares this descriptor set binding; individual shaders reference a
+// texture by index rather than declaring their own samplers.
+layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
+
+// Sample the bindless texture array by id. nonuniformEXT is always
+// required because texture ids vary per draw / per shape.
+vec4 velk_texture(uint id, vec2 uv)
+{
+    return texture(velk_textures[nonuniformEXT(id)], uv);
+}
 
 // Unit quad vertex position from a triangle strip vertex index.
 // Returns (0,0), (1,0), (0,1), (1,1) for indices 0..3.

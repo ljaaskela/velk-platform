@@ -164,11 +164,15 @@ int main(int argc, char* argv[])
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+layout(buffer_reference, std430) readonly buffer CheckerParams {
     vec4 color_a;
     vec4 color_b;
     float scale;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(RectInstanceData)
+    CheckerParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -189,11 +193,15 @@ void main()
 #version 450
 #include "velk.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(Ptr64)
+layout(buffer_reference, std430) readonly buffer CheckerParams {
     vec4 color_a;
     vec4 color_b;
     float scale;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    CheckerParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -203,10 +211,10 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float s = root.scale;
+    float s = root.material.scale;
     vec2 cell = floor(v_local_uv * s);
     float checker = mod(cell.x + cell.y, 2.0);
-    frag_color = mix(root.color_a, root.color_b, checker);
+    frag_color = mix(root.material.color_a, root.material.color_b, checker);
 }
 )";
 

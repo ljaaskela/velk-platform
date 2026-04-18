@@ -25,9 +25,17 @@
 namespace velk::ui {
 
 constexpr string_view velk_ui_glsl = R"(
-// world_matrix is the element's full 4x4 world transform, filled in by
-// the batch builder. (pos, size) is the rect's local-space footprint;
-// vertex shaders compute gl_Position = vp * world_matrix * vec4(pos + q*size, 0, 1).
+// Minimum viable per-instance record. Carries just the element's world
+// transform; any visual type that fits this schema (no local rect, no
+// extra per-instance fields) can use ElementInstanceData directly.
+struct ElementInstance {
+    mat4 world_matrix;
+};
+
+// Per-instance data for quad-shaped visuals. `world_matrix` is the
+// element's world transform (filled in by the batch builder). (pos,
+// size) is the rect's local-space footprint; vertex shaders compute
+// gl_Position = vp * world_matrix * vec4(pos + q*size, 0, 1).
 struct RectInstance {
     mat4 world_matrix;
     vec2 pos;
@@ -44,6 +52,10 @@ struct TextInstance {
     uint _pad0;
     uint _pad1;
     uint _pad2;
+};
+
+layout(buffer_reference, std430) readonly buffer ElementInstanceData {
+    ElementInstance data[];
 };
 
 layout(buffer_reference, std430) readonly buffer RectInstanceData {
@@ -385,6 +397,18 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             slot.passes.push_back(std::move(p));
         }
 
+        // Debug overlays: tail-appended so they blit on top of whatever
+        // the view passes produced on the target surface.
+        for (auto& ov : debug_overlays_) {
+            if (!ov.surface || ov.texture_id == 0) continue;
+            RenderPass op;
+            op.kind = PassKind::Blit;
+            op.blit_source = ov.texture_id;
+            op.blit_surface_id = ov.surface->get_render_target_id();
+            op.blit_dst_rect = ov.dst_rect;
+            slot.passes.push_back(std::move(op));
+        }
+
         if (!frame_buffer_.overflowed()) {
             break;
         }
@@ -428,6 +452,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
     auto consumed_scenes = consume_scenes(desc);
 
+    batch_builder_.reset_frame_state();
     build_frame_passes(desc, consumed_scenes, *slot);
 
     active_slot_ = nullptr;
@@ -508,6 +533,18 @@ void Renderer::present(Frame frame)
                     had_texture_pass = false;
                 }
                 backend_->dispatch({&pass.compute, 1});
+                backend_->blit_to_surface(pass.blit_source, pass.blit_surface_id, pass.blit_dst_rect);
+                continue;
+            }
+
+            if (pass.kind == PassKind::Blit) {
+                // Bare blit from a texture (e.g. a G-buffer attachment)
+                // to a surface subrect. Used for debug overlays on top
+                // of whatever was already drawn/blitted to the surface.
+                if (had_texture_pass) {
+                    backend_->barrier(PipelineStage::ColorOutput, PipelineStage::ComputeShader);
+                    had_texture_pass = false;
+                }
                 backend_->blit_to_surface(pass.blit_source, pass.blit_surface_id, pass.blit_dst_rect);
                 continue;
             }
@@ -599,6 +636,31 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
         frame_buffer_.init_slot(frame_slots_[i].buffer, *backend_);
     }
     slot_cv_.notify_all();
+}
+
+void Renderer::add_debug_overlay(const IWindowSurface::Ptr& surface,
+                                  TextureId texture_id,
+                                  const rect& dst_rect)
+{
+    debug_overlays_.push_back({surface, texture_id, dst_rect});
+}
+
+void Renderer::clear_debug_overlays()
+{
+    debug_overlays_.clear();
+}
+
+TextureId Renderer::get_gbuffer_attachment(const IElement::Ptr& camera_element,
+                                            const IWindowSurface::Ptr& surface,
+                                            uint32_t attachment_index) const
+{
+    for (auto& v : views_) {
+        if (v.camera_element.get() != camera_element.get()) continue;
+        if (v.surface.get() != surface.get()) continue;
+        if (v.gbuffer_group == 0 || !backend_) return 0;
+        return backend_->get_render_target_group_attachment(v.gbuffer_group, attachment_index);
+    }
+    return 0;
 }
 
 void Renderer::on_gpu_resource_destroyed(IGpuResource* resource)

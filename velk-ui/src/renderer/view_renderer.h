@@ -46,6 +46,7 @@ enum class PassKind
     ComputeBlit,  ///< Compute dispatch writing to a storage image, then blit to a surface.
     GBufferFill,  ///< Raster draws into a multi-attachment G-buffer group (no surface blit).
     Compute,      ///< Pure compute dispatch, no blit. Result consumed by a later pass via sampled image / storage.
+    Blit,         ///< Pure blit from a source texture to a surface rect. Used for debug overlays.
 };
 
 /**

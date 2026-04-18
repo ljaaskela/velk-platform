@@ -8,6 +8,7 @@
 #include <velk-render/interface/intf_raster_shader.h>
 #include <velk-ui/interface/intf_visual.h>
 
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -300,17 +301,10 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        auto* mat_data = batch.material
-            ? interface_cast<IDrawData>(batch.material.get())
-            : nullptr;
-        size_t mat_size = mat_data ? mat_data->get_draw_data_size() : 0;
-        if (mat_size > 0 && (mat_size % 16) != 0) {
-            VELK_LOG(E,
-                     "Renderer: material get_draw_data_size (%zu) is not 16-byte aligned. "
-                     "Use VELK_GPU_STRUCT for your material data.",
-                     mat_size);
-        }
-        size_t total_size = sizeof(DrawDataHeader) + mat_size;
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+
+        constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
+        size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
 
         auto reservation = frame_data.reserve(total_size);
         if (!reservation.ptr) {
@@ -321,12 +315,7 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         uint64_t draw_data_addr = reservation.gpu_addr;
 
         std::memcpy(dst, &header, sizeof(header));
-        if (mat_size > 0) {
-            if (failed(mat_data->write_draw_data(dst + sizeof(DrawDataHeader), mat_size))) {
-                VELK_LOG(E, "Renderer: material write_draw_data failed");
-                continue;
-            }
-        }
+        std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
 
         if (!pipeline_map) {
             continue;
@@ -399,11 +388,10 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        auto* mat_data = batch.material
-            ? interface_cast<IDrawData>(batch.material.get())
-            : nullptr;
-        size_t mat_size = mat_data ? mat_data->get_draw_data_size() : 0;
-        size_t total_size = sizeof(DrawDataHeader) + mat_size;
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+
+        constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
+        size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
 
         auto reservation = frame_data.reserve(total_size);
         if (!reservation.ptr) {
@@ -412,11 +400,7 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         auto* dst = static_cast<uint8_t*>(reservation.ptr);
         uint64_t draw_data_addr = reservation.gpu_addr;
         std::memcpy(dst, &header, sizeof(header));
-        if (mat_size > 0) {
-            if (failed(mat_data->write_draw_data(dst + sizeof(DrawDataHeader), mat_size))) {
-                continue;
-            }
-        }
+        std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
 
         // Resolve the G-buffer pipeline variant. Forward key is stable
         // (hash on visual class / material), so we reuse it as the key
@@ -463,6 +447,36 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
 
         out_calls.push_back(call);
     }
+}
+
+uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& frame_data)
+{
+    if (!prog) return 0;
+    auto it = frame_material_addrs_.find(prog);
+    if (it != frame_material_addrs_.end()) return it->second;
+
+    uint64_t addr = 0;
+    if (auto* dd = interface_cast<IDrawData>(prog)) {
+        size_t sz = dd->get_draw_data_size();
+        if (sz > 0 && (sz % 16) != 0) {
+            VELK_LOG(E,
+                     "Renderer: material get_draw_data_size (%zu) is not 16-byte aligned. "
+                     "Use VELK_GPU_STRUCT for your material data.",
+                     sz);
+        }
+        if (sz > 0) {
+            void* scratch = std::malloc(sz);
+            if (scratch) {
+                std::memset(scratch, 0, sz);
+                if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                    addr = frame_data.write(scratch, sz);
+                }
+                std::free(scratch);
+            }
+        }
+    }
+    frame_material_addrs_[prog] = addr;
+    return addr;
 }
 
 } // namespace velk::ui

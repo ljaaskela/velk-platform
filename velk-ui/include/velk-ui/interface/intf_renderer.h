@@ -5,6 +5,7 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
+#include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-ui/interface/intf_element.h>
 
@@ -113,6 +114,35 @@ public:
      * @param count Maximum frames in flight.
      */
     virtual void set_max_frames_in_flight(uint32_t count) = 0;
+
+    /**
+     * @brief Registers a persistent debug overlay: blits `texture_id`
+     *        onto `surface` at `dst_rect` after all view passes have
+     *        run. Stacks in registration order. No-ops if `texture_id`
+     *        is 0 at frame time.
+     *
+     * Useful for displaying intermediate textures (G-buffer
+     * attachments, shadow maps, AO buffers) without wiring a dedicated
+     * sub-renderer toggle for each.
+     */
+    virtual void add_debug_overlay(const IWindowSurface::Ptr& surface,
+                                   TextureId texture_id,
+                                   const rect& dst_rect) = 0;
+
+    /** @brief Removes all debug overlays previously added. */
+    virtual void clear_debug_overlays() = 0;
+
+    /**
+     * @brief Returns the bindless texture id of a G-buffer attachment
+     *        for the given (camera, surface) view. Attachment indices
+     *        follow the GBufferAttachment enum (Albedo=0, Normal=1,
+     *        WorldPos=2, MaterialParams=3). Returns 0 if the view has
+     *        no G-buffer allocated yet (e.g. first frame not rendered
+     *        or the camera is not Deferred).
+     */
+    virtual TextureId get_gbuffer_attachment(const IElement::Ptr& camera_element,
+                                             const IWindowSurface::Ptr& surface,
+                                             uint32_t attachment_index) const = 0;
 
     /** @brief Releases all GPU resources. */
     virtual void shutdown() = 0;

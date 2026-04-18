@@ -943,7 +943,9 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     img_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     img_ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (desc.usage == TextureUsage::RenderTarget || is_color_attachment) {
-        img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // TRANSFER_SRC_BIT lets blit_to_surface use the attachment
+        // directly as a blit source (e.g. G-buffer debug overlays).
+        img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         td.is_renderable = true;
     }
     if (desc.usage == TextureUsage::Storage) {
@@ -981,6 +983,7 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     auto cb = begin_one_shot_commands();
     transition_image_layout(cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout);
     end_one_shot_commands(cb);
+    td.current_layout = initial_layout;
 
     // Update bindless sampler descriptor (binding 0)
     VkDescriptorImageInfo sampler_info{};
@@ -1680,10 +1683,14 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_
     to_dst.srcAccessMask = 0;
     to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-    // Storage texture: GENERAL -> TRANSFER_SRC_OPTIMAL
+    // Source texture: current layout -> TRANSFER_SRC_OPTIMAL. Works for
+    // both storage images (current = GENERAL, written by compute) and
+    // render-target attachments (current = SHADER_READ_ONLY_OPTIMAL,
+    // sampled by prior passes).
+    VkImageLayout src_canonical_layout = td.current_layout;
     VkImageMemoryBarrier to_src{};
     to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    to_src.oldLayout = src_canonical_layout;
     to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1691,7 +1698,9 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_
     to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     to_src.subresourceRange.levelCount = 1;
     to_src.subresourceRange.layerCount = 1;
-    to_src.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    to_src.srcAccessMask = (src_canonical_layout == VK_IMAGE_LAYOUT_GENERAL)
+                               ? VK_ACCESS_SHADER_WRITE_BIT
+                               : VK_ACCESS_SHADER_READ_BIT;
     to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
     VkImageMemoryBarrier pre[2] = {to_dst, to_src};
@@ -1740,11 +1749,11 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_
     to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     to_present.dstAccessMask = 0;
 
-    // Storage texture: TRANSFER_SRC_OPTIMAL -> GENERAL (ready for next compute)
+    // Source texture: TRANSFER_SRC_OPTIMAL -> canonical layout.
     VkImageMemoryBarrier to_general{};
     to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    to_general.newLayout = src_canonical_layout;
     to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_general.image = td.image;

@@ -21,11 +21,15 @@ constexpr string_view gradient_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+layout(buffer_reference, std430) readonly buffer GradientParams {
     vec4 start_color;
     vec4 end_color;
     float angle;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(RectInstanceData)
+    GradientParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -46,11 +50,15 @@ constexpr string_view gradient_fragment_src = R"(
 #version 450
 #include "velk.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(Ptr64)
+layout(buffer_reference, std430) readonly buffer GradientParams {
     vec4 start_color;
     vec4 end_color;
     float angle;
+};
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    GradientParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -60,11 +68,11 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float rad = radians(root.angle);
+    float rad = radians(root.material.angle);
     vec2 dir = vec2(cos(rad), sin(rad));
     float t = dot(v_local_uv - 0.5, dir) + 0.5;
     t = clamp(t, 0.0, 1.0);
-    frag_color = mix(root.start_color, root.end_color, t);
+    frag_color = mix(root.material.start_color, root.material.end_color, t);
 }
 )";
 
