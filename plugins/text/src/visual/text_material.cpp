@@ -121,12 +121,12 @@ uint64_t TextMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, text_fragment_src, text_vertex_src);
 }
 
-size_t TextMaterial::gpu_data_size() const
+size_t TextMaterial::get_draw_data_size() const
 {
     return sizeof(TextMaterialData);
 }
 
-ReturnValue TextMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue TextMaterial::write_draw_data(void* out, size_t size) const
 {
     if (size == sizeof(TextMaterialData)) {
         auto& p = *static_cast<TextMaterialData*>(out);
@@ -178,22 +178,17 @@ BrdfSample velk_fill_text(FillContext ctx)
 )";
 } // namespace
 
-string_view TextMaterial::get_fill_src() const
-{
-    return text_fill_src;
-}
-
-string_view TextMaterial::get_fill_fn_name() const
+string_view TextMaterial::get_snippet_fn_name() const
 {
     return "velk_fill_text";
 }
 
-string_view TextMaterial::get_fill_include_name() const
+string_view TextMaterial::get_snippet_source() const
 {
-    return "velk_text_fill.glsl";
+    return text_fill_src;
 }
 
-void TextMaterial::register_fill_includes(IRenderContext& ctx) const
+void TextMaterial::register_snippet_includes(IRenderContext& ctx) const
 {
     ctx.register_shader_include("velk_text.glsl", embedded::velk_text_glsl);
 }

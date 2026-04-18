@@ -83,8 +83,6 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/trait/intf_click.h
     include/velk-ui/interface/trait/intf_hover.h
     include/velk-ui/interface/trait/intf_drag.h
-    include/velk-ui/interface/intf_camera.h
-    include/velk-ui/interface/intf_light.h
     include/velk-ui/api/render_trait.h
     include/velk-ui/api/trait/light.h
     include/velk-ui/interface/intf_element.h

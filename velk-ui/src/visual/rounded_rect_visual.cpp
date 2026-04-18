@@ -86,19 +86,17 @@ vector<DrawEntry> RoundedRectVisual::get_draw_entries(const rect& bounds)
     return {entry};
 }
 
-uint64_t RoundedRectVisual::get_pipeline_key() const
+uint64_t RoundedRectVisual::get_raster_pipeline_key() const
 {
     return kPipelineKey;
 }
 
-string_view RoundedRectVisual::get_fragment_src() const
+::velk::ShaderSource RoundedRectVisual::get_raster_source(::velk::IRasterShader::Target) const
 {
-    return kFragmentSrc;
-}
-
-string_view RoundedRectVisual::get_intersect_src() const
-{
-    return kIntersectSrc;
+    // Forward and deferred share the same source today (no
+    // G-buffer variant yet). `kIntersectSrc` lives on
+    // `IAnalyticShape::get_shape_intersect_source` if ever wired up.
+    return {/*vertex*/ {}, kFragmentSrc};
 }
 
 } // namespace velk::ui

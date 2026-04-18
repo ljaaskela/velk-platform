@@ -1,22 +1,21 @@
 #ifndef VELK_UI_TRAIT_LIGHT_H
 #define VELK_UI_TRAIT_LIGHT_H
 
-#include <velk-ui/ext/trait.h>
-#include <velk-ui/interface/intf_light.h>
+#include <velk/ext/object.h>
+
+#include <velk-render/interface/intf_light.h>
 #include <velk-ui/plugin.h>
 
 namespace velk::ui::impl {
 
 /**
- * @brief Default light trait implementation.
+ * @brief Default light render-trait implementation.
  *
  * Pure data container — properties via ILight's state macro. The
  * renderer reads the owning element's world_matrix for position and
- * forward axis; this class holds only the intrinsic source properties
- * (type, colour, intensity, range, cone angles). Shadow casting is
- * delegated to an IShadowTechnique attached via RenderTrait::add_technique.
+ * forward axis; this class holds only the intrinsic source properties.
  */
-class Light : public ext::Render<Light, ILight>
+class Light : public ::velk::ext::Object<Light, ::velk::ILight>
 {
 public:
     VELK_CLASS_UID(ClassId::Render::Light, "Light");

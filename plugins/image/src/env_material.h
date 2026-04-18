@@ -3,6 +3,7 @@
 
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 namespace velk::ui::impl {
@@ -32,7 +33,7 @@ public:
  * Owned by the Environment, shared across all cameras using the same
  * environment (same batching model as Font-owned TextMaterial).
  */
-class EnvMaterial : public ::velk::ext::Material<EnvMaterial, IEnvMaterialInternal>
+class EnvMaterial : public ::velk::ext::Material<EnvMaterial, IEnvMaterialInternal, ::velk::IShaderSnippet>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Material::Environment, "EnvMaterial");
@@ -42,12 +43,12 @@ public:
 
     // IMaterial
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
-    size_t gpu_data_size() const override;
-    ReturnValue write_gpu_data(void* out, size_t size) const override;
+    size_t get_draw_data_size() const override;
+    ReturnValue write_draw_data(void* out, size_t size) const override;
 
-    string_view get_fill_src() const override;
-    string_view get_fill_fn_name() const override;
-    string_view get_fill_include_name() const override;
+    // IShaderSnippet
+    string_view get_snippet_fn_name() const override;
+    string_view get_snippet_source() const override;
 
 private:
     float intensity_ = 1.f;

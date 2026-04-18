@@ -49,6 +49,10 @@ add_library(velk_render SHARED
     include/velk-render/detail/intf_renderer_internal.h
     include/velk-render/api/render_context.h
     include/velk-render/api/material/shader.h
+    include/velk-render/interface/intf_analytic_shape.h
+    include/velk-render/interface/intf_draw_data.h
+    include/velk-render/interface/intf_raster_shader.h
+    include/velk-render/interface/intf_shader_snippet.h
     include/velk-render/interface/intf_render_technique.h
     include/velk-render/interface/intf_shadow_technique.h
     include/velk-render/api/render_technique.h

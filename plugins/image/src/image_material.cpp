@@ -75,12 +75,12 @@ uint64_t ImageMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, image_fragment_src, image_vertex_src);
 }
 
-size_t ImageMaterial::gpu_data_size() const
+size_t ImageMaterial::get_draw_data_size() const
 {
     return sizeof(ImageParams);
 }
 
-ReturnValue ImageMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue ImageMaterial::write_draw_data(void* out, size_t size) const
 {
     if (auto state = read_state<IImageMaterial>(this)) {
         return set_material<ImageParams>(out, size, [&](auto& p) {
@@ -110,19 +110,14 @@ BrdfSample velk_fill_image(FillContext ctx)
 )";
 } // namespace
 
-string_view ImageMaterial::get_fill_src() const
-{
-    return image_fill_src;
-}
-
-string_view ImageMaterial::get_fill_fn_name() const
+string_view ImageMaterial::get_snippet_fn_name() const
 {
     return "velk_fill_image";
 }
 
-string_view ImageMaterial::get_fill_include_name() const
+string_view ImageMaterial::get_snippet_source() const
 {
-    return "velk_image.glsl";
+    return image_fill_src;
 }
 
 } // namespace velk::ui::impl

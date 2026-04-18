@@ -4,6 +4,7 @@
 #include <velk/api/hierarchy.h>
 #include <velk/api/state.h>
 
+#include <velk-render/interface/intf_render_trait.h>
 #include <velk-ui/api/trait.h>
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_scene.h>
@@ -58,10 +59,22 @@ public:
         return trait ? add_attachment(trait.get()) : ReturnValue::InvalidArgument;
     }
 
+    /** @brief Attaches a render trait (camera, light, ...) to this element. */
+    ReturnValue add_trait(const ::velk::IRenderTrait::Ptr& trait)
+    {
+        return trait ? add_attachment(trait) : ReturnValue::InvalidArgument;
+    }
+
     /** @brief Removes a previously attached trait from this element. */
     ReturnValue remove_trait(const Trait& trait)
     {
         return trait ? remove_attachment(trait.get()) : ReturnValue::InvalidArgument;
+    }
+
+    /** @brief Removes a previously attached render trait from this element. */
+    ReturnValue remove_trait(const ::velk::IRenderTrait::Ptr& trait)
+    {
+        return trait ? remove_attachment(trait) : ReturnValue::InvalidArgument;
     }
 
     /** @brief Finds the first attached trait implementing interface T, or nullptr. */

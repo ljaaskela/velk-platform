@@ -8,8 +8,8 @@
 #include <velk-render/gbuffer.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_window_surface.h>
-#include <velk-ui/interface/intf_camera.h>
-#include <velk-ui/interface/intf_light.h>
+#include <velk-render/interface/intf_camera.h>
+#include <velk-render/interface/intf_light.h>
 
 #include <algorithm>
 #include <cmath>

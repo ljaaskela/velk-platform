@@ -56,52 +56,13 @@ public:
      */
     virtual vector<IBuffer::Ptr> get_gpu_resources() const { return {}; }
 
-    /**
-     * @brief Returns the pipeline key for this visual's built-in shader,
-     *        or 0 if the visual does not use a built-in pipeline (e.g. it
-     *        brings its own material via the paint property).
-     *
-     * Each visual class should return a stable, class-unique 64-bit value
-     * (typically a constexpr hash of a class-level name). The renderer
-     * compiles a pipeline per unique key on first sight.
-     */
-    virtual uint64_t get_pipeline_key() const = 0;
-
-    /**
-     * @brief Returns the vertex shader source for this visual's pipeline.
-     *        An empty string means "use the registered default vertex shader".
-     */
-    virtual string_view get_vertex_src() const = 0;
-
-    /**
-     * @brief Returns the fragment shader source for this visual's pipeline.
-     *        An empty string means "use the registered default fragment shader".
-     */
-    virtual string_view get_fragment_src() const = 0;
-
-    /**
-     * @brief Returns a GLSL snippet that intersects a ray with this visual's
-     *        shape, for use by the ray-traced render backend.
-     *
-     * The snippet is a function definition (not a whole shader). Currently
-     * unused by the RT path — rect / cube / sphere intersects live in the
-     * compute shader prelude and dispatch on get_shape_kind(). Reserved for
-     * visuals with a genuinely one-off primitive (rounded box, capsule, SDF
-     * blob, etc.) that would bloat the prelude with a single-use function.
-     */
-    virtual string_view get_intersect_src() const = 0;
-
-    /**
-     * @brief Returns this visual's shape kind for the RT dispatch.
-     *
-     *   0 = rect (planar quad, u_axis x v_axis)
-     *   1 = cube (oriented box, u_axis x v_axis x w_axis)
-     *   2 = sphere (centered in the element's bounding box, radius from size)
-     *
-     * The RT compute shader switches on this per-shape value to call the
-     * right intersect routine in the prelude. Default is rect.
-     */
-    virtual uint32_t get_shape_kind() const { return 0; }
+    // Shader provision and analytic-shape dispatch live on separate
+    // role interfaces (`IRasterShader`, `IAnalyticShape`). A visual
+    // that contributes its own pipeline implements `IRasterShader`;
+    // a visual that's an analytic RT primitive implements
+    // `IAnalyticShape`. Visuals can implement either, both, or
+    // neither (e.g. a TextureVisual that piggybacks on a paint-
+    // supplied material).
 };
 
 } // namespace velk::ui

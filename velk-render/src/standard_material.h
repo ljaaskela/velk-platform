@@ -3,6 +3,7 @@
 
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-render/interface/intf_standard.h>
 #include <velk-render/plugin.h>
 
@@ -21,18 +22,17 @@ namespace velk::impl {
  *   final    = kD * diffuse + F * specular
  * Fresnel-Schlick blends between them.
  */
-class StandardMaterial : public ::velk::ext::Material<StandardMaterial, IStandard>
+class StandardMaterial : public ::velk::ext::Material<StandardMaterial, IStandard, IShaderSnippet>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::StandardMaterial, "StandardMaterial");
 
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
-    size_t gpu_data_size() const override;
-    ReturnValue write_gpu_data(void* out, size_t size) const override;
+    size_t get_draw_data_size() const override;
+    ReturnValue write_draw_data(void* out, size_t size) const override;
 
-    string_view get_fill_src() const override;
-    string_view get_fill_fn_name() const override;
-    string_view get_fill_include_name() const override;
+    string_view get_snippet_fn_name() const override;
+    string_view get_snippet_source() const override;
 };
 
 } // namespace velk::impl

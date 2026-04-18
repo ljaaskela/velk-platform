@@ -29,8 +29,8 @@ class RtShadow : public ::velk::ext::Object<RtShadow, IShadowTechnique>
 public:
     VELK_CLASS_UID(ClassId::RtShadow, "RtShadow");
 
-    ShaderInclude get_shader_include() const override;
-    string_view   get_fn_name() const override;
+    string_view get_snippet_fn_name() const override;
+    string_view get_snippet_source() const override;
 
     void prepare(ShadowContext& /*ctx*/) override {}
 };

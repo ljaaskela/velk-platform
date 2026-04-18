@@ -10,7 +10,7 @@
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_surface.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
 #include <velk-ui/interface/intf_environment.h>
 #include <velk-ui/interface/intf_render_to_texture.h>
 
@@ -95,7 +95,9 @@ void Rasterizer::build_passes(ViewEntry& entry,
         FrameGlobals globals{};
         mat4 vp_mat;
         if (camera) {
-            vp_mat = camera->get_view_projection(*entry.camera_element, vp_w, vp_h);
+            auto cam_es = read_state<IElement>(entry.camera_element);
+            mat4 cam_world = cam_es ? cam_es->world_matrix : mat4::identity();
+            vp_mat = camera->get_view_projection(cam_world, vp_w, vp_h);
         } else {
             build_ortho_projection(globals.view_projection, vp_w, vp_h);
             std::memcpy(vp_mat.m, globals.view_projection, sizeof(vp_mat.m));

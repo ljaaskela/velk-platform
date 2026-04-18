@@ -1,7 +1,7 @@
 #include "projection_type_extension.h"
 
 #include <velk/api/any.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
 
 namespace velk::ui {
 

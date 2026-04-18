@@ -8,14 +8,16 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk/string.h>
 
+#include <velk-render/interface/intf_analytic_shape.h>
+#include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_technique.h>
 #include <velk-render/interface/intf_shadow_technique.h>
 #include <velk-render/interface/intf_surface.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
+#include <velk-render/interface/intf_light.h>
 #include <velk-ui/interface/intf_environment.h>
-#include <velk-ui/interface/intf_light.h>
 #include <velk-ui/interface/intf_visual.h>
 
 #include <algorithm>
@@ -46,9 +48,9 @@ void build_ortho_projection(float* out, float width, float height)
 uint32_t RayTracer::register_shadow_tech(IShadowTechnique* tech, FrameContext& ctx)
 {
     if (!tech || !ctx.render_ctx) return 0;
-    auto inc = tech->get_shader_include();
-    auto fn = tech->get_fn_name();
-    if (inc.snippet.empty() || inc.include_name.empty() || fn.empty()) return 0;
+    auto fn = tech->get_snippet_fn_name();
+    auto src = tech->get_snippet_source();
+    if (fn.empty() || src.empty()) return 0;
     auto* obj = interface_cast<IObject>(tech);
     if (!obj) return 0;
     Uid uid = obj->get_class_uid();
@@ -57,10 +59,14 @@ uint32_t RayTracer::register_shadow_tech(IShadowTechnique* tech, FrameContext& c
     if (it != shadow_tech_id_by_class_.end()) {
         return it->second;
     }
-    ctx.render_ctx->register_shader_include(inc.include_name, inc.snippet);
-    tech->register_includes(*ctx.render_ctx);
+    // The shader include filename is derived from fn_name + ".glsl".
+    string include_name;
+    include_name.append(fn);
+    include_name.append(string_view(".glsl", 5));
+    ctx.render_ctx->register_shader_include(include_name, src);
+    tech->register_snippet_includes(*ctx.render_ctx);
     uint32_t id = static_cast<uint32_t>(shadow_tech_info_by_id_.size()) + 1;
-    shadow_tech_info_by_id_.push_back({fn, inc.include_name});
+    shadow_tech_info_by_id_.push_back({fn, std::move(include_name)});
     shadow_tech_id_by_class_[key] = id;
     return id;
 }
@@ -68,10 +74,11 @@ uint32_t RayTracer::register_shadow_tech(IShadowTechnique* tech, FrameContext& c
 uint32_t RayTracer::register_material(IProgram* prog, FrameContext& ctx)
 {
     if (!prog || !ctx.render_ctx) return 0;
-    auto fill = prog->get_fill_src();
-    auto fn = prog->get_fill_fn_name();
-    auto inc = prog->get_fill_include_name();
-    if (fill.empty() || fn.empty() || inc.empty()) return 0;
+    auto* snippet = interface_cast<IShaderSnippet>(prog);
+    if (!snippet) return 0;
+    auto fn = snippet->get_snippet_fn_name();
+    auto src = snippet->get_snippet_source();
+    if (fn.empty() || src.empty()) return 0;
     auto* obj = interface_cast<IObject>(prog);
     if (!obj) return 0;
     Uid uid = obj->get_class_uid();
@@ -80,15 +87,19 @@ uint32_t RayTracer::register_material(IProgram* prog, FrameContext& ctx)
     if (it != material_id_by_class_.end()) {
         return it->second;
     }
+    // The shader include filename is derived from fn_name + ".glsl".
+    string include_name;
+    include_name.append(fn);
+    include_name.append(string_view(".glsl", 5));
     // Register the material's fill snippet as a shader include so the
     // composed shader can `#include "<name>"` and get proper line-number
     // diagnostics in compile errors.
-    ctx.render_ctx->register_shader_include(inc, fill);
+    ctx.render_ctx->register_shader_include(include_name, src);
     // Let the material register any further include dependencies
     // (e.g. the text material's velk_text.glsl).
-    prog->register_fill_includes(*ctx.render_ctx);
+    snippet->register_snippet_includes(*ctx.render_ctx);
     uint32_t id = static_cast<uint32_t>(material_info_by_id_.size()) + 1;
-    material_info_by_id_.push_back({fn, inc});
+    material_info_by_id_.push_back({fn, std::move(include_name)});
     material_id_by_class_[key] = id;
     return id;
 }
@@ -158,7 +169,7 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
         if (n > 0) {
             src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
         }
-        src += mi.fill_fn_name;
+        src += mi.fn_name;
         append_literal("(ctx);\n");
     }
     append_literal("        default: { BrdfSample bs; bs.emission = ctx.base; bs.throughput = vec3(0.0); bs.next_dir = vec3(0.0); bs.terminate = true; return bs; }\n");
@@ -246,7 +257,9 @@ void RayTracer::build_passes(ViewEntry& entry,
     // Camera view-projection + world position for ray generation.
     mat4 vp_mat;
     if (camera) {
-        vp_mat = camera->get_view_projection(*entry.camera_element,
+        auto cam_es = read_state<IElement>(entry.camera_element);
+        mat4 cam_world = cam_es ? cam_es->world_matrix : mat4::identity();
+        vp_mat = camera->get_view_projection(cam_world,
                                              static_cast<float>(vp_w),
                                              static_cast<float>(vp_h));
     } else {
@@ -319,12 +332,13 @@ void RayTracer::build_passes(ViewEntry& entry,
                 if (mat_id == 0) {
                     continue;
                 }
-                size_t sz = prog->gpu_data_size();
+                auto* dd = interface_cast<IDrawData>(prog);
+                size_t sz = dd ? dd->get_draw_data_size() : 0;
                 if (sz > 0) {
                     void* scratch = std::malloc(sz);
                     if (scratch) {
                         std::memset(scratch, 0, sz);
-                        if (prog->write_gpu_data(scratch, sz) == ReturnValue::Success) {
+                        if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
                             mat_addr = ctx.frame_buffer->write(scratch, sz);
                         }
                         std::free(scratch);
@@ -337,7 +351,8 @@ void RayTracer::build_passes(ViewEntry& entry,
                 if (!seen) frame_materials_.push_back(mat_id);
             }
 
-            uint32_t shape_kind = visual->get_shape_kind();
+            auto* analytic_shape = interface_cast<IAnalyticShape>(visual);
+            uint32_t shape_kind = analytic_shape ? analytic_shape->get_shape_kind() : 0;
 
             // Cube and sphere have no raster draw entries; we emit a single
             // shape directly from the element's 3D transform + size.
@@ -364,7 +379,8 @@ void RayTracer::build_passes(ViewEntry& entry,
 
             // Rect path: iterate draw entries (one shape per entry).
             float radius = 0.f;
-            if (!visual->get_intersect_src().empty()) {
+            if (analytic_shape &&
+                !analytic_shape->get_shape_intersect_source().empty()) {
                 radius = std::min(std::min(ew, eh) * 0.5f, 12.f);
             }
 
@@ -538,12 +554,13 @@ void RayTracer::build_passes(ViewEntry& entry,
                 IProgram* prog = env_prog.get();
                 env_mat_id = register_material(prog, ctx);
                 if (env_mat_id != 0) {
-                    size_t sz = prog->gpu_data_size();
+                    auto* dd = interface_cast<IDrawData>(prog);
+                    size_t sz = dd ? dd->get_draw_data_size() : 0;
                     if (sz > 0) {
                         void* scratch = std::malloc(sz);
                         if (scratch) {
                             std::memset(scratch, 0, sz);
-                            if (prog->write_gpu_data(scratch, sz) == ReturnValue::Success) {
+                            if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
                                 env_data_addr = ctx.frame_buffer->write(scratch, sz);
                             }
                             std::free(scratch);

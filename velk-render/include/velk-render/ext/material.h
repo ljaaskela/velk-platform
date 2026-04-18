@@ -2,6 +2,7 @@
 #define VELK_RENDER_EXT_MATERIAL_H
 
 #include <velk-render/ext/gpu_resource.h>
+#include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_material_internal.h>
 #include <velk-render/interface/intf_render_context.h>
 
@@ -27,7 +28,7 @@ namespace velk::ext {
  *   };
  */
 template <class T, class... Extra>
-class Material : public GpuResource<T, IMaterialInternal, Extra...>
+class Material : public GpuResource<T, IMaterialInternal, IDrawData, Extra...>
 {
 public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return handle_; }

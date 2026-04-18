@@ -17,7 +17,7 @@
 #include <velk-ui/api/trait/trs.h>
 #include <velk-ui/api/visual/rect.h>
 #include <velk-ui/api/visual/visual.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
 
 constexpr velk::string_view ipsum = R"(
 Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Proin tortor purus platea sit eu id nisi litora libero. Neque vulputate consequat ac amet augue blandit maximus aliquet congue.
@@ -59,15 +59,15 @@ int main(int argc, char* argv[])
 
     // The dashboard scene has two cameras: an ortho camera (no orbit trait)
     // and a perspective camera with an orbit trait. Find them by trait.
-    auto camera = scene.find_first<velk::ui::ICamera>();   // first camera in pre-order = ortho
+    auto camera = scene.find_first<velk::ICamera>();   // first camera in pre-order = ortho
     auto camera_3d = scene.find_first<velk::ui::IOrbit>(); // only the perspective one has orbit
 
     if (camera) {
         app.add_view(window, camera, {0.5f, 0, 0.5f, 1.0f});
     }
     if (camera_3d) {
-        velk::ui::Camera(camera_3d.find_trait<velk::ui::ICamera>())
-            .set_render_path(velk::ui::RenderPath::RayTrace);
+        velk::ui::Camera(camera_3d.find_trait<velk::ICamera>())
+            .set_render_path(velk::RenderPath::RayTrace);
         app.add_view(window, camera_3d, {0, 0, .5f, 1.0f});
     }
 

@@ -77,12 +77,12 @@ uint64_t GradientMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, gradient_fragment_src, gradient_vertex_src);
 }
 
-size_t GradientMaterial::gpu_data_size() const
+size_t GradientMaterial::get_draw_data_size() const
 {
     return gradient_params_size;
 }
 
-ReturnValue GradientMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue GradientMaterial::write_draw_data(void* out, size_t size) const
 {
     if (auto state = read_state<IGradient>(this)) {
         return set_material<GradientParams>(out, size, [&](auto& p) {
@@ -118,19 +118,14 @@ BrdfSample velk_fill_gradient(FillContext ctx)
 )";
 } // namespace
 
-string_view GradientMaterial::get_fill_src() const
-{
-    return gradient_fill_src;
-}
-
-string_view GradientMaterial::get_fill_fn_name() const
+string_view GradientMaterial::get_snippet_fn_name() const
 {
     return "velk_fill_gradient";
 }
 
-string_view GradientMaterial::get_fill_include_name() const
+string_view GradientMaterial::get_snippet_source() const
 {
-    return "velk_gradient.glsl";
+    return gradient_fill_src;
 }
 
 } // namespace velk::ui

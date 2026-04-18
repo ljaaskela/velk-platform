@@ -21,7 +21,7 @@
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/plugin.h>
 #include <velk-render/render_types.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
 #include <velk-ui/interface/intf_render_to_texture.h>
 #include <velk-ui/interface/intf_renderer.h>
 #include <velk-ui/interface/intf_scene.h>

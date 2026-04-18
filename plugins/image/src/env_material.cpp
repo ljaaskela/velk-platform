@@ -104,12 +104,12 @@ uint64_t EnvMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, env_fragment_src, env_vertex_src);
 }
 
-size_t EnvMaterial::gpu_data_size() const
+size_t EnvMaterial::get_draw_data_size() const
 {
     return sizeof(EnvGpuData);
 }
 
-ReturnValue EnvMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue EnvMaterial::write_draw_data(void* out, size_t size) const
 {
     return set_material<EnvGpuData>(out, size, [&](auto& p) {
         p.intensity = intensity_;
@@ -145,19 +145,14 @@ BrdfSample velk_fill_env(FillContext ctx)
 )";
 } // namespace
 
-string_view EnvMaterial::get_fill_src() const
-{
-    return env_fill_src;
-}
-
-string_view EnvMaterial::get_fill_fn_name() const
+string_view EnvMaterial::get_snippet_fn_name() const
 {
     return "velk_fill_env";
 }
 
-string_view EnvMaterial::get_fill_include_name() const
+string_view EnvMaterial::get_snippet_source() const
 {
-    return "velk_env.glsl";
+    return env_fill_src;
 }
 
 } // namespace velk::ui::impl

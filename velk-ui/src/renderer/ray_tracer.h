@@ -38,14 +38,18 @@ public:
 private:
     struct MaterialInfo
     {
-        string_view fill_fn_name;
-        string_view include_name;
+        string_view fn_name;
+        // Built as fn_name + ".glsl" — owned to survive beyond the stack
+        // frame that constructed it.
+        string      include_name;
     };
 
     struct ShadowTechInfo
     {
         string_view fn_name;
-        string_view include_name;
+        // Built as fn_name + ".glsl" — owned to survive beyond the stack
+        // frame that constructed it (techniques supply only fn_name).
+        string      include_name;
     };
 
     // Material class (low 64 bits of class UID) -> small integer id.

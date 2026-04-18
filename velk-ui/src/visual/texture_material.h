@@ -21,8 +21,8 @@ public:
     VELK_CLASS_UID(::velk::ui::ClassId::Material::Texture, "TextureMaterial");
 
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
-    size_t gpu_data_size() const override;
-    ReturnValue write_gpu_data(void* out, size_t size) const override;
+    size_t get_draw_data_size() const override;
+    ReturnValue write_draw_data(void* out, size_t size) const override;
 };
 
 } // namespace velk::ui::impl

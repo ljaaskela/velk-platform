@@ -149,12 +149,12 @@ uint64_t StandardMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, /*fragment*/ {}, standard_vertex_src);
 }
 
-size_t StandardMaterial::gpu_data_size() const
+size_t StandardMaterial::get_draw_data_size() const
 {
     return sizeof(StandardParams);
 }
 
-ReturnValue StandardMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue StandardMaterial::write_draw_data(void* out, size_t size) const
 {
     if (auto state = read_state<IStandard>(this)) {
         return set_material<StandardParams>(out, size, [&](auto& p) {
@@ -166,8 +166,7 @@ ReturnValue StandardMaterial::write_gpu_data(void* out, size_t size) const
     return ReturnValue::Fail;
 }
 
-string_view StandardMaterial::get_fill_src() const          { return standard_fill_src; }
-string_view StandardMaterial::get_fill_fn_name() const      { return "velk_fill_standard"; }
-string_view StandardMaterial::get_fill_include_name() const { return "velk_standard.glsl"; }
+string_view StandardMaterial::get_snippet_fn_name() const { return "velk_fill_standard"; }
+string_view StandardMaterial::get_snippet_source() const  { return standard_fill_src; }
 
 } // namespace velk::impl

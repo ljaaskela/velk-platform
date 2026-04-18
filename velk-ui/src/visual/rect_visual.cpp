@@ -14,7 +14,7 @@ vector<DrawEntry> RectVisual::get_draw_entries(const rect& bounds)
     }
 
     DrawEntry entry{};
-    entry.pipeline_key = get_pipeline_key();
+    entry.pipeline_key = get_raster_pipeline_key();
     entry.bounds = bounds;
     entry.set_instance(RectInstance{
         {},  // world_matrix: written by batch_builder per-instance

@@ -3,6 +3,7 @@
 
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-ui/interface/intf_gradient.h>
 #include <velk-ui/plugin.h>
 
@@ -15,18 +16,17 @@ namespace velk::ui {
  * Provides gradient parameters (start_color, end_color, angle) as GPU data
  * that the shader reads via buffer_reference.
  */
-class GradientMaterial : public ::velk::ext::Material<GradientMaterial, IGradient>
+class GradientMaterial : public ::velk::ext::Material<GradientMaterial, IGradient, ::velk::IShaderSnippet>
 {
 public:
     VELK_CLASS_UID(ClassId::Material::Gradient, "GradientMaterial");
 
     uint64_t get_pipeline_handle(IRenderContext& ctx) override;
-    size_t gpu_data_size() const override;
-    ReturnValue write_gpu_data(void* out, size_t size) const override;
+    size_t get_draw_data_size() const override;
+    ReturnValue write_draw_data(void* out, size_t size) const override;
 
-    string_view get_fill_src() const override;
-    string_view get_fill_fn_name() const override;
-    string_view get_fill_include_name() const override;
+    string_view get_snippet_fn_name() const override;
+    string_view get_snippet_source() const override;
 };
 
 } // namespace velk::ui

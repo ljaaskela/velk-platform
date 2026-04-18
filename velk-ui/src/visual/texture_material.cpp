@@ -75,12 +75,12 @@ uint64_t TextureMaterial::get_pipeline_handle(IRenderContext& ctx)
     return ensure_pipeline(ctx, texture_fragment_src, texture_vertex_src);
 }
 
-size_t TextureMaterial::gpu_data_size() const
+size_t TextureMaterial::get_draw_data_size() const
 {
     return sizeof(TextureParams);
 }
 
-ReturnValue TextureMaterial::write_gpu_data(void* out, size_t size) const
+ReturnValue TextureMaterial::write_draw_data(void* out, size_t size) const
 {
     if (auto state = read_state<ITextureVisual>(this)) {
         return set_material<TextureParams>(out, size, [&](auto& p) {

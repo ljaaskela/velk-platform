@@ -21,7 +21,7 @@
 #include <velk-ui/api/visual/cube.h>
 #include <velk-ui/api/visual/rounded_rect.h>
 #include <velk-ui/api/visual/sphere.h>
-#include <velk-ui/interface/intf_camera.h>
+#include <velk-render/interface/intf_camera.h>
 
 #include <chrono>
 #include <cmath>
@@ -118,8 +118,8 @@ int main(int /*argc*/, char* /*argv*/[])
     auto camera_3d = scene.find_first<velk::ui::IOrbit>();
     velk::ui::OrbitTrait orbit;
     if (camera_3d) {
-        velk::ui::Camera(camera_3d.find_trait<velk::ui::ICamera>())
-            .set_render_path(velk::ui::RenderPath::RayTrace);
+        velk::ui::Camera(camera_3d.find_trait<velk::ICamera>())
+            .set_render_path(velk::RenderPath::RayTrace);
         app.add_view(window, camera_3d, {0, 0, 1.f, 1.f});
         orbit = velk::ui::OrbitTrait(camera_3d.find_trait<velk::ui::IOrbit>());
     } else {
@@ -229,7 +229,7 @@ int main(int /*argc*/, char* /*argv*/[])
 
     velk::PerformanceOverlayConfig poc;
     poc.enabled = true;
-    app.set_performance_overlay(window, poc);
+    // app.set_performance_overlay(window, poc);
 
     auto t0 = std::chrono::steady_clock::now();
     auto tick = [&]() {

@@ -4,6 +4,8 @@
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_raster_shader.h>
 #include <velk-ui/interface/intf_visual.h>
 
 #include <cstring>
@@ -49,13 +51,16 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
 
         // Ensure the visual's built-in pipeline is compiled. Empty shader
         // sources on the visual fall back to the renderer's registered
-        // defaults (see IRenderContext::compile_pipeline).
+        // defaults (see IRenderContext::compile_pipeline). Visuals that
+        // don't contribute their own shader (TextureVisual, cube/sphere)
+        // simply don't implement IRasterShader.
         if (render_ctx) {
-            uint64_t key = visual->get_pipeline_key();
-            if (key != 0 && render_ctx->pipeline_map().find(key) == render_ctx->pipeline_map().end()) {
-                render_ctx->compile_pipeline(visual->get_fragment_src(),
-                                             visual->get_vertex_src(),
-                                             key);
+            if (auto* rs = interface_cast<IRasterShader>(visual)) {
+                uint64_t key = rs->get_raster_pipeline_key();
+                if (key != 0 && render_ctx->pipeline_map().find(key) == render_ctx->pipeline_map().end()) {
+                    auto src = rs->get_raster_source(IRasterShader::Target::Forward);
+                    render_ctx->compile_pipeline(src.fragment, src.vertex, key);
+                }
             }
         }
 
@@ -295,10 +300,13 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        size_t mat_size = batch.material ? batch.material->gpu_data_size() : 0;
+        auto* mat_data = batch.material
+            ? interface_cast<IDrawData>(batch.material.get())
+            : nullptr;
+        size_t mat_size = mat_data ? mat_data->get_draw_data_size() : 0;
         if (mat_size > 0 && (mat_size % 16) != 0) {
             VELK_LOG(E,
-                     "Renderer: material gpu_data_size (%zu) is not 16-byte aligned. "
+                     "Renderer: material get_draw_data_size (%zu) is not 16-byte aligned. "
                      "Use VELK_GPU_STRUCT for your material data.",
                      mat_size);
         }
@@ -314,8 +322,8 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
 
         std::memcpy(dst, &header, sizeof(header));
         if (mat_size > 0) {
-            if (failed(batch.material->write_gpu_data(dst + sizeof(DrawDataHeader), mat_size))) {
-                VELK_LOG(E, "Renderer: material write_gpu_data failed");
+            if (failed(mat_data->write_draw_data(dst + sizeof(DrawDataHeader), mat_size))) {
+                VELK_LOG(E, "Renderer: material write_draw_data failed");
                 continue;
             }
         }
@@ -391,7 +399,10 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        size_t mat_size = batch.material ? batch.material->gpu_data_size() : 0;
+        auto* mat_data = batch.material
+            ? interface_cast<IDrawData>(batch.material.get())
+            : nullptr;
+        size_t mat_size = mat_data ? mat_data->get_draw_data_size() : 0;
         size_t total_size = sizeof(DrawDataHeader) + mat_size;
 
         auto reservation = frame_data.reserve(total_size);
@@ -402,7 +413,7 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         uint64_t draw_data_addr = reservation.gpu_addr;
         std::memcpy(dst, &header, sizeof(header));
         if (mat_size > 0) {
-            if (failed(batch.material->write_gpu_data(dst + sizeof(DrawDataHeader), mat_size))) {
+            if (failed(mat_data->write_draw_data(dst + sizeof(DrawDataHeader), mat_size))) {
                 continue;
             }
         }
@@ -428,8 +439,11 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
             string_view vsrc;
             string_view fsrc;
             if (batch.material) {
-                vsrc = batch.material->get_gbuffer_vertex_src();
-                fsrc = batch.material->get_gbuffer_fragment_src();
+                if (auto* rs = interface_cast<IRasterShader>(batch.material.get())) {
+                    auto src = rs->get_raster_source(IRasterShader::Target::Deferred);
+                    vsrc = src.vertex;
+                    fsrc = src.fragment;
+                }
             }
             gpid = render_ctx->compile_gbuffer_pipeline(fsrc, vsrc, key, target_group);
         }

@@ -1,15 +1,14 @@
 #ifndef VELK_UI_RASTERIZER_H
 #define VELK_UI_RASTERIZER_H
 
+#include "view_renderer.h"
+
 #include <velk/vector.h>
 
 #include <unordered_map>
-
-#include "view_renderer.h"
+#include <velk-render/interface/intf_camera.h>
 
 namespace velk::ui {
-
-class ICamera;
 
 /**
  * @brief Per-view renderer that emits classic graphics draw passes.

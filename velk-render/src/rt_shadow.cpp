@@ -45,14 +45,14 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
 )";
 } // namespace
 
-ShaderInclude RtShadow::get_shader_include() const
-{
-    return {rt_shadow_snippet, "velk_shadow_rt.glsl"};
-}
-
-string_view RtShadow::get_fn_name() const
+string_view RtShadow::get_snippet_fn_name() const
 {
     return "velk_shadow_rt";
+}
+
+string_view RtShadow::get_snippet_source() const
+{
+    return rt_shadow_snippet;
 }
 
 } // namespace velk::impl

@@ -1,6 +1,7 @@
 #ifndef VELK_UI_SPHERE_VISUAL_H
 #define VELK_UI_SPHERE_VISUAL_H
 
+#include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/plugin.h>
 
@@ -14,12 +15,14 @@ namespace velk::ui {
  * the RT path, the renderer emits an RtShape with shape_kind = 2 (sphere),
  * center at the element's AABB centroid, radius from the minimum extent.
  */
-class SphereVisual : public ext::Visual<SphereVisual>
+class SphereVisual : public ext::Visual<SphereVisual, ::velk::IAnalyticShape>
 {
 public:
     VELK_CLASS_UID(ClassId::Visual::Sphere, "SphereVisual");
 
     vector<DrawEntry> get_draw_entries(const rect&) override { return {}; }
+
+    // IAnalyticShape
     uint32_t get_shape_kind() const override { return 2; }
 };
 

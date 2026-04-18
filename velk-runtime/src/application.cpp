@@ -325,7 +325,7 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
     scene.add(root, camera_elem);
 
     auto camera_trait = ui::trait::render::create_camera();
-    camera_trait.set_projection(ui::Projection::Ortho);
+    camera_trait.set_projection(::velk::Projection::Ortho);
     camera_elem.add_trait(camera_trait);
 
     auto text_elem = ui::create_element();

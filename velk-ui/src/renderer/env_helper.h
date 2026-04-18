@@ -1,8 +1,8 @@
 #ifndef VELK_UI_ENV_HELPER_H
 #define VELK_UI_ENV_HELPER_H
 
+#include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_render_backend.h>
-#include <velk-ui/interface/intf_camera.h>
 #include <velk-ui/interface/intf_environment.h>
 
 #include "view_renderer.h"

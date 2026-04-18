@@ -45,7 +45,7 @@ struct ShadowContext
  * includes each distinct technique's snippet, and dispatches to the
  * technique-specific evaluator via a switch keyed on uid hash.
  *
- * Implied GLSL signature of `get_fn_name()`:
+ * Implied GLSL signature of `get_snippet_fn_name()`:
  *
  *     float <fn_name>(uint light_idx, vec3 world_pos, vec3 world_normal);
  *
