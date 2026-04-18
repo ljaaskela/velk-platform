@@ -5,6 +5,7 @@
 #include <velk/api/object.h>
 
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-ui/ext/trait.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/api/font.h>
@@ -23,7 +24,7 @@ namespace velk::ui {
  * Layout is performed lazily in get_draw_entries() and cached via
  * ChangeCache so it only re-runs when inputs change.
  */
-class TextVisual : public ext::Visual<TextVisual, ITextVisual>
+class TextVisual : public ext::Visual<TextVisual, ITextVisual, ::velk::IShaderSnippet>
 {
 public:
     VELK_CLASS_UID(ClassId::Visual::Text, "TextVisual");
@@ -34,6 +35,13 @@ public:
     // IVisual
     vector<DrawEntry> get_draw_entries(const rect& bounds) override;
     vector<IBuffer::Ptr> get_gpu_resources() const override;
+
+    // IShaderSnippet: deferred `velk_visual_discard` that drops
+    // fragments whose glyph coverage is below threshold. Assumes the
+    // material is TextMaterial (whose deferred fragment provides v_uv,
+    // v_glyph_index, and `root.material.*` in scope).
+    string_view get_snippet_fn_name() const override;
+    string_view get_snippet_source() const override;
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;

@@ -9,6 +9,7 @@
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_target.h>
+#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_scene.h>
@@ -32,6 +33,15 @@ public:
         vector<DrawEntry> entries;
         uint64_t pipeline_override = 0;
         IProgram::Ptr material;
+        // Per-visual deferred-fragment discard snippet (SDF corners,
+        // glyph coverage, ...). Non-null only when the visual opts in
+        // via IShaderSnippet. See batch_builder's gbuffer pipeline
+        // composer for how it's spliced into the material's fragment.
+        // `discard_key_perturb` is a precomputed 64-bit contribution
+        // XORed into the gbuffer pipeline cache key so two visuals that
+        // share a material still get distinct composed pipelines.
+        IShaderSnippet::Ptr visual_discard;
+        uint64_t discard_key_perturb = 0;
     };
 
     struct ElementCache
@@ -49,6 +59,10 @@ public:
         uint32_t instance_stride = 0;
         uint32_t instance_count = 0;
         IProgram::Ptr material;
+        IShaderSnippet::Ptr visual_discard;
+        // Precomputed key perturbation for the gbuffer pipeline cache;
+        // 0 when the visual contributes no discard snippet.
+        uint64_t discard_key_perturb = 0;
     };
 
     struct RenderTargetPassData

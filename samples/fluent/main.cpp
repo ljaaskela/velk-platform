@@ -21,6 +21,7 @@
 #include <velk-ui/api/visual/cube.h>
 #include <velk-ui/api/visual/rounded_rect.h>
 #include <velk-ui/api/visual/sphere.h>
+#include <velk-ui/plugins/text/api/text_visual.h>
 #include <velk-render/interface/intf_camera.h>
 
 #include <chrono>
@@ -178,6 +179,27 @@ int main(int /*argc*/, char* /*argv*/[])
         cube.add_trait(cube_vis);
         scene.add(scene.root(), cube);
 
+        // Text block standing on the floor in front of the mirror grid.
+        // The default text visual lies in the XY plane facing -Z; we
+        // rotate it to stand vertical (XZ plane, facing -Y toward camera)
+        // and translate down onto the floor.
+        {
+            auto text = velk::ui::create_element();
+            auto text_sz = velk::ui::trait::layout::create_fixed_size(
+                velk::ui::dim::px(900.f), velk::ui::dim::px(180.f));
+            auto text_trs = velk::ui::trait::transform::create_trs();
+            text_trs.set_translate({-450.f, 550.f, 650.f});
+            auto tv = velk::ui::trait::visual::create_text();
+            tv.set_text("velk-ui // deferred PBR");
+            tv.set_font_size(128.f);
+            tv.set_color({0.95f, 0.55f, 1.0f, 1.f});
+            tv.set_layout(velk::ui::TextLayout::MultiLine);
+            text.add_trait(text_sz);
+            text.add_trait(text_trs);
+            text.add_trait(tv);
+            scene.add(scene.root(), text);
+        }
+
         auto sphere = velk::ui::create_element();
         auto sphere_sz = velk::ui::trait::layout::create_fixed_size(
             velk::ui::dim::px(180.f), velk::ui::dim::px(180.f), velk::ui::dim::px(180.f));
@@ -229,7 +251,7 @@ int main(int /*argc*/, char* /*argv*/[])
 
     velk::PerformanceOverlayConfig poc;
     poc.enabled = true;
-    // app.set_performance_overlay(window, poc);
+    app.set_performance_overlay(window, poc);
 
     auto t0 = std::chrono::steady_clock::now();
     auto tick = [&]() {

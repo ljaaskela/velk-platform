@@ -89,14 +89,14 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     ctx->set_default_vertex_shader(ctx->compile_shader(default_vertex_src, ShaderStage::Vertex));
     ctx->set_default_fragment_shader(ctx->compile_shader(default_fragment_src, ShaderStage::Fragment));
 
-    // Deferred G-buffer defaults. Used by the deferred pipeline when a
-    // material doesn't override get_gbuffer_{vertex,fragment}_src(). The
-    // default emits the instance colour as albedo with LightingMode::Unlit
-    // so UI visuals composite through compute lighting unchanged.
+    // Deferred G-buffer default vertex. The default fragment isn't
+    // pre-compiled: its standalone source declares a `velk_visual_discard`
+    // forward decl whose definition only arrives when batch_builder's
+    // composer appends the visual's discard snippet (or an empty stub).
+    // The composer always supplies a complete fragment, so the default
+    // fragment slot in IRenderContext stays unused.
     ctx->set_default_gbuffer_vertex_shader(
         ctx->compile_shader(default_gbuffer_vertex_src, ShaderStage::Vertex));
-    ctx->set_default_gbuffer_fragment_shader(
-        ctx->compile_shader(default_gbuffer_fragment_src, ShaderStage::Fragment));
 
     frame_buffer_.init();
     for (auto& slot : frame_slots_) {

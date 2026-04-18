@@ -62,23 +62,21 @@ constexpr string_view standard_deferred_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer StandardParams {
-    vec4 base_color;
-    float metallic;
-    float roughness;
-    float _pad0;
-    float _pad1;
-};
-
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(RectInstanceData)
-    StandardParams material;
+    OpaquePtr material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
 
-layout(location = 0) out vec3 v_world_pos;
-layout(location = 1) out vec3 v_world_normal;
+// Canonical deferred varyings, matching default_gbuffer_vertex_src so
+// any per-visual discard snippet composed into the fragment can read
+// v_local_uv / v_size / v_color alongside world_pos / world_normal.
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec2 v_local_uv;
+layout(location = 2) flat out vec2 v_size;
+layout(location = 3) out vec3 v_world_pos;
+layout(location = 4) out vec3 v_world_normal;
 
 void main()
 {
@@ -87,6 +85,9 @@ void main()
     vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
     vec4 world_pos_h = inst.world_matrix * local_pos;
     gl_Position = root.global_data.view_projection * world_pos_h;
+    v_color = inst.color;
+    v_local_uv = q;
+    v_size = inst.size;
     v_world_pos = world_pos_h.xyz;
     v_world_normal = normalize(vec3(inst.world_matrix[2]));
 }
@@ -115,16 +116,25 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 
 layout(push_constant) uniform PC { DrawData root; };
 
-layout(location = 0) in vec3 v_world_pos;
-layout(location = 1) in vec3 v_world_normal;
+// Canonical deferred varyings; only a subset is used here but all are
+// declared so a composed `velk_visual_discard()` can reference them.
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
 
 layout(location = 0) out vec4 g_albedo;
 layout(location = 1) out vec4 g_normal;
 layout(location = 2) out vec4 g_world_pos;
 layout(location = 3) out vec4 g_material;
 
+// Composer supplies either the visual's discard snippet or an empty stub.
+void velk_visual_discard();
+
 void main()
 {
+    velk_visual_discard();
     g_albedo    = root.material.base_color;
     g_normal    = vec4(normalize(v_world_normal), 0.0);
     g_world_pos = vec4(v_world_pos, 0.0);

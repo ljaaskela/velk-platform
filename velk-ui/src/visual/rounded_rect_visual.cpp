@@ -91,12 +91,53 @@ uint64_t RoundedRectVisual::get_raster_pipeline_key() const
     return kPipelineKey;
 }
 
-::velk::ShaderSource RoundedRectVisual::get_raster_source(::velk::IRasterShader::Target) const
+::velk::ShaderSource RoundedRectVisual::get_raster_source(::velk::IRasterShader::Target t) const
 {
-    // Forward and deferred share the same source today (no
-    // G-buffer variant yet). `kIntersectSrc` lives on
-    // `IAnalyticShape::get_shape_intersect_source` if ever wired up.
-    return {/*vertex*/ {}, kFragmentSrc};
+    // Forward: custom SDF fragment (vertex stays default).
+    // Deferred: no override - the batch_builder composes the material's
+    // deferred fragment with this visual's `velk_visual_discard` snippet
+    // (see get_snippet_source below), so SDF corner clipping lands in
+    // the gbuffer pass without duplicating a full fragment here.
+    if (t == ::velk::IRasterShader::Target::Forward) {
+        return {/*vertex*/ {}, kFragmentSrc};
+    }
+    return {};
+}
+
+namespace {
+
+// Deferred discard snippet: clips the rect's rounded corners against
+// the same SDF as kFragmentSrc, then early-outs via `discard`. The
+// deferred compositor has no alpha blending, so this is a hard cutoff
+// (no AA) — matches what every other deferred-only renderer gives you
+// without MSAA/TAA.
+constexpr string_view kDiscardSrc = R"(
+void velk_visual_discard()
+{
+    float radius = min(min(v_size.x, v_size.y) * 0.5, 12.0);
+    vec2 half_size = v_size * 0.5;
+    vec2 p = (v_local_uv - 0.5) * v_size;
+    vec2 d = abs(p) - half_size + radius;
+    float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+    if (sdf > 0.0) discard;
+}
+)";
+
+} // namespace
+
+string_view RoundedRectVisual::get_shape_intersect_source() const
+{
+    return kIntersectSrc;
+}
+
+string_view RoundedRectVisual::get_snippet_fn_name() const
+{
+    return "velk_visual_discard";
+}
+
+string_view RoundedRectVisual::get_snippet_source() const
+{
+    return kDiscardSrc;
 }
 
 } // namespace velk::ui

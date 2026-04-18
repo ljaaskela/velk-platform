@@ -103,7 +103,11 @@ void main()
 [[maybe_unused]] constexpr string_view default_gbuffer_fragment_src = R"(
 #version 450
 
+// Canonical deferred varyings; the default gbuffer vertex emits the
+// full set and every fragment reads a subset.
 layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
 layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 
@@ -113,8 +117,13 @@ layout(location = 1) out vec4 g_normal;         // xyz: world normal
 layout(location = 2) out vec4 g_world_pos;      // xyz: world position
 layout(location = 3) out vec4 g_material;       // r: metallic, g: roughness, b: lighting_mode, a: _
 
+// Forward decl; the batch_builder composer appends either the visual's
+// discard snippet or an empty stub after this fragment's body.
+void velk_visual_discard();
+
 void main()
 {
+    velk_visual_discard();
     g_albedo      = v_color;
     g_normal      = vec4(normalize(v_world_normal), 0.0);
     g_world_pos   = vec4(v_world_pos, 0.0);

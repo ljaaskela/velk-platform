@@ -1,5 +1,7 @@
 #include "batch_builder.h"
 
+#include "default_ui_shaders.h"
+
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
@@ -10,6 +12,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <velk/string.h>
 
 namespace {
 
@@ -69,6 +72,21 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         {
             VELK_PERF_SCOPE("renderer.get_draw_entries");
             vc.entries = visual->get_draw_entries(local_rect);
+        }
+
+        // Capture an optional per-visual `velk_visual_discard` snippet.
+        // Deferred gbuffer fragments call this at the top of main(); the
+        // composer in build_gbuffer_draw_calls splices the snippet in.
+        // The key perturbation is folded from the visual's class uid so
+        // two visuals sharing a material still get distinct pipelines.
+        if (auto* snippet = interface_cast<IShaderSnippet>(visual)) {
+            if (!snippet->get_snippet_source().empty()) {
+                vc.visual_discard = interface_pointer_cast<IShaderSnippet>(att);
+                if (auto* obj = interface_cast<IObject>(visual)) {
+                    Uid uid = obj->get_class_uid();
+                    vc.discard_key_perturb = uid.lo ^ uid.hi;
+                }
+            }
         }
 
         auto vstate = read_state<IVisual>(visual);
@@ -180,6 +198,8 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                         batch.texture_key = texture;
                         batch.instance_stride = de.instance_size;
                         batch.material = vc.material;
+                        batch.visual_discard = vc.visual_discard;
+                        batch.discard_key_perturb = vc.discard_key_perturb;
                         target_batches.push_back(std::move(batch));
                         last_bkey = bkey;
                     }
@@ -402,34 +422,55 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         std::memcpy(dst, &header, sizeof(header));
         std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
 
-        // Resolve the G-buffer pipeline variant. Forward key is stable
-        // (hash on visual class / material), so we reuse it as the key
-        // in the G-buffer pipeline map. Sources come from the material's
-        // deferred overrides if present, else the registered defaults.
-        uint64_t key = batch.pipeline_key;
-        if (key == 0 && batch.material) {
-            key = batch.material->get_pipeline_handle(*render_ctx);
+        // Resolve the G-buffer pipeline variant. Base key is the forward
+        // pipeline key (stable hash on visual class / material); perturb
+        // by the visual's discard-snippet class so two visuals sharing
+        // the same material still get distinct gbuffer pipelines with
+        // the right `velk_visual_discard` spliced in.
+        uint64_t forward_key = batch.pipeline_key;
+        if (forward_key == 0 && batch.material) {
+            forward_key = batch.material->get_pipeline_handle(*render_ctx);
         }
-        if (key == 0) {
+        if (forward_key == 0) {
             continue;
         }
+        uint64_t gbuffer_key = forward_key ^ batch.discard_key_perturb;
 
         PipelineId gpid = 0;
         auto& gmap = render_ctx->gbuffer_pipeline_map();
-        auto git = gmap.find(key);
+        auto git = gmap.find(gbuffer_key);
         if (git != gmap.end()) {
             gpid = git->second;
         } else {
             string_view vsrc;
-            string_view fsrc;
+            string_view base_fsrc;
             if (batch.material) {
                 if (auto* rs = interface_cast<IRasterShader>(batch.material.get())) {
                     auto src = rs->get_raster_source(IRasterShader::Target::Deferred);
                     vsrc = src.vertex;
-                    fsrc = src.fragment;
+                    base_fsrc = src.fragment;
                 }
             }
-            gpid = render_ctx->compile_gbuffer_pipeline(fsrc, vsrc, key, target_group);
+            if (base_fsrc.empty()) {
+                base_fsrc = default_gbuffer_fragment_src;
+            }
+
+            // Compose fragment = material's (or default) source + the
+            // visual's discard snippet body, OR an empty stub when the
+            // visual opts out. Every deferred fragment forward-declares
+            // `void velk_visual_discard()` and calls it at the top of
+            // main; the composer supplies the definition here.
+            string composed;
+            composed.append(base_fsrc);
+            composed.append(string_view("\n", 1));
+            if (batch.visual_discard) {
+                composed.append(batch.visual_discard->get_snippet_source());
+            } else {
+                composed.append(string_view("void velk_visual_discard() {}\n", 30));
+            }
+
+            gpid = render_ctx->compile_gbuffer_pipeline(
+                string_view(composed), vsrc, gbuffer_key, target_group);
         }
         if (gpid == 0) {
             continue;

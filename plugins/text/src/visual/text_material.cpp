@@ -107,6 +107,88 @@ VELK_GPU_STRUCT TextMaterialData
 };
 static_assert(sizeof(TextMaterialData) == 32, "TextMaterialData must be 32 bytes");
 
+// Deferred vertex: same transform as the forward path but also emits
+// world_pos + world_normal so the gbuffer has usable geometry data.
+// Material slot is OpaquePtr since the vertex doesn't dereference it.
+constexpr string_view text_deferred_vertex_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(TextInstanceData)
+    OpaquePtr material;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec2 v_uv;
+layout(location = 2) flat out uint v_glyph_index;
+layout(location = 3) out vec3 v_world_pos;
+layout(location = 4) out vec3 v_world_normal;
+
+void main()
+{
+    vec2 q = velk_unit_quad(gl_VertexIndex);
+    TextInstance inst = root.instance_data.data[gl_InstanceIndex];
+    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
+    vec4 world_pos_h = inst.world_matrix * local_pos;
+    gl_Position = root.global_data.view_projection * world_pos_h;
+    v_color = inst.color;
+    v_uv = vec2(q.x, 1.0 - q.y);
+    v_glyph_index = inst.glyph_index;
+    v_world_pos = world_pos_h.xyz;
+    v_world_normal = normalize(vec3(inst.world_matrix[2]));
+}
+)";
+
+// Deferred fragment: TextVisual's visual_discard (spliced in by the
+// batch_builder composer) drops fragments below a coverage threshold
+// before the body runs. Surviving fragments write the glyph's color
+// into the G-buffer tagged as Unlit - text doesn't participate in PBR
+// lighting, deferred compute passes albedo through unchanged.
+constexpr string_view text_deferred_fragment_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk_text.glsl"
+
+layout(buffer_reference, std430) buffer TextParams {
+    VelkTextCurveBuffer curves;
+    VelkTextBandBuffer bands;
+    VelkTextGlyphBuffer glyphs;
+};
+
+layout(buffer_reference, std430) buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    TextParams material;
+};
+
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_uv;
+layout(location = 2) flat in uint v_glyph_index;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
+
+layout(location = 0) out vec4 g_albedo;
+layout(location = 1) out vec4 g_normal;
+layout(location = 2) out vec4 g_world_pos;
+layout(location = 3) out vec4 g_material;
+
+void velk_visual_discard();
+
+void main()
+{
+    velk_visual_discard();
+    g_albedo    = v_color;
+    g_normal    = vec4(normalize(v_world_normal), 0.0);
+    g_world_pos = vec4(v_world_pos, 0.0);
+    g_material  = vec4(0.0, 0.0, 0.0 /*Unlit*/, 0.0);
+}
+)";
+
 } // namespace
 
 void TextMaterial::set_font_buffers(IBuffer::Ptr curves, IBuffer::Ptr bands, IBuffer::Ptr glyphs)
@@ -199,6 +281,14 @@ string_view TextMaterial::get_snippet_source() const
 void TextMaterial::register_snippet_includes(IRenderContext& ctx) const
 {
     ctx.register_shader_include("velk_text.glsl", embedded::velk_text_glsl);
+}
+
+ShaderSource TextMaterial::get_raster_source(IRasterShader::Target t) const
+{
+    if (t == IRasterShader::Target::Deferred) {
+        return {text_deferred_vertex_src, text_deferred_fragment_src};
+    }
+    return {};
 }
 
 } // namespace velk::ui
