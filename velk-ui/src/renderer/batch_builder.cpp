@@ -7,6 +7,7 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_raster_shader.h>
 #include <velk-ui/interface/intf_visual.h>
 
@@ -98,6 +99,29 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
             if (render_ctx && vstate && vstate->paint) {
                 auto prog = vstate->paint.get<IProgram>();
                 if (prog) {
+                    // Materials with an IMaterial eval body get their
+                    // forward pipeline composed from the shared driver
+                    // template + the material's eval_src + vertex_src.
+                    // The compiled handle is stored on the material via
+                    // set_pipeline_handle so subsequent get_pipeline_handle
+                    // calls short-circuit.
+                    if (auto* mat = interface_cast<IMaterial>(prog.get());
+                        mat && prog->get_pipeline_handle(*render_ctx) == 0) {
+                        auto eval_src = mat->get_eval_src();
+                        auto vertex_src = mat->get_vertex_src();
+                        auto eval_fn = mat->get_eval_fn_name();
+                        if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
+                            mat->register_eval_includes(*render_ctx);
+                            string frag = compose_eval_fragment(
+                                forward_fragment_driver_template, eval_src, eval_fn,
+                                mat->get_forward_discard_threshold());
+                            uint64_t h = render_ctx->compile_pipeline(
+                                string_view(frag), vertex_src);
+                            if (h) {
+                                prog->set_pipeline_handle(h);
+                            }
+                        }
+                    }
                     uint64_t handle = prog->get_pipeline_handle(*render_ctx);
                     if (handle) {
                         vc.pipeline_override = handle;
@@ -130,7 +154,11 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
 {
     VELK_PERF_SCOPE("renderer.rebuild_batches");
     out_batches.clear();
-    render_target_passes_.clear();
+    // Note: render_target_passes_ is NOT cleared here — it's cleared
+    // once per frame in reset_frame_state (called at Renderer::prepare
+    // start). Each view's rebuild_batches appends; find_or_make_pass
+    // dedups so an RTT element shared between views only emits once
+    // per frame from build_shared_passes.
 
     auto resolve_texture = [](const IProgram::Ptr& material, uint64_t fallback) -> uint64_t {
         return material ? reinterpret_cast<uintptr_t>(material.get()) : fallback;
@@ -226,12 +254,17 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
 
     auto* scene = state.scene;
 
-    auto find_or_make_pass = [&](IElement* rt_elem) -> RenderTargetPassData& {
+    // Returns a fresh pass entry for `rt_elem`, or nullptr if some
+    // earlier view's rebuild this frame already populated this element
+    // (same scene walked by two views → same subtree). The nullptr
+    // answer makes the walk skip re-appending into the existing entry,
+    // so the RTT pass draws the subtree exactly once.
+    auto find_or_make_pass = [&](IElement* rt_elem) -> RenderTargetPassData* {
         for (auto& rtp : render_target_passes_) {
-            if (rtp.element == rt_elem) return rtp;
+            if (rtp.element == rt_elem) return nullptr;
         }
         render_target_passes_.push_back({rt_elem, {}, {}, {}});
-        return render_target_passes_.back();
+        return &render_target_passes_.back();
     };
 
     // Every element is recorded in the ambient (main) lists. An
@@ -251,8 +284,10 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
         if (!elem_ptr) return;
         auto* elem = elem_ptr.get();
 
-        RenderTargetPassData* inner_pass =
-            elem->has_render_traits() ? &find_or_make_pass(elem) : active_pass;
+        RenderTargetPassData* inner_pass = active_pass;
+        if (elem->has_render_traits()) {
+            inner_pass = find_or_make_pass(elem);
+        }
 
         ambient_before.push_back(elem);
         if (inner_pass) inner_pass->before_entries.push_back(elem);
@@ -450,11 +485,26 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         } else {
             string_view vsrc;
             string_view base_fsrc;
+            string composed_fsrc;
+
+            // Materials provide a velk_eval_<name> body; the deferred
+            // driver + material eval_src + vertex_src compose into the
+            // G-buffer fragment below. Materials without eval_src fall
+            // through to `default_gbuffer_fragment_src` (flat unlit
+            // albedo).
             if (batch.material) {
-                if (auto* rs = interface_cast<IRasterShader>(batch.material.get())) {
-                    auto src = rs->get_raster_source(IRasterShader::Target::Deferred);
-                    vsrc = src.vertex;
-                    base_fsrc = src.fragment;
+                if (auto* mat = interface_cast<IMaterial>(batch.material.get());
+                    mat && !mat->get_eval_src().empty()
+                    && !mat->get_vertex_src().empty()
+                    && !mat->get_eval_fn_name().empty()) {
+                    mat->register_eval_includes(*render_ctx);
+                    composed_fsrc = compose_eval_fragment(
+                        deferred_fragment_driver_template,
+                        mat->get_eval_src(),
+                        mat->get_eval_fn_name(),
+                        mat->get_deferred_discard_threshold());
+                    vsrc = mat->get_vertex_src();
+                    base_fsrc = string_view(composed_fsrc);
                 }
             }
             if (base_fsrc.empty()) {

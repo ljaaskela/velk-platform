@@ -50,6 +50,14 @@ private:
 
     std::unordered_map<IElement*, RenderTargetEntry> render_target_entries_;
 
+    // Ensures every render-target element in batch_builder's
+    // render_target_passes has an allocated backend texture and its
+    // render_target_id set on the RenderTarget object. Called from
+    // build_passes BEFORE emit_forward_pass so that build_draw_calls
+    // for the main pass sees correct render-target ids when resolving
+    // texture_keys that point at RTT surfaces.
+    void ensure_render_targets(FrameContext& ctx);
+
     // Inserts an env fullscreen batch at the front of view.batches when the
     // camera has an environment. Relies on ensure_env_ready to do the
     // texture upload.

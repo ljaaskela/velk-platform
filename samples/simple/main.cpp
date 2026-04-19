@@ -139,7 +139,7 @@ int main(int argc, char* argv[])
             auto sz =
                 velk::ui::trait::layout::create_fixed_size(velk::ui::dim::px(640), velk::ui::dim::px(1080));
             auto tr = velk::ui::trait::transform::create_trs();
-            tr.set_translate({offset, offset, 0});
+            tr.set_translate({offset, offset, offset});
             auto vis = velk::ui::trait::visual::create_text();
             vis.set_text(ipsum);
             vis.set_color({1.f - c, c, (c * 2.f) / 2.f, 1});

@@ -1,5 +1,7 @@
 #include "gradient_material.h"
 
+#include "../renderer/default_ui_shaders.h"
+
 #include <velk/api/state.h>
 
 #include <cstring>
@@ -16,74 +18,36 @@ VELK_GPU_STRUCT GradientParams
     float angle;
 };
 
-constexpr string_view gradient_vertex_src = R"(
-#version 450
-#include "velk.glsl"
-#include "velk-ui.glsl"
-
-layout(buffer_reference, std430) readonly buffer GradientParams {
+// Eval body: linear gradient across the local rect UV, driven by
+// `angle` in degrees. Shared across forward / deferred / RT; the
+// framework wraps this into the appropriate per-path driver.
+constexpr string_view gradient_eval_src = R"(
+layout(buffer_reference, std430) readonly buffer GradientMaterialData {
     vec4 start_color;
     vec4 end_color;
-    float angle;
+    vec4 angle_pad; // x = angle in degrees; yzw unused
 };
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
-    GradientParams material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
-
-layout(location = 0) out vec2 v_local_uv;
-
-void main()
+MaterialEval velk_eval_gradient(EvalContext ctx)
 {
-    vec2 q = velk_unit_quad(gl_VertexIndex);
-    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
-    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
-    v_local_uv = q;
-}
-)";
-
-constexpr string_view gradient_fragment_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(buffer_reference, std430) readonly buffer GradientParams {
-    vec4 start_color;
-    vec4 end_color;
-    float angle;
-};
-
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr)
-    GradientParams material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
-
-layout(location = 0) in vec2 v_local_uv;
-layout(location = 0) out vec4 frag_color;
-
-void main()
-{
-    float rad = radians(root.material.angle);
+    GradientMaterialData d = GradientMaterialData(ctx.data_addr);
+    float rad = radians(d.angle_pad.x);
     vec2 dir = vec2(cos(rad), sin(rad));
-    float t = dot(v_local_uv - 0.5, dir) + 0.5;
-    t = clamp(t, 0.0, 1.0);
-    frag_color = mix(root.material.start_color, root.material.end_color, t);
+    float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);
+
+    MaterialEval e;
+    e.color = mix(d.start_color, d.end_color, t);
+    e.normal = ctx.normal;
+    e.metallic = 0.0;
+    e.roughness = 1.0;
+    e.lighting_mode = VELK_LIGHTING_UNLIT;
+    return e;
 }
 )";
 
 } // namespace
 
 constexpr auto gradient_params_size = sizeof(GradientParams);
-
-uint64_t GradientMaterial::get_pipeline_handle(IRenderContext& ctx)
-{
-    return ensure_pipeline(ctx, gradient_fragment_src, gradient_vertex_src);
-}
 
 size_t GradientMaterial::get_draw_data_size() const
 {
@@ -102,39 +66,19 @@ ReturnValue GradientMaterial::write_draw_data(void* out, size_t size) const
     return ReturnValue::Fail;
 }
 
-namespace {
-constexpr string_view gradient_fill_src = R"(
-layout(buffer_reference, std430) readonly buffer GradientMaterialData {
-    vec4 start_color;
-    vec4 end_color;
-    vec4 angle_pad; // x = angle in degrees; yzw unused
-};
-
-BrdfSample velk_fill_gradient(FillContext ctx)
+string_view GradientMaterial::get_eval_src() const
 {
-    GradientMaterialData d = GradientMaterialData(ctx.data_addr);
-    float rad = radians(d.angle_pad.x);
-    vec2 dir = vec2(cos(rad), sin(rad));
-    float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);
-    BrdfSample bs;
-    bs.emission = mix(d.start_color, d.end_color, t);
-    bs.throughput = vec3(0.0);
-    bs.next_dir = vec3(0.0);
-    bs.terminate = true;
-    bs.sample_count_hint = 1u;
-    return bs;
-}
-)";
-} // namespace
-
-string_view GradientMaterial::get_snippet_fn_name() const
-{
-    return "velk_fill_gradient";
+    return gradient_eval_src;
 }
 
-string_view GradientMaterial::get_snippet_source() const
+string_view GradientMaterial::get_eval_fn_name() const
 {
-    return gradient_fill_src;
+    return "velk_eval_gradient";
+}
+
+string_view GradientMaterial::get_vertex_src() const
+{
+    return rect_material_vertex_src;
 }
 
 } // namespace velk::ui

@@ -111,22 +111,13 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
         src += string_view(s, std::strlen(s));
     };
 
-    append_literal("BrdfSample velk_resolve_fill(uint mid, FillContext ctx) {\n");
-    append_literal("    switch (mid) {\n");
+    // Order matters:
+    //   1) velk_eval_shadow dispatch (called from velk_pbr_shade).
+    //   2) velk_pbr_shade helper (calls velk_eval_shadow; called from
+    //      velk_resolve_fill for Lit materials).
+    //   3) velk_resolve_fill dispatch (calls velk_pbr_shade).
+
     char buf[128];
-    for (auto id : material_ids) {
-        if (id == 0 || id > material_info_by_id.size()) continue;
-        const auto& mi = material_info_by_id[id - 1];
-        int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
-        if (n > 0) {
-            src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
-        }
-        src += mi.fn_name;
-        append_literal("(ctx);\n");
-    }
-    append_literal("        default: { BrdfSample bs; bs.emission = ctx.base; bs.throughput = vec3(0.0); bs.next_dir = vec3(0.0); bs.terminate = true; bs.sample_count_hint = 1u; return bs; }\n");
-    append_literal("    }\n");
-    append_literal("}\n");
 
     append_literal("float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_normal) {\n");
     append_literal("    switch (tech_id) {\n");
@@ -141,6 +132,36 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
         append_literal("(light_idx, world_pos, world_normal);\n");
     }
     append_literal("        default: return 1.0;\n");
+    append_literal("    }\n");
+    append_literal("}\n");
+
+    // Shared PBR shading helper — defined after velk_eval_shadow (which
+    // it calls) and before velk_resolve_fill (which calls it for Lit
+    // materials).
+    src += rt_pbr_shade_src;
+
+    append_literal("BrdfSample velk_resolve_fill(uint mid, EvalContext ctx) {\n");
+    append_literal("    switch (mid) {\n");
+    for (auto id : material_ids) {
+        if (id == 0 || id > material_info_by_id.size()) continue;
+        const auto& mi = material_info_by_id[id - 1];
+        int n = std::snprintf(buf, sizeof(buf), "        case %uu: { MaterialEval e = ", id);
+        if (n > 0) {
+            src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
+        }
+        src += mi.fn_name;
+        append_literal("(ctx);"
+                       " if (e.lighting_mode == VELK_LIGHTING_STANDARD)"
+                       " return velk_pbr_shade(e, ctx);"
+                       " BrdfSample bs;"
+                       " bs.emission = e.color;"
+                       " bs.throughput = vec3(0.0);"
+                       " bs.next_dir = vec3(0.0);"
+                       " bs.terminate = true;"
+                       " bs.sample_count_hint = 1u;"
+                       " return bs; }\n");
+    }
+    append_literal("        default: { BrdfSample bs; bs.emission = ctx.base; bs.throughput = vec3(0.0); bs.next_dir = vec3(0.0); bs.terminate = true; bs.sample_count_hint = 1u; return bs; }\n");
     append_literal("    }\n");
     append_literal("}\n");
 

@@ -8,6 +8,7 @@
 #include <velk/api/velk.h>
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_material.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -31,11 +32,13 @@ void FrameSnippetRegistry::begin_frame()
 uint32_t FrameSnippetRegistry::register_material(IProgram* prog, IRenderContext& ctx)
 {
     if (!prog) return 0;
-    auto* snippet = interface_cast<IShaderSnippet>(prog);
-    if (!snippet) return 0;
-    auto fn = snippet->get_snippet_fn_name();
-    auto src = snippet->get_snippet_source();
+
+    auto* mat = interface_cast<IMaterial>(prog);
+    if (!mat) return 0;
+    auto fn = mat->get_eval_fn_name();
+    auto src = mat->get_eval_src();
     if (fn.empty() || src.empty()) return 0;
+
     auto* obj = interface_cast<IObject>(prog);
     if (!obj) return 0;
     Uid uid = obj->get_class_uid();
@@ -50,7 +53,7 @@ uint32_t FrameSnippetRegistry::register_material(IProgram* prog, IRenderContext&
     include_name.append(fn);
     include_name.append(string_view(".glsl", 5));
     ctx.register_shader_include(include_name, src);
-    snippet->register_snippet_includes(ctx);
+    mat->register_eval_includes(ctx);
 
     uint32_t id = static_cast<uint32_t>(material_info_by_id_.size()) + 1;
     material_info_by_id_.push_back({fn, std::move(include_name)});

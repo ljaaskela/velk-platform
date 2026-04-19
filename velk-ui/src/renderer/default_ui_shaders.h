@@ -1,7 +1,13 @@
 #ifndef VELK_RENDER_DEFAULT_SHADERS_H
 #define VELK_RENDER_DEFAULT_SHADERS_H
 
+#include <velk/string.h>
 #include <velk/string_view.h>
+
+#include <velk-ui/ext/material_shaders.h>
+
+#include <cstdio>
+#include <cstring>
 
 namespace velk {
 
@@ -96,6 +102,9 @@ void main()
 }
 )";
 
+// rect_material_vertex_src now lives in <velk-ui/ext/material_shaders.h>
+// so plugins can reuse it without depending on this internal header.
+
 // Default fragment shader for the deferred G-buffer fill. Writes the
 // instance color straight through to albedo, marks the fragment as
 // "unlit" so the compute lighting pass passes albedo through unchanged.
@@ -130,6 +139,152 @@ void main()
     g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
 }
 )";
+
+// ===== Material eval-driver fragment templates =====
+// Forward and deferred fragment shaders that materials with a
+// `velk_eval_<name>` body share. The raster-pipeline composer
+// concatenates these with the material's eval_src, vertex_src, and the
+// visual's (optional) discard snippet, then compiles.
+//
+// Each template assumes:
+//   - `velk.glsl` and `velk-ui.glsl` are #included by the composer
+//     (which gives EvalContext / MaterialEval / VELK_LIGHTING_*).
+//   - A literal  <%EVAL_FN%>  is replaced with the material's eval
+//     function name (e.g. "velk_eval_gradient").
+//   - A literal  <%DISCARD%>  is replaced with a float literal for the
+//     alpha-discard threshold.
+//   - The composer emits the eval_src (declares the material's own
+//     buffer_reference types + velk_eval_<name>) BEFORE this template.
+//   - The DrawData buffer_reference here uses OpaquePtr for the
+//     instance and material slots — the fragment doesn't dereference
+//     the typed layouts, it just forwards the material address via
+//     ctx.data_addr and lets the eval's own typed pointer pick it up.
+
+[[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    OpaquePtr material;
+};
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
+layout(location = 5) flat in uint v_shape_param;
+
+layout(location = 0) out vec4 frag_color;
+
+void main()
+{
+    EvalContext ctx;
+    ctx.data_addr   = uint64_t(root.material);
+    ctx.texture_id  = root.texture_id;  // per-drawcall, shared by all instances
+    ctx.shape_param = v_shape_param;
+    ctx.uv          = v_local_uv;
+    ctx.base        = v_color;
+    ctx.ray_dir     = normalize(v_world_pos - root.global_data.cam_pos.xyz);
+    ctx.normal      = v_world_normal;
+    ctx.hit_pos     = v_world_pos;
+
+    MaterialEval e = <%EVAL_FN%>(ctx);
+    if (e.color.a < <%DISCARD%>) discard;
+    frag_color = e.color;
+}
+)";
+
+[[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr)
+    OpaquePtr material;
+};
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
+layout(location = 5) flat in uint v_shape_param;
+
+layout(location = 0) out vec4 g_albedo;
+layout(location = 1) out vec4 g_normal;
+layout(location = 2) out vec4 g_world_pos;
+layout(location = 3) out vec4 g_material;
+
+// Composer appends either the visual's discard snippet or an empty stub.
+void velk_visual_discard();
+
+void main()
+{
+    velk_visual_discard();
+
+    EvalContext ctx;
+    ctx.data_addr   = uint64_t(root.material);
+    ctx.texture_id  = root.texture_id;
+    ctx.shape_param = v_shape_param;
+    ctx.uv          = v_local_uv;
+    ctx.base        = v_color;
+    ctx.ray_dir     = normalize(v_world_pos - root.global_data.cam_pos.xyz);
+    ctx.normal      = v_world_normal;
+    ctx.hit_pos     = v_world_pos;
+
+    MaterialEval e = <%EVAL_FN%>(ctx);
+    if (e.color.a < <%DISCARD%>) discard;
+
+    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
+    g_albedo    = e.color;
+    g_normal    = vec4(N, 0.0);
+    g_world_pos = vec4(v_world_pos, 0.0);
+    g_material  = vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0);
+}
+)";
+
+/**
+ * @brief Composes a full fragment shader from a driver template and a
+ *        material's eval source.
+ *
+ * Substitutes `<%EVAL_FN%>` with @p eval_fn and `<%DISCARD%>` with a
+ * float literal of @p discard_threshold, then prepends a preamble
+ * (`#version`, shared includes) and the material's @p eval_src. The
+ * result is the complete fragment source ready for `compile_pipeline`.
+ */
+inline string compose_eval_fragment(string_view driver_template,
+                                    string_view eval_src,
+                                    string_view eval_fn,
+                                    float discard_threshold)
+{
+    string out;
+    out.append(string_view("#version 450\n"
+                           "#define VELK_RASTER 1\n"
+                           "#include \"velk.glsl\"\n"
+                           "#include \"velk-ui.glsl\"\n"));
+    out.append(eval_src);
+    out.append(string_view("\n"));
+
+    char thr_buf[32];
+    int tn = std::snprintf(thr_buf, sizeof(thr_buf), "%f", discard_threshold);
+    string_view thr(thr_buf, tn > 0 ? static_cast<size_t>(tn) : 0);
+
+    // Tiny placeholder replacement: scan for <%EVAL_FN%> and <%DISCARD%>.
+    size_t i = 0;
+    while (i < driver_template.size()) {
+        if (i + 10 <= driver_template.size()
+            && std::memcmp(driver_template.data() + i, "<%EVAL_FN%>", 11) == 0) {
+            out.append(eval_fn);
+            i += 11;
+        } else if (i + 11 <= driver_template.size()
+                   && std::memcmp(driver_template.data() + i, "<%DISCARD%>", 11) == 0) {
+            out.append(thr);
+            i += 11;
+        } else {
+            out.append(string_view(driver_template.data() + i, 1));
+            ++i;
+        }
+    }
+    return out;
+}
 
 // Default compute shader for the deferred lighting pass. Samples the
 // G-buffer attachments + light buffer and writes the shaded color to
@@ -561,8 +716,10 @@ void main()
 // all material snippets and before main.
 [[maybe_unused]] constexpr string_view rt_compute_prelude_src = R"(
 #version 450
+#define VELK_COMPUTE 1
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
+#include "velk-ui.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -610,18 +767,8 @@ struct RayHit {
     uint shape_index; // only set by trace_closest_hit
 };
 
-// Everything a material fill function receives. Bundling keeps the call
-// sites small and makes adding new per-hit context cheap.
-struct FillContext {
-    uint64_t data_addr;    // material's per-draw GPU data
-    uint texture_id;       // bindless texture slot (0 if unused)
-    uint shape_param;      // per-shape material slot (e.g. glyph index)
-    vec2 uv;               // hit uv (0..1 across the shape)
-    vec4 base;             // shape base color
-    vec3 ray_dir;          // incoming ray direction
-    vec3 normal;           // surface normal at hit
-    vec3 hit_pos;          // world-space hit point (undefined for env miss)
-};
+// EvalContext + MaterialEval shared between raster and RT come from
+// velk-ui.glsl (included above).
 
 // Result of evaluating a material at a hit. GLSL forbids recursion, so
 // materials cannot call trace_ray; instead they return the local emission
@@ -929,7 +1076,7 @@ bool trace_any_hit(Ray ray, float t_max) {
 
 // Forward declaration. The composer emits the actual definition after
 // material #includes. Materials are pure (no recursion into trace_ray).
-BrdfSample velk_resolve_fill(uint mid, FillContext ctx);
+BrdfSample velk_resolve_fill(uint mid, EvalContext ctx);
 
 // Forward declaration for the shadow-technique dispatch. Emitted by
 // the composer after shadow-technique #includes. Materials that want
@@ -962,6 +1109,82 @@ vec3 env_miss_color(vec3 rd) {
 }
 )";
 
+// Shared PBR shading helper. Converts a MaterialEval produced by a
+// material's velk_eval_<name> into a BrdfSample. Every Lit material
+// routes through this instead of open-coding its own PBR body.
+//
+// Placement: composer emits this string between `velk_eval_shadow` and
+// `velk_resolve_fill` so it can call the former and be called by the
+// latter. Depends on pc.lights, pc.light_count, env_miss_color,
+// velk_eval_shadow, ggx_sample_half, rng_next_vec2 — all in scope at
+// that point.
+[[maybe_unused]] constexpr string_view rt_pbr_shade_src = R"(
+BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
+{
+    vec3 N = normalize(eval.normal);
+    vec3 V = normalize(-ctx.ray_dir);
+    float metallic  = clamp(eval.metallic, 0.0, 1.0);
+    float roughness = clamp(eval.roughness, 0.04, 1.0);
+    vec3 base = eval.color.rgb;
+
+    // Fresnel at normal incidence: 0.04 for dielectrics, base for metals.
+    vec3 F0 = mix(vec3(0.04), base, metallic);
+    float VdotN = max(dot(V, N), 0.0);
+    vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - VdotN, 5.0);
+
+    // Direct lighting from scene lights. Each light contributes a
+    // Lambertian diffuse term scaled by its distance / spot attenuation
+    // and modulated by its shadow technique's visibility.
+    vec3 direct = vec3(0.0);
+    for (uint li = 0u; li < pc.light_count; ++li) {
+        Light light = pc.lights.data[li];
+        vec3 L;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            vec3 to_light = light.position.xyz - ctx.hit_pos;
+            float dist = length(to_light);
+            L = to_light / max(dist, 1e-6);
+            float range = max(light.params.x, 1e-6);
+            float t = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                float cos_a = dot(-L, light.direction.xyz);
+                atten *= smoothstep(light.params.z, light.params.y, cos_a);
+            }
+        }
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0 || atten <= 0.0) continue;
+        float shadow = velk_eval_shadow(light.flags.y, li, ctx.hit_pos, N);
+        vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
+        direct += base * (1.0 - metallic) * NdotL * radiance;
+    }
+
+    // Diffuse term: crude "irradiance at the normal" via a single env
+    // sample. Upgrade to preconvolved irradiance or stochastic cosine
+    // sampling when visibly needed.
+    vec3 env_at_normal = env_miss_color(N);
+    vec3 diffuse = base * (1.0 - metallic) * env_at_normal;
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+    // Specular: sample a GGX half-vector, reflect V around it. Main's
+    // iterative loop evaluates the reflected ray and multiplies by F.
+    vec3 H = ggx_sample_half(N, roughness, rng_next_vec2());
+    vec3 Lr = reflect(-V, H);
+
+    BrdfSample bs;
+    bs.emission = vec4(kD * diffuse + direct, eval.color.a);
+    bs.throughput = F;
+    bs.next_dir = Lr;
+    bs.terminate = false;
+    // Sample count scales with GGX lobe width: 1 at mirror, up to 16 at
+    // fully rough. Tracer clamps against its own per-bounce cap.
+    bs.sample_count_hint = uint(1.0 + roughness * roughness * 15.0);
+    return bs;
+}
+)";
+
 // Compute ray tracer main body.
 //
 // Primary visibility runs the classic painter's loop (iterate all shapes
@@ -985,7 +1208,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
         }
         // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
         RtShape s = pc.bvh_shapes.data[hit.shape_index];
-        FillContext ctx;
+        EvalContext ctx;
         ctx.data_addr = s.material_data_addr;
         ctx.texture_id = s.texture_id;
         ctx.shape_param = s.shape_param;
@@ -1060,7 +1283,7 @@ void main()
         RayHit hit;
         if (!intersect_shape(primary, s, hit)) continue;
 
-        FillContext ctx;
+        EvalContext ctx;
         ctx.data_addr = s.material_data_addr;
         ctx.texture_id = s.texture_id;
         ctx.shape_param = s.shape_param;

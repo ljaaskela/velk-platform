@@ -45,8 +45,8 @@ class FrameSnippetRegistry
 public:
     struct MaterialInfo
     {
-        string_view fn_name;      ///< velk_fill_<name>() (pointer into material-owned source).
-        string      include_name; ///< "<fn_name>.glsl" owned copy for render-context includes.
+        string_view fn_name;      ///< `velk_eval_<X>` function name returning MaterialEval.
+        string      include_name; ///< Owned include filename registered with IRenderContext.
     };
 
     struct ShadowTechInfo

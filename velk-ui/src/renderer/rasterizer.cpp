@@ -87,6 +87,13 @@ void Rasterizer::build_passes(ViewEntry& entry,
         entry.batches_dirty = false;
     }
 
+    // Ensure each RTT subtree's backend texture exists and its
+    // render_target_id is set BEFORE the main view pass's draw calls
+    // get built — otherwise a TextureVisual sampling from an RTT sees
+    // id=0 on frame one and the DrawCall has the zero address baked
+    // in. This is idempotent across frames.
+    ensure_render_targets(ctx);
+
     auto sstate = read_state<IWindowSurface>(entry.surface);
     float sw = static_cast<float>(sstate ? sstate->size.x : 0);
     float sh = static_cast<float>(sstate ? sstate->size.y : 0);
@@ -113,6 +120,14 @@ void Rasterizer::build_passes(ViewEntry& entry,
         globals.viewport[1] = vp_h;
         globals.viewport[2] = 1.0f / vp_w;
         globals.viewport[3] = 1.0f / vp_h;
+        if (camera) {
+            auto cam_es = read_state<IElement>(entry.camera_element);
+            if (cam_es) {
+                globals.cam_pos[0] = cam_es->world_matrix(0, 3);
+                globals.cam_pos[1] = cam_es->world_matrix(1, 3);
+                globals.cam_pos[2] = cam_es->world_matrix(2, 3);
+            }
+        }
         globals.bvh_root = ctx.bvh_root;
         globals.bvh_node_count = ctx.bvh_node_count;
         globals.bvh_shape_count = ctx.bvh_shape_count;
@@ -184,15 +199,11 @@ void Rasterizer::emit_deferred_gbuffer_pass(ViewEntry& entry, FrameContext& ctx,
     out_passes.push_back(std::move(g_pass));
 }
 
-void Rasterizer::build_shared_passes(FrameContext& ctx, vector<RenderPass>& out_passes)
+void Rasterizer::ensure_render_targets(FrameContext& ctx)
 {
-    if (!ctx.backend || !ctx.frame_buffer || !ctx.batch_builder || !ctx.pipeline_map) {
+    if (!ctx.backend || !ctx.batch_builder || !ctx.resources) {
         return;
     }
-
-    // Render-to-texture passes: one per element with a RenderCache trait
-    // whose subtree has been batched into batch_builder_.render_target_passes()
-    // during the per-view rebuild_batches calls.
     for (auto& rtp : ctx.batch_builder->render_target_passes()) {
         auto& rte = render_target_entries_[rtp.element];
         if (!rte.target) {
@@ -202,9 +213,8 @@ void Rasterizer::build_shared_passes(FrameContext& ctx, vector<RenderPass>& out_
                 }
             }
         }
-        if (!rte.target) {
-            continue;
-        }
+        if (!rte.target) continue;
+
         int w{1}, h{1};
         if (auto es = read_state<IElement>(rtp.element)) {
             w = std::max(static_cast<int>(es->size.width), 1);
@@ -224,12 +234,30 @@ void Rasterizer::build_shared_passes(FrameContext& ctx, vector<RenderPass>& out_
             rte.texture_id = ctx.backend->create_texture(tdesc);
             rte.width = w;
             rte.height = h;
-            rte.target->set_render_target_id(static_cast<uint64_t>(rte.texture_id));
+            if (rte.texture_id != 0) {
+                rte.target->set_render_target_id(static_cast<uint64_t>(rte.texture_id));
+            }
         }
+    }
+}
 
-        if (rte.texture_id == 0) {
-            continue;
-        }
+void Rasterizer::build_shared_passes(FrameContext& ctx, vector<RenderPass>& out_passes)
+{
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.batch_builder || !ctx.pipeline_map) {
+        return;
+    }
+
+    // Render-to-texture passes: one per element with a RenderCache trait
+    // whose subtree has been batched into batch_builder_.render_target_passes()
+    // during the per-view rebuild_batches calls. Texture allocation +
+    // `render_target_id` wiring already happened in ensure_render_targets()
+    // called from build_passes (so main-pass build_draw_calls sees the
+    // correct id); here we just emit the draw pass into the target.
+    for (auto& rtp : ctx.batch_builder->render_target_passes()) {
+        auto it = render_target_entries_.find(rtp.element);
+        if (it == render_target_entries_.end()) continue;
+        auto& rte = it->second;
+        if (!rte.target || rte.texture_id == 0) continue;
 
         FrameGlobals rt_globals{};
         build_ortho_projection(

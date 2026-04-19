@@ -186,37 +186,6 @@ vector<IBuffer::Ptr> TextVisual::get_gpu_resources() const
 
 namespace {
 
-// Deferred discard: compute slug glyph coverage and drop fragments
-// below threshold. Matches the alpha modulation the forward fragment
-// applies, but hard-cut because the gbuffer has no alpha blending.
-// Assumes TextMaterial's deferred fragment is the base being composed,
-// so v_uv, v_glyph_index, and root.material.curves/bands/glyphs are in
-// scope.
-constexpr string_view text_discard_src = R"(
-void velk_visual_discard()
-{
-    float coverage = velk_text_coverage(v_uv, v_glyph_index,
-                                         root.material.curves,
-                                         root.material.bands,
-                                         root.material.glyphs);
-    if (coverage < 0.5) discard;
-}
-)";
-
-} // namespace
-
-string_view TextVisual::get_snippet_fn_name() const
-{
-    return "velk_visual_discard";
-}
-
-string_view TextVisual::get_snippet_source() const
-{
-    return text_discard_src;
-}
-
-namespace {
-
 // Shape-intersect snippet: rect hit + slug coverage threshold. Runs
 // inside BVH traversal (shadow / bounce rays), so shadows cast by text
 // track the glyph silhouette instead of the quad. `fwidth` isn't

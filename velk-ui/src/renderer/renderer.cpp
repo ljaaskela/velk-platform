@@ -67,6 +67,39 @@ layout(buffer_reference, std430) readonly buffer RectInstanceData {
 layout(buffer_reference, std430) readonly buffer TextInstanceData {
     TextInstance data[];
 };
+
+// ===== Material evaluation types =====
+// Shared across raster (forward / deferred fragment drivers) and RT
+// (compute shader `velk_resolve_fill` dispatch). Every material
+// provides a `velk_eval_<name>(EvalContext) -> MaterialEval` function;
+// per-path drivers convert the MaterialEval into the output shape
+// required by that path (frag_color / G-buffer attachments / BrdfSample).
+
+const uint VELK_LIGHTING_UNLIT   = 0u;  // Pass color straight through, no shading.
+const uint VELK_LIGHTING_STANDARD = 1u; // Full PBR lighting via velk_pbr_shade.
+
+// Everything a material eval function receives. Bundles instance + hit
+// context so adding a new per-hit input stays cheap.
+struct EvalContext {
+    uint64_t data_addr;    // material's per-draw GPU data pointer
+    uint texture_id;       // bindless texture slot (0 if unused)
+    uint shape_param;      // per-shape material slot (e.g. glyph index)
+    vec2 uv;               // hit / fragment uv (0..1 across the shape)
+    vec4 base;             // shape base color (instance tint)
+    vec3 ray_dir;          // incoming ray / view direction (0 if unavailable)
+    vec3 normal;           // surface normal at hit (world space)
+    vec3 hit_pos;          // world-space hit point (or frag world position)
+};
+
+// Canonical material output. Produced by velk_eval_<name> once per
+// shading point and consumed by every path-specific driver.
+struct MaterialEval {
+    vec4 color;            // rgba; alpha = coverage / opacity
+    vec3 normal;           // world-space normal (default: ctx.normal)
+    float metallic;        // 0..1
+    float roughness;       // 0..1
+    uint lighting_mode;    // VELK_LIGHTING_*
+};
 )";
 
 void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx)

@@ -27,6 +27,7 @@ struct FrameGlobals
     float    view_projection[16];          ///< Combined view-projection matrix from the camera.
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
+    float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
     uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
@@ -35,7 +36,7 @@ struct FrameGlobals
     uint64_t bvh_shapes_addr;              ///< GPU pointer to the scene's RtShape array.
 };
 
-static_assert(sizeof(FrameGlobals) == 176, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 192, "FrameGlobals layout must match velk.glsl");
 
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.

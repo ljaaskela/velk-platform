@@ -39,6 +39,17 @@ public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return handle_; }
     void set_pipeline_handle(uint64_t handle) override { handle_ = handle; }
 
+    // IMaterial defaults. Concrete materials override to provide real
+    // eval + vertex sources; unimplemented materials return empty and
+    // the composers fall back to the (transitional) IRasterShader /
+    // IShaderSnippet path until every material has migrated.
+    string_view get_eval_src() const override { return {}; }
+    string_view get_eval_fn_name() const override { return {}; }
+    string_view get_vertex_src() const override { return {}; }
+    void register_eval_includes(IRenderContext&) const override {}
+    float get_forward_discard_threshold() const override { return 0.001f; }
+    float get_deferred_discard_threshold() const override { return 0.5f; }
+
     /**
      * @brief Default persistent-buffer implementation.
      *

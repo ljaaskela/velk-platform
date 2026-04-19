@@ -108,6 +108,7 @@ add_library(velk_ui SHARED
     include/velk-ui/api/trait/orbit.h
     include/velk-ui/interface/intf_visual.h
     include/velk-ui/ext/trait.h
+    include/velk-ui/ext/material_shaders.h
     include/velk-ui/api/trait/fixed_size.h
     include/velk-ui/api/trait/stack.h
     include/velk-ui/api/element.h

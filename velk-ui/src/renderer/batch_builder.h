@@ -111,12 +111,19 @@ public:
     void clear() { element_cache_.clear(); render_target_passes_.clear(); }
 
     /**
-     * @brief Resets per-frame state. Currently clears the material
-     *        address cache used by build_draw_calls so each frame
-     *        uploads material params once regardless of how many
-     *        batches reference the same material.
+     * @brief Resets per-frame state. Clears the material address cache
+     *        used by build_draw_calls so each frame uploads material
+     *        params once regardless of how many batches reference the
+     *        same material. Also clears the render-target-pass union
+     *        so each view's `rebuild_batches` this frame accumulates
+     *        into a fresh list (dedup via find_or_make_pass inside
+     *        rebuild_batches keeps shared RTTs single-emit).
      */
-    void reset_frame_state() { frame_material_addrs_.clear(); }
+    void reset_frame_state()
+    {
+        frame_material_addrs_.clear();
+        render_target_passes_.clear();
+    }
 
     /** @brief Returns the element cache (for resource upload iteration). */
     const std::unordered_map<IElement*, ElementCache>& element_cache() const { return element_cache_; }

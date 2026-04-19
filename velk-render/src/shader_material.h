@@ -23,6 +23,16 @@ public:
     void set_pipeline_handle(uint64_t handle) override { pipeline_handle_ = handle; }
     ReturnValue setup_inputs(const vector<ShaderParam>& params) override;
 
+    // IMaterial — ShaderMaterial doesn't use the framework eval path
+    // (its shaders come from the user). Defaults return empty so the
+    // composers treat it as opting out of the eval-driver machinery.
+    string_view get_eval_src() const override { return {}; }
+    string_view get_eval_fn_name() const override { return {}; }
+    string_view get_vertex_src() const override { return {}; }
+    void register_eval_includes(IRenderContext&) const override {}
+    float get_forward_discard_threshold() const override { return 0.0f; }
+    float get_deferred_discard_threshold() const override { return 0.5f; }
+
 private:
     uint64_t pipeline_handle_ = 0;
     vector<ShaderParam> params_;

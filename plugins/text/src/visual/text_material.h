@@ -3,9 +3,7 @@
 
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_buffer.h>
-#include <velk-render/interface/intf_raster_shader.h>
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-ui/plugins/text/plugin.h>
 
 namespace velk::ui {
@@ -13,10 +11,6 @@ namespace velk::ui {
 /**
  * @brief Internal interface for binding a TextMaterial to a font's three
  *        GPU buffers (curves, bands, glyph table).
- *
- * The Font creates one TextMaterial via the type registry and casts to this
- * interface to wire its own buffers in. Visuals never call this directly:
- * they consume the bound material via `IFont::get_material()`.
  */
 class ITextMaterialInternal : public Interface<ITextMaterialInternal>
 {
@@ -27,25 +21,16 @@ public:
 };
 
 /**
- * @brief Material for analytic-Bezier text rendering (Slug-style coverage).
+ * @brief Analytic-Bezier text material (Slug-style coverage).
  *
- * One instance per font, owned by the Font itself. Holds the font's three
- * GPU buffers (curves, bands, glyph table) and emits their GPU virtual
- * addresses as the material's per-draw GPU data. The slug fragment shader
- * binds them via `buffer_reference` and walks them to compute coverage.
- *
- * Because the material is shared across every text visual using the same
- * font, those visuals naturally batch into a single draw call.
- *
- * The pipeline (vertex + fragment shader) is compiled lazily on the first
- * call to `get_pipeline_handle`. The text-specific GLSL include
- * (`velk_text.glsl`, defining the slug coverage function) is registered
- * with the render context just before compilation.
+ * Migrated to the eval-driver architecture. One `velk_eval_text` body
+ * computes glyph coverage and returns the alpha-modulated color; the
+ * framework generates forward / deferred / RT-fill variants. Owns a
+ * custom vertex shader because the instance layout carries a per-glyph
+ * `glyph_index` that surfaces as the canonical `v_shape_param`.
  */
 class TextMaterial : public ::velk::ext::Material<TextMaterial,
-                                                   ITextMaterialInternal,
-                                                   ::velk::IShaderSnippet,
-                                                   ::velk::IRasterShader>
+                                                   ITextMaterialInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::TextMaterial, "TextMaterial");
@@ -56,18 +41,13 @@ public:
                           IBuffer::Ptr glyphs) override;
 
     // IMaterial
-    uint64_t get_pipeline_handle(IRenderContext& ctx) override;
     size_t get_draw_data_size() const override;
     ReturnValue write_draw_data(void* out, size_t size) const override;
 
-    // IShaderSnippet (RT fill)
-    string_view get_snippet_fn_name() const override;
-    string_view get_snippet_source() const override;
-    void register_snippet_includes(IRenderContext& ctx) const override;
-
-    // IRasterShader: deferred vertex/fragment. Forward path uses the
-    // default ensure_pipeline wiring (returns empty).
-    ShaderSource get_raster_source(IRasterShader::Target t) const override;
+    string_view get_eval_src() const override;
+    string_view get_eval_fn_name() const override;
+    string_view get_vertex_src() const override;
+    void register_eval_includes(IRenderContext& ctx) const override;
 
 private:
     IBuffer::Ptr curves_;

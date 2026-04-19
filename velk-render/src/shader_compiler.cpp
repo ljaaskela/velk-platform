@@ -56,6 +56,7 @@ layout(buffer_reference, std430) readonly buffer GlobalData {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;          // width, height, 1/width, 1/height
+    vec4 cam_pos;           // xyz = world-space camera position, w = _
     uint bvh_root;
     uint bvh_node_count;
     uint bvh_shape_count;

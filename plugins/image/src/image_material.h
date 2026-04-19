@@ -3,7 +3,6 @@
 
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_shader_snippet.h>
 #include <velk-ui/plugins/image/intf_image_material.h>
 #include <velk-ui/plugins/image/plugin.h>
 
@@ -12,23 +11,23 @@ namespace velk::ui::impl {
 /**
  * @brief Material that samples a bound `ISurface` and multiplies by a tint.
  *
- * The texture is bound via the `texture` property as an `ObjectRef`. The
- * draw call's `texture_key` is set by `ImageVisual` to the texture pointer
- * (cast to uint64_t); the renderer resolves this through its texture map
- * and writes the resulting bindless index into `DrawDataHeader.texture_id`,
- * which the fragment shader reads.
+ * Migrated to the eval-driver architecture: one `velk_eval_image`
+ * body produces forward / deferred / RT-fill variants. The texture is
+ * bound via the `texture` property on the state; the renderer
+ * resolves the draw-call's `texture_key` to a bindless index and
+ * exposes it as `root.texture_id` in the fragment driver.
  */
-class ImageMaterial : public ::velk::ext::Material<ImageMaterial, IImageMaterial, ::velk::IShaderSnippet>
+class ImageMaterial : public ::velk::ext::Material<ImageMaterial, IImageMaterial>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Material::Image, "ImageMaterial");
 
-    uint64_t get_pipeline_handle(IRenderContext& ctx) override;
     size_t get_draw_data_size() const override;
     ReturnValue write_draw_data(void* out, size_t size) const override;
 
-    string_view get_snippet_fn_name() const override;
-    string_view get_snippet_source() const override;
+    string_view get_eval_src() const override;
+    string_view get_eval_fn_name() const override;
+    string_view get_vertex_src() const override;
 };
 
 } // namespace velk::ui::impl
