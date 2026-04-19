@@ -10,30 +10,24 @@ namespace {
 
 constexpr uint64_t kPipelineKey = make_hash64("RoundedRectVisual");
 
-// Ray-intersect snippet for the compute ray tracer. Provisional signature:
-// the ray tracer composes this into a template that declares the Ray and
-// Hit types plus any common helpers. Function name is the convention the
-// generator will splice in via a macro or include.
+// RT shape-intersect snippet: SDF-clipped rounded rect. Matches the
+// signature expected by the composed intersect_shape dispatcher.
+// shape.params[0] carries the corner radius set by scene_collector.
 constexpr string_view kIntersectSrc = R"(
-bool velk_intersect(Ray ray, vec2 size, out Hit hit)
+bool velk_intersect_rounded_rect(Ray ray, RtShape shape, out RayHit hit)
 {
-    if (abs(ray.direction.z) < 1e-6) return false;
-    float t = -ray.origin.z / ray.direction.z;
-    if (t < ray.tmin || t > ray.tmax) return false;
-
-    vec2 p = ray.origin.xy + t * ray.direction.xy;
-
-    float radius = min(min(size.x, size.y) * 0.5, 12.0);
-    vec2 half_size = size * 0.5;
-    vec2 centered = p - half_size;
+    if (!intersect_rect(ray, shape, hit)) return false;
+    float radius = shape.params.x;
+    if (radius <= 0.0) return true;
+    float u_len = length(shape.u_axis.xyz);
+    float v_len = length(shape.v_axis.xyz);
+    vec2 size_w = vec2(u_len, v_len);
+    vec2 p_w = hit.uv * size_w;
+    vec2 half_size = size_w * 0.5;
+    vec2 centered = p_w - half_size;
     vec2 d = abs(centered) - half_size + radius;
     float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
-    if (sdf > 0.0) return false;
-
-    hit.t = t;
-    hit.uv = p / size;
-    hit.normal = vec3(0.0, 0.0, ray.direction.z > 0.0 ? -1.0 : 1.0);
-    return true;
+    return sdf <= 0.0;
 }
 )";
 
@@ -128,6 +122,11 @@ void velk_visual_discard()
 string_view RoundedRectVisual::get_shape_intersect_source() const
 {
     return kIntersectSrc;
+}
+
+string_view RoundedRectVisual::get_shape_intersect_fn_name() const
+{
+    return "velk_intersect_rounded_rect";
 }
 
 string_view RoundedRectVisual::get_snippet_fn_name() const

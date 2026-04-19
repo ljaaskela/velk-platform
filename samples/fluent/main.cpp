@@ -119,8 +119,7 @@ int main(int /*argc*/, char* /*argv*/[])
     auto camera_3d = scene.find_first<velk::ui::IOrbit>();
     velk::ui::OrbitTrait orbit;
     if (camera_3d) {
-        velk::ui::Camera(camera_3d.find_trait<velk::ICamera>())
-            .set_render_path(velk::RenderPath::Deferred);
+        velk::ui::Camera(camera_3d.find_trait<velk::ICamera>()).set_render_path(velk::RenderPath::Deferred);
         app.add_view(window, camera_3d, {0, 0, 1.f, 1.f});
         orbit = velk::ui::OrbitTrait(camera_3d.find_trait<velk::ui::IOrbit>());
     } else {
@@ -188,10 +187,10 @@ int main(int /*argc*/, char* /*argv*/[])
             auto text_sz = velk::ui::trait::layout::create_fixed_size(
                 velk::ui::dim::px(900.f), velk::ui::dim::px(180.f));
             auto text_trs = velk::ui::trait::transform::create_trs();
-            text_trs.set_translate({-450.f, 550.f, 650.f});
+            text_trs.set_translate({-450.f, 450.f, 650.f});
             auto tv = velk::ui::trait::visual::create_text();
-            tv.set_text("velk-ui // deferred PBR");
-            tv.set_font_size(128.f);
+            tv.set_text("velk-ui");
+            tv.set_font_size(256.f);
             tv.set_color({0.95f, 0.55f, 1.0f, 1.f});
             tv.set_layout(velk::ui::TextLayout::MultiLine);
             text.add_trait(text_sz);

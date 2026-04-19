@@ -46,6 +46,8 @@ namespace velk::ui::embedded {
 // =====================================================================
 
 [[maybe_unused]] constexpr string_view velk_text_glsl = R"(
+#ifndef VELK_TEXT_GLSL_INCLUDED
+#define VELK_TEXT_GLSL_INCLUDED
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
@@ -251,6 +253,7 @@ float velk_text_coverage(
 
     return velk_text_combine_coverage(xcov, ycov, xwgt, ywgt);
 }
+#endif // VELK_TEXT_GLSL_INCLUDED
 )";
 
 } // namespace velk::ui::embedded

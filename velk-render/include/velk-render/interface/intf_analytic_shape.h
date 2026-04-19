@@ -8,6 +8,9 @@
 
 namespace velk {
 
+class IRenderContext;
+
+
 /**
  * @brief Contract for analytic primitive shapes consumed by the RT
  *        path's shape-kind dispatch.
@@ -22,20 +25,48 @@ class IAnalyticShape : public Interface<IAnalyticShape>
 {
 public:
     /**
-     * @brief Returns the shape kind the RT compute shader dispatches on.
+     * @brief Identifies the primitive kind for the RT shape buffer.
      *
-     *   0 = rect (planar quad, u_axis x v_axis)
-     *   1 = cube (oriented box, u_axis x v_axis x w_axis)
-     *   2 = sphere (centered in the element's bounding box, radius from size)
+     * Built-in kinds reserved by the RT prelude:
+     *   0 = rect (planar quad)
+     *   1 = cube (oriented box)
+     *   2 = sphere
+     *
+     * Visuals that ship a custom intersect snippet return one of
+     * these (usually 0 for rect-based variants like a rounded
+     * rectangle or a text glyph quad) so the emitted shape data fits
+     * the same `RtShape` layout. The renderer's composer replaces the
+     * built-in dispatch with one that also calls the custom intersect
+     * for shapes whose emitting visual registered a snippet.
      */
     virtual uint32_t get_shape_kind() const = 0;
 
     /**
-     * @brief Returns an optional GLSL snippet for a custom intersect
-     *        routine. Empty for visuals that use the built-in
-     *        shape-kind dispatch without a custom body.
+     * @brief Returns the visual's custom intersect function body in
+     *        GLSL, if any.
+     *
+     * When non-empty, the function must have the signature
+     * `bool <fn_name>(Ray ray, RtShape shape, out RayHit hit)` where
+     * `<fn_name>` is `get_snippet_fn_name()` below. The composer
+     * dispatches to it instead of the built-in rect/cube/sphere
+     * intersect for shapes this visual emitted.
      */
     virtual string_view get_shape_intersect_source() const { return {}; }
+
+    /**
+     * @brief Name of the intersect function defined in
+     *        @ref get_shape_intersect_source. Ignored when the source
+     *        is empty.
+     */
+    virtual string_view get_shape_intersect_fn_name() const { return {}; }
+
+    /**
+     * @brief Lets the visual register any shader includes its
+     *        intersect snippet depends on (e.g. text coverage helpers)
+     *        into @p ctx. Called by the composer right after the
+     *        snippet itself is registered.
+     */
+    virtual void register_shape_intersect_includes(IRenderContext& /*ctx*/) const {}
 };
 
 } // namespace velk

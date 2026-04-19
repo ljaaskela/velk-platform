@@ -1,6 +1,8 @@
 #ifndef VELK_UI_DEFERRED_LIGHTER_H
 #define VELK_UI_DEFERRED_LIGHTER_H
 
+#include <unordered_map>
+
 #include "view_renderer.h"
 
 namespace velk::ui {
@@ -33,9 +35,12 @@ public:
     void shutdown(FrameContext& ctx) override;
 
 private:
-    // Compiled compute pipeline key (single pipeline reused across views,
-    // since all view G-buffer groups are format-compatible).
-    uint64_t pipeline_key_ = 0;
+    // Pipeline cache: different intersect-snippet sets compose to
+    // different shader variants, each compiled once and kept across
+    // frames. Key is an FNV-1a hash of the active intersect id list.
+    std::unordered_map<uint64_t, bool> compiled_pipelines_;
+
+    uint64_t ensure_pipeline(FrameContext& ctx);
 
     // Fullscreen composite pipeline that samples the deferred output
     // texture and alpha-blends it onto the surface. Compiled lazily on

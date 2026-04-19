@@ -4,6 +4,7 @@
 
 #include <velk/api/object.h>
 #include <velk/api/velk.h>
+#include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -20,6 +21,7 @@ void FrameSnippetRegistry::begin_frame()
     frame_material_instances_.clear();
     frame_materials_.clear();
     frame_shadow_techs_.clear();
+    frame_intersects_.clear();
 }
 
 uint32_t FrameSnippetRegistry::register_material(IProgram* prog, IRenderContext& ctx)
@@ -84,6 +86,41 @@ uint32_t FrameSnippetRegistry::register_shadow_tech(IShadowTechnique* tech, IRen
         if (fs == id) { seen = true; break; }
     }
     if (!seen) frame_shadow_techs_.push_back(id);
+    return id;
+}
+
+uint32_t FrameSnippetRegistry::register_intersect(IAnalyticShape* shape, IRenderContext& ctx)
+{
+    if (!shape) return 0;
+    auto fn = shape->get_shape_intersect_fn_name();
+    auto src = shape->get_shape_intersect_source();
+    if (fn.empty() || src.empty()) return 0;
+    auto* obj = interface_cast<IObject>(shape);
+    if (!obj) return 0;
+    Uid uid = obj->get_class_uid();
+    uint64_t key = uid.hi ^ uid.lo;
+
+    auto it = intersect_id_by_class_.find(key);
+    uint32_t id;
+    if (it != intersect_id_by_class_.end()) {
+        id = it->second;
+    } else {
+        string include_name;
+        include_name.append(fn);
+        include_name.append(string_view(".glsl", 5));
+        ctx.register_shader_include(include_name, src);
+        shape->register_shape_intersect_includes(ctx);
+        // First visual-contributed kind = 3 (rect/cube/sphere hold 0/1/2).
+        id = static_cast<uint32_t>(intersect_info_by_id_.size()) + 3;
+        intersect_info_by_id_.push_back({fn, std::move(include_name)});
+        intersect_id_by_class_[key] = id;
+    }
+
+    bool seen = false;
+    for (auto fi : frame_intersects_) {
+        if (fi == id) { seen = true; break; }
+    }
+    if (!seen) frame_intersects_.push_back(id);
     return id;
 }
 

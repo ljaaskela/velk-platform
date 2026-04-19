@@ -52,11 +52,13 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
 
     const auto& material_ids = ctx.snippets->frame_materials();
     const auto& shadow_tech_ids = ctx.snippets->frame_shadow_techs();
+    const auto& intersect_ids = ctx.snippets->frame_intersects();
     const auto& material_info_by_id = ctx.snippets->material_info_by_id();
     const auto& shadow_tech_info_by_id = ctx.snippets->shadow_tech_info_by_id();
+    const auto& intersect_info_by_id = ctx.snippets->intersect_info_by_id();
 
-    // Pipeline cache key: FNV-1a across the sorted material-id and
-    // shadow-tech-id lists. Different technique combos compose to
+    // Pipeline cache key: FNV-1a across the sorted material / shadow /
+    // intersect id lists. Different snippet combos compose to
     // different shaders, so they need distinct cache entries.
     constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
     constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
@@ -67,6 +69,10 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
     }
     key = (key ^ 0xdeadbeefULL) * kFnvPrime;
     for (auto id : shadow_tech_ids) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    key = (key ^ 0xfeedfaceULL) * kFnvPrime;
+    for (auto id : intersect_ids) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
     key |= 0x8000000000000000ULL;
@@ -90,6 +96,14 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
         const auto& ti = shadow_tech_info_by_id[id - 1];
         src += string_view("#include \"", 10);
         src += ti.include_name;
+        src += string_view("\"\n", 2);
+    }
+    for (auto id : intersect_ids) {
+        // Visual-contributed ids start at 3 and index intersect_info_by_id[id - 3].
+        if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
+        const auto& ii = intersect_info_by_id[id - 3];
+        src += string_view("#include \"", 10);
+        src += ii.include_name;
         src += string_view("\"\n", 2);
     }
 
@@ -127,6 +141,27 @@ uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
         append_literal("(light_idx, world_pos, world_normal);\n");
     }
     append_literal("        default: return 1.0;\n");
+    append_literal("    }\n");
+    append_literal("}\n");
+
+    // Shape-intersect dispatch. Built-in kinds 0/1/2 forward to the
+    // prelude's rect/cube/sphere intersect functions; visual-
+    // contributed kinds (3+) call their registered snippets.
+    append_literal("bool intersect_shape(Ray ray, RtShape shape, out RayHit hit) {\n");
+    append_literal("    switch (shape.shape_kind) {\n");
+    append_literal("        case 1u: return intersect_cube(ray, shape, hit);\n");
+    append_literal("        case 2u: return intersect_sphere(ray, shape, hit);\n");
+    for (auto id : intersect_ids) {
+        if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
+        const auto& ii = intersect_info_by_id[id - 3];
+        int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
+        if (n > 0) {
+            src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
+        }
+        src += ii.fn_name;
+        append_literal("(ray, shape, hit);\n");
+    }
+    append_literal("        default: return intersect_rect(ray, shape, hit);\n");
     append_literal("    }\n");
     append_literal("}\n");
 
@@ -241,6 +276,10 @@ void RayTracer::build_passes(ViewEntry& entry,
         site.geometry.material_id = mat.mat_id;
         site.geometry.material_data_addr = mat.mat_addr;
         site.geometry.texture_id = tex_id;
+        if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
+            uint32_t kind = ctx.snippets->register_intersect(analytic, *ctx.render_ctx);
+            if (kind != 0) site.geometry.shape_kind = kind;
+        }
         shapes.push_back(site.geometry);
     });
 

@@ -33,6 +33,7 @@ public:
     // radius on emitted shadow/RT shapes.
     uint32_t get_shape_kind() const override { return 0; }
     string_view get_shape_intersect_source() const override;
+    string_view get_shape_intersect_fn_name() const override;
 
     // IShaderSnippet: provides the deferred `velk_visual_discard`
     // implementation that clips the rect's rounded corners.

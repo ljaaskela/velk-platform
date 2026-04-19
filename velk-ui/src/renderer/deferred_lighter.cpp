@@ -2,9 +2,11 @@
 
 #include "default_ui_shaders.h"
 #include "env_helper.h"
+#include "frame_snippet_registry.h"
 #include "scene_collector.h"
 
 #include <velk/api/state.h>
+#include <velk/string.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <velk-render/gbuffer.h>
@@ -16,6 +18,7 @@
 #include <velk-render/interface/intf_camera.h>
 #include <velk-ui/interface/intf_environment.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -23,13 +26,72 @@ namespace velk::ui {
 
 namespace {
 
-// Single canonical key for the deferred compute pipeline. Render
-// passes for every view's G-buffer are format-compatible, so one
-// compiled pipeline works across views; compile once, reuse forever.
-constexpr uint64_t kDeferredPipelineKey = 0xD0FE'2ED1'191A'ABCDULL;
 constexpr uint64_t kDeferredCompositePipelineKey = 0xD0FE'2ED1'C0A1'1105ULL;
 
 } // namespace
+
+uint64_t DeferredLighter::ensure_pipeline(FrameContext& ctx)
+{
+    if (!ctx.render_ctx || !ctx.snippets) return 0;
+
+    const auto& intersect_ids = ctx.snippets->frame_intersects();
+    const auto& intersect_info_by_id = ctx.snippets->intersect_info_by_id();
+
+    // Pipeline cache key: FNV-1a across the active intersect id set.
+    // Different visual-contributed intersect snippets compose into
+    // different shader variants.
+    constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
+    constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
+    constexpr uint64_t kDeferredTag = 0x44665232'44666572ULL;
+    uint64_t key = kFnvBasis ^ kDeferredTag;
+    for (auto id : intersect_ids) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    key |= 0x4000000000000000ULL;
+
+    if (compiled_pipelines_.find(key) != compiled_pipelines_.end()) {
+        return key;
+    }
+
+    string src;
+    src += default_deferred_compute_src;
+    for (auto id : intersect_ids) {
+        if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
+        const auto& ii = intersect_info_by_id[id - 3];
+        src += string_view("#include \"", 10);
+        src += ii.include_name;
+        src += string_view("\"\n", 2);
+    }
+
+    auto append_literal = [&src](const char* s) {
+        src += string_view(s, std::strlen(s));
+    };
+
+    // intersect_shape dispatch: built-in kinds 0/1/2 forward to the
+    // prelude's rect/cube/sphere intersect functions; visual-registered
+    // kinds (3+) call their registered snippets.
+    append_literal("bool intersect_shape(Ray ray, RtShape shape, out RayHit hit) {\n");
+    append_literal("    switch (shape.shape_kind) {\n");
+    append_literal("        case 1u: return intersect_cube(ray, shape, hit);\n");
+    append_literal("        case 2u: return intersect_sphere(ray, shape, hit);\n");
+    char buf[128];
+    for (auto id : intersect_ids) {
+        if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
+        const auto& ii = intersect_info_by_id[id - 3];
+        int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
+        if (n > 0) src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
+        src += ii.fn_name;
+        append_literal("(ray, shape, hit);\n");
+    }
+    append_literal("        default: return intersect_rect(ray, shape, hit);\n");
+    append_literal("    }\n");
+    append_literal("}\n");
+
+    uint64_t compiled = ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
+    if (compiled == 0) return 0;
+    compiled_pipelines_[key] = true;
+    return key;
+}
 
 void DeferredLighter::build_passes(ViewEntry& entry,
                                    const SceneState& scene_state,
@@ -79,14 +141,12 @@ void DeferredLighter::build_passes(ViewEntry& entry,
     }
     if (entry.deferred_output_tex == 0) return;
 
-    // Compile the compute pipeline lazily. One pipeline shared across
-    // all deferred views in this render context.
-    if (pipeline_key_ == 0) {
-        pipeline_key_ = ctx.render_ctx->compile_compute_pipeline(
-            default_deferred_compute_src, kDeferredPipelineKey);
-    }
-    if (pipeline_key_ == 0) return;
-    auto pit = ctx.pipeline_map->find(pipeline_key_);
+    // Compose the compute pipeline for the current frame's visual
+    // intersect set. Different sets compose to different shader variants;
+    // compile-once caches in compiled_pipelines_.
+    uint64_t pipeline_key = ensure_pipeline(ctx);
+    if (pipeline_key == 0) return;
+    auto pit = ctx.pipeline_map->find(pipeline_key);
     if (pit == ctx.pipeline_map->end()) return;
 
     // Look up G-buffer attachment texture ids for sampling.
@@ -240,10 +300,10 @@ void DeferredLighter::on_view_removed(ViewEntry& entry, FrameContext& ctx)
 
 void DeferredLighter::shutdown(FrameContext& /*ctx*/)
 {
-    // Per-view output textures are released via on_view_removed; the
-    // shared compute pipeline lives in the render context's pipeline
-    // map and is destroyed with it.
-    pipeline_key_ = 0;
+    // Per-view output textures are released via on_view_removed; compiled
+    // compute pipelines live in the render context's pipeline map and
+    // are destroyed with it.
+    compiled_pipelines_.clear();
 }
 
 } // namespace velk::ui

@@ -384,6 +384,16 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 site.geometry.material_id = mat.mat_id;
                 site.geometry.material_data_addr = mat.mat_addr;
                 site.geometry.texture_id = tex_id;
+
+                // Custom visual intersect: if the visual contributes a
+                // snippet, register it and stamp the generated kind id
+                // into the shape so the composed intersect_shape
+                // dispatches to the snippet instead of the built-in
+                // rect/cube/sphere routines.
+                if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
+                    uint32_t kind = snippets_.register_intersect(analytic, *render_ctx_);
+                    if (kind != 0) site.geometry.shape_kind = kind;
+                }
             });
             SceneBvh info;
             info.root = build.root_index;

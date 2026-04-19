@@ -1,9 +1,12 @@
 #include "text_visual.h"
 
+#include "../embedded/velk_text_glsl.h"
+
 #include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/intf_render_context.h>
 #include <velk-ui/instance_types.h>
 #include <velk-ui/plugins/text/intf_text_plugin.h>
 
@@ -210,6 +213,52 @@ string_view TextVisual::get_snippet_fn_name() const
 string_view TextVisual::get_snippet_source() const
 {
     return text_discard_src;
+}
+
+namespace {
+
+// Shape-intersect snippet: rect hit + slug coverage threshold. Runs
+// inside BVH traversal (shadow / bounce rays), so shadows cast by text
+// track the glyph silhouette instead of the quad. `fwidth` isn't
+// available in compute, so it's stubbed the same way text_material's
+// fill snippet does.
+constexpr string_view text_intersect_src = R"(
+#define fwidth(x) vec2(1.0 / 32.0)
+#include "velk_text.glsl"
+
+layout(buffer_reference, std430) buffer TextIntersectData {
+    VelkTextCurveBuffer curves;
+    VelkTextBandBuffer bands;
+    VelkTextGlyphBuffer glyphs;
+};
+
+bool velk_intersect_text_glyph(Ray ray, RtShape shape, out RayHit hit)
+{
+    if (!intersect_rect(ray, shape, hit)) return false;
+    if (shape.material_data_addr == 0u) return true;
+    TextIntersectData d = TextIntersectData(shape.material_data_addr);
+    vec2 glyph_uv = vec2(hit.uv.x, 1.0 - hit.uv.y);
+    float coverage = velk_text_coverage(glyph_uv, shape.shape_param,
+                                         d.curves, d.bands, d.glyphs);
+    return coverage >= 0.5;
+}
+)";
+
+} // namespace
+
+string_view TextVisual::get_shape_intersect_source() const
+{
+    return text_intersect_src;
+}
+
+string_view TextVisual::get_shape_intersect_fn_name() const
+{
+    return "velk_intersect_text_glyph";
+}
+
+void TextVisual::register_shape_intersect_includes(::velk::IRenderContext& ctx) const
+{
+    ctx.register_shader_include("velk_text.glsl", embedded::velk_text_glsl);
 }
 
 } // namespace velk::ui

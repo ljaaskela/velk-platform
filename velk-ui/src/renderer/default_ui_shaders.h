@@ -191,7 +191,7 @@ layout(push_constant) uniform PC {
 struct Ray { vec3 origin; vec3 dir; };
 struct RayHit { float t; vec2 uv; vec3 normal; uint shape_index; };
 
-bool intersect_rect_d(Ray ray, RtShape shape, out RayHit hit)
+bool intersect_rect(Ray ray, RtShape shape, out RayHit hit)
 {
     vec3 u_axis = shape.u_axis.xyz;
     vec3 v_axis = shape.v_axis.xyz;
@@ -230,7 +230,7 @@ bool intersect_rect_d(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 
-bool intersect_cube_d(Ray ray, RtShape shape, out RayHit hit)
+bool intersect_cube(Ray ray, RtShape shape, out RayHit hit)
 {
     vec3 U = shape.u_axis.xyz;
     vec3 V = shape.v_axis.xyz;
@@ -258,7 +258,7 @@ bool intersect_cube_d(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 
-bool intersect_sphere_d(Ray ray, RtShape shape, out RayHit hit)
+bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
 {
     vec3 center = shape.origin.xyz
                 + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
@@ -281,12 +281,12 @@ bool intersect_sphere_d(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 
-bool intersect_shape_d(Ray ray, RtShape shape, out RayHit hit)
-{
-    if (shape.shape_kind == 1u) return intersect_cube_d(ray, shape, hit);
-    if (shape.shape_kind == 2u) return intersect_sphere_d(ray, shape, hit);
-    return intersect_rect_d(ray, shape, hit);
-}
+// Forward declaration. The DeferredLighter composer appends the
+// dispatch body (plus any visual-contributed intersect snippets) when
+// compiling the compute pipeline variant for the current scene's
+// intersect set. Built-in kinds forward to the *_d functions above;
+// visual-registered kinds call their registered snippets.
+bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
 
 // Ray-vs-AABB slab test. Returns true if ray intersects the box within
 // [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
@@ -322,7 +322,7 @@ bool trace_any_hit_bvh(Ray ray, float t_max)
         for (uint i = 0u; i < node.shape_count; ++i) {
             RtShape s = pc.globals.bvh_shapes.data[node.first_shape + i];
             RayHit h;
-            if (intersect_shape_d(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
+            if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
 
         for (uint i = 0u; i < node.child_count; ++i) {
@@ -795,14 +795,12 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 
-// Dispatch on shape_kind. Adding a new primitive means adding a case
-// here and (for non-prelude shapes) wiring up IVisual::get_intersect_src.
-bool intersect_shape(Ray ray, RtShape shape, out RayHit hit)
-{
-    if (shape.shape_kind == 1u) return intersect_cube(ray, shape, hit);
-    if (shape.shape_kind == 2u) return intersect_sphere(ray, shape, hit);
-    return intersect_rect(ray, shape, hit);
-}
+// Forward declaration: the RT composer generates the dispatch body
+// after material / shadow-tech / intersect snippets have been
+// included. Built-in cases (rect/cube/sphere) forward to the
+// functions above; visual-registered intersects get `case <id>:`
+// entries in the generated switch.
+bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
 
 // ===== RNG: PCG-hash seeded by (pixel, frame). =====
 uint g_rng_state;
