@@ -34,6 +34,8 @@ add_library(velk_ui SHARED
     src/renderer/gpu_resource_manager.cpp
     src/renderer/batch_builder.h
     src/renderer/batch_builder.cpp
+    src/renderer/frame_snippet_registry.h
+    src/renderer/frame_snippet_registry.cpp
     src/transform/trs.h
     src/transform/trs.cpp
     src/transform/look_at.h

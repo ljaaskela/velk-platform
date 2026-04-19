@@ -63,6 +63,7 @@ struct TextureDesc
 {
     int width{};                                    ///< Texture width in pixels.
     int height{};                                   ///< Texture height in pixels.
+    int mip_levels{1};                              ///< Number of mip levels. upload_texture fills mip 0 and generates the rest via blit-downsampling.
     PixelFormat format{PixelFormat::RGBA8};          ///< Pixel format.
     TextureUsage usage{TextureUsage::Sampled};       ///< Usage hint.
 };

@@ -364,9 +364,11 @@ float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_
     return 1.0;
 }
 
-// Equirect env sample along rd, applying rotation and intensity.
-// Returns vec3(0) when the view has no environment.
-vec3 env_miss_color(vec3 rd)
+// Equirect env sample with explicit mip LOD. The env texture ships
+// with a bilinear-downsampled mip chain as a rough roughness
+// prefilter; higher `lod` values read blurrier mips. Returns vec3(0)
+// when the view has no environment.
+vec3 env_miss_color_lod(vec3 rd, float lod)
 {
     if (pc.env_texture_id == 0u) return vec3(0.0);
     const float PI = 3.14159265358979323846;
@@ -376,8 +378,11 @@ vec3 env_miss_color(vec3 rd)
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
     float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
-    return velk_texture(pc.env_texture_id, vec2(u, v)).rgb * params.x;
+    return textureLod(velk_textures[nonuniformEXT(pc.env_texture_id)],
+                      vec2(u, v), lod).rgb * params.x;
 }
+
+vec3 env_miss_color(vec3 rd) { return env_miss_color_lod(rd, 0.0); }
 
 // GGX normal distribution, Smith geometry, Schlick Fresnel. Same forms
 // used by the RT path's velk_fill_standard.
@@ -488,12 +493,17 @@ void main()
             direct_specular += spec * NdotL * radiance;
         }
 
-        // Env lighting: single-sample approximation. Diffuse reads along
-        // N; specular reads along the mirror reflection (no roughness
-        // prefilter yet, so rough surfaces get a sharper reflection than
-        // physically correct).
-        vec3 env_diffuse  = env_miss_color(N);
-        vec3 env_specular = env_miss_color(reflect(-V, N));
+        // Env lighting: single-sample approximation. Diffuse reads
+        // along N with a deep LOD so it reads roughly the irradiance
+        // average; specular reads the mirror reflection with LOD scaled
+        // by roughness as a cheap GGX-prefilter stand-in (bilinear mips
+        // rather than true GGX-convolved, but it reads right).
+        float env_max_lod = float(textureQueryLevels(
+            velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
+        float spec_lod = roughness * env_max_lod;
+        float diffuse_lod = env_max_lod;
+        vec3 env_diffuse  = env_miss_color_lod(N, diffuse_lod);
+        vec3 env_specular = env_miss_color_lod(reflect(-V, N), spec_lod);
         vec3 F_env = fresnel_schlick(NdotV, F0);
         vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
 
@@ -576,7 +586,7 @@ layout(push_constant) uniform PC {
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;          // x=env_material_id, y=env_texture_id, z=frame_counter, w=_
-    RtShapeList shapes;         // primary-ray buffer (painter-sorted back-to-front)
+    RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
     RtShapeList bvh_shapes;     // element-grouped buffer; BvhNode ranges index here
     BvhNodeList bvh_nodes;
     uint bvh_root;
@@ -860,12 +870,15 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 
 // ===== Closest-hit BVH traversal. Used by bounces + shadows. The
 // resulting `hit.shape_index` indexes into `pc.bvh_shapes` (not
-// `pc.shapes`, which only primary rays consume).
+// `pc.shapes`, which only primary rays consume). Stack depth bounds
+// the max fan-out per node across the UI tree walk; wide scene roots
+// (a grid of 40+ tiles, a dashboard of cards) need more than 32.
+const int kBvhStackSize = 128;
 bool trace_closest_hit(Ray ray, out RayHit hit) {
     hit.t = 1e30;
     hit.shape_index = 0xffffffffu;
     if (pc.bvh_node_count == 0u) return false;
-    uint stack[32];
+    uint stack[kBvhStackSize];
     int sp = 0;
     stack[sp++] = pc.bvh_root;
     while (sp > 0) {
@@ -883,7 +896,7 @@ bool trace_closest_hit(Ray ray, out RayHit hit) {
             }
         }
         for (uint i = 0u; i < node.child_count; ++i) {
-            if (sp < 32) stack[sp++] = node.first_child + i;
+            if (sp < kBvhStackSize) stack[sp++] = node.first_child + i;
         }
     }
     return hit.shape_index != 0xffffffffu;
@@ -892,7 +905,7 @@ bool trace_closest_hit(Ray ray, out RayHit hit) {
 // Any-hit BVH traversal for shadow rays: first confirmed blocker wins.
 bool trace_any_hit(Ray ray, float t_max) {
     if (pc.bvh_node_count == 0u) return false;
-    uint stack[32];
+    uint stack[kBvhStackSize];
     int sp = 0;
     stack[sp++] = pc.bvh_root;
     while (sp > 0) {
@@ -906,7 +919,7 @@ bool trace_any_hit(Ray ray, float t_max) {
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
         for (uint i = 0u; i < node.child_count; ++i) {
-            if (sp < 32) stack[sp++] = node.first_child + i;
+            if (sp < kBvhStackSize) stack[sp++] = node.first_child + i;
         }
     }
     return false;
@@ -1021,6 +1034,23 @@ void main()
     primary.origin = near_w;
     primary.dir = normalize(far_w - near_w);
 
+    // Painter-sorted back-to-front iteration over the primary buffer.
+    // Co-planar UI shapes (cards, text, overlays stacked at z=0) need
+    // this to composite in authored layer order; closest-hit BVH would
+    // advance past a whole plane after the first hit and drop every
+    // other shape sharing that t. BVH is used for bounces + shadows
+    // where closest-hit is the right semantics.
+    //
+    // Future: a proper front-to-back BVH walk for primary is possible
+    // once each BVH node can be flagged "coplanar group" at build time
+    // (all its shapes share a plane within tolerance) - the walker
+    // would iterate the group's shapes painter-style instead of doing
+    // closest-hit inside it, and fall back to closest-hit between
+    // groups. Complications: coplanar sibling elements under a non-
+    // coplanar parent need virtual-group bucketing; nearly-coplanar
+    // rotated geometry (fluent's ±6° tile yaw) should NOT group.
+    // Parked while primary cost is still O(shapes) * cheap-intersect;
+    // revisit if profiling shows the primary pass is hot.
     vec3 accum = env_miss_color(primary.dir);
 
     for (uint i = 0u; i < shape_count; ++i) {
@@ -1041,12 +1071,6 @@ void main()
 
         vec3 shape_rgb = bs.emission.rgb;
         if (!bs.terminate) {
-            // Add the bounced contribution (specular reflection for
-            // StandardMaterial). To denoise the stochastic GGX sample we
-            // take kSpp samples per primary hit and average. The first
-            // sample reuses the direction the material already picked;
-            // the rest re-evaluate the material to draw fresh half-
-            // vectors from the RNG. Cost scales linearly with kSpp.
             const int kSpp = 4;
             vec3 bounce = vec3(0.0);
             Ray refl;

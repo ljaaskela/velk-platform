@@ -157,6 +157,7 @@ private:
         int height = 0;
         PixelFormat format = PixelFormat::RGBA8;
         bool is_renderable = false;
+        uint32_t mip_levels = 1;
         // Current image layout for cross-pass operations (e.g. blits).
         // Storage textures land at GENERAL after their initial transition;
         // render-target attachments sit at SHADER_READ_ONLY_OPTIMAL between
@@ -216,7 +217,7 @@ private:
     VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(VkCommandBuffer cb);
     void transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
-                                 VkImageLayout new_layout);
+                                 VkImageLayout new_layout, uint32_t mip_levels = 1);
 };
 
 } // namespace velk::vk

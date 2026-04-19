@@ -525,6 +525,9 @@ bool VkBackend::create_bindless_descriptor()
     sampler_ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler_ci.magFilter = VK_FILTER_LINEAR;
     sampler_ci.minFilter = VK_FILTER_LINEAR;
+    sampler_ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler_ci.minLod = 0.f;
+    sampler_ci.maxLod = VK_LOD_CLAMP_NONE;
     sampler_ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -932,25 +935,28 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     }
     const bool is_color_attachment = (desc.usage == TextureUsage::ColorAttachment);
 
+    uint32_t mip_levels = desc.mip_levels > 0 ? static_cast<uint32_t>(desc.mip_levels) : 1u;
+
     VkImageCreateInfo img_ci{};
     img_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     img_ci.imageType = VK_IMAGE_TYPE_2D;
     img_ci.format = vk_format;
     img_ci.extent = {static_cast<uint32_t>(desc.width), static_cast<uint32_t>(desc.height), 1};
-    img_ci.mipLevels = 1;
+    img_ci.mipLevels = mip_levels;
     img_ci.arrayLayers = 1;
     img_ci.samples = VK_SAMPLE_COUNT_1_BIT;
     img_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     img_ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (mip_levels > 1) {
+        // Mip chain is generated post-upload via blit-downsample; each
+        // mip serves as a blit source for the next level.
+        img_ci.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     if (desc.usage == TextureUsage::RenderTarget || is_color_attachment) {
-        // TRANSFER_SRC_BIT lets blit_to_surface use the attachment
-        // directly as a blit source (e.g. G-buffer debug overlays).
         img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         td.is_renderable = true;
     }
     if (desc.usage == TextureUsage::Storage) {
-        // TRANSFER_SRC_BIT allows this texture to be blitted onto a surface
-        // by blit_to_surface (the compute-RT output path).
         img_ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
 
@@ -962,14 +968,14 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         return 0;
     }
 
-    // Image view
+    // Image view spans all mip levels so textureLod() can reach any of them.
     VkImageViewCreateInfo view_ci{};
     view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_ci.image = td.image;
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_ci.format = vk_format;
     view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    view_ci.subresourceRange.levelCount = 1;
+    view_ci.subresourceRange.levelCount = mip_levels;
     view_ci.subresourceRange.layerCount = 1;
 
     vkCreateImageView(device_, &view_ci, nullptr, &td.view);
@@ -981,9 +987,10 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         ? VK_IMAGE_LAYOUT_GENERAL
         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     auto cb = begin_one_shot_commands();
-    transition_image_layout(cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout);
+    transition_image_layout(cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout, mip_levels);
     end_one_shot_commands(cb);
     td.current_layout = initial_layout;
+    td.mip_levels = mip_levels;
 
     // Update bindless sampler descriptor (binding 0)
     VkDescriptorImageInfo sampler_info{};
@@ -1141,21 +1148,96 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
 
     auto cb = begin_one_shot_commands();
 
-    // Transition to transfer dst
-    transition_image_layout(
-        cb, td.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const uint32_t mip_levels = td.mip_levels;
 
-    // Copy
+    // Transition all mip levels to TRANSFER_DST for the initial upload.
+    transition_image_layout(
+        cb, td.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mip_levels);
+
+    // Upload the source pixels to mip 0.
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-
     vkCmdCopyBufferToImage(cb, staging, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    // Transition back to shader read
-    transition_image_layout(
-        cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (mip_levels > 1) {
+        // Generate the rest of the chain by progressively blitting from
+        // level i (TRANSFER_SRC) into level i+1 (TRANSFER_DST). Each
+        // level is transitioned to SHADER_READ_ONLY once we're done
+        // reading from it, so we end with every mip ready for sampling.
+        int32_t mip_w = width;
+        int32_t mip_h = height;
+        for (uint32_t i = 1; i < mip_levels; ++i) {
+            // Source mip (i-1): TRANSFER_DST -> TRANSFER_SRC.
+            VkImageMemoryBarrier bar{};
+            bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.image = td.image;
+            bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            bar.subresourceRange.baseMipLevel = i - 1;
+            bar.subresourceRange.levelCount = 1;
+            bar.subresourceRange.layerCount = 1;
+            bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &bar);
+
+            int32_t next_w = mip_w > 1 ? mip_w / 2 : 1;
+            int32_t next_h = mip_h > 1 ? mip_h / 2 : 1;
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = i - 1;
+            blit.srcSubresource.layerCount = 1;
+            blit.srcOffsets[1] = {mip_w, mip_h, 1};
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = i;
+            blit.dstSubresource.layerCount = 1;
+            blit.dstOffsets[1] = {next_w, next_h, 1};
+            vkCmdBlitImage(cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &blit, VK_FILTER_LINEAR);
+
+            // Source mip now fully written + read; move to SHADER_READ_ONLY.
+            bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &bar);
+
+            mip_w = next_w;
+            mip_h = next_h;
+        }
+
+        // Final level (mip_levels - 1) is still TRANSFER_DST; flip to
+        // SHADER_READ_ONLY to match the rest.
+        VkImageMemoryBarrier tail{};
+        tail.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        tail.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        tail.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        tail.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        tail.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        tail.image = td.image;
+        tail.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        tail.subresourceRange.baseMipLevel = mip_levels - 1;
+        tail.subresourceRange.levelCount = 1;
+        tail.subresourceRange.layerCount = 1;
+        tail.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        tail.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &tail);
+    } else {
+        // Single-level image: flip mip 0 back to sampling layout.
+        transition_image_layout(
+            cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+    }
 
     end_one_shot_commands(cb);
 
@@ -1911,7 +1993,7 @@ void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
 }
 
 void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
-                                        VkImageLayout new_layout)
+                                        VkImageLayout new_layout, uint32_t mip_levels)
 {
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1921,7 +2003,7 @@ void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkIma
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.levelCount = mip_levels;
     barrier.subresourceRange.layerCount = 1;
 
     VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;

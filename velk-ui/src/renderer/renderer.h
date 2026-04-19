@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include "batch_builder.h"
 #include "frame_data_manager.h"
+#include "frame_snippet_registry.h"
 #include "gpu_resource_manager.h"
 #include "deferred_lighter.h"
 #include "ray_tracer.h"
@@ -102,6 +103,12 @@ private:
     FrameDataManager frame_buffer_;
 
     FrameSlot* active_slot_ = nullptr;
+
+    // Shared per-frame scene snippet registry (materials + shadow
+    // techniques). Owned here so both the scene-wide BVH build and
+    // the sub-renderers (RayTracer composer, DeferredLighter light
+    // resolution) read from the same stable ids.
+    FrameSnippetRegistry snippets_;
 
     // Sub-renderers; one per render path.
     Rasterizer rasterizer_;

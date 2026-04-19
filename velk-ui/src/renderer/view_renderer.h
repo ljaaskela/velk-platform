@@ -19,6 +19,8 @@
 
 namespace velk::ui {
 
+class FrameSnippetRegistry;
+
 /** @brief Shared non-owning context passed to per-view sub-renderers. */
 struct FrameContext
 {
@@ -27,6 +29,7 @@ struct FrameContext
     FrameDataManager* frame_buffer = nullptr;
     GpuResourceManager* resources = nullptr;
     BatchBuilder* batch_builder = nullptr; ///< Shared visual-command cache.
+    FrameSnippetRegistry* snippets = nullptr; ///< Shared material / shadow-tech / intersect snippet registry.
     const std::unordered_map<uint64_t, PipelineId>* pipeline_map = nullptr;
     IGpuResourceObserver* observer = nullptr; ///< Renderer as observer of GPU resources.
     uint64_t present_counter = 0;

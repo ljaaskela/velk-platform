@@ -156,6 +156,7 @@ FrameContext Renderer::make_frame_context()
     ctx.frame_buffer = &frame_buffer_;
     ctx.resources = &resources_;
     ctx.batch_builder = &batch_builder_;
+    ctx.snippets = &snippets_;
     ctx.pipeline_map = pipeline_map_;
     ctx.observer = this;
     ctx.present_counter = present_counter_;
@@ -362,7 +363,28 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         };
         std::unordered_map<IScene*, SceneBvh> scene_bvhs;
         for (auto& [scene, state] : consumed_scenes) {
-            auto build = build_scene_bvh(scene, [](ShapeSite&) {});
+            // Resolve material + texture per shape via the shared
+            // snippet registry so scene-BVH shapes carry the same
+            // material_id / material_data_addr / texture_id as RT's
+            // primary buffer. Both consumers read from one scene BVH.
+            auto build = build_scene_bvh(scene, [&](ShapeSite& site) {
+                auto mat = site.paint
+                    ? snippets_.resolve_material(site.paint, *render_ctx_, frame_buffer_)
+                    : FrameSnippetRegistry::MaterialRef{};
+                uint32_t tex_id = 0;
+                if (site.draw_entry && site.draw_entry->texture_key != 0) {
+                    auto* surf = reinterpret_cast<ISurface*>(
+                        static_cast<uintptr_t>(site.draw_entry->texture_key));
+                    tex_id = resources_.find_texture(surf);
+                    if (tex_id == 0) {
+                        uint64_t rt_id = get_render_target_id(surf);
+                        if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
+                    }
+                }
+                site.geometry.material_id = mat.mat_id;
+                site.geometry.material_data_addr = mat.mat_addr;
+                site.geometry.texture_id = tex_id;
+            });
             SceneBvh info;
             info.root = build.root_index;
             info.node_count = static_cast<uint32_t>(build.nodes.size());
@@ -500,6 +522,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
     auto consumed_scenes = consume_scenes(desc);
 
     batch_builder_.reset_frame_state();
+    snippets_.begin_frame();
     build_frame_passes(desc, consumed_scenes, *slot);
 
     active_slot_ = nullptr;

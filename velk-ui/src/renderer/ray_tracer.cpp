@@ -2,6 +2,7 @@
 
 #include "default_ui_shaders.h"
 #include "env_helper.h"
+#include "frame_snippet_registry.h"
 #include "scene_collector.h"
 
 #include <velk/api/perf.h>
@@ -43,72 +44,16 @@ void build_ortho_projection(float* out, float width, float height)
 
 } // namespace
 
-uint32_t RayTracer::register_shadow_tech(IShadowTechnique* tech, FrameContext& ctx)
+uint64_t RayTracer::ensure_pipeline(FrameContext& ctx)
 {
-    if (!tech || !ctx.render_ctx) return 0;
-    auto fn = tech->get_snippet_fn_name();
-    auto src = tech->get_snippet_source();
-    if (fn.empty() || src.empty()) return 0;
-    auto* obj = interface_cast<IObject>(tech);
-    if (!obj) return 0;
-    Uid uid = obj->get_class_uid();
-    uint64_t key = uid.hi ^ uid.lo;
-    auto it = shadow_tech_id_by_class_.find(key);
-    if (it != shadow_tech_id_by_class_.end()) {
-        return it->second;
-    }
-    // The shader include filename is derived from fn_name + ".glsl".
-    string include_name;
-    include_name.append(fn);
-    include_name.append(string_view(".glsl", 5));
-    ctx.render_ctx->register_shader_include(include_name, src);
-    tech->register_snippet_includes(*ctx.render_ctx);
-    uint32_t id = static_cast<uint32_t>(shadow_tech_info_by_id_.size()) + 1;
-    shadow_tech_info_by_id_.push_back({fn, std::move(include_name)});
-    shadow_tech_id_by_class_[key] = id;
-    return id;
-}
-
-uint32_t RayTracer::register_material(IProgram* prog, FrameContext& ctx)
-{
-    if (!prog || !ctx.render_ctx) return 0;
-    auto* snippet = interface_cast<IShaderSnippet>(prog);
-    if (!snippet) return 0;
-    auto fn = snippet->get_snippet_fn_name();
-    auto src = snippet->get_snippet_source();
-    if (fn.empty() || src.empty()) return 0;
-    auto* obj = interface_cast<IObject>(prog);
-    if (!obj) return 0;
-    Uid uid = obj->get_class_uid();
-    uint64_t key = uid.hi ^ uid.lo;
-    auto it = material_id_by_class_.find(key);
-    if (it != material_id_by_class_.end()) {
-        return it->second;
-    }
-    // The shader include filename is derived from fn_name + ".glsl".
-    string include_name;
-    include_name.append(fn);
-    include_name.append(string_view(".glsl", 5));
-    // Register the material's fill snippet as a shader include so the
-    // composed shader can `#include "<name>"` and get proper line-number
-    // diagnostics in compile errors.
-    ctx.render_ctx->register_shader_include(include_name, src);
-    // Let the material register any further include dependencies
-    // (e.g. the text material's velk_text.glsl).
-    snippet->register_snippet_includes(*ctx.render_ctx);
-    uint32_t id = static_cast<uint32_t>(material_info_by_id_.size()) + 1;
-    material_info_by_id_.push_back({fn, std::move(include_name)});
-    material_id_by_class_[key] = id;
-    return id;
-}
-
-uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
-                                    const vector<uint32_t>& shadow_tech_ids,
-                                    FrameContext& ctx)
-{
-    if (!ctx.render_ctx) {
+    if (!ctx.render_ctx || !ctx.snippets) {
         return 0;
     }
+
+    const auto& material_ids = ctx.snippets->frame_materials();
+    const auto& shadow_tech_ids = ctx.snippets->frame_shadow_techs();
+    const auto& material_info_by_id = ctx.snippets->material_info_by_id();
+    const auto& shadow_tech_info_by_id = ctx.snippets->shadow_tech_info_by_id();
 
     // Pipeline cache key: FNV-1a across the sorted material-id and
     // shadow-tech-id lists. Different technique combos compose to
@@ -120,13 +65,10 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
     for (auto id : material_ids) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
-    // Separator so a material id X can't collide with a shadow id X.
     key = (key ^ 0xdeadbeefULL) * kFnvPrime;
     for (auto id : shadow_tech_ids) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
-    // Sentinel bit keeps RT keys well away from the render context's
-    // auto-assign counter range (PipelineKey::CustomBase..).
     key |= 0x8000000000000000ULL;
 
     auto cached = compiled_pipelines_.find(key);
@@ -134,20 +76,18 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
         return key;
     }
 
-    // Compose source: prelude + #include each active material & shadow
-    // technique snippet + generated dispatch switches + main.
     string src;
     src += rt_compute_prelude_src;
     for (auto id : material_ids) {
-        if (id == 0 || id > material_info_by_id_.size()) continue;
-        const auto& mi = material_info_by_id_[id - 1];
+        if (id == 0 || id > material_info_by_id.size()) continue;
+        const auto& mi = material_info_by_id[id - 1];
         src += string_view("#include \"", 10);
         src += mi.include_name;
         src += string_view("\"\n", 2);
     }
     for (auto id : shadow_tech_ids) {
-        if (id == 0 || id > shadow_tech_info_by_id_.size()) continue;
-        const auto& ti = shadow_tech_info_by_id_[id - 1];
+        if (id == 0 || id > shadow_tech_info_by_id.size()) continue;
+        const auto& ti = shadow_tech_info_by_id[id - 1];
         src += string_view("#include \"", 10);
         src += ti.include_name;
         src += string_view("\"\n", 2);
@@ -161,8 +101,8 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
     append_literal("    switch (mid) {\n");
     char buf[128];
     for (auto id : material_ids) {
-        if (id == 0 || id > material_info_by_id_.size()) continue;
-        const auto& mi = material_info_by_id_[id - 1];
+        if (id == 0 || id > material_info_by_id.size()) continue;
+        const auto& mi = material_info_by_id[id - 1];
         int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
         if (n > 0) {
             src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
@@ -174,12 +114,11 @@ uint64_t RayTracer::ensure_pipeline(const vector<uint32_t>& material_ids,
     append_literal("    }\n");
     append_literal("}\n");
 
-    // Shadow dispatch: tech_id 0 means "no shadow" (fully lit).
     append_literal("float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_normal) {\n");
     append_literal("    switch (tech_id) {\n");
     for (auto id : shadow_tech_ids) {
-        if (id == 0 || id > shadow_tech_info_by_id_.size()) continue;
-        const auto& ti = shadow_tech_info_by_id_[id - 1];
+        if (id == 0 || id > shadow_tech_info_by_id.size()) continue;
+        const auto& ti = shadow_tech_info_by_id[id - 1];
         int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
         if (n > 0) {
             src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
@@ -274,91 +213,42 @@ void RayTracer::build_passes(ViewEntry& entry,
         cam_pz = es->world_matrix(2, 3);
     }
 
+    // Primary rays composite in painter order, which requires a
+    // separate flat shape buffer. The scene-wide BVH (in ctx) has
+    // element-grouped order; it's the right structure for closest-hit
+    // bounces + shadows but wrong for co-planar UI compositing where
+    // every overlapping shape on a plane must still contribute.
+    // Materials resolve through the shared snippet registry so the
+    // primary buffer and BVH use the same material ids.
     vector<RtShape> shapes;
-    frame_materials_.clear();
-
-    // Cache of paint-program -> (material_id, material_data_addr). The
-    // same visual may emit multiple rect draw entries; we only want to
-    // register + write each material once per frame.
-    struct MaterialEntry {
-        IProgram* prog;
-        uint32_t mat_id;
-        uint64_t mat_addr;
-    };
-    vector<MaterialEntry> material_cache;
-
     enumerate_scene_shapes(scene_state, [&](ShapeSite& site) {
-        uint32_t mat_id = 0;
-        uint64_t mat_addr = 0;
-        if (site.paint) {
-            MaterialEntry* entry = nullptr;
-            for (auto& me : material_cache) {
-                if (me.prog == site.paint) { entry = &me; break; }
-            }
-            if (!entry) {
-                uint32_t id = register_material(site.paint, ctx);
-                if (id == 0) return;
-                uint64_t addr = 0;
-                if (auto* dd = interface_cast<IDrawData>(site.paint)) {
-                    size_t sz = dd->get_draw_data_size();
-                    if (sz > 0) {
-                        void* scratch = std::malloc(sz);
-                        if (scratch) {
-                            std::memset(scratch, 0, sz);
-                            if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
-                                addr = ctx.frame_buffer->write(scratch, sz);
-                            }
-                            std::free(scratch);
-                        }
-                    }
-                }
-                material_cache.push_back({site.paint, id, addr});
-                entry = &material_cache.back();
-                bool seen = false;
-                for (auto fm : frame_materials_) {
-                    if (fm == id) { seen = true; break; }
-                }
-                if (!seen) frame_materials_.push_back(id);
-            }
-            mat_id = entry->mat_id;
-            mat_addr = entry->mat_addr;
+        auto mat = site.paint
+            ? ctx.snippets->resolve_material(site.paint, *ctx.render_ctx, *ctx.frame_buffer)
+            : FrameSnippetRegistry::MaterialRef{};
+        if (site.paint && mat.mat_id == 0) {
+            return;
         }
-
         uint32_t tex_id = 0;
         if (site.draw_entry && site.draw_entry->texture_key != 0) {
             auto* surf = reinterpret_cast<ISurface*>(
                 static_cast<uintptr_t>(site.draw_entry->texture_key));
             tex_id = ctx.resources->find_texture(surf);
-            // RTT textures aren't tracked in resources_; their bindless
-            // id lives on the IRenderTarget. Fall back to that, mirroring
-            // what batch_builder does for the raster path.
             if (tex_id == 0) {
                 uint64_t rt_id = get_render_target_id(surf);
-                if (rt_id != 0) {
-                    tex_id = static_cast<uint32_t>(rt_id);
-                }
+                if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
             }
         }
-
-        site.geometry.material_id = mat_id;
-        site.geometry.material_data_addr = mat_addr;
+        site.geometry.material_id = mat.mat_id;
+        site.geometry.material_data_addr = mat.mat_addr;
         site.geometry.texture_id = tex_id;
         shapes.push_back(site.geometry);
     });
 
     vector<GpuLight> lights;
-    frame_shadow_techs_.clear();
     enumerate_scene_lights(scene_state, [&](LightSite& site) {
         if (auto* tech = find_shadow_technique(site.light)) {
-            uint32_t id = register_shadow_tech(tech, ctx);
-            site.base.flags[1] = id;
-            if (id != 0) {
-                bool seen = false;
-                for (auto fs : frame_shadow_techs_) {
-                    if (fs == id) { seen = true; break; }
-                }
-                if (!seen) frame_shadow_techs_.push_back(id);
-            }
+            site.base.flags[1] =
+                ctx.snippets->register_shadow_tech(tech, *ctx.render_ctx);
         }
         lights.push_back(site.base);
     });
@@ -381,34 +271,15 @@ void RayTracer::build_passes(ViewEntry& entry,
             auto env_mat = resolved.env->get_material();
             if (env_mat) {
                 auto env_prog = interface_pointer_cast<IProgram>(env_mat);
-                IProgram* prog = env_prog.get();
-                env_mat_id = register_material(prog, ctx);
-                if (env_mat_id != 0) {
-                    auto* dd = interface_cast<IDrawData>(prog);
-                    size_t sz = dd ? dd->get_draw_data_size() : 0;
-                    if (sz > 0) {
-                        void* scratch = std::malloc(sz);
-                        if (scratch) {
-                            std::memset(scratch, 0, sz);
-                            if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
-                                env_data_addr = ctx.frame_buffer->write(scratch, sz);
-                            }
-                            std::free(scratch);
-                        }
-                    }
-                    bool seen = false;
-                    for (auto id : frame_materials_) {
-                        if (id == env_mat_id) { seen = true; break; }
-                    }
-                    if (!seen) frame_materials_.push_back(env_mat_id);
-                }
+                auto env_ref = ctx.snippets->resolve_material(
+                    env_prog.get(), *ctx.render_ctx, *ctx.frame_buffer);
+                env_mat_id = env_ref.mat_id;
+                env_data_addr = env_ref.mat_addr;
             }
         }
     }
 
-    std::sort(frame_materials_.begin(), frame_materials_.end());
-    std::sort(frame_shadow_techs_.begin(), frame_shadow_techs_.end());
-    uint64_t rt_pipeline_key = ensure_pipeline(frame_materials_, frame_shadow_techs_, ctx);
+    uint64_t rt_pipeline_key = ensure_pipeline(ctx);
     if (rt_pipeline_key == 0) {
         return;
     }
@@ -417,12 +288,11 @@ void RayTracer::build_passes(ViewEntry& entry,
         return;
     }
 
-    // Plane-grouped back-to-front sort for alpha compositing. Shapes that
-    // share a plane (same normal + same offset, up to a quantisation
-    // tolerance) stay in enumeration order via stable_sort, preserving
-    // authored layering on a flat UI panel regardless of camera angle.
+    // Plane-grouped back-to-front painter sort for the primary buffer.
+    // Shapes that share a plane stay in enumeration order via
+    // stable_sort, preserving authored layering on a flat UI panel.
     // Shapes on different planes sort by NDC depth of a representative
-    // origin, so stacked 3D panels composite back-to-front.
+    // origin so stacked 3D panels composite back-to-front.
     if (shapes.size() > 1) {
         auto plane_key = [](const RtShape& s) -> uint64_t {
             float ux = s.u_axis[0], uy = s.u_axis[1], uz = s.u_axis[2];
@@ -449,8 +319,6 @@ void RayTracer::build_passes(ViewEntry& entry,
             return h;
         };
 
-        // Per-shape plane key and per-plane depth (NDC z of the first
-        // shape encountered on that plane).
         vector<uint64_t> keys(shapes.size());
         std::unordered_map<uint64_t, float> plane_depth;
         for (size_t i = 0; i < shapes.size(); ++i) {
@@ -470,7 +338,7 @@ void RayTracer::build_passes(ViewEntry& entry,
                 uint64_t ka = keys[a];
                 uint64_t kb = keys[b];
                 if (ka == kb) return false;
-                return plane_depth[ka] > plane_depth[kb]; // farther first
+                return plane_depth[ka] > plane_depth[kb];
             });
 
         vector<RtShape> sorted_shapes(shapes.size());
@@ -482,50 +350,6 @@ void RayTracer::build_passes(ViewEntry& entry,
     if (!shapes.empty()) {
         shapes_addr = ctx.frame_buffer->write(
             shapes.data(), shapes.size() * sizeof(RtShape));
-    }
-
-    // Scene BVH for bounce + shadow rays. Shares the same material
-    // resolution logic as the primary buffer above so material_id /
-    // material_data_addr / texture_id land on each BVH shape. Primary
-    // rays still walk the painter-sorted buffer (`shapes_addr`); only
-    // secondary rays read from the BVH-indexed buffer to preserve
-    // transparency compositing order.
-    auto bvh_build = build_scene_bvh(scene_state.scene, [&](ShapeSite& site) {
-        uint32_t mat_id = 0;
-        uint64_t mat_addr = 0;
-        if (site.paint) {
-            MaterialEntry* entry_cache = nullptr;
-            for (auto& me : material_cache) {
-                if (me.prog == site.paint) { entry_cache = &me; break; }
-            }
-            if (entry_cache) {
-                mat_id = entry_cache->mat_id;
-                mat_addr = entry_cache->mat_addr;
-            }
-        }
-        uint32_t tex_id = 0;
-        if (site.draw_entry && site.draw_entry->texture_key != 0) {
-            auto* surf = reinterpret_cast<ISurface*>(
-                static_cast<uintptr_t>(site.draw_entry->texture_key));
-            tex_id = ctx.resources->find_texture(surf);
-            if (tex_id == 0) {
-                uint64_t rt_id = get_render_target_id(surf);
-                if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
-            }
-        }
-        site.geometry.material_id = mat_id;
-        site.geometry.material_data_addr = mat_addr;
-        site.geometry.texture_id = tex_id;
-    });
-    uint64_t bvh_shapes_addr = 0;
-    uint64_t bvh_nodes_addr = 0;
-    if (!bvh_build.shapes.empty()) {
-        bvh_shapes_addr = ctx.frame_buffer->write(
-            bvh_build.shapes.data(), bvh_build.shapes.size() * sizeof(RtShape));
-    }
-    if (!bvh_build.nodes.empty()) {
-        bvh_nodes_addr = ctx.frame_buffer->write(
-            bvh_build.nodes.data(), bvh_build.nodes.size() * sizeof(GpuBvhNode));
     }
 
     VELK_GPU_STRUCT PushC {
@@ -564,10 +388,10 @@ void RayTracer::build_passes(ViewEntry& entry,
     pc.env_texture_id = env_tex_id;
     pc.frame_counter = static_cast<uint32_t>(ctx.present_counter);
     pc.shapes_addr = shapes_addr;
-    pc.bvh_shapes_addr = bvh_shapes_addr;
-    pc.bvh_nodes_addr = bvh_nodes_addr;
-    pc.bvh_root = bvh_build.root_index;
-    pc.bvh_node_count = static_cast<uint32_t>(bvh_build.nodes.size());
+    pc.bvh_shapes_addr = ctx.bvh_shapes_addr;
+    pc.bvh_nodes_addr = ctx.bvh_nodes_addr;
+    pc.bvh_root = ctx.bvh_root;
+    pc.bvh_node_count = ctx.bvh_node_count;
     pc.env_data_addr = env_data_addr;
     pc.lights_addr = lights_addr;
     pc.light_count = static_cast<uint32_t>(lights.size());
