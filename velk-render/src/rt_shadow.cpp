@@ -38,9 +38,7 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     r.origin = world_pos + n * 0.5;
     r.dir    = L;
 
-    RayHit hit;
-    if (!trace_closest_hit(r, hit)) return 1.0;
-    return (hit.t >= t_max) ? 1.0 : 0.0;
+    return trace_any_hit(r, t_max) ? 0.0 : 1.0;
 }
 )";
 } // namespace

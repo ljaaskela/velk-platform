@@ -576,7 +576,11 @@ layout(push_constant) uniform PC {
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;          // x=env_material_id, y=env_texture_id, z=frame_counter, w=_
-    RtShapeList shapes;
+    RtShapeList shapes;         // primary-ray buffer (painter-sorted back-to-front)
+    RtShapeList bvh_shapes;     // element-grouped buffer; BvhNode ranges index here
+    BvhNodeList bvh_nodes;
+    uint bvh_root;
+    uint bvh_node_count;
     uint64_t env_data_addr;
     LightList lights;
     uint light_count;
@@ -839,22 +843,73 @@ vec3 ggx_sample_reflect(vec3 V, vec3 N, float roughness, vec2 xi) {
     return reflect(-V, H);
 }
 
-// ===== Closest-hit scene traversal =====
+// Ray-vs-AABB slab test. Shared by the BVH walkers below.
+bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
+{
+    vec3 inv_d = 1.0 / ray.dir;
+    vec3 t0 = (bmin - ray.origin) * inv_d;
+    vec3 t1 = (bmax - ray.origin) * inv_d;
+    vec3 tmn = min(t0, t1);
+    vec3 tmx = max(t0, t1);
+    float tnear = max(max(tmn.x, tmn.y), tmn.z);
+    float tfar  = min(min(tmx.x, tmx.y), tmx.z);
+    if (tfar < max(tnear, 0.0) || tnear > t_max) return false;
+    t_hit = max(tnear, 0.0);
+    return true;
+}
+
+// ===== Closest-hit BVH traversal. Used by bounces + shadows. The
+// resulting `hit.shape_index` indexes into `pc.bvh_shapes` (not
+// `pc.shapes`, which only primary rays consume).
 bool trace_closest_hit(Ray ray, out RayHit hit) {
     hit.t = 1e30;
     hit.shape_index = 0xffffffffu;
-    uint count = pc.extras.w;
-    for (uint i = 0u; i < count; ++i) {
-        RtShape s = pc.shapes.data[i];
-        RayHit h;
-        if (intersect_shape(ray, s, h)) {
-            if (h.t < hit.t) {
+    if (pc.bvh_node_count == 0u) return false;
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = pc.bvh_root;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        BvhNode node = pc.bvh_nodes.data[ni];
+        float t_enter;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            uint idx = node.first_shape + i;
+            RtShape s = pc.bvh_shapes.data[idx];
+            RayHit h;
+            if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < hit.t) {
                 hit = h;
-                hit.shape_index = i;
+                hit.shape_index = idx;
             }
+        }
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < 32) stack[sp++] = node.first_child + i;
         }
     }
     return hit.shape_index != 0xffffffffu;
+}
+
+// Any-hit BVH traversal for shadow rays: first confirmed blocker wins.
+bool trace_any_hit(Ray ray, float t_max) {
+    if (pc.bvh_node_count == 0u) return false;
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = pc.bvh_root;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        BvhNode node = pc.bvh_nodes.data[ni];
+        float t_enter;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_enter)) continue;
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            RtShape s = pc.bvh_shapes.data[node.first_shape + i];
+            RayHit h;
+            if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
+        }
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < 32) stack[sp++] = node.first_child + i;
+        }
+    }
+    return false;
 }
 
 // Forward declaration. The composer emits the actual definition after
@@ -913,7 +968,8 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             acc += throughput * env_miss_color(ray.dir);
             return acc;
         }
-        RtShape s = pc.shapes.data[hit.shape_index];
+        // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
+        RtShape s = pc.bvh_shapes.data[hit.shape_index];
         FillContext ctx;
         ctx.data_addr = s.material_data_addr;
         ctx.texture_id = s.texture_id;

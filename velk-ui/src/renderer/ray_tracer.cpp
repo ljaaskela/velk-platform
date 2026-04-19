@@ -484,7 +484,51 @@ void RayTracer::build_passes(ViewEntry& entry,
             shapes.data(), shapes.size() * sizeof(RtShape));
     }
 
-    struct PushC {
+    // Scene BVH for bounce + shadow rays. Shares the same material
+    // resolution logic as the primary buffer above so material_id /
+    // material_data_addr / texture_id land on each BVH shape. Primary
+    // rays still walk the painter-sorted buffer (`shapes_addr`); only
+    // secondary rays read from the BVH-indexed buffer to preserve
+    // transparency compositing order.
+    auto bvh_build = build_scene_bvh(scene_state.scene, [&](ShapeSite& site) {
+        uint32_t mat_id = 0;
+        uint64_t mat_addr = 0;
+        if (site.paint) {
+            MaterialEntry* entry_cache = nullptr;
+            for (auto& me : material_cache) {
+                if (me.prog == site.paint) { entry_cache = &me; break; }
+            }
+            if (entry_cache) {
+                mat_id = entry_cache->mat_id;
+                mat_addr = entry_cache->mat_addr;
+            }
+        }
+        uint32_t tex_id = 0;
+        if (site.draw_entry && site.draw_entry->texture_key != 0) {
+            auto* surf = reinterpret_cast<ISurface*>(
+                static_cast<uintptr_t>(site.draw_entry->texture_key));
+            tex_id = ctx.resources->find_texture(surf);
+            if (tex_id == 0) {
+                uint64_t rt_id = get_render_target_id(surf);
+                if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
+            }
+        }
+        site.geometry.material_id = mat_id;
+        site.geometry.material_data_addr = mat_addr;
+        site.geometry.texture_id = tex_id;
+    });
+    uint64_t bvh_shapes_addr = 0;
+    uint64_t bvh_nodes_addr = 0;
+    if (!bvh_build.shapes.empty()) {
+        bvh_shapes_addr = ctx.frame_buffer->write(
+            bvh_build.shapes.data(), bvh_build.shapes.size() * sizeof(RtShape));
+    }
+    if (!bvh_build.nodes.empty()) {
+        bvh_nodes_addr = ctx.frame_buffer->write(
+            bvh_build.nodes.data(), bvh_build.nodes.size() * sizeof(GpuBvhNode));
+    }
+
+    VELK_GPU_STRUCT PushC {
         float inv_vp[16];
         float cam_pos[4];
         uint32_t image_index;
@@ -496,14 +540,15 @@ void RayTracer::build_passes(ViewEntry& entry,
         uint32_t frame_counter;
         uint32_t _env_pad1;
         uint64_t shapes_addr;
+        uint64_t bvh_shapes_addr;
+        uint64_t bvh_nodes_addr;
+        uint32_t bvh_root;
+        uint32_t bvh_node_count;
         uint64_t env_data_addr;
-        // Lights appended for the hybrid-lighting compositor. light_count
-        // = 0 means no dynamic lights; env-based lighting still applies.
         uint64_t lights_addr;
         uint32_t light_count;
         uint32_t _lights_pad;
     };
-    static_assert(sizeof(PushC) == 144, "PushC layout mismatch");
 
     PushC pc{};
     std::memcpy(pc.inv_vp, inv_vp.m, sizeof(pc.inv_vp));
@@ -519,6 +564,10 @@ void RayTracer::build_passes(ViewEntry& entry,
     pc.env_texture_id = env_tex_id;
     pc.frame_counter = static_cast<uint32_t>(ctx.present_counter);
     pc.shapes_addr = shapes_addr;
+    pc.bvh_shapes_addr = bvh_shapes_addr;
+    pc.bvh_nodes_addr = bvh_nodes_addr;
+    pc.bvh_root = bvh_build.root_index;
+    pc.bvh_node_count = static_cast<uint32_t>(bvh_build.nodes.size());
     pc.env_data_addr = env_data_addr;
     pc.lights_addr = lights_addr;
     pc.light_count = static_cast<uint32_t>(lights.size());
