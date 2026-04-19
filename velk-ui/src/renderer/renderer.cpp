@@ -245,6 +245,22 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
         auto state = scene->consume_state();
         bool has_changes = !state.redraw_list.empty() || !state.removed_list.empty();
 
+        // A change only warrants a batch rebuild if a visual-bearing
+        // element actually changed. Non-visual changes (camera
+        // transform, lights, etc.) legitimately land in redraw_list
+        // but don't affect any rendered batch, so flagging views
+        // dirty for them would force a full rebuild_batches every pan
+        // frame.
+        bool has_visual_changes = !state.removed_list.empty();
+        if (!has_visual_changes) {
+            for (auto* elem : state.redraw_list) {
+                if (::velk::has_attachment<IVisual>(elem)) {
+                    has_visual_changes = true;
+                    break;
+                }
+            }
+        }
+
         // Evict removed elements
         {
             FrameContext ctx = make_frame_context();
@@ -325,7 +341,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             }
         }
 
-        if (has_changes || resources_uploaded) {
+        if (has_visual_changes || resources_uploaded) {
             for (auto& v : views_) {
                 auto sp = v.camera_element->get_scene();
                 if (interface_cast<IScene>(sp) == scene) {

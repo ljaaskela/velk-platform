@@ -159,25 +159,14 @@ void Scene::update(const UpdateInfo& info)
         solver_.solve(*h, geometry_);
     }
 
-    // Layout or draw-order change: mark every element for redraw so
-    // the renderer rebuilds its batches with the new positions / z-
-    // order. The batch builder walks the tree on its own each frame,
-    // so there is no flat visual list to rebuild here anymore.
-    if ((dirty_ & (DirtyFlags::Layout | DirtyFlags::DrawOrder)) != DirtyFlags::None) {
-        redraw_list_.clear();
-        std::function<void(const IObject::Ptr&)> walk_all;
-        walk_all = [&](const IObject::Ptr& obj) {
-            auto elem = interface_pointer_cast<IElement>(obj);
-            if (!elem) return;
-            redraw_list_.push_back(elem.get());
-            for (auto& kid : logical_.children_of(obj)) {
-                walk_all(kid);
-            }
-        };
-        if (auto r = logical_.root()) {
-            walk_all(r);
-        }
-    }
+    // `redraw_list_` already contains every element whose own
+    // on_state_changed fired this frame (see the dirty_elements_ loop
+    // above), including elements that the layout solver touched (size
+    // / world_matrix / world_aabb writes that actually changed).
+    // We intentionally do NOT blanket-add every element in the tree
+    // here: a single camera-position change used to cascade through
+    // Layout dirty and mark every visual for redraw, forcing both the
+    // BVH and the raster batches to rebuild every pan frame.
 
     dirty_ = DirtyFlags::None;
 }

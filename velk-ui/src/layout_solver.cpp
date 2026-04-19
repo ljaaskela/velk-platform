@@ -61,21 +61,29 @@ void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& ele
         c = lt->measure(c, *element, hierarchy);
     }
 
-    // Write size from constraint bounds
-    write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
+    auto reader = read_state<IElement>(element);
+    if (!reader) {
+        return;
+    }
+
+    // Write size from constraint bounds — only if changed. A redundant
+    // write would fire an on_state_changed("size") notification and
+    // cascade Layout-dirty back to the scene, which would force every
+    // visual into the redraw list the following frame.
+    if (reader->size != c.bounds.extent) {
+        write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
+    }
 
     for (auto* lt : constraint_traits) {
         lt->apply(c, *element, hierarchy);
     }
 
     // Compute base world matrix from layout position
-    auto reader = read_state<IElement>(element);
-    if (!reader) {
-        return;
-    }
 
     mat4 world = parent_world * mat4::translate(reader->position);
-    write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
+    if (!(reader->world_matrix == world)) {
+        write_state<IElement>(element, [&](IElement::State& s) { s.world_matrix = world; });
+    }
 
     // Run transform traits
     for (auto&& tt : transform_traits) {
@@ -126,7 +134,9 @@ void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& ele
         }
     }
 
-    write_state<IElement>(element, [&](IElement::State& s) { s.world_aabb = combined; });
+    if (reader->world_aabb != combined) {
+        write_state<IElement>(element, [&](IElement::State& s) { s.world_aabb = combined; });
+    }
 }
 
 } // namespace velk::ui
