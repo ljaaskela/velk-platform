@@ -94,12 +94,33 @@ struct EvalContext {
 // Canonical material output. Produced by velk_eval_<name> once per
 // shading point and consumed by every path-specific driver.
 struct MaterialEval {
-    vec4 color;            // rgba; alpha = coverage / opacity
-    vec3 normal;           // world-space normal (default: ctx.normal)
-    float metallic;        // 0..1
-    float roughness;       // 0..1
-    uint lighting_mode;    // VELK_LIGHTING_*
+    vec4 color;                   // base rgb + alpha (post factor*texture)
+    vec3 normal;                  // world-space shading normal (default: ctx.normal)
+    float metallic;               // 0..1
+    float roughness;               // 0..1
+    vec3 emissive;                // emissive contribution, added unlit
+    float occlusion;              // 0..1, modulates ambient/diffuse
+    vec3 specular_color_factor;   // KHR_materials_specular: dielectric F0 tint
+    float specular_factor;        // KHR_materials_specular: Fresnel weight
+    uint lighting_mode;           // VELK_LIGHTING_*
 };
+
+// Returns a MaterialEval prefilled with spec-correct defaults. Materials
+// build on top of this so newly added fields get sensible values without
+// every material needing to track them explicitly.
+MaterialEval velk_default_material_eval() {
+    MaterialEval e;
+    e.color = vec4(1.0);
+    e.normal = vec3(0.0, 0.0, 1.0);
+    e.metallic = 0.0;
+    e.roughness = 1.0;
+    e.emissive = vec3(0.0);
+    e.occlusion = 1.0;
+    e.specular_color_factor = vec3(1.0);
+    e.specular_factor = 1.0;
+    e.lighting_mode = VELK_LIGHTING_UNLIT;
+    return e;
+}
 )";
 
 void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx)

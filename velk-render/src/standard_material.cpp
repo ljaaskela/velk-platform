@@ -158,11 +158,20 @@ MaterialEval velk_eval_standard(EvalContext ctx)
         base *= velk_texture(d.base_color.texture_id, ctx.uv);
     }
 
-    MaterialEval e;
+    vec3 emissive = d.emissive.factor.rgb * d.emissive.strength;
+    if (d.emissive.texture_id != 0u) {
+        emissive *= velk_texture(d.emissive.texture_id, ctx.uv).rgb;
+    }
+
+    MaterialEval e = velk_default_material_eval();
     e.color = base;
     e.normal = ctx.normal;
     e.metallic = d.metallic_roughness.metallic_factor;
     e.roughness = d.metallic_roughness.roughness_factor;
+    e.emissive = emissive;
+    e.occlusion = d.occlusion.strength;
+    e.specular_color_factor = d.specular.color_factor.rgb;
+    e.specular_factor = d.specular.factor;
     e.lighting_mode = VELK_LIGHTING_STANDARD;
     return e;
 }

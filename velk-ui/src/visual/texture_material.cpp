@@ -26,12 +26,9 @@ MaterialEval velk_eval_texture(EvalContext ctx)
     TextureMaterialData d = TextureMaterialData(ctx.data_addr);
     vec4 sampled = velk_texture(ctx.texture_id, ctx.uv);
 
-    MaterialEval e;
+    MaterialEval e = velk_default_material_eval();
     e.color = sampled * d.tint;
     e.normal = ctx.normal;
-    e.metallic = 0.0;
-    e.roughness = 1.0;
-    e.lighting_mode = VELK_LIGHTING_UNLIT;
     return e;
 }
 )";

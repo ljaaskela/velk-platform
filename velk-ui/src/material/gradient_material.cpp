@@ -35,12 +35,9 @@ MaterialEval velk_eval_gradient(EvalContext ctx)
     vec2 dir = vec2(cos(rad), sin(rad));
     float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);
 
-    MaterialEval e;
+    MaterialEval e = velk_default_material_eval();
     e.color = mix(d.start_color, d.end_color, t);
     e.normal = ctx.normal;
-    e.metallic = 0.0;
-    e.roughness = 1.0;
-    e.lighting_mode = VELK_LIGHTING_UNLIT;
     return e;
 }
 )";
