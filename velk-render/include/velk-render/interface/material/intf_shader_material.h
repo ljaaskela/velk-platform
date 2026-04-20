@@ -4,7 +4,7 @@
 #include <velk/api/object_ref.h>
 #include <velk/interface/intf_metadata.h>
 
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 
 namespace velk {
 

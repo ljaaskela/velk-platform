@@ -3,8 +3,6 @@
 #include <velk/api/state.h>
 #include <velk-render/gpu_data.h>
 
-#include <cstring>
-
 namespace velk::impl {
 
 namespace {
@@ -84,7 +82,75 @@ MaterialEval velk_eval_standard(EvalContext ctx)
 }
 )";
 
+Uid property_class_id(const IMaterialProperty::Ptr& p)
+{
+    auto* obj = interface_cast<IObject>(p);
+    return obj ? obj->get_class_uid() : Uid{};
+}
+
 } // namespace
+
+IMaterialProperty::Ptr StandardMaterial::get_material_property(Uid class_id) const
+{
+    for (size_t i = properties_.size(); i > 0; --i) {
+        auto& p = properties_[i - 1];
+        if (p && property_class_id(p) == class_id) {
+            return p;
+        }
+    }
+    return {};
+}
+
+vector<IMaterialProperty::Ptr> StandardMaterial::get_material_properties() const
+{
+    // One entry per unique class id, effective (last-wins) instance only.
+    vector<IMaterialProperty::Ptr> result;
+    for (size_t i = properties_.size(); i > 0; --i) {
+        auto& p = properties_[i - 1];
+        if (!p) {
+            continue;
+        }
+        Uid cid = property_class_id(p);
+        bool already_seen = false;
+        for (auto& existing : result) {
+            if (property_class_id(existing) == cid) {
+                already_seen = true;
+                break;
+            }
+        }
+        if (!already_seen) {
+            result.push_back(p);
+        }
+    }
+    return result;
+}
+
+ReturnValue StandardMaterial::add_attachment(const IInterface::Ptr& attachment)
+{
+    auto rv = Base::add_attachment(attachment);
+    if (succeeded(rv)) {
+        if (auto p = interface_pointer_cast<IMaterialProperty>(attachment)) {
+            properties_.push_back(p);
+        }
+    }
+    return rv;
+}
+
+ReturnValue StandardMaterial::remove_attachment(const IInterface::Ptr& attachment)
+{
+    auto rv = Base::remove_attachment(attachment);
+    if (succeeded(rv)) {
+        if (auto p = interface_pointer_cast<IMaterialProperty>(attachment)) {
+            for (auto it = properties_.begin(); it != properties_.end(); ++it) {
+                if (*it == p) {
+                    properties_.erase(it);
+                    break;
+                }
+            }
+        }
+    }
+    return rv;
+}
 
 size_t StandardMaterial::get_draw_data_size() const
 {
@@ -93,14 +159,32 @@ size_t StandardMaterial::get_draw_data_size() const
 
 ReturnValue StandardMaterial::write_draw_data(void* out, size_t size) const
 {
-    if (auto state = read_state<IStandard>(this)) {
-        return set_material<StandardParams>(out, size, [&](auto& p) {
-            p.base_color = state->base_color;
-            p.metallic   = state->metallic;
-            p.roughness  = state->roughness;
-        });
+    color base_color{1.f, 1.f, 1.f, 1.f};
+    float metallic  = 0.f;
+    float roughness = 0.5f;
+
+    // Forward pass over attach order: later entries of the same class overwrite
+    // earlier ones, giving "last wins" in a single O(n) walk.
+    for (auto& p : properties_) {
+        if (!p) {
+            continue;
+        }
+        Uid cid = property_class_id(p);
+        if (cid == ClassId::BaseColorProperty) {
+            base_color = read_state_value<IBaseColorProperty>(p, &IBaseColorProperty::State::factor);
+        } else if (cid == ClassId::MetallicRoughnessProperty) {
+            metallic  = read_state_value<IMetallicRoughnessProperty>(
+                p, &IMetallicRoughnessProperty::State::metallic_factor);
+            roughness = read_state_value<IMetallicRoughnessProperty>(
+                p, &IMetallicRoughnessProperty::State::roughness_factor);
+        }
     }
-    return ReturnValue::Fail;
+
+    return set_material<StandardParams>(out, size, [&](auto& p) {
+        p.base_color = base_color;
+        p.metallic   = metallic;
+        p.roughness  = roughness;
+    });
 }
 
 string_view StandardMaterial::get_eval_src() const

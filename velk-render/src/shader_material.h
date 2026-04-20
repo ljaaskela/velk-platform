@@ -5,8 +5,8 @@
 
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material_internal.h>
-#include <velk-render/interface/intf_shader_material.h>
+#include <velk-render/interface/material/intf_material_internal.h>
+#include <velk-render/interface/material/intf_shader_material.h>
 #include <velk-render/plugin.h>
 
 namespace velk::impl {

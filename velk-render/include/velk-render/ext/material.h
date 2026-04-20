@@ -6,7 +6,7 @@
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material_internal.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/interface/intf_program_data_buffer.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>

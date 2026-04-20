@@ -3,7 +3,7 @@
 
 #include <velk/api/state.h>
 
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-ui/api/trait.h>
 #include <velk-ui/interface/intf_visual.h>
 

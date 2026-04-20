@@ -4,7 +4,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <unordered_map>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/interface/intf_window_surface.h>

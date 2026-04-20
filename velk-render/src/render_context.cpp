@@ -9,7 +9,7 @@
 #include <velk/api/velk.h>
 #include <velk/hash.h>
 
-#include <velk-render/interface/intf_material_internal.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/platform.h>
 
 namespace velk {

@@ -7,7 +7,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/interface/intf_buffer.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 
 #include <velk-ui/types.h>
 

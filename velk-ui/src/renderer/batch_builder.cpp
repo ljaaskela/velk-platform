@@ -7,7 +7,7 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_raster_shader.h>
 #include <velk-ui/interface/intf_visual.h>
 

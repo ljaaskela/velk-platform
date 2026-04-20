@@ -174,7 +174,7 @@ Use `ShaderMaterial` when the shader comes from outside your application code: L
 ### Creating a shader material
 
 ```cpp
-#include <velk-render/api/material/shader.h>
+#include <velk-render/api/material/shader_material.h>
 
 constexpr velk::string_view my_frag = R"(
 #version 450

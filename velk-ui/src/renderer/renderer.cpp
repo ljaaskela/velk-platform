@@ -13,7 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-ui/interface/intf_environment.h>
 #include <velk-ui/interface/intf_visual.h>

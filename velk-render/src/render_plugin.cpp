@@ -1,5 +1,6 @@
 #include "render_plugin.h"
 
+#include "material_property.h"
 #include "program_data_buffer.h"
 #include "render_context.h"
 #include "rt_shadow.h"
@@ -24,6 +25,14 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<RenderTexture>(velk);
     rv &= register_type<impl::ShaderMaterial>(velk);
     rv &= register_type<impl::StandardMaterial>(velk);
+    rv &= register_type<impl::BaseColorProperty>(velk);
+    rv &= register_type<impl::MetallicRoughnessProperty>(velk);
+    rv &= register_type<impl::NormalProperty>(velk);
+    rv &= register_type<impl::OcclusionProperty>(velk);
+    rv &= register_type<impl::EmissiveProperty>(velk);
+    rv &= register_type<impl::SpecularProperty>(velk);
+    rv &= register_type<impl::AlphaModeProperty>(velk);
+    rv &= register_type<impl::DoubleSidedProperty>(velk);
     rv &= register_type<impl::RtShadow>(velk);
     rv &= register_type<impl::ProgramDataBuffer>(velk);
     rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk);

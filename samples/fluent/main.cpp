@@ -7,7 +7,7 @@
 #include <velk/api/callback.h>
 #include <velk/api/velk.h>
 
-#include <velk-render/api/material/standard.h>
+#include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/api/shadow_technique.h>
 #include <velk-runtime/api/application.h>
