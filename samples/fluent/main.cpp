@@ -7,9 +7,12 @@
 #include <velk/api/callback.h>
 #include <velk/api/velk.h>
 
+#include <chrono>
+#include <cmath>
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/api/shadow_technique.h>
+#include <velk-render/interface/intf_camera.h>
 #include <velk-runtime/api/application.h>
 #include <velk-ui/api/camera.h>
 #include <velk-ui/api/element.h>
@@ -21,11 +24,8 @@
 #include <velk-ui/api/visual/cube.h>
 #include <velk-ui/api/visual/rounded_rect.h>
 #include <velk-ui/api/visual/sphere.h>
+#include <velk-ui/plugins/image/api/image.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
-#include <velk-render/interface/intf_camera.h>
-
-#include <chrono>
-#include <cmath>
 
 namespace {
 
@@ -54,6 +54,8 @@ void build_mirror_grid(velk::ui::Scene& scene, velk::ui::Element grid_root)
         return x;
     };
 
+    velk::StandardMaterial m;
+
     uint32_t idx = 0;
     for (int row = 0; row < kRows; ++row) {
         for (int col = 0; col < kCols; ++col, ++idx) {
@@ -68,6 +70,7 @@ void build_mirror_grid(velk::ui::Scene& scene, velk::ui::Element grid_root)
 
             auto mat = velk::material::create_standard(
                 velk::color{0.9f, 0.92f, 0.95f, 1.f}, /*metallic=*/1.f, roughness);
+            m = mat;
 
             auto tile = velk::ui::create_element();
             auto sz = velk::ui::trait::layout::create_fixed_size(
@@ -88,6 +91,9 @@ void build_mirror_grid(velk::ui::Scene& scene, velk::ui::Element grid_root)
             scene.add(grid_root, tile);
         }
     }
+
+    auto img = velk::ui::image::load_image("image:app://assets/avatar.png");
+    m.base_color().set_texture(img.as_surface());
 }
 
 } // namespace

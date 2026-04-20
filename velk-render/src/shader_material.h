@@ -18,7 +18,7 @@ public:
 
     uint64_t get_pipeline_handle(IRenderContext&) override { return pipeline_handle_; }
     size_t get_draw_data_size() const override;
-    ReturnValue write_draw_data(void* out, size_t size) const override;
+    ReturnValue write_draw_data(void* out, size_t size, ITextureResolver* resolver = nullptr) const override;
 
     void set_pipeline_handle(uint64_t handle) override { pipeline_handle_ = handle; }
     ReturnValue setup_inputs(const vector<ShaderParam>& params) override;
@@ -32,6 +32,7 @@ public:
     void register_eval_includes(IRenderContext&) const override {}
     float get_forward_discard_threshold() const override { return 0.0f; }
     float get_deferred_discard_threshold() const override { return 0.5f; }
+    vector<ISurface*> get_textures() const override { return {}; }
 
 private:
     uint64_t pipeline_handle_ = 0;

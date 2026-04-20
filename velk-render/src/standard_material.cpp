@@ -2,25 +2,94 @@
 
 #include <velk/api/state.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_texture_resolver.h>
 
 namespace velk::impl {
 
 namespace {
 
-VELK_GPU_STRUCT StandardParams
+// GPU-side per-property sub-structs. Each mirrors one IMaterialProperty
+// subclass 1:1: the class-specific factor(s) plus the resolved bindless
+// TextureId (0 = no texture). Padding keeps std430 16-byte alignment for
+// the containing StandardMaterialParams.
+
+VELK_GPU_STRUCT BaseColorParams
 {
-    ::velk::color base_color;
-    float metallic;
-    float roughness;
-    float _pad[2];
+    ::velk::color factor{1.f, 1.f, 1.f, 1.f};  // glTF baseColorFactor (RGBA)
+    uint32_t texture_id{};                      // baseColorTexture (0 = none)
+    uint32_t _pad[3]{};
 };
-static_assert(sizeof(StandardParams) == 32,
-              "StandardParams must be 32 bytes (std430 + alignas(16))");
+static_assert(sizeof(BaseColorParams) == 32, "BaseColorParams must be 32 bytes");
+
+VELK_GPU_STRUCT MetallicRoughnessParams
+{
+    float metallic_factor{1.f};
+    float roughness_factor{1.f};
+    uint32_t texture_id{};       // B = metallic, G = roughness
+    uint32_t _pad{};
+};
+static_assert(sizeof(MetallicRoughnessParams) == 16, "MetallicRoughnessParams must be 16 bytes");
+
+VELK_GPU_STRUCT NormalParams
+{
+    float scale{1.f};
+    uint32_t texture_id{};
+    uint32_t _pad[2]{};
+};
+static_assert(sizeof(NormalParams) == 16, "NormalParams must be 16 bytes");
+
+VELK_GPU_STRUCT OcclusionParams
+{
+    float strength{1.f};
+    uint32_t texture_id{};       // R channel
+    uint32_t _pad[2]{};
+};
+static_assert(sizeof(OcclusionParams) == 16, "OcclusionParams must be 16 bytes");
+
+VELK_GPU_STRUCT EmissiveParams
+{
+    ::velk::color factor{0.f, 0.f, 0.f, 1.f};
+    float strength{1.f};         // KHR_materials_emissive_strength
+    uint32_t texture_id{};
+    uint32_t _pad[2]{};
+};
+static_assert(sizeof(EmissiveParams) == 32, "EmissiveParams must be 32 bytes");
+
+VELK_GPU_STRUCT SpecularParams
+{
+    ::velk::color color_factor{1.f, 1.f, 1.f, 1.f};  // KHR_materials_specular specularColorFactor
+    float factor{1.f};                                 // KHR_materials_specular specularFactor
+    uint32_t texture_id{};                             // specularTexture (A = specular)
+    uint32_t color_texture_id{};                       // specularColorTexture (RGB = color)
+    uint32_t _pad{};
+};
+static_assert(sizeof(SpecularParams) == 32, "SpecularParams must be 32 bytes");
+
+VELK_GPU_STRUCT AlphaModeParams
+{
+    float cutoff{0.5f};
+    uint32_t mode{};             // 0 = Opaque, 1 = Mask, 2 = Blend
+    uint32_t double_sided{};     // boolean folded into this block to save a slot
+    uint32_t _pad{};
+};
+static_assert(sizeof(AlphaModeParams) == 16, "AlphaModeParams must be 16 bytes");
+
+VELK_GPU_STRUCT StandardMaterialParams
+{
+    BaseColorParams         base_color;
+    MetallicRoughnessParams metallic_roughness;
+    NormalParams            normal;
+    OcclusionParams         occlusion;
+    EmissiveParams          emissive;
+    SpecularParams          specular;
+    AlphaModeParams         alpha_mode;
+};
+static_assert(sizeof(StandardMaterialParams) == 160,
+              "StandardMaterialParams layout must match standard_eval_src");
 
 // Rect-instance vertex shader. Duplicates the velk-ui-provided
 // rect_material_vertex_src body to avoid a velk-render -> velk-ui
-// header dependency. If more velk-render materials need the same
-// vertex, factor out a velk-render-owned shared constant.
+// header dependency.
 constexpr string_view standard_vertex_src = R"(
 #version 450
 #include "velk.glsl"
@@ -56,27 +125,44 @@ void main()
 }
 )";
 
-// Eval body: produce MaterialEval(Standard) carrying base_color,
-// metallic, roughness + the surface normal. The framework's RT fill
-// wrapper routes Standard materials through the shared
-// `velk_pbr_shade` helper (direct lighting + GGX specular bounce);
-// the deferred driver writes the params into the G-buffer; the
-// forward driver shows base_color as-is (unlit forward preview).
+// Eval: structured StandardMaterialData whose GLSL blocks mirror the
+// C++ sub-structs above. Each property (base color, metallic-roughness,
+// normal, occlusion, emissive, specular, alpha mode) has its factor(s)
+// and texture_id contiguous so the shader reads `d.base_color.factor *
+// velk_texture(d.base_color.texture_id, uv)` without indirection.
 constexpr string_view standard_eval_src = R"(
+struct BaseColorParams { vec4 factor; uint texture_id; uint _pad0; uint _pad1; uint _pad2; };
+struct MetallicRoughnessParams { float metallic_factor; float roughness_factor; uint texture_id; uint _pad; };
+struct NormalParams { float scale; uint texture_id; uint _pad0; uint _pad1; };
+struct OcclusionParams { float strength; uint texture_id; uint _pad0; uint _pad1; };
+struct EmissiveParams { vec4 factor; float strength; uint texture_id; uint _pad0; uint _pad1; };
+struct SpecularParams { vec4 color_factor; float factor; uint texture_id; uint color_texture_id; uint _pad; };
+struct AlphaModeParams { float cutoff; uint mode; uint double_sided; uint _pad; };
+
 layout(buffer_reference, std430) readonly buffer StandardMaterialData {
-    vec4 base_color;
-    vec4 params;  // x = metallic, y = roughness, zw unused
+    BaseColorParams         base_color;
+    MetallicRoughnessParams metallic_roughness;
+    NormalParams            normal;
+    OcclusionParams         occlusion;
+    EmissiveParams          emissive;
+    SpecularParams          specular;
+    AlphaModeParams         alpha_mode;
 };
 
 MaterialEval velk_eval_standard(EvalContext ctx)
 {
     StandardMaterialData d = StandardMaterialData(ctx.data_addr);
 
+    vec4 base = d.base_color.factor;
+    if (d.base_color.texture_id != 0u) {
+        base *= velk_texture(d.base_color.texture_id, ctx.uv);
+    }
+
     MaterialEval e;
-    e.color = d.base_color;
+    e.color = base;
     e.normal = ctx.normal;
-    e.metallic = d.params.x;
-    e.roughness = d.params.y;
+    e.metallic = d.metallic_roughness.metallic_factor;
+    e.roughness = d.metallic_roughness.roughness_factor;
     e.lighting_mode = VELK_LIGHTING_STANDARD;
     return e;
 }
@@ -86,6 +172,13 @@ Uid property_class_id(const IMaterialProperty::Ptr& p)
 {
     auto* obj = interface_cast<IObject>(p);
     return obj ? obj->get_class_uid() : Uid{};
+}
+
+ISurface* property_texture(const IMaterialProperty::Ptr& p)
+{
+    if (!p) return nullptr;
+    auto r = read_state<IMaterialProperty>(p.get());
+    return r ? r->texture.template get<ISurface>().get() : nullptr;
 }
 
 } // namespace
@@ -154,36 +247,69 @@ ReturnValue StandardMaterial::remove_attachment(const IInterface::Ptr& attachmen
 
 size_t StandardMaterial::get_draw_data_size() const
 {
-    return sizeof(StandardParams);
+    return sizeof(StandardMaterialParams);
 }
 
-ReturnValue StandardMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue StandardMaterial::write_draw_data(void* out, size_t size, ITextureResolver* resolver) const
 {
-    color base_color{1.f, 1.f, 1.f, 1.f};
-    float metallic  = 0.f;
-    float roughness = 0.5f;
+    auto resolve = [resolver](ISurface* s) -> uint32_t {
+        return resolver ? resolver->resolve(s) : 0u;
+    };
 
-    // Forward pass over attach order: later entries of the same class overwrite
-    // earlier ones, giving "last wins" in a single O(n) walk.
-    for (auto& p : properties_) {
-        if (!p) {
-            continue;
-        }
-        Uid cid = property_class_id(p);
-        if (cid == ClassId::BaseColorProperty) {
-            base_color = read_state_value<IBaseColorProperty>(p, &IBaseColorProperty::State::factor);
-        } else if (cid == ClassId::MetallicRoughnessProperty) {
-            metallic  = read_state_value<IMetallicRoughnessProperty>(
-                p, &IMetallicRoughnessProperty::State::metallic_factor);
-            roughness = read_state_value<IMetallicRoughnessProperty>(
-                p, &IMetallicRoughnessProperty::State::roughness_factor);
-        }
-    }
+    return set_material<StandardMaterialParams>(out, size, [&](auto& p) {
+        // Sub-struct defaults (in-class initializers on each *Params) match
+        // the glTF 2.0 spec; set_material zero-inits + re-applies them via
+        // `p = {}`, so missing properties need no explicit handling here.
 
-    return set_material<StandardParams>(out, size, [&](auto& p) {
-        p.base_color = base_color;
-        p.metallic   = metallic;
-        p.roughness  = roughness;
+        // Forward pass over attach order; later entries of the same class
+        // overwrite earlier ones ("last wins" via assignment order).
+        for (auto& prop : properties_) {
+            if (!prop) continue;
+            Uid cid = property_class_id(prop);
+            ISurface* tex = property_texture(prop);
+
+            if (cid == ClassId::BaseColorProperty) {
+                if (auto r = read_state<IBaseColorProperty>(prop)) {
+                    p.base_color.factor = r->factor;
+                }
+                p.base_color.texture_id = resolve(tex);
+            } else if (cid == ClassId::MetallicRoughnessProperty) {
+                if (auto r = read_state<IMetallicRoughnessProperty>(prop)) {
+                    p.metallic_roughness.metallic_factor = r->metallic_factor;
+                    p.metallic_roughness.roughness_factor = r->roughness_factor;
+                }
+                p.metallic_roughness.texture_id = resolve(tex);
+            } else if (cid == ClassId::NormalProperty) {
+                if (auto r = read_state<INormalProperty>(prop)) {
+                    p.normal.scale = r->scale;
+                }
+                p.normal.texture_id = resolve(tex);
+            } else if (cid == ClassId::OcclusionProperty) {
+                if (auto r = read_state<IOcclusionProperty>(prop)) {
+                    p.occlusion.strength = r->strength;
+                }
+                p.occlusion.texture_id = resolve(tex);
+            } else if (cid == ClassId::EmissiveProperty) {
+                if (auto r = read_state<IEmissiveProperty>(prop)) {
+                    p.emissive.factor = r->factor;
+                    p.emissive.strength = r->strength;
+                }
+                p.emissive.texture_id = resolve(tex);
+            } else if (cid == ClassId::SpecularProperty) {
+                if (auto r = read_state<ISpecularProperty>(prop)) {
+                    p.specular.factor = r->factor;
+                    p.specular.color_factor = r->color_factor;
+                }
+                p.specular.texture_id = resolve(tex);
+            } else if (cid == ClassId::AlphaModeProperty) {
+                if (auto r = read_state<IAlphaModeProperty>(prop)) {
+                    p.alpha_mode.mode = static_cast<uint32_t>(r->mode);
+                    p.alpha_mode.cutoff = r->cutoff;
+                }
+            } else if (cid == ClassId::DoubleSidedProperty) {
+                p.alpha_mode.double_sided = 1;
+            }
+        }
     });
 }
 
@@ -200,6 +326,22 @@ string_view StandardMaterial::get_eval_fn_name() const
 string_view StandardMaterial::get_vertex_src() const
 {
     return standard_vertex_src;
+}
+
+vector<ISurface*> StandardMaterial::get_textures() const
+{
+    // Used by batch_builder's upload path to surface material-owned
+    // textures alongside visual-owned ones. Slot order is informational;
+    // write_draw_data embeds TextureIds directly in StandardMaterialParams.
+    vector<ISurface*> out;
+    out.reserve(SlotCount);
+    out.push_back(property_texture(get_material_property(ClassId::BaseColorProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::MetallicRoughnessProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::NormalProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::OcclusionProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::EmissiveProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::SpecularProperty)));
+    return out;
 }
 
 } // namespace velk::impl

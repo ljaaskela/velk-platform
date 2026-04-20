@@ -49,6 +49,7 @@ public:
     void register_eval_includes(IRenderContext&) const override {}
     float get_forward_discard_threshold() const override { return 0.001f; }
     float get_deferred_discard_threshold() const override { return 0.5f; }
+    vector<ISurface*> get_textures() const override { return {}; }
 
     /**
      * @brief Default persistent-buffer implementation.
@@ -63,7 +64,7 @@ public:
      * Materials with no draw data return nullptr, which keeps the
      * renderer on the frame-scratch fallback path.
      */
-    ::velk::IBuffer::Ptr get_data_buffer() override
+    ::velk::IBuffer::Ptr get_data_buffer(::velk::ITextureResolver* resolver = nullptr) override
     {
         size_t sz = this->get_draw_data_size();
         if (sz == 0) {
@@ -79,8 +80,8 @@ public:
             }
         }
         bool ok = true;
-        data_buffer_->write(sz, [this, &ok](void* dst, size_t n) {
-            ok = this->write_draw_data(dst, n) == ReturnValue::Success;
+        data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
+            ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
         });
         return ok ? data_buffer_ : nullptr;
     }

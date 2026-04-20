@@ -10,6 +10,7 @@
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shader_snippet.h>
+#include <velk-render/interface/intf_texture_resolver.h>
 #include <velk-render/render_types.h>
 #include <velk-ui/interface/intf_element.h>
 #include <velk-ui/interface/intf_scene.h>
@@ -139,7 +140,8 @@ private:
     // sight this frame and returns its GPU address. Subsequent calls
     // for the same IProgram return the cached address, so a material
     // shared by N batches only pays one upload.
-    uint64_t write_material_once(IProgram* prog, FrameDataManager& frame_data);
+    uint64_t write_material_once(IProgram* prog, FrameDataManager& frame_data,
+                                 ::velk::ITextureResolver* resolver);
 
     std::unordered_map<IElement*, ElementCache> element_cache_;
     vector<RenderTargetPassData> render_target_passes_;

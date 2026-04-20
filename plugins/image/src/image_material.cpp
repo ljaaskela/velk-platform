@@ -42,7 +42,7 @@ size_t ImageMaterial::get_draw_data_size() const
     return sizeof(ImageParams);
 }
 
-ReturnValue ImageMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue ImageMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (auto state = read_state<IImageMaterial>(this)) {
         return set_material<ImageParams>(out, size, [&](auto& p) {

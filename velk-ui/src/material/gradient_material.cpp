@@ -54,7 +54,7 @@ size_t GradientMaterial::get_draw_data_size() const
     return gradient_params_size;
 }
 
-ReturnValue GradientMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue GradientMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (auto state = read_state<IGradient>(this)) {
         return set_material<GradientParams>(out, size, [&](auto& p) {

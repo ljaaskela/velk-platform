@@ -104,7 +104,7 @@ size_t EnvMaterial::get_draw_data_size() const
     return sizeof(EnvGpuData);
 }
 
-ReturnValue EnvMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue EnvMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     return set_material<EnvGpuData>(out, size, [&](auto& p) {
         p.intensity = intensity_;

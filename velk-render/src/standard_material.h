@@ -37,11 +37,27 @@ public:
     ReturnValue remove_attachment(const IInterface::Ptr& attachment) override;
 
     size_t get_draw_data_size() const override;
-    ReturnValue write_draw_data(void* out, size_t size) const override;
+    ReturnValue write_draw_data(void* out, size_t size, ITextureResolver* resolver = nullptr) const override;
 
     string_view get_eval_src() const override;
     string_view get_eval_fn_name() const override;
     string_view get_vertex_src() const override;
+
+    vector<ISurface*> get_textures() const override;
+
+    /// Fixed slot indices into DrawDataHeader::texture_ids[] used by the
+    /// standard material eval shader. Must match the order returned by
+    /// get_textures() and the `velk_eval_standard` GLSL body.
+    enum TextureSlot : uint32_t
+    {
+        SlotBaseColor = 0,
+        SlotMetallicRoughness = 1,
+        SlotNormal = 2,
+        SlotOcclusion = 3,
+        SlotEmissive = 4,
+        SlotSpecular = 5,
+        SlotCount = 6,
+    };
 
 private:
     using Base = ::velk::ext::Material<StandardMaterial, IStandardMaterial>;

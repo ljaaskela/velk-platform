@@ -7,8 +7,11 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_render_target.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_raster_shader.h>
+#include "gpu_resource_manager.h"
 #include <velk-ui/interface/intf_visual.h>
 
 #include <algorithm>
@@ -132,13 +135,27 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         }
 
         for (auto& res : visual->get_gpu_resources()) {
-            if (!res) {
-                continue;
+            if (res) {
+                if (observer) {
+                    res->add_gpu_resource_observer(observer);
+                }
+                cache.gpu_resources.push_back(res);
             }
-            if (observer) {
-                res->add_gpu_resource_observer(observer);
+        }
+
+        // Multi-texture materials (e.g. StandardMaterial) attach their
+        // textures to the material, not the visual. Surface the ones that
+        // carry uploadable pixel data (IImage etc.) so renderer's upload
+        // pass picks them up and registers them with the resource manager.
+        if (auto* mat = interface_cast<IMaterial>(vc.material)) {
+            for (auto* tex : mat->get_textures()) {
+                if (auto buf = ::velk::get_self<IBuffer>(tex)) {
+                    if (observer) {
+                        buf->add_gpu_resource_observer(observer);
+                    }
+                    cache.gpu_resources.push_back(buf);
+                }
             }
-            cache.gpu_resources.push_back(IBuffer::WeakPtr(res));
         }
 
         VisualPhase phase = vstate ? vstate->visual_phase : VisualPhase::BeforeChildren;
@@ -362,7 +379,7 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
         size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
@@ -449,7 +466,7 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
         size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
@@ -546,7 +563,8 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
     }
 }
 
-uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& frame_data)
+uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& frame_data,
+                                           ::velk::ITextureResolver* resolver)
 {
     if (!prog) return 0;
     auto it = frame_material_addrs_.find(prog);
@@ -565,7 +583,7 @@ uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& fra
             void* scratch = std::malloc(sz);
             if (scratch) {
                 std::memset(scratch, 0, sz);
-                if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                if (dd->write_draw_data(scratch, sz, resolver) == ReturnValue::Success) {
                     addr = frame_data.write(scratch, sz);
                 }
                 std::free(scratch);

@@ -115,7 +115,7 @@ size_t TextMaterial::get_draw_data_size() const
     return sizeof(TextMaterialData);
 }
 
-ReturnValue TextMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue TextMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (size == sizeof(TextMaterialData)) {
         auto& p = *static_cast<TextMaterialData*>(out);

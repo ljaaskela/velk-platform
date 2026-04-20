@@ -2,12 +2,14 @@
 #define VELK_RENDER_INTF_MATERIAL_H
 
 #include <velk/string_view.h>
+#include <velk/vector.h>
 
 #include <velk-render/interface/intf_program.h>
 
 namespace velk {
 
 class IRenderContext;
+class ISurface;
 
 /**
  * @brief Renderable material.
@@ -47,6 +49,12 @@ public:
     /// Alpha-discard threshold for the deferred fragment driver. Deferred
     /// has no alpha blending, so a higher threshold is the default.
     virtual float get_deferred_discard_threshold() const = 0;
+
+    /// Returns the bindable textures this material samples, in slot order.
+    /// The renderer resolves each to a bindless TextureId and writes them
+    /// into DrawDataHeader::texture_ids[] in the same order, so shader code
+    /// can index them by fixed position. Default: no textures.
+    virtual vector<ISurface*> get_textures() const = 0;
 };
 
 } // namespace velk

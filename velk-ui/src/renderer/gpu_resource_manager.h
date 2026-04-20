@@ -9,7 +9,9 @@
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/intf_texture_resolver.h>
 
 namespace velk::ui {
 
@@ -18,8 +20,11 @@ namespace velk::ui {
  *
  * Tracks texture (ISurface) and buffer (IBuffer) mappings from CPU objects
  * to backend handles. Handles deferred destruction to ensure GPU-safe lifetimes.
+ *
+ * Also implements ITextureResolver so materials can embed bindless TextureIds
+ * into their UBOs via IDrawData::write_draw_data.
  */
-class GpuResourceManager
+class GpuResourceManager : public ITextureResolver
 {
 public:
     struct BufferEntry
@@ -30,6 +35,18 @@ public:
 
     /** @brief Returns the TextureId for a surface, or 0 if not tracked. */
     TextureId find_texture(ISurface* surf) const;
+
+    /// ITextureResolver: find_texture with RenderTexture fallback.
+    TextureId resolve(ISurface* surf) const override
+    {
+        if (!surf) return 0;
+        TextureId tid = find_texture(surf);
+        if (tid == 0) {
+            uint64_t rt_id = ::velk::get_render_target_id(surf);
+            if (rt_id != 0) tid = static_cast<TextureId>(rt_id);
+        }
+        return tid;
+    }
 
     /** @brief Registers a surface -> TextureId mapping. */
     void register_texture(ISurface* surf, TextureId tid);

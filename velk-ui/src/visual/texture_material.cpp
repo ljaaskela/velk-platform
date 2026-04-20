@@ -43,7 +43,7 @@ size_t TextureMaterial::get_draw_data_size() const
     return sizeof(TextureParams);
 }
 
-ReturnValue TextureMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue TextureMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (auto state = read_state<ITextureVisual>(this)) {
         return set_material<TextureParams>(out, size, [&](auto& p) {
