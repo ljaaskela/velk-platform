@@ -27,17 +27,17 @@ constexpr uint32_t SpvOpMemberDecorate = 72;
 // SPIR-V decoration
 constexpr uint32_t SpvDecorationOffset = 35;
 
-// The standard DrawDataHeader has these fields (32 bytes total):
+// The standard DrawDataHeader has these fields (32 bytes total),
+// matching the VELK_DRAW_DATA macro expansion in shader_compiler.cpp:
 //   globals (buffer_reference, 8 bytes)
 //   instances (buffer_reference, 8 bytes)
 //   texture_id (uint, 4 bytes)
 //   instance_count (uint, 4 bytes)
-//   _pad0 (uint, 4 bytes)
-//   _pad1 (uint, 4 bytes)
+//   vbo (buffer_reference, 8 bytes)
 // After the header a single `material` buffer_reference slot points at
 // the per-material params struct; reflection descends into that struct
 // to enumerate the user-facing inputs.
-constexpr uint32_t kHeaderFieldCount = 6;
+constexpr uint32_t kHeaderFieldCount = 5;
 constexpr uint32_t kHeaderSize = 32;
 
 struct TypeInfo

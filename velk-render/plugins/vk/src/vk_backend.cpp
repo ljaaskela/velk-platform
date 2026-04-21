@@ -849,6 +849,9 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
     buf_ci.size = desc.size;
     buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (desc.index_buffer) {
+        buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
 
     VmaAllocationCreateInfo alloc_ci{};
     if (desc.cpu_writable) {
@@ -1669,7 +1672,16 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
                                call.root_constants);
         }
 
-        vkCmdDraw(sync.command_buffer, call.vertex_count, call.instance_count, 0, 0);
+        if (call.index_buffer != 0) {
+            auto bit = buffers_.find(call.index_buffer);
+            if (bit == buffers_.end()) {
+                continue;
+            }
+            vkCmdBindIndexBuffer(sync.command_buffer, bit->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(sync.command_buffer, call.index_count, call.instance_count, 0, 0, 0);
+        } else {
+            vkCmdDraw(sync.command_buffer, call.vertex_count, call.instance_count, 0, 0);
+        }
     }
 }
 

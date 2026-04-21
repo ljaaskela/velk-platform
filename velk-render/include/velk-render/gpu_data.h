@@ -55,6 +55,7 @@ VELK_GPU_STRUCT DrawDataHeader
     uint64_t instances_address; ///< GPU pointer to the instance data array.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.
+    uint64_t vbo_address;       ///< GPU pointer to the draw's vertex buffer (mesh VBO).
 };
 
 static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for std430 alignment");

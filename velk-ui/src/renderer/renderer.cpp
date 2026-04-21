@@ -378,6 +378,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                             GpuBufferDesc bdesc{};
                             bdesc.size = bsize;
                             bdesc.cpu_writable = true;
+                            bdesc.index_buffer = buf->is_index_buffer();
                             GpuResourceManager::BufferEntry bentry{};
                             bentry.handle = backend_->create_buffer(bdesc);
                             bentry.size = bsize;

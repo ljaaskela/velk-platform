@@ -57,6 +57,9 @@ void Rasterizer::prepend_environment_batch(ICamera& camera, ViewEntry& entry, Fr
     env_batch.instance_count = 1;
     env_batch.instance_data.resize(4, 0);
     env_batch.material = std::move(material);
+    if (ctx.render_ctx) {
+        env_batch.mesh = ctx.render_ctx->get_mesh_builder().get_unit_quad();
+    }
 
     entry.batches.insert(entry.batches.begin(), std::move(env_batch));
 }

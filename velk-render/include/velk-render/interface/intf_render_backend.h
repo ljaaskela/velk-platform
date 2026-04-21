@@ -45,8 +45,9 @@ enum class PixelFormat : uint8_t
 /// Describes a GPU buffer to create.
 struct GpuBufferDesc
 {
-    size_t size{};           ///< Buffer size in bytes.
-    bool cpu_writable{true}; ///< If false, the buffer is device-local only.
+    size_t size{};            ///< Buffer size in bytes.
+    bool cpu_writable{true};  ///< If false, the buffer is device-local only.
+    bool index_buffer{false}; ///< If true, allocated with INDEX_BUFFER usage so it can be bound for indexed draws.
 };
 
 /// Texture usage hint.
@@ -71,8 +72,8 @@ struct TextureDesc
 /// Primitive topology for pipeline creation.
 enum class Topology : uint8_t
 {
-    TriangleStrip, ///< 4 vertices per quad (default for UI).
-    TriangleList,  ///< 3 vertices per triangle (meshes).
+    TriangleList,  ///< 3 vertices per triangle (default; matches every IMesh today, including the unit quad).
+    TriangleStrip, ///< Legacy strip mode; no current path uses it.
 };
 
 /// Describes a graphics pipeline to create.
@@ -80,7 +81,7 @@ struct PipelineDesc
 {
     IShader::Ptr vertex;                        ///< Vertex shader
     IShader::Ptr fragment;                      ///< Fragment shader
-    Topology topology{Topology::TriangleStrip}; ///< Primitive assembly mode.
+    Topology topology{Topology::TriangleList};  ///< Primitive assembly mode.
     CullMode cull_mode{CullMode::None};         ///< Face culling. None preserves legacy behavior.
     BlendMode blend_mode{BlendMode::Alpha};     ///< Color-attachment blend. Forced to Opaque on MRT groups.
 
@@ -114,11 +115,18 @@ struct ComputePipelineDesc
 inline constexpr size_t kMaxRootConstantsSize = 256;
 
 /// A single draw call submitted to the backend.
+///
+/// When `index_buffer` is non-zero the call is dispatched as
+/// `vkCmdDrawIndexed(index_count, ...)` after binding the IBO. Otherwise
+/// it falls through to `vkCmdDraw(vertex_count, ...)`.
 struct DrawCall
 {
     PipelineId pipeline{};      ///< Which pipeline to bind.
-    uint32_t vertex_count{};    ///< Vertices per instance (e.g. 4 for a quad strip).
+    uint32_t vertex_count{};    ///< Vertices per instance for non-indexed draws.
     uint32_t instance_count{1}; ///< Number of instances to draw.
+
+    GpuBuffer index_buffer{};   ///< Index buffer to bind (0 = non-indexed draw).
+    uint32_t index_count{};     ///< Indices per instance for indexed draws.
 
     /// Push constant data, typically an 8-byte GPU pointer to a DrawDataHeader.
     uint8_t root_constants[kMaxRootConstantsSize]{};

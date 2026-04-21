@@ -20,7 +20,7 @@ inline constexpr string_view rect_material_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+    VELK_DRAW_DATA(RectInstanceData, VelkVbo2D)
     OpaquePtr material;
 };
 
@@ -35,7 +35,7 @@ layout(location = 5) flat out uint v_shape_param;
 
 void main()
 {
-    vec2 q = velk_unit_quad(gl_VertexIndex);
+    vec2 q = velk_vertex_pos2d(root);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
     vec4 world_pos = inst.world_matrix * local_pos;

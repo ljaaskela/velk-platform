@@ -5,6 +5,7 @@
 
 #include <unordered_map>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -64,6 +65,11 @@ public:
         // Precomputed key perturbation for the gbuffer pipeline cache;
         // 0 when the visual contributes no discard snippet.
         uint64_t discard_key_perturb = 0;
+        // Geometry input. Every batch carries the same mesh across its
+        // instances; the renderer writes vbo/ibo addresses into the
+        // DrawDataHeader and issues an indexed draw with
+        // vertex_count = mesh->get_index_count().
+        IMesh::Ptr mesh;
     };
 
     struct RenderTargetPassData

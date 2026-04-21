@@ -7,6 +7,7 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/material/intf_material.h>
@@ -23,9 +24,9 @@
 
 namespace {
 
-uint64_t make_batch_key(uint64_t pipeline, uint64_t texture)
+uint64_t make_batch_key(uint64_t pipeline, uint64_t mesh, uint64_t texture)
 {
-    return pipeline * 31 + texture;
+    return (pipeline * 31 + mesh) * 31 + texture;
 }
 
 // Reads pipeline-state hints from the material's attached IMaterialOptions.
@@ -51,6 +52,13 @@ MaterialPipelineState material_pipeline_state(velk::IProgram* prog)
                   ? velk::BlendMode::Alpha
                   : velk::BlendMode::Opaque;
     return s;
+}
+
+velk::Topology to_backend_topology(velk::MeshTopology mt)
+{
+    return mt == velk::MeshTopology::TriangleStrip
+             ? velk::Topology::TriangleStrip
+             : velk::Topology::TriangleList;
 }
 
 } // namespace
@@ -90,12 +98,18 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         // defaults (see IRenderContext::compile_pipeline). Visuals that
         // don't contribute their own shader (TextureVisual, cube/sphere)
         // simply don't implement IRasterShader.
+        //
+        // These built-in raster shaders all target the unit quad
+        // (TriangleStrip, no IBO). Pass that topology explicitly so the
+        // pipeline's input assembly matches the draw.
         if (render_ctx) {
             if (auto* rs = interface_cast<IRasterShader>(visual)) {
                 uint64_t key = rs->get_raster_pipeline_key();
                 if (key != 0 && render_ctx->pipeline_map().find(key) == render_ctx->pipeline_map().end()) {
                     auto src = rs->get_raster_source(IRasterShader::Target::Forward);
-                    render_ctx->compile_pipeline(src.fragment, src.vertex, key);
+                    render_ctx->compile_pipeline(src.fragment, src.vertex, key, 0,
+                                                 ::velk::CullMode::None, ::velk::BlendMode::Alpha,
+                                                 ::velk::Topology::TriangleStrip);
                 }
             }
         }
@@ -104,6 +118,37 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         {
             VELK_PERF_SCOPE("renderer.get_draw_entries");
             vc.entries = visual->get_draw_entries(local_size);
+        }
+
+        // Default any entry without an explicit mesh to the engine's
+        // unit quad. The mesh is owned by the render context's mesh
+        // builder; its VBO/IBO ride through the standard
+        // get_gpu_resources upload pass below.
+        //
+        // The unit quad's buffers are singletons that outlive every
+        // element. They get destroyed when the render context goes
+        // away, which is AFTER the renderer (Application destroys
+        // renderer_ before render_ctx_). So we deliberately skip
+        // add_gpu_resource_observer here: the buffer's destructor would
+        // otherwise notify a dead renderer at process exit.
+        IMesh::Ptr quad;
+        if (render_ctx) {
+            quad = render_ctx->get_mesh_builder().get_unit_quad();
+        }
+        for (auto& entry : vc.entries) {
+            if (!entry.mesh) {
+                entry.mesh = quad;
+            }
+        }
+        if (quad) {
+            if (auto vbo = quad->get_vbo()) {
+                cache.gpu_resources.push_back(vbo);
+            }
+            if (auto ibo = quad->get_ibo()) {
+                cache.gpu_resources.push_back(ibo);
+            }
+            // The unit quad (TriangleStrip) has no IBO; skipping is fine
+            // since the renderer's draw path handles null IBO.
         }
 
         // Capture an optional per-visual `velk_visual_discard` snippet.
@@ -145,8 +190,17 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
                                 forward_fragment_driver_template, eval_src, eval_fn,
                                 mat->get_forward_discard_threshold());
                             auto ps = material_pipeline_state(prog.get());
+                            // Topology is taken from the visual's first
+                            // draw entry. Materials are assumed to be used
+                            // with a single mesh topology in their lifetime;
+                            // mixing topologies on one material would need
+                            // per-topology pipeline caching (out of scope).
+                            Topology topo = Topology::TriangleList;
+                            if (!vc.entries.empty() && vc.entries.front().mesh) {
+                                topo = to_backend_topology(vc.entries.front().mesh->get_topology());
+                            }
                             uint64_t h = render_ctx->compile_pipeline(
-                                string_view(frag), vertex_src, 0, 0, ps.cull, ps.blend);
+                                string_view(frag), vertex_src, 0, 0, ps.cull, ps.blend, topo);
                             if (h) {
                                 prog->set_pipeline_handle(h);
                             }
@@ -255,8 +309,10 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                 for (auto& de : vc.entries) {
                     uint64_t pipeline = (vc.pipeline_override != 0) ? vc.pipeline_override : de.pipeline_key;
                     uint64_t texture = de.texture_key;
+                    uint64_t mesh_key = reinterpret_cast<uintptr_t>(de.mesh.get());
 
-                    uint64_t bkey = make_batch_key(pipeline, resolve_texture(vc.material, texture));
+                    uint64_t bkey = make_batch_key(pipeline, mesh_key,
+                                                   resolve_texture(vc.material, texture));
 
                     if (target_batches.empty() || bkey != last_bkey) {
                         Batch batch;
@@ -266,6 +322,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                         batch.material = vc.material;
                         batch.visual_discard = vc.visual_discard;
                         batch.discard_key_perturb = vc.discard_key_perturb;
+                        batch.mesh = de.mesh;
                         target_batches.push_back(std::move(batch));
                         last_bkey = bkey;
                     }
@@ -400,11 +457,28 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
             }
         }
 
+        IMesh* mesh = batch.mesh.get();
+        if (!mesh) continue;
+        auto vbo = mesh->get_vbo();
+        if (!vbo) continue;
+
+        // IBO is optional: indexed draw when present, plain vkCmdDraw
+        // when null (TriangleStrip unit quad path).
+        auto ibo = mesh->get_ibo();
+        GpuBuffer ibo_handle = 0;
+        if (ibo) {
+            auto* ibo_entry = resources.find_buffer(ibo.get());
+            if (!ibo_entry || !ibo_entry->handle) continue;
+            ibo_handle = ibo_entry->handle;
+        }
+
         DrawDataHeader header{};
         header.globals_address = globals_gpu_addr;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
+        header.vbo_address = vbo->get_gpu_address();
+        if (!header.vbo_address) continue;
 
         uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
@@ -444,7 +518,12 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
 
         DrawCall call{};
         call.pipeline = pit->second;
-        call.vertex_count = 4;
+        if (ibo_handle) {
+            call.index_buffer = ibo_handle;
+            call.index_count = mesh->get_index_count();
+        } else {
+            call.vertex_count = mesh->get_vertex_count();
+        }
         call.instance_count = batch.instance_count;
         call.root_constants_size = sizeof(uint64_t);
         std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
@@ -487,11 +566,26 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
             }
         }
 
+        IMesh* mesh = batch.mesh.get();
+        if (!mesh) continue;
+        auto vbo = mesh->get_vbo();
+        if (!vbo) continue;
+
+        auto ibo = mesh->get_ibo();
+        GpuBuffer ibo_handle = 0;
+        if (ibo) {
+            auto* ibo_entry = resources.find_buffer(ibo.get());
+            if (!ibo_entry || !ibo_entry->handle) continue;
+            ibo_handle = ibo_entry->handle;
+        }
+
         DrawDataHeader header{};
         header.globals_address = globals_gpu_addr;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
+        header.vbo_address = vbo->get_gpu_address();
+        if (!header.vbo_address) continue;
 
         uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
@@ -570,8 +664,9 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
             }
 
             auto ps = material_pipeline_state(batch.material.get());
+            Topology topo = to_backend_topology(mesh->get_topology());
             gpid = render_ctx->compile_gbuffer_pipeline(
-                string_view(composed), vsrc, gbuffer_key, target_group, ps.cull);
+                string_view(composed), vsrc, gbuffer_key, target_group, ps.cull, topo);
         }
         if (gpid == 0) {
             continue;
@@ -582,7 +677,12 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
 
         DrawCall call{};
         call.pipeline = gpid;
-        call.vertex_count = 4;
+        if (ibo_handle) {
+            call.index_buffer = ibo_handle;
+            call.index_count = mesh->get_index_count();
+        } else {
+            call.vertex_count = mesh->get_vertex_count();
+        }
         call.instance_count = batch.instance_count;
         call.root_constants_size = sizeof(uint64_t);
         std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));

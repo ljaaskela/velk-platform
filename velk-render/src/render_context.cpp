@@ -58,6 +58,13 @@ bool RenderContextImpl::init(const RenderConfig& config)
     // cache uses this map to compute its per-shader cache keys.
     shader_includes_["velk.glsl"] = string(kVelkGlsl);
 
+    mesh_builder_ = instance().create<IMeshBuilder>(ClassId::MeshBuilder);
+    if (!mesh_builder_) {
+        VELK_LOG(E, "RenderContext::init: failed to create mesh builder");
+        backend_ = nullptr;
+        return false;
+    }
+
     initialized_ = true;
     VELK_LOG(I, "RenderContext initialized (Vulkan, bindless)");
     return true;
@@ -78,6 +85,11 @@ IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& confi
     });
 
     return surface;
+}
+
+IMeshBuilder& RenderContextImpl::get_mesh_builder()
+{
+    return *mesh_builder_;
 }
 
 IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage stage, uint64_t key)
@@ -136,7 +148,8 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
 
 uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                             uint64_t key, RenderTargetGroup target_group,
-                                            CullMode cull_mode, BlendMode blend_mode)
+                                            CullMode cull_mode, BlendMode blend_mode,
+                                            Topology topology)
 {
     if (!initialized_ || !backend_) {
         return 0;
@@ -161,6 +174,7 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
     desc.fragment = frag_shader;
     desc.cull_mode = cull_mode;
     desc.blend_mode = blend_mode;
+    desc.topology = topology;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {
@@ -176,11 +190,12 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
 
 uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
                                              uint64_t key, RenderTargetGroup target_group,
-                                             CullMode cull_mode, BlendMode blend_mode)
+                                             CullMode cull_mode, BlendMode blend_mode,
+                                             Topology topology)
 {
     auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
     auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
-    return create_pipeline(vert, frag, key, target_group, cull_mode, blend_mode);
+    return create_pipeline(vert, frag, key, target_group, cull_mode, blend_mode, topology);
 }
 
 uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute, uint64_t key)
@@ -220,7 +235,8 @@ PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_sour
                                                        string_view vertex_source,
                                                        uint64_t key,
                                                        RenderTargetGroup target_group,
-                                                       CullMode cull_mode)
+                                                       CullMode cull_mode,
+                                                       Topology topology)
 {
     if (!initialized_ || !backend_ || key == 0 || target_group == 0) {
         return 0;
@@ -248,6 +264,7 @@ PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_sour
     desc.cull_mode = cull_mode;
     // G-buffer passes always write opaquely regardless of alpha mode.
     desc.blend_mode = BlendMode::Opaque;
+    desc.topology = topology;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {

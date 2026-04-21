@@ -85,6 +85,15 @@ public:
      * (e.g. textures) can ignore the call.
      */
     virtual void set_gpu_address(uint64_t /*addr*/) {}
+
+    /**
+     * @brief Returns true if this buffer should be allocated with index
+     *        buffer usage so it can be bound via vkCmdBindIndexBuffer
+     *        for indexed draws.
+     *
+     * Default false; only IBOs (Mesh::get_ibo) override.
+     */
+    virtual bool is_index_buffer() const { return false; }
 };
 
 /**

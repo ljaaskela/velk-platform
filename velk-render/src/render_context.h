@@ -27,12 +27,14 @@ public:
                              uint64_t key = 0,
                              RenderTargetGroup target_group = 0,
                              CullMode cull_mode = CullMode::None,
-                             BlendMode blend_mode = BlendMode::Alpha) override;
+                             BlendMode blend_mode = BlendMode::Alpha,
+                             Topology topology = Topology::TriangleList) override;
     uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                               uint64_t key = 0,
                               RenderTargetGroup target_group = 0,
                               CullMode cull_mode = CullMode::None,
-                              BlendMode blend_mode = BlendMode::Alpha) override;
+                              BlendMode blend_mode = BlendMode::Alpha,
+                              Topology topology = Topology::TriangleList) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 
@@ -58,12 +60,16 @@ public:
                                         string_view vertex_source,
                                         uint64_t key,
                                         RenderTargetGroup target_group,
-                                        CullMode cull_mode = CullMode::None) override;
+                                        CullMode cull_mode = CullMode::None,
+                                        Topology topology = Topology::TriangleList) override;
 
     IRenderBackend::Ptr backend() const override { return backend_; }
 
+    IMeshBuilder& get_mesh_builder() override;
+
 private:
     IRenderBackend::Ptr backend_;
+    IMeshBuilder::Ptr mesh_builder_;
     std::unordered_map<uint64_t, PipelineId> pipeline_map_;
     ShaderIncludeMap shader_includes_;
     mutable ShaderCache shader_cache_;

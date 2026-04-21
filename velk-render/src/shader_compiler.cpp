@@ -84,26 +84,37 @@ vec4 velk_texture(uint id, vec2 uv)
     return texture(velk_textures[nonuniformEXT(id)], uv);
 }
 
-// Unit quad vertex position from a triangle strip vertex index.
-// Returns (0,0), (1,0), (0,1), (1,1) for indices 0..3.
-vec2 velk_unit_quad(int vertex_index)
-{
-    return vec2(vertex_index & 1, vertex_index >> 1);
-}
+// Standard 2D vertex layout shared by all UI visuals (rect, rounded
+// rect, text glyphs, image, texture, env). Matches the unit quad mesh
+// shipped by IMeshBuilder::get_unit_quad().
+//
+// IBO is bound on the host side via vkCmdBindIndexBuffer + dispatched
+// with vkCmdDrawIndexed, so the vertex shader's gl_VertexIndex is the
+// post-fetch index into the VBO directly (no shader-side IBO lookup).
+struct VelkVertex2D { vec2 position; };
+layout(buffer_reference, std430) readonly buffer VelkVbo2D { VelkVertex2D data[]; };
+
+// Vertex-shader helper: position from the VBO at the current
+// gl_VertexIndex. Macro (not function) so the readonly memory
+// qualifier on the buffer_reference is preserved at the call site,
+// and so velk.glsl doesn't reference gl_VertexIndex at namespace
+// scope (would break fragment shaders that also include this file).
+#define velk_vertex_pos2d(root) ((root).vbo.data[gl_VertexIndex].position)
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA(RectInstanceData)
+//       VELK_DRAW_DATA(RectInstanceData, MyVbo)
 //       vec4 my_material_param;  // optional material fields follow
 //   };
-// Padding ensures material data starts at the correct std430 alignment.
-#define VELK_DRAW_DATA(InstancesType) \
-    GlobalData global_data;           \
-    InstancesType instance_data;      \
-    uint texture_id;                  \
-    uint instance_count;              \
-    uint _velk_pad0;                  \
-    uint _velk_pad1;
+// `VboType` is a `buffer_reference`-typed handle whose target struct
+// matches the material's vertex layout (e.g. `VelkVbo2D` for the unit
+// quad). The 32-byte header keeps everything 8-byte aligned for std430.
+#define VELK_DRAW_DATA(InstancesType, VboType) \
+    GlobalData global_data;                    \
+    InstancesType instance_data;               \
+    uint texture_id;                           \
+    uint instance_count;                       \
+    VboType vbo;
 )";
 
 namespace {

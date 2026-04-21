@@ -29,7 +29,7 @@ namespace velk {
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+    VELK_DRAW_DATA(RectInstanceData, VelkVbo2D)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -40,7 +40,7 @@ layout(location = 2) flat out vec2 v_size;
 
 void main()
 {
-    vec2 q = velk_unit_quad(gl_VertexIndex);
+    vec2 q = velk_vertex_pos2d(root);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
     gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
@@ -75,7 +75,7 @@ void main()
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData)
+    VELK_DRAW_DATA(RectInstanceData, VelkVbo2D)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -88,7 +88,7 @@ layout(location = 4) out vec3 v_world_normal;
 
 void main()
 {
-    vec2 q = velk_unit_quad(gl_VertexIndex);
+    vec2 q = velk_vertex_pos2d(root);
     RectInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
     vec4 world_pos = inst.world_matrix * local_pos;
@@ -162,7 +162,7 @@ void main()
 
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
@@ -196,7 +196,7 @@ void main()
 
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };

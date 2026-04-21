@@ -33,6 +33,15 @@ inline constexpr Uid RtShadow{"a1b54a78-cb8c-4c26-9d4e-413648cb280f"};
 /** @brief Persistent IBuffer holding a program's per-draw data, cross-frame stable GPU address. */
 inline constexpr Uid ProgramDataBuffer{"5362a373-42bf-48b1-9537-1229f44d008d"};
 
+/** @brief Geometry input to draw calls: VBO + IBO + layout descriptor. */
+inline constexpr Uid Mesh{"d82485b9-7d93-4196-ae98-f22f6131f7c8"};
+
+/** @brief IBuffer storage for a Mesh's VBO or IBO bytes. */
+inline constexpr Uid MeshBuffer{"99f3245e-0115-4284-85ca-1c4a5ee93c97"};
+
+/** @brief Factory for IMesh; create-and-fill helper that hides the impl class. */
+inline constexpr Uid MeshBuilder{"00332b65-d0f7-4b5f-bbed-764d8732be3e"};
+
 } // namespace ClassId
 
 namespace PluginId {

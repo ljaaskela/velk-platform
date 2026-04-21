@@ -1,6 +1,7 @@
 #include "render_plugin.h"
 
 #include "material_property.h"
+#include "mesh.h"
 #include "program_data_buffer.h"
 #include "render_context.h"
 #include "rt_shadow.h"
@@ -34,6 +35,9 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::MaterialOptions>(velk);
     rv &= register_type<impl::RtShadow>(velk);
     rv &= register_type<impl::ProgramDataBuffer>(velk);
+    rv &= register_type<impl::Mesh>(velk);
+    rv &= register_type<impl::MeshBuffer>(velk);
+    rv &= register_type<impl::MeshBuilder>(velk);
     rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk);
     return rv;
 }
