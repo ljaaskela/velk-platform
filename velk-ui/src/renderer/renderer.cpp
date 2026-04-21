@@ -28,58 +28,29 @@
 namespace velk::ui {
 
 constexpr string_view velk_ui_glsl = R"(
-// Minimum viable per-instance record. Carries just the element's world
-// transform; any visual type that fits this schema (no local rect, no
-// extra per-instance fields) can use ElementInstanceData directly.
+// Universal per-instance record shared by every visual (rect,
+// rounded rect, text glyphs, textures, images, env, cube, sphere,
+// meshes, and future glTF primitives).
+//
+//   world_matrix — element transform, filled by batch_builder.
+//   offset.xyz   — local offset (glyph pos for text; 0 otherwise).
+//   size.xyz     — extents (size.z = 0 for 2D visuals).
+//   color        — visual tint.
+//   params.x     — shape_param (glyph index / material slot);
+//                  yzw reserved.
+//
+// Vertex shaders compute:
+//   gl_Position = vp * world_matrix * vec4(offset + v.position * size, 1);
 struct ElementInstance {
     mat4 world_matrix;
-};
-
-// Per-instance data for quad-shaped visuals. `world_matrix` is the
-// element's world transform (filled in by the batch builder). (pos,
-// size) is the rect's local-space footprint; vertex shaders compute
-// gl_Position = vp * world_matrix * vec4(pos + q*size, 0, 1).
-struct RectInstance {
-    mat4 world_matrix;
-    vec2 pos;
-    vec2 size;
+    vec4 offset;
+    vec4 size;
     vec4 color;
-};
-
-struct TextInstance {
-    mat4 world_matrix;
-    vec2 pos;
-    vec2 size;
-    vec4 color;
-    uint glyph_index;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-};
-
-// Per-instance data for 3D mesh draws. `size.xyz` scales the mesh's
-// unit-bounds vertices into element-local space; `world_matrix` is
-// the element's transform (translation + rotation, no scale).
-struct MeshInstance {
-    mat4 world_matrix;
-    vec4 size;   // xyz = element extents, w = padding
-    vec4 color;  // visual tint
+    uvec4 params;
 };
 
 layout(buffer_reference, std430) readonly buffer ElementInstanceData {
     ElementInstance data[];
-};
-
-layout(buffer_reference, std430) readonly buffer RectInstanceData {
-    RectInstance data[];
-};
-
-layout(buffer_reference, std430) readonly buffer TextInstanceData {
-    TextInstance data[];
-};
-
-layout(buffer_reference, std430) readonly buffer MeshInstanceData {
-    MeshInstance data[];
 };
 
 // ===== Material evaluation types =====

@@ -46,7 +46,6 @@ public:
 
     string_view get_eval_src() const override;
     string_view get_eval_fn_name() const override;
-    string_view get_vertex_src() const override;
     void register_eval_includes(IRenderContext& ctx) const override;
 
 private:

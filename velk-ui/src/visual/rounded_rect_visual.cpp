@@ -71,11 +71,12 @@ vector<DrawEntry> RoundedRectVisual::get_draw_entries(const ::velk::size& bounds
     DrawEntry entry{};
     entry.pipeline_key = kPipelineKey;
     entry.bounds = {0, 0, bounds.width, bounds.height};
-    entry.set_instance(RectInstance{
+    entry.set_instance(ElementInstance{
         {},  // world_matrix: written by batch_builder per-instance
-        {0.f, 0.f},
-        {bounds.width, bounds.height},
-        state->color});
+        {0.f, 0.f, 0.f, 0.f},
+        {bounds.width, bounds.height, 0.f, 0.f},
+        state->color,
+        {0u, 0u, 0u, 0u}});
 
     return {entry};
 }

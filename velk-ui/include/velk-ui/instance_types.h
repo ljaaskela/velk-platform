@@ -11,57 +11,31 @@ namespace velk {
  * @file instance_types.h
  * @brief C++ instance data structs that mirror GLSL shader layouts.
  *
- * Each struct matches the std430 layout of its GLSL counterpart.
+ * `ElementInstance` is the universal per-instance record. Every visual
+ * (rect, rounded rect, text glyph, texture, image, env, cube, sphere,
+ * and future glTF meshes) packs this layout into its DrawEntry. The
+ * shader reads it as a single struct; 2D visuals leave `size.z = 0`
+ * and `offset = 0`; text glyph instances carry per-glyph offset + a
+ * glyph index in `params.x`; 3D primitives fill all three xyz extents
+ * in `size`.
  *
- * The first field of every instance type is world_matrix: the element's
- * full 4x4 transform in world space. The batch builder fills it in for
- * every instance it emits; visuals leave it zero-initialised. Vertex
- * shaders compute the final position as
+ * `world_matrix` at offset 0 is written per-instance by the batch
+ * builder (it copies the element's world transform into this slot);
+ * visuals leave it zero-initialised.
  *
- *     gl_Position = view_projection * world_matrix * vec4(pos + q*size, 0, 1);
- *
- * where (pos, size) is the instance's local-space rect (identical to the
- * old 2D encoding). This lets arbitrary 3D transforms flow through
- * raster pipelines (rotated cards, flipping dials, ...) while keeping
- * pure-2D UI a special case (world_matrix = translation-only).
+ * Matches GLSL: see `ElementInstance` in velk-ui.glsl.
  */
 
-/**
- * @brief Instance data for rect and rounded-rect pipelines.
- *
- * Matches GLSL: struct RectInstance { mat4 world_matrix; vec2 pos; vec2 size; vec4 color; };
- */
-VELK_GPU_STRUCT RectInstance
+VELK_GPU_STRUCT ElementInstance
 {
-    mat4 world_matrix;
-    vec2 pos;
-    vec2 size;
-    color col;
+    mat4 world_matrix;  ///< 64 B — filled by batch_builder per instance.
+    vec4 offset;        ///< 16 B — xyz = local offset (glyph pos for text, 0 otherwise).
+    vec4 size;          ///< 16 B — xyz = extents (size.z = 0 for 2D visuals).
+    color col;          ///< 16 B — visual tint.
+    uint32_t params[4]; ///< 16 B — params[0] = shape_param (glyph index, ...); others reserved.
 };
-static_assert(sizeof(RectInstance) == 96, "RectInstance must be 96 bytes (matches GLSL std430)");
-
-/**
- * @brief Instance data for the analytic-Bezier text pipeline.
- *
- * One instance per laid-out glyph quad. The shader uses `glyph_index` to
- * look up the glyph's curve and band data via the per-batch buffer
- * references emitted by the text material; uv is derived from the unit
- * quad with a Y flip in the vertex shader (the curves use FreeType's Y-up
- * convention).
- *
- * Matches GLSL: struct TextInstance { mat4 world_matrix; vec2 pos;
- *   vec2 size; vec4 color; uint glyph_index; uint _pad[3]; };
- */
-VELK_GPU_STRUCT TextInstance
-{
-    mat4 world_matrix;
-    vec2 pos;
-    vec2 size;
-    color col;
-    uint32_t glyph_index;
-    uint32_t _pad[3];
-};
-static_assert(sizeof(TextInstance) == 112, "TextInstance must be 112 bytes (std430 array stride)");
+static_assert(sizeof(ElementInstance) == 128,
+              "ElementInstance must be 128 bytes (matches GLSL std430)");
 
 } // namespace velk
 

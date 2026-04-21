@@ -22,49 +22,6 @@ VELK_GPU_STRUCT TextMaterialData
 };
 static_assert(sizeof(TextMaterialData) == 32, "TextMaterialData must be 32 bytes");
 
-// Vertex shader for analytic-Bezier text. Reads TextInstance per glyph
-// (world_matrix + pos + size + color + glyph_index) and emits the
-// canonical set of varyings the eval-driver framework consumes.
-// `v_shape_param` carries the per-glyph index.
-constexpr string_view text_vertex_src = R"(
-#version 450
-#include "velk.glsl"
-#include "velk-ui.glsl"
-
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(TextInstanceData, VelkVbo2D)
-    OpaquePtr material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
-
-layout(location = 0) out vec4 v_color;
-layout(location = 1) out vec2 v_local_uv;
-layout(location = 2) flat out vec2 v_size;
-layout(location = 3) out vec3 v_world_pos;
-layout(location = 4) out vec3 v_world_normal;
-layout(location = 5) flat out uint v_shape_param;
-
-void main()
-{
-    vec2 q = velk_vertex_pos2d(root);
-    TextInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
-    vec4 world_pos_h = inst.world_matrix * local_pos;
-    gl_Position = root.global_data.view_projection * world_pos_h;
-    v_color = inst.color;
-    // Canonical uv (Y-down, matches every other rect material). The
-    // eval flips to FreeType Y-up before calling velk_text_coverage,
-    // so raster and RT arrive at the same glyph-space uv despite
-    // coming from different sources (vertex q vs intersect_rect).
-    v_local_uv = q;
-    v_size = inst.size;
-    v_world_pos = world_pos_h.xyz;
-    v_world_normal = normalize(vec3(inst.world_matrix[2]));
-    v_shape_param = inst.glyph_index;
-}
-)";
-
 // Eval body: glyph coverage from the slug buffers. Compute shaders
 // have no fragment-quad derivatives; override fwidth there with a
 // fixed per-pixel estimate so velk_text.glsl compiles cleanly. Raster
@@ -134,10 +91,6 @@ string_view TextMaterial::get_eval_fn_name() const
     return "velk_eval_text";
 }
 
-string_view TextMaterial::get_vertex_src() const
-{
-    return text_vertex_src;
-}
 
 void TextMaterial::register_eval_includes(IRenderContext& ctx) const
 {

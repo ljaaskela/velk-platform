@@ -12,7 +12,7 @@ namespace velk::ui {
 inline constexpr uint64_t kPrimitive3DPipelineKey = make_hash64("VelkPrimitive3D");
 
 // Vertex shader: reads interleaved vec3 position + vec3 normal + vec2
-// uv from the mesh's VBO, scales position by the instance size,
+// uv from the mesh's VBO, offsets + scales by the element instance,
 // applies the element's world matrix, and emits the canonical set of
 // varyings the forward/deferred fragment drivers consume.
 inline constexpr string_view primitive3d_vertex_src = R"(
@@ -21,7 +21,7 @@ inline constexpr string_view primitive3d_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(MeshInstanceData, VelkVbo3D)
+    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -35,9 +35,9 @@ layout(location = 4) out vec3 v_world_normal;
 void main()
 {
     VelkVertex3D v = velk_vertex3d(root);
-    MeshInstance inst = root.instance_data.data[gl_InstanceIndex];
+    ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
 
-    vec4 local = vec4(v.position * inst.size.xyz, 1.0);
+    vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
     vec4 world_pos_h = inst.world_matrix * local;
     gl_Position = root.global_data.view_projection * world_pos_h;
 

@@ -184,35 +184,35 @@ void emit_shapes_for_element(IElement* element, F&& cb)
         ::velk::size local_size{ew, eh, ed};
         auto entries = visual->get_draw_entries(local_size);
         for (auto& dentry : entries) {
-            // Instance layout (instance_types.h):
-            //   [ 0..63 ] mat4 world_matrix (raster only)
-            //   [64..71] vec2 pos
-            //   [72..79] vec2 size
-            //   [80..95] vec4 color
-            //   [96..99] uint glyph_index (TextInstance only)
-            constexpr size_t kPosOff = 64;
-            constexpr size_t kSizeOff = 72;
-            constexpr size_t kColorOff = 80;
-            constexpr size_t kGlyphIdxOff = 96;
+            // Instance layout — ElementInstance (see instance_types.h):
+            //   [  0.. 63] mat4 world_matrix (raster only; zero here)
+            //   [ 64.. 79] vec4 offset  (xy = local offset; z pad)
+            //   [ 80.. 95] vec4 size    (xy = local extents; z pad)
+            //   [ 96..111] vec4 color
+            //   [112..115] uint shape_param (glyph index etc.)
+            constexpr size_t kOffsetOff = 64;
+            constexpr size_t kSizeOff   = 80;
+            constexpr size_t kColorOff  = 96;
+            constexpr size_t kParamsOff = 112;
             if (dentry.instance_size < kSizeOff + 8) continue;
 
             float local_px = 0, local_py = 0, sz_w = 0, sz_h = 0;
-            std::memcpy(&local_px, dentry.instance_data + kPosOff, 4);
-            std::memcpy(&local_py, dentry.instance_data + kPosOff + 4, 4);
-            std::memcpy(&sz_w, dentry.instance_data + kSizeOff, 4);
-            std::memcpy(&sz_h, dentry.instance_data + kSizeOff + 4, 4);
+            std::memcpy(&local_px, dentry.instance_data + kOffsetOff,     4);
+            std::memcpy(&local_py, dentry.instance_data + kOffsetOff + 4, 4);
+            std::memcpy(&sz_w,     dentry.instance_data + kSizeOff,       4);
+            std::memcpy(&sz_h,     dentry.instance_data + kSizeOff + 4,   4);
 
             float cr = vs->color.r, cg = vs->color.g, cb_ = vs->color.b, ca = vs->color.a;
             if (dentry.instance_size >= kColorOff + 16) {
-                std::memcpy(&cr, dentry.instance_data + kColorOff, 4);
-                std::memcpy(&cg, dentry.instance_data + kColorOff + 4, 4);
-                std::memcpy(&cb_, dentry.instance_data + kColorOff + 8, 4);
-                std::memcpy(&ca, dentry.instance_data + kColorOff + 12, 4);
+                std::memcpy(&cr,  dentry.instance_data + kColorOff,      4);
+                std::memcpy(&cg,  dentry.instance_data + kColorOff + 4,  4);
+                std::memcpy(&cb_, dentry.instance_data + kColorOff + 8,  4);
+                std::memcpy(&ca,  dentry.instance_data + kColorOff + 12, 4);
             }
 
             uint32_t shape_param = 0;
-            if (dentry.instance_size >= kGlyphIdxOff + 4) {
-                std::memcpy(&shape_param, dentry.instance_data + kGlyphIdxOff, 4);
+            if (dentry.instance_size >= kParamsOff + 4) {
+                std::memcpy(&shape_param, dentry.instance_data + kParamsOff, 4);
             }
 
             ShapeSite site{};

@@ -3,23 +3,12 @@
 #include "primitive_shaders.h"
 
 #include <velk/api/state.h>
-#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_mesh.h>
+#include <velk-ui/instance_types.h>
 
 #include <cstring>
 
 namespace velk::ui {
-
-namespace {
-
-VELK_GPU_STRUCT SphereInstanceCpu
-{
-    ::velk::mat4 world_matrix;
-    float size[4];
-    float color[4];
-};
-
-} // namespace
 
 vector<DrawEntry> SphereVisual::get_draw_entries(const ::velk::size& bounds)
 {
@@ -29,15 +18,10 @@ vector<DrawEntry> SphereVisual::get_draw_entries(const ::velk::size& bounds)
     DrawEntry entry{};
     entry.pipeline_key = kPrimitive3DPipelineKey;
 
-    SphereInstanceCpu inst{};
-    inst.size[0] = bounds.width;
-    inst.size[1] = bounds.height;
-    inst.size[2] = bounds.depth;
-    inst.size[3] = 0.f;
-    inst.color[0] = col.r;
-    inst.color[1] = col.g;
-    inst.color[2] = col.b;
-    inst.color[3] = col.a;
+    ElementInstance inst{};
+    inst.offset = {0.f, 0.f, 0.f, 0.f};
+    inst.size = {bounds.width, bounds.height, bounds.depth, 0.f};
+    inst.col = col;
     entry.set_instance(inst);
 
     return { entry };

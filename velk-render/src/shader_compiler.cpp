@@ -85,30 +85,20 @@ vec4 velk_texture(uint id, vec2 uv)
     return texture(velk_textures[nonuniformEXT(id)], uv);
 }
 
-// Standard 2D vertex layout shared by all UI visuals (rect, rounded
-// rect, text glyphs, image, texture, env). Matches the unit quad mesh
-// shipped by IMeshBuilder::get_unit_quad().
-//
-// IBO is bound on the host side via vkCmdBindIndexBuffer + dispatched
-// with vkCmdDrawIndexed, so the vertex shader's gl_VertexIndex is the
-// post-fetch index into the VBO directly (no shader-side IBO lookup).
-struct VelkVertex2D { vec2 position; };
-layout(buffer_reference, std430) readonly buffer VelkVbo2D { VelkVertex2D data[]; };
-
-// Standard 3D vertex layout shared by procedural primitives (cube,
-// sphere, ...) and glTF imports. 32-byte tight C-style packing
-// (vec3 pos + vec3 normal + vec2 uv) via scalar layout — the default
-// std430 rule would pad vec3 to 16 bytes and inflate this to 48.
-// Enabled by the Vulkan `scalarBlockLayout` feature (see vk_backend).
+// Standard vertex layout used by every visual (2D and 3D). 32-byte
+// tight C-style packing (vec3 pos + vec3 normal + vec2 uv) via scalar
+// layout — the default std430 rule would pad vec3 to 16 bytes and
+// inflate this to 48. Enabled by the Vulkan `scalarBlockLayout`
+// feature (see vk_backend). 2D visuals use the unit quad mesh
+// (z = 0, normal = +Z); 3D meshes use full xyz positions + normals.
 struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; };
 layout(buffer_reference, scalar) readonly buffer VelkVbo3D { VelkVertex3D data[]; };
 
-// Vertex-shader helpers: fetch current gl_VertexIndex from the VBO.
-// Macros (not functions) so the readonly memory qualifier on the
+// Vertex-shader helper: fetch current gl_VertexIndex from the VBO.
+// Macro (not function) so the readonly memory qualifier on the
 // buffer_reference is preserved at the call site, and so velk.glsl
 // doesn't reference gl_VertexIndex at namespace scope (would break
 // fragment shaders that also include this file).
-#define velk_vertex_pos2d(root) ((root).vbo.data[gl_VertexIndex].position)
 #define velk_vertex3d(root) ((root).vbo.data[gl_VertexIndex])
 
 // Standard DrawData header fields. Use inside a buffer_reference block:

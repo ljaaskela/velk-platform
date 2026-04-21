@@ -77,44 +77,6 @@ VELK_GPU_STRUCT StandardMaterialParams
 static_assert(sizeof(StandardMaterialParams) == 144,
               "StandardMaterialParams layout must match standard_eval_src");
 
-// Rect-instance vertex shader. Duplicates the velk-ui-provided
-// rect_material_vertex_src body to avoid a velk-render -> velk-ui
-// header dependency.
-constexpr string_view standard_vertex_src = R"(
-#version 450
-#include "velk.glsl"
-#include "velk-ui.glsl"
-
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(RectInstanceData, VelkVbo2D)
-    OpaquePtr material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
-
-layout(location = 0) out vec4 v_color;
-layout(location = 1) out vec2 v_local_uv;
-layout(location = 2) flat out vec2 v_size;
-layout(location = 3) out vec3 v_world_pos;
-layout(location = 4) out vec3 v_world_normal;
-layout(location = 5) flat out uint v_shape_param;
-
-void main()
-{
-    vec2 q = velk_vertex_pos2d(root);
-    RectInstance inst = root.instance_data.data[gl_InstanceIndex];
-    vec4 local_pos = vec4(inst.pos + q * inst.size, 0.0, 1.0);
-    vec4 world_pos = inst.world_matrix * local_pos;
-    gl_Position = root.global_data.view_projection * world_pos;
-    v_color = inst.color;
-    v_local_uv = q;
-    v_size = inst.size;
-    v_world_pos = world_pos.xyz;
-    v_world_normal = normalize(vec3(inst.world_matrix[2]));
-    v_shape_param = 0u;
-}
-)";
-
 // Eval: structured StandardMaterialData whose GLSL blocks mirror the
 // C++ sub-structs above. Each property (base color, metallic-roughness,
 // normal, occlusion, emissive, specular, alpha mode) has its factor(s)
@@ -340,11 +302,6 @@ string_view StandardMaterial::get_eval_src() const
 string_view StandardMaterial::get_eval_fn_name() const
 {
     return "velk_eval_standard";
-}
-
-string_view StandardMaterial::get_vertex_src() const
-{
-    return standard_vertex_src;
 }
 
 vector<ISurface*> StandardMaterial::get_textures() const

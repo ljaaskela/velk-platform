@@ -73,9 +73,5 @@ string_view GradientMaterial::get_eval_fn_name() const
     return "velk_eval_gradient";
 }
 
-string_view GradientMaterial::get_vertex_src() const
-{
-    return rect_material_vertex_src;
-}
 
 } // namespace velk::ui

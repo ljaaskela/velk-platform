@@ -151,11 +151,11 @@ vector<DrawEntry> TextVisual::get_draw_entries(const ::velk::size& bounds)
             entry.bounds = {pg.pos.x + offset_x, pg.pos.y + offset_y,
                             pg.size.x, pg.size.y};
 
-            TextInstance inst{};
-            inst.pos = {pg.pos.x + offset_x, pg.pos.y + offset_y};
-            inst.size = pg.size;
+            ElementInstance inst{};
+            inst.offset = {pg.pos.x + offset_x, pg.pos.y + offset_y, 0.f, 0.f};
+            inst.size = {pg.size.x, pg.size.y, 0.f, 0.f};
             inst.col = col;
-            inst.glyph_index = pg.glyph_index;
+            inst.params[0] = pg.glyph_index;
             entry.set_instance(inst);
 
             result.push_back(entry);

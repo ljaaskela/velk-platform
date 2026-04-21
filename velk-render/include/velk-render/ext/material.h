@@ -6,6 +6,7 @@
 #include <velk/api/event.h>
 #include <velk/api/state.h>
 
+#include <velk-render/ext/element_vertex.h>
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_draw_data.h>
@@ -76,7 +77,9 @@ public:
     // IShaderSnippet path until every material has migrated.
     string_view get_eval_src() const override { return {}; }
     string_view get_eval_fn_name() const override { return {}; }
-    string_view get_vertex_src() const override { return {}; }
+    /// Default: the shared element vertex shader. Materials that need
+    /// a different vertex path (e.g. fullscreen env) override.
+    string_view get_vertex_src() const override { return ext::element_vertex_src; }
     void register_eval_includes(IRenderContext&) const override {}
     /// Framework-level discard thresholds derived from the attached
     /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend

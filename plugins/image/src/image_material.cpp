@@ -59,9 +59,4 @@ string_view ImageMaterial::get_eval_fn_name() const
     return "velk_eval_image";
 }
 
-string_view ImageMaterial::get_vertex_src() const
-{
-    return rect_material_vertex_src;
-}
-
 } // namespace velk::ui::impl

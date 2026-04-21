@@ -27,7 +27,6 @@ public:
 
     string_view get_eval_src() const override;
     string_view get_eval_fn_name() const override;
-    string_view get_vertex_src() const override;
 };
 
 } // namespace velk::ui::impl
