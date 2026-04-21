@@ -49,7 +49,7 @@ size_t ShaderMaterial::get_draw_data_size() const
     return gpu_data_size_;
 }
 
-ReturnValue ShaderMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue ShaderMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (params_.empty() || !out || size < gpu_data_size_) {
         return ReturnValue::Fail;

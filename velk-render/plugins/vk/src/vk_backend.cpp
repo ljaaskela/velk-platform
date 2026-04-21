@@ -1321,15 +1321,23 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    switch (desc.cull_mode) {
+    case CullMode::None:  rasterizer.cullMode = VK_CULL_MODE_NONE;     break;
+    case CullMode::Back:  rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; break;
+    case CullMode::Front: rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; break;
+    }
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    // Blending: MRT render passes (G-buffer) always write opaque; for
+    // single-attachment passes, honor the material's requested blend mode.
+    bool blend_enabled = (target_group == 0) && (desc.blend_mode == BlendMode::Alpha);
+
     VkPipelineColorBlendAttachmentState blend_att{};
-    blend_att.blendEnable = (target_group == 0) ? VK_TRUE : VK_FALSE;
+    blend_att.blendEnable = blend_enabled ? VK_TRUE : VK_FALSE;
     blend_att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     blend_att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     blend_att.colorBlendOp = VK_BLEND_OP_ADD;

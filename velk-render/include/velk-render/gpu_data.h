@@ -41,12 +41,13 @@ static_assert(sizeof(FrameGlobals) == 192, "FrameGlobals layout must match velk.
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * The shader receives a pointer to this via push constants. The header
- * contains GPU pointers to the globals and instance data, plus a bindless
- * texture index. Material-specific data follows immediately after.
- *
  * Padded to 32 bytes via VELK_GPU_STRUCT so material data (which may
  * start with a vec4) meets std430 16-byte alignment.
+ *
+ * Multi-texture materials (e.g. StandardMaterial) embed their bindless
+ * TextureIds directly in their own UBO via ITextureResolver, so the
+ * header carries only the single texture_id used by simple visuals
+ * (image, texture, text).
  */
 VELK_GPU_STRUCT DrawDataHeader
 {

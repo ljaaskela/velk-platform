@@ -8,7 +8,7 @@
 #include <velk/api/velk.h>
 #include <velk/ext/core_object.h>
 #include <velk/interface/resource/intf_resource_store.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-ui/instance_types.h>
 #include <velk-ui/interface/intf_visual.h>
 #include <velk-ui/plugins/image/intf_image_material.h>

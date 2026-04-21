@@ -12,6 +12,18 @@ inline constexpr Uid Renderer{"8f4bdd2c-865b-4266-a1f1-abb921c9d60b"};
 inline constexpr Uid WindowSurface{"ee9a45db-d4e3-44c4-bbee-19c244a5f32a"};
 inline constexpr Uid ShaderMaterial{"04a29568-7677-42ee-9858-83b87196057f"};
 inline constexpr Uid StandardMaterial{"4559e280-879d-4154-9565-d7346897588f"};
+
+/** @brief Material property classes. Attached to StandardMaterial; see design-notes/material_properties.md. */
+inline constexpr Uid BaseColorProperty{"28936f89-103a-4d63-81ec-f2f4abf781a2"};
+inline constexpr Uid MetallicRoughnessProperty{"183e0b2e-86f2-4744-b28d-1a5584c532ea"};
+inline constexpr Uid NormalProperty{"06a7f15d-0787-4b46-ba50-86c8bc2ef3a2"};
+inline constexpr Uid OcclusionProperty{"9c20673d-48af-4431-9a88-08739644fd10"};
+inline constexpr Uid EmissiveProperty{"72229e6c-15db-4cda-8d30-58e66e95c679"};
+inline constexpr Uid SpecularProperty{"447cb08a-10b9-49f0-bcc5-18c57799608a"};
+
+/** @brief Pipeline-state options attachable to any material. */
+inline constexpr Uid MaterialOptions{"791cbf4f-7a8b-4343-b12a-a278fc46393e"};
+
 inline constexpr Uid Shader{"1e766d8e-917b-419f-8262-14fbfb8fbb16"};
 inline constexpr Uid RenderTexture{"ed3e9c55-9227-4c93-8c96-1759452e741f"};
 

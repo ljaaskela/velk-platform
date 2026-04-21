@@ -8,6 +8,21 @@
 
 namespace velk {
 
+/// Face culling mode, shared between material options and pipeline creation.
+enum class CullMode : uint8_t
+{
+    None,   ///< No culling. Default; matches glTF doubleSided = true.
+    Back,   ///< Cull back faces. glTF single-sided default.
+    Front,  ///< Cull front faces. Useful for skyboxes and shadow tricks.
+};
+
+/// Blend state for the color attachment of a pipeline.
+enum class BlendMode : uint8_t
+{
+    Alpha,   ///< Standard alpha blending (src.rgb * src.a + dst.rgb * (1 - src.a)). Default.
+    Opaque,  ///< No blending; fragment overwrites destination.
+};
+
 /// Pipeline keys used by the render context's auto-assign counter.
 /// Visuals that own a built-in pipeline provide their own stable key
 /// (typically via make_hash64 on the class name).

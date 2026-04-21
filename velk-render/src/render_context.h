@@ -25,10 +25,14 @@ public:
                                 uint64_t key = 0) override;
     uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                              uint64_t key = 0,
-                             RenderTargetGroup target_group = 0) override;
+                             RenderTargetGroup target_group = 0,
+                             CullMode cull_mode = CullMode::None,
+                             BlendMode blend_mode = BlendMode::Alpha) override;
     uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                               uint64_t key = 0,
-                              RenderTargetGroup target_group = 0) override;
+                              RenderTargetGroup target_group = 0,
+                              CullMode cull_mode = CullMode::None,
+                              BlendMode blend_mode = BlendMode::Alpha) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 
@@ -53,7 +57,8 @@ public:
     PipelineId compile_gbuffer_pipeline(string_view fragment_source,
                                         string_view vertex_source,
                                         uint64_t key,
-                                        RenderTargetGroup target_group) override;
+                                        RenderTargetGroup target_group,
+                                        CullMode cull_mode = CullMode::None) override;
 
     IRenderBackend::Ptr backend() const override { return backend_; }
 

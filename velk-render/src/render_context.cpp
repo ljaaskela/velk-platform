@@ -9,7 +9,7 @@
 #include <velk/api/velk.h>
 #include <velk/hash.h>
 
-#include <velk-render/interface/intf_material_internal.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/platform.h>
 
 namespace velk {
@@ -135,7 +135,8 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
 }
 
 uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
-                                            uint64_t key, RenderTargetGroup target_group)
+                                            uint64_t key, RenderTargetGroup target_group,
+                                            CullMode cull_mode, BlendMode blend_mode)
 {
     if (!initialized_ || !backend_) {
         return 0;
@@ -158,6 +159,8 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
     PipelineDesc desc;
     desc.vertex = vert_shader;
     desc.fragment = frag_shader;
+    desc.cull_mode = cull_mode;
+    desc.blend_mode = blend_mode;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {
@@ -172,11 +175,12 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
 }
 
 uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
-                                             uint64_t key, RenderTargetGroup target_group)
+                                             uint64_t key, RenderTargetGroup target_group,
+                                             CullMode cull_mode, BlendMode blend_mode)
 {
     auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
     auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
-    return create_pipeline(vert, frag, key, target_group);
+    return create_pipeline(vert, frag, key, target_group, cull_mode, blend_mode);
 }
 
 uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute, uint64_t key)
@@ -215,7 +219,8 @@ uint64_t RenderContextImpl::compile_compute_pipeline(string_view compute_source,
 PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_source,
                                                        string_view vertex_source,
                                                        uint64_t key,
-                                                       RenderTargetGroup target_group)
+                                                       RenderTargetGroup target_group,
+                                                       CullMode cull_mode)
 {
     if (!initialized_ || !backend_ || key == 0 || target_group == 0) {
         return 0;
@@ -240,6 +245,9 @@ PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_sour
     PipelineDesc desc;
     desc.vertex = vert;
     desc.fragment = frag;
+    desc.cull_mode = cull_mode;
+    // G-buffer passes always write opaquely regardless of alpha mode.
+    desc.blend_mode = BlendMode::Opaque;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {

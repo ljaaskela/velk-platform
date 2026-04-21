@@ -91,12 +91,9 @@ MaterialEval velk_eval_text(EvalContext ctx)
     vec2 glyph_uv = vec2(ctx.uv.x, 1.0 - ctx.uv.y);
     float coverage = velk_text_coverage(glyph_uv, ctx.shape_param,
                                          d.curves, d.bands, d.glyphs);
-    MaterialEval e;
+    MaterialEval e = velk_default_material_eval();
     e.color = vec4(ctx.base.rgb, ctx.base.a * coverage);
     e.normal = ctx.normal;
-    e.metallic = 0.0;
-    e.roughness = 1.0;
-    e.lighting_mode = VELK_LIGHTING_UNLIT;
     return e;
 }
 )";
@@ -115,7 +112,7 @@ size_t TextMaterial::get_draw_data_size() const
     return sizeof(TextMaterialData);
 }
 
-ReturnValue TextMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue TextMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (size == sizeof(TextMaterialData)) {
         auto& p = *static_cast<TextMaterialData*>(out);

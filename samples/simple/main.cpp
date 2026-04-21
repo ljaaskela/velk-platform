@@ -4,7 +4,7 @@
 #include <velk/api/callback.h>
 #include <velk/api/velk.h>
 
-#include <velk-render/api/material/shader.h>
+#include <velk-render/api/material/shader_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-runtime/api/application.h>
 #include <velk-ui/api/camera.h>

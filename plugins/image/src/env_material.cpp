@@ -81,12 +81,9 @@ MaterialEval velk_eval_env(EvalContext ctx)
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
     vec3 rgb = velk_texture(ctx.texture_id, vec2(u, v)).rgb;
 
-    MaterialEval e;
+    MaterialEval e = velk_default_material_eval();
     e.color = vec4(rgb * d.params.x, 1.0);
     e.normal = ctx.normal;
-    e.metallic = 0.0;
-    e.roughness = 1.0;
-    e.lighting_mode = VELK_LIGHTING_UNLIT;
     return e;
 }
 )";
@@ -104,7 +101,7 @@ size_t EnvMaterial::get_draw_data_size() const
     return sizeof(EnvGpuData);
 }
 
-ReturnValue EnvMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue EnvMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     return set_material<EnvGpuData>(out, size, [&](auto& p) {
         p.intensity = intensity_;

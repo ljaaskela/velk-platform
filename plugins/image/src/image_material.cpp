@@ -25,12 +25,9 @@ MaterialEval velk_eval_image(EvalContext ctx)
     ImageMaterialData d = ImageMaterialData(ctx.data_addr);
     vec4 sampled = velk_texture(ctx.texture_id, ctx.uv);
 
-    MaterialEval e;
+    MaterialEval e = velk_default_material_eval();
     e.color = sampled * d.tint;
     e.normal = ctx.normal;
-    e.metallic = 0.0;
-    e.roughness = 1.0;
-    e.lighting_mode = VELK_LIGHTING_UNLIT;
     return e;
 }
 )";
@@ -42,7 +39,7 @@ size_t ImageMaterial::get_draw_data_size() const
     return sizeof(ImageParams);
 }
 
-ReturnValue ImageMaterial::write_draw_data(void* out, size_t size) const
+ReturnValue ImageMaterial::write_draw_data(void* out, size_t size, ITextureResolver*) const
 {
     if (auto state = read_state<IImageMaterial>(this)) {
         return set_material<ImageParams>(out, size, [&](auto& p) {

@@ -11,7 +11,7 @@
 #include <velk/string.h>
 
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_technique.h>
 #include <velk-render/interface/intf_shadow_technique.h>

@@ -3,10 +3,14 @@
 
 #include <velk/api/velk.h>
 
+#include <velk/api/event.h>
+#include <velk/api/state.h>
+
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material_internal.h>
+#include <velk-render/interface/material/intf_material_internal.h>
+#include <velk-render/interface/material/intf_material_options.h>
 #include <velk-render/interface/intf_program_data_buffer.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>
@@ -35,9 +39,36 @@ namespace velk::ext {
 template <class T, class... Extra>
 class Material : public GpuResource<T, IMaterialInternal, IDrawData, Extra...>
 {
+    using Base = GpuResource<T, IMaterialInternal, IDrawData, Extra...>;
+
 public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return handle_; }
     void set_pipeline_handle(uint64_t handle) override { handle_ = handle; }
+
+    /// Subscribe / unsubscribe to IMaterialOptions attachments so option
+    /// writes propagate into pipeline invalidation without polling.
+    ReturnValue add_attachment(const IInterface::Ptr& attachment) override
+    {
+        auto rv = Base::add_attachment(attachment);
+        if (succeeded(rv)) {
+            if (auto* opts = interface_cast<IMaterialOptions>(attachment)) {
+                bind_options_subscription(opts);
+            }
+        }
+        return rv;
+    }
+
+    ReturnValue remove_attachment(const IInterface::Ptr& attachment) override
+    {
+        bool was_options = interface_cast<IMaterialOptions>(attachment) != nullptr;
+        auto rv = Base::remove_attachment(attachment);
+        if (succeeded(rv) && was_options) {
+            constexpr AttachmentQuery q{IMaterialOptions::UID, {}};
+            auto next = this->find_attachment(q, Resolve::Existing);
+            bind_options_subscription(interface_cast<IMaterialOptions>(next));
+        }
+        return rv;
+    }
 
     // IMaterial defaults. Concrete materials override to provide real
     // eval + vertex sources; unimplemented materials return empty and
@@ -47,8 +78,37 @@ public:
     string_view get_eval_fn_name() const override { return {}; }
     string_view get_vertex_src() const override { return {}; }
     void register_eval_includes(IRenderContext&) const override {}
-    float get_forward_discard_threshold() const override { return 0.001f; }
-    float get_deferred_discard_threshold() const override { return 0.5f; }
+    /// Framework-level discard thresholds derived from the attached
+    /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend
+    /// mode → 0 (no discard, blending handles alpha); Opaque → a tiny
+    /// epsilon to drop fully-transparent fragments.
+    float get_forward_discard_threshold() const override
+    {
+        return discard_threshold_from_options(0.001f);
+    }
+    float get_deferred_discard_threshold() const override
+    {
+        return discard_threshold_from_options(0.5f);
+    }
+    vector<ISurface*> get_textures() const override { return {}; }
+
+protected:
+    float discard_threshold_from_options(float opaque_default) const
+    {
+        constexpr AttachmentQuery q{IMaterialOptions::UID, {}};
+        auto att = const_cast<Material*>(this)->find_attachment(q, Resolve::Existing);
+        if (auto r = ::velk::read_state<::velk::IMaterialOptions>(att)) {
+            switch (r->alpha_mode) {
+            case ::velk::AlphaMode::Mask:  return r->alpha_cutoff;
+            case ::velk::AlphaMode::Blend: return 0.0f;
+            case ::velk::AlphaMode::Opaque:
+            default:                       break;
+            }
+        }
+        return opaque_default;
+    }
+
+public:
 
     /**
      * @brief Default persistent-buffer implementation.
@@ -63,7 +123,7 @@ public:
      * Materials with no draw data return nullptr, which keeps the
      * renderer on the frame-scratch fallback path.
      */
-    ::velk::IBuffer::Ptr get_data_buffer() override
+    ::velk::IBuffer::Ptr get_data_buffer(::velk::ITextureResolver* resolver = nullptr) override
     {
         size_t sz = this->get_draw_data_size();
         if (sz == 0) {
@@ -79,8 +139,8 @@ public:
             }
         }
         bool ok = true;
-        data_buffer_->write(sz, [this, &ok](void* dst, size_t n) {
-            ok = this->write_draw_data(dst, n) == ReturnValue::Success;
+        data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
+            ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
         });
         return ok ? data_buffer_ : nullptr;
     }
@@ -139,8 +199,18 @@ protected:
     }
 
 private:
+    void bind_options_subscription(IMaterialOptions* opts)
+    {
+        if (opts) {
+            options_sub_ = ScopedHandler(opts->on_options_changed(), [this]() { handle_ = 0; });
+        } else {
+            options_sub_.reset();
+        }
+    }
+
     uint64_t handle_{};
     ::velk::IProgramDataBuffer::Ptr data_buffer_;
+    ScopedHandler options_sub_;
 };
 
 } // namespace velk::ext

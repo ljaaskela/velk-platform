@@ -8,7 +8,7 @@
 
 #include <velk-render/gbuffer.h>
 #include <velk-render/gpu_data.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-ui/interface/intf_environment.h>

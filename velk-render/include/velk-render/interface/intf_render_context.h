@@ -4,7 +4,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <unordered_map>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/interface/intf_window_surface.h>
@@ -61,7 +61,9 @@ public:
      */
     virtual uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                      uint64_t key = 0,
-                                     RenderTargetGroup target_group = 0) = 0;
+                                     RenderTargetGroup target_group = 0,
+                                     CullMode cull_mode = CullMode::None,
+                                     BlendMode blend_mode = BlendMode::Alpha) = 0;
 
     /**
      * @brief Convenience: compiles GLSL shaders and creates the pipeline in one call.
@@ -73,7 +75,9 @@ public:
      */
     virtual uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                                       uint64_t key = 0,
-                                      RenderTargetGroup target_group = 0) = 0;
+                                      RenderTargetGroup target_group = 0,
+                                      CullMode cull_mode = CullMode::None,
+                                      BlendMode blend_mode = BlendMode::Alpha) = 0;
 
     /**
      * @brief Creates a compute pipeline from a compiled compute shader.
@@ -142,7 +146,8 @@ public:
     virtual PipelineId compile_gbuffer_pipeline(string_view fragment_source,
                                                 string_view vertex_source,
                                                 uint64_t key,
-                                                RenderTargetGroup target_group) = 0;
+                                                RenderTargetGroup target_group,
+                                                CullMode cull_mode = CullMode::None) = 0;
 
     /**
      * @brief Registers a virtual shader include.

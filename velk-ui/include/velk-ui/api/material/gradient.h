@@ -4,7 +4,7 @@
 #include <velk/api/object.h>
 #include <velk/api/state.h>
 
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-ui/interface/intf_gradient.h>
 #include <velk-ui/plugin.h>
 

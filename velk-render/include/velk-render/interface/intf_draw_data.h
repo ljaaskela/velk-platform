@@ -4,6 +4,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_texture_resolver.h>
 
 #include <cstddef>
 
@@ -32,9 +33,13 @@ public:
      * @brief Writes per-draw GPU data into the staging buffer.
      * @param out  Destination buffer (immediately after DrawDataHeader).
      * @param size Buffer size in bytes (equals get_draw_data_size()).
+     * @param resolver Optional bindless TextureId resolver for materials
+     *                 that embed texture ids in their UBO. Callers that
+     *                 know the material samples no textures may pass null.
      * @return ReturnValue::Success on success, ReturnValue::Fail on error.
      */
-    virtual ReturnValue write_draw_data(void* out, size_t size) const = 0;
+    virtual ReturnValue write_draw_data(void* out, size_t size,
+                                        ITextureResolver* resolver = nullptr) const = 0;
 
     /**
      * @brief Returns a persistent IBuffer holding this program's current
@@ -53,8 +58,12 @@ public:
      * Default returns nullptr for programs that have no persistent
      * buffer; such programs fall back to per-frame serialisation via
      * `write_draw_data` into the renderer's frame scratch arena.
+     *
+     * @param resolver Optional bindless TextureId resolver; forwarded
+     *                 to `write_draw_data` so materials can embed ids
+     *                 in their UBO.
      */
-    virtual IBuffer::Ptr get_data_buffer() { return nullptr; }
+    virtual IBuffer::Ptr get_data_buffer(ITextureResolver* resolver = nullptr) { (void)resolver; return nullptr; }
 };
 
 } // namespace velk

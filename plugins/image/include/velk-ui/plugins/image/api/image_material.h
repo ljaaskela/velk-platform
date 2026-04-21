@@ -6,7 +6,7 @@
 #include <velk/api/state.h>
 
 #include <velk-render/interface/intf_image.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-ui/plugins/image/intf_image_material.h>
 #include <velk-ui/plugins/image/plugin.h>

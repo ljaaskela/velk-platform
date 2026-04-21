@@ -1126,11 +1126,15 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     float metallic  = clamp(eval.metallic, 0.0, 1.0);
     float roughness = clamp(eval.roughness, 0.04, 1.0);
     vec3 base = eval.color.rgb;
+    float ao = clamp(eval.occlusion, 0.0, 1.0);
 
-    // Fresnel at normal incidence: 0.04 for dielectrics, base for metals.
-    vec3 F0 = mix(vec3(0.04), base, metallic);
+    // KHR_materials_specular: dielectric F0 tinted by specular_color_factor
+    // and weighted by specular_factor. Metals continue to use base as F0.
+    vec3 dielectric_F0 = 0.04 * eval.specular_color_factor * eval.specular_factor;
+    vec3 F0 = mix(dielectric_F0, base, metallic);
     float VdotN = max(dot(V, N), 0.0);
     vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - VdotN, 5.0);
+    F *= eval.specular_factor;
 
     // Direct lighting from scene lights. Each light contributes a
     // Lambertian diffuse term scaled by its distance / spot attenuation
@@ -1162,10 +1166,10 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     }
 
     // Diffuse term: crude "irradiance at the normal" via a single env
-    // sample. Upgrade to preconvolved irradiance or stochastic cosine
-    // sampling when visibly needed.
+    // sample, modulated by AO. Upgrade to preconvolved irradiance or
+    // stochastic cosine sampling when visibly needed.
     vec3 env_at_normal = env_miss_color(N);
-    vec3 diffuse = base * (1.0 - metallic) * env_at_normal;
+    vec3 diffuse = base * (1.0 - metallic) * env_at_normal * ao;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
 
     // Specular: sample a GGX half-vector, reflect V around it. Main's
@@ -1174,7 +1178,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     vec3 Lr = reflect(-V, H);
 
     BrdfSample bs;
-    bs.emission = vec4(kD * diffuse + direct, eval.color.a);
+    bs.emission = vec4(kD * diffuse + direct + eval.emissive, eval.color.a);
     bs.throughput = F;
     bs.next_dir = Lr;
     bs.terminate = false;

@@ -8,7 +8,7 @@
 #include <velk/api/velk.h>
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -204,7 +204,7 @@ FrameSnippetRegistry::resolve_material(IProgram* prog, FrameContext& ctx)
     // destruction to a safe window (see GpuResourceManager).
     IBuffer::Ptr data_buf;
     if (auto* dd = interface_cast<IDrawData>(prog)) {
-        data_buf = dd->get_data_buffer();
+        data_buf = dd->get_data_buffer(ctx.resources);
     }
     if (data_buf) {
         ensure_data_buffer_uploaded(data_buf.get(), ctx);
@@ -219,7 +219,7 @@ FrameSnippetRegistry::resolve_material(IProgram* prog, FrameContext& ctx)
             void* scratch = std::malloc(sz);
             if (scratch) {
                 std::memset(scratch, 0, sz);
-                if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                if (dd->write_draw_data(scratch, sz, ctx.resources) == ReturnValue::Success) {
                     addr = ctx.frame_buffer->write(scratch, sz);
                 }
                 std::free(scratch);

@@ -81,6 +81,8 @@ struct PipelineDesc
     IShader::Ptr vertex;                        ///< Vertex shader
     IShader::Ptr fragment;                      ///< Fragment shader
     Topology topology{Topology::TriangleStrip}; ///< Primitive assembly mode.
+    CullMode cull_mode{CullMode::None};         ///< Face culling. None preserves legacy behavior.
+    BlendMode blend_mode{BlendMode::Alpha};     ///< Color-attachment blend. Forced to Opaque on MRT groups.
 
     /// @brief Returns the size of vertex shader bytecode
     inline size_t get_vertex_size() const { return vertex ? vertex->get_data_size() : 0; }

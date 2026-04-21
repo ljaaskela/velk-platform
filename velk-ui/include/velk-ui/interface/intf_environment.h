@@ -3,7 +3,7 @@
 
 #include <velk/interface/intf_metadata.h>
 #include <velk/interface/resource/intf_resource.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/material/intf_material.h>
 
 namespace velk::ui {
 

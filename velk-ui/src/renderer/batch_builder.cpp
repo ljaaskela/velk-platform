@@ -7,8 +7,12 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_material.h>
+#include <velk-render/interface/intf_render_target.h>
+#include <velk-render/interface/intf_surface.h>
+#include <velk-render/interface/material/intf_material.h>
+#include <velk-render/interface/material/intf_material_options.h>
 #include <velk-render/interface/intf_raster_shader.h>
+#include "gpu_resource_manager.h"
 #include <velk-ui/interface/intf_visual.h>
 
 #include <algorithm>
@@ -22,6 +26,31 @@ namespace {
 uint64_t make_batch_key(uint64_t pipeline, uint64_t texture)
 {
     return pipeline * 31 + texture;
+}
+
+// Reads pipeline-state hints from the material's attached IMaterialOptions.
+// Absence means legacy defaults: no culling, alpha blending on.
+struct MaterialPipelineState
+{
+    velk::CullMode cull = velk::CullMode::None;
+    velk::BlendMode blend = velk::BlendMode::Alpha;
+};
+
+MaterialPipelineState material_pipeline_state(velk::IProgram* prog)
+{
+    MaterialPipelineState s{};
+    auto* storage = interface_cast<velk::IObjectStorage>(prog);
+    if (!storage) return s;
+    auto opts = storage->template find_attachment<velk::IMaterialOptions>();
+    if (!opts) return s;
+    auto r = velk::read_state<velk::IMaterialOptions>(opts.get());
+    if (!r) return s;
+    s.cull = r->cull_mode;
+    // Mask and Opaque both write opaquely; Blend alpha-blends.
+    s.blend = (r->alpha_mode == velk::AlphaMode::Blend)
+                  ? velk::BlendMode::Alpha
+                  : velk::BlendMode::Opaque;
+    return s;
 }
 
 } // namespace
@@ -115,8 +144,9 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
                             string frag = compose_eval_fragment(
                                 forward_fragment_driver_template, eval_src, eval_fn,
                                 mat->get_forward_discard_threshold());
+                            auto ps = material_pipeline_state(prog.get());
                             uint64_t h = render_ctx->compile_pipeline(
-                                string_view(frag), vertex_src);
+                                string_view(frag), vertex_src, 0, 0, ps.cull, ps.blend);
                             if (h) {
                                 prog->set_pipeline_handle(h);
                             }
@@ -132,13 +162,27 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
         }
 
         for (auto& res : visual->get_gpu_resources()) {
-            if (!res) {
-                continue;
+            if (res) {
+                if (observer) {
+                    res->add_gpu_resource_observer(observer);
+                }
+                cache.gpu_resources.push_back(res);
             }
-            if (observer) {
-                res->add_gpu_resource_observer(observer);
+        }
+
+        // Multi-texture materials (e.g. StandardMaterial) attach their
+        // textures to the material, not the visual. Surface the ones that
+        // carry uploadable pixel data (IImage etc.) so renderer's upload
+        // pass picks them up and registers them with the resource manager.
+        if (auto* mat = interface_cast<IMaterial>(vc.material)) {
+            for (auto* tex : mat->get_textures()) {
+                if (auto buf = ::velk::get_self<IBuffer>(tex)) {
+                    if (observer) {
+                        buf->add_gpu_resource_observer(observer);
+                    }
+                    cache.gpu_resources.push_back(buf);
+                }
             }
-            cache.gpu_resources.push_back(IBuffer::WeakPtr(res));
         }
 
         VisualPhase phase = vstate ? vstate->visual_phase : VisualPhase::BeforeChildren;
@@ -362,7 +406,7 @@ void BatchBuilder::build_draw_calls(const vector<Batch>& batches, vector<DrawCal
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
         size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
@@ -449,7 +493,7 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;
 
-        uint64_t material_addr = write_material_once(batch.material.get(), frame_data);
+        uint64_t material_addr = write_material_once(batch.material.get(), frame_data, &resources);
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
         size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
@@ -525,8 +569,9 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
                 composed.append(string_view("void velk_visual_discard() {}\n", 30));
             }
 
+            auto ps = material_pipeline_state(batch.material.get());
             gpid = render_ctx->compile_gbuffer_pipeline(
-                string_view(composed), vsrc, gbuffer_key, target_group);
+                string_view(composed), vsrc, gbuffer_key, target_group, ps.cull);
         }
         if (gpid == 0) {
             continue;
@@ -546,7 +591,8 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
     }
 }
 
-uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& frame_data)
+uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& frame_data,
+                                           ::velk::ITextureResolver* resolver)
 {
     if (!prog) return 0;
     auto it = frame_material_addrs_.find(prog);
@@ -565,7 +611,7 @@ uint64_t BatchBuilder::write_material_once(IProgram* prog, FrameDataManager& fra
             void* scratch = std::malloc(sz);
             if (scratch) {
                 std::memset(scratch, 0, sz);
-                if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
+                if (dd->write_draw_data(scratch, sz, resolver) == ReturnValue::Success) {
                     addr = frame_data.write(scratch, sz);
                 }
                 std::free(scratch);

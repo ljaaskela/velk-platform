@@ -1,5 +1,5 @@
-#ifndef VELK_RENDER_API_MATERIAL_SHADER_H
-#define VELK_RENDER_API_MATERIAL_SHADER_H
+#ifndef VELK_RENDER_API_MATERIAL_SHADER_MATERIAL_H
+#define VELK_RENDER_API_MATERIAL_SHADER_MATERIAL_H
 
 #include <velk/api/object.h>
 #include <velk/api/property.h>
@@ -7,7 +7,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-render/interface/intf_shader_material.h>
+#include <velk-render/interface/material/intf_shader_material.h>
 #include <velk-render/plugin.h>
 
 namespace velk {
@@ -71,4 +71,4 @@ inline ShaderMaterial create_shader_material(IRenderContext& ctx, string_view fr
 
 } // namespace velk
 
-#endif // VELK_RENDER_API_MATERIAL_SHADER_H
+#endif // VELK_RENDER_API_MATERIAL_SHADER_MATERIAL_H
