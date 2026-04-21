@@ -189,16 +189,9 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
 
         auto vstate = read_state<IVisual>(visual);
 
-        // Mesh visuals bypass paint-material routing: StandardMaterial
-        // (and every current material) ships a RectInstance-based vertex
-        // shader that would be fed MeshInstance bytes and mis-interpret
-        // them. Their own IRasterShader handles the mesh path correctly.
-        // A 3D-capable material + variant vertex path is a follow-up.
-        const bool is_mesh_visual = interface_cast<IMeshVisual>(visual) != nullptr;
-
         {
             VELK_PERF_SCOPE("renderer.resolve_material");
-            if (!is_mesh_visual && render_ctx && vstate && vstate->paint) {
+            if (render_ctx && vstate && vstate->paint) {
                 auto prog = vstate->paint.get<IProgram>();
                 if (prog) {
                     // Materials with an IMaterial eval body get their

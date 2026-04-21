@@ -8,8 +8,9 @@ namespace velk {
 /// @file gpu_data.h
 /// Framework-level GPU data structures.
 ///
-/// Visual-specific instance types (RectInstance, TextInstance, etc.) are defined
-/// by the visuals that produce them, not here.
+/// The universal per-instance type (`ElementInstance`) lives in
+/// `velk-ui/instance_types.h`; visuals fill its fields and the
+/// renderer's batch builder writes the world matrix.
 
 /// Declares a struct with std430-compatible alignment (16 bytes).
 /// Use for material GPU data structs that follow the DrawDataHeader.

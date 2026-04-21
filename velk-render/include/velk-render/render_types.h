@@ -33,9 +33,9 @@ inline constexpr uint64_t Default = 1;       ///< Filled rect
 inline constexpr uint64_t CustomBase = 1000; ///< Auto-assigned keys start here.
 } // namespace PipelineKey
 
-/// Maximum inline instance data size in a DrawEntry.
-// Large enough for the current biggest instance (TextInstance = 112 bytes,
-// which carries a mat4 world_matrix + pos/size/color + glyph_index).
+/// Maximum inline instance data size in a DrawEntry. Sized for the
+/// universal `ElementInstance` (128 bytes: mat4 world_matrix + vec4
+/// offset + vec4 size + vec4 color + uvec4 params).
 inline constexpr uint32_t kMaxInstanceDataSize = 128;
 
 /**
@@ -63,7 +63,7 @@ struct DrawEntry
 
     /**
      * @brief Packs a typed instance struct into instance_data.
-     * @tparam T Instance struct type (e.g. RectInstance, TextInstance).
+     * @tparam T Instance struct type (typically ElementInstance).
      */
     template <typename T>
     void set_instance(const T& inst)

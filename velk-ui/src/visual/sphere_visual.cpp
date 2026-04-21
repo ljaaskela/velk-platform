@@ -6,8 +6,6 @@
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-ui/instance_types.h>
 
-#include <cstring>
-
 namespace velk::ui {
 
 vector<DrawEntry> SphereVisual::get_draw_entries(const ::velk::size& bounds)

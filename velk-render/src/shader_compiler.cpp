@@ -103,12 +103,12 @@ layout(buffer_reference, scalar) readonly buffer VelkVbo3D { VelkVertex3D data[]
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA(RectInstanceData, MyVbo)
+//       VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
 //       vec4 my_material_param;  // optional material fields follow
 //   };
-// `VboType` is a `buffer_reference`-typed handle whose target struct
-// matches the material's vertex layout (e.g. `VelkVbo2D` for the unit
-// quad). The 32-byte header keeps everything 8-byte aligned for std430.
+// `VboType` is a `buffer_reference`-typed handle to the vertex buffer
+// (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
+// The 32-byte header keeps everything 8-byte aligned for std430.
 #define VELK_DRAW_DATA(InstancesType, VboType) \
     GlobalData global_data;                    \
     InstancesType instance_data;               \

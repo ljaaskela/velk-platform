@@ -1,7 +1,5 @@
 #include "gradient_material.h"
 
-#include "../renderer/default_ui_shaders.h"
-
 #include <velk/api/state.h>
 
 #include <cstring>

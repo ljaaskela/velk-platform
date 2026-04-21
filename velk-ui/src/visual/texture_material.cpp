@@ -1,11 +1,10 @@
 #include "texture_material.h"
 
-#include "../renderer/default_ui_shaders.h"
-
 #include <velk/api/state.h>
-#include <velk-render/gpu_data.h>
 
 #include <cstring>
+#include <velk-render/gpu_data.h>
+#include <velk-ui/ext/material_shaders.h>
 
 namespace velk::ui::impl {
 
