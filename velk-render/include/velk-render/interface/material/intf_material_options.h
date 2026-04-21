@@ -9,17 +9,6 @@
 
 namespace velk {
 
-class IMaterialOptions;
-
-/// Observer invoked when an IMaterialOptions' state changes. Materials
-/// subscribe to the options they hold, so they can invalidate their
-/// cached pipeline and notify their own observers in turn.
-class IMaterialOptionsObserver : public Interface<IMaterialOptionsObserver>
-{
-public:
-    virtual void on_material_options_changed(IMaterialOptions* opts) = 0;
-};
-
 /// glTF 2.0 alphaMode.
 enum class AlphaMode : uint8_t
 {
@@ -37,6 +26,9 @@ enum class AlphaMode : uint8_t
  *
  * Attach to a material via `IObjectStorage::add_attachment`. Absence
  * means defaults: opaque, cutoff 0.5, back-face culled (single-sided).
+ *
+ * `on_options_changed` fires after any PROP write so dependent
+ * materials can invalidate their cached pipeline.
  */
 class IMaterialOptions : public Interface<IMaterialOptions>
 {
@@ -44,13 +36,9 @@ public:
     VELK_INTERFACE(
         (PROP, AlphaMode, alpha_mode,   AlphaMode::Opaque),
         (PROP, float,     alpha_cutoff, 0.5f),
-        (PROP, CullMode,  cull_mode,    CullMode::Back)
+        (PROP, CullMode,  cull_mode,    CullMode::Back),
+        (EVT,  on_options_changed)
     )
-
-    /// Subscribes an observer. Idempotent (adding twice yields one notification).
-    virtual void add_observer(IMaterialOptionsObserver* observer) = 0;
-    /// Unsubscribes a previously added observer.
-    virtual void remove_observer(IMaterialOptionsObserver* observer) = 0;
 };
 
 } // namespace velk

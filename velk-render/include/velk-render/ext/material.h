@@ -3,6 +3,7 @@
 
 #include <velk/api/velk.h>
 
+#include <velk/api/event.h>
 #include <velk/api/state.h>
 
 #include <velk-render/ext/gpu_resource.h>
@@ -36,21 +37,13 @@ namespace velk::ext {
  *   };
  */
 template <class T, class... Extra>
-class Material : public GpuResource<T, IMaterialInternal, IDrawData, IMaterialOptionsObserver, Extra...>
+class Material : public GpuResource<T, IMaterialInternal, IDrawData, Extra...>
 {
-    using Base = GpuResource<T, IMaterialInternal, IDrawData, IMaterialOptionsObserver, Extra...>;
+    using Base = GpuResource<T, IMaterialInternal, IDrawData, Extra...>;
 
 public:
     uint64_t get_pipeline_handle(IRenderContext&) override { return handle_; }
     void set_pipeline_handle(uint64_t handle) override { handle_ = handle; }
-
-    /// IMaterialOptionsObserver: a subscribed IMaterialOptions had one of
-    /// its PROPs written. The pipeline compiled against the previous state
-    /// is now stale; clear it so the next rebuild_commands recompiles.
-    void on_material_options_changed(IMaterialOptions* /*opts*/) override
-    {
-        handle_ = 0;
-    }
 
     /// Subscribe / unsubscribe to IMaterialOptions attachments so option
     /// writes propagate into pipeline invalidation without polling.
@@ -59,7 +52,7 @@ public:
         auto rv = Base::add_attachment(attachment);
         if (succeeded(rv)) {
             if (auto* opts = interface_cast<IMaterialOptions>(attachment)) {
-                opts->add_observer(this);
+                bind_options_subscription(opts);
             }
         }
         return rv;
@@ -67,11 +60,12 @@ public:
 
     ReturnValue remove_attachment(const IInterface::Ptr& attachment) override
     {
+        bool was_options = interface_cast<IMaterialOptions>(attachment) != nullptr;
         auto rv = Base::remove_attachment(attachment);
-        if (succeeded(rv)) {
-            if (auto* opts = interface_cast<IMaterialOptions>(attachment)) {
-                opts->remove_observer(this);
-            }
+        if (succeeded(rv) && was_options) {
+            constexpr AttachmentQuery q{IMaterialOptions::UID, {}};
+            auto next = this->find_attachment(q, Resolve::Existing);
+            bind_options_subscription(interface_cast<IMaterialOptions>(next));
         }
         return rv;
     }
@@ -205,8 +199,18 @@ protected:
     }
 
 private:
+    void bind_options_subscription(IMaterialOptions* opts)
+    {
+        if (opts) {
+            options_sub_ = ScopedHandler(opts->on_options_changed(), [this]() { handle_ = 0; });
+        } else {
+            options_sub_.reset();
+        }
+    }
+
     uint64_t handle_{};
     ::velk::IProgramDataBuffer::Ptr data_buffer_;
+    ScopedHandler options_sub_;
 };
 
 } // namespace velk::ext
