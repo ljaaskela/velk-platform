@@ -26,6 +26,17 @@ public:
     /** @brief Implicit conversion to the underlying IMaterialOptions pointer. */
     operator IMaterialOptions::Ptr() const { return as_ptr<IMaterialOptions>(); }
 
+    /** @brief Access all material options in one transaction */
+    using SetOptionsFn = void(IMaterialOptions::State&);
+    ::velk::ReturnValue set_options(SetOptionsFn* fn)
+    {
+        if (auto writer = ::velk::write_state<IMaterialOptions>(as<IMaterialOptions>())) {
+            fn(*writer);
+            return ::velk::Success;
+        }
+        return ::velk::Fail;
+    }
+
     /** @brief Alpha handling: Opaque, Mask, or Blend. */
     AlphaMode get_alpha_mode() const
     {

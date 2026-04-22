@@ -15,8 +15,8 @@ struct ShaderParam;
  * @brief Internal interface for configuring a material after creation.
  *
  * Used by factory methods (e.g. IRenderContext::create_shader_material) to
- * inject reflected shader parameters. Pipeline handle storage is handled
- * via IProgram::set_pipeline_handle on the program side.
+ * inject reflected shader parameters and shader sources. Pipeline handle
+ * storage is handled via IProgram::set_pipeline_handle on the program side.
  */
 class IMaterialInternal : public Interface<IMaterialInternal, IMaterial>
 {
@@ -27,6 +27,13 @@ public:
     {
         return ReturnValue::NothingToDo;
     }
+
+    /// Provide the raw GLSL sources for materials that bypass the
+    /// eval-driver (e.g. ShaderMaterial). The renderer will compile the
+    /// pipeline lazily on first draw, reading the current IMaterialOptions
+    /// attachment — so options set between creation and first draw are
+    /// honored. Default implementation does nothing.
+    virtual void set_sources(string_view /*vertex_source*/, string_view /*fragment_source*/) {}
 };
 
 } // namespace velk

@@ -860,13 +860,15 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.render_pass);
 
     // Load render pass (for subsequent passes on the same surface within a frame).
-    // Depth is also preserved here so forward draws after a deferred-composite
-    // depth-blit can test against the deferred depth values.
+    // Color is preserved (LOAD). Depth is cleared because not every path
+    // leading to a load pass populates depth (e.g. RT blit_to_surface) —
+    // keeping CLEAR means the pass is usable whether depth was populated
+    // or not.
     atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     atts[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     if (has_depth) {
-        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        atts[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.load_render_pass);
 

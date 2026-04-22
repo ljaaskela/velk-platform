@@ -2,6 +2,7 @@
 #define VELK_RENDER_API_MATERIAL_MATERIAL_H
 
 #include <velk/api/object.h>
+#include <velk/api/state.h>
 
 #include <velk-render/api/material/material_options.h>
 #include <velk-render/interface/material/intf_material.h>
@@ -25,20 +26,21 @@ public:
     explicit Material(IMaterial::Ptr mat) : Object(as_object(mat)) {}
     operator IMaterial::Ptr() const { return as_ptr<IMaterial>(); }
 
-    /// Returns the attached IMaterialOptions, or an empty wrapper if none.
-    /// Empty reads return glTF-spec defaults; writes on empty are no-ops.
-    MaterialOptions options() const
-    {
-        return MaterialOptions(as_object(find_attachment<IMaterialOptions>()));
-    }
+    /// Returns true if an IMaterialOptions attachment is already present.
+    /// Non-creating; safe to call without side effects.
+    bool has_options() const { return find_attachment<IMaterialOptions>() != nullptr; }
 
-    /// Returns the attached IMaterialOptions, creating one on first call.
-    /// Use when you need to modify pipeline state.
-    MaterialOptions ensure_options()
+    /// Returns the material's IMaterialOptions attachment. Creates one
+    /// on first access, so both reads and writes always work. Use
+    /// has_options() to check for existence without creating.
+    MaterialOptions options()
     {
         return MaterialOptions(
             as_object(find_or_create_attachment<IMaterialOptions>(ClassId::MaterialOptions)));
     }
+
+    /// Write material options as one transaction
+    ::velk::ReturnValue set_options(MaterialOptions::SetOptionsFn* fn) { return options().set_options(fn); }
 };
 
 } // namespace velk

@@ -1,11 +1,11 @@
 #ifndef VELK_RENDER_API_MATERIAL_SHADER_MATERIAL_H
 #define VELK_RENDER_API_MATERIAL_SHADER_MATERIAL_H
 
-#include <velk/api/object.h>
 #include <velk/api/property.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_metadata.h>
 
+#include <velk-render/api/material/material.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/material/intf_shader_material.h>
 #include <velk-render/plugin.h>
@@ -15,20 +15,20 @@ namespace velk {
 /**
  * @brief Convenience wrapper around a ShaderMaterial.
  *
- * Provides ergonomic access to shader input properties:
+ * Inherits Material, so pipeline-state configuration uses the same
+ * options()/has_options() API as every other material:
  *
  *   auto sm = velk::create_shader_material(ctx, frag, vert);
+ *   sm.options().set_depth_test(CompareOp::LessEqual);
  *   sm.input<float>("scale").set_value(8.f);
  *   sm.input<color>("tint").set_value({1, 0, 0, 1});
  */
-class ShaderMaterial : public Object
+class ShaderMaterial : public Material
 {
 public:
     ShaderMaterial() = default;
-    explicit ShaderMaterial(IObject::Ptr obj) : Object(check_object<IShaderMaterial>(obj)) {}
-    explicit ShaderMaterial(IMaterial::Ptr m) : Object(as_object(m)) {}
-
-    operator IMaterial::Ptr() const { return as_ptr<IMaterial>(); }
+    explicit ShaderMaterial(IObject::Ptr obj) : Material(check_object<IShaderMaterial>(obj)) {}
+    explicit ShaderMaterial(IMaterial::Ptr m) : Material(m) {}
 
     /// Returns a typed property accessor for a shader input by name.
     template <class T>

@@ -281,11 +281,10 @@ void DeferredLighter::build_passes(ViewEntry& entry,
     pass.blit_source = entry.deferred_output_tex;
     pass.blit_surface_id = entry.surface ? entry.surface->get_render_target_id() : 0;
     pass.blit_dst_rect = {vp_x, vp_y, vp_w, vp_h};
-    // Copy the G-buffer depth into the surface's depth buffer after the
-    // color blit so forward draws on this surface depth-test against the
-    // deferred scene. Falls back to a no-op in the backend if the surface
-    // has no depth attachment.
-    pass.blit_depth_source_group = entry.gbuffer_group;
+    // NB: forward-on-top-of-deferred depth composition is deferred — if
+    // we want that later, populate pass.blit_depth_source_group and
+    // restore the depth-preserving load_render_pass variant in the VK
+    // backend so it doesn't get re-cleared.
     out_passes.push_back(std::move(pass));
 }
 

@@ -9,6 +9,12 @@
 
 namespace velk::impl {
 
+void ShaderMaterial::set_sources(string_view vertex_source, string_view fragment_source)
+{
+    vertex_source_ = vertex_source;
+    fragment_source_ = fragment_source;
+}
+
 ReturnValue ShaderMaterial::setup_inputs(const vector<ShaderParam>& params)
 {
     params_ = params;

@@ -38,6 +38,12 @@ public:
     /// factor common cases into reusable prefabs.
     virtual string_view get_vertex_src() const = 0;
 
+    /// Full fragment shader source. Non-empty iff this material bypasses
+    /// the eval-driver composition (e.g. ShaderMaterial, which lets the
+    /// user supply a complete fragment). Default is empty; eval-based
+    /// materials leave this empty and rely on get_eval_src() instead.
+    virtual string_view get_fragment_src() const { return {}; }
+
     /// Opt-in: register any shader includes the eval_src depends on
     /// (e.g. `velk_text.glsl`). Called before the first compile.
     virtual void register_eval_includes(IRenderContext& /*ctx*/) const = 0;

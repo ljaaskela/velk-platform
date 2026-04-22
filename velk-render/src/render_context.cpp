@@ -86,6 +86,25 @@ IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& confi
 
     surface->set_depth_format(config.depth);
 
+    // Eagerly create the backend-side swapchain so the backend's default
+    // render pass gets upgraded to match the surface's depth config
+    // before any pipelines are compiled. Otherwise a pipeline compiled
+    // between create_surface() and add_view() would target the initial
+    // depth-less default render pass and be incompatible with the
+    // swapchain's depth-enabled render pass at draw time.
+    if (backend_) {
+        SurfaceDesc desc{};
+        desc.width = config.width;
+        desc.height = config.height;
+        desc.update_rate = config.update_rate;
+        desc.target_fps = config.target_fps;
+        desc.depth = config.depth;
+        uint64_t sid = backend_->create_surface(desc);
+        if (sid != 0) {
+            surface->set_render_target_id(sid);
+        }
+    }
+
     return surface;
 }
 
@@ -298,25 +317,24 @@ void RenderContextImpl::register_shader_include(string_view name, string_view co
 IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_source,
                                                          string_view vertex_source)
 {
-    auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
-    auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
-
-    uint64_t key = create_pipeline(vert, frag);
-    if (!key) {
-        return nullptr;
-    }
-
     auto mat = instance().create<IMaterialInternal>(ClassId::ShaderMaterial);
     if (!mat) {
         return nullptr;
     }
 
-    mat->set_pipeline_handle(key);
+    // Hand over the sources; pipeline compilation is the renderer's job
+    // and happens lazily on first draw — so any IMaterialOptions attached
+    // between now and then is honored, same as every other material.
+    mat->set_sources(vertex_source, fragment_source);
 
-    // Reflect material parameters from the vertex shader SPIR-V
-    const auto& vert_shader = vert ? vert : default_vertex_shader_;
-    if (vert_shader) {
-        auto vert_data = vert_shader->get_data();
+    // Reflect material parameters from the vertex shader SPIR-V for
+    // dynamic-property setup. Compilation hits the shader cache on
+    // second run (inside the renderer's pipeline compile).
+    auto vert = vertex_source.empty()
+                    ? default_vertex_shader_
+                    : compile_shader(vertex_source, ShaderStage::Vertex);
+    if (vert) {
+        auto vert_data = vert->get_data();
         if (!vert_data.empty()) {
             auto params = reflect_material_params(vert_data.begin(), vert_data.size());
             if (!params.empty()) {

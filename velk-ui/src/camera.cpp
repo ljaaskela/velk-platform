@@ -45,9 +45,11 @@ mat4 Camera::get_view_projection(const mat4& world_matrix,
         float n = state->near_clip;
         float fa = state->far_clip;
         // Vulkan clip-space: Z in [0, 1]. Y is left un-flipped because
-        // velk's world Y already points down (matching Vulkan's framebuffer
-        // Y), so CCW world meshes map to CW screen-space as expected by
-        // the backend's VK_FRONT_FACE_CLOCKWISE setting.
+        // velk's world Y points down (matching Vulkan's framebuffer Y
+        // and the 2D UI convention). The world->framebuffer chain
+        // produces a winding inversion for CCW-from-outside meshes,
+        // which the backend accounts for via the default
+        // FrontFace::Clockwise. See design-notes/coordinate_conventions.md.
         proj(0, 0) = f / aspect;
         proj(1, 1) = f;
         proj(2, 2) = -fa / (fa - n);

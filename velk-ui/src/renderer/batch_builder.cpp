@@ -194,27 +194,37 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
                         auto eval_src = mat->get_eval_src();
                         auto vertex_src = mat->get_vertex_src();
                         auto eval_fn = mat->get_eval_fn_name();
+                        auto frag_src = mat->get_fragment_src();
+                        auto po = pipeline_options_from_storage(
+                            interface_cast<IObjectStorage>(prog.get()));
+                        // Topology is taken from the visual's first
+                        // draw entry. Materials are assumed to be used
+                        // with a single mesh topology in their lifetime;
+                        // mixing topologies on one material would need
+                        // per-topology pipeline caching (out of scope).
+                        po.topology = Topology::TriangleList;
+                        if (!vc.entries.empty() && vc.entries.front().mesh) {
+                            po.topology = to_backend_topology(vc.entries.front().mesh->get_topology());
+                        }
+                        uint64_t h = 0;
                         if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
+                            // Eval-driver path: compose the eval body with
+                            // the forward driver template and compile.
                             mat->register_eval_includes(*render_ctx);
                             string frag = compose_eval_fragment(
                                 forward_fragment_driver_template, eval_src, eval_fn,
                                 mat->get_forward_discard_threshold());
-                            auto po = pipeline_options_from_storage(
-                                interface_cast<IObjectStorage>(prog.get()));
-                            // Topology is taken from the visual's first
-                            // draw entry. Materials are assumed to be used
-                            // with a single mesh topology in their lifetime;
-                            // mixing topologies on one material would need
-                            // per-topology pipeline caching (out of scope).
-                            po.topology = Topology::TriangleList;
-                            if (!vc.entries.empty() && vc.entries.front().mesh) {
-                                po.topology = to_backend_topology(vc.entries.front().mesh->get_topology());
-                            }
-                            uint64_t h = render_ctx->compile_pipeline(
+                            h = render_ctx->compile_pipeline(
                                 string_view(frag), vertex_src, 0, 0, po);
-                            if (h) {
-                                prog->set_pipeline_handle(h);
-                            }
+                        } else if (!frag_src.empty() && !vertex_src.empty()) {
+                            // Raw-shader path: the material supplies a full
+                            // fragment source (e.g. ShaderMaterial). No eval
+                            // composition, straight compile.
+                            h = render_ctx->compile_pipeline(
+                                frag_src, vertex_src, 0, 0, po);
+                        }
+                        if (h) {
+                            prog->set_pipeline_handle(h);
                         }
                     }
                     uint64_t handle = prog->get_pipeline_handle(*render_ctx);
