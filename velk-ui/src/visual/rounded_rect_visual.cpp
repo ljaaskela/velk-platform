@@ -34,9 +34,16 @@ bool velk_intersect_rounded_rect(Ray ray, RtShape shape, out RayHit hit)
 constexpr string_view kFragmentSrc = R"(
 #version 450
 
+// The shared element vertex shader writes the full canonical varying
+// set (locations 0..5). Declare all inputs even if unused so the
+// SPIR-V interface matches and the validator doesn't warn about
+// dropped outputs.
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
 layout(location = 2) flat in vec2 v_size;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
+layout(location = 5) flat in uint v_shape_param;
 layout(location = 0) out vec4 frag_color;
 
 float rounded_rect_sdf(vec2 p, vec2 half_size, float radius)

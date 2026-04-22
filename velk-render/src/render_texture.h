@@ -35,10 +35,14 @@ public:
     void set_size(uint32_t w, uint32_t h) { size_ = {w, h}; }
     void set_format(PixelFormat fmt) { format_ = fmt; }
 
+    DepthFormat get_depth_format() const override { return depth_format_; }
+    void set_depth_format(DepthFormat df) override { depth_format_ = df; }
+
 private:
     uint64_t render_target_id_ = 0;
     uvec2 size_{};
     PixelFormat format_ = PixelFormat::RGBA8;
+    DepthFormat depth_format_ = DepthFormat::None;
 };
 
 } // namespace velk

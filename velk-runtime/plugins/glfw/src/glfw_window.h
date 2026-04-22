@@ -28,11 +28,13 @@ public:
     void set_input_dispatcher(ui::IInputDispatcher::Ptr dispatcher);
     void set_pending_update_rate(UpdateRate r) { pending_update_rate_ = r; }
     void set_pending_target_fps(int fps) { pending_target_fps_ = fps; }
+    void set_pending_depth(DepthFormat d) { pending_depth_ = d; }
 
     GLFWwindow* glfw_handle() const { return window_; }
     void* external_handle() const { return external_handle_; }
     UpdateRate pending_update_rate() const { return pending_update_rate_; }
     int pending_target_fps() const { return pending_target_fps_; }
+    DepthFormat pending_depth() const { return pending_depth_; }
 
     IWindowSurface::Ptr surface() const override;
     ui::IInputDispatcher& input() const override;
@@ -52,6 +54,7 @@ private:
     ui::IInputDispatcher::Ptr input_;
     UpdateRate pending_update_rate_ = UpdateRate::VSync;
     int pending_target_fps_ = 60;
+    DepthFormat pending_depth_ = DepthFormat::None;
 };
 
 } // namespace velk::impl

@@ -37,6 +37,7 @@ layout(location = 1) out vec2 v_local_uv;
 layout(location = 2) flat out vec2 v_size;
 layout(location = 3) out vec3 v_world_pos;
 layout(location = 4) out vec3 v_world_normal;
+layout(location = 5) flat out uint v_shape_param;
 
 void main()
 {

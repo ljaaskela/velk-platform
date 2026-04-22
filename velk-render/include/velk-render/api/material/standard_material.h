@@ -104,6 +104,13 @@ inline StandardMaterial create_standard(color base = color{1.f, 1.f, 1.f, 1.f}, 
     m.set_base_color(base);
     m.set_metallic(metallic);
     m.set_roughness(roughness);
+    // Ensure an IMaterialOptions attachment exists so the batch
+    // builder picks up the 3D-oriented interface defaults (depth
+    // test + write on, back-face cull) when compiling pipelines.
+    // Without this, materials without explicit options would fall
+    // back to the PipelineOptions struct defaults, which are
+    // 2D-safe (depth off) and render 3D meshes in submission order.
+    m.ensure_options();
     return m;
 }
 

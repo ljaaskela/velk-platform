@@ -41,6 +41,9 @@ public:
 
     // IAnalyticShape
     uint32_t get_shape_kind() const override { return 2; }
+
+private:
+    mutable IMesh::Ptr mesh_;
 };
 
 } // namespace velk::ui

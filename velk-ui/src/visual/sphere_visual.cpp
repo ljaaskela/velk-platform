@@ -2,8 +2,11 @@
 
 #include "primitive_shaders.h"
 
+#include <velk/api/attachment.h>
 #include <velk/api/state.h>
 #include <velk-render/interface/intf_mesh.h>
+#include <velk-render/interface/material/intf_material_options.h>
+#include <velk-render/plugin.h>
 #include <velk-ui/instance_types.h>
 
 namespace velk::ui {
@@ -27,9 +30,19 @@ vector<DrawEntry> SphereVisual::get_draw_entries(const ::velk::size& bounds)
 
 ::velk::IMesh::Ptr SphereVisual::get_mesh(::velk::IRenderContext& ctx) const
 {
+    if (mesh_) {
+        return mesh_;
+    }
     auto ps = read_state<::velk::IPrimitiveShape>(this);
     uint32_t subs = ps ? ps->subdivisions : 0;
-    return ctx.get_mesh_builder().get_sphere(subs);
+    mesh_ = ctx.get_mesh_builder().get_sphere(subs);
+    // Attach an IMaterialOptions on first use so the batch builder's
+    // raster-shader path can read depth/cull/blend from it. The
+    // IMaterialOptions interface defaults (LessEqual depth test, depth
+    // write on, backface cull) are correct for a closed 3D mesh.
+    ::velk::find_or_create_attachment<::velk::IMaterialOptions>(const_cast<SphereVisual*>(this),
+                                                                ::velk::ClassId::MaterialOptions);
+    return mesh_;
 }
 
 ::velk::ShaderSource SphereVisual::get_raster_source(::velk::IRasterShader::Target t) const

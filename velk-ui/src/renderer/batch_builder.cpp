@@ -30,29 +30,29 @@ uint64_t make_batch_key(uint64_t pipeline, uint64_t mesh, uint64_t texture)
     return (pipeline * 31 + mesh) * 31 + texture;
 }
 
-// Reads pipeline-state hints from the material's attached IMaterialOptions.
-// Absence means legacy defaults: no culling, alpha blending on.
-struct MaterialPipelineState
+// Builds PipelineOptions from an attached IMaterialOptions. Storage is
+// either the material (IProgram) or, when there is no material, the
+// visual itself — so visuals like CubeVisual that attach their own
+// options still drive pipeline state. If no options are attached,
+// the PipelineOptions defaults (2D-safe: no cull, alpha blend, no depth)
+// apply; topology must still be set explicitly by the caller.
+velk::PipelineOptions pipeline_options_from_storage(velk::IObjectStorage* storage)
 {
-    velk::CullMode cull = velk::CullMode::None;
-    velk::BlendMode blend = velk::BlendMode::Alpha;
-};
-
-MaterialPipelineState material_pipeline_state(velk::IProgram* prog)
-{
-    MaterialPipelineState s{};
-    auto* storage = interface_cast<velk::IObjectStorage>(prog);
-    if (!storage) return s;
+    velk::PipelineOptions o{};
+    if (!storage) return o;
     auto opts = storage->template find_attachment<velk::IMaterialOptions>();
-    if (!opts) return s;
+    if (!opts) return o;
     auto r = velk::read_state<velk::IMaterialOptions>(opts.get());
-    if (!r) return s;
-    s.cull = r->cull_mode;
+    if (!r) return o;
+    o.cull_mode = r->cull_mode;
+    o.front_face = r->front_face;
     // Mask and Opaque both write opaquely; Blend alpha-blends.
-    s.blend = (r->alpha_mode == velk::AlphaMode::Blend)
-                  ? velk::BlendMode::Alpha
-                  : velk::BlendMode::Opaque;
-    return s;
+    o.blend_mode = (r->alpha_mode == velk::AlphaMode::Blend)
+                       ? velk::BlendMode::Alpha
+                       : velk::BlendMode::Opaque;
+    o.depth_test = r->depth_test;
+    o.depth_write = r->depth_write;
+    return o;
 }
 
 velk::Topology to_backend_topology(velk::MeshTopology mt)
@@ -151,23 +151,12 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
                 if (key != 0 && render_ctx->pipeline_map().find(key) == render_ctx->pipeline_map().end()) {
                     auto src = rs->get_raster_source(IRasterShader::Target::Forward);
                     ::velk::Topology topo = ::velk::Topology::TriangleStrip;
-                    ::velk::CullMode cull = ::velk::CullMode::None;
                     if (!vc.entries.empty() && vc.entries.front().mesh) {
-                        auto* m = vc.entries.front().mesh.get();
-                        topo = to_backend_topology(m->get_topology());
-                        // Closed 3D meshes need backface culling: the
-                        // backend has no depth buffer yet, so without
-                        // culling, back faces drawn later overwrite
-                        // front faces in submission order ("inside-out"
-                        // look). 2D unit-quad draws stay CullMode::None
-                        // because single-sided quads have no back face
-                        // to worry about.
-                        if (topo == ::velk::Topology::TriangleList) {
-                            cull = ::velk::CullMode::Back;
-                        }
+                        topo = to_backend_topology(vc.entries.front().mesh->get_topology());
                     }
-                    render_ctx->compile_pipeline(src.fragment, src.vertex, key, 0,
-                                                 cull, ::velk::BlendMode::Alpha, topo);
+                    auto po = pipeline_options_from_storage(interface_cast<IObjectStorage>(visual));
+                    po.topology = topo;
+                    render_ctx->compile_pipeline(src.fragment, src.vertex, key, 0, po);
                 }
             }
         }
@@ -210,18 +199,19 @@ void BatchBuilder::rebuild_commands(IElement* element, IGpuResourceObserver* obs
                             string frag = compose_eval_fragment(
                                 forward_fragment_driver_template, eval_src, eval_fn,
                                 mat->get_forward_discard_threshold());
-                            auto ps = material_pipeline_state(prog.get());
+                            auto po = pipeline_options_from_storage(
+                                interface_cast<IObjectStorage>(prog.get()));
                             // Topology is taken from the visual's first
                             // draw entry. Materials are assumed to be used
                             // with a single mesh topology in their lifetime;
                             // mixing topologies on one material would need
                             // per-topology pipeline caching (out of scope).
-                            Topology topo = Topology::TriangleList;
+                            po.topology = Topology::TriangleList;
                             if (!vc.entries.empty() && vc.entries.front().mesh) {
-                                topo = to_backend_topology(vc.entries.front().mesh->get_topology());
+                                po.topology = to_backend_topology(vc.entries.front().mesh->get_topology());
                             }
                             uint64_t h = render_ctx->compile_pipeline(
-                                string_view(frag), vertex_src, 0, 0, ps.cull, ps.blend, topo);
+                                string_view(frag), vertex_src, 0, 0, po);
                             if (h) {
                                 prog->set_pipeline_handle(h);
                             }
@@ -700,16 +690,11 @@ void BatchBuilder::build_gbuffer_draw_calls(const vector<Batch>& batches,
                 composed.append(string_view("void velk_visual_discard() {}\n", 30));
             }
 
-            auto ps = material_pipeline_state(batch.material.get());
-            Topology topo = to_backend_topology(mesh->get_topology());
-            // Same rationale as the forward path: closed 3D meshes
-            // need backface culling because there's no depth buffer.
-            CullMode cull = ps.cull;
-            if (!batch.material && topo == Topology::TriangleList) {
-                cull = CullMode::Back;
-            }
+            auto po = pipeline_options_from_storage(
+                interface_cast<IObjectStorage>(batch.material.get()));
+            po.topology = to_backend_topology(mesh->get_topology());
             gpid = render_ctx->compile_gbuffer_pipeline(
-                string_view(composed), vsrc, gbuffer_key, target_group, cull, topo);
+                string_view(composed), vsrc, gbuffer_key, target_group, po);
         }
         if (gpid == 0) {
             continue;

@@ -44,11 +44,15 @@ mat4 Camera::get_view_projection(const mat4& world_matrix,
         float aspect = width / height;
         float n = state->near_clip;
         float fa = state->far_clip;
+        // Vulkan clip-space: Z in [0, 1]. Y is left un-flipped because
+        // velk's world Y already points down (matching Vulkan's framebuffer
+        // Y), so CCW world meshes map to CW screen-space as expected by
+        // the backend's VK_FRONT_FACE_CLOCKWISE setting.
         proj(0, 0) = f / aspect;
         proj(1, 1) = f;
-        proj(2, 2) = -(fa + n) / (fa - n);
+        proj(2, 2) = -fa / (fa - n);
         proj(3, 2) = -1.f;
-        proj(2, 3) = -(2.f * fa * n) / (fa - n);
+        proj(2, 3) = -(n * fa) / (fa - n);
     }
 
     return proj * view;

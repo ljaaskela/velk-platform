@@ -88,6 +88,12 @@ struct RenderPass
     uint64_t blit_surface_id = 0;
     TextureId blit_source = 0;
     rect blit_dst_rect{};
+
+    // Optional: after the color blit, copy this group's depth attachment
+    // into blit_surface_id's depth buffer. Zero = no depth blit. Used by
+    // the deferred compositor so forward draws on the surface can
+    // depth-test against the deferred scene.
+    RenderTargetGroup blit_depth_source_group = 0;
 };
 
 /**

@@ -222,6 +222,8 @@ void VkBackend::shutdown()
         if (gd.framebuffer)       vkDestroyFramebuffer(device_, gd.framebuffer, nullptr);
         if (gd.render_pass)       vkDestroyRenderPass(device_, gd.render_pass, nullptr);
         if (gd.load_render_pass)  vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
+        if (gd.depth_view)        vkDestroyImageView(device_, gd.depth_view, nullptr);
+        if (gd.depth_image)       vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
         for (auto a : gd.attachments) {
             auto tit = textures_.find(a);
             if (tit == textures_.end()) continue;
@@ -649,6 +651,10 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
             sd.width = desc.width;
             sd.height = desc.height;
             sd.update_rate = desc.update_rate;
+            sd.depth_format = desc.depth;
+            sd.depth_vk_format = (desc.depth == DepthFormat::Default)
+                                     ? VK_FORMAT_D32_SFLOAT
+                                     : VK_FORMAT_UNDEFINED;
             if (!create_swapchain(sd)) {
                 return 0;
             }
@@ -756,37 +762,96 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
         vkCreateImageView(device_, &view_ci, nullptr, &sd.image_views[i]);
     }
 
+    // Depth images (one per swapchain image so frames-in-flight don't race).
+    const bool has_depth = sd.depth_format != DepthFormat::None;
+    if (has_depth) {
+        sd.depth_images.resize(img_count, VK_NULL_HANDLE);
+        sd.depth_views.resize(img_count, VK_NULL_HANDLE);
+        sd.depth_allocations.resize(img_count, VK_NULL_HANDLE);
+
+        for (uint32_t i = 0; i < img_count; ++i) {
+            VkImageCreateInfo ici{};
+            ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            ici.imageType = VK_IMAGE_TYPE_2D;
+            ici.format = sd.depth_vk_format;
+            ici.extent = { extent.width, extent.height, 1 };
+            ici.mipLevels = 1;
+            ici.arrayLayers = 1;
+            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_DST_BIT; // target of deferred-composite depth blit
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+            vmaCreateImage(allocator_, &ici, &aci,
+                           &sd.depth_images[i], &sd.depth_allocations[i], nullptr);
+
+            VkImageViewCreateInfo dv_ci{};
+            dv_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            dv_ci.image = sd.depth_images[i];
+            dv_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            dv_ci.format = sd.depth_vk_format;
+            dv_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            dv_ci.subresourceRange.levelCount = 1;
+            dv_ci.subresourceRange.layerCount = 1;
+            vkCreateImageView(device_, &dv_ci, nullptr, &sd.depth_views[i]);
+        }
+    }
+
     // Render pass
-    VkAttachmentDescription color_att{};
-    color_att.format = sd.image_format;
-    color_att.samples = VK_SAMPLE_COUNT_1_BIT;
-    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color_att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentDescription atts[2]{};
+    atts[0].format = sd.image_format;
+    atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    atts[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentReference color_ref{};
     color_ref.attachment = 0;
     color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+    VkAttachmentReference depth_ref{};
+    if (has_depth) {
+        atts[1].format = sd.depth_vk_format;
+        atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        depth_ref.attachment = 1;
+        depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color_ref;
+    subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
 
     VkSubpassDependency dep{};
     dep.srcSubpass = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                        | (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
 
     VkRenderPassCreateInfo rp_ci{};
     rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_ci.attachmentCount = 1;
-    rp_ci.pAttachments = &color_att;
+    rp_ci.attachmentCount = has_depth ? 2u : 1u;
+    rp_ci.pAttachments = atts;
     rp_ci.subpassCount = 1;
     rp_ci.pSubpasses = &subpass;
     rp_ci.dependencyCount = 1;
@@ -794,24 +859,54 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
 
     vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.render_pass);
 
-    // Load render pass (for subsequent passes on the same surface within a frame)
-    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    color_att.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // Load render pass (for subsequent passes on the same surface within a frame).
+    // Depth is also preserved here so forward draws after a deferred-composite
+    // depth-blit can test against the deferred depth values.
+    atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    atts[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (has_depth) {
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
     vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.load_render_pass);
 
     // Framebuffers
     sd.framebuffers.resize(img_count);
     for (uint32_t i = 0; i < img_count; ++i) {
+        VkImageView fb_atts[2] = { sd.image_views[i],
+                                   has_depth ? sd.depth_views[i] : VK_NULL_HANDLE };
+
         VkFramebufferCreateInfo fb_ci{};
         fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fb_ci.renderPass = sd.render_pass;
-        fb_ci.attachmentCount = 1;
-        fb_ci.pAttachments = &sd.image_views[i];
+        fb_ci.attachmentCount = has_depth ? 2u : 1u;
+        fb_ci.pAttachments = fb_atts;
         fb_ci.width = extent.width;
         fb_ci.height = extent.height;
         fb_ci.layers = 1;
 
         vkCreateFramebuffer(device_, &fb_ci, nullptr, &sd.framebuffers[i]);
+    }
+
+    // If this is the first surface with depth and the default render pass
+    // has no depth, recreate the default render pass with depth so
+    // pipelines compiled against it remain render-pass-compatible with
+    // this surface's depth-enabled render pass.
+    if (has_depth && default_depth_format_ == VK_FORMAT_UNDEFINED) {
+        if (default_render_pass_) {
+            vkDestroyRenderPass(device_, default_render_pass_, nullptr);
+            default_render_pass_ = VK_NULL_HANDLE;
+        }
+        default_depth_format_ = sd.depth_vk_format;
+
+        VkAttachmentDescription datts[2] = { atts[0], atts[1] };
+        datts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        datts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        datts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        datts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkRenderPassCreateInfo drp_ci = rp_ci;
+        drp_ci.pAttachments = datts;
+        vkCreateRenderPass(device_, &drp_ci, nullptr, &default_render_pass_);
     }
 
     return true;
@@ -834,6 +929,18 @@ void VkBackend::destroy_swapchain(SurfaceData& sd)
     if (sd.swapchain) {
         vkDestroySwapchainKHR(device_, sd.swapchain, nullptr);
     }
+
+    for (size_t i = 0; i < sd.depth_views.size(); ++i) {
+        if (sd.depth_views[i]) {
+            vkDestroyImageView(device_, sd.depth_views[i], nullptr);
+        }
+        if (sd.depth_images[i] && sd.depth_allocations[i]) {
+            vmaDestroyImage(allocator_, sd.depth_images[i], sd.depth_allocations[i]);
+        }
+    }
+    sd.depth_views.clear();
+    sd.depth_images.clear();
+    sd.depth_allocations.clear();
 
     sd.framebuffers.clear();
     sd.image_views.clear();
@@ -1316,7 +1423,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{};
     input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    input_assembly.topology = (desc.topology == Topology::TriangleStrip)
+    input_assembly.topology = (desc.options.topology == Topology::TriangleStrip)
         ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
         : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
@@ -1329,20 +1436,21 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
-    switch (desc.cull_mode) {
+    switch (desc.options.cull_mode) {
     case CullMode::None:  rasterizer.cullMode = VK_CULL_MODE_NONE;     break;
     case CullMode::Back:  rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; break;
     case CullMode::Front: rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; break;
     }
-    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-
+    rasterizer.frontFace = (desc.options.front_face == FrontFace::Clockwise)
+        ? VK_FRONT_FACE_CLOCKWISE
+        : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     // Blending: MRT render passes (G-buffer) always write opaque; for
     // single-attachment passes, honor the material's requested blend mode.
-    bool blend_enabled = (target_group == 0) && (desc.blend_mode == BlendMode::Alpha);
+    bool blend_enabled = (target_group == 0) && (desc.options.blend_mode == BlendMode::Alpha);
 
     VkPipelineColorBlendAttachmentState blend_att{};
     blend_att.blendEnable = blend_enabled ? VK_TRUE : VK_FALSE;
@@ -1370,6 +1478,41 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     dynamic.dynamicStateCount = 2;
     dynamic.pDynamicStates = dynamic_states;
 
+    // Depth-stencil state. Only attached when the target render pass
+    // actually has a depth attachment. For target_group != 0 the group
+    // carries its own depth_vk_format; for the swapchain path
+    // default_depth_format_ is populated by create_swapchain.
+    // A material with depth_test=Disabled drawn into a depth-enabled pass
+    // silently has depth testing off — this is the "(a) ignore" edge case.
+    bool target_has_depth = false;
+    if (target_group == 0) {
+        target_has_depth = (default_depth_format_ != VK_FORMAT_UNDEFINED);
+    } else {
+        auto git = render_target_groups_.find(target_group);
+        target_has_depth = (git != render_target_groups_.end())
+                           && (git->second.depth_vk_format != VK_FORMAT_UNDEFINED);
+    }
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+    if (target_has_depth) {
+        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depth_stencil.depthTestEnable = (desc.options.depth_test != CompareOp::Disabled) ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthWriteEnable = desc.options.depth_write ? VK_TRUE : VK_FALSE;
+        switch (desc.options.depth_test) {
+        case CompareOp::Never:        depth_stencil.depthCompareOp = VK_COMPARE_OP_NEVER;            break;
+        case CompareOp::Less:         depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;             break;
+        case CompareOp::Equal:        depth_stencil.depthCompareOp = VK_COMPARE_OP_EQUAL;            break;
+        case CompareOp::LessEqual:    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;    break;
+        case CompareOp::Greater:      depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER;          break;
+        case CompareOp::NotEqual:     depth_stencil.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;        break;
+        case CompareOp::GreaterEqual: depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+        case CompareOp::Always:       depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
+        case CompareOp::Disabled:     depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
+        }
+        depth_stencil.minDepthBounds = 0.0f;
+        depth_stencil.maxDepthBounds = 1.0f;
+    }
+
     VkGraphicsPipelineCreateInfo pipeline_ci{};
     pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipeline_ci.stageCount = 2;
@@ -1379,6 +1522,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     pipeline_ci.pViewportState = &viewport_state;
     pipeline_ci.pRasterizationState = &rasterizer;
     pipeline_ci.pMultisampleState = &multisample;
+    pipeline_ci.pDepthStencilState = target_has_depth ? &depth_stencil : nullptr;
     pipeline_ci.pColorBlendState = &blend;
     pipeline_ci.pDynamicState = &dynamic;
     pipeline_ci.layout = pipeline_layout_;
@@ -1505,6 +1649,7 @@ void VkBackend::begin_pass(uint64_t target_id)
     VkRenderPass rp = VK_NULL_HANDLE;
     VkFramebuffer fb = VK_NULL_HANDLE;
     uint32_t group_attachment_count = 0;
+    bool target_has_depth = false;
 
     // MRT group dispatch: high bit set => RenderTargetGroup handle.
     if (is_render_target_group(target_id)) {
@@ -1524,6 +1669,7 @@ void VkBackend::begin_pass(uint64_t target_id)
         current_target_width_ = gd.width;
         current_target_height_ = gd.height;
         group_attachment_count = static_cast<uint32_t>(gd.attachments.size());
+        const bool group_has_depth = gd.depth_vk_format != VK_FORMAT_UNDEFINED;
 
         if (!already_cleared) {
             cleared_render_target_groups_.push_back(target_id);
@@ -1536,13 +1682,19 @@ void VkBackend::begin_pass(uint64_t target_id)
         rp_begin.renderArea.extent = {static_cast<uint32_t>(current_target_width_),
                                       static_cast<uint32_t>(current_target_height_)};
 
-        // One zero-clear per attachment — the CLEAR render pass needs
-        // one VkClearValue per VK_ATTACHMENT_LOAD_OP_CLEAR attachment.
-        vector<VkClearValue> clear_values(group_attachment_count);
-        for (auto& cv : clear_values) {
-            cv.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        // One zero-clear per color attachment, plus one depth clear if
+        // the group has a depth attachment. The LOAD variant ignores
+        // color clear values (loadOp=LOAD) but still clears depth, so
+        // the array must be sized for the worst case.
+        const uint32_t clear_count = group_attachment_count + (group_has_depth ? 1u : 0u);
+        vector<VkClearValue> clear_values(clear_count);
+        for (uint32_t i = 0; i < group_attachment_count; ++i) {
+            clear_values[i].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
         }
-        rp_begin.clearValueCount = group_attachment_count;
+        if (group_has_depth) {
+            clear_values[group_attachment_count].depthStencil = {1.0f, 0};
+        }
+        rp_begin.clearValueCount = clear_count;
         rp_begin.pClearValues = clear_values.data();
 
         vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
@@ -1584,6 +1736,7 @@ void VkBackend::begin_pass(uint64_t target_id)
         fb = sd.framebuffers[sd.image_index];
         current_target_width_ = sd.width;
         current_target_height_ = sd.height;
+        target_has_depth = (sd.depth_format != DepthFormat::None);
         surface_has_clear_ = true;
     } else {
         // Try texture render target
@@ -1619,10 +1772,11 @@ void VkBackend::begin_pass(uint64_t target_id)
     rp_begin.renderArea.extent = {static_cast<uint32_t>(current_target_width_),
                                   static_cast<uint32_t>(current_target_height_)};
 
-    VkClearValue clear_value{};
-    clear_value.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-    rp_begin.clearValueCount = 1;
-    rp_begin.pClearValues = &clear_value;
+    VkClearValue clear_values[2]{};
+    clear_values[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clear_values[1].depthStencil = {1.0f, 0};
+    rp_begin.clearValueCount = target_has_depth ? 2u : 1u;
+    rp_begin.pClearValues = clear_values;
 
     vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1884,6 +2038,145 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t surface_id, rect dst_
     surface_has_clear_ = true;
 }
 
+void VkBackend::blit_group_depth_to_surface(RenderTargetGroup src_group,
+                                            uint64_t surface_id,
+                                            rect dst_rect)
+{
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    auto sit = surfaces_.find(surface_id);
+    if (sit == surfaces_.end()) return;
+    auto& sd = sit->second;
+    if (sd.depth_format == DepthFormat::None) return;
+
+    auto git = render_target_groups_.find(src_group);
+    if (git == render_target_groups_.end()) return;
+    auto& gd = git->second;
+    if (gd.depth_vk_format == VK_FORMAT_UNDEFINED) return;
+
+    // Acquire swapchain image if not already this frame. This mirrors
+    // blit_to_surface — typically the caller runs blit_to_surface first
+    // and we just reuse sd.image_index.
+    if (present_surface_id_ != surface_id) {
+        present_surface_id_ = surface_id;
+        present_acquire_sem_idx_ = acquire_semaphore_index_;
+        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+        VkResult result = vkAcquireNextImageKHR(
+            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            present_surface_id_ = 0;
+            return;
+        }
+    }
+
+    VkImage dst_image = sd.depth_images[sd.image_index];
+
+    // Source depth is currently in DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    // (finalLayout of the group's render pass). Destination depth is
+    // in UNDEFINED (first use this frame) — we don't care about
+    // previous content because we're overwriting it.
+    VkImageMemoryBarrier to_src{};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = gd.depth_image;
+    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    to_src.subresourceRange.levelCount = 1;
+    to_src.subresourceRange.layerCount = 1;
+    to_src.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst_image;
+    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    to_dst.subresourceRange.levelCount = 1;
+    to_dst.subresourceRange.layerCount = 1;
+    to_dst.srcAccessMask = 0;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageMemoryBarrier pre[2] = {to_src, to_dst};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, pre);
+
+    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
+    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
+    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
+    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
+    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
+        dx0 = 0;
+        dy0 = 0;
+        dx1 = sd.width;
+        dy1 = sd.height;
+    }
+
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[1] = {gd.width, gd.height, 1};
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[0] = {dx0, dy0, 0};
+    blit.dstOffsets[1] = {dx1, dy1, 1};
+
+    // Depth must blit with NEAREST — LINEAR is not supported for
+    // depth/stencil aspect on most implementations.
+    vkCmdBlitImage(sync.command_buffer,
+                   gd.depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst_image,      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_NEAREST);
+
+    // Source back to DEPTH_STENCIL_ATTACHMENT_OPTIMAL for reuse next frame.
+    VkImageMemoryBarrier src_back{};
+    src_back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    src_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    src_back.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    src_back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    src_back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    src_back.image = gd.depth_image;
+    src_back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    src_back.subresourceRange.levelCount = 1;
+    src_back.subresourceRange.layerCount = 1;
+    src_back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    src_back.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    // Destination to DEPTH_STENCIL_ATTACHMENT_OPTIMAL so the surface's
+    // load render pass (initialLayout=DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    // loadOp=LOAD) can preserve the blitted depth for forward draws.
+    VkImageMemoryBarrier dst_back{};
+    dst_back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    dst_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    dst_back.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    dst_back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dst_back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dst_back.image = dst_image;
+    dst_back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    dst_back.subresourceRange.levelCount = 1;
+    dst_back.subresourceRange.layerCount = 1;
+    dst_back.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dst_back.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    VkImageMemoryBarrier post[2] = {src_back, dst_back};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, post);
+
+    // If a later begin_pass runs on this surface, it should preserve the
+    // color we blitted and the depth we just blitted — use load_render_pass.
+    surface_has_clear_ = true;
+}
+
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
 {
     switch (stage) {
@@ -2058,7 +2351,7 @@ void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkIma
 }
 
 RenderTargetGroup VkBackend::create_render_target_group(
-    array_view<const PixelFormat> formats, int width, int height)
+    array_view<const PixelFormat> formats, int width, int height, DepthFormat depth)
 {
     if (formats.size() == 0 || width <= 0 || height <= 0) {
         return 0;
@@ -2067,6 +2360,9 @@ RenderTargetGroup VkBackend::create_render_target_group(
     RenderTargetGroupData gd{};
     gd.width = width;
     gd.height = height;
+    gd.depth_vk_format = (depth == DepthFormat::Default)
+                             ? VK_FORMAT_D32_SFLOAT
+                             : VK_FORMAT_UNDEFINED;
     gd.attachments.reserve(formats.size());
     gd.vk_formats.reserve(formats.size());
 
@@ -2099,11 +2395,46 @@ RenderTargetGroup VkBackend::create_render_target_group(
         gd.vk_formats.push_back(vk_f);
     }
 
-    // Build the multi-attachment render pass. One subpass, all attachments
-    // are color attachments, no depth yet (added in a later milestone).
-    vector<VkAttachmentDescription> atts(formats.size());
-    vector<VkAttachmentReference> refs(formats.size());
-    for (size_t i = 0; i < formats.size(); ++i) {
+    // Allocate depth image for the group when requested. One image shared
+    // by both the CLEAR and LOAD render passes (depth is ephemeral — each
+    // pass clears it at begin).
+    const bool has_depth = gd.depth_vk_format != VK_FORMAT_UNDEFINED;
+    if (has_depth) {
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = gd.depth_vk_format;
+        ici.extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // blit to surface depth for forward-over-deferred
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        vmaCreateImage(allocator_, &ici, &aci, &gd.depth_image, &gd.depth_allocation, nullptr);
+
+        VkImageViewCreateInfo dv_ci{};
+        dv_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        dv_ci.image = gd.depth_image;
+        dv_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        dv_ci.format = gd.depth_vk_format;
+        dv_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        dv_ci.subresourceRange.levelCount = 1;
+        dv_ci.subresourceRange.layerCount = 1;
+        vkCreateImageView(device_, &dv_ci, nullptr, &gd.depth_view);
+    }
+
+    // Build the multi-attachment render pass. All color attachments plus
+    // an optional depth attachment (when has_depth).
+    const size_t n_color = formats.size();
+    const size_t n_atts = n_color + (has_depth ? 1 : 0);
+    vector<VkAttachmentDescription> atts(n_atts);
+    vector<VkAttachmentReference> refs(n_color);
+    for (size_t i = 0; i < n_color; ++i) {
         atts[i] = {};
         atts[i].format = gd.vk_formats[i];
         atts[i].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2117,17 +2448,37 @@ RenderTargetGroup VkBackend::create_render_target_group(
         refs[i].attachment = static_cast<uint32_t>(i);
         refs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
+    VkAttachmentReference depth_ref{};
+    if (has_depth) {
+        auto& d = atts[n_color];
+        d = {};
+        d.format = gd.depth_vk_format;
+        d.samples = VK_SAMPLE_COUNT_1_BIT;
+        d.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        d.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        depth_ref.attachment = static_cast<uint32_t>(n_color);
+        depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = static_cast<uint32_t>(refs.size());
     subpass.pColorAttachments = refs.data();
+    subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
 
     VkSubpassDependency dep{};
     dep.srcSubpass = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                        | (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
 
     VkRenderPassCreateInfo rp_ci{};
     rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2138,25 +2489,36 @@ RenderTargetGroup VkBackend::create_render_target_group(
     rp_ci.dependencyCount = 1;
     rp_ci.pDependencies = &dep;
 
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &gd.render_pass) != VK_SUCCESS) {
+    auto cleanup_on_fail = [&]() {
+        if (gd.depth_view)  vkDestroyImageView(device_, gd.depth_view, nullptr);
+        if (gd.depth_image) vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
         for (auto a : gd.attachments) destroy_texture(a);
+    };
+
+    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &gd.render_pass) != VK_SUCCESS) {
+        cleanup_on_fail();
         return 0;
     }
-    // LOAD variant for re-entry in the same frame.
-    for (auto& a : atts) {
-        a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // LOAD variant for re-entry in the same frame. Color attachments
+    // preserve; depth still clears (deferred passes treat depth as
+    // ephemeral per pass).
+    for (size_t i = 0; i < n_color; ++i) {
+        atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        atts[i].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     if (vkCreateRenderPass(device_, &rp_ci, nullptr, &gd.load_render_pass) != VK_SUCCESS) {
         vkDestroyRenderPass(device_, gd.render_pass, nullptr);
-        for (auto a : gd.attachments) destroy_texture(a);
+        cleanup_on_fail();
         return 0;
     }
 
-    // Framebuffer binds all N attachment views in declaration order.
-    vector<VkImageView> views(formats.size());
-    for (size_t i = 0; i < formats.size(); ++i) {
+    // Framebuffer binds all N color attachment views + optional depth view.
+    vector<VkImageView> views(n_atts);
+    for (size_t i = 0; i < n_color; ++i) {
         views[i] = textures_[gd.attachments[i]].view;
+    }
+    if (has_depth) {
+        views[n_color] = gd.depth_view;
     }
     VkFramebufferCreateInfo fb_ci{};
     fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -2170,7 +2532,7 @@ RenderTargetGroup VkBackend::create_render_target_group(
     if (vkCreateFramebuffer(device_, &fb_ci, nullptr, &gd.framebuffer) != VK_SUCCESS) {
         vkDestroyRenderPass(device_, gd.render_pass, nullptr);
         vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
-        for (auto a : gd.attachments) destroy_texture(a);
+        cleanup_on_fail();
         return 0;
     }
 
@@ -2187,6 +2549,8 @@ void VkBackend::destroy_render_target_group(RenderTargetGroup group)
     if (gd.framebuffer)       vkDestroyFramebuffer(device_, gd.framebuffer, nullptr);
     if (gd.render_pass)       vkDestroyRenderPass(device_, gd.render_pass, nullptr);
     if (gd.load_render_pass)  vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
+    if (gd.depth_view)        vkDestroyImageView(device_, gd.depth_view, nullptr);
+    if (gd.depth_image)       vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
     for (auto a : gd.attachments) destroy_texture(a);
     render_target_groups_.erase(it);
 }

@@ -27,6 +27,18 @@ public:
 
     /** @brief Sets the backend handle. Called by the renderer after creating the backend resource. */
     virtual void set_render_target_id(uint64_t id) = 0;
+
+    /**
+     * @brief Returns the depth attachment format of this target.
+     *
+     * DepthFormat::None means the target has no depth attachment. The backend
+     * uses this to decide whether to wire depth state on pipelines and to
+     * clear depth at pass begin.
+     */
+    virtual DepthFormat get_depth_format() const { return DepthFormat::None; }
+
+    /** @brief Sets the depth attachment format. Called during target creation. */
+    virtual void set_depth_format(DepthFormat /*df*/) {}
 };
 
 /**

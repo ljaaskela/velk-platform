@@ -25,6 +25,7 @@ struct WindowConfig
     bool resizable{true};                       ///< Whether the user can resize the window.
     UpdateRate update_rate{UpdateRate::VSync};  ///< Surface pacing mode (VSync, Unlimited, or Targeted).
     uint32_t target_fps{60};                    ///< Target framerate for UpdateRate::Targeted
+    DepthFormat depth{DepthFormat::None};       ///< Depth attachment. None for flat UI, Default for 3D scenes.
 };
 
 /**

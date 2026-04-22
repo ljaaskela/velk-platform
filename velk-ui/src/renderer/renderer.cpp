@@ -162,6 +162,9 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurfac
             desc.height = state->size.y;
             desc.update_rate = state->update_rate;
             desc.target_fps = state->target_fps;
+            if (auto* rt = interface_cast<IRenderTarget>(surface)) {
+                desc.depth = rt->get_depth_format();
+            }
             uint64_t sid = backend_->create_surface(desc);
             if (auto* rt = interface_cast<IRenderTarget>(surface)) {
                 rt->set_render_target_id(sid);
@@ -690,6 +693,10 @@ void Renderer::present(Frame frame)
                 }
                 backend_->dispatch({&pass.compute, 1});
                 backend_->blit_to_surface(pass.blit_source, pass.blit_surface_id, pass.blit_dst_rect);
+                if (pass.blit_depth_source_group != 0) {
+                    backend_->blit_group_depth_to_surface(
+                        pass.blit_depth_source_group, pass.blit_surface_id, pass.blit_dst_rect);
+                }
                 continue;
             }
 

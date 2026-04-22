@@ -63,6 +63,39 @@ public:
     bool get_double_sided() const { return get_cull_mode() == CullMode::None; }
     /** @brief Sets cull_mode to None (true) or Back (false). Convenience for glTF doubleSided. */
     void set_double_sided(bool v) { set_cull_mode(v ? CullMode::None : CullMode::Back); }
+
+    /** @brief Winding that counts as front. CounterClockwise (right-handed / glTF) by default. */
+    FrontFace get_front_face() const
+    {
+        return read_state_value<IMaterialOptions>(&IMaterialOptions::State::front_face);
+    }
+    /** @copybrief get_front_face */
+    void set_front_face(FrontFace v)
+    {
+        write_state_value<IMaterialOptions>(&IMaterialOptions::State::front_face, v);
+    }
+
+    /** @brief Depth compare op. Disabled turns depth testing off for this material. */
+    CompareOp get_depth_test() const
+    {
+        return read_state_value<IMaterialOptions>(&IMaterialOptions::State::depth_test);
+    }
+    /** @copybrief get_depth_test */
+    void set_depth_test(CompareOp v)
+    {
+        write_state_value<IMaterialOptions>(&IMaterialOptions::State::depth_test, v);
+    }
+
+    /** @brief Whether this material writes to the depth buffer. */
+    bool get_depth_write() const
+    {
+        return read_state_value<IMaterialOptions>(&IMaterialOptions::State::depth_write);
+    }
+    /** @copybrief get_depth_write */
+    void set_depth_write(bool v)
+    {
+        write_state_value<IMaterialOptions>(&IMaterialOptions::State::depth_write, v);
+    }
 };
 
 } // namespace velk

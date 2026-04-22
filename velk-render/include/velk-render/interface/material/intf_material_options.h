@@ -37,6 +37,9 @@ public:
         (PROP, AlphaMode, alpha_mode,   AlphaMode::Opaque),
         (PROP, float,     alpha_cutoff, 0.5f),
         (PROP, CullMode,  cull_mode,    CullMode::Back),
+        (PROP, FrontFace, front_face,   FrontFace::Clockwise),
+        (PROP, CompareOp, depth_test,   CompareOp::LessEqual),
+        (PROP, bool,      depth_write,  true),
         (EVT,  on_options_changed)
     )
 };

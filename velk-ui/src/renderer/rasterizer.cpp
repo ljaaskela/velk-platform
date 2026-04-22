@@ -313,7 +313,8 @@ RenderTargetGroup Rasterizer::ensure_gbuffer(ViewEntry& view, int width, int hei
     view.gbuffer_group = ctx.backend->create_render_target_group(
         array_view<const PixelFormat>(kGBufferFormats,
                                       static_cast<uint32_t>(GBufferAttachment::Count)),
-        width, height);
+        width, height,
+        DepthFormat::Default);
     if (view.gbuffer_group != 0) {
         view.gbuffer_width = width;
         view.gbuffer_height = height;

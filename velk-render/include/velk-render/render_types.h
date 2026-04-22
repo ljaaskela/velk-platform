@@ -25,6 +25,34 @@ enum class BlendMode : uint8_t
     Opaque,  ///< No blending; fragment overwrites destination.
 };
 
+/// Depth compare op. `Disabled` turns depth testing off entirely.
+enum class CompareOp : uint8_t
+{
+    Disabled,
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+};
+
+/// Depth attachment format for a render target.
+enum class DepthFormat : uint8_t
+{
+    None,     ///< No depth attachment.
+    Default,  ///< Backend picks a sensible default (currently D32_SFLOAT).
+};
+
+/// Front-face winding convention. Pairs with CullMode.
+enum class FrontFace : uint8_t
+{
+    CounterClockwise,  ///< CCW triangles are front (right-handed / glTF default).
+    Clockwise,         ///< CW triangles are front.
+};
+
 /// Pipeline keys used by the render context's auto-assign counter.
 /// Visuals that own a built-in pipeline provide their own stable key
 /// (typically via make_hash64 on the class name).
@@ -128,6 +156,7 @@ struct SurfaceConfig
     int height{};                               ///< Surface height in pixels.
     UpdateRate update_rate{UpdateRate::VSync};  ///< Pacing mode (VSync, Unlimited, Targeted).
     int target_fps{60};                         ///< Target framerate for UpdateRate::Targeted (ignored otherwise).
+    DepthFormat depth{DepthFormat::None};       ///< Depth attachment. None for flat UI, Default for 3D scenes.
 };
 
 } // namespace velk

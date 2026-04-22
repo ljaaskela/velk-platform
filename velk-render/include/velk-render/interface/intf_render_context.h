@@ -63,9 +63,7 @@ public:
     virtual uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                      uint64_t key = 0,
                                      RenderTargetGroup target_group = 0,
-                                     CullMode cull_mode = CullMode::None,
-                                     BlendMode blend_mode = BlendMode::Alpha,
-                                     Topology topology = Topology::TriangleList) = 0;
+                                     const PipelineOptions& options = {}) = 0;
 
     /**
      * @brief Convenience: compiles GLSL shaders and creates the pipeline in one call.
@@ -78,9 +76,7 @@ public:
     virtual uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                                       uint64_t key = 0,
                                       RenderTargetGroup target_group = 0,
-                                      CullMode cull_mode = CullMode::None,
-                                      BlendMode blend_mode = BlendMode::Alpha,
-                                      Topology topology = Topology::TriangleList) = 0;
+                                      const PipelineOptions& options = {}) = 0;
 
     /**
      * @brief Creates a compute pipeline from a compiled compute shader.
@@ -150,8 +146,7 @@ public:
                                                 string_view vertex_source,
                                                 uint64_t key,
                                                 RenderTargetGroup target_group,
-                                                CullMode cull_mode = CullMode::None,
-                                                Topology topology = Topology::TriangleList) = 0;
+                                                const PipelineOptions& options = {}) = 0;
 
     /**
      * @brief Registers a virtual shader include.

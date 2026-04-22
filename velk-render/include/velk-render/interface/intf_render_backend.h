@@ -76,14 +76,25 @@ enum class Topology : uint8_t
     TriangleStrip, ///< Legacy strip mode; no current path uses it.
 };
 
+/// Non-shader pipeline state. Every knob the rasterizer and fragment
+/// stage need is collected here so create_pipeline / compile_pipeline
+/// signatures stay short as options grow.
+struct PipelineOptions
+{
+    Topology  topology{Topology::TriangleList};             ///< Primitive assembly mode.
+    CullMode  cull_mode{CullMode::None};                    ///< Face culling.
+    FrontFace front_face{FrontFace::CounterClockwise};      ///< Winding that counts as front.
+    BlendMode blend_mode{BlendMode::Alpha};                 ///< Color-attachment blend. Forced to Opaque on MRT groups.
+    CompareOp depth_test{CompareOp::Disabled};              ///< Depth test op. Ignored if the target has no depth attachment.
+    bool      depth_write{false};                           ///< Write depth. Ignored if the target has no depth attachment.
+};
+
 /// Describes a graphics pipeline to create.
 struct PipelineDesc
 {
-    IShader::Ptr vertex;                        ///< Vertex shader
-    IShader::Ptr fragment;                      ///< Fragment shader
-    Topology topology{Topology::TriangleList};  ///< Primitive assembly mode.
-    CullMode cull_mode{CullMode::None};         ///< Face culling. None preserves legacy behavior.
-    BlendMode blend_mode{BlendMode::Alpha};     ///< Color-attachment blend. Forced to Opaque on MRT groups.
+    IShader::Ptr vertex;        ///< Vertex shader
+    IShader::Ptr fragment;      ///< Fragment shader
+    PipelineOptions options{};  ///< Rasterizer / depth / blend state.
 
     /// @brief Returns the size of vertex shader bytecode
     inline size_t get_vertex_size() const { return vertex ? vertex->get_data_size() : 0; }
@@ -153,6 +164,7 @@ struct SurfaceDesc
     int height{};                                       ///< Initial surface height in pixels.
     UpdateRate update_rate{UpdateRate::VSync};          ///< Swapchain pacing mode.
     int target_fps{60};                                 ///< Target framerate for UpdateRate::Targeted.
+    DepthFormat depth{DepthFormat::None};               ///< Depth attachment for the swapchain.
 };
 
 /// Pipeline stage for barrier synchronization.
@@ -248,7 +260,8 @@ public:
      * @return a `RenderTargetGroup` handle (high bit set), or 0 on failure.
      */
     virtual RenderTargetGroup create_render_target_group(
-        array_view<const PixelFormat> formats, int width, int height) = 0;
+        array_view<const PixelFormat> formats, int width, int height,
+        DepthFormat depth = DepthFormat::None) = 0;
 
     /** @brief Destroys a render target group, its attachments, render pass, and framebuffer. */
     virtual void destroy_render_target_group(RenderTargetGroup group) = 0;
@@ -333,6 +346,26 @@ public:
      *                 means "full surface".
      */
     virtual void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect = {}) = 0;
+
+    /**
+     * @brief Copies the depth attachment of an MRT render target group into
+     *        the surface's depth buffer.
+     *
+     * Used by the deferred compositor to plumb the G-buffer's depth into the
+     * swapchain so subsequent forward draws onto the surface can depth-test
+     * against the deferred scene. Source group must have been created with a
+     * depth attachment; destination surface must have been created with
+     * SurfaceDesc::depth != None.
+     *
+     * No-op if either side lacks a depth attachment. Handles layout
+     * transitions; leaves both images back in DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
+     *
+     * @param dst_rect Destination rect in surface pixels. Zero width/height
+     *                 means "full surface".
+     */
+    virtual void blit_group_depth_to_surface(RenderTargetGroup src_group,
+                                             uint64_t surface_id,
+                                             rect dst_rect = {}) = 0;
 
     /**
      * @brief Inserts a pipeline barrier between passes.

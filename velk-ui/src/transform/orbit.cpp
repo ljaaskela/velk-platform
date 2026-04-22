@@ -26,7 +26,11 @@ void Orbit::transform(IElement& element)
         0.f
     };
 
-    // Spherical to cartesian offset from target
+    // velk-ui 3D world uses the same Y-down convention as the 2D UI
+    // (matches Vulkan's framebuffer). The camera's local +Y axis is
+    // aligned to world +Y — so "orbit up = +Y" is a local-axis
+    // declaration, not a physical-up claim. Combined with Vulkan's
+    // Y-down framebuffer, the resulting image renders upright.
     float yaw = deg_to_rad(state->yaw);
     float pitch = deg_to_rad(state->pitch);
     float d = state->distance;
@@ -45,7 +49,8 @@ void Orbit::transform(IElement& element)
     }
     fwd = vec3::normalize(fwd);
 
-    // Right = normalize(forward x up), up = (0, 1, 0)
+    // Right = normalize(forward x up), up = (0, 1, 0) in camera-local
+    // terms (see comment above).
     vec3 right = vec3::cross(fwd, vec3::unit_y());
     if (vec3::is_zero(right)) {
         return;

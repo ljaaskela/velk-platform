@@ -84,6 +84,8 @@ IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& confi
         s.target_fps = config.target_fps;
     });
 
+    surface->set_depth_format(config.depth);
+
     return surface;
 }
 
@@ -148,8 +150,7 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
 
 uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                             uint64_t key, RenderTargetGroup target_group,
-                                            CullMode cull_mode, BlendMode blend_mode,
-                                            Topology topology)
+                                            const PipelineOptions& options)
 {
     if (!initialized_ || !backend_) {
         return 0;
@@ -172,9 +173,7 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
     PipelineDesc desc;
     desc.vertex = vert_shader;
     desc.fragment = frag_shader;
-    desc.cull_mode = cull_mode;
-    desc.blend_mode = blend_mode;
-    desc.topology = topology;
+    desc.options = options;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {
@@ -190,12 +189,11 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
 
 uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
                                              uint64_t key, RenderTargetGroup target_group,
-                                             CullMode cull_mode, BlendMode blend_mode,
-                                             Topology topology)
+                                             const PipelineOptions& options)
 {
     auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
     auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
-    return create_pipeline(vert, frag, key, target_group, cull_mode, blend_mode, topology);
+    return create_pipeline(vert, frag, key, target_group, options);
 }
 
 uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute, uint64_t key)
@@ -235,8 +233,7 @@ PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_sour
                                                        string_view vertex_source,
                                                        uint64_t key,
                                                        RenderTargetGroup target_group,
-                                                       CullMode cull_mode,
-                                                       Topology topology)
+                                                       const PipelineOptions& options)
 {
     if (!initialized_ || !backend_ || key == 0 || target_group == 0) {
         return 0;
@@ -261,10 +258,9 @@ PipelineId RenderContextImpl::compile_gbuffer_pipeline(string_view fragment_sour
     PipelineDesc desc;
     desc.vertex = vert;
     desc.fragment = frag;
-    desc.cull_mode = cull_mode;
+    desc.options = options;
     // G-buffer passes always write opaquely regardless of alpha mode.
-    desc.blend_mode = BlendMode::Opaque;
-    desc.topology = topology;
+    desc.options.blend_mode = BlendMode::Opaque;
 
     PipelineId pid = backend_->create_pipeline(desc, target_group);
     if (!pid) {

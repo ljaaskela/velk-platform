@@ -37,7 +37,8 @@ public:
     void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) override;
 
     RenderTargetGroup create_render_target_group(
-        array_view<const PixelFormat> formats, int width, int height) override;
+        array_view<const PixelFormat> formats, int width, int height,
+        DepthFormat depth = DepthFormat::None) override;
     void destroy_render_target_group(RenderTargetGroup group) override;
     TextureId get_render_target_group_attachment(
         RenderTargetGroup group, uint32_t index) const override;
@@ -53,6 +54,8 @@ public:
     void end_pass() override;
     void dispatch(array_view<const DispatchCall> calls) override;
     void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect) override;
+    void blit_group_depth_to_surface(RenderTargetGroup src_group, uint64_t surface_id,
+                                     rect dst_rect) override;
     void barrier(PipelineStage src, PipelineStage dst) override;
     void end_frame() override;
 
@@ -101,9 +104,13 @@ private:
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
 
     // Default render pass (created at init from the initial surface format,
-    // used for pipeline creation before any swapchain exists)
+    // used for pipeline creation before any swapchain exists). If any
+    // surface has a depth attachment, the default render pass is recreated
+    // with a matching depth attachment so pipelines targeting surfaces are
+    // compatible with depth-enabled render passes.
     VkRenderPass default_render_pass_ = VK_NULL_HANDLE;
     VkFormat default_surface_format_ = VK_FORMAT_UNDEFINED;
+    VkFormat default_depth_format_ = VK_FORMAT_UNDEFINED; ///< VK_FORMAT_UNDEFINED = no depth.
 
     // Surfaces
     struct SurfaceData
@@ -120,6 +127,14 @@ private:
         int height = 0;
         uint32_t image_index = 0;
         UpdateRate update_rate = UpdateRate::VSync;
+
+        // Depth attachment (one per swapchain image; DepthFormat::None means
+        // none of these are populated and the render pass has no depth).
+        DepthFormat depth_format = DepthFormat::None;
+        VkFormat depth_vk_format = VK_FORMAT_UNDEFINED;
+        vector<VkImage> depth_images;
+        vector<VkImageView> depth_views;
+        vector<VmaAllocation> depth_allocations;
     };
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
@@ -184,6 +199,12 @@ private:
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         int width = 0;
         int height = 0;
+
+        // Optional depth attachment. VK_FORMAT_UNDEFINED means no depth.
+        VkFormat depth_vk_format = VK_FORMAT_UNDEFINED;
+        VkImage depth_image = VK_NULL_HANDLE;
+        VkImageView depth_view = VK_NULL_HANDLE;
+        VmaAllocation depth_allocation = VK_NULL_HANDLE;
     };
 
     std::unordered_map<RenderTargetGroup, RenderTargetGroupData> render_target_groups_;
