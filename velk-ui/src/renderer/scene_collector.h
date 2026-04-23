@@ -144,16 +144,35 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx, F&& cb)
         auto* visual = interface_cast<IVisual>(storage->get_attachment(j));
         if (!visual) continue;
 
-        // 2D-authoring affordances (color + paint) live on IVisual2D.
-        // 3D visuals have neither; their geometry color defaults to
-        // white and materials attach via other routes.
-        auto vs2d = read_state<IVisual2D>(visual);
-        ::velk::color tint = vs2d ? vs2d->color : ::velk::color::white();
 
         IProgram* paint = nullptr;
-        if (vs2d && vs2d->paint) {
-            auto prog_ptr = vs2d->paint.template get<IProgram>();
-            paint = prog_ptr.get();
+        ::velk::color tint = ::velk::color::white();
+        if (auto vs2d = read_state<IVisual2D>(visual)) {
+            // 2D-authoring affordances (color + paint) live on IVisual2D.
+            // 3D visuals have neither; color defaults to white and the
+            // material lives on the mesh's first primitive.
+            tint = vs2d->color;
+            if (vs2d->paint) {
+                auto prog_ptr = vs2d->paint.template get<IProgram>();
+                paint = prog_ptr.get();
+            }
+        } else if (auto vs3d = read_state<IVisual3D>(visual)) {
+            // 3D visual fallback: reach through IVisual3D::mesh to the
+            // first primitive's material. Matches what CubeVisual /
+            // SphereVisual stamp onto DrawEntry::material for the raster
+            // path; here we feed the same program into the RT shape's
+            // material_id resolution so cubes/spheres with authored
+            // materials shade correctly in primary and bounce rays.
+            auto mesh_obj = vs3d->mesh.template get<IMesh>();
+            if (mesh_obj) {
+                auto prims = mesh_obj->get_primitives();
+                if (prims.size() > 0) {
+                    if (auto ps = read_state<IMeshPrimitive>(prims[0].get()); ps && ps->material) {
+                        auto prog_ptr = ps->material.template get<IProgram>();
+                        paint = prog_ptr.get();
+                    }
+                }
+            }
         }
 
         auto* analytic = interface_cast<IAnalyticShape>(visual);

@@ -697,6 +697,7 @@ layout(push_constant) uniform PC {
     LightList lights;
     uint light_count;
     uint _lights_pad;
+    GlobalData globals;         // this view's FrameGlobals; routed into ctx.globals for eval bodies.
 } pc;
 
 // ===== Core ray / hit / fill-context types =====
@@ -1144,7 +1145,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 // small iterative secondary loop for that hit's specular path. GLSL has
 // no recursion, so bounces can't be a function — they live inline here.
 [[maybe_unused]] constexpr string_view rt_compute_main_src = R"(
-const int kMaxBounces = 3;
+const int kMaxBounces = 4;
 
 vec3 trace_bounce(Ray ray, vec3 throughput)
 {
@@ -1199,78 +1200,98 @@ void main()
 
     rng_init(uvec2(coord), pc.env.z);
 
-    vec2 ndc = (vec2(coord) + 0.5) / vec2(float(w), float(h)) * 2.0 - 1.0;
-    vec4 near_h = pc.inv_view_projection * vec4(ndc, 0.0, 1.0);
-    vec4 far_h  = pc.inv_view_projection * vec4(ndc, 1.0, 1.0);
-    vec3 near_w = near_h.xyz / near_h.w;
-    vec3 far_w  = far_h.xyz  / far_h.w;
+    // Per-pixel primary sample count. Each sample fires one jittered
+    // primary ray through the painter-sorted loop; the results are
+    // averaged. Reduces edge-aliasing on shape boundaries and damps
+    // bounce noise from rough specular hits. Cost scales linearly
+    // with kPrimarySamples; 1 = no AA (raw stochastic output),
+    // 4 = typical quality / cost balance.
+    const uint kPrimarySamples = 4u;
 
-    Ray primary;
-    primary.origin = near_w;
-    primary.dir = normalize(far_w - near_w);
+    vec3 final = vec3(0.0);
+    for (uint psample = 0u; psample < kPrimarySamples; ++psample) {
+        // Sub-pixel jitter. Uniform 0..1 offset into the pixel; with
+        // multiple samples the average lands near the pixel center
+        // while still anti-aliasing edges. RNG is seeded per coord
+        // + frame so jitter patterns are stable within a frame and
+        // different between frames.
+        vec2 jitter = vec2(rng_next_float(), rng_next_float());
+        vec2 ndc = (vec2(coord) + jitter) / vec2(float(w), float(h)) * 2.0 - 1.0;
+        vec4 near_h = pc.inv_view_projection * vec4(ndc, 0.0, 1.0);
+        vec4 far_h  = pc.inv_view_projection * vec4(ndc, 1.0, 1.0);
+        vec3 near_w = near_h.xyz / near_h.w;
+        vec3 far_w  = far_h.xyz  / far_h.w;
 
-    // Painter-sorted back-to-front iteration over the primary buffer.
-    // Co-planar UI shapes (cards, text, overlays stacked at z=0) need
-    // this to composite in authored layer order; closest-hit BVH would
-    // advance past a whole plane after the first hit and drop every
-    // other shape sharing that t. BVH is used for bounces + shadows
-    // where closest-hit is the right semantics.
-    //
-    // Future: a proper front-to-back BVH walk for primary is possible
-    // once each BVH node can be flagged "coplanar group" at build time
-    // (all its shapes share a plane within tolerance) - the walker
-    // would iterate the group's shapes painter-style instead of doing
-    // closest-hit inside it, and fall back to closest-hit between
-    // groups. Complications: coplanar sibling elements under a non-
-    // coplanar parent need virtual-group bucketing; nearly-coplanar
-    // rotated geometry (fluent's ±6° tile yaw) should NOT group.
-    // Parked while primary cost is still O(shapes) * cheap-intersect;
-    // revisit if profiling shows the primary pass is hot.
-    vec3 accum = env_miss_color(primary.dir);
+        Ray primary;
+        primary.origin = near_w;
+        primary.dir = normalize(far_w - near_w);
 
-    for (uint i = 0u; i < shape_count; ++i) {
-        RtShape s = pc.shapes.data[i];
-        RayHit hit;
-        if (!intersect_shape(primary, s, hit)) continue;
+        // Painter-sorted back-to-front iteration over the primary
+        // buffer. Co-planar UI shapes (cards, text, overlays stacked
+        // at z=0) need this to composite in authored layer order;
+        // closest-hit BVH would advance past a whole plane after the
+        // first hit and drop every other shape sharing that t. BVH
+        // is used for bounces + shadows where closest-hit is the
+        // right semantics.
+        //
+        // Future: a proper front-to-back BVH walk for primary is
+        // possible once each BVH node can be flagged "coplanar group"
+        // at build time (all its shapes share a plane within
+        // tolerance) - the walker would iterate the group's shapes
+        // painter-style instead of doing closest-hit inside it, and
+        // fall back to closest-hit between groups. Parked while
+        // primary cost is still O(shapes) * cheap-intersect; revisit
+        // if profiling shows the primary pass is hot.
+        vec3 accum = env_miss_color(primary.dir);
 
-        EvalContext ctx;
-        ctx.globals = pc.globals;
-        ctx.data_addr = s.material_data_addr;
-        ctx.texture_id = s.texture_id;
-        ctx.shape_param = s.shape_param;
-        ctx.uv = hit.uv;
-        ctx.base = s.color;
-        ctx.ray_dir = primary.dir;
-        ctx.normal = hit.normal;
-        ctx.hit_pos = primary.origin + hit.t * primary.dir;
-        BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
+        for (uint i = 0u; i < shape_count; ++i) {
+            RtShape s = pc.shapes.data[i];
+            RayHit hit;
+            if (!intersect_shape(primary, s, hit)) continue;
 
-        vec3 shape_rgb = bs.emission.rgb;
-        if (!bs.terminate) {
-            // Per-hit sample count: material's preferred count (scales
-            // with roughness / lobe width), clamped by the tracer's
-            // global cap. Mirror surfaces collapse to 1; rough surfaces
-            // spend the budget to flatten GGX noise.
-            const uint kSppCap = 8u;
-            uint spp = clamp(bs.sample_count_hint, 1u, kSppCap);
-            vec3 bounce = vec3(0.0);
-            Ray refl;
-            refl.origin = ctx.hit_pos + hit.normal * 1e-3;
-            refl.dir = bs.next_dir;
-            bounce += trace_bounce(refl, bs.throughput);
-            for (uint sp = 1u; sp < spp; ++sp) {
-                BrdfSample bs2 = velk_resolve_fill(s.material_id, ctx);
+            EvalContext ctx;
+            ctx.globals = pc.globals;
+            ctx.data_addr = s.material_data_addr;
+            ctx.texture_id = s.texture_id;
+            ctx.shape_param = s.shape_param;
+            ctx.uv = hit.uv;
+            ctx.base = s.color;
+            ctx.ray_dir = primary.dir;
+            ctx.normal = hit.normal;
+            ctx.hit_pos = primary.origin + hit.t * primary.dir;
+            BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
+
+            vec3 shape_rgb = bs.emission.rgb;
+            if (!bs.terminate) {
+                // Per-hit sample count: material's preferred count
+                // (scales with roughness / lobe width), clamped by
+                // the tracer's global cap. Mirror surfaces collapse
+                // to 1; rough surfaces spend the budget to flatten
+                // GGX noise.
+                const uint kSppCap = 12u;
+                uint spp = clamp(bs.sample_count_hint, 1u, kSppCap);
+                vec3 bounce = vec3(0.0);
+                Ray refl;
                 refl.origin = ctx.hit_pos + hit.normal * 1e-3;
-                refl.dir = bs2.next_dir;
-                bounce += trace_bounce(refl, bs2.throughput);
+                refl.dir = bs.next_dir;
+                bounce += trace_bounce(refl, bs.throughput);
+                for (uint sp = 1u; sp < spp; ++sp) {
+                    BrdfSample bs2 = velk_resolve_fill(s.material_id, ctx);
+                    refl.origin = ctx.hit_pos + hit.normal * 1e-3;
+                    refl.dir = bs2.next_dir;
+                    bounce += trace_bounce(refl, bs2.throughput);
+                }
+                shape_rgb += bounce * (1.0 / float(spp));
             }
-            shape_rgb += bounce * (1.0 / float(spp));
+            float a = clamp(bs.emission.a, 0.0, 1.0);
+            accum = shape_rgb * a + accum * (1.0 - a);
         }
-        float a = clamp(bs.emission.a, 0.0, 1.0);
-        accum = shape_rgb * a + accum * (1.0 - a);
+
+        final += accum;
     }
 
-    imageStore(gStorageImages[nonuniformEXT(pc.extras.x)], coord, vec4(accum, 1.0));
+    imageStore(gStorageImages[nonuniformEXT(pc.extras.x)], coord,
+               vec4(final * (1.0 / float(kPrimarySamples)), 1.0));
 }
 )";
 

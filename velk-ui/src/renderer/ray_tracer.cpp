@@ -266,6 +266,33 @@ void RayTracer::build_passes(ViewEntry& entry,
         cam_pz = es->world_matrix(2, 3);
     }
 
+    // Write this view's FrameGlobals so the RT compute can route the
+    // shared EvalContext::globals pointer to material eval bodies —
+    // same shape every driver uses. The flat inv_view_projection /
+    // cam_pos / bvh_* fields also present in the RT push constant are
+    // kept because existing bounce / primary code still references
+    // them directly; evals should reach globals through ctx.globals.
+    uint64_t globals_gpu_addr = 0;
+    {
+        FrameGlobals globals{};
+        std::memcpy(globals.view_projection, vp_mat.m, sizeof(vp_mat.m));
+        std::memcpy(globals.inverse_view_projection, inv_vp.m, sizeof(inv_vp.m));
+        globals.viewport[0] = static_cast<float>(vp_w);
+        globals.viewport[1] = static_cast<float>(vp_h);
+        globals.viewport[2] = 1.0f / static_cast<float>(vp_w);
+        globals.viewport[3] = 1.0f / static_cast<float>(vp_h);
+        globals.cam_pos[0] = cam_px;
+        globals.cam_pos[1] = cam_py;
+        globals.cam_pos[2] = cam_pz;
+        globals.bvh_root = ctx.bvh_root;
+        globals.bvh_node_count = ctx.bvh_node_count;
+        globals.bvh_shape_count = ctx.bvh_shape_count;
+        globals.bvh_nodes_addr = ctx.bvh_nodes_addr;
+        globals.bvh_shapes_addr = ctx.bvh_shapes_addr;
+        globals_gpu_addr = ctx.frame_buffer->write(&globals, sizeof(globals));
+    }
+    entry.frame_globals_addr = globals_gpu_addr;
+
     // Primary rays composite in painter order, which requires a
     // separate flat shape buffer. The scene-wide BVH (in ctx) has
     // element-grouped order; it's the right structure for closest-hit
@@ -428,6 +455,7 @@ void RayTracer::build_passes(ViewEntry& entry,
         uint64_t lights_addr;
         uint32_t light_count;
         uint32_t _lights_pad;
+        uint64_t globals_addr;
     };
 
     PushC pc{};
@@ -451,6 +479,7 @@ void RayTracer::build_passes(ViewEntry& entry,
     pc.env_data_addr = env_data_addr;
     pc.lights_addr = lights_addr;
     pc.light_count = static_cast<uint32_t>(lights.size());
+    pc.globals_addr = globals_gpu_addr;
 
     RenderPass pass;
     pass.kind = PassKind::ComputeBlit;
