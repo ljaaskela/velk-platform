@@ -22,6 +22,8 @@ add_library(velk_ui SHARED
     src/visual/cube_visual.cpp
     src/visual/sphere_visual.h
     src/visual/sphere_visual.cpp
+    src/visual/mesh_visual.h
+    src/visual/mesh_visual.cpp
     src/visual/texture_visual.h
     src/visual/texture_visual.cpp
     src/visual/texture_material.h

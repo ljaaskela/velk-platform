@@ -25,6 +25,18 @@ public:
 
     /** @brief Returns the pixel format. */
     virtual PixelFormat format() const = 0;
+
+    /**
+     * @brief Returns the per-texture sampler state.
+     *
+     * Backends materialise one underlying GPU sampler per distinct
+     * SamplerDesc and bind it alongside the texture's image. The default
+     * (Repeat + Linear) matches the glTF 2.0 sampler default and is what
+     * most 2D / UI assets want; concrete subtypes override when they
+     * carry stronger source information (glTF imports a sampler record,
+     * environment maps want clamp, etc.).
+     */
+    virtual SamplerDesc get_sampler_desc() const { return {}; }
 };
 
 } // namespace velk

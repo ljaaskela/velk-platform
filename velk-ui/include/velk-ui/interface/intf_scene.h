@@ -62,8 +62,18 @@ public:
     /** @brief Loads a scene from a resource URI (e.g. "app://scenes/my_scene.json"). */
     virtual IFuture::Ptr load_from(string_view path) = 0;
 
-    /** @brief Imports elements from a store and replicates them into the scene hierarchy. */
-    virtual void load(IStore& store) = 0;
+    /**
+     * @brief Imports elements from a store and replicates them into the scene hierarchy.
+     *
+     * When @p parent is null, the imported root replaces the scene's root
+     * (existing tree is cleared). When @p parent is a scene element, the
+     * imported root becomes a child of @p parent and the current scene
+     * tree is preserved.
+     *
+     * Returns Success on a complete load, NothingToDo if the store has
+     * no hierarchy, or Fail on structural errors.
+     */
+    virtual ReturnValue load(IStore& store, IElement* parent = nullptr) = 0;
 
     /** @brief Sets the layout bounds for this scene. */
     virtual void set_geometry(aabb geometry) = 0;

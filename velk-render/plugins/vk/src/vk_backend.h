@@ -97,8 +97,26 @@ private:
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
-    VkSampler linear_sampler_ = VK_NULL_HANDLE;
+    VkSampler linear_sampler_ = VK_NULL_HANDLE;  ///< Default Repeat+Linear sampler. Kept as the fallback when no per-texture desc is supplied.
     uint32_t next_bindless_index_ = 1; // 0 reserved for "no texture"
+
+    /// Per-(SamplerDesc) sampler cache. Lookup key is the byte pattern of
+    /// the desc (struct is POD with no padding for our enum sizes), so
+    /// distinct addressing/filter combinations each materialise exactly
+    /// once.
+    struct SamplerKey
+    {
+        SamplerDesc desc{};
+        bool operator==(const SamplerKey& o) const { return desc == o.desc; }
+    };
+    struct SamplerKeyHash
+    {
+        size_t operator()(const SamplerKey& k) const noexcept;
+    };
+    std::unordered_map<SamplerKey, VkSampler, SamplerKeyHash> sampler_cache_;
+
+    /// Returns a VkSampler matching @p desc, creating + caching on first use.
+    VkSampler get_or_create_sampler(const SamplerDesc& desc);
 
     // Shared pipeline layout (push constants + bindless set)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;

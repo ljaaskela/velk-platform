@@ -2,6 +2,7 @@
 #define VELK_RENDER_INTF_IMAGE_H
 
 #include <velk/interface/resource/intf_resource.h>
+#include <velk-render/render_types.h>
 
 #include <cstdint>
 
@@ -40,6 +41,16 @@ class IImage : public Interface<IImage, IResource>
 public:
     /** @brief Returns the current load status. */
     virtual ImageStatus status() const = 0;
+
+    /**
+     * @brief Overrides the sampler desc used when this image is uploaded.
+     *
+     * Loaders that know more than the image plugin (e.g. the glTF
+     * importer reading a `sampler` record) call this between decode and
+     * first observation by the renderer. Has no effect once the texture
+     * has been uploaded — the sampler captured at upload time is final.
+     */
+    virtual void set_sampler_desc(const SamplerDesc& desc) = 0;
 };
 
 } // namespace velk

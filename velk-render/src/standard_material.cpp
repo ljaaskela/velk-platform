@@ -17,7 +17,8 @@ VELK_GPU_STRUCT BaseColorParams
 {
     ::velk::color factor{1.f, 1.f, 1.f, 1.f};  // glTF baseColorFactor (RGBA)
     uint32_t texture_id{};                      // baseColorTexture (0 = none)
-    uint32_t _pad[3]{};
+    uint32_t tex_coord{};                       // 0 = ctx.uv (TEXCOORD_0), 1 = ctx.uv1
+    uint32_t _pad[2]{};
 };
 static_assert(sizeof(BaseColorParams) == 32, "BaseColorParams must be 32 bytes");
 
@@ -26,7 +27,7 @@ VELK_GPU_STRUCT MetallicRoughnessParams
     float metallic_factor{1.f};
     float roughness_factor{1.f};
     uint32_t texture_id{};       // B = metallic, G = roughness
-    uint32_t _pad{};
+    uint32_t tex_coord{};        // 0 = ctx.uv, 1 = ctx.uv1
 };
 static_assert(sizeof(MetallicRoughnessParams) == 16, "MetallicRoughnessParams must be 16 bytes");
 
@@ -34,7 +35,8 @@ VELK_GPU_STRUCT NormalParams
 {
     float scale{1.f};
     uint32_t texture_id{};
-    uint32_t _pad[2]{};
+    uint32_t tex_coord{};        // 0 = ctx.uv, 1 = ctx.uv1
+    uint32_t _pad{};
 };
 static_assert(sizeof(NormalParams) == 16, "NormalParams must be 16 bytes");
 
@@ -42,7 +44,8 @@ VELK_GPU_STRUCT OcclusionParams
 {
     float strength{1.f};
     uint32_t texture_id{};       // R channel
-    uint32_t _pad[2]{};
+    uint32_t tex_coord{};        // 0 = ctx.uv, 1 = ctx.uv1
+    uint32_t _pad{};
 };
 static_assert(sizeof(OcclusionParams) == 16, "OcclusionParams must be 16 bytes");
 
@@ -51,7 +54,8 @@ VELK_GPU_STRUCT EmissiveParams
     ::velk::color factor{0.f, 0.f, 0.f, 1.f};
     float strength{1.f};         // KHR_materials_emissive_strength
     uint32_t texture_id{};
-    uint32_t _pad[2]{};
+    uint32_t tex_coord{};        // 0 = ctx.uv, 1 = ctx.uv1
+    uint32_t _pad{};
 };
 static_assert(sizeof(EmissiveParams) == 32, "EmissiveParams must be 32 bytes");
 
@@ -61,9 +65,11 @@ VELK_GPU_STRUCT SpecularParams
     float factor{1.f};                                 // KHR_materials_specular specularFactor
     uint32_t texture_id{};                             // specularTexture (A = specular)
     uint32_t color_texture_id{};                       // specularColorTexture (RGB = color)
-    uint32_t _pad{};
+    uint32_t tex_coord{};                              // UV set for specular texture
+    uint32_t color_tex_coord{};                        // UV set for specular_color texture
+    uint32_t _pad[2]{};
 };
-static_assert(sizeof(SpecularParams) == 32, "SpecularParams must be 32 bytes");
+static_assert(sizeof(SpecularParams) == 48, "SpecularParams must be 48 bytes");
 
 VELK_GPU_STRUCT StandardMaterialParams
 {
@@ -74,7 +80,7 @@ VELK_GPU_STRUCT StandardMaterialParams
     EmissiveParams          emissive;
     SpecularParams          specular;
 };
-static_assert(sizeof(StandardMaterialParams) == 144,
+static_assert(sizeof(StandardMaterialParams) == 160,
               "StandardMaterialParams layout must match standard_eval_src");
 
 // Eval: structured StandardMaterialData whose GLSL blocks mirror the
@@ -83,12 +89,15 @@ static_assert(sizeof(StandardMaterialParams) == 144,
 // and texture_id contiguous so the shader reads `d.base_color.factor *
 // velk_texture(d.base_color.texture_id, uv)` without indirection.
 constexpr string_view standard_eval_src = R"(
-struct BaseColorParams { vec4 factor; uint texture_id; uint _pad0; uint _pad1; uint _pad2; };
-struct MetallicRoughnessParams { float metallic_factor; float roughness_factor; uint texture_id; uint _pad; };
-struct NormalParams { float scale; uint texture_id; uint _pad0; uint _pad1; };
-struct OcclusionParams { float strength; uint texture_id; uint _pad0; uint _pad1; };
-struct EmissiveParams { vec4 factor; float strength; uint texture_id; uint _pad0; uint _pad1; };
-struct SpecularParams { vec4 color_factor; float factor; uint texture_id; uint color_texture_id; uint _pad; };
+struct BaseColorParams { vec4 factor; uint texture_id; uint tex_coord; uint _pad0; uint _pad1; };
+struct MetallicRoughnessParams { float metallic_factor; float roughness_factor; uint texture_id; uint tex_coord; };
+struct NormalParams { float scale; uint texture_id; uint tex_coord; uint _pad; };
+struct OcclusionParams { float strength; uint texture_id; uint tex_coord; uint _pad; };
+struct EmissiveParams { vec4 factor; float strength; uint texture_id; uint tex_coord; uint _pad; };
+struct SpecularParams {
+    vec4 color_factor; float factor; uint texture_id; uint color_texture_id;
+    uint tex_coord; uint color_tex_coord; uint _pad0; uint _pad1;
+};
 
 layout(buffer_reference, std430) readonly buffer StandardMaterialData {
     BaseColorParams         base_color;
@@ -99,6 +108,9 @@ layout(buffer_reference, std430) readonly buffer StandardMaterialData {
     SpecularParams          specular;
 };
 
+// Per-property tex_coord selects TEXCOORD_0 (ctx.uv) or TEXCOORD_1 (ctx.uv1).
+#define VELK_STD_UV(ctx, tc) ((tc) == 0u ? (ctx).uv : (ctx).uv1)
+
 MaterialEval velk_eval_standard(EvalContext ctx)
 {
     StandardMaterialData d = StandardMaterialData(ctx.data_addr);
@@ -106,14 +118,15 @@ MaterialEval velk_eval_standard(EvalContext ctx)
     // Base color = factor * texture (texture defaults to white when absent).
     vec4 base = d.base_color.factor;
     if (d.base_color.texture_id != 0u) {
-        base *= velk_texture(d.base_color.texture_id, ctx.uv);
+        base *= velk_texture(d.base_color.texture_id, VELK_STD_UV(ctx, d.base_color.tex_coord));
     }
 
     // MR texture: B = metallic, G = roughness per glTF spec.
     float metallic  = d.metallic_roughness.metallic_factor;
     float roughness = d.metallic_roughness.roughness_factor;
     if (d.metallic_roughness.texture_id != 0u) {
-        vec4 mr = velk_texture(d.metallic_roughness.texture_id, ctx.uv);
+        vec4 mr = velk_texture(d.metallic_roughness.texture_id,
+                               VELK_STD_UV(ctx, d.metallic_roughness.tex_coord));
         metallic  *= mr.b;
         roughness *= mr.g;
     }
@@ -121,25 +134,29 @@ MaterialEval velk_eval_standard(EvalContext ctx)
     // Occlusion: R channel, lerp from 1 by strength so strength=0 disables.
     float occlusion = 1.0;
     if (d.occlusion.texture_id != 0u) {
-        float ao = velk_texture(d.occlusion.texture_id, ctx.uv).r;
+        float ao = velk_texture(d.occlusion.texture_id,
+                                VELK_STD_UV(ctx, d.occlusion.tex_coord)).r;
         occlusion = mix(1.0, ao, d.occlusion.strength);
     }
 
     // Emissive = factor * strength * texture.
     vec3 emissive = d.emissive.factor.rgb * d.emissive.strength;
     if (d.emissive.texture_id != 0u) {
-        emissive *= velk_texture(d.emissive.texture_id, ctx.uv).rgb;
+        emissive *= velk_texture(d.emissive.texture_id,
+                                 VELK_STD_UV(ctx, d.emissive.tex_coord)).rgb;
     }
 
     // KHR_materials_specular: factor comes from A channel, color from RGB
     // of separate textures per spec.
     float specular_factor = d.specular.factor;
     if (d.specular.texture_id != 0u) {
-        specular_factor *= velk_texture(d.specular.texture_id, ctx.uv).a;
+        specular_factor *= velk_texture(d.specular.texture_id,
+                                        VELK_STD_UV(ctx, d.specular.tex_coord)).a;
     }
     vec3 specular_color = d.specular.color_factor.rgb;
     if (d.specular.color_texture_id != 0u) {
-        specular_color *= velk_texture(d.specular.color_texture_id, ctx.uv).rgb;
+        specular_color *= velk_texture(d.specular.color_texture_id,
+                                       VELK_STD_UV(ctx, d.specular.color_tex_coord)).rgb;
     }
 
     MaterialEval e = velk_default_material_eval();
@@ -256,39 +273,59 @@ ReturnValue StandardMaterial::write_draw_data(void* out, size_t size, ITextureRe
             Uid cid = property_class_id(prop);
             ISurface* tex = property_texture(prop);
 
+            // Common per-property base surface — every IMaterialProperty
+            // carries a tex_coord PROP that selects TEXCOORD_0 (0) or
+            // TEXCOORD_1 (1). Read once per property; specular has a second
+            // tex_coord for its color texture and is handled below.
+            uint32_t tc = 0;
+            if (auto r = read_state<IMaterialProperty>(prop)) {
+                tc = static_cast<uint32_t>(r->tex_coord);
+            }
+
             if (cid == ClassId::BaseColorProperty) {
                 if (auto r = read_state<IBaseColorProperty>(prop)) {
                     p.base_color.factor = r->factor;
                 }
                 p.base_color.texture_id = resolve(tex);
+                p.base_color.tex_coord = tc;
             } else if (cid == ClassId::MetallicRoughnessProperty) {
                 if (auto r = read_state<IMetallicRoughnessProperty>(prop)) {
                     p.metallic_roughness.metallic_factor = r->metallic_factor;
                     p.metallic_roughness.roughness_factor = r->roughness_factor;
                 }
                 p.metallic_roughness.texture_id = resolve(tex);
+                p.metallic_roughness.tex_coord = tc;
             } else if (cid == ClassId::NormalProperty) {
                 if (auto r = read_state<INormalProperty>(prop)) {
                     p.normal.scale = r->scale;
                 }
                 p.normal.texture_id = resolve(tex);
+                p.normal.tex_coord = tc;
             } else if (cid == ClassId::OcclusionProperty) {
                 if (auto r = read_state<IOcclusionProperty>(prop)) {
                     p.occlusion.strength = r->strength;
                 }
                 p.occlusion.texture_id = resolve(tex);
+                p.occlusion.tex_coord = tc;
             } else if (cid == ClassId::EmissiveProperty) {
                 if (auto r = read_state<IEmissiveProperty>(prop)) {
                     p.emissive.factor = r->factor;
                     p.emissive.strength = r->strength;
                 }
                 p.emissive.texture_id = resolve(tex);
+                p.emissive.tex_coord = tc;
             } else if (cid == ClassId::SpecularProperty) {
                 if (auto r = read_state<ISpecularProperty>(prop)) {
                     p.specular.factor = r->factor;
                     p.specular.color_factor = r->color_factor;
                 }
                 p.specular.texture_id = resolve(tex);
+                p.specular.tex_coord = tc;
+                // Specular_color may use a different UV set per glTF
+                // KHR_materials_specular. Round 1 leaves it equal to the
+                // base specular tex_coord; the importer in round 2 will
+                // populate it from the spec's separate texCoord field.
+                p.specular.color_tex_coord = tc;
             }
         }
     });

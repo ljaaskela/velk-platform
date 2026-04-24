@@ -372,6 +372,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                                 tdesc.width = tw;
                                 tdesc.height = th;
                                 tdesc.format = surf->format();
+                                tdesc.sampler = surf->get_sampler_desc();
                                 tid = backend_->create_texture(tdesc);
                                 resources_.register_texture(surf, tid);
                             }

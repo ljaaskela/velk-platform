@@ -33,6 +33,7 @@ bool Application::init(const ApplicationConfig& config)
     reg.load_plugin_from_path("velk_vk.dll");
     reg.load_plugin_from_path("velk_text.dll");
     reg.load_plugin_from_path("velk_image.dll");
+    reg.load_plugin_from_path("velk_gltf.dll");
     reg.load_plugin_from_path("velk_importer.dll");
 
     // Load the platform plugin (compile-time selection).

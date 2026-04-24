@@ -85,13 +85,13 @@ IFuture::Ptr Scene::load_from(string_view path)
         return promise.get_future<ReturnValue>();
     }
 
-    load(*result.store);
+    auto rv = load(*result.store);
 
-    promise.set_value(ReturnValue::Success);
+    promise.set_value(succeeded(rv) ? ReturnValue::Success : rv);
     return promise.get_future<ReturnValue>();
 }
 
-void Scene::load(IStore& store)
+ReturnValue Scene::load(IStore& store, IElement* parent)
 {
     ensure_hierarchy();
 
@@ -106,22 +106,41 @@ void Scene::load(IStore& store)
     }
 
     if (!hierarchy_obj) {
-        return;
+        return ReturnValue::NothingToDo;
     }
 
     auto* src = interface_cast<IHierarchy>(hierarchy_obj);
     if (!src) {
-        return;
+        return ReturnValue::Fail;
     }
 
     auto src_root = src->root();
     if (!src_root) {
-        return;
+        return ReturnValue::NothingToDo;
     }
 
-    // Replicate imported hierarchy into our scene
-    set_root(src_root);
-    replicate_children(*src, src_root);
+    if (parent) {
+        // Graft the imported root under the caller-supplied parent element.
+        // Scene tree is preserved; only the subtree at `parent` gains children.
+        auto* parent_as_obj = interface_cast<IObject>(parent);
+        if (!parent_as_obj) {
+            return ReturnValue::Fail;
+        }
+        auto parent_obj = parent_as_obj->get_self<IObject>();
+        if (!parent_obj) {
+            return ReturnValue::Fail;
+        }
+        auto rv = add(parent_obj, src_root);
+        if (!succeeded(rv)) {
+            return rv;
+        }
+        replicate_children(*src, src_root);
+    } else {
+        // Replicate imported hierarchy into our scene, replacing the root.
+        set_root(src_root);
+        replicate_children(*src, src_root);
+    }
+    return ReturnValue::Success;
 }
 
 void Scene::set_geometry(aabb geometry)

@@ -67,6 +67,7 @@ struct TextureDesc
     int mip_levels{1};                              ///< Number of mip levels. upload_texture fills mip 0 and generates the rest via blit-downsampling.
     PixelFormat format{PixelFormat::RGBA8};          ///< Pixel format.
     TextureUsage usage{TextureUsage::Sampled};       ///< Usage hint.
+    SamplerDesc sampler{};                           ///< Per-texture sampler state (wrap / filter / mipmap). Defaults to Repeat + Linear.
 };
 
 /// Primitive topology for pipeline creation.

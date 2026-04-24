@@ -268,7 +268,13 @@ void VkBackend::shutdown()
     vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptor_layout_, nullptr);
     vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-    vkDestroySampler(device_, linear_sampler_, nullptr);
+    // linear_sampler_ lives inside sampler_cache_ (primed at init); loop
+    // destroys everything in one pass.
+    for (auto& [key, sampler] : sampler_cache_) {
+        vkDestroySampler(device_, sampler, nullptr);
+    }
+    sampler_cache_.clear();
+    linear_sampler_ = VK_NULL_HANDLE;
 
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         vkDestroyFence(device_, frame_sync_[i].fence, nullptr);
@@ -525,21 +531,80 @@ bool VkBackend::create_sync_objects()
     return true;
 }
 
+namespace {
+
+VkFilter to_vk_filter(SamplerFilter f)
+{
+    return f == SamplerFilter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+}
+
+VkSamplerMipmapMode to_vk_mipmap_mode(SamplerMipmapMode m)
+{
+    return m == SamplerMipmapMode::Nearest
+        ? VK_SAMPLER_MIPMAP_MODE_NEAREST
+        : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+}
+
+VkSamplerAddressMode to_vk_address(SamplerAddressMode a)
+{
+    switch (a) {
+    case SamplerAddressMode::Repeat:         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case SamplerAddressMode::ClampToEdge:    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+}
+
+} // namespace
+
+size_t VkBackend::SamplerKeyHash::operator()(const SamplerKey& k) const noexcept
+{
+    // Pack the six 8-bit enums into a single 64-bit hash input. Each enum
+    // value fits in 3 bits today; using a full byte each keeps the packing
+    // robust to future enum growth.
+    uint64_t v = 0;
+    v |= static_cast<uint64_t>(k.desc.wrap_s)      << 0;
+    v |= static_cast<uint64_t>(k.desc.wrap_t)      << 8;
+    v |= static_cast<uint64_t>(k.desc.wrap_r)      << 16;
+    v |= static_cast<uint64_t>(k.desc.mag_filter)  << 24;
+    v |= static_cast<uint64_t>(k.desc.min_filter)  << 32;
+    v |= static_cast<uint64_t>(k.desc.mipmap_mode) << 40;
+    return std::hash<uint64_t>{}(v);
+}
+
+VkSampler VkBackend::get_or_create_sampler(const SamplerDesc& desc)
+{
+    SamplerKey key{desc};
+    if (auto it = sampler_cache_.find(key); it != sampler_cache_.end()) {
+        return it->second;
+    }
+
+    VkSamplerCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    ci.magFilter = to_vk_filter(desc.mag_filter);
+    ci.minFilter = to_vk_filter(desc.min_filter);
+    ci.mipmapMode = to_vk_mipmap_mode(desc.mipmap_mode);
+    ci.addressModeU = to_vk_address(desc.wrap_s);
+    ci.addressModeV = to_vk_address(desc.wrap_t);
+    ci.addressModeW = to_vk_address(desc.wrap_r);
+    ci.minLod = 0.f;
+    ci.maxLod = VK_LOD_CLAMP_NONE;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (vkCreateSampler(device_, &ci, nullptr, &sampler) != VK_SUCCESS) {
+        return linear_sampler_;
+    }
+    sampler_cache_.emplace(key, sampler);
+    return sampler;
+}
+
 bool VkBackend::create_bindless_descriptor()
 {
-    // Sampler
-    VkSamplerCreateInfo sampler_ci{};
-    sampler_ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_ci.magFilter = VK_FILTER_LINEAR;
-    sampler_ci.minFilter = VK_FILTER_LINEAR;
-    sampler_ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    sampler_ci.minLod = 0.f;
-    sampler_ci.maxLod = VK_LOD_CLAMP_NONE;
-    sampler_ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-
-    if (vkCreateSampler(device_, &sampler_ci, nullptr, &linear_sampler_) != VK_SUCCESS) {
+    // Prime the cache with the default (Repeat + Linear) sampler and keep
+    // a named reference so call sites that want "the default" don't re-hash.
+    // Shutdown destroys every cached sampler, including this one.
+    linear_sampler_ = get_or_create_sampler(SamplerDesc{});
+    if (!linear_sampler_) {
         return false;
     }
 
@@ -1109,9 +1174,11 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     td.current_layout = initial_layout;
     td.mip_levels = mip_levels;
 
-    // Update bindless sampler descriptor (binding 0)
+    // Update bindless sampler descriptor (binding 0). Per-texture sampler
+    // matches desc.sampler exactly; the cache returns one VkSampler per
+    // distinct addressing/filter combination.
     VkDescriptorImageInfo sampler_info{};
-    sampler_info.sampler = linear_sampler_;
+    sampler_info.sampler = get_or_create_sampler(desc.sampler);
     sampler_info.imageView = td.view;
     sampler_info.imageLayout = initial_layout;
 

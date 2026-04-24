@@ -64,6 +64,51 @@ enum class DefaultBufferType : uint8_t
     Uv1,  ///< One vec2 (0, 0); paired with DrawDataHeader::uv1_enabled == 0 so the vertex shader reads index 0 only.
 };
 
+/// Texture addressing mode for coordinates outside [0, 1]. Matches
+/// glTF 2.0's sampler wrap modes and the GPU's stock address options.
+enum class SamplerAddressMode : uint8_t
+{
+    Repeat,          ///< uv mod 1. Default; matches glTF spec default.
+    MirroredRepeat,  ///< Ping-pong on each integer boundary.
+    ClampToEdge,     ///< Clamp to [0, 1]; out-of-range samples return the edge texel.
+};
+
+/// Texture magnification / minification filter.
+enum class SamplerFilter : uint8_t
+{
+    Nearest,  ///< Nearest-neighbour sampling.
+    Linear,   ///< Bilinear filtering. Default.
+};
+
+/// Texture mipmap mode. Chosen alongside the min filter.
+enum class SamplerMipmapMode : uint8_t
+{
+    Nearest,  ///< Pick the nearest mip level.
+    Linear,   ///< Trilinear (interpolate between two mip levels). Default.
+};
+
+/// Sampler configuration for a texture. Honoured per-texture by the
+/// backend: each distinct `SamplerDesc` the renderer sees materialises
+/// one underlying GPU sampler (cached). Matches the slot structure of
+/// glTF 2.0 samplers.
+struct SamplerDesc
+{
+    SamplerAddressMode wrap_s{SamplerAddressMode::Repeat};
+    SamplerAddressMode wrap_t{SamplerAddressMode::Repeat};
+    SamplerAddressMode wrap_r{SamplerAddressMode::Repeat};
+    SamplerFilter mag_filter{SamplerFilter::Linear};
+    SamplerFilter min_filter{SamplerFilter::Linear};
+    SamplerMipmapMode mipmap_mode{SamplerMipmapMode::Linear};
+
+    constexpr bool operator==(const SamplerDesc& rhs) const
+    {
+        return wrap_s == rhs.wrap_s && wrap_t == rhs.wrap_t && wrap_r == rhs.wrap_r
+            && mag_filter == rhs.mag_filter && min_filter == rhs.min_filter
+            && mipmap_mode == rhs.mipmap_mode;
+    }
+    constexpr bool operator!=(const SamplerDesc& rhs) const { return !(*this == rhs); }
+};
+
 /// Pipeline keys used by the render context's auto-assign counter.
 /// Visuals that own a built-in pipeline provide their own stable key
 /// (typically via make_hash64 on the class name).

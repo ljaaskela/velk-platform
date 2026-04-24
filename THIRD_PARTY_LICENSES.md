@@ -13,6 +13,8 @@ velk-ui bundles or links the following third-party software:
 | [Inter](https://rsms.me/inter/) | 4.x | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
 | [Slug reference shaders](https://github.com/EricLengyel/Slug) | 2025 reference | MIT / Apache 2.0 (patent in public domain) | Translated to GLSL in `plugins/text/src/embedded/velk_text_glsl.h` |
 | [stb_image](https://github.com/nothings/stb) | latest (single header) | MIT or Public Domain (dual) | `plugins/image/third_party/stb/stb_image.h` |
+| [cgltf](https://github.com/jkuhlmann/cgltf) | latest (single header) | MIT | `plugins/gltf/third_party/cgltf/cgltf.h` |
+| [MikkTSpace](https://github.com/mmikk/MikkTSpace) | latest | Zlib | `plugins/gltf/third_party/mikktspace/` |
 
 ## Inter font
 
@@ -45,6 +47,14 @@ shaderc is Google's GLSL to SPIR-V compiler, distributed under the Apache 2.0 li
 ## stb_image
 
 `stb_image.h` is a single-header public domain (or MIT) image loader by Sean Barrett, vendored as `plugins/image/third_party/stb/stb_image.h`. Used by the image plugin (`velk_image`) to decode png/jpg/bmp/tga/gif/hdr/psd images into RGBA8 pixel data. The full dual license text is at the bottom of the header file itself.
+
+## cgltf
+
+`cgltf.h` is a single-header glTF 2.0 parser by Johannes Kuhlmann, distributed under the MIT license. Vendored as `plugins/gltf/third_party/cgltf/cgltf.h` and used by the glTF plugin (`velk_gltf`) to parse `.gltf` and `.glb` files into runtime `IGltfAsset` objects. The full license is at the top of the header.
+
+## MikkTSpace
+
+MikkTSpace is a tangent-space generator by Morten S. Mikkelsen, distributed under the Zlib license. Vendored as `plugins/gltf/third_party/mikktspace/` and used by the glTF plugin (`velk_gltf`) to synthesize tangents for glTF meshes that carry a normal map but omit the `TANGENT` attribute. The full license is included in the source files.
 
 ## Slug reference shaders
 

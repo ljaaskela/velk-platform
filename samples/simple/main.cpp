@@ -152,6 +152,30 @@ int main(int argc, char* argv[])
             offset += 10;
             c += .1f;
         }*/
+
+    // glTF round-2 smoke test: load BoxTextured.glb under a host element
+    // that scales it up to scene units (BoxTextured is a unit cube; the
+    // dashboard scene works in pixel-ish coordinates).
+    {
+        auto& rs = velk::instance().resource_store();
+        auto asset = rs.get_resource<velk::ui::IGltfAsset>("gltf:app://assets/BoxTextured.glb");
+        if (asset) {
+            auto store = asset->instantiate();
+            if (store) {
+                auto host = velk::ui::create_element();
+                auto host_trs = velk::ui::trait::transform::create_trs();
+                host_trs.set_translate({0.f, 0.f, 0.f});
+                host_trs.set_scale({200.f, 200.f, 200.f});
+                host.add_trait(host_trs);
+                scene.add(scene.root(), host);
+                scene.load(*store, host.as_ptr<velk::ui::IElement>().get());
+                VELK_LOG(I, "gltf: loaded BoxTextured.glb (%zu objects)", store->object_count());
+            } else {
+                VELK_LOG(W, "gltf: BoxTextured.glb instantiate() returned null");
+            }
+        } else {
+            VELK_LOG(W, "gltf: BoxTextured.glb resource not available");
+        }
     }
 
     // Custom shader material: checkerboard pattern on the first card

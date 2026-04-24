@@ -13,9 +13,13 @@ namespace velk::ui {
  * @brief Convenience wrapper around ITrs.
  *
  *   auto trs = trait::transform::create_trs();
- *   trs.set_rotation(45.f);
- *   trs.set_scale({0.5f, 0.5f});
+ *   trs.set_rotation({0.f, 45.f, 0.f});   // Euler degrees (XYZ)
+ *   trs.set_scale({0.5f, 0.5f, 0.5f});
  *   elem.add_trait(trs);
+ *
+ * Rotation is stored as a quaternion on the interface; Euler-degree
+ * accessors are retained for hand-authored content and convert to / from
+ * quat internally.
  */
 class Trs : public Trait
 {
@@ -29,11 +33,32 @@ public:
     auto get_translate() const { return read_state_value<ITrs>(&ITrs::State::translate); }
     void set_translate(const vec3& v) { write_state_value<ITrs>(&ITrs::State::translate, v); }
 
-    auto get_rotation() const { return read_state_value<ITrs>(&ITrs::State::rotation); }
-    void set_rotation(const vec3& v) { write_state_value<ITrs>(&ITrs::State::rotation, v); }
+    /// Native quaternion accessor.
+    quat get_rotation_quat() const { return read_state_value<ITrs>(&ITrs::State::rotation); }
+    void set_rotation_quat(const quat& q) { write_state_value<ITrs>(&ITrs::State::rotation, q); }
+
+    /// Euler XYZ in degrees, matching the legacy `ITrs` rotation semantics
+    /// (Rx * Ry * Rz). Rounds-trips for typical authored rotations; near
+    /// gimbal lock the quat round-trip is not lossless.
+    vec3 get_rotation() const
+    {
+        quat q = get_rotation_quat();
+        vec3 r = q.to_euler();
+        constexpr float kRadToDeg = 57.2957795130823f;
+        return {r.x * kRadToDeg, r.y * kRadToDeg, r.z * kRadToDeg};
+    }
+    void set_rotation(const vec3& euler_degrees)
+    {
+        constexpr float kDegToRad = 0.0174532925199433f;
+        set_rotation_quat(quat::from_euler({
+            euler_degrees.x * kDegToRad,
+            euler_degrees.y * kDegToRad,
+            euler_degrees.z * kDegToRad
+        }));
+    }
 
     auto get_scale() const { return read_state_value<ITrs>(&ITrs::State::scale); }
-    void set_scale(const vec2& v) { write_state_value<ITrs>(&ITrs::State::scale, v); }
+    void set_scale(const vec3& v) { write_state_value<ITrs>(&ITrs::State::scale, v); }
 };
 
 namespace trait::transform {

@@ -27,7 +27,7 @@ public:
 
     // IScene
     IFuture::Ptr load_from(string_view path) override;
-    void load(IStore& store) override;
+    ReturnValue load(IStore& store, IElement* parent = nullptr) override;
     void set_geometry(aabb geometry) override;
     void update(const UpdateInfo& info) override;
     SceneState consume_state() override;

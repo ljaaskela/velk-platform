@@ -47,6 +47,18 @@ public:
         return Future<ReturnValue>(with<IScene>([&](auto& s) { return s.load_from(path); }));
     }
 
+    /**
+     * @brief Imports elements from @p store into the scene.
+     *
+     * With @p parent null, replaces the scene root (existing tree
+     * cleared). With @p parent non-null, grafts the imported root as a
+     * child of @p parent.
+     */
+    ReturnValue load(IStore& store, IElement* parent = nullptr)
+    {
+        return with_or<IScene>([&](auto& s) { return s.load(store, parent); }, ReturnValue::InvalidArgument);
+    }
+
     /** @brief Sets the layout bounds for this scene. */
     void set_geometry(aabb geometry)
     {

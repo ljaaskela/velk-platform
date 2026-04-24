@@ -43,6 +43,11 @@ public:
 
     void set_persistent_flag(bool value) { persistent_ = value; }
 
+    /// Sets the sampler desc the renderer should use when uploading this
+    /// image. Must be called before the image is first observed by the
+    /// renderer (subsequent changes won't replace the descriptor).
+    void set_sampler_desc(const SamplerDesc& desc) override { sampler_desc_ = desc; }
+
     // IResource
     string_view uri() const override { return uri_; }
     bool exists() const override { return status_ == ImageStatus::Loaded; }
@@ -71,6 +76,7 @@ public:
     // ISurface
     uvec2 get_dimensions() const override { return {static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)}; }
     PixelFormat format() const override { return format_; }
+    SamplerDesc get_sampler_desc() const override { return sampler_desc_; }
 
 private:
     string uri_;
@@ -81,6 +87,7 @@ private:
     ImageStatus status_{ImageStatus::Unloaded};
     bool dirty_{false};
     bool persistent_{false};
+    SamplerDesc sampler_desc_{};
 };
 
 } // namespace velk::ui::impl

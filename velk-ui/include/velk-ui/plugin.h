@@ -59,6 +59,9 @@ inline constexpr Uid Cube{"957908b0-41b3-4b0e-9b15-49f5c478af3c"};
 /** @brief 3D sphere inscribed in the element's bounding box. RT-only today. */
 inline constexpr Uid Sphere{"18072f38-60dd-436a-80b4-942bbca36b52"};
 
+/** @brief Generic 3D mesh visual. Renders any IMesh assigned via IVisual3D::mesh; no procedural fallback. */
+inline constexpr Uid Mesh{"db5043f9-ed9f-4032-b7c3-60c92a75f657"};
+
 } // namespace Visual
 
 namespace Material {

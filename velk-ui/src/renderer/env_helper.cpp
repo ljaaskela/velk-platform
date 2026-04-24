@@ -55,6 +55,7 @@ EnvResolved ensure_env_ready(ICamera& camera, FrameContext& ctx)
                 desc.width = tw;
                 desc.height = th;
                 desc.format = surf->format();
+                desc.sampler = surf->get_sampler_desc();
                 // Mip chain approximates roughness prefilter: sampling
                 // higher LODs blurs the reflection for rough surfaces.
                 // Backend bilinear-downsamples at upload time; a proper
