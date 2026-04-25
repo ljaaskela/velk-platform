@@ -66,6 +66,8 @@ add_library(velk_ui SHARED
     src/import/align_type_extension.cpp
     src/import/dim_type_extension.h
     src/import/dim_type_extension.cpp
+    src/import/light_type_extension.h
+    src/import/light_type_extension.cpp
     src/import/projection_type_extension.h
     src/import/projection_type_extension.cpp
     src/import/visual_phase_type_extension.h

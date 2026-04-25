@@ -454,10 +454,20 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
         if (t_max < 1e-6) return 1.0;
         L = to_light / t_max;
     }
-    vec3 n = normalize(world_normal);
+    // Bias the ray origin toward the light to avoid self-intersection.
+    // Earlier we biased along the normal, which fails for double-sided
+    // thin geometry (awnings, banners) where the visible face's normal
+    // can point away from the light: the bias would push the origin
+    // into the back face and immediately self-shadow. L-biasing always
+    // moves into the lit half-space regardless of which way the normal
+    // happens to face. Magnitude is small to work at meter scale; for
+    // pixel-scale scenes a per-camera or per-light bias would be ideal.
     Ray r;
-    r.origin = world_pos + n * 0.5;
+    r.origin = world_pos + L * 0.005;
     r.dir    = L;
+    // Pull t_max slightly short of the light position so the ray
+    // doesn't hit the light's own fixture mesh on the way in.
+    t_max = max(t_max - 0.005, 0.0);
     return trace_any_hit_bvh(r, t_max) ? 0.0 : 1.0;
 }
 

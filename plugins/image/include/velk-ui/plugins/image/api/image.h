@@ -91,6 +91,26 @@ inline Image load_image(string_view uri, bool persistent = false)
     return img;
 }
 
+/**
+ * @brief Creates an Image directly from decoded RGBA pixel data, bypassing
+ *        the bytes decoder. The pixel buffer is copied; the caller does
+ *        not need to keep `pixels` alive past this call.
+ *
+ * Useful for importers that synthesize textures (e.g. the glTF spec/gloss
+ * to metallic/roughness conversion). The image is not registered with the
+ * resource store; the caller owns the lifetime via the returned wrapper.
+ */
+inline Image create_image_from_pixels(string_view uri, int width, int height,
+                                      PixelFormat format,
+                                      const uint8_t* pixels, size_t pixel_size)
+{
+    auto img_ptr = ::velk::instance().create<IImage>(::velk::ui::ClassId::Image);
+    if (img_ptr) {
+        img_ptr->init_from_pixels(uri, width, height, format, pixels, pixel_size);
+    }
+    return Image(img_ptr);
+}
+
 } // namespace image
 
 } // namespace velk::ui

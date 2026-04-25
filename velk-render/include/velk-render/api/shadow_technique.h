@@ -3,6 +3,7 @@
 
 #include <velk-render/api/render_technique.h>
 #include <velk-render/interface/intf_shadow_technique.h>
+#include <velk-render/plugin.h>
 
 namespace velk {
 

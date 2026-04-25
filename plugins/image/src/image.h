@@ -48,6 +48,10 @@ public:
     /// renderer (subsequent changes won't replace the descriptor).
     void set_sampler_desc(const SamplerDesc& desc) override { sampler_desc_ = desc; }
 
+    /// IImage interface entry: copy pixels and call init().
+    void init_from_pixels(string_view uri, int width, int height, PixelFormat format,
+                          const uint8_t* pixels, size_t pixel_size) override;
+
     // IResource
     string_view uri() const override { return uri_; }
     bool exists() const override { return status_ == ImageStatus::Loaded; }

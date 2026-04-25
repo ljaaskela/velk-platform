@@ -19,11 +19,18 @@ void Orbit::transform(IElement& element)
         return;
     }
 
-    // Target position (center of target element)
+    // Target position is the world-space translation of the target
+    // element. For 3D pivots (a sceneless empty element used as a target,
+    // or a glTF asset's host node) that translation is the pivot point
+    // directly. We deliberately do NOT add `size * 0.5` here: an element's
+    // size is a 2D-layout extent, not a 3D extent, and after a child
+    // hierarchy is loaded under the target the layout solver may grow
+    // `size` to encompass child world AABBs, which would then teleport
+    // the orbit eye away from the actual geometry.
     vec3 target{
-        target_state->world_matrix(0, 3) + target_state->size.width * 0.5f,
-        target_state->world_matrix(1, 3) + target_state->size.height * 0.5f,
-        0.f
+        target_state->world_matrix(0, 3),
+        target_state->world_matrix(1, 3),
+        target_state->world_matrix(2, 3)
     };
 
     // velk-ui 3D world uses the same Y-down convention as the 2D UI

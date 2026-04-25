@@ -15,6 +15,7 @@
 
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/material/material_property.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/material/intf_material_property.h>
@@ -24,6 +25,7 @@
 
 #include "cgltf.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -333,6 +335,97 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         }
     }
 
+    // Legacy KHR_materials_pbrSpecularGlossiness: convert to metal/rough +
+    // KHR_materials_specular on the fly, treating surfaces as dielectric.
+    // See design-notes/gltf-import.md for the full list of shortcuts.
+    if (m.has_pbr_specular_glossiness && !m.has_pbr_metallic_roughness) {
+        const auto& sg = m.pbr_specular_glossiness;
+        mat.set_base_color({sg.diffuse_factor[0], sg.diffuse_factor[1],
+                            sg.diffuse_factor[2], sg.diffuse_factor[3]});
+        if (auto img = image_for(sg.diffuse_texture.texture)) {
+            mat.base_color().set_texture(img);
+            apply_tex_transform(mat.base_color(), sg.diffuse_texture);
+        }
+        mat.set_metallic(0.f);
+        mat.set_roughness(1.f - sg.glossiness_factor);
+
+        const float smax = std::max({sg.specular_factor[0],
+                                     sg.specular_factor[1],
+                                     sg.specular_factor[2]});
+        if (smax > 0.f) {
+            // F0 caps at 0.04 in the specular extension; values above
+            // (e.g. polished marble's F0 ~= 1.0) get clamped and look
+            // matte. Heuristic upgrade to metal is a future improvement.
+            mat.specular().set_factor(std::min(smax / 0.04f, 1.f));
+            mat.specular().set_color_factor({sg.specular_factor[0] / smax,
+                                              sg.specular_factor[1] / smax,
+                                              sg.specular_factor[2] / smax, 1.f});
+        }
+
+        // Per-pixel data: split specularGlossinessTexture (RGB = sRGB
+        // specular tint, A = linear glossiness) into two new textures:
+        //   - metallicRoughness: G = 1 - alpha (roughness, linear), B = 0
+        //   - specularColor: RGB copied (sRGB), A = 255 (full strength)
+        // Source pixels are still CPU-resident since the renderer hasn't
+        // uploaded yet at decode time.
+        if (sg.specular_glossiness_texture.texture
+            && sg.specular_glossiness_texture.texture->image) {
+            const auto* src_img_obj = sg.specular_glossiness_texture.texture->image;
+            size_t img_idx = static_cast<size_t>(src_img_obj - data->images);
+            if (img_idx < images.size() && images[img_idx]) {
+                auto src_surf = images[img_idx];
+                auto* buf = interface_cast<IBuffer>(src_surf.get());
+                const uint8_t* src_pixels = buf ? buf->get_data() : nullptr;
+                size_t src_size = buf ? buf->get_data_size() : 0;
+                auto dims = src_surf->get_dimensions();
+                size_t pixel_count = static_cast<size_t>(dims.x) * dims.y;
+                if (src_pixels && src_size == pixel_count * 4) {
+                    vector<uint8_t> mr_pixels;
+                    mr_pixels.resize(src_size);
+                    vector<uint8_t> sp_pixels;
+                    sp_pixels.resize(src_size);
+                    for (size_t i = 0; i < pixel_count; ++i) {
+                        const uint8_t* sp = src_pixels + i * 4;
+                        mr_pixels[i * 4 + 0] = 255;          // R: occlusion (unused, default)
+                        mr_pixels[i * 4 + 1] = static_cast<uint8_t>(255 - sp[3]);  // G: roughness
+                        mr_pixels[i * 4 + 2] = 0;            // B: metallic = 0
+                        mr_pixels[i * 4 + 3] = 255;
+                        sp_pixels[i * 4 + 0] = sp[0];
+                        sp_pixels[i * 4 + 1] = sp[1];
+                        sp_pixels[i * 4 + 2] = sp[2];
+                        sp_pixels[i * 4 + 3] = 255;          // A: specular strength = 1
+                    }
+                    char mr_uri[80];
+                    std::snprintf(mr_uri, sizeof(mr_uri),
+                                  "gltf-mr-%p-%zu",
+                                  static_cast<const void*>(data), img_idx);
+                    auto mr_img = ::velk::ui::image::create_image_from_pixels(
+                        mr_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
+                        PixelFormat::RGBA8, mr_pixels.data(), mr_pixels.size());
+                    if (mr_img) {
+                        static_cast<IImage::Ptr>(mr_img)->set_sampler_desc(src_surf->get_sampler_desc());
+                        mat.metallic_roughness().set_texture(mr_img.as_surface());
+                        apply_tex_transform(mat.metallic_roughness(),
+                                            sg.specular_glossiness_texture);
+                    }
+                    char sp_uri[80];
+                    std::snprintf(sp_uri, sizeof(sp_uri),
+                                  "gltf-sp-%p-%zu",
+                                  static_cast<const void*>(data), img_idx);
+                    auto sp_img = ::velk::ui::image::create_image_from_pixels(
+                        sp_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
+                        PixelFormat::RGBA8_SRGB, sp_pixels.data(), sp_pixels.size());
+                    if (sp_img) {
+                        static_cast<IImage::Ptr>(sp_img)->set_sampler_desc(src_surf->get_sampler_desc());
+                        mat.specular().set_texture(sp_img.as_surface());
+                        apply_tex_transform(mat.specular(),
+                                            sg.specular_glossiness_texture);
+                    }
+                }
+            }
+        }
+    }
+
     return static_cast<IMaterial::Ptr>(mat);
 }
 
@@ -441,15 +534,19 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
         vector<float> uvs1;
         if (uv1 && !read_attribute_to_floats(uv1, uvs1, 2)) continue;
 
+        // glTF is right-handed Y-up; velk world is Y-down. Negate Y on
+        // positions and normals so the asset stands the right way up
+        // physically. Single-axis reflection inverts triangle winding,
+        // so we compensate below by swapping two indices per triangle.
         for (uint32_t k = 0; k < v_count; ++k) {
             InterleavedVertex& v = vbo[v_cursor + k];
-            v.pos[0] = positions[k * 3 + 0];
-            v.pos[1] = positions[k * 3 + 1];
-            v.pos[2] = positions[k * 3 + 2];
+            v.pos[0] =  positions[k * 3 + 0];
+            v.pos[1] = -positions[k * 3 + 1];
+            v.pos[2] =  positions[k * 3 + 2];
             if (nrm) {
-                v.nrm[0] = normals[k * 3 + 0];
-                v.nrm[1] = normals[k * 3 + 1];
-                v.nrm[2] = normals[k * 3 + 2];
+                v.nrm[0] =  normals[k * 3 + 0];
+                v.nrm[1] = -normals[k * 3 + 1];
+                v.nrm[2] =  normals[k * 3 + 2];
             } else {
                 v.nrm[0] = 0; v.nrm[1] = 0; v.nrm[2] = 1;
             }
@@ -471,10 +568,21 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
         }
 
         // Indices: copy + rebase by v_cursor so each primitive references
-        // its own vertex range within the shared VBO.
+        // its own vertex range within the shared VBO. We also swap the
+        // 2nd and 3rd vertex of every triangle to compensate for the
+        // winding flip introduced by the Y-axis position negation above.
         vector<uint32_t> prim_indices;
         if (!read_indices_to_uint32(p.indices, prim_indices)) continue;
-        for (uint32_t k = 0; k < i_count; ++k) {
+        const uint32_t tri_count = i_count / 3;
+        for (uint32_t t = 0; t < tri_count; ++t) {
+            ibo[i_cursor + t * 3 + 0] = prim_indices[t * 3 + 0] + v_cursor;
+            ibo[i_cursor + t * 3 + 1] = prim_indices[t * 3 + 2] + v_cursor;
+            ibo[i_cursor + t * 3 + 2] = prim_indices[t * 3 + 1] + v_cursor;
+        }
+        // Tail (non-triangle indices) — keep order. cgltf only gives us
+        // triangles when the primitive type is triangles, so this is
+        // strictly defensive.
+        for (uint32_t k = tri_count * 3; k < i_count; ++k) {
             ibo[i_cursor + k] = prim_indices[k] + v_cursor;
         }
 

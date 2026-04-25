@@ -5,6 +5,7 @@
 #include "element.h"
 #include "import/align_type_extension.h"
 #include "import/dim_type_extension.h"
+#include "import/light_type_extension.h"
 #include "import/projection_type_extension.h"
 #include "import/visual_phase_type_extension.h"
 #include "input/click.h"
@@ -68,6 +69,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<AlignTypeExtension>(velk, alloc);
     rv &= register_type<ProjectionTypeExtension>(velk, alloc);
     rv &= register_type<VisualPhaseTypeExtension>(velk, alloc);
+    rv &= register_type<LightTypeExtension>(velk, alloc);
     // Value type registrations
     rv &= register_type<::velk::ext::AnyValue<dim>>(velk);
     rv &= register_type<::velk::ext::AnyValue<DirtyFlags>>(velk);
@@ -75,6 +77,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<::velk::ext::AnyValue<VAlign>>(velk);
     rv &= register_type<::velk::ext::AnyValue<Projection>>(velk);
     rv &= register_type<::velk::ext::AnyValue<VisualPhase>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<LightType>>(velk);
     rv &= register_type<::velk::ext::AnyValue<PointerEvent>>(velk);
     rv &= register_type<::velk::ext::AnyValue<ScrollEvent>>(velk);
     rv &= register_type<::velk::ext::AnyValue<KeyEvent>>(velk);

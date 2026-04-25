@@ -117,6 +117,9 @@ inline constexpr Uid ProjectionTypeExtension{"9dc1211c-70f1-41ea-a19f-099e2e7d66
 /** @brief Type extension for VisualPhase enum values in the importer. */
 inline constexpr Uid VisualPhaseTypeExtension{"8ebb28a3-c32a-4258-b09e-fa2c592d4382"};
 
+/** @brief Type extension for LightType enum values in the importer. */
+inline constexpr Uid LightTypeExtension{"7e1487e0-9b8f-4dc2-bc07-a18523b0d4f1"};
+
 } // namespace Import
 
 } // namespace ClassId

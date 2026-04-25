@@ -199,6 +199,13 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx, F&& cb)
             continue;
         }
 
+        // 3D visuals that aren't analytic primitives are triangle
+        // meshes (e.g. MeshVisual from a glTF import). The 2D-rect emit
+        // path below would treat their draw entries as 2D rects and
+        // produce garbage shapes that pollute the shadow BVH; until we
+        // have a triangle / mesh shape kind, skip them entirely.
+        if (interface_cast<IVisual3D>(visual)) continue;
+
         float radius = 0.f;
         if (analytic && !analytic->get_shape_intersect_source().empty()) {
             radius = std::min(std::min(ew, eh) * 0.5f, 12.f);

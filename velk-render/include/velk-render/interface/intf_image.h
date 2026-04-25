@@ -2,6 +2,7 @@
 #define VELK_RENDER_INTF_IMAGE_H
 
 #include <velk/interface/resource/intf_resource.h>
+#include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/render_types.h>
 
 #include <cstdint>
@@ -51,6 +52,21 @@ public:
      * has been uploaded — the sampler captured at upload time is final.
      */
     virtual void set_sampler_desc(const SamplerDesc& desc) = 0;
+
+    /**
+     * @brief Initializes the image directly from decoded RGBA pixel data,
+     *        bypassing any bytes decoder.
+     *
+     * Used by importers that need to synthesize textures whose bytes are
+     * not on disk (e.g. the glTF spec/gloss converter that derives a
+     * roughness texture from a specularGlossinessTexture). The pixel
+     * buffer is copied internally; `pixels` must remain valid only for
+     * the duration of the call. After this returns, `status()` is
+     * `Loaded`.
+     */
+    virtual void init_from_pixels(string_view uri, int width, int height,
+                                  PixelFormat format,
+                                  const uint8_t* pixels, size_t pixel_size) = 0;
 };
 
 } // namespace velk
