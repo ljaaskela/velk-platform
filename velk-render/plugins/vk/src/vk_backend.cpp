@@ -608,12 +608,13 @@ bool VkBackend::create_bindless_descriptor()
         return false;
     }
 
-    // Descriptor set layout: two bindings
+    // Descriptor set layout: three bindings
     //   0: variable-length sampler array (combined image+sampler) for sampled reads
-    //   1: variable-length storage-image array for compute imageStore writes
-    // Only the LAST binding may use VARIABLE_DESCRIPTOR_COUNT, so binding 1
-    // carries that flag; binding 0 uses a fixed count.
-    VkDescriptorSetLayoutBinding bindings[2]{};
+    //   1: storage-image array for compute imageStore writes (rgba8-format)
+    //   2: storage-image array for compute imageStore writes (rgba32f-format)
+    // Only the LAST binding may use VARIABLE_DESCRIPTOR_COUNT, so binding 2
+    // carries that flag; bindings 0 and 1 use fixed counts.
+    VkDescriptorSetLayoutBinding bindings[3]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[0].descriptorCount = kMaxBindlessTextures;
@@ -624,7 +625,14 @@ bool VkBackend::create_bindless_descriptor()
     bindings[1].descriptorCount = kMaxBindlessTextures;
     bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    VkDescriptorBindingFlags binding_flags[2] = {
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[2].descriptorCount = kMaxBindlessTextures;
+    bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorBindingFlags binding_flags[3] = {
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
@@ -634,14 +642,14 @@ bool VkBackend::create_bindless_descriptor()
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flags_ci.bindingCount = 2;
+    flags_ci.bindingCount = 3;
     flags_ci.pBindingFlags = binding_flags;
 
     VkDescriptorSetLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layout_ci.pNext = &flags_ci;
     layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    layout_ci.bindingCount = 2;
+    layout_ci.bindingCount = 3;
     layout_ci.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &descriptor_layout_) != VK_SUCCESS) {
@@ -649,17 +657,19 @@ bool VkBackend::create_bindless_descriptor()
     }
 
     // Pool
-    VkDescriptorPoolSize pool_sizes[2]{};
+    VkDescriptorPoolSize pool_sizes[3]{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_sizes[0].descriptorCount = kMaxBindlessTextures;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     pool_sizes[1].descriptorCount = kMaxBindlessTextures;
+    pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    pool_sizes[2].descriptorCount = kMaxBindlessTextures;
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_ci.maxSets = 1;
-    pool_ci.poolSizeCount = 2;
+    pool_ci.poolSizeCount = 3;
     pool_ci.pPoolSizes = pool_sizes;
 
     if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_) != VK_SUCCESS) {
@@ -1194,8 +1204,13 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
 
     vkUpdateDescriptorSets(device_, 1, &sampler_write, 0, nullptr);
 
-    // For storage textures, also register as a storage image (binding 1) so
-    // compute shaders can imageStore via the same bindless_index.
+    // For storage textures, also register as a storage image so compute
+    // shaders can imageStore via the same bindless_index. RGBA8-format
+    // textures land on binding 1 (matched by `image2D rgba8` in GLSL);
+    // RGBA32F-format textures land on binding 2 (matched by `image2D
+    // rgba32f`). Per-format bindings are required because Vulkan's
+    // image-format compatibility rules forbid writing rgba32f data
+    // through an rgba8-typed image view.
     if (desc.usage == TextureUsage::Storage) {
         VkDescriptorImageInfo storage_info{};
         storage_info.imageView = td.view;
@@ -1204,7 +1219,7 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         VkWriteDescriptorSet storage_write{};
         storage_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         storage_write.dstSet = descriptor_set_;
-        storage_write.dstBinding = 1;
+        storage_write.dstBinding = (desc.format == PixelFormat::RGBA32F) ? 2u : 1u;
         storage_write.dstArrayElement = td.bindless_index;
         storage_write.descriptorCount = 1;
         storage_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;

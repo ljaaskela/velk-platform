@@ -498,6 +498,15 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     }
                 }
             }
+            // Force a full re-walk so the BVH cb fires for every
+            // primitive and the per-instance log block runs. Clearing
+            // the cache also bypasses the SceneBvh::rebuild AABB-hash
+            // shortcut that would otherwise downgrade dirty back to
+            // false on a static scene.
+            if (log_bvh_next_) {
+                dirty = true;
+                bvh->force_full_rebuild();
+            }
             bvh->rebuild(scene, render_ctx_, frame_buffer_, dirty, [&](ShapeSite& site) {
                 auto mat = site.paint
                     ? snippets_.resolve_material(site.paint, ctx)
@@ -535,9 +544,29 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     }
                     site.geometry.mesh_data_addr = frame_buffer_.write(
                         &site.mesh_instance, sizeof(site.mesh_instance));
+
+                    if (log_bvh_next_ && site.mesh_primitive) {
+                        auto* mp = site.mesh_primitive;
+                        auto buf = mp->get_buffer();
+                        uint64_t buffer_addr = buf ? buf->get_gpu_address() : 0;
+                        uint32_t i_count = mp->get_index_count();
+                        uint32_t v_stride = mp->get_vertex_stride();
+                        uint32_t triangle_count = i_count / 3u;
+                        uint32_t ibo_offset = static_cast<uint32_t>(
+                            buf ? buf->get_ibo_offset() : 0);
+                        VELK_LOG(I, "BVH cb: inst=%p mesh_static_addr=0x%016llx "
+                                    "buffer_addr=0x%016llx ibo_offset=0x%08x "
+                                    "triangle_count=%u v_stride=%u",
+                                 (void*)mp,
+                                 (unsigned long long)site.mesh_instance.mesh_static_addr,
+                                 (unsigned long long)buffer_addr,
+                                 ibo_offset, triangle_count, v_stride);
+                    }
                 }
             });
             scene_bvhs[scene] = bvh;
+            // One-shot consumed: clear so subsequent frames don't spam.
+            log_bvh_next_ = false;
         }
 
         // Per-view passes go into a temp so the shared passes (RTT, etc.)
@@ -871,6 +900,17 @@ TextureId Renderer::get_gbuffer_attachment(const IElement::Ptr& camera_element,
         if (v.surface.get() != surface.get()) continue;
         if (v.gbuffer_group == 0 || !backend_) return 0;
         return backend_->get_render_target_group_attachment(v.gbuffer_group, attachment_index);
+    }
+    return 0;
+}
+
+TextureId Renderer::get_shadow_debug_texture(const IElement::Ptr& camera_element,
+                                              const IWindowSurface::Ptr& surface) const
+{
+    for (auto& v : views_) {
+        if (v.camera_element.get() != camera_element.get()) continue;
+        if (v.surface.get() != surface.get()) continue;
+        return v.shadow_debug_tex;
     }
     return 0;
 }

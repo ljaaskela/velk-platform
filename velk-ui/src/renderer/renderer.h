@@ -59,6 +59,9 @@ public:
     TextureId get_gbuffer_attachment(const IElement::Ptr& camera_element,
                                      const IWindowSurface::Ptr& surface,
                                      uint32_t attachment_index) const override;
+    TextureId get_shadow_debug_texture(const IElement::Ptr& camera_element,
+                                       const IWindowSurface::Ptr& surface) const override;
+    void request_bvh_log() override { log_bvh_next_ = true; }
     void shutdown() override;
 
 private:
@@ -96,6 +99,12 @@ private:
         rect dst_rect{};
     };
     vector<DebugOverlay> debug_overlays_;
+
+    // One-shot flag set by request_bvh_log(), consumed in the next
+    // BVH-emit cb. The cb walks every mesh instance and prints
+    // (instance_index, buffer_addr, ibo_offset, triangle_count) so the
+    // log can be compared against the F12-dumped shadow_debug image.
+    bool log_bvh_next_ = false;
 
     // Shared visual-command / gpu-resource cache. Both the dirty-resource
     // upload in consume_scenes and the Rasterizer path read from it, so it

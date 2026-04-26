@@ -89,6 +89,12 @@ public:
 
     void invalidate() override { dirty_ = true; }
 
+    /// Clears the cached topology so the next `rebuild` re-walks every
+    /// shape and re-fires the shape callback, regardless of the AABB
+    /// hash check. Used by debug hooks that need to observe per-shape
+    /// emit-time state on demand.
+    void force_full_rebuild() { cached_nodes_.clear(); }
+
 private:
     /// Hash all visual-bearing elements' world_aabbs to detect
     /// geometry-only changes without re-emitting shapes. Walks the

@@ -117,6 +117,11 @@ void InputDispatcher::scroll_event(const ScrollEvent& event)
 
 void InputDispatcher::key_event(const KeyEvent& event)
 {
+    // Broadcast to external subscribers first (debug overlays, sample
+    // key handlers). Subscribers see every key regardless of focus
+    // state, mirroring the on_pointer_event / on_scroll_event paths.
+    ::velk::invoke_event(get_interface(IInterface::UID), "on_key_event", event);
+
     // Key events dispatch to focused element and bubble up.
     // Stub for now: full implementation comes with focus management.
     if (!focused_) {

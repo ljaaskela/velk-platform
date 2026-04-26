@@ -144,6 +144,27 @@ public:
                                              const IWindowSurface::Ptr& surface,
                                              uint32_t attachment_index) const = 0;
 
+    /**
+     * @brief Returns the bindless texture id of the per-view RT shadow
+     *        diagnostic image (RGBA32F) for the given (camera, surface)
+     *        view. The image is written by the deferred shadow compute
+     *        when the shadow_debug_image_id push constant is non-zero;
+     *        each pixel carries (buffer_addr_lo, buffer_addr_hi,
+     *        ibo_offset, triangle_count) of the BLAS instance the
+     *        shadow ray walked. Returns 0 if no Deferred view is set up.
+     */
+    virtual TextureId get_shadow_debug_texture(const IElement::Ptr& camera_element,
+                                               const IWindowSurface::Ptr& surface) const = 0;
+
+    /**
+     * @brief Requests a one-shot dump of every mesh shape's MeshStaticData
+     *        (instance index, buffer_addr, ibo_offset, triangle_count) to
+     *        the log on the next BVH rebuild. Used together with the F12
+     *        shadow-debug image dump so CPU-emitted values can be compared
+     *        per-pixel against GPU-observed values.
+     */
+    virtual void request_bvh_log() = 0;
+
     /** @brief Releases all GPU resources. */
     virtual void shutdown() = 0;
 };

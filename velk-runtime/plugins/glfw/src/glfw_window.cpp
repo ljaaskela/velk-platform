@@ -23,6 +23,7 @@ void GlfwWindow::set_glfw_handle(GLFWwindow* window)
         glfwSetCursorPosCallback(window_, cursor_pos_callback);
         glfwSetMouseButtonCallback(window_, mouse_button_callback);
         glfwSetScrollCallback(window_, scroll_callback);
+        glfwSetKeyCallback(window_, key_callback);
     }
 }
 
@@ -151,6 +152,26 @@ void GlfwWindow::scroll_callback(GLFWwindow* window, double xoffset, double yoff
     ev.delta = {static_cast<float>(xoffset), static_cast<float>(yoffset)};
     ev.unit = ui::ScrollUnit::Lines;
     self->input_->scroll_event(ev);
+}
+
+void GlfwWindow::key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+    auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+    if (!self || !self->input_) {
+        return;
+    }
+
+    ui::KeyEvent ev;
+    ev.key = key;
+    ev.scancode = scancode;
+    ev.action = (action == GLFW_PRESS)    ? ui::KeyAction::Down
+                : (action == GLFW_REPEAT) ? ui::KeyAction::Repeat
+                                          : ui::KeyAction::Up;
+    if (mods & GLFW_MOD_SHIFT)   ev.modifiers = ev.modifiers | ui::Modifier::Shift;
+    if (mods & GLFW_MOD_CONTROL) ev.modifiers = ev.modifiers | ui::Modifier::Ctrl;
+    if (mods & GLFW_MOD_ALT)     ev.modifiers = ev.modifiers | ui::Modifier::Alt;
+    if (mods & GLFW_MOD_SUPER)   ev.modifiers = ev.modifiers | ui::Modifier::Super;
+    self->input_->key_event(ev);
 }
 
 } // namespace velk::impl

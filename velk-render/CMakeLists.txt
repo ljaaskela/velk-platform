@@ -29,7 +29,6 @@ add_library(velk_render SHARED
     src/mesh_builder.h
     src/mesh_builder.cpp
     src/primitive_meshes.cpp
-    src/debug/render_target_dump.cpp
     include/velk-render/debug/render_target_dump.h
     include/velk-render/blas.h
     include/velk-render/interface/intf_mesh.h

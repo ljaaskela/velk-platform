@@ -69,6 +69,19 @@ public:
             [&](auto& w) { return ScopedHandler(w.input().on_pointer_event(), std::move(fn)); });
     }
 
+    /**
+     * @brief Convenience: subscribes a handler to the window's key event stream.
+     *
+     * Receives every key event regardless of focus state. Same RAII pattern
+     * as @c add_on_pointer_event.
+     */
+    template <class F>
+    ScopedHandler add_on_key_event(F&& fn)
+    {
+        return with<IWindow>(
+            [&](auto& w) { return ScopedHandler(w.input().on_key_event(), std::move(fn)); });
+    }
+
     /** @brief Returns the render context associated with this window, wrapped for null-safety. */
     RenderContext render_context() const
     {

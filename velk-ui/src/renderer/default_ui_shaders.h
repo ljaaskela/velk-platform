@@ -255,6 +255,7 @@ inline string compose_eval_fragment(string_view driver_template,
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
@@ -285,7 +286,7 @@ layout(push_constant) uniform PC {
     uint height;               // 40
     uint light_count;          // 44
     uint env_texture_id;       // 48
-    uint _pad0;                // 52
+    uint shadow_debug_image_id;// 52  RGBA32F storage image; 0 = disabled
     LightList lights;          // 56
     _EnvParamsBuf env_params;  // 64
     GlobalData globals;        // 72
@@ -409,9 +410,21 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
     if (st.blas_node_count == 0u) return false;
 
-    // Ray into mesh-local space.
+    // Ray into mesh-local space. Normalize the local direction so MT's
+    // numerical thresholds (`abs(det) < 1e-7`, `tt < 1e-4`) stay
+    // calibrated against mesh-edge magnitudes regardless of world
+    // scale. Without this, instances scaled up by a large world
+    // matrix produce a tiny local `ld`, which makes every triangle's
+    // `det` collapse below the rejection threshold and silently drops
+    // the entire instance from shadow casting (the bistro mm-scale
+    // chairs were the original symptom). Track the original local-dir
+    // length so the returned `hit.t` can be converted back to
+    // world-space distance for the caller's `t_max` comparison.
     vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;
-    vec3 ld = (inst.inv_world * vec4(ray.dir,    0.0)).xyz;
+    vec3 ld_unnorm = (inst.inv_world * vec4(ray.dir, 0.0)).xyz;
+    float ld_scale = length(ld_unnorm);
+    if (ld_scale < 1e-30) return false;
+    vec3 ld = ld_unnorm / ld_scale;
 
     MeshIndices  ib = MeshIndices (st.buffer_addr + uint64_t(st.ibo_offset));
     MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
@@ -465,12 +478,20 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
                 vec3 v1 = vec3(vb.data[o1], vb.data[o1 + 1u], vb.data[o1 + 2u]);
                 vec3 v2 = vec3(vb.data[o2], vb.data[o2 + 1u], vb.data[o2 + 2u]);
 
-                // Möller-Trumbore.
+                // Möller-Trumbore. The det rejection threshold scales
+                // with the actual edge magnitudes so meshes whose
+                // local-space coordinates are tiny (e.g. instances
+                // with a large baked-in world scale) don't have every
+                // triangle silently filtered out as "near-parallel".
+                // The same scaling applies to the per-hit `tt` floor
+                // so it's a meaningful "ignore self-intersection"
+                // distance regardless of mesh scale.
                 vec3 e1 = v1 - v0;
                 vec3 e2 = v2 - v0;
                 vec3 p  = cross(ld, e2);
                 float det = dot(e1, p);
-                if (abs(det) < 1e-7) continue;
+                float det_scale = max(length(e1) * length(p), 1e-30);
+                if (abs(det) < 1e-7 * det_scale) continue;
                 float inv_det = 1.0 / det;
                 vec3 to_v0 = lo - v0;
                 float u = dot(to_v0, p) * inv_det;
@@ -479,7 +500,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
                 float v = dot(ld, q) * inv_det;
                 if (v < 0.0 || u + v > 1.0) continue;
                 float tt = dot(e2, q) * inv_det;
-                if (tt < 1e-4 || tt >= best_t) continue;
+                float tt_floor = 1e-4 * max(length(e1), length(e2));
+                if (tt < tt_floor || tt >= best_t) continue;
                 best_t = tt;
                 best_u = u;
                 best_v = v;
