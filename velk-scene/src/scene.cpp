@@ -1,0 +1,525 @@
+#include "scene.h"
+
+#include <velk/api/future.h>
+#include <velk/api/perf.h>
+#include <velk/api/state.h>
+#include <velk/api/velk.h>
+#include <velk/interface/intf_object_storage.h>
+#include <velk/interface/intf_plugin_registry.h>
+#include <velk/interface/intf_store.h>
+
+#include <velk-scene/interface/intf_render_to_texture.h>
+#include <velk-scene/interface/intf_scene_plugin.h>
+#include <velk/interface/resource/intf_resource.h>
+#include <velk/interface/resource/intf_resource_store.h>
+#include <velk/plugins/importer/api/importer.h>
+
+#include <algorithm>
+#include <functional>
+
+#include <algorithm>
+
+#ifdef VELK_LAYOUT_DEBUG
+#define LAYOUT_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define LAYOUT_LOG(...) ((void)0)
+#endif
+
+namespace velk::impl {
+
+namespace {
+
+IHierarchy* get_hierarchy(Hierarchy& h)
+{
+    return interface_cast<IHierarchy>(h.get());
+}
+
+} // namespace
+
+namespace {
+
+IScenePlugin* scene_plugin()
+{
+    auto plugin = ::velk::instance().plugin_registry().find_plugin(
+        ::velk::PluginId::ScenePlugin);
+    return interface_cast<IScenePlugin>(plugin.get());
+}
+
+} // namespace
+
+Scene::Scene()
+{
+    if (auto* sp = scene_plugin()) {
+        sp->register_scene(this);
+    }
+}
+
+Scene::~Scene()
+{
+    if (auto* sp = scene_plugin()) {
+        sp->unregister_scene(this);
+    }
+}
+
+IFuture::Ptr Scene::load_from(string_view path)
+{
+    VELK_PERF_SCOPE("scene.load_from");
+    auto promise = make_promise();
+
+    auto file = instance().resource_store().get_resource<IFile>(path);
+    if (!file) {
+        VELK_LOG(E, "Scene::load_from: failed to resolve resource '%.*s'",
+                 static_cast<int>(path.size()), path.data());
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
+    }
+
+    string json;
+    if (failed(file->read_text(json))) {
+        VELK_LOG(E, "Scene::load_from: failed to read '%.*s'",
+                 static_cast<int>(path.size()), path.data());
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
+    }
+
+    auto importer = create_json_importer();
+    auto result = importer.import_from(json);
+
+    for (auto& err : result.errors) {
+        VELK_LOG(E, "Scene::load_from: import error: %s", err.c_str());
+    }
+
+    if (!result.store) {
+        promise.set_value(ReturnValue::Fail);
+        return promise.get_future<ReturnValue>();
+    }
+
+    auto rv = load(*result.store);
+
+    promise.set_value(succeeded(rv) ? ReturnValue::Success : rv);
+    return promise.get_future<ReturnValue>();
+}
+
+ReturnValue Scene::load(IStore& store, IElement* parent)
+{
+    ensure_hierarchy();
+
+    // Find the first hierarchy in the store (convention: "hierarchy:<name>")
+    static const string_view hierarchy_keys[] = {"hierarchy:scene", "hierarchy:main", "hierarchy:root"};
+    IObject::Ptr hierarchy_obj;
+    for (auto& key : hierarchy_keys) {
+        hierarchy_obj = store.find(key);
+        if (hierarchy_obj) {
+            break;
+        }
+    }
+
+    if (!hierarchy_obj) {
+        return ReturnValue::NothingToDo;
+    }
+
+    auto* src = interface_cast<IHierarchy>(hierarchy_obj);
+    if (!src) {
+        return ReturnValue::Fail;
+    }
+
+    auto src_root = src->root();
+    if (!src_root) {
+        return ReturnValue::NothingToDo;
+    }
+
+    if (parent) {
+        // Graft the imported root under the caller-supplied parent element.
+        // Scene tree is preserved; only the subtree at `parent` gains children.
+        auto* parent_as_obj = interface_cast<IObject>(parent);
+        if (!parent_as_obj) {
+            return ReturnValue::Fail;
+        }
+        auto parent_obj = parent_as_obj->get_self<IObject>();
+        if (!parent_obj) {
+            return ReturnValue::Fail;
+        }
+        auto rv = add(parent_obj, src_root);
+        if (!succeeded(rv)) {
+            return rv;
+        }
+        replicate_children(*src, src_root);
+    } else {
+        // Replicate imported hierarchy into our scene, replacing the root.
+        set_root(src_root);
+        replicate_children(*src, src_root);
+    }
+    return ReturnValue::Success;
+}
+
+void Scene::set_geometry(aabb geometry)
+{
+    if (geometry_ != geometry) {
+        geometry_ = geometry;
+        std::unique_lock lock(state_mutex_);
+        set_dirty(DirtyFlags::Layout);
+        LAYOUT_LOG("Scene::set_geometry: %.0fx%.0f", geometry.extent.width, geometry.extent.height);
+    }
+}
+
+void Scene::update(const UpdateInfo& info)
+{
+    VELK_PERF_EVENT(Update);
+    VELK_PERF_SCOPE("scene.update");
+    auto* h = get_hierarchy(logical_);
+    if (!h) {
+        return;
+    }
+
+    std::unique_lock lock(state_mutex_);
+
+    // Merge per-element dirty flags into scene-level flags
+    for (auto* elem : dirty_elements_) {
+        auto f = elem->consume_dirty();
+        dirty_ |= f;
+        if (f != DirtyFlags::None) {
+            redraw_list_.push_back(elem);
+        }
+    }
+    dirty_elements_.clear();
+
+    // Layout (constraint solving + transform/AABB propagation) is run
+    // by an external pre-update hook owned by whichever layer provides
+    // the constraint traits — velk-ui's plugin runs its LayoutSolver
+    // before invoking scene->update() each frame. Scene itself no
+    // longer touches layout, keeping the scene-model layer free of UI
+    // policy.
+    (void)h;
+
+    // `redraw_list_` already contains every element whose own
+    // on_state_changed fired this frame (see the dirty_elements_ loop
+    // above), including elements that the layout solver touched (size
+    // / world_matrix / world_aabb writes that actually changed).
+    // We intentionally do NOT blanket-add every element in the tree
+    // here: a single camera-position change used to cascade through
+    // Layout dirty and mark every visual for redraw, forcing both the
+    // BVH and the raster batches to rebuild every pan frame.
+
+    dirty_ = DirtyFlags::None;
+}
+
+SceneState Scene::consume_state()
+{
+    std::unique_lock lock(state_mutex_);
+
+    SceneState state;
+    state.redraw_list = std::move(redraw_list_);
+    state.removed_list = std::move(removed_list_);
+    state.scene = this;
+    return state;
+}
+
+void Scene::notify_dirty(IElement& element, DirtyFlags flags)
+{
+    std::unique_lock lock(state_mutex_);
+    dirty_elements_.push_back(&element);
+    dirty_ |= flags;
+}
+
+vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t max_count,
+                                       const ElementQuery& filter) const
+{
+    std::shared_lock lock(state_mutex_);
+
+    // Walk the tree once to produce a pre-order list (same order as
+    // the old flat visual_list). Siblings are z-sorted so reverse
+    // iteration visits the topmost element first, matching the
+    // previous hit-testing semantics.
+    vector<IElement::Ptr> flat;
+    std::function<void(const IObject::Ptr&)> collect;
+    collect = [&](const IObject::Ptr& obj) {
+        auto elem = interface_pointer_cast<IElement>(obj);
+        if (!elem) return;
+        flat.push_back(elem);
+        auto kids = logical_.children_of(obj);
+        std::sort(kids.begin(), kids.end(), [](const IObject::Ptr& a, const IObject::Ptr& b) {
+            auto ra = read_state<IElement>(a);
+            auto rb = read_state<IElement>(b);
+            int32_t za = ra ? ra->z_index : 0;
+            int32_t zb = rb ? rb->z_index : 0;
+            return za < zb;
+        });
+        for (auto& kid : kids) {
+            collect(kid);
+        }
+    };
+    if (auto r = logical_.root()) {
+        collect(r);
+    }
+
+    vector<IElement::Ptr> hits;
+    for (size_t i = flat.size(); i > 0; --i) {
+        auto& elem = flat[i - 1];
+
+        auto* storage = interface_cast<IObjectStorage>(elem);
+        if (!storage) continue;
+        // Trait filter: every required UID in `filter.traits` must be
+        // implemented by at least one of the element's attachments. An
+        // empty filter accepts every element (raw geometric hit test).
+        bool keep = true;
+        for (auto required : filter.traits) {
+            bool found = false;
+            for (size_t j = 0; j < storage->attachment_count(); ++j) {
+                if (storage->get_attachment(j)->get_interface(required) != nullptr) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { keep = false; break; }
+        }
+        if (!keep) continue;
+
+        auto reader = read_state<IElement>(elem);
+        if (!reader) continue;
+        float wx = reader->world_matrix.m[12];
+        float wy = reader->world_matrix.m[13];
+        float w = reader->size.width;
+        float h = reader->size.height;
+
+        if (origin.x >= wx && origin.x < wx + w &&
+            origin.y >= wy && origin.y < wy + h) {
+            hits.push_back(elem);
+            if (max_count > 0 && hits.size() >= max_count) break;
+        }
+    }
+
+    return hits;
+}
+
+vector<IElement::Ptr> Scene::find_elements(const ElementQuery& query, size_t max_count) const
+{
+    auto root = logical_.root();
+    if (!root) {
+        return {};
+    }
+
+    // Walk the hierarchy depth-first, pre-order.
+    vector<IElement::Ptr> matches;
+    vector<IObject::Ptr> stack;
+    stack.push_back(root);
+
+    while (!stack.empty()) {
+        auto obj = std::move(stack.back());
+        stack.pop_back();
+
+        if (auto elem = interface_pointer_cast<IElement>(obj)) {
+            // Check that every requested trait is present.
+            bool match = true;
+            if (!query.traits.empty()) {
+                auto* storage = interface_cast<IObjectStorage>(elem);
+                if (!storage) {
+                    match = false;
+                } else {
+                    for (auto trait_uid : query.traits) {
+                        if (!storage->find_attachment(AttachmentQuery{trait_uid})) {
+                            match = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (match) {
+                matches.push_back(elem);
+                if (max_count > 0 && matches.size() >= max_count) {
+                    return matches;
+                }
+            }
+        }
+
+        // Push children in reverse so we visit them in order.
+        if (auto children = logical_.children_of(obj); !children.empty()) {
+            stack.reserve(stack.size() + children.size());
+            for (size_t i = children.size(); i > 0; --i) {
+                stack.push_back(children[i - 1]);
+            }
+        }
+    }
+
+    return matches;
+}
+
+::velk::IBvh::Ptr Scene::get_default_bvh() const
+{
+    return ::velk::find_attachment<::velk::IBvh>(logical_.root().object());
+}
+
+void Scene::ensure_hierarchy()
+{
+    if (!initialized_) {
+        logical_ = create_hierarchy();
+        initialized_ = true;
+    }
+}
+
+void Scene::attach_element(const IObject::Ptr& obj)
+{
+    if (auto* observer = interface_cast<ISceneObserver>(obj)) {
+        observer->on_attached(*this);
+    }
+    std::unique_lock lock(state_mutex_);
+    set_dirty(DirtyFlags::DrawOrder);
+}
+
+void Scene::detach_element(const IObject::Ptr& obj)
+{
+    if (auto* observer = interface_cast<ISceneObserver>(obj)) {
+        observer->on_detached(*this);
+    }
+    std::unique_lock lock(state_mutex_);
+    removed_list_.push_back(interface_pointer_cast<IElement>(obj));
+    set_dirty(DirtyFlags::DrawOrder);
+}
+
+void Scene::detach_subtree(const IObject::Ptr& obj)
+{
+    auto* h = get_hierarchy(logical_);
+    if (!h) {
+        return;
+    }
+
+    vector<IObject::Ptr> stack;
+    stack.push_back(obj);
+    while (!stack.empty()) {
+        auto node = stack.back();
+        stack.pop_back();
+        auto kids = h->children_of(node);
+        for (auto& kid : kids) {
+            stack.push_back(kid);
+        }
+        detach_element(node);
+    }
+}
+
+void Scene::replicate_children(IHierarchy& src, const IObject::Ptr& parent)
+{
+    auto kids = src.children_of(parent);
+    for (auto& kid : kids) {
+        add(parent, kid);
+        replicate_children(src, kid);
+    }
+}
+
+// IHierarchy forwarding
+
+ReturnValue Scene::set_root(const IObject::Ptr& root)
+{
+    ensure_hierarchy();
+
+    // Detach old root and its subtree
+    auto old_root = logical_.root();
+    if (old_root) {
+        detach_subtree(old_root.object());
+    }
+
+    auto rv = logical_.set_root(root);
+    if (rv == ReturnValue::Success && root) {
+        attach_element(root);
+    }
+    return rv;
+}
+
+ReturnValue Scene::add(const IObject::Ptr& parent, const IObject::Ptr& child)
+{
+    ensure_hierarchy();
+
+    auto rv = logical_.add(parent, child);
+    if (rv == ReturnValue::Success) {
+        attach_element(child);
+    }
+    return rv;
+}
+
+ReturnValue Scene::insert(const IObject::Ptr& parent, size_t index,
+                                const IObject::Ptr& child)
+{
+    ensure_hierarchy();
+
+    auto rv = logical_.insert(parent, index, child);
+    if (rv == ReturnValue::Success) {
+        attach_element(child);
+    }
+    return rv;
+}
+
+ReturnValue Scene::remove(const IObject::Ptr& object)
+{
+    auto rv = logical_.remove(object);
+    if (rv == ReturnValue::Success) {
+        detach_subtree(object);
+    }
+    return rv;
+}
+
+ReturnValue Scene::replace(const IObject::Ptr& old_child, const IObject::Ptr& new_child)
+{
+    auto rv = logical_.replace(old_child, new_child);
+    if (rv == ReturnValue::Success) {
+        detach_element(old_child);
+        attach_element(new_child);
+    }
+    return rv;
+}
+
+void Scene::clear()
+{
+    if (auto r = root()) {
+        detach_subtree(r);
+    }
+    logical_.clear();
+}
+
+IObject::Ptr Scene::root() const
+{
+    return logical_.root();
+}
+
+IObject::Ptr Scene::parent_of(const IObject::Ptr& object) const
+{
+    return logical_.parent_of(object);
+}
+
+vector<IObject::Ptr> Scene::children_of(const IObject::Ptr& object) const
+{
+    auto h = logical_.operator IHierarchy::Ptr();
+    return h ? h->children_of(object) : vector<IObject::Ptr>{};
+}
+
+IObject::Ptr Scene::child_at(const IObject::Ptr& object, size_t index) const
+{
+    return logical_.child_at(object, index);
+}
+
+size_t Scene::child_count(const IObject::Ptr& object) const
+{
+    return logical_.child_count(object);
+}
+
+void Scene::for_each_child(const IObject::Ptr& object, void* context, ChildVisitorFn visitor) const
+{
+    auto h = logical_.operator IHierarchy::Ptr();
+    if (h) {
+        h->for_each_child(object, context, visitor);
+    }
+}
+
+bool Scene::contains(const IObject::Ptr& object) const
+{
+    return logical_.contains(object);
+}
+
+size_t Scene::size() const
+{
+    return logical_.size();
+}
+
+IHierarchy::Node Scene::node_of(const IObject::Ptr& object) const
+{
+    return logical_.node_of(object).hierarchy_node();
+}
+
+} // namespace velk::impl

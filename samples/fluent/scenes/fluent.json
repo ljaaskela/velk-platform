@@ -2,10 +2,10 @@
   "version": 1,
   "comment": "Fluent RT demo. Camera + env + floor + empty grid root. The mirror grid and the floor's StandardMaterial are wired up in main.cpp.",
   "objects": [
-    { "id": "scene_root", "class": "velk-ui.Element" },
-    { "id": "camera_3d",  "class": "velk-ui.Element" },
-    { "id": "floor",      "class": "velk-ui.Element" },
-    { "id": "grid_root",  "class": "velk-ui.Element" }
+    { "id": "scene_root", "class": "velk-scene.Element" },
+    { "id": "camera_3d",  "class": "velk-scene.Element" },
+    { "id": "floor",      "class": "velk-scene.Element" },
+    { "id": "grid_root",  "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -16,16 +16,16 @@
     { "id": "sky", "uri": "env:app://assets/qwantani_dusk_1_puresky_4k.hdr", "persistent": true }
   ],
   "attachments": [
-    { "targets": ["camera_3d"], "class": "velk-ui.Camera",
+    { "targets": ["camera_3d"], "class": "velk-scene.Camera",
       "properties": { "projection": 1, "fov": 45.0, "far_clip": 10000.0,
                       "environment": { "ref": "resources.sky" } } },
-    { "targets": ["camera_3d"], "class": "velk-ui.Orbit",
+    { "targets": ["camera_3d"], "class": "velk-scene.Orbit",
       "properties": { "target": { "ref": "grid_root", "type": "weak" },
                       "distance": 1800.0, "yaw": 0.0, "pitch": 20.0 } },
 
     { "targets": ["floor"], "class": "velk-ui.FixedSize",
       "properties": { "width": "4000px", "height": "4000px" } },
-    { "targets": ["floor"], "class": "velk-ui.Trs",
+    { "targets": ["floor"], "class": "velk-scene.Trs",
       "properties": { "translate": { "x": -2000, "y": 700, "z": -2000 },
                       "rotation":  { "x": 90, "y": 0, "z": 0 } } },
     { "targets": ["floor"], "class": "velk-ui.RectVisual",

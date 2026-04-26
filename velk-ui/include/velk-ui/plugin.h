@@ -7,14 +7,8 @@ namespace velk::ui {
 
 namespace ClassId {
 
-/** @brief UI element node. Holds position, size, transform, and z-index. */
-inline constexpr Uid Element{"074fde67-68e0-43fb-b52d-265665f301ee"};
-
-/** @brief Scene graph. Owns the element hierarchy, runs layout, and pushes changes to the renderer. */
-inline constexpr Uid Scene{"03779f51-3fb0-45d7-9a9e-a25ef0a42dce"};
-
-/** @brief Scene-wide BVH attachment; implements IBvh. Installed by the renderer on first frame. */
-inline constexpr Uid SceneBvh{"d9678826-947d-4f92-beee-5746340fe072"};
+// Note: Element + Scene moved to velk-scene/plugin.h.
+// Note: SceneBvh moved to velk-scene/plugin.h.
 
 namespace Constraint {
 
@@ -26,21 +20,7 @@ inline constexpr Uid FixedSize{"f237dfd2-1a17-4078-9741-e0a7afd7b6a4"};
 
 } // namespace Constraint
 
-namespace Transform {
-
-/** @brief Decomposed transform: translate, rotate (Z), scale. */
-inline constexpr Uid Trs{"7c167a04-2d3e-41b9-8c42-6fd41be05794"};
-
-/** @brief Raw 4x4 matrix transform. */
-inline constexpr Uid Matrix{"44c08a4c-83f9-40f8-b900-b00d5a8f3e55"};
-
-/** @brief Orients an element to face a target element. */
-inline constexpr Uid LookAt{"aa7cb3fd-f93c-4929-855e-210661a019ad"};
-
-/** @brief Positions and orients an element on a sphere around a target. */
-inline constexpr Uid Orbit{"88ae2321-87dd-4c9f-8195-e50b5ad690dd"};
-
-} // namespace Transform
+// Note: Transform/* moved to velk-scene/plugin.h.
 
 namespace Visual {
 
@@ -53,14 +33,7 @@ inline constexpr Uid RoundedRect{"327eb630-63f9-4144-ab05-e97d6099e920"};
 /** @brief Displays a texture on the element bounds. */
 inline constexpr Uid Texture{"84b11445-5f14-41f8-b949-d79aab19115d"};
 
-/** @brief 3D axis-aligned box in the element's local frame. RT-only today. */
-inline constexpr Uid Cube{"957908b0-41b3-4b0e-9b15-49f5c478af3c"};
-
-/** @brief 3D sphere inscribed in the element's bounding box. RT-only today. */
-inline constexpr Uid Sphere{"18072f38-60dd-436a-80b4-942bbca36b52"};
-
-/** @brief Generic 3D mesh visual. Renders any IMesh assigned via IVisual3D::mesh; no procedural fallback. */
-inline constexpr Uid Mesh{"db5043f9-ed9f-4032-b7c3-60c92a75f657"};
+// Note: Cube + Sphere + Mesh moved to velk-scene/plugin.h.
 
 } // namespace Visual
 
@@ -76,11 +49,7 @@ inline constexpr Uid Texture{"5b68e32e-99a1-46e4-b029-de4bab50db06"};
 
 namespace Render {
 
-/** @brief Camera trait. Defines how the scene is observed (projection, zoom, scale). */
-inline constexpr Uid Camera{"3cd4d525-fc81-4e27-a9c5-ac231036e474"};
-
-/** @brief Light trait. Directional / point / spot source, with intrinsic colour and intensity. */
-inline constexpr Uid Light{"6267f894-7953-45df-adb2-7eaaa5fe2def"};
+// Note: Camera + Light moved to velk-scene/plugin.h.
 
 /** @brief Caches an element's rendered subtree into a RenderTexture. */
 inline constexpr Uid RenderCache{"d8a3aed1-cda4-4046-a69c-409ed7edc5c2"};

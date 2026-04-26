@@ -5,7 +5,7 @@
 #include <velk/string.h>
 
 #include <velk-ui/interface/intf_font.h>
-#include <velk-ui/types.h>
+#include <velk-scene/types.h>
 
 namespace velk::ui {
 
@@ -21,9 +21,9 @@ public:
     VELK_INTERFACE(
         (PROP, string, text, {}),                                  ///< Text content to render.
         (PROP, float, font_size, 16.f),                            ///< Font size in pixels.
-        (PROP, ui::HAlign, h_align, ui::HAlign::Left),             ///< Horizontal text alignment.
-        (PROP, ui::VAlign, v_align, ui::VAlign::Top),              ///< Vertical text alignment.
-        (PROP, ui::TextLayout, layout, ui::TextLayout::MultiLine)  ///< Text layout mode.
+        (PROP, ::velk::HAlign, h_align, ::velk::HAlign::Left),             ///< Horizontal text alignment.
+        (PROP, ::velk::VAlign, v_align, ::velk::VAlign::Top),              ///< Vertical text alignment.
+        (PROP, ::velk::TextLayout, layout, ::velk::TextLayout::MultiLine)  ///< Text layout mode.
     )
 
     /** @brief Sets the font used for shaping and rasterization. Takes ownership (shared). */

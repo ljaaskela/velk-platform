@@ -9,7 +9,7 @@ namespace velk {
  * @brief Marker base for renderer-enumerated scene content attached
  *        to a scene element.
  *
- * Peer category to `velk::ui::ITrait` (which participates in the UI
+ * Peer category to `velk::ITrait` (which participates in the UI
  * layout pipeline). `IRenderTrait` attachments aren't run by the
  * layout solver — the renderer queries them each frame via
  * `interface_cast<IRenderTrait>` (and then casts to the specific

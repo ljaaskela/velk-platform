@@ -30,7 +30,7 @@ add_library(velk_image SHARED
     include/velk-ui/plugins/image/api/environment.h
 )
 
-target_link_libraries(velk_image PRIVATE velk velk_ui velk_render)
+target_link_libraries(velk_image PRIVATE velk velk_scene velk_ui velk_render)
 
 target_include_directories(velk_image
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

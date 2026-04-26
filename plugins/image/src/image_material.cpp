@@ -2,7 +2,7 @@
 
 #include <velk/api/state.h>
 #include <velk-render/gpu_data.h>
-#include <velk-ui/ext/material_shaders.h>
+#include <velk-scene/ext/material_shaders.h>
 
 #include <cstring>
 

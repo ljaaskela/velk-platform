@@ -4,8 +4,8 @@
 #include <velk/api/event.h>
 #include <velk/api/object.h>
 
-#include <velk-ui/api/element.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/scene.h>
 #include <velk-ui/interface/intf_input_dispatcher.h>
 #include <velk-ui/plugin.h>
 

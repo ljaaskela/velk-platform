@@ -10,10 +10,10 @@
 #include <velk-runtime/interface/intf_window.h>
 #include <velk-runtime/interface/intf_window_provider.h>
 #include <velk-runtime/plugin.h>
-#include <velk-ui/api/element.h>
-#include <velk-ui/api/scene.h>
-#include <velk-ui/interface/intf_renderer.h>
-#include <velk-ui/interface/intf_scene.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/scene.h>
+#include <velk-scene/interface/intf_renderer.h>
+#include <velk-scene/interface/intf_scene.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
 #include <chrono>
@@ -29,15 +29,15 @@ public:
     IWindow::Ptr create_window(const WindowConfig& config) override;
     IWindow::Ptr wrap_native_surface(void* native_handle) override;
     void add_view(const IObject::Ptr& window,
-                  const ui::IElement::Ptr& camera,
+                  const ::velk::IElement::Ptr& camera,
                   const rect& viewport) override;
     bool poll() override;
     void update() override;
-    ui::Frame prepare() override;
-    void submit(ui::Frame frame) override;
+    ::velk::Frame prepare() override;
+    void submit(::velk::Frame frame) override;
     void present() override;
     IRenderContext::Ptr render_context() const override;
-    ui::IRenderer::Ptr renderer() const override;
+    ::velk::IRenderer::Ptr renderer() const override;
     void set_performance_overlay(const IObject::Ptr& window,
                                  const PerformanceOverlayConfig& config) override;
     void shutdown() override;
@@ -46,16 +46,16 @@ private:
     struct WindowSceneLink
     {
         IObject::Ptr window;
-        shared_ptr<ui::IScene> scene;
+        shared_ptr<::velk::IScene> scene;
         ScopedHandler resize_handler;
     };
 
     struct PerformanceOverlay
     {
         IObject::Ptr window;
-        ui::Scene scene;
-        ui::Element camera_element;
-        ui::Element text_element;
+        ::velk::Scene scene;
+        ::velk::Element camera_element;
+        ::velk::Element text_element;
         ui::TextVisual text_visual;
         int frame_count = 0;
         double cpu_time_accum = 0.0;
@@ -64,7 +64,7 @@ private:
     };
 
     void bind_scene_to_window(const IObject::Ptr& window, IWindow* iwin,
-                              const shared_ptr<ui::IScene>& scene);
+                              const shared_ptr<::velk::IScene>& scene);
 
     /// Ensures render context + renderer exist after the first window is created.
     bool ensure_render_context();
@@ -75,7 +75,7 @@ private:
 
     ApplicationConfig config_;
     IRenderContext::Ptr render_ctx_;
-    ui::IRenderer::Ptr renderer_;
+    ::velk::IRenderer::Ptr renderer_;
     IWindowProvider* window_provider_ = nullptr;
     IPlugin::Ptr platform_plugin_;
     vector<IObject::Ptr> windows_;

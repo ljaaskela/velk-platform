@@ -21,23 +21,21 @@
 
 #include <velk/api/velk.h>
 
+#include <cmath>
 #include <velk-render/api/material/shader_material.h>
+#include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/ext/element_vertex.h>
 #include <velk-render/interface/intf_camera.h>
-
-#include <cmath>
-
 #include <velk-runtime/api/application.h>
-
-#include <velk-ui/api/camera.h>
-#include <velk-ui/api/element.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/camera.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/scene.h>
 #include <velk-ui/api/trait/fixed_size.h>
-#include <velk-ui/api/trait/orbit.h>
-#include <velk-ui/api/trait/trs.h>
-#include <velk-ui/api/visual/cube.h>
-#include <velk-ui/api/visual/visual.h>
+#include <velk-scene/api/trait/orbit.h>
+#include <velk-scene/api/trait/trs.h>
+#include <velk-scene/api/visual/cube.h>
+#include <velk-scene/api/visual/visual.h>
 
 namespace {
 
@@ -90,12 +88,12 @@ int main(int /*argc*/, char* /*argv*/[])
     }
 
     // Build the scene programmatically: one camera, one cube, no JSON.
-    auto scene = velk::ui::create_scene();
+    auto scene = velk::create_scene();
     scene.set_geometry(velk::aabb::from_size(
         {static_cast<float>(wc.width), static_cast<float>(wc.height)}));
-    auto root = velk::ui::create_element();
-    auto camera = velk::ui::create_element();
-    auto cube = velk::ui::create_element();
+    auto root = velk::create_element();
+    auto camera = velk::create_element();
+    auto cube = velk::create_element();
 
     scene.set_root(root);
     scene.add(root, camera);
@@ -105,12 +103,12 @@ int main(int /*argc*/, char* /*argv*/[])
     // render path so the custom fragment shader actually runs and its
     // output hits the swapchain directly (deferred would route through
     // the G-buffer + lighting compute, hiding the gl_FrontFacing output).
-    auto cam_trait = velk::ui::trait::render::create_camera();
+    auto cam_trait = velk::trait::render::create_camera();
     camera.add_trait(cam_trait);
-    velk::ui::Camera(cam_trait).set_projection(velk::Projection::Perspective);
-    velk::ui::Camera(cam_trait).set_render_path(velk::RenderPath::Forward);
+    velk::Camera(cam_trait).set_projection(velk::Projection::Perspective);
+    velk::Camera(cam_trait).set_render_path(velk::RenderPath::Forward);
 
-    auto orbit = velk::ui::trait::transform::create_orbit();
+    auto orbit = velk::trait::transform::create_orbit();
     orbit.set_target(cube);
     orbit.set_distance(500.f);
     orbit.set_pitch(25.f);
@@ -121,9 +119,9 @@ int main(int /*argc*/, char* /*argv*/[])
     // gl_FrontFacing. Uses the standard element vertex shader so the
     // varyings line up.
     auto cube_sz = velk::ui::trait::layout::create_fixed_size(
-        velk::ui::dim::px(200.f), velk::ui::dim::px(200.f), velk::ui::dim::px(200.f));
-    auto cube_trs = velk::ui::trait::transform::create_trs();
-    auto cube_vis = velk::ui::trait::visual::create_cube();
+        velk::dim::px(200.f), velk::dim::px(200.f), velk::dim::px(200.f));
+    auto cube_trs = velk::trait::transform::create_trs();
+    auto cube_vis = velk::trait::visual::create_cube();
 
     auto sm = velk::ShaderMaterial(
         ctx.create_shader_material(front_facing_frag, velk::ext::element_vertex_src));
@@ -141,14 +139,13 @@ int main(int /*argc*/, char* /*argv*/[])
             mo.depth_test = velk::CompareOp::LessEqual;
             mo.depth_write = true;
         });
-        velk::ui::Mesh cube_mesh(ctx.build_cube());
+        velk::Mesh cube_mesh(ctx.build_cube());
         cube_mesh.set_material(0, sm);
         cube_vis.set_mesh(cube_mesh);
     } else {
         VELK_LOG(E, "winding_test: create_shader_material returned null; test cannot run");
         return 1;
     }
-
     cube.add_trait(cube_sz);
     cube.add_trait(cube_trs);
     cube.add_trait(cube_vis);
@@ -160,7 +157,7 @@ int main(int /*argc*/, char* /*argv*/[])
     float t = 0.f;
     while (app.poll()) {
         t += 0.01f;
-        velk::ui::OrbitTrait o(camera.find_trait<velk::ui::IOrbit>());
+        velk::OrbitTrait o(camera.find_trait<velk::IOrbit>());
         if (o) {
             o.set_yaw(t * 20.f);
             o.set_pitch(25.f + 10.f * std::sin(t * 0.7f));

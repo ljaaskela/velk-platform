@@ -32,7 +32,7 @@ When using the runtime, every `Window` already owns an `IInputDispatcher`. The p
 
 ```cpp
 auto window = app.create_window({.width = 1280, .height = 720});
-auto scene = velk::ui::create_scene("app://scenes/main.json");
+auto scene = velk::create_scene("app://scenes/main.json");
 app.add_view(window, scene.child_at(scene.root(), 0));   // also binds dispatcher to scene
 ```
 

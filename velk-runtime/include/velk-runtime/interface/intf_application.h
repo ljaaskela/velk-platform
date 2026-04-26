@@ -6,8 +6,8 @@
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/render_types.h>
 #include <velk-runtime/interface/intf_window.h>
-#include <velk-ui/interface/intf_element.h>
-#include <velk-ui/interface/intf_renderer.h>
+#include <velk-scene/interface/intf_element.h>
+#include <velk-scene/interface/intf_renderer.h>
 
 namespace velk {
 
@@ -127,7 +127,7 @@ public:
      * @param viewport Normalized viewport rect (0..1). Default = full surface.
      */
     virtual void add_view(const IObject::Ptr& window,
-                          const ui::IElement::Ptr& camera,
+                          const ::velk::IElement::Ptr& camera,
                           const rect& viewport = {}) = 0;
 
     /**
@@ -161,7 +161,7 @@ public:
      *
      * @return Opaque frame handle.
      */
-    virtual ui::Frame prepare() = 0;
+    virtual ::velk::Frame prepare() = 0;
 
     /**
      * @brief Submits a prepared frame to the GPU.
@@ -173,7 +173,7 @@ public:
      *
      * @param frame Frame handle returned by prepare().
      */
-    virtual void submit(ui::Frame frame) = 0;
+    virtual void submit(::velk::Frame frame) = 0;
 
     /**
      * @brief Convenience: prepare() + submit() in one synchronous call.
@@ -187,7 +187,7 @@ public:
     virtual IRenderContext::Ptr render_context() const = 0;
 
     /** @brief Returns the default renderer owned by this application, or null if not yet created. */
-    virtual ui::IRenderer::Ptr renderer() const = 0;
+    virtual ::velk::IRenderer::Ptr renderer() const = 0;
 
     /**
      * @brief Enables, disables, or reconfigures a performance overlay on a window.

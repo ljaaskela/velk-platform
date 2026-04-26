@@ -26,6 +26,7 @@ add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/animator"  "${CMAKE_BINARY_DIR
 # =============================================================================
 add_subdirectory(velk-render)
 add_subdirectory(velk-render/plugins/vk)
+add_subdirectory(velk-scene)
 add_subdirectory(velk-ui)
 add_subdirectory(plugins/text)
 add_subdirectory(plugins/image)

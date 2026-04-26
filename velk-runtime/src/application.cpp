@@ -8,13 +8,13 @@
 #include <thread>
 #include <velk-render/api/render_context.h>
 #include <velk-runtime/interface/intf_window.h>
-#include <velk-ui/api/camera.h>
-#include <velk-ui/api/element.h>
+#include <velk-scene/api/camera.h>
+#include <velk-scene/api/element.h>
 #include <velk-ui/api/renderer.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/scene.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
-#include <velk-ui/interface/intf_element.h>
+#include <velk-scene/interface/intf_element.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
@@ -30,6 +30,7 @@ bool Application::init(const ApplicationConfig& config)
     // Load all standard plugins.
     reg.load_plugin_from_path("velk_ui.dll");
     reg.load_plugin_from_path("velk_render.dll");
+    reg.load_plugin_from_path("velk_scene.dll");
     reg.load_plugin_from_path("velk_vk.dll");
     reg.load_plugin_from_path("velk_text.dll");
     reg.load_plugin_from_path("velk_image.dll");
@@ -145,7 +146,7 @@ IWindow::Ptr Application::wrap_native_surface(void* native_handle)
 }
 
 void Application::add_view(const IObject::Ptr& window,
-                           const ui::IElement::Ptr& camera,
+                           const ::velk::IElement::Ptr& camera,
                            const rect& viewport)
 {
     if (!renderer_) {
@@ -158,7 +159,7 @@ void Application::add_view(const IObject::Ptr& window,
     renderer_->add_view(camera, iwin->surface(), viewport);
 
     // Derive the scene from the camera element and bind resize.
-    auto* elem = interface_cast<ui::IElement>(camera);
+    auto* elem = interface_cast<::velk::IElement>(camera);
     if (elem) {
         auto scene = elem->get_scene();
         if (scene) {
@@ -172,7 +173,7 @@ void Application::add_view(const IObject::Ptr& window,
 
 void Application::bind_scene_to_window(const IObject::Ptr& window,
                                        IWindow* iwin,
-                                       const shared_ptr<ui::IScene>& scene)
+                                       const shared_ptr<::velk::IScene>& scene)
 {
     // Check if this window-scene pair is already linked.
     for (auto& link : scene_links_) {
@@ -188,7 +189,7 @@ void Application::bind_scene_to_window(const IObject::Ptr& window,
 
     // Subscribe to on_resize to update scene geometry synchronously
     // inside the platform event loop (matching old GLFW callback timing).
-    weak_ptr<ui::IScene> weak_scene(scene);
+    weak_ptr<::velk::IScene> weak_scene(scene);
     ScopedHandler resize_handler(iwin->on_resize(), [weak_scene](const ::velk::size& new_size) {
         auto s = weak_scene.lock();
         if (s) {
@@ -216,7 +217,7 @@ void Application::update()
     instance().update();
 }
 
-ui::Frame Application::prepare()
+::velk::Frame Application::prepare()
 {
     if (!renderer_) {
         return {};
@@ -227,7 +228,7 @@ ui::Frame Application::prepare()
     return frame;
 }
 
-void Application::submit(ui::Frame frame)
+void Application::submit(::velk::Frame frame)
 {
     if (!renderer_) {
         return;
@@ -290,7 +291,7 @@ IRenderContext::Ptr Application::render_context() const
     return render_ctx_;
 }
 
-ui::IRenderer::Ptr Application::renderer() const
+::velk::IRenderer::Ptr Application::renderer() const
 {
     return renderer_;
 }
@@ -318,21 +319,21 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
 
     // Create the overlay scene with a root element, an ortho camera child,
     // and a text element child holding the FPS text visual.
-    auto scene = ui::create_scene();
-    auto root = ui::create_element();
+    auto scene = ::velk::create_scene();
+    auto root = ::velk::create_element();
     scene.set_root(root);
 
-    auto camera_elem = ui::create_element();
+    auto camera_elem = ::velk::create_element();
     scene.add(root, camera_elem);
 
-    auto camera_trait = ui::trait::render::create_camera();
+    auto camera_trait = ::velk::trait::render::create_camera();
     camera_trait.set_projection(::velk::Projection::Ortho);
     camera_elem.add_trait(camera_trait);
 
-    auto text_elem = ui::create_element();
+    auto text_elem = ::velk::create_element();
     scene.add(root, text_elem);
 
-    auto text_sz = ui::trait::layout::create_fixed_size(ui::dim::px(112), ui::dim::px(64));
+    auto text_sz = ui::trait::layout::create_fixed_size(::velk::dim::px(112), ::velk::dim::px(64));
     text_elem.add_trait(text_sz);
 
     auto text_bg = ui::trait::visual::create_rect();
@@ -344,7 +345,7 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
     text_visual.set_text("FPS: ...");
     text_visual.set_font_size(config.font_size);
     text_visual.set_color(config.text_color);
-    text_visual.set_layout(ui::TextLayout::MultiLine);
+    text_visual.set_layout(::velk::TextLayout::MultiLine);
     char buf[96];
     std::snprintf(buf, sizeof(buf), "- fps\ncpu - ms\ngpu - ms");
     text_visual.set_text(string(buf));
@@ -360,7 +361,7 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
     renderer_->add_view(camera_elem, iwin->surface(), {0, 0, 1, 1});
 
     // Bind resize so the overlay scene tracks window size.
-    bind_scene_to_window(window, iwin, static_cast<ui::IScene::Ptr>(scene));
+    bind_scene_to_window(window, iwin, static_cast<::velk::IScene::Ptr>(scene));
 
     PerformanceOverlay ov;
     ov.window = window;

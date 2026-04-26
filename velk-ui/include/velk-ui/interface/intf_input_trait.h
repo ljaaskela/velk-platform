@@ -2,7 +2,7 @@
 #define VELK_UI_INTF_INPUT_TRAIT_H
 
 #include <velk-ui/input_types.h>
-#include <velk-ui/interface/intf_trait.h>
+#include <velk-scene/interface/intf_trait.h>
 
 namespace velk::ui {
 

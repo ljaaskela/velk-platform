@@ -15,10 +15,10 @@ A `Scene` is the top-level container for UI. It owns a tree of elements, runs la
 Scene extends velk's `ClassId::Hierarchy`, which provides a general-purpose parent/child tree of `IObject` pointers. In velk-ui, those objects are always elements. The `Scene` API wrapper inherits `velk::Hierarchy`, so all hierarchy operations (add, remove, replace, iterate) work directly on the scene.
 
 ```cpp
-auto scene = velk::ui::create_scene();
+auto scene = velk::create_scene();
 
-auto root = velk::ui::create_element();
-auto child = velk::ui::create_element();
+auto root = velk::create_element();
+auto child = velk::create_element();
 
 scene.set_root(root);
 scene.add(root, child);
@@ -35,7 +35,7 @@ Scene overrides the velk `Hierarchy` node accessors to return `Element` instead 
 An `Element` is the fundamental building block. It holds position, size, and z-index properties. An element has no visual appearance on its own; that comes from traits.
 
 ```cpp
-auto elem = velk::ui::create_element();
+auto elem = velk::create_element();
 elem.set_position({10.f, 20.f, 0.f});
 elem.set_size({200.f, 100.f});
 elem.set_z_index(1);  // draw on top of siblings with lower z-index
@@ -89,7 +89,7 @@ See [Update cycle](update-cycle.md) for the full frame flow.
 Scenes can be loaded from JSON files via the velk resource store:
 
 ```cpp
-auto scene = velk::ui::create_scene("app://scenes/my_scene.json");
+auto scene = velk::create_scene("app://scenes/my_scene.json");
 ```
 
 The JSON format declares objects, hierarchy, and trait attachments:
@@ -98,8 +98,8 @@ The JSON format declares objects, hierarchy, and trait attachments:
 {
   "version": 1,
   "objects": [
-    { "id": "root", "class": "velk-ui.Element" },
-    { "id": "child", "class": "velk-ui.Element" }
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "child", "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": { "root": ["child"] }
@@ -111,7 +111,7 @@ The JSON format declares objects, hierarchy, and trait attachments:
 }
 ```
 
-Available class names: `velk-ui.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-ui.Trs`, `velk-ui.Matrix`, `velk-ui.RectVisual`, `velk-ui.RoundedRectVisual`, `velk-ui.Font`, `velk_text.TextVisual`.
+Available class names: `velk-scene.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-scene.Trs`, `velk-scene.Matrix`, `velk-ui.RectVisual`, `velk-ui.RoundedRectVisual`, `velk-ui.Font`, `velk_text.TextVisual`.
 
 ## Classes
 

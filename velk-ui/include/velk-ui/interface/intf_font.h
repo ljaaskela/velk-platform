@@ -9,7 +9,7 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/material/intf_material.h>
 
-#include <velk-ui/types.h>
+#include <velk-scene/types.h>
 
 #include <cstdint>
 

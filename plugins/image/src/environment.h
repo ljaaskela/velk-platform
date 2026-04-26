@@ -7,7 +7,7 @@
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_surface.h>
-#include <velk-ui/interface/intf_environment.h>
+#include <velk-scene/interface/intf_environment.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 #include <cstdint>

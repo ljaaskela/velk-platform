@@ -1,8 +1,12 @@
 #include "plugin.h"
 
-#include "camera.h"
+#include <velk/interface/intf_plugin_registry.h>
+#include <velk-render/interface/intf_camera.h>
+#include <velk-render/interface/intf_light.h>
+#include <velk-scene/interface/intf_scene_plugin.h>
+#include <velk-scene/plugin.h>
+
 #include "constraint/fixed_size.h"
-#include "element.h"
 #include "import/align_type_extension.h"
 #include "import/dim_type_extension.h"
 #include "import/light_type_extension.h"
@@ -14,18 +18,9 @@
 #include "input/input_dispatcher.h"
 #include "layout/stack.h"
 #include "material/gradient_material.h"
-#include "renderer/renderer.h"
-#include "scene.h"
-#include "trait/light.h"
-#include "transform/look_at.h"
-#include "transform/matrix.h"
-#include "transform/orbit.h"
-#include "transform/trs.h"
-#include "visual/cube_visual.h"
-#include "visual/mesh_visual.h"
+#include "layout_solver.h"
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
-#include "visual/sphere_visual.h"
 #include "render_cache.h"
 #include "visual/texture_material.h"
 #include "visual/texture_visual.h"
@@ -38,25 +33,14 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
 {
     config.enableUpdate = true;
 
-    auto rv = register_type<Element>(velk);
-    rv &= register_type<Scene>(velk);
-    rv &= register_type<Stack>(velk);
+    auto rv = register_type<Stack>(velk);
     rv &= register_type<FixedSize>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
-    rv &= register_type<CubeVisual>(velk);
-    rv &= register_type<SphereVisual>(velk);
-    rv &= register_type<MeshVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);
     rv &= register_type<impl::TextureMaterial>(velk);
     rv &= register_type<impl::RenderCache>(velk);
     rv &= register_type<GradientMaterial>(velk);
-    rv &= register_type<impl::Camera>(velk);
-    rv &= register_type<impl::Light>(velk);
-    rv &= register_type<Trs>(velk);
-    rv &= register_type<Matrix>(velk);
-    rv &= register_type<LookAt>(velk);
-    rv &= register_type<Orbit>(velk);
     rv &= register_type<impl::InputDispatcher>(velk);
     rv &= register_type<Click>(velk);
     rv &= register_type<Hover>(velk);
@@ -64,7 +48,6 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     // Low instance count types, alloc as needed.
     ::velk::TypeOptions alloc;
     alloc.policy = ::velk::CreationPolicy::Alloc;
-    rv &= register_type<Renderer>(velk, alloc);
     rv &= register_type<DimTypeExtension>(velk, alloc);
     rv &= register_type<AlignTypeExtension>(velk, alloc);
     rv &= register_type<ProjectionTypeExtension>(velk, alloc);
@@ -92,9 +75,30 @@ ReturnValue VelkUiPlugin::shutdown(IVelk&)
 
 void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo& info)
 {
-    for (auto* scene : Scene::live_scenes()) {
-        scene->update(info.info);
-    }
+    // Pre-update: run velk-ui's LayoutSolver against every live scene
+    // before its own update() runs. The solver is the velk-ui side of
+    // Scene::update — it materialises the constraints + transforms +
+    // AABB propagation that scene-model itself doesn't know about.
+    // Scene::update afterwards merges resulting dirty notifications
+    // and finalises per-frame state.
+    auto plugin_ptr = ::velk::instance().plugin_registry().find_plugin(
+        ::velk::PluginId::ScenePlugin);
+    auto* scene_svc = interface_cast<IScenePlugin>(plugin_ptr.get());
+    if (!scene_svc) return;
+
+    LayoutSolver solver;
+    struct Ctx { LayoutSolver* solver; const IPlugin::PostUpdateInfo* info; };
+    Ctx ctx{&solver, &info};
+    scene_svc->for_each_scene(+[](IScene* scene, void* user) {
+        if (!scene) return;
+        auto& c = *static_cast<Ctx*>(user);
+        if ((scene->pending_dirty() & DirtyFlags::Layout) != DirtyFlags::None) {
+            if (auto* h = interface_cast<IHierarchy>(scene)) {
+                c.solver->solve(*h, scene->get_geometry());
+            }
+        }
+        scene->update(c.info->info);
+    }, &ctx);
 }
 
 } // namespace velk::ui

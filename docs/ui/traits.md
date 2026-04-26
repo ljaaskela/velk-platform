@@ -52,7 +52,7 @@ Layout, Constraint, and Transform run inside the layout solver during `Scene::up
 Traits are managed via `add_trait()` / `remove_trait()` on the Element wrapper:
 
 ```cpp
-auto elem = velk::ui::create_element();
+auto elem = velk::create_element();
 
 auto stack = velk::ui::trait::layout::create_stack();
 auto rect = velk::ui::trait::visual::create_rect();
@@ -117,7 +117,7 @@ Transform traits implement `ITransformTrait` and modify the element's world matr
 | Orbit | `IOrbit` | Positions and orients the element on a sphere around a target |
 
 ```cpp
-auto trs = velk::ui::trait::transform::create_trs();
+auto trs = velk::trait::transform::create_trs();
 trs.set_rotation(45.f);         // degrees around Z
 trs.set_scale({0.5f, 0.5f});
 elem.add_trait(trs);
@@ -126,7 +126,7 @@ elem.add_trait(trs);
 LookAt and Orbit are particularly useful for cameras. Orbit positions the element at a given distance, yaw (horizontal angle), and pitch (vertical angle) from the target element's center, and orients it to face the target:
 
 ```cpp
-auto orbit = velk::ui::trait::transform::create_orbit();
+auto orbit = velk::trait::transform::create_orbit();
 orbit.set_target(scene.root());
 orbit.set_distance(1200.f);
 orbit.set_yaw(30.f);    // degrees
@@ -137,7 +137,7 @@ camera_element.add_trait(orbit);
 In JSON:
 
 ```json
-{ "targets": ["camera_3d"], "class": "velk-ui.Orbit",
+{ "targets": ["camera_3d"], "class": "velk-scene.Orbit",
   "properties": { "target": { "ref": "root", "type": "weak" }, "distance": 1200, "yaw": 30, "pitch": 15 } }
 ```
 
@@ -176,8 +176,8 @@ Assigning a material to `paint` overrides the default solid-color fill with a cu
 3D visuals are authored through a mesh reference; materials live on primitives. Procedural primitives lazily populate the mesh on first render, but most callers build it up-front so per-primitive materials can be set at authoring time:
 
 ```cpp
-auto cube_vis = velk::ui::trait::visual::create_cube();
-velk::ui::Mesh cube_mesh(ctx.build_cube());
+auto cube_vis = velk::trait::visual::create_cube();
+velk::Mesh cube_mesh(ctx.build_cube());
 cube_mesh.set_material(0, velk::material::create_standard(
     color{0.95f, 0.7f, 0.4f, 1.f}, /*metallic=*/0.9f, /*roughness=*/0.15f));
 cube_vis.set_mesh(cube_mesh);
@@ -223,8 +223,8 @@ Render traits affect how the scene is observed, identified by `TraitPhase::Rende
 The camera is attached to an element in the scene hierarchy. The element's world transform provides the camera position. The renderer binds a camera element to a surface via `add_view()`.
 
 ```cpp
-auto camera_elem = velk::ui::create_element();
-camera_elem.add_trait(velk::ui::trait::render::create_camera());
+auto camera_elem = velk::create_element();
+camera_elem.add_trait(velk::trait::render::create_camera());
 scene.add(scene.root(), camera_elem);
 
 renderer->add_view(camera_elem, surface);
@@ -233,11 +233,11 @@ renderer->add_view(camera_elem, surface);
 In JSON, the camera is defined as a trait on an element:
 
 ```json
-{ "id": "camera", "class": "velk-ui.Element" }
+{ "id": "camera", "class": "velk-scene.Element" }
 ```
 
 ```json
-{ "targets": ["camera"], "class": "velk-ui.Camera", "properties": { "zoom": 1.0 } }
+{ "targets": ["camera"], "class": "velk-scene.Camera", "properties": { "zoom": 1.0 } }
 ```
 
 Camera properties:

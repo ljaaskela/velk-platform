@@ -2,7 +2,7 @@ add_executable(velk_ui_fluent
     main.cpp
 )
 
-target_link_libraries(velk_ui_fluent PRIVATE velk velk_ui velk_render velk_runtime velk_text velk_image)
+target_link_libraries(velk_ui_fluent PRIVATE velk velk_scene velk_ui velk_render velk_runtime velk_text velk_image velk_gltf)
 
 # Stage scenes + assets next to the executable. The simple sample's
 # asset directory is copied first (shared HDRI etc.); fluent's own

@@ -3,7 +3,7 @@
 
 #include <velk/api/object_ref.h>
 #include <velk/api/state.h>
-#include <velk-ui/api/visual/visual.h>
+#include <velk-scene/api/visual/visual.h>
 #include <velk-ui/interface/intf_texture_visual.h>
 #include <velk-ui/plugin.h>
 

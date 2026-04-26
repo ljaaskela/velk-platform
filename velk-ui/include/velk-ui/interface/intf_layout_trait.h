@@ -3,9 +3,9 @@
 
 #include <velk/interface/intf_hierarchy.h>
 
-#include <velk-ui/interface/intf_element.h>
-#include <velk-ui/interface/intf_trait.h>
-#include <velk-ui/types.h>
+#include <velk-scene/interface/intf_element.h>
+#include <velk-scene/interface/intf_trait.h>
+#include <velk-scene/types.h>
 
 namespace velk::ui {
 

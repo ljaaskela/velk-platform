@@ -7,7 +7,7 @@
 #include <velk-ui/interface/intf_input_dispatcher.h>
 #include <velk-ui/plugin.h>
 #include <velk-ui/interface/intf_input_trait.h>
-#include <velk-ui/interface/intf_scene.h>
+#include <velk-scene/interface/intf_scene.h>
 
 namespace velk::ui::impl {
 

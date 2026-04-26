@@ -12,10 +12,10 @@
 
 #include <velk-render/api/shadow_technique.h>
 #include <velk-render/plugin.h>
-#include <velk-ui/api/element.h>
-#include <velk-ui/api/trait/light.h>
-#include <velk-ui/api/trait/trs.h>
-#include <velk-ui/api/visual/mesh.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/trait/light.h>
+#include <velk-scene/api/trait/trs.h>
+#include <velk-scene/api/visual/mesh.h>
 
 #include <cmath>
 
@@ -79,7 +79,7 @@ namespace {
 // looks like translate(t) * rotate(q) * scale(s), the Y-mirror is
 // translate(t.x, -t.y, t.z) * rotate(-q.x, q.y, -q.z, q.w) * scale(s),
 // derived from M * R * M with M = diag(1, -1, 1).
-void apply_node_transform(::velk::ui::Trs& trs, const cgltf_node& node)
+void apply_node_transform(::velk::Trs& trs, const cgltf_node& node)
 {
     if (node.has_matrix) {
         // Matrix nodes: decompose into TRS. Standard decomposition assuming
@@ -151,7 +151,7 @@ void instantiate_node(const cgltf_data* data, const cgltf_node* node,
     using namespace ::velk::ui;
 
     auto elem = create_element();
-    auto trs = trait::transform::create_trs();
+    auto trs = ::velk::trait::transform::create_trs();
     apply_node_transform(trs, *node);
     elem.add_trait(trs);
 
@@ -178,20 +178,20 @@ void instantiate_node(const cgltf_data* data, const cgltf_node* node,
         const cgltf_light& l = *node->light;
         constexpr float kIntensityScale = 1.f / 1000.f;
         const float intensity = l.intensity * kIntensityScale;
-        ::velk::ui::Light light;
+        ::velk::Light light;
         switch (l.type) {
         case cgltf_light_type_directional:
-            light = trait::render::create_directional_light(
+            light = ::velk::trait::render::create_directional_light(
                 ::velk::color{l.color[0], l.color[1], l.color[2], 1.f}, intensity);
             break;
         case cgltf_light_type_point:
-            light = trait::render::create_point_light(
+            light = ::velk::trait::render::create_point_light(
                 ::velk::color{l.color[0], l.color[1], l.color[2], 1.f}, intensity,
                 l.range > 0.f ? l.range : 1000.f);
             break;
         case cgltf_light_type_spot: {
             constexpr float kRadToDeg = 57.29577951f;
-            light = trait::render::create_spot_light(
+            light = ::velk::trait::render::create_spot_light(
                 ::velk::color{l.color[0], l.color[1], l.color[2], 1.f}, intensity,
                 l.range > 0.f ? l.range : 1000.f,
                 l.spot_inner_cone_angle * kRadToDeg,
@@ -257,7 +257,7 @@ IStore::Ptr GltfAsset::instantiate() const
     // keeps the asset's X and Z axes intact so signage faces the same
     // direction as in the source asset; only Y flips, which is what we
     // actually want.
-    auto root = ::velk::ui::create_element();
+    auto root = ::velk::create_element();
     auto root_obj = interface_pointer_cast<IObject>(static_cast<IElement::Ptr>(root));
     store.add("gltf:node:root", root_obj);
     hier.set_root(root_obj);

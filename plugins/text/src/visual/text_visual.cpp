@@ -7,7 +7,7 @@
 #include <velk/api/velk.h>
 #include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_render_context.h>
-#include <velk-ui/instance_types.h>
+#include <velk-scene/instance_types.h>
 #include <velk-ui/plugins/text/intf_text_plugin.h>
 
 namespace velk::ui {

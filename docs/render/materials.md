@@ -48,8 +48,8 @@ rect.set_paint(velk::material::create_gradient(color::red(), color::blue(), 45.f
 **3D visuals (cube, sphere, future mesh / glTF)** carry no paint slot. Materials live on `IMeshPrimitive::material` instead, one per primitive. Creating a cube with a standard material looks like:
 
 ```cpp
-velk::ui::CubeVisual cube_vis = velk::ui::trait::visual::create_cube();
-velk::ui::Mesh mesh(ctx.build_cube());
+velk::CubeVisual cube_vis = velk::trait::visual::create_cube();
+velk::Mesh mesh(ctx.build_cube());
 mesh.set_material(0, velk::material::create_standard(
     color{0.95f, 0.7f, 0.4f, 1.f}, /*metallic=*/0.9f, /*roughness=*/0.15f));
 cube_vis.set_mesh(mesh);
@@ -73,7 +73,7 @@ Shader includes are registered via `IRenderContext::register_shader_include()`. 
 - `velk_texture(id, uv)` — bindless texture sample helper.
 - `BvhNode`, `RtShape`, `Ray`, `RayHit` — ray-trace types used by shadow / bounce shaders.
 
-**velk-ui.glsl** (provided by velk-ui, registered on renderer init):
+**velk-ui.glsl** (provided by velk-scene, registered on renderer init):
 - `ElementInstance` — the universal per-instance record shared by every visual: `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
 - `ElementInstanceData` — buffer_reference array of `ElementInstance`.
 - `EvalContext` — everything a material eval body receives: `data_addr`, `texture_id`, `shape_param`, `uv`, `base`, `ray_dir`, `normal`, `hit_pos`.
@@ -203,7 +203,7 @@ Attaching the material depends on the visual kind (see [Where materials live](#w
 rect.set_paint(mat);
 
 // 3D: material on the primitive.
-velk::ui::Mesh cube_mesh(ctx.build_cube());
+velk::Mesh cube_mesh(ctx.build_cube());
 cube_mesh.set_material(0, mat);
 cube_vis.set_mesh(cube_mesh);
 ```

@@ -62,10 +62,10 @@ auto sphere_mesh = ctx.build_sphere(32);
 
 ## Authoring materials on primitives
 
-Materials are a property of the primitive, not the mesh. Using the `velk::ui::Mesh` API wrapper:
+Materials are a property of the primitive, not the mesh. Using the `velk::Mesh` API wrapper:
 
 ```cpp
-velk::ui::Mesh cube_mesh(ctx.build_cube());
+velk::Mesh cube_mesh(ctx.build_cube());
 cube_mesh.set_material(0, velk::material::create_standard(
     velk::color{0.95f, 0.7f, 0.4f, 1.f}, /*metallic=*/0.9f, /*roughness=*/0.15f));
 ```
@@ -75,7 +75,7 @@ cube_mesh.set_material(0, velk::material::create_standard(
 To attach the mesh to a 3D visual:
 
 ```cpp
-auto cube_vis = velk::ui::trait::visual::create_cube();
+auto cube_vis = velk::trait::visual::create_cube();
 cube_vis.set_mesh(cube_mesh);
 cube.add_trait(cube_vis);
 ```
@@ -96,7 +96,7 @@ Callers who want to configure material at authoring time (before the first frame
 
 ```cpp
 auto mesh = ctx.build_cube();
-velk::ui::Mesh(mesh).set_material(0, my_material);
+velk::Mesh(mesh).set_material(0, my_material);
 cube_vis.set_mesh(mesh);
 ```
 

@@ -136,7 +136,7 @@ The image plugin works with the importer's resource and visual blocks. Two patte
 ```json
 {
   "objects": [
-    { "id": "logo", "class": "velk-ui.Element" }
+    { "id": "logo", "class": "velk-scene.Element" }
   ],
   "attachments": [
     { "targets": ["logo"], "class": "velk-ui.FixedSize",
@@ -199,7 +199,7 @@ Environments go in the importer's `"resources"` section and are referenced by th
     { "id": "sky", "uri": "env:app://hdri/sky.hdr", "persistent": true }
   ],
   "attachments": [
-    { "targets": ["camera_3d"], "class": "velk-ui.Camera",
+    { "targets": ["camera_3d"], "class": "velk-scene.Camera",
       "properties": {
         "projection": 1,
         "environment": { "ref": "resources.sky" }

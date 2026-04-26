@@ -12,9 +12,9 @@ The user-facing entry point. Application setup, window management, frame loop, p
 |---|---|
 | [Runtime](runtime/runtime.md) | `Application`, `Window`, both creation modes (managed / framework-driven), frame loop, performance overlay, plugin loading |
 
-## UI
+## Scene + UI
 
-What you put inside a window: scenes, elements, traits, input.
+What you put inside a window: scenes, elements, traits, input. The scene model + renderer + transform / camera / light / 3D-visual traits live in `velk-scene`; layout, input, and 2D visuals live in `velk-ui` on top of it. The split is mostly invisible at the authoring level — JSON class names are the only place it surfaces (e.g. `velk-scene.Element`, `velk-ui.Stack`).
 
 | Document | Description |
 |---|---|
@@ -22,7 +22,7 @@ What you put inside a window: scenes, elements, traits, input.
 | [Traits](ui/traits.md) | The trait system: phases, layout / constraint / transform / visual / input traits, CRTP bases |
 | [Input](ui/input.md) | Input dispatcher, hit testing, dispatch model, built-in traits, custom input traits |
 | [Update cycle](ui/update-cycle.md) | What `velk::instance().update()` does internally: dirty flags, layout solver, trait phases |
-| [Performance](ui/performance.md) | velk-ui's performance design choices: single element type, flat hierarchy, batched dirty processing |
+| [Performance](ui/performance.md) | Performance design choices: single element type, flat hierarchy, batched dirty processing |
 
 ## Render
 

@@ -7,7 +7,7 @@
 
 namespace velk::ui {
 
-class FixedSize : public ext::Layout<FixedSize, TraitPhase::Constraint, IFixedSize>
+class FixedSize : public ext::LayoutTrait<FixedSize, TraitPhase::Constraint, IFixedSize>
 {
 public:
     VELK_CLASS_UID(ClassId::Constraint::FixedSize, "FixedSize");

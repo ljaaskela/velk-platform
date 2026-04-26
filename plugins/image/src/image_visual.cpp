@@ -9,8 +9,8 @@
 #include <velk/ext/core_object.h>
 #include <velk/interface/resource/intf_resource_store.h>
 #include <velk-render/interface/material/intf_material.h>
-#include <velk-ui/instance_types.h>
-#include <velk-ui/interface/intf_visual.h>
+#include <velk-scene/instance_types.h>
+#include <velk-scene/interface/intf_visual.h>
 #include <velk-ui/plugins/image/intf_image_material.h>
 
 namespace velk::ui::impl {

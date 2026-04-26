@@ -3,7 +3,7 @@
 
 #include <velk/api/state.h>
 
-#include <velk-ui/api/visual/visual.h>
+#include <velk-scene/api/visual/visual.h>
 #include <velk-ui/plugins/image/intf_image_visual.h>
 #include <velk-ui/plugins/image/plugin.h>
 

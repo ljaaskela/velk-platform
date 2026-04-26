@@ -48,7 +48,7 @@ velk::instance().plugin_registry().load_plugin_from_path("velk_text.dll");
 Attach a `TextVisual` to any element. By default the visual uses the shared default font.
 
 ```cpp
-#include <velk-ui/api/element.h>
+#include <velk-scene/api/element.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
 using namespace velk::ui;

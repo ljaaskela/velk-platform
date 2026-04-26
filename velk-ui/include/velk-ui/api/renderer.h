@@ -5,7 +5,7 @@
 #include <velk-render/detail/intf_renderer_internal.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>
-#include <velk-ui/interface/intf_renderer.h>
+#include <velk-scene/interface/intf_renderer.h>
 
 namespace velk::ui {
 

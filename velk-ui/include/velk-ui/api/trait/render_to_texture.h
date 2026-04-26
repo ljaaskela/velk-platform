@@ -3,8 +3,8 @@
 
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
-#include <velk-ui/api/element.h>
-#include <velk-ui/interface/intf_render_to_texture.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/interface/intf_render_to_texture.h>
 #include <velk-ui/plugin.h>
 
 namespace velk::ui {

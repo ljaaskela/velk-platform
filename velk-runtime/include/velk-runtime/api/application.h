@@ -8,7 +8,7 @@
 #include <velk-runtime/api/window.h>
 #include <velk-runtime/interface/intf_application.h>
 #include <velk-runtime/plugin.h>
-#include <velk-ui/api/element.h>
+#include <velk-scene/api/element.h>
 
 namespace velk {
 
@@ -24,7 +24,7 @@ namespace velk {
  * @code
  * auto app = velk::create_app({});
  * auto window = app.create_window({.width = 1280, .height = 720});
- * auto scene = velk::ui::create_scene("app://scenes/main.json");
+ * auto scene = velk::create_scene("app://scenes/main.json");
  * app.add_view(window, scene.child_at(scene.root(), 0));
  * while (app.poll()) {
  *     app.update();
@@ -76,7 +76,7 @@ public:
      * @param camera   Camera element with an attached ICamera trait.
      * @param viewport Normalized viewport rect (0..1). Default = full surface.
      */
-    void add_view(const IWindow::Ptr& window, const ui::IElement::Ptr& camera, const rect& viewport = {})
+    void add_view(const IWindow::Ptr& window, const ::velk::IElement::Ptr& camera, const rect& viewport = {})
     {
         with<IApplication>(
             [&](auto& a) { a.add_view(interface_pointer_cast<::velk::IObject>(window), camera, viewport); });
@@ -103,7 +103,7 @@ public:
      * Builds draw commands for all registered views. The returned Frame handle
      * is then passed to submit().
      */
-    ui::Frame prepare()
+    ::velk::Frame prepare()
     {
         return with<IApplication>([](auto& a) { return a.prepare(); });
     }
@@ -114,7 +114,7 @@ public:
      * Safe to call from any thread. For UpdateRate::Targeted windows, sleeps
      * after presenting to enforce the configured target framerate.
      */
-    void submit(ui::Frame frame)
+    void submit(::velk::Frame frame)
     {
         with<IApplication>([&](auto& a) { a.submit(frame); });
     }
@@ -132,7 +132,7 @@ public:
     }
 
     /** @brief Returns the default renderer owned by this application, or null if not yet created. */
-    ui::IRenderer::Ptr renderer() const
+    ::velk::IRenderer::Ptr renderer() const
     {
         return with<IApplication>([](auto& a) { return a.renderer(); });
     }

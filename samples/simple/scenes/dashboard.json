@@ -1,24 +1,24 @@
 {
   "version": 1,
   "objects": [
-    { "id": "scene_root", "class": "velk-ui.Element" },
-    { "id": "camera", "class": "velk-ui.Element" },
-    { "id": "camera_3d", "class": "velk-ui.Element" },
-    { "id": "root", "class": "velk-ui.Element" },
-    { "id": "header", "class": "velk-ui.Element" },
-    { "id": "logo", "class": "velk-ui.Element" },
-    { "id": "body", "class": "velk-ui.Element" },
-    { "id": "sidebar", "class": "velk-ui.Element" },
-    { "id": "nav1", "class": "velk-ui.Element" },
-    { "id": "nav2", "class": "velk-ui.Element" },
-    { "id": "nav3", "class": "velk-ui.Element" },
-    { "id": "content", "class": "velk-ui.Element" },
-    { "id": "card1", "class": "velk-ui.Element" },
-    { "id": "card2", "class": "velk-ui.Element" },
-    { "id": "card3", "class": "velk-ui.Element" },
-    { "id": "card4", "class": "velk-ui.Element" },
+    { "id": "scene_root", "class": "velk-scene.Element" },
+    { "id": "camera", "class": "velk-scene.Element" },
+    { "id": "camera_3d", "class": "velk-scene.Element" },
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "header", "class": "velk-scene.Element" },
+    { "id": "logo", "class": "velk-scene.Element" },
+    { "id": "body", "class": "velk-scene.Element" },
+    { "id": "sidebar", "class": "velk-scene.Element" },
+    { "id": "nav1", "class": "velk-scene.Element" },
+    { "id": "nav2", "class": "velk-scene.Element" },
+    { "id": "nav3", "class": "velk-scene.Element" },
+    { "id": "content", "class": "velk-scene.Element" },
+    { "id": "card1", "class": "velk-scene.Element" },
+    { "id": "card2", "class": "velk-scene.Element" },
+    { "id": "card3", "class": "velk-scene.Element" },
+    { "id": "card4", "class": "velk-scene.Element" },
     { "id": "content_texture", "class": "velk-render.RenderTexture" },
-    { "id": "rtt_display", "class": "velk-ui.Element" }
+    { "id": "rtt_display", "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -33,9 +33,9 @@
     { "id": "sky", "uri": "env:app://assets/qwantani_dusk_1_puresky_4k.hdr", "persistent": true }
   ],
   "attachments": [
-    { "targets": ["camera"],     "class": "velk-ui.Camera" },
-    { "targets": ["camera_3d"], "class": "velk-ui.Camera", "properties": { "projection": 1, "fov": 45.0, "far_clip": 5000.0, "environment": { "ref": "resources.sky" } } },
-    { "targets": ["camera_3d"], "class": "velk-ui.Orbit", "properties": { "target": { "ref": "card3", "type": "weak" }, "distance": 1200.0, "yaw": 30.0, "pitch": 15.0 } },
+    { "targets": ["camera"],     "class": "velk-scene.Camera" },
+    { "targets": ["camera_3d"], "class": "velk-scene.Camera", "properties": { "projection": 1, "fov": 45.0, "far_clip": 5000.0, "environment": { "ref": "resources.sky" } } },
+    { "targets": ["camera_3d"], "class": "velk-scene.Orbit", "properties": { "target": { "ref": "card3", "type": "weak" }, "distance": 1200.0, "yaw": 30.0, "pitch": 15.0 } },
     { "targets": ["root"],    "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 0 } },
     { "targets": ["body"],    "class": "velk-ui.Stack", "properties": { "axis": 0, "spacing": 0 } },
     { "targets": ["sidebar"], "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 4 } },
@@ -65,7 +65,7 @@
     { "targets": ["card4"],   "class": "velk-text.TextVisual", "properties": { "text": "Uptime",          "font_size": 128.0, "v_align": "center", "color": { "r": 0.7, "g": 0.7, "b": 0.75, "a": 1.0 } } },
 
     { "targets": ["rtt_display"], "class": "velk-ui.FixedSize", "properties": { "width": "400px", "height": "300px" } },
-    { "targets": ["rtt_display"], "class": "velk-ui.Trs", "properties": { "translate": { "x": 50, "y": 400, "z": 0 } } },
+    { "targets": ["rtt_display"], "class": "velk-scene.Trs", "properties": { "translate": { "x": 50, "y": 400, "z": 0 } } },
     { "targets": ["rtt_display"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 0.5 } } },
     { "targets": ["rtt_display"], "class": "velk-ui.TextureVisual", "properties": { "texture": { "ref": "content_texture" } } }
   ]

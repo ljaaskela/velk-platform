@@ -5,7 +5,7 @@
 #include <velk/interface/intf_object_storage.h>
 
 #include <algorithm>
-#include <velk-ui/interface/intf_element.h>
+#include <velk-scene/interface/intf_element.h>
 
 namespace velk::ui {
 

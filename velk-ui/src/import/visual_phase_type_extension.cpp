@@ -1,7 +1,7 @@
 #include "visual_phase_type_extension.h"
 
 #include <velk/api/any.h>
-#include <velk-ui/interface/intf_visual.h>
+#include <velk-scene/interface/intf_visual.h>
 
 namespace velk::ui {
 

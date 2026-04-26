@@ -11,7 +11,7 @@ add_library(velk_runtime SHARED
     include/velk-runtime/api/window.h
 )
 
-target_link_libraries(velk_runtime PRIVATE velk velk_render velk_ui velk_text)
+target_link_libraries(velk_runtime PRIVATE velk velk_render velk_scene velk_ui velk_text)
 
 target_include_directories(velk_runtime
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -4,7 +4,7 @@
 #include <velk/api/event.h>
 #include <velk/api/state.h>
 
-#include <velk-ui/api/trait.h>
+#include <velk-scene/api/trait.h>
 #include <velk-ui/interface/trait/intf_click.h>
 #include <velk-ui/plugin.h>
 

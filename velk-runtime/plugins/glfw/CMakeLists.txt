@@ -33,7 +33,7 @@ add_library(velk_runtime_glfw SHARED
     include/velk-runtime/plugins/glfw/plugin.h
 )
 
-target_link_libraries(velk_runtime_glfw PRIVATE velk velk_runtime velk_render velk_vk velk_ui glfw)
+target_link_libraries(velk_runtime_glfw PRIVATE velk velk_runtime velk_render velk_vk velk_scene velk_ui glfw)
 
 target_include_directories(velk_runtime_glfw
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

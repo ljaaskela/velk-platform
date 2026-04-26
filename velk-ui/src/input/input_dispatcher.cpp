@@ -5,7 +5,7 @@
 #include <velk/interface/intf_object.h>
 #include <velk/interface/intf_object_storage.h>
 
-#include <velk-ui/api/element.h>
+#include <velk-scene/api/element.h>
 
 #ifdef VELK_INPUT_DEBUG
 #define INPUT_LOG(...) VELK_LOG(I, __VA_ARGS__)

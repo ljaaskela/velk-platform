@@ -6,7 +6,7 @@
 #include <velk/api/velk.h>
 #include <velk/interface/resource/intf_resource_store.h>
 
-#include <velk-ui/interface/intf_environment.h>
+#include <velk-scene/interface/intf_environment.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 namespace velk::ui {

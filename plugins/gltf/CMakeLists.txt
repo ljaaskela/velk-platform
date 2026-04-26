@@ -17,7 +17,7 @@ add_library(velk_gltf SHARED
     third_party/cgltf/cgltf.h
 )
 
-target_link_libraries(velk_gltf PRIVATE velk velk_ui velk_render velk_image)
+target_link_libraries(velk_gltf PRIVATE velk velk_scene velk_ui velk_render velk_image)
 
 target_include_directories(velk_gltf
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

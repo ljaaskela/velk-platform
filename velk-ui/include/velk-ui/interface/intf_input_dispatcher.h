@@ -4,7 +4,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <velk-ui/input_types.h>
-#include <velk-ui/interface/intf_element.h>
+#include <velk-scene/interface/intf_element.h>
 
 namespace velk::ui {
 

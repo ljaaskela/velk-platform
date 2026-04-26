@@ -2,7 +2,7 @@
 
 #include <velk/api/state.h>
 #include <velk/hash.h>
-#include <velk-ui/instance_types.h>
+#include <velk-scene/instance_types.h>
 
 namespace velk::ui {
 

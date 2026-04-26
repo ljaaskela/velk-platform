@@ -2,7 +2,7 @@ add_executable(velk_ui_simple
     main.cpp
 )
 
-target_link_libraries(velk_ui_simple PRIVATE velk velk_ui velk_render velk_runtime velk_text velk_gltf)
+target_link_libraries(velk_ui_simple PRIVATE velk velk_scene velk_ui velk_render velk_runtime velk_text velk_gltf)
 
 # Stage scenes + assets next to the executable so the app:// resolver
 # finds them relative to the binary dir.
