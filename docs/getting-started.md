@@ -33,7 +33,7 @@ The smallest velk-platform program creates an application, opens a window, loads
 
 ```cpp
 #include <velk-runtime/api/application.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/scene.h>
 
 int main()
 {
@@ -43,9 +43,9 @@ int main()
     }
 
     auto window = app.create_window({.width = 1280, .height = 720, .title = "demo"});
-    auto scene = velk::ui::create_scene("app://scenes/dashboard.json");
+    auto scene = velk::create_scene("app://scenes/dashboard.json");
 
-    if (auto camera = scene.find_first<velk::ui::ICamera>()) {
+    if (auto camera = scene.find_first<velk::ICamera>()) {
         app.add_view(window, camera);
     }
 
@@ -66,9 +66,9 @@ The example above loads a scene from a JSON file. A minimal scene file looks lik
 {
   "version": 1,
   "objects": [
-    { "id": "scene_root", "class": "velk-ui.Element" },
-    { "id": "camera",     "class": "velk-ui.Element" },
-    { "id": "panel",      "class": "velk-ui.Element" }
+    { "id": "scene_root", "class": "velk-scene.Element" },
+    { "id": "camera",     "class": "velk-scene.Element" },
+    { "id": "panel",      "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -76,7 +76,7 @@ The example above loads a scene from a JSON file. A minimal scene file looks lik
     }
   },
   "attachments": [
-    { "targets": ["camera"], "class": "velk-ui.Camera" },
+    { "targets": ["camera"], "class": "velk-scene.Camera" },
     { "targets": ["panel"],  "class": "velk-ui.FixedSize",
       "properties": { "width": "300px", "height": "200px" } },
     { "targets": ["panel"],  "class": "velk-ui.RectVisual",
@@ -92,11 +92,11 @@ The `app://` URI scheme resolves paths relative to the executable's working dire
 You can also build elements in code, mixing freely with JSON-loaded ones:
 
 ```cpp
-#include <velk-ui/api/element.h>
+#include <velk-scene/api/element.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
 
-auto button = velk::ui::create_element();
+auto button = velk::create_element();
 
 auto fs = velk::ui::trait::layout::create_fixed_size();
 fs.set_size(velk::ui::dim::px(120.f), velk::ui::dim::px(40.f));
@@ -115,7 +115,7 @@ scene.add(scene.root(), button);
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
-auto label = velk::ui::create_element();
+auto label = velk::create_element();
 auto text = velk::ui::trait::visual::create_text();
 text.set_font(velk::ui::get_default_font());   // built-in Inter Regular
 text.set_text("Hello, velk!");

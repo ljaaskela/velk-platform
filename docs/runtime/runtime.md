@@ -34,15 +34,15 @@ For most apps, this is the only setup code you write. The runtime hides GLFW, Vu
 
 ```cpp
 #include <velk-runtime/api/application.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/scene.h>
 
 int main()
 {
     auto app = velk::create_app({});
     auto window = app.create_window({.width = 1280, .height = 720, .title = "demo"});
 
-    auto scene = velk::ui::create_scene("app://scenes/main.json");
-    if (auto camera = scene.find_first<velk::ui::ICamera>()) {
+    auto scene = velk::create_scene("app://scenes/main.json");
+    if (auto camera = scene.find_first<velk::ICamera>()) {
         app.add_view(window, camera);
     }
 

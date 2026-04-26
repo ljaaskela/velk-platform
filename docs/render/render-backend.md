@@ -260,7 +260,7 @@ The C++ side writes addresses and indices; the GLSL side declares the same field
 The `instances_address` in the header points to an array of `ElementInstance` structs. This is the universal per-instance record: every visual (rect, rounded rect, text glyph, texture, image, env, cube, sphere, future glTF meshes) packs this one layout, so there's only one GLSL instance type to learn and one vertex shader pattern that handles everything.
 
 ```cpp
-// C++ (velk-ui/instance_types.h)
+// C++ (velk-scene/instance_types.h)
 
 VELK_GPU_STRUCT ElementInstance
 {
@@ -310,7 +310,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 | Include | Source | Provides |
 |--|--|--|
 | `velk.glsl` | velk-render (always available) | `GlobalData`, `VelkVertex3D`, `VelkVbo3D`, `velk_vertex3d(root)`, `OpaquePtr`, `VELK_DRAW_DATA(InstancesType, VboType)`, `velk_texture(id, uv)`, BVH / RT types |
-| `velk-ui.glsl` | velk-ui (registered by the UI renderer) | `ElementInstance`, `ElementInstanceData`, `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
+| `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance`, `ElementInstanceData`, `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
 Modules can register additional includes via `IRenderContext::register_shader_include()` — the text plugin registers `velk_text.glsl` for glyph coverage sampling.
 
