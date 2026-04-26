@@ -7,7 +7,7 @@
 
 namespace velk::ui {
 
-class Stack : public ext::Layout<Stack, TraitPhase::Layout, IStack>
+class Stack : public ext::LayoutTrait<Stack, TraitPhase::Layout, IStack>
 {
 public:
     VELK_CLASS_UID(ClassId::Constraint::Stack, "Stack");

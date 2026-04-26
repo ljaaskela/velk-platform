@@ -164,7 +164,7 @@ struct ViewEntry
  * TODO(plugin-view-renderers): today this is an in-DLL-only split. For a
  * plugin to provide its own render path, the following would have to move:
  *   - Promote this interface to a public `IViewRenderer` under
- *     velk-ui/include with VELK_CLASS_UID + `Interface<>` CRTP.
+ *     velk-scene/include with VELK_CLASS_UID + `Interface<>` CRTP.
  *   - Move `GpuResourceManager` and `FrameDataManager` to velk-render as
  *     stable public interfaces (they are generic GPU plumbing that also
  *     doesn't really belong in velk-ui), and replace the concrete pointers

@@ -3,7 +3,7 @@
 
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_shader_snippet.h>
-#include <velk-ui/ext/trait.h>
+#include <velk-scene/ext/trait.h>
 #include <velk-ui/plugin.h>
 
 namespace velk::ui {
@@ -14,7 +14,7 @@ namespace velk::ui {
  * Produces a single FillRoundedRect draw command. The renderer uses
  * an SDF fragment shader to clip corners with antialiasing.
  */
-class RoundedRectVisual : public ext::Visual2D<RoundedRectVisual,
+class RoundedRectVisual : public ::velk::ext::Visual2D<RoundedRectVisual,
                                                 ::velk::IAnalyticShape,
                                                 ::velk::IShaderSnippet>
 {

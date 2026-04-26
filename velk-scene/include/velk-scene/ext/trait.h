@@ -12,25 +12,43 @@
 
 namespace velk::ext {
 
+/**
+ * @brief Generic CRTP base for traits that participate in the Element
+ *        dirty/notify protocol.
+ *
+ * Bundles the universal plumbing: ITraitNotify (so the element can
+ * observe phase-dirty events) and IMetadataObserver (so property
+ * writes flow through on_state_changed). Subclasses provide
+ * `get_phase()` and the interface-specific defaults; they call
+ * `invoke_trait_dirty(flags)` from their own `on_state_changed` to
+ * push the right dirty flag.
+ */
 template <class T, class... Extra>
-class Transform : public ::velk::ext::Object<T, ITransformTrait, ITraitNotify, IMetadataObserver, Extra...>
+class Trait : public ::velk::ext::Object<T, ITraitNotify, IMetadataObserver, Extra...>
+{
+protected:
+    void invoke_trait_dirty(DirtyFlags flags)
+    {
+        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
+    }
+};
+
+template <class T, class... Extra>
+class Transform : public Trait<T, ITransformTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Transform; }
     void transform(IElement&) override {}
 
 protected:
-    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Layout)
+    void on_state_changed(string_view, IMetadata&, Uid) override
     {
-        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
+        this->invoke_trait_dirty(DirtyFlags::Layout);
     }
-
-    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
 };
 
 template <class T, class Variant, class... Extra>
-class VisualBase : public ::velk::ext::Object<T, Variant, ::velk::IRasterShader,
-                                              ITraitNotify, IMetadataObserver, Extra...>
+class VisualBase : public Trait<T, Variant, ::velk::IRasterShader, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Visual; }
@@ -53,14 +71,12 @@ public:
     vector<IBuffer::Ptr> get_gpu_resources(::velk::IRenderContext&) const override { return {}; }
 
 protected:
-    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Visual)
+    void invoke_visual_changed() { this->invoke_trait_dirty(DirtyFlags::Visual); }
+
+    void on_state_changed(string_view, IMetadata&, Uid) override
     {
-        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
+        this->invoke_trait_dirty(DirtyFlags::Visual);
     }
-
-    void invoke_visual_changed() { invoke_trait_dirty(DirtyFlags::Visual); }
-
-    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_trait_dirty(); }
 };
 
 template <class T, class... Extra>
@@ -70,16 +86,10 @@ template <class T, class... Extra>
 class Visual3D : public VisualBase<T, IVisual3D, Extra...> {};
 
 template <class T, class... Extra>
-class Render : public ::velk::ext::Object<T, ITraitNotify, Extra...>
+class Render : public Trait<T, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Render; }
-
-protected:
-    void invoke_trait_dirty(DirtyFlags flags = DirtyFlags::Visual)
-    {
-        invoke_event(this->get_interface(IInterface::UID), "on_trait_dirty", flags);
-    }
 };
 
 } // namespace velk::ext

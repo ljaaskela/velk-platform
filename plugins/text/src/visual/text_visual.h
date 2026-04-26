@@ -6,7 +6,7 @@
 
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_buffer.h>
-#include <velk-ui/ext/trait.h>
+#include <velk-scene/ext/trait.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/intf_text_visual.h>
@@ -24,7 +24,7 @@ namespace velk::ui {
  * Layout is performed lazily in get_draw_entries() and cached via
  * ChangeCache so it only re-runs when inputs change.
  */
-class TextVisual : public ext::Visual2D<TextVisual, ITextVisual,
+class TextVisual : public ::velk::ext::Visual2D<TextVisual, ITextVisual,
                                          ::velk::IAnalyticShape>
 {
 public:

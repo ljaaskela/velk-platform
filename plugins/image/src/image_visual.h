@@ -4,7 +4,7 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_surface.h>
-#include <velk-ui/ext/trait.h>
+#include <velk-scene/ext/trait.h>
 #include <velk-ui/plugins/image/intf_image_visual.h>
 #include <velk-ui/plugins/image/plugin.h>
 
@@ -21,7 +21,7 @@ class ImageMaterial;
  * `ImageMaterial`. Apps can either set this directly or use the underlying
  * `ImageMaterial` if they want to attach the same image to a custom visual.
  */
-class ImageVisual : public ::velk::ui::ext::Visual2D<ImageVisual, IImageVisual>
+class ImageVisual : public ::velk::ext::Visual2D<ImageVisual, IImageVisual>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Visual::Image, "ImageVisual");

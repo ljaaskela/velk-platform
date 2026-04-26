@@ -48,9 +48,34 @@ add_library(velk_scene SHARED
     src/env_helper.cpp
     src/default_ui_shaders.h
 
+    # 3D visuals
+    src/visual/cube_visual.h
+    src/visual/cube_visual.cpp
+    src/visual/sphere_visual.h
+    src/visual/sphere_visual.cpp
+    src/visual/mesh_visual.h
+    src/visual/mesh_visual.cpp
+    src/visual/primitive_shaders.h
+
+    # Render-feeding traits
+    src/camera.h
+    src/camera.cpp
+    src/trait/light.h
+
+    # Transform traits
+    src/transform/trs.h
+    src/transform/trs.cpp
+    src/transform/matrix.h
+    src/transform/matrix.cpp
+    src/transform/look_at.h
+    src/transform/look_at.cpp
+    src/transform/orbit.h
+    src/transform/orbit.cpp
+
     # Public interfaces (scene model + renderer surface)
     include/velk-scene/plugin.h
     include/velk-scene/types.h
+    include/velk-scene/instance_types.h
     include/velk-scene/api/element.h
     include/velk-scene/api/scene.h
     include/velk-scene/api/trait.h
@@ -64,6 +89,30 @@ add_library(velk_scene SHARED
     include/velk-scene/interface/intf_environment.h
     include/velk-scene/interface/intf_render_to_texture.h
     include/velk-scene/ext/material_shaders.h
+
+    # Transform trait public surface
+    include/velk-scene/interface/intf_transform_trait.h
+    include/velk-scene/interface/trait/intf_trs.h
+    include/velk-scene/interface/trait/intf_matrix.h
+    include/velk-scene/interface/trait/intf_look_at.h
+    include/velk-scene/interface/trait/intf_orbit.h
+    include/velk-scene/api/trait/trs.h
+    include/velk-scene/api/trait/matrix.h
+    include/velk-scene/api/trait/look_at.h
+    include/velk-scene/api/trait/orbit.h
+
+    # Render-feeding traits public surface
+    include/velk-scene/api/render_trait.h
+    include/velk-scene/api/camera.h
+    include/velk-scene/api/trait/light.h
+
+    # 3D visual public surface
+    include/velk-scene/api/mesh.h
+    include/velk-scene/api/visual/visual.h
+    include/velk-scene/api/visual/cube.h
+    include/velk-scene/api/visual/sphere.h
+    include/velk-scene/api/visual/mesh.h
+    include/velk-scene/ext/trait.h
 )
 
 target_link_libraries(velk_scene PRIVATE velk velk_importer velk_render)

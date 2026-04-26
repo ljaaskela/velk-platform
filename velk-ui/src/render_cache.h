@@ -1,7 +1,7 @@
 #ifndef VELK_UI_RENDER_CACHE_H
 #define VELK_UI_RENDER_CACHE_H
 
-#include <velk-ui/ext/trait.h>
+#include <velk-scene/ext/trait.h>
 #include <velk-scene/interface/intf_render_to_texture.h>
 #include <velk-ui/plugin.h>
 
@@ -14,7 +14,7 @@ namespace velk::ui::impl {
  * visual output into a texture. The texture can be displayed elsewhere
  * via a TextureVisual bound to the render_target ObjectRef.
  */
-class RenderCache : public ::velk::ui::ext::Render<RenderCache, IRenderToTexture, IMetadataObserver>
+class RenderCache : public ::velk::ext::Render<RenderCache, IRenderToTexture>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Render::RenderCache, "RenderCache");
