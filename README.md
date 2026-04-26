@@ -18,11 +18,18 @@ Bindless GPU rendering abstraction:
 * Minimal backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls.
 * Includes a Vulkan 1.2 backend (`velk::vk`) with BDA and bindless descriptors.
 
+### Scene model + renderer ([velk-scene](velk-scene/))
+
+Element / Scene primitives, scene graph, transforms, 3D visuals, and the renderer:
+* `IElement` / `IScene` interfaces, JSON scene loading, BVH, dirty tracking.
+* Render paths (Forward / Deferred / RayTrace) consuming the scene model and submitting draw calls via velk-render.
+* Render-feeding traits (Camera, Light) and 3D visuals (Cube, Sphere, Mesh) live here alongside the transform traits (Trs, Matrix, LookAt, Orbit).
+
 ### UI framework ([velk-ui](velk-ui/))
 
-Declarative UI framework:
-* Scene graphs, element composition via traits (constraints, visuals, transforms, input), JSON scene loading.
-* A scene renderer using velk-render that walks the visual tree and submits draw calls to the render backend.
+Declarative UI policy on top of velk-scene:
+* Layout solver and constraint / layout traits (Stack, FixedSize), 2D visuals (Rect, RoundedRect, Texture), input (Click, Hover, Drag), gradient + render caches.
+* Importer type extensions and value-type registrations consumed by the JSON scene loader.
 
 #### Plugins
 * Text rendering plugin ([velk_text](docs/plugins/text.md)) using analytic Bezier glyph coverage adapted from Eric Lengyel's [Slug](https://github.com/EricLengyel/Slug) reference shaders. No glyph atlas: outlines are baked once with FreeType, packed into GPU curve and band buffers, and shaded per-pixel with exact analytic coverage. Scale-independent: one font instance renders at any pixel size with no re-baking.
@@ -34,7 +41,7 @@ User documentation lives at [`docs/`](docs/) — see [`docs/README.md`](docs/REA
 
 * **[Getting started](docs/getting-started.md)** Minimal example walkthrough
 * **[Runtime](docs/runtime/runtime.md)** Application setup, frame loop, both creation modes
-* **[Scene](docs/ui/scene.md)** / **[Traits](docs/ui/traits.md)** / **[Input](docs/ui/input.md)** UI authoring
+* **[Scene](docs/ui/scene.md)** / **[Traits](docs/ui/traits.md)** / **[Input](docs/ui/input.md)** Scene + UI authoring
 * **[Rendering](docs/render/rendering.md)** / **[Render backend](docs/render/render-backend.md)** Internals
 * **[Text](docs/plugins/text.md)** / **[Image](docs/plugins/image.md)** Bundled plugins
 
@@ -44,7 +51,7 @@ A minimal application which shows a fixed 64px*64px velk logo on screen.
 
 ```cpp
 #include <velk-runtime/api/application.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/scene.h>
 
 int main()
 {
@@ -53,9 +60,9 @@ int main()
     // Create a window
     auto window = app.create_window({.width = 1280, .height = 720, .title = "demo"});
     // Load a scene from a file
-    auto scene = velk::ui::create_scene("app://scenes/velk_logo.json");
+    auto scene = velk::create_scene("app://scenes/velk_logo.json");
     // Find the first Element with a Trait implementing ICamera and bind it to the window
-    if (auto camera = scene.find_first<velk::ui::ICamera>()) {
+    if (auto camera = scene.find_first<velk::ICamera>()) {
         app.add_view(window, camera);
     }
     // Application loop
@@ -71,9 +78,9 @@ velk_logo.json:
 {
   "version": 1,
   "objects": [
-    { "id": "root", "class": "velk-ui.Element" },
-    { "id": "camera", "class": "velk-ui.Element" },
-    { "id": "logo", "class": "velk-ui.Element" }
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "camera", "class": "velk-scene.Element" },
+    { "id": "logo", "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -81,7 +88,7 @@ velk_logo.json:
     }
   },
   "attachments": [
-    { "targets": ["camera"],  "class": "velk-ui.Camera" },
+    { "targets": ["camera"],  "class": "velk-scene.Camera" },
     { "targets": ["logo"],    "class": "velk-ui.FixedSize", "properties": { "width": "64px", "height": "64px" } },
     { "targets": ["logo"],    "class": "velk_image.ImageVisual", "properties": { "uri": "image:app://assets/logo.png" } }
   ]
@@ -91,13 +98,13 @@ velk_logo.json:
 Or, equivalently, build the same scene programmatically in C++ instead of loading from JSON:
 
 ```cpp
-#include <velk-ui/api/camera.h>
-#include <velk-ui/api/element.h>
-#include <velk-ui/api/scene.h>
+#include <velk-scene/api/camera.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/scene.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/plugins/image/api/image_visual.h>
 
-using namespace velk::ui;
+using namespace velk;
 
 // Empty scene; no JSON file
 auto scene = create_scene();
@@ -112,14 +119,14 @@ scene.set_root(root);
 scene.add(root, logo);
 scene.add(root, camera);
 
-// Camera: Camera trait ("attachments": velk-ui.Camera)
+// Camera: Camera trait ("attachments": velk-scene.Camera)
 camera.add_trait(trait::render::create_camera());
 
 // logo: FixedSize 64x64 ("attachments": velk-ui.FixedSize)
-logo.add_trait(trait::layout::create_fixed_size(dim::px(64.f), dim::px(64.f));
+logo.add_trait(ui::trait::layout::create_fixed_size(dim::px(64.f), dim::px(64.f)));
 
-// logo: Visual trait to show the image ("attachments": velk-ui.ImageVisual)
-logo.add_trait(trait::visual::create_image("image:app://assets/logo.png"));
+// logo: Visual trait to show the image ("attachments": velk_image.ImageVisual)
+logo.add_trait(ui::trait::visual::create_image("image:app://assets/logo.png"));
 ```
 
 Build & run:
