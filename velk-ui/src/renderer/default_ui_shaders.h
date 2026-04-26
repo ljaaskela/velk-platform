@@ -631,7 +631,16 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     Ray r;
     r.origin = world_pos + n_bias + L * 0.005;
     r.dir    = L;
-    t_max = max(t_max - 0.005, 0.0);
+    // Light-end exclusion zone: ignore occluders in the last 5% of the
+    // ray (5 mm minimum). Without this, point / spot lights mounted
+    // inside a fixture (lamp shade, sconce, hanging bulb) are fully
+    // self-occluded by the fixture geometry and never reach any
+    // surface. 5% covers typical fixture sizes for lights at meter
+    // scale; the 5 mm floor handles small/close lights without going
+    // negative. Directional lights have t_max = 1e30 so the margin
+    // is irrelevant for them.
+    float margin = max(0.005, t_max * 0.05);
+    t_max = max(t_max - margin, 0.0);
     return trace_any_hit_bvh(r, t_max) ? 0.0 : 1.0;
 }
 

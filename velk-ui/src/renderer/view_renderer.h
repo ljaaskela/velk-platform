@@ -136,6 +136,15 @@ struct ViewEntry
     int deferred_width = 0;
     int deferred_height = 0;
 
+    // Optional per-view diagnostic image written by the deferred shadow
+    // compute (shape buffer_addr, ibo_offset, triangle_count packed into
+    // RGBA32F via uintBitsToFloat). Allocated lazily when shadow debug
+    // is enabled; left at 0 otherwise. Same lifetime story as
+    // deferred_output_tex (resize-aware, deferred destroy).
+    TextureId shadow_debug_tex = 0;
+    int shadow_debug_width = 0;
+    int shadow_debug_height = 0;
+
     // Transient: GPU address of this view's FrameGlobals block for the
     // current frame. Written by the Rasterizer's raster-pass build and
     // read by DeferredLighter so its compute shader can reach scene-wide

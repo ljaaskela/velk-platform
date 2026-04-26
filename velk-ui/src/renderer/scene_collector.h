@@ -642,10 +642,21 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx, F&& cb)
         const uint32_t right_idx = static_cast<uint32_t>(out.nodes.size());
         out.nodes.push_back({});
 
-        node.first_shape = 0;
-        node.shape_count = 0;
-        node.first_child = left_idx;
-        node.child_count = 2;
+        // Re-acquire the node reference: the push_backs above may have
+        // reallocated `out.nodes`, dangling the `node` reference taken
+        // earlier (line `out.nodes[item.self_index]`). The AABB writes
+        // earlier in this iteration landed in the pre-reallocation
+        // buffer and were copied to the new buffer, so they're fine.
+        // The first_child / child_count writes below MUST go through
+        // a fresh reference; otherwise they hit freed memory and the
+        // actual node stays with zero-initialised children — making
+        // it look like an empty leaf and dropping every shape under
+        // that subtree from the BVH walk.
+        GpuBvhNode& self = out.nodes[item.self_index];
+        self.first_shape = 0;
+        self.shape_count = 0;
+        self.first_child = left_idx;
+        self.child_count = 2;
 
         // Push right first so left is processed first (cheaper for the
         // refs array's cache locality on the next iteration).
