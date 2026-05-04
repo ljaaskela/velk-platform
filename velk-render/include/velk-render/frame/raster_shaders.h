@@ -114,14 +114,13 @@ layout(location = 0) out vec4 frag_color;
 void main()
 {
     EvalContext ctx;
-    ctx.globals     = root.global_data;
     ctx.data_addr   = uint64_t(root.material);
     ctx.texture_id  = root.texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - root.global_data.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_world_pos - view_globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
 
@@ -159,14 +158,13 @@ void main()
     velk_visual_discard();
 
     EvalContext ctx;
-    ctx.globals     = root.global_data;
     ctx.data_addr   = uint64_t(root.material);
     ctx.texture_id  = root.texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - root.global_data.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_world_pos - view_globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
 

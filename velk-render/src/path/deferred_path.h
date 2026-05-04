@@ -35,7 +35,7 @@ namespace velk {
  *      output texture and blits to the view surface.
  *
  * The two stages share per-view state (batches, gbuffer_group,
- * deferred_output_tex, shadow_debug_tex, frame_globals_addr) via the
+ * deferred_output_tex, shadow_debug_tex) via the
  * `ViewState` struct.
  */
 class DeferredPath : public ext::RenderPath<DeferredPath>

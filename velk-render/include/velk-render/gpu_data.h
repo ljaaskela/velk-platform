@@ -19,10 +19,12 @@ namespace velk {
 
 /// Per-frame global data written by the renderer, read by all shaders.
 ///
-/// Layout must match the `GlobalData` buffer_reference block in velk.glsl
-/// (std430). Scene-wide state (BVH nodes + shapes, BVH metadata) lives
-/// here so every view sees the same acceleration structure after
-/// Renderer::build_frame_passes builds it once per scene per frame.
+/// Layout must match the `ViewGlobalsBuffer` UBO declaration in
+/// velk.glsl (scalar layout). The view preparer writes one of these
+/// per view per frame into the per-frame staging buffer; the graph
+/// executor binds the relevant region as descriptor binding 4 before
+/// each pass, and shaders read view-level state (camera, viewport,
+/// BVH, present_counter) from `view_globals.X`.
 struct FrameGlobals
 {
     float    view_projection[16];          ///< Combined view-projection matrix from the camera.
@@ -32,7 +34,7 @@ struct FrameGlobals
     uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
-    uint32_t _pad0;
+    uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint64_t bvh_nodes_addr;               ///< GPU pointer to the BvhNode array.
     uint64_t bvh_shapes_addr;              ///< GPU pointer to the scene's RtShape array.
 };
@@ -52,7 +54,7 @@ static_assert(sizeof(FrameGlobals) == 192, "FrameGlobals layout must match velk.
  */
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_address;   ///< GPU pointer to FrameGlobals.
+    uint64_t _reserved0;        ///< Reserved 8 bytes; keeps the header at 48 bytes so material data following the header begins on a 16-byte boundary in std430 layout.
     uint64_t instances_address; ///< GPU pointer to the instance data array.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.

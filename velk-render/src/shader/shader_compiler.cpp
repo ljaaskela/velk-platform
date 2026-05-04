@@ -101,20 +101,6 @@ layout(buffer_reference, std430) readonly buffer MeshIndices { uint data[]; };
 // layout is pos[0..2], normal[3..5], uv[6..7].
 layout(buffer_reference, std430) readonly buffer MeshVertices { float data[]; };
 
-// Frame globals: projection matrix, its inverse, viewport, BVH metadata.
-layout(buffer_reference, std430) readonly buffer GlobalData {
-    mat4 view_projection;
-    mat4 inverse_view_projection;
-    vec4 viewport;          // width, height, 1/width, 1/height
-    vec4 cam_pos;           // xyz = world-space camera position, w = _
-    uint bvh_root;
-    uint bvh_node_count;
-    uint bvh_shape_count;
-    uint _pad0;
-    BvhNodeList bvh_nodes;
-    RtShapeList bvh_shapes;
-};
-
 // Generic 8-byte buffer_reference placeholder. Use it wherever the
 // shader needs to preserve the layout of a typed pointer field without
 // caring about the target's contents (e.g. fragment shaders that skip
@@ -126,6 +112,27 @@ layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
 // shares this descriptor set binding; individual shaders reference a
 // texture by index rather than declaring their own samplers.
 layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
+
+// Per-view globals UBO. The renderer writes a small FrameGlobals block
+// into a per-view uniform buffer once per frame and binds it at
+// binding 4 before each pass; shaders read view-level state from
+// `view_globals` instead of dereferencing a per-draw GPU pointer.
+// Layout matches the FrameGlobals struct in gpu_data.h byte-for-byte
+// under scalarBlockLayout. Vertex, fragment, and compute stages may all
+// read it. Use this in preference to the per-draw `global_data`
+// buffer_reference for any view-level state.
+layout(set = 0, binding = 4, scalar) uniform ViewGlobalsBuffer {
+    mat4 view_projection;
+    mat4 inverse_view_projection;
+    vec4 viewport;
+    vec4 cam_pos;
+    uint bvh_root;
+    uint bvh_node_count;
+    uint bvh_shape_count;
+    uint present_counter;
+    BvhNodeList bvh_nodes;
+    RtShapeList bvh_shapes;
+} view_globals;
 
 // Storage-image arrays for compute imageStore are declared locally
 // per-shader (rgba8 -> binding 1, rgba32f -> binding 2, rgba16f ->
@@ -182,7 +189,7 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
 // The 48-byte header keeps everything 16-byte aligned for std430.
 #define VELK_DRAW_DATA(InstancesType, VboType) \
-    GlobalData global_data;                    \
+    OpaquePtr _reserved0;                      \
     InstancesType instance_data;               \
     uint texture_id;                           \
     uint instance_count;                       \

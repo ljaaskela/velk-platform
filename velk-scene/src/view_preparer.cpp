@@ -108,7 +108,13 @@ void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
     globals.bvh_shape_count = rv.bvh_shape_count;
     globals.bvh_nodes_addr = rv.bvh_nodes_addr;
     globals.bvh_shapes_addr = rv.bvh_shapes_addr;
-    rv.frame_globals_addr = ctx.frame_buffer->write(&globals, sizeof(globals));
+    globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
+    uint64_t globals_addr = ctx.frame_buffer->write(&globals, sizeof(globals));
+    if (globals_addr) {
+        rv.view_globals_buffer = ctx.frame_buffer->active_buffer();
+        rv.view_globals_offset = globals_addr - ctx.frame_buffer->active_buffer_base();
+        rv.view_globals_range  = sizeof(globals);
+    }
 }
 
 void ViewPreparer::prepare_lights(const SceneState& scene_state, FrameContext& ctx,

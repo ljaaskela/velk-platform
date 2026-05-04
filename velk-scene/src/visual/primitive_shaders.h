@@ -39,7 +39,7 @@ void main()
 
     vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
     vec4 world_pos_h = inst.world_matrix * local;
-    gl_Position = root.global_data.view_projection * world_pos_h;
+    gl_Position = view_globals.view_projection * world_pos_h;
 
     v_color = inst.color;
     v_local_uv = v.uv;

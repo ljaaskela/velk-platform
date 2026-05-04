@@ -175,12 +175,28 @@ void RenderGraph::compile()
 
 void RenderGraph::execute(::velk::IRenderBackend& backend)
 {
+    GpuBuffer last_vg_buffer = 0;
+    uint64_t  last_vg_offset = 0;
+    uint32_t  last_vg_range  = 0;
+
     for (size_t i = 0; i < passes_.size(); ++i) {
         auto& gp = passes_[i];
         auto& barrier = barriers_[i];
 
         if (barrier.emit) {
             backend.barrier(barrier.src, barrier.dst);
+        }
+
+        if (gp.view_globals_buffer != 0 &&
+            (gp.view_globals_buffer != last_vg_buffer ||
+             gp.view_globals_offset != last_vg_offset ||
+             gp.view_globals_range  != last_vg_range)) {
+            backend.bind_view_globals(gp.view_globals_buffer,
+                                      gp.view_globals_offset,
+                                      gp.view_globals_range);
+            last_vg_buffer = gp.view_globals_buffer;
+            last_vg_offset = gp.view_globals_offset;
+            last_vg_range  = gp.view_globals_range;
         }
 
         for (auto& op : gp.ops) {

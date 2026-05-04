@@ -457,6 +457,7 @@ bool VkBackend::create_device()
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
     features12.runtimeDescriptorArray = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
@@ -656,7 +657,7 @@ bool VkBackend::create_bindless_descriptor()
     //   3: storage-image array for compute imageStore writes (rgba16f-format)
     // Only the LAST binding may use VARIABLE_DESCRIPTOR_COUNT, so binding 3
     // carries that flag; bindings 0..2 use fixed counts.
-    VkDescriptorSetLayoutBinding bindings[4]{};
+    VkDescriptorSetLayoutBinding bindings[5]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[0].descriptorCount = kMaxBindlessTextures;
@@ -677,7 +678,25 @@ bool VkBackend::create_bindless_descriptor()
     bindings[3].descriptorCount = kMaxBindlessTextures;
     bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    VkDescriptorBindingFlags binding_flags[4] = {
+    // ViewGlobals UBO: a per-view FrameGlobals block. Dynamic-uniform-buffer
+    // so a single descriptor binding can serve all views in a frame —
+    // each pass carries its own dynamic offset that the backend supplies
+    // to vkCmdBindDescriptorSets at bind time. Plain UPDATE_AFTER_BIND
+    // would race because GPU descriptor reads happen at draw-execute
+    // time, so multiple updates within one command buffer would collapse
+    // to last-writer-wins for all draws using the binding.
+    bindings[4].binding = 4;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT |
+                             VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // UNIFORM_BUFFER_DYNAMIC (binding 4) is not allowed to use
+    // UPDATE_AFTER_BIND_BIT per the Vulkan spec; PARTIALLY_BOUND_BIT
+    // alone is sufficient and matches the per-frame "rebind buffer once,
+    // vary offset per pass" pattern.
+    VkDescriptorBindingFlags binding_flags[5] = {
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
@@ -685,20 +704,20 @@ bool VkBackend::create_bindless_descriptor()
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-            VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
     };
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flags_ci.bindingCount = 4;
+    flags_ci.bindingCount = 5;
     flags_ci.pBindingFlags = binding_flags;
 
     VkDescriptorSetLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layout_ci.pNext = &flags_ci;
     layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    layout_ci.bindingCount = 4;
+    layout_ci.bindingCount = 5;
     layout_ci.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &descriptor_layout_) != VK_SUCCESS) {
@@ -706,7 +725,7 @@ bool VkBackend::create_bindless_descriptor()
     }
 
     // Pool
-    VkDescriptorPoolSize pool_sizes[4]{};
+    VkDescriptorPoolSize pool_sizes[5]{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_sizes[0].descriptorCount = kMaxBindlessTextures;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -715,28 +734,22 @@ bool VkBackend::create_bindless_descriptor()
     pool_sizes[2].descriptorCount = kMaxBindlessTextures;
     pool_sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     pool_sizes[3].descriptorCount = kMaxBindlessTextures;
+    pool_sizes[4].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    pool_sizes[4].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_ci.maxSets = 1;
-    pool_ci.poolSizeCount = 4;
+    pool_ci.poolSizeCount = 5;
     pool_ci.pPoolSizes = pool_sizes;
 
     if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_) != VK_SUCCESS) {
         return false;
     }
 
-    // Allocate set
-    uint32_t variable_count = kMaxBindlessTextures;
-    VkDescriptorSetVariableDescriptorCountAllocateInfo variable_ci{};
-    variable_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
-    variable_ci.descriptorSetCount = 1;
-    variable_ci.pDescriptorCounts = &variable_count;
-
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc_info.pNext = &variable_ci;
     alloc_info.descriptorPool = descriptor_pool_;
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_layout_;
@@ -1088,7 +1101,7 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
     buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     if (desc.index_buffer) {
         buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -2005,8 +2018,8 @@ void VkBackend::begin_pass(uint64_t target_id)
                                 0,
                                 1,
                                 &descriptor_set_,
-                                0,
-                                nullptr);
+                                1,
+                                &view_globals_dynamic_offset_);
         return;
     }
 
@@ -2087,8 +2100,8 @@ void VkBackend::begin_pass(uint64_t target_id)
                             0,
                             1,
                             &descriptor_set_,
-                            0,
-                            nullptr);
+                            1,
+                            &view_globals_dynamic_offset_);
 }
 
 void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
@@ -2165,7 +2178,7 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
-                            0, nullptr);
+                            1, &view_globals_dynamic_offset_);
 
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
@@ -2560,6 +2573,41 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
         1, &mem_barrier,
         0, nullptr,
         0, nullptr);
+}
+
+void VkBackend::bind_view_globals(GpuBuffer buffer, uint64_t offset, uint32_t range)
+{
+    if (buffer == 0 || range == 0) return;
+
+    // Buffer changes (typically once per frame as the staging slot
+    // rotates) require a fresh descriptor write; the per-view offset is
+    // supplied as a dynamic offset on every subsequent
+    // vkCmdBindDescriptorSets and does not need a descriptor update.
+    if (buffer != view_globals_buffer_ || range != view_globals_range_) {
+        auto it = buffers_.find(buffer);
+        if (it == buffers_.end()) return;
+
+        VkDescriptorBufferInfo buf_info{};
+        buf_info.buffer = it->second.buffer;
+        buf_info.offset = 0;
+        buf_info.range  = range;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = descriptor_set_;
+        write.dstBinding = 4;
+        write.dstArrayElement = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        write.pBufferInfo = &buf_info;
+
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+        view_globals_buffer_ = buffer;
+        view_globals_range_  = range;
+    }
+
+    view_globals_dynamic_offset_ = static_cast<uint32_t>(offset);
 }
 
 void VkBackend::end_frame()

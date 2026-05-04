@@ -440,6 +440,16 @@ public:
      */
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
+    /**
+     * @brief Updates descriptor binding 4 to point at a per-view ViewGlobals UBO range.
+     *
+     * Bound region is `(buffer, offset, range)`. Subsequent draws and
+     * dispatches see the updated UBO at `layout(set=0, binding=4)`. Call
+     * between passes (UPDATE_AFTER_BIND on this binding allows updates while
+     * descriptor set is bound). Pass `buffer == 0` to leave the binding as-is.
+     */
+    virtual void bind_view_globals(GpuBuffer buffer, uint64_t offset, uint32_t range) = 0;
+
     /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
     virtual void end_frame() = 0;
 

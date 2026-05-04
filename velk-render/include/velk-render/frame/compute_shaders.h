@@ -53,8 +53,9 @@ layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
     vec4 params; // x = intensity, y = rotation_rad, zw = _
 };
 
-// GlobalData / RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
-// GlobalData carries inverse_view_projection + scene BVH (nodes + shapes).
+// RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
+// View-level globals (inverse_view_projection, BVH, present_counter)
+// are read directly from the `view_globals` UBO declared in the prelude.
 
 layout(push_constant) uniform PC {
     vec4 cam_pos;              // offset 0
@@ -70,7 +71,6 @@ layout(push_constant) uniform PC {
     uint shadow_debug_image_id;// 52  RGBA32F storage image; 0 = disabled
     LightList lights;          // 56
     _EnvParamsBuf env_params;  // 64
-    GlobalData globals;        // 72
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -377,18 +377,18 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 // any realistic UI scene depth.
 bool trace_any_hit(Ray ray, float t_max)
 {
-    if (pc.globals.bvh_node_count == 0u) return false;
+    if (view_globals.bvh_node_count == 0u) return false;
     uint stack[32];
     int sp = 0;
-    stack[sp++] = pc.globals.bvh_root;
+    stack[sp++] = view_globals.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.globals.bvh_nodes.data[ni];
+        BvhNode node = view_globals.bvh_nodes.data[ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = pc.globals.bvh_shapes.data[node.first_shape + i];
+            RtShape s = view_globals.bvh_shapes.data[node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -399,8 +399,8 @@ bool trace_any_hit(Ray ray, float t_max)
         // Falls back to natural order for non-binary or single-child
         // nodes (none today, but kept defensive).
         if (node.child_count == 2u) {
-            BvhNode l = pc.globals.bvh_nodes.data[node.first_child];
-            BvhNode r = pc.globals.bvh_nodes.data[node.first_child + 1u];
+            BvhNode l = view_globals.bvh_nodes.data[node.first_child];
+            BvhNode r = view_globals.bvh_nodes.data[node.first_child + 1u];
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -508,7 +508,7 @@ void main()
     // the environment. Falls back to black when the view has no env.
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
-        mat4 inv_vp = pc.globals.inverse_view_projection;
+        mat4 inv_vp = view_globals.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
         vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
@@ -615,7 +615,7 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         float ao = 1.0;
-        if (pc.globals.bvh_node_count != 0u) {
+        if (view_globals.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
             ao_r.origin = world_pos + N * 0.01;
@@ -715,7 +715,7 @@ layout(push_constant) uniform PC {
     mat4 inv_view_projection;
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
-    uvec4 env;          // x=env_material_id, y=env_texture_id, z=frame_counter, w=_
+    uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
     RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
     RtShapeList bvh_shapes;     // element-grouped buffer; BvhNode ranges index here
     BvhNodeList bvh_nodes;
@@ -725,7 +725,6 @@ layout(push_constant) uniform PC {
     LightList lights;
     uint light_count;
     uint _lights_pad;
-    GlobalData globals;         // this view's FrameGlobals; routed into ctx.globals for eval bodies.
 } pc;
 
 // ===== Core ray / hit / fill-context types =====
@@ -1280,7 +1279,6 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
         // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
         RtShape s = pc.bvh_shapes.data[hit.shape_index];
         EvalContext ctx;
-        ctx.globals = pc.globals;
         ctx.data_addr = s.material_data_addr;
         ctx.texture_id = s.texture_id;
         ctx.shape_param = s.shape_param;
@@ -1322,7 +1320,7 @@ void main()
     uint shape_count = pc.extras.w;
     if (coord.x >= int(w) || coord.y >= int(h)) return;
 
-    rng_init(uvec2(coord), pc.env.z);
+    rng_init(uvec2(coord), view_globals.present_counter);
 
     // Per-pixel primary sample count. Each sample fires one jittered
     // primary ray through the painter-sorted loop; the results are
@@ -1374,7 +1372,6 @@ void main()
             if (!intersect_shape(primary, s, hit)) continue;
 
             EvalContext ctx;
-            ctx.globals = pc.globals;
             ctx.data_addr = s.material_data_addr;
             ctx.texture_id = s.texture_id;
             ctx.shape_param = s.shape_param;

@@ -113,7 +113,6 @@ inline void emit_draw_calls(
     const vector<Batch>& batches,
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
-    uint64_t globals_gpu_addr,
     MaterialAddrCache& material_cache,
     IBuffer* default_uv1,
     ResolvePipelineFn resolve_pipeline,
@@ -160,7 +159,6 @@ inline void emit_draw_calls(
         }
 
         DrawDataHeader header{};
-        header.globals_address = globals_gpu_addr;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count;

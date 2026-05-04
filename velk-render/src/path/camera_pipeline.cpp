@@ -112,6 +112,10 @@ void CameraPipeline::emit(::velk::ViewEntry& view,
     /// converts RGBA16F to the swapchain's display format in one GPU
     /// op. ctx.target_format flows to forward pipelines so they
     /// compile against an RGBA16F render pass.
+    /// Save and restore so subsequent views (e.g. an overlay camera
+    /// added to the same surface) don't inherit RGBA16F and compile
+    /// pipelines that mismatch the swapchain's render pass.
+    ::velk::PixelFormat saved_format = ctx.target_format;
     ctx.target_format = ::velk::PixelFormat::RGBA16F;
 
     auto path_target = ensure_storage_target(vs.path_output, w, h,
@@ -121,7 +125,10 @@ void CameraPipeline::emit(::velk::ViewEntry& view,
                                              ::velk::TextureUsage::Storage,
                                              ::velk::PixelFormat::RGBA16F, ctx, graph);
     if (!path_target || !post_target) {
-        // Allocation failure: fall back to direct rendering.
+        // Allocation failure: fall back to direct rendering. Restore
+        // the format first so the path compiles pipelines matching the
+        // swapchain rather than the HDR target we couldn't allocate.
+        ctx.target_format = saved_format;
         path->build_passes(view, render_view, color_target, ctx, graph);
         return;
     }
@@ -144,6 +151,8 @@ void CameraPipeline::emit(::velk::ViewEntry& view,
         blit.writes.push_back(interface_pointer_cast<::velk::IGpuResource>(color_target));
     }
     graph.add_pass(std::move(blit));
+
+    ctx.target_format = saved_format;
 }
 
 void CameraPipeline::on_view_removed(::velk::ViewEntry& view, ::velk::FrameContext& ctx)

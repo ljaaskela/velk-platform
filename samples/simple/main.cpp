@@ -209,7 +209,7 @@ void main()
     vec2 q = velk_vertex3d(root).position.xy;
     ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
-    gl_Position = root.global_data.view_projection * inst.world_matrix * local_pos;
+    gl_Position = view_globals.view_projection * inst.world_matrix * local_pos;
     v_local_uv = q;
 }
 )";

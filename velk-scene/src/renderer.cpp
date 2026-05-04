@@ -67,12 +67,10 @@ const uint VELK_LIGHTING_UNLIT   = 0u;  // Pass color straight through, no shadi
 const uint VELK_LIGHTING_STANDARD = 1u; // Full PBR lighting via velk_pbr_shade.
 
 // Everything a material eval function receives. Bundles instance + hit
-// context so adding a new per-hit input stays cheap. `globals` points
-// at the same FrameGlobals buffer every path already has; evals that
-// need camera position, viewport, or (rarely) BVH state dereference
-// through it without breaking cross-driver portability.
+// context so adding a new per-hit input stays cheap. Evals that need
+// view-level state (camera position, viewport, BVH, present_counter)
+// read directly from the `view_globals` UBO declared in velk.glsl.
 struct EvalContext {
-    GlobalData globals;    // frame globals (view_projection, cam_pos, viewport, BVH)
     uint64_t data_addr;    // material's per-draw GPU data pointer
     uint texture_id;       // bindless texture slot (0 if unused)
     uint shape_param;      // per-shape material slot (e.g. glyph index)

@@ -115,7 +115,7 @@ void ForwardPath::build_passes(ViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             env_batches, *ctx.frame_buffer, *ctx.resources,
-            render_view.frame_globals_addr, mcache,
+            mcache,
             default_uv1, resolve, /*frustum=*/nullptr);
     }
 
@@ -124,7 +124,7 @@ void ForwardPath::build_passes(ViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-            render_view.frame_globals_addr, mcache,
+            mcache,
             default_uv1, resolve, frustum_ptr);
     }
 
@@ -138,6 +138,9 @@ void ForwardPath::build_passes(ViewEntry& entry,
     if (color_target) {
         pass.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
     }
+    pass.view_globals_buffer = render_view.view_globals_buffer;
+    pass.view_globals_offset = render_view.view_globals_offset;
+    pass.view_globals_range  = render_view.view_globals_range;
     graph.add_pass(std::move(pass));
 }
 

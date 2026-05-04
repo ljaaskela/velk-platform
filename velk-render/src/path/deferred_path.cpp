@@ -275,7 +275,6 @@ void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
         *render_view.batches,
         *ctx.frame_buffer,
         *ctx.resources,
-        render_view.frame_globals_addr,
         *ctx.material_cache,
         default_uv1,
         resolve,
@@ -289,6 +288,9 @@ void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
     gp.ops.push_back(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
     gp.ops.push_back(ops::EndPass{});
     gp.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+    gp.view_globals_buffer = render_view.view_globals_buffer;
+    gp.view_globals_offset = render_view.view_globals_offset;
+    gp.view_globals_range  = render_view.view_globals_range;
     graph.add_pass(std::move(gp));
 }
 
@@ -361,7 +363,6 @@ void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
         uint32_t shadow_debug_image_id;
         uint64_t lights_addr;
         uint64_t env_data_addr;
-        uint64_t globals_addr;
     };
     static_assert(sizeof(PushC) == 80, "Deferred PushC layout mismatch");
 
@@ -382,7 +383,6 @@ void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
     pc.lights_addr = lights_addr;
     pc.env_data_addr = render_view.env.data_addr;
-    pc.globals_addr = render_view.frame_globals_addr;
 
     GraphPass gp;
     DispatchCall dc{};
@@ -401,6 +401,9 @@ void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
     gp.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     gp.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
     if (color_target) gp.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+    gp.view_globals_buffer = render_view.view_globals_buffer;
+    gp.view_globals_offset = render_view.view_globals_offset;
+    gp.view_globals_range  = render_view.view_globals_range;
     graph.add_pass(std::move(gp));
 }
 

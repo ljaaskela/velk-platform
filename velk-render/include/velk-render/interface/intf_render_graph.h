@@ -43,6 +43,16 @@ struct GraphPass
 
     /// Resources written by this pass.
     vector<IGpuResource::Ptr> writes;
+
+    /// Optional view-globals UBO binding for this pass. When set, the
+    /// graph executor calls `IRenderBackend::bind_view_globals` before
+    /// the pass's ops, so shaders see the right per-view FrameGlobals at
+    /// `layout(set=0, binding=4)`. `view_globals_buffer == 0` leaves the
+    /// previous binding intact (used for passes that don't read
+    /// view-level state, e.g. pure blits).
+    GpuBuffer view_globals_buffer = 0;
+    uint64_t  view_globals_offset = 0;
+    uint32_t  view_globals_range  = 0;
 };
 
 /**

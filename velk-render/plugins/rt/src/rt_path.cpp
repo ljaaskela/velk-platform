@@ -187,7 +187,7 @@ void RtPath::build_passes(ViewEntry& entry,
         uint32_t shape_count;
         uint32_t env_material_id;
         uint32_t env_texture_id;
-        uint32_t frame_counter;
+        uint32_t _env_pad0;
         uint32_t _env_pad1;
         uint64_t shapes_addr;
         uint64_t bvh_shapes_addr;
@@ -198,7 +198,6 @@ void RtPath::build_passes(ViewEntry& entry,
         uint64_t lights_addr;
         uint32_t light_count;
         uint32_t _lights_pad;
-        uint64_t globals_addr;
     };
 
     PushC pc{};
@@ -213,7 +212,6 @@ void RtPath::build_passes(ViewEntry& entry,
     pc.shape_count = static_cast<uint32_t>(shapes.size());
     pc.env_material_id = render_view.env.material_id;
     pc.env_texture_id = render_view.env.texture_id;
-    pc.frame_counter = static_cast<uint32_t>(ctx.present_counter);
     pc.shapes_addr = shapes_addr;
     pc.bvh_shapes_addr = render_view.bvh_shapes_addr;
     pc.bvh_nodes_addr = render_view.bvh_nodes_addr;
@@ -222,7 +220,6 @@ void RtPath::build_passes(ViewEntry& entry,
     pc.env_data_addr = render_view.env.data_addr;
     pc.lights_addr = lights_addr;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
-    pc.globals_addr = render_view.frame_globals_addr;
 
     DispatchCall dc{};
     dc.pipeline = pit->second;
@@ -240,6 +237,9 @@ void RtPath::build_passes(ViewEntry& entry,
         render_view.viewport});
     gp.writes.push_back(interface_pointer_cast<IGpuResource>(vs.rt_output));
     if (color_target) gp.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+    gp.view_globals_buffer = render_view.view_globals_buffer;
+    gp.view_globals_offset = render_view.view_globals_offset;
+    gp.view_globals_range  = render_view.view_globals_range;
     graph.add_pass(std::move(gp));
 }
 

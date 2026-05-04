@@ -74,6 +74,13 @@ public:
 
     virtual size_t get_buffer_size() const = 0;
     virtual size_t get_peak_usage() const = 0;
+
+    /// @brief Active slot's underlying GPU buffer. 0 if no slot is active.
+    virtual GpuBuffer active_buffer() const = 0;
+
+    /// @brief Active slot's GPU base address. Subtract from a written
+    ///        gpu_addr to get a buffer offset for descriptor binding.
+    virtual uint64_t active_buffer_base() const = 0;
 };
 
 } // namespace velk
