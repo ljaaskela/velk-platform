@@ -40,6 +40,11 @@ struct SceneState
     vector<IElement*> redraw_list;
     /** @brief Elements that were detached from the scene since the last update. */
     vector<IElement::Ptr> removed_list;
+    /** @brief OR of every per-element DirtyFlags merged in since the last
+     *         consume_state(). Lets consumers fast-path "transform-only"
+     *         frames (Layout flag only) without falling back to a full
+     *         visual rebuild. `DirtyFlags::None` when nothing changed. */
+    DirtyFlags flags = DirtyFlags::None;
     /** @brief Non-owning pointer to the originating scene. Valid for the lifetime
      *         of this SceneState; consumers walk the element tree directly
      *         (BVH build, batch builder, ray-cast). */

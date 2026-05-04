@@ -4,6 +4,7 @@
 #include <velk/vector.h>
 
 #include <unordered_map>
+#include <unordered_set>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
@@ -62,6 +63,19 @@ public:
         vector<IBatch::Ptr> batches;
     };
 
+    /// Per-element record of every batch slot that element contributes
+    /// to. Populated during `rebuild_batches`; consumed by the
+    /// transform-only fast path which writes new world matrices directly
+    /// into existing slots without rewalking the scene.
+    struct ElementSlot
+    {
+        IBatch* batch = nullptr;       ///< Non-owning; batch lifetime tied to caller-owned vector<IBatch::Ptr>.
+        uint32_t instance_index = 0;   ///< Slot index within the batch.
+        float offset_x = 0.f;          ///< RTT subtree offset baked in at emit time.
+        float offset_y = 0.f;
+    };
+    using ElementSlotMap = std::unordered_map<IElement*, vector<ElementSlot>>;
+
     /**
      * @brief Rebuilds visual commands for a single element from its traits.
      *
@@ -72,8 +86,16 @@ public:
      */
     void rebuild_commands(IElement* element, IRenderContext* render_ctx);
 
-    /** @brief Rebuilds batches from the visual list, pre-filtering render target subtrees. */
-    void rebuild_batches(const SceneState& state, vector<IBatch::Ptr>& out_batches);
+    /** @brief Rebuilds batches from the visual list, pre-filtering render
+     *         target subtrees. Also populates @p out_slots with the per-
+     *         element batch-slot records (used by the transform-only
+     *         fast path) and @p out_rtt_roots with the elements that
+     *         introduce an RTT subtree (so the fast path can detect when
+     *         an RTT root moves and fall back to a full rebuild). */
+    void rebuild_batches(const SceneState& state,
+                         vector<IBatch::Ptr>& out_batches,
+                         ElementSlotMap& out_slots,
+                         std::unordered_set<IElement*>& out_rtt_roots);
 
     /** @brief Removes an element from the cache. */
     void evict(IElement* element) { element_cache_.erase(element); }

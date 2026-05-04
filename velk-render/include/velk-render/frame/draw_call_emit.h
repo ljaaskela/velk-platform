@@ -131,9 +131,14 @@ inline void emit_draw_calls(
         PipelineId pipeline = resolve_pipeline(batch);
         if (pipeline == 0) continue;
 
-        auto instance_bytes = batch.instance_data();
-        uint64_t instances_addr =
-            frame_data.write(instance_bytes.begin(), instance_bytes.size());
+        // Persistent batch buffer: ViewPreparer::prepare_batches uploads
+        // dirty batches via the resource manager and stamps the GPU
+        // address onto the batch's IBuffer. Read it directly — no
+        // per-frame staging copy of (potentially large) instance data.
+        auto* batch_buf = interface_cast<IBuffer>(&batch);
+        uint64_t instances_addr = batch_buf
+            ? batch_buf->get_gpu_handle(GpuResourceKey::Default)
+            : 0;
         if (!instances_addr) continue;
 
         uint32_t texture_id = 0;

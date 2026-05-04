@@ -166,10 +166,15 @@ void BatchBuilder::rebuild_commands(IElement* element, IRenderContext* render_ct
     }
 }
 
-void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>& out_batches)
+void BatchBuilder::rebuild_batches(const SceneState& state,
+                                   vector<IBatch::Ptr>& out_batches,
+                                   ElementSlotMap& out_slots,
+                                   std::unordered_set<IElement*>& out_rtt_roots)
 {
     VELK_PERF_SCOPE("renderer.rebuild_batches");
     out_batches.clear();
+    out_slots.clear();
+    out_rtt_roots.clear();
     // Note: render_target_passes_ is NOT cleared here — it's cleared
     // once per frame in reset_frame_state (called at Renderer::prepare
     // start). Each view's rebuild_batches appends; find_or_make_pass
@@ -186,7 +191,8 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>&
 
     auto emit_visuals = [&](const vector<IElement*>& entries, VisualPhase phase,
                             vector<IBatch::Ptr>& target_batches,
-                            float offset_x = 0.f, float offset_y = 0.f) {
+                            float offset_x = 0.f, float offset_y = 0.f,
+                            bool track_slots = true) {
         uint64_t last_bkey = 0;
         size_t max_visuals = 0;
         for (auto* elem : entries) {
@@ -271,6 +277,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>&
                     auto& instance_data = batch->mutable_instance_data();
 
                     auto data_offset = instance_data.size();
+                    uint32_t slot_index = batch->instance_count();
                     instance_data.resize(data_offset + de.instance_size);
                     std::memcpy(instance_data.data() + data_offset, de.instance_data,
                                 de.instance_size);
@@ -280,8 +287,13 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>&
                     // instance so shaders get the correct transform.
                     std::memcpy(instance_data.data() + data_offset, world.m, sizeof(world.m));
 
-                    batch->set_instance_count(batch->instance_count() + 1);
+                    batch->set_instance_count(slot_index + 1);
                     batch->set_world_aabb(aabb::merge(batch->world_aabb(), elem_state->world_aabb));
+
+                    if (track_slots) {
+                        out_slots[elem].push_back(ElementSlot{
+                            batch, slot_index, offset_x, offset_y});
+                    }
                 }
             }
         }
@@ -330,6 +342,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>&
         RenderTargetPassData* inner_pass = active_pass;
         if (elem->has_render_traits()) {
             inner_pass = find_or_make_pass(elem);
+            out_rtt_roots.insert(elem);
         }
 
         ambient_before.push_back(elem);
@@ -358,13 +371,17 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>&
         walk(scene->root(), main_before, main_after, nullptr);
     }
 
-    // Batch render target passes (offset by the element's world position)
+    // Batch render target passes (offset by the element's world position).
+    // Skip slot tracking for RTT subtrees: their batches live on the
+    // RenderTargetPassData, not in out_batches, so the per-view fast path
+    // can't reach them. Any dirty element inside an RTT subtree forces a
+    // full rebuild via the rtt_roots check on the fast path.
     for (auto& rtp : render_target_passes_) {
         auto es = read_state<IElement>(rtp.element);
         float ox = es ? es->world_matrix(0, 3) : 0.f;
         float oy = es ? es->world_matrix(1, 3) : 0.f;
-        emit_visuals(rtp.before_entries, VisualPhase::BeforeChildren, rtp.batches, ox, oy);
-        emit_visuals(rtp.after_entries, VisualPhase::AfterChildren, rtp.batches, ox, oy);
+        emit_visuals(rtp.before_entries, VisualPhase::BeforeChildren, rtp.batches, ox, oy, /*track_slots=*/false);
+        emit_visuals(rtp.after_entries, VisualPhase::AfterChildren, rtp.batches, ox, oy, /*track_slots=*/false);
     }
 
     emit_visuals(main_before, VisualPhase::BeforeChildren, out_batches);

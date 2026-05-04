@@ -200,7 +200,9 @@ void Scene::update(const UpdateInfo& info)
     // Layout dirty and mark every visual for redraw, forcing both the
     // BVH and the raster batches to rebuild every pan frame.
 
-    dirty_ = DirtyFlags::None;
+    // `dirty_` survives until consume_state() so SceneState carries
+    // the merged flags downstream (e.g., BatchBuilder uses Layout-only
+    // frames as a fast-path for transform-only instance updates).
 }
 
 SceneState Scene::consume_state()
@@ -210,7 +212,9 @@ SceneState Scene::consume_state()
     SceneState state;
     state.redraw_list = std::move(redraw_list_);
     state.removed_list = std::move(removed_list_);
+    state.flags = dirty_;
     state.scene = this;
+    dirty_ = DirtyFlags::None;
     return state;
 }
 

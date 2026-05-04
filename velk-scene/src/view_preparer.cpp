@@ -13,8 +13,10 @@
 
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_analytic_shape.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shadow_technique.h>
@@ -22,6 +24,7 @@
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/interface/material/intf_material.h>
 #include <velk-scene/interface/intf_environment.h>
+#include <velk-scene/interface/intf_visual.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -43,14 +46,92 @@ void build_ortho_projection(float* out, float width, float height)
 
 } // namespace
 
+bool ViewPreparer::try_update_transforms(ViewEntry& entry,
+                                         const SceneState& scene_state)
+{
+    auto cache_it = view_caches_.find(&entry);
+    if (cache_it == view_caches_.end()) return false;
+    auto& cache = cache_it->second;
+
+    // Structural mutations always demand a full rebuild.
+    if (!scene_state.removed_list.empty()) return false;
+    if (cache.batches.empty()) return false;
+
+    // Layout-only flag set is the safe transform-only signal. Any
+    // Visual or DrawOrder bit reshapes the batch set.
+    constexpr DirtyFlags kLayoutOnly = DirtyFlags::Layout;
+    if ((scene_state.flags & ~kLayoutOnly) != DirtyFlags::None) return false;
+
+    // Non-visual elements (cameras, lights, etc.) end up in the redraw
+    // list when their transform changes but contribute no batches.
+    // Skip them in both passes below; only visual-bearing elements
+    // need slot updates.
+    for (auto* elem : scene_state.redraw_list) {
+        if (cache.rtt_roots.count(elem)) return false;
+        if (!::velk::has_attachment<IVisual>(elem)) continue;
+        if (!cache.element_slots.count(elem)) return false;
+    }
+
+    for (auto* elem : scene_state.redraw_list) {
+        if (!::velk::has_attachment<IVisual>(elem)) continue;
+        auto state = read_state<IElement>(elem);
+        if (!state) return false;
+        for (auto& slot : cache.element_slots[elem]) {
+            mat4 world = state->world_matrix;
+            world(0, 3) -= slot.offset_x;
+            world(1, 3) -= slot.offset_y;
+            slot.batch->update_instance_at(
+                slot.instance_index,
+                array_view<const uint8_t>(
+                    reinterpret_cast<const uint8_t*>(world.m),
+                    sizeof(world.m)));
+        }
+    }
+    return true;
+}
+
 void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_state,
-                                   BatchBuilder& batch_builder, RenderView& rv)
+                                   BatchBuilder& batch_builder, FrameContext& ctx,
+                                   RenderView& rv)
 {
     auto& cache = view_caches_[&entry];
     if (entry.batches_dirty) {
-        batch_builder.rebuild_batches(scene_state, cache.batches);
-        entry.batches_dirty = false;
+        if (try_update_transforms(entry, scene_state)) {
+            entry.batches_dirty = false;
+        } else {
+            batch_builder.rebuild_batches(scene_state, cache.batches,
+                                          cache.element_slots, cache.rtt_roots);
+            entry.batches_dirty = false;
+        }
     }
+
+    // Upload any batches whose instance data changed this frame
+    // (rebuild filled them; fast-path patched matrices in place; either
+    // sets `is_dirty()`). The renderer's persistent buffer pipeline
+    // gives each batch a stable GPU address; emit_draw_calls reads it
+    // directly instead of writing instance bytes into per-frame staging.
+    if (ctx.resources && ctx.backend) {
+        for (auto& batch_ptr : cache.batches) {
+            auto* buf = interface_cast<IBuffer>(batch_ptr.get());
+            if (!buf || !buf->is_dirty()) continue;
+            size_t bsize = buf->get_data_size();
+            const uint8_t* bytes = buf->get_data();
+            if (!bytes || bsize == 0) {
+                buf->clear_dirty();
+                continue;
+            }
+            GpuBufferDesc bdesc{};
+            bdesc.size = bsize;
+            bdesc.cpu_writable = true;
+            auto* be = ctx.resources->ensure_buffer_storage(buf, bdesc);
+            if (!be) continue;
+            if (auto* dst = ctx.backend->map(be->handle)) {
+                std::memcpy(dst, bytes, bsize);
+            }
+            buf->clear_dirty();
+        }
+    }
+
     rv.batches = &cache.batches;
 }
 
@@ -283,7 +364,7 @@ RenderView ViewPreparer::prepare(ViewEntry& entry,
 
     // Path-gated: skip the heavy scene walks when the path doesn't
     // declare a need for them.
-    if (needs.batches) prepare_batches(entry, scene_state, batch_builder, rv);
+    if (needs.batches) prepare_batches(entry, scene_state, batch_builder, ctx, rv);
     if (needs.lights)  prepare_lights(scene_state, ctx, rv);
     if (needs.shapes)  prepare_shapes(scene_state, ctx, rv);
 

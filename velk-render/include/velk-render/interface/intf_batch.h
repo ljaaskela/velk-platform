@@ -73,6 +73,17 @@ public:
     ///        lazy-compile the pipeline against any target format on
     ///        cache miss without re-reading the visual / material storage.
     virtual PipelineOptions pipeline_options() const = 0;
+
+    /// @brief Overwrite one instance's bytes in-place. Used by the
+    ///        scene-side incremental update path to push a fresh world
+    ///        matrix (or any transform-only payload) into an existing
+    ///        slot without touching the rest of the batch. The byte
+    ///        range overwritten is `[instance_index * instance_stride,
+    ///        instance_index * instance_stride + bytes.size())`.
+    ///        @p bytes.size() must be `<= instance_stride`. Out-of-range
+    ///        slots are silently ignored.
+    virtual void update_instance_at(uint32_t instance_index,
+                                    array_view<const uint8_t> bytes) = 0;
 };
 
 } // namespace velk

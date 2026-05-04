@@ -4,6 +4,9 @@
 #include <velk/vector.h>
 
 #include <unordered_map>
+#include <unordered_set>
+
+#include "batch_builder.h"
 
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/render_view.h>
@@ -12,8 +15,6 @@
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-scene/interface/intf_element.h>
 #include <velk-render/render_path/view_entry.h>
-
-namespace velk { class BatchBuilder; }
 
 namespace velk {
 
@@ -62,13 +63,25 @@ private:
     struct ViewCache
     {
         vector<IBatch::Ptr> batches;
+        BatchBuilder::ElementSlotMap element_slots;
+        std::unordered_set<IElement*> rtt_roots;
     };
     std::unordered_map<ViewEntry*, ViewCache> view_caches_;
 
+    /// Try the transform-only fast path for @p entry. Returns true if
+    /// @p scene_state's flags + dirty list permit incremental update
+    /// (Layout-only changes, no structural mutations) and every dirty
+    /// element was found in the cached slot map. Falls back to full
+    /// rebuild when this returns false.
+    bool try_update_transforms(ViewEntry& entry, const SceneState& scene_state);
+
     /// Rebuilds the per-view raster batch cache when @p entry.batches_dirty
-    /// is set, then points @p rv at it.
+    /// is set, uploads any dirty batches' instance buffers via the
+    /// resource manager (giving each batch a stable GPU address), then
+    /// points @p rv at the cache.
     void prepare_batches(ViewEntry& entry, const SceneState& scene_state,
-                         BatchBuilder& batch_builder, RenderView& rv);
+                         BatchBuilder& batch_builder, FrameContext& ctx,
+                         RenderView& rv);
 
     /// Resolves the camera (or ortho fallback) into view-projection /
     /// inverse-VP / cam_pos / frustum on @p rv, using @p entry's
