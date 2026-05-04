@@ -458,6 +458,10 @@ bool VkBackend::create_device()
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    // Required for vkCmdDrawIndexedIndirectCount / vkCmdDrawIndirectCount —
+    // the always-indirect emission path lets the GPU determine the actual
+    // draw count later (post-culling) without a CPU readback.
+    features12.drawIndirectCount = VK_TRUE;
     features12.runtimeDescriptorArray = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
@@ -1101,7 +1105,8 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
     buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (desc.index_buffer) {
         buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -2144,16 +2149,31 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
                                call.root_constants);
         }
 
-        if (call.index_buffer != 0) {
+        // Resolve indirect-draw buffers.
+        auto args_it = buffers_.find(call.args_buffer);
+        auto count_it = buffers_.find(call.count_buffer);
+        if (args_it == buffers_.end() || count_it == buffers_.end()) {
+            continue;
+        }
+        VkBuffer args_vk = args_it->second.buffer;
+        VkBuffer count_vk = count_it->second.buffer;
+
+        if (call.indexed) {
             auto bit = buffers_.find(call.index_buffer);
             if (bit == buffers_.end()) {
                 continue;
             }
             vkCmdBindIndexBuffer(sync.command_buffer, bit->second.buffer,
                                  call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(sync.command_buffer, call.index_count, call.instance_count, 0, 0, 0);
+            vkCmdDrawIndexedIndirectCount(sync.command_buffer,
+                                          args_vk, call.args_buffer_offset,
+                                          count_vk, call.count_buffer_offset,
+                                          call.max_draw_count, call.args_stride);
         } else {
-            vkCmdDraw(sync.command_buffer, call.vertex_count, call.instance_count, 0, 0);
+            vkCmdDrawIndirectCount(sync.command_buffer,
+                                   args_vk, call.args_buffer_offset,
+                                   count_vk, call.count_buffer_offset,
+                                   call.max_draw_count, call.args_stride);
         }
     }
 }

@@ -205,16 +205,52 @@ inline void emit_draw_calls(
             resources.register_pipeline(material_ptr.get(), pipeline);
         }
 
+        // Always-indirect: write a single VkDraw{Indexed,}IndirectCommand
+        // record + a single uint32 count = 1 into the frame staging
+        // buffer. CPU-driven today; a future GPU culling pass will
+        // overwrite the count without changing the call shape.
         DrawCall call{};
         call.pipeline = pipeline;
-        if (ibo_handle) {
+        call.indexed = (ibo_handle != 0);
+        if (call.indexed) {
             call.index_buffer = ibo_handle;
             call.index_buffer_offset = ibo_offset;
-            call.index_count = primitive->get_index_count();
+
+            struct {
+                uint32_t indexCount;
+                uint32_t instanceCount;
+                uint32_t firstIndex;
+                int32_t  vertexOffset;
+                uint32_t firstInstance;
+            } args{ primitive->get_index_count(), batch.instance_count(),
+                    0, 0, 0 };
+            uint64_t args_addr = frame_data.write(&args, sizeof(args));
+            if (!args_addr) continue;
+            call.args_buffer = frame_data.active_buffer();
+            call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+            call.args_stride = sizeof(args);
         } else {
-            call.vertex_count = primitive->get_vertex_count();
+            struct {
+                uint32_t vertexCount;
+                uint32_t instanceCount;
+                uint32_t firstVertex;
+                uint32_t firstInstance;
+            } args{ primitive->get_vertex_count(), batch.instance_count(),
+                    0, 0 };
+            uint64_t args_addr = frame_data.write(&args, sizeof(args));
+            if (!args_addr) continue;
+            call.args_buffer = frame_data.active_buffer();
+            call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+            call.args_stride = sizeof(args);
         }
-        call.instance_count = batch.instance_count();
+
+        uint32_t count_value = 1;
+        uint64_t count_addr = frame_data.write(&count_value, sizeof(count_value), 4);
+        if (!count_addr) continue;
+        call.count_buffer = frame_data.active_buffer();
+        call.count_buffer_offset = count_addr - frame_data.active_buffer_base();
+        call.max_draw_count = 1;
+
         call.root_constants_size = sizeof(uint64_t);
         std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
 

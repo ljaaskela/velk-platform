@@ -130,20 +130,30 @@ struct ComputePipelineDesc
 /// the per-frame light buffer addresses in one dispatch.
 inline constexpr size_t kMaxRootConstantsSize = 256;
 
-/// A single draw call submitted to the backend.
+/// A single indirect draw call submitted to the backend.
 ///
-/// When `index_buffer` is non-zero the call is dispatched as
-/// `vkCmdDrawIndexed(index_count, ...)` after binding the IBO. Otherwise
-/// it falls through to `vkCmdDraw(vertex_count, ...)`.
+/// Always dispatched via `vkCmdDrawIndexedIndirectCount` (when @c indexed
+/// is true and `index_buffer` is bound) or `vkCmdDrawIndirectCount`
+/// (when @c indexed is false). The actual draw count is read from
+/// `count_buffer` at GPU execution time, allowing future GPU-side
+/// culling to write the count without CPU involvement; today the CPU
+/// writes count = 1 and a single VkDraw{Indexed,}IndirectCommand record
+/// per batch into `args_buffer`.
 struct DrawCall
 {
     PipelineId pipeline{};      ///< Which pipeline to bind.
-    uint32_t vertex_count{};    ///< Vertices per instance for non-indexed draws.
-    uint32_t instance_count{1}; ///< Number of instances to draw.
+    bool indexed{false};        ///< true => VkDrawIndexedIndirectCommand, false => VkDrawIndirectCommand.
 
-    GpuBuffer index_buffer{};         ///< Index buffer to bind (0 = non-indexed draw).
-    uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer` where indices start.
-    uint32_t index_count{};           ///< Indices per instance for indexed draws.
+    GpuBuffer index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
+    uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
+
+    GpuBuffer args_buffer{};          ///< Buffer holding indirect-draw records.
+    uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
+    uint32_t args_stride{};           ///< sizeof(VkDraw{Indexed,}IndirectCommand). Stride between records.
+
+    GpuBuffer count_buffer{};         ///< Buffer holding the uint32 actual draw count.
+    uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
+    uint32_t max_draw_count{1};       ///< Upper bound; backend issues min(count_buffer[0], max_draw_count) draws.
 
     /// Push constant data, typically an 8-byte GPU pointer to a DrawDataHeader.
     uint8_t root_constants[kMaxRootConstantsSize]{};
