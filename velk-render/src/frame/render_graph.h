@@ -31,12 +31,12 @@ public:
     bool empty() const override { return passes_.empty(); }
     void clear() override;
     void import(const ::velk::IGpuResource::Ptr& resource) override;
-    void add_pass(::velk::GraphPass&& pass) override;
+    void add_pass(::velk::IRenderPass::Ptr pass) override;
     void compile() override;
     void execute(::velk::IRenderBackend& backend) override;
 
-    ::velk::vector<::velk::GraphPass>& passes() override { return passes_; }
-    const ::velk::vector<::velk::GraphPass>& passes() const override { return passes_; }
+    ::velk::vector<::velk::IRenderPass::Ptr>& passes() override { return passes_; }
+    const ::velk::vector<::velk::IRenderPass::Ptr>& passes() const override { return passes_; }
 
     ::velk::IGpuResourceManager& resources() override;
 
@@ -71,7 +71,7 @@ private:
         ::velk::PipelineStage dst = ::velk::PipelineStage::FragmentShader;
     };
 
-    ::velk::vector<::velk::GraphPass> passes_;
+    ::velk::vector<::velk::IRenderPass::Ptr> passes_;
     ::velk::vector<Barrier> barriers_;
     std::unordered_map<::velk::IGpuResource*, ResourceState> states_;
     std::unordered_map<::velk::IGpuResource*, bool> imported_;
@@ -87,7 +87,7 @@ private:
     /// passes that end with a blit settle into ColorWrite (the
     /// blit destination's final layout) regardless of any preceding
     /// dispatch.
-    static PassClass classify(const ::velk::GraphPass& pass);
+    static PassClass classify(const ::velk::IRenderPass& pass);
 };
 
 } // namespace velk::impl

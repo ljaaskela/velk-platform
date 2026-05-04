@@ -48,18 +48,19 @@ void RenderGraph::import(const ::velk::IGpuResource::Ptr& resource)
     states_.emplace(raw, ResourceState::Undefined);
 }
 
-void RenderGraph::add_pass(::velk::GraphPass&& pass)
+void RenderGraph::add_pass(::velk::IRenderPass::Ptr pass)
 {
-    for (auto& r : pass.reads) {
+    if (!pass) return;
+    for (auto& r : pass->reads()) {
         if (r) states_.emplace(r.get(), ResourceState::Undefined);
     }
-    for (auto& w : pass.writes) {
+    for (auto& w : pass->writes()) {
         if (w) states_.emplace(w.get(), ResourceState::Undefined);
     }
     passes_.push_back(std::move(pass));
 }
 
-RenderGraph::PassClass RenderGraph::classify(const ::velk::GraphPass& pass)
+RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 {
     // Last-op-wins: the post-pass resource state matches the kind of
     // the last work-doing op. Submit -> ColorWrite (raster); Dispatch
@@ -69,7 +70,7 @@ RenderGraph::PassClass RenderGraph::classify(const ::velk::GraphPass& pass)
     bool has_submit = false;
     bool has_dispatch = false;
     bool has_blit = false;
-    for (auto& op : pass.ops) {
+    for (auto& op : pass.ops()) {
         if (std::holds_alternative<::velk::ops::Submit>(op)) has_submit = true;
         else if (std::holds_alternative<::velk::ops::Dispatch>(op)) has_dispatch = true;
         else if (std::holds_alternative<::velk::ops::BlitToSurface>(op)
@@ -118,9 +119,9 @@ void RenderGraph::compile()
     /// Raster passes that target an RTT texture write a fresh target
     /// without sampling prior graph resources. Skip the pre-pass barrier
     /// for them (matches old `reads_textures(Raster, raster_to_texture)`).
-    auto skip_pre_barrier = [](const ::velk::GraphPass& pass, PassClass c) {
+    auto skip_pre_barrier = [](const ::velk::IRenderPass& pass, PassClass c) {
         if (c != PassClass::Raster) return false;
-        for (auto& op : pass.ops) {
+        for (auto& op : pass.ops()) {
             if (auto* bp = std::get_if<::velk::ops::BeginPass>(&op)) {
                 // A BeginPass on a non-zero target could be either a
                 // surface or an RTT texture; raster-into-texture is the
@@ -130,14 +131,14 @@ void RenderGraph::compile()
                 // a write declared (which is the RTT case — RenderTarget
                 // RTT path always pushes its target into writes).
                 (void)bp;
-                return !pass.writes.empty();
+                return !pass.writes().empty();
             }
         }
         return false;
     };
 
     for (size_t i = 0; i < passes_.size(); ++i) {
-        auto& gp = passes_[i];
+        const ::velk::IRenderPass& gp = *passes_[i];
         auto& barrier = barriers_[i];
 
         PassClass cls = classify(gp);
@@ -167,7 +168,7 @@ void RenderGraph::compile()
         }
 
         ResourceState new_state = write_state(cls);
-        for (auto& w : gp.writes) {
+        for (auto& w : gp.writes()) {
             if (w) states_[w.get()] = new_state;
         }
     }
@@ -180,26 +181,27 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
     uint32_t  last_vg_range  = 0;
 
     for (size_t i = 0; i < passes_.size(); ++i) {
-        auto& gp = passes_[i];
+        const ::velk::IRenderPass& gp = *passes_[i];
         auto& barrier = barriers_[i];
 
         if (barrier.emit) {
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        if (gp.view_globals_buffer != 0 &&
-            (gp.view_globals_buffer != last_vg_buffer ||
-             gp.view_globals_offset != last_vg_offset ||
-             gp.view_globals_range  != last_vg_range)) {
-            backend.bind_view_globals(gp.view_globals_buffer,
-                                      gp.view_globals_offset,
-                                      gp.view_globals_range);
-            last_vg_buffer = gp.view_globals_buffer;
-            last_vg_offset = gp.view_globals_offset;
-            last_vg_range  = gp.view_globals_range;
+        GpuBuffer vg_buf = gp.view_globals_buffer();
+        uint64_t  vg_off = gp.view_globals_offset();
+        uint32_t  vg_rng = gp.view_globals_range();
+        if (vg_buf != 0 &&
+            (vg_buf != last_vg_buffer ||
+             vg_off != last_vg_offset ||
+             vg_rng != last_vg_range)) {
+            backend.bind_view_globals(vg_buf, vg_off, vg_rng);
+            last_vg_buffer = vg_buf;
+            last_vg_offset = vg_off;
+            last_vg_range  = vg_rng;
         }
 
-        for (auto& op : gp.ops) {
+        for (auto& op : gp.ops()) {
             std::visit([&](auto& o) {
                 using T = std::decay_t<decltype(o)>;
                 if constexpr (std::is_same_v<T, ::velk::ops::BeginPass>) {

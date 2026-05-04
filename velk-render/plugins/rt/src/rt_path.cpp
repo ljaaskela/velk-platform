@@ -1,10 +1,13 @@
 #include "rt_path.h"
 
 #include <velk/api/perf.h>
+#include <velk/api/velk.h>
 #include <velk/string.h>
 
 #include <velk-render/frame/compute_shaders.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/plugin.h>
 
 #include <algorithm>
 #include <cmath>
@@ -229,17 +232,18 @@ void RtPath::build_passes(ViewEntry& entry,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
-    GraphPass gp;
-    gp.ops.push_back(ops::Dispatch{dc});
-    gp.ops.push_back(ops::BlitToSurface{
+    auto gp = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+    if (!gp) return;
+    gp->add_op(ops::Dispatch{dc});
+    gp->add_op(ops::BlitToSurface{
         static_cast<TextureId>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default)),
         color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
         render_view.viewport});
-    gp.writes.push_back(interface_pointer_cast<IGpuResource>(vs.rt_output));
-    if (color_target) gp.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
-    gp.view_globals_buffer = render_view.view_globals_buffer;
-    gp.view_globals_offset = render_view.view_globals_offset;
-    gp.view_globals_range  = render_view.view_globals_range;
+    gp->add_write(interface_pointer_cast<IGpuResource>(vs.rt_output));
+    if (color_target) gp->add_write(interface_pointer_cast<IGpuResource>(color_target));
+    gp->set_view_globals(render_view.view_globals_buffer,
+                          render_view.view_globals_offset,
+                          render_view.view_globals_range);
     graph.add_pass(std::move(gp));
 }
 

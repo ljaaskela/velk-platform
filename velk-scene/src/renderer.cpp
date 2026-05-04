@@ -4,6 +4,8 @@
 #include "scene_collector.h"
 
 #include <velk-render/frame/raster_shaders.h>
+#include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/plugin.h>
 
 #include <velk/api/any.h>
 #include <velk/api/perf.h>
@@ -730,8 +732,9 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // the view passes produced on the target surface.
         for (auto& ov : debug_overlays_) {
             if (!ov.surface || ov.texture_id == 0) continue;
-            GraphPass gp;
-            gp.ops.push_back(ops::BlitToSurface{
+            auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+            if (!gp) continue;
+            gp->add_op(ops::BlitToSurface{
                 ov.texture_id,
                 ov.surface->get_gpu_handle(GpuResourceKey::Default),
                 ov.dst_rect});
@@ -830,8 +833,8 @@ void Renderer::present(Frame frame)
         // pending slot's pass matches a write in the frame being
         // presented, the slot's pass is dropped. Tier 2 graph deps will
         // subsume this.
-        auto pass_writes_target = [](const GraphPass& pass) -> uint64_t {
-            for (auto& w : pass.writes) {
+        auto pass_writes_target = [](const IRenderPass& pass) -> uint64_t {
+            for (auto& w : pass.writes()) {
                 if (!w) continue;
                 uint64_t id = get_render_target_id(w);
                 if (id != 0) return id;
@@ -847,10 +850,11 @@ void Renderer::present(Frame frame)
             auto& t_passes = target->graph->passes();
             for (auto it = s_passes.begin(); it != s_passes.end();) {
                 bool overlaps = false;
-                uint64_t it_id = pass_writes_target(*it);
+                if (!*it) { it = s_passes.erase(it); continue; }
+                uint64_t it_id = pass_writes_target(**it);
                 if (it_id != 0) {
                     for (auto& tp : t_passes) {
-                        if (pass_writes_target(tp) == it_id) {
+                        if (tp && pass_writes_target(*tp) == it_id) {
                             overlaps = true;
                             break;
                         }

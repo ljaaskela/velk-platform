@@ -1,10 +1,13 @@
 #include "path/tonemap.h"
 
+#include <velk/api/velk.h>
 #include <velk/string.h>
 
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/plugin.h>
 
 #include <cstring>
 
@@ -122,10 +125,11 @@ void Tonemap::emit(::velk::ViewEntry& /*view*/,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
-    ::velk::GraphPass gp;
-    gp.ops.push_back(::velk::ops::Dispatch{dc});
-    gp.reads.push_back(interface_pointer_cast<::velk::IGpuResource>(input));
-    gp.writes.push_back(interface_pointer_cast<::velk::IGpuResource>(output));
+    auto gp = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
+    if (!gp) return;
+    gp->add_op(::velk::ops::Dispatch{dc});
+    gp->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
+    gp->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
     graph.add_pass(std::move(gp));
 }
 

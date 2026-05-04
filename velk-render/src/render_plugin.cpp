@@ -5,6 +5,8 @@
 #include "path/forward_path.h"
 #include "path/post_process.h"
 #include "frame/render_graph.h"
+
+#include <velk-render/ext/default_render_pass.h>
 #include "resource/render_texture_group.h"
 #include "path/tonemap.h"
 #include "material/material_property.h"
@@ -71,6 +73,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
 
     // Per-frame render graph. Renderer creates one per FrameSlot.
     rv &= register_type<impl::RenderGraph>(velk);
+    rv &= register_type<impl::DefaultRenderPass>(velk);
 
     // Post-processing: container + first built-in effect.
     rv &= register_type<impl::PostProcess>(velk);

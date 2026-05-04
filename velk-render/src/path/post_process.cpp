@@ -7,8 +7,10 @@
 
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_window_surface.h>
+#include <velk-render/plugin.h>
 
 namespace velk::impl {
 
@@ -67,16 +69,16 @@ void PostProcess::emit(::velk::ViewEntry& view,
     /// special-case "am I the last stage?". An empty container does a
     /// passthrough blit so the path output still reaches `output`.
     if (effects.empty()) {
-        ::velk::GraphPass passthrough;
-        passthrough.ops.push_back(::velk::ops::BlitToSurface{
+        auto passthrough = ::velk::instance().create<::velk::IRenderPass>(
+            ::velk::ClassId::DefaultRenderPass);
+        if (!passthrough) return;
+        passthrough->add_op(::velk::ops::BlitToSurface{
             static_cast<::velk::TextureId>(
                 input->get_gpu_handle(::velk::GpuResourceKey::Default)),
             output->get_gpu_handle(::velk::GpuResourceKey::Default),
             {0, 0, static_cast<float>(w), static_cast<float>(h)}});
-        passthrough.reads.push_back(
-            interface_pointer_cast<::velk::IGpuResource>(input));
-        passthrough.writes.push_back(
-            interface_pointer_cast<::velk::IGpuResource>(output));
+        passthrough->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
+        passthrough->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
         graph.add_pass(std::move(passthrough));
         return;
     }

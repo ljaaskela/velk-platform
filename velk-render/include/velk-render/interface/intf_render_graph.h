@@ -5,55 +5,12 @@
 #include <velk/uid.h>
 #include <velk/vector.h>
 
-#include <velk-render/frame/render_pass.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_pass.h>
 
 namespace velk {
-
-/**
- * @brief A pass added to the render graph.
- *
- * Holds an ordered sequence of GPU ops + explicit read / write resource
- * declarations. The executor walks ops 1:1 to backend methods; the
- * graph's compile step inspects ops + reads/writes to classify the
- * pass's stage (raster / compute / blit) and insert a pipeline barrier
- * before consumers of prior writes.
- *
- * Bindless texture reads from materials are NOT declared — they're
- * invisible to the graph and stay fence-synced at the descriptor-set
- * level. Tier 1 tracks resources at coarse granularity: gbuffer
- * attachments are tracked through the group resource (not per-
- * attachment), and non-Ptr handles (raw `TextureId`,
- * `RenderTargetGroup`) are out of scope.
- */
-struct GraphPass
-{
-    /// Ordered ops executed in sequence. Typical shapes:
-    ///   - Raster pass:        BeginPass, Submit, EndPass
-    ///   - GBuffer fill:       BeginPass, Submit, EndPass (target_id is the group handle)
-    ///   - Compute dispatch:   Dispatch
-    ///   - Compute + blit:     Dispatch, BlitToSurface[, BlitGroupDepthToSurface]
-    ///   - Pure blit:          BlitToSurface
-    vector<GraphOp> ops;
-
-    /// Resources read by this pass.
-    vector<IGpuResource::Ptr> reads;
-
-    /// Resources written by this pass.
-    vector<IGpuResource::Ptr> writes;
-
-    /// Optional view-globals UBO binding for this pass. When set, the
-    /// graph executor calls `IRenderBackend::bind_view_globals` before
-    /// the pass's ops, so shaders see the right per-view FrameGlobals at
-    /// `layout(set=0, binding=4)`. `view_globals_buffer == 0` leaves the
-    /// previous binding intact (used for passes that don't read
-    /// view-level state, e.g. pure blits).
-    GpuBuffer view_globals_buffer = 0;
-    uint64_t  view_globals_offset = 0;
-    uint32_t  view_globals_range  = 0;
-};
 
 /**
  * @brief Per-frame collection of passes with declared resource flow.
@@ -96,8 +53,8 @@ public:
      */
     virtual void import(const IGpuResource::Ptr& resource) = 0;
 
-    /** @brief Appends a pass. */
-    virtual void add_pass(GraphPass&& pass) = 0;
+    /** @brief Appends a pass. The graph takes shared ownership of the Ptr. */
+    virtual void add_pass(IRenderPass::Ptr pass) = 0;
 
     /**
      * @brief Tier 1 compile: assigns barriers based on per-resource
@@ -119,8 +76,8 @@ public:
      *        needs to walk Raster targets and prune overlapping passes
      *        from older frames. Tier 2 graph deps will subsume this.
      */
-    virtual vector<GraphPass>& passes() = 0;
-    virtual const vector<GraphPass>& passes() const = 0;
+    virtual vector<IRenderPass::Ptr>& passes() = 0;
+    virtual const vector<IRenderPass::Ptr>& passes() const = 0;
 
     /**
      * @brief Per-frame transient resource manager owned by the graph.

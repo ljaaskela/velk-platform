@@ -1,14 +1,17 @@
 #include "path/forward_path.h"
 
+#include <velk/api/velk.h>
 #include <velk/string.h>
 
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/frame/raster_shaders.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/material/intf_material.h>
+#include <velk-render/plugin.h>
 
 namespace velk {
 
@@ -39,8 +42,8 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
 
     uint64_t compiled_key = 0;
     if (use_material) {
-        if (auto* mat = interface_cast<IMaterial>(material_ptr.get())) {
-            auto* src = interface_cast<IShaderSource>(material_ptr.get());
+        if (auto* mat = interface_cast<IMaterial>(material_ptr)) {
+            auto* src = interface_cast<IShaderSource>(material_ptr);
             auto eval_src = src ? src->get_source(shader_role::kEval) : string_view{};
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto eval_fn = src ? src->get_fn_name(shader_role::kEval) : string_view{};
@@ -130,19 +133,20 @@ void ForwardPath::build_passes(ViewEntry& entry,
             default_uv1, resolve, frustum_ptr);
     }
 
-    GraphPass pass;
+    auto pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+    if (!pass) return;
     uint64_t target_id = color_target
         ? color_target->get_gpu_handle(GpuResourceKey::Default)
         : 0;
-    pass.ops.push_back(ops::BeginPass{target_id});
-    pass.ops.push_back(ops::Submit{render_view.viewport, std::move(draw_calls)});
-    pass.ops.push_back(ops::EndPass{});
+    pass->add_op(ops::BeginPass{target_id});
+    pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
+    pass->add_op(ops::EndPass{});
     if (color_target) {
-        pass.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
-    pass.view_globals_buffer = render_view.view_globals_buffer;
-    pass.view_globals_offset = render_view.view_globals_offset;
-    pass.view_globals_range  = render_view.view_globals_range;
+    pass->set_view_globals(render_view.view_globals_buffer,
+                           render_view.view_globals_offset,
+                           render_view.view_globals_range);
     graph.add_pass(std::move(pass));
 }
 

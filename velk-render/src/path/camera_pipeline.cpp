@@ -7,6 +7,8 @@
 
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/plugin.h>
 
 namespace velk::impl {
 
@@ -138,19 +140,21 @@ void CameraPipeline::emit(::velk::ViewEntry& view,
     post->emit(view, path_target, post_target, ctx, graph);
 
     // Final blit from post-process output to the actual surface.
-    ::velk::GraphPass blit;
-    blit.ops.push_back(::velk::ops::BlitToSurface{
-        static_cast<::velk::TextureId>(
-            post_target->get_gpu_handle(::velk::GpuResourceKey::Default)),
-        color_target
-            ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
-            : 0,
-        render_view.viewport});
-    blit.reads.push_back(interface_pointer_cast<::velk::IGpuResource>(post_target));
-    if (color_target) {
-        blit.writes.push_back(interface_pointer_cast<::velk::IGpuResource>(color_target));
+    auto blit = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
+    if (blit) {
+        blit->add_op(::velk::ops::BlitToSurface{
+            static_cast<::velk::TextureId>(
+                post_target->get_gpu_handle(::velk::GpuResourceKey::Default)),
+            color_target
+                ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
+                : 0,
+            render_view.viewport});
+        blit->add_read(post_target);
+        if (color_target) {
+            blit->add_write(color_target);
+        }
+        graph.add_pass(std::move(blit));
     }
-    graph.add_pass(std::move(blit));
 
     ctx.target_format = saved_format;
 }

@@ -58,6 +58,9 @@ inline constexpr Uid FrameSnippetRegistry{"6a013996-cdfa-4abf-a738-52eaf18d068f"
 /** @brief Per-frame render graph (Tier 1: ordered passes + barrier insertion). */
 inline constexpr Uid RenderGraph{"cdeab6d1-97dc-480a-ae53-4eb0bc184baf"};
 
+/** @brief Default `IRenderPass` implementation. Hive-pooled per-frame pass produced by render-path pipelines. */
+inline constexpr Uid DefaultRenderPass{"ffc6e6c3-639a-461e-ad5c-7bc4ed902edf"};
+
 namespace Path {
 
 /** @brief Forward shading: classic raster pass over scene batches. Default fallback. */
