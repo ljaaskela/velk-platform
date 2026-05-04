@@ -5,7 +5,7 @@
 
 #include <unordered_map>
 
-#include <velk-render/frame/batch.h>
+#include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/plugin.h>
 #include <velk-render/ext/render_path.h>

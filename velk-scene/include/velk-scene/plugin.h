@@ -16,6 +16,9 @@ inline constexpr Uid Scene{"03779f51-3fb0-45d7-9a9e-a25ef0a42dce"};
 /** @brief Scene-wide BVH attachment; implements IBvh. Installed by the renderer on first frame. */
 inline constexpr Uid SceneBvh{"d9678826-947d-4f92-beee-5746340fe072"};
 
+/** @brief Default IBatch implementation. Hive-pooled per-frame batch produced by BatchBuilder. */
+inline constexpr Uid DefaultBatch{"60bc17f5-0e81-43e3-b82e-46a6fb7e479a"};
+
 namespace Transform {
 
 /** @brief Decomposed transform: translate, rotate (Z), scale. */

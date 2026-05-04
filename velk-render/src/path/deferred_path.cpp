@@ -28,17 +28,19 @@ namespace {
 /// way two visuals sharing a material still get distinct pipelines
 /// with the right `velk_visual_discard` body. Returns 0 to skip.
 PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                      const Batch& batch,
+                                      const IBatch& batch,
                                       RenderTargetGroup target_group)
 {
-    uint64_t forward_key = batch.pipeline_key;
-    if (forward_key == 0 && batch.material) {
-        forward_key = batch.material->get_pipeline_handle(ctx);
+    auto material_ptr = batch.material();
+    auto shader_source_ptr = batch.shader_source();
+    uint64_t forward_key = batch.pipeline_key();
+    if (forward_key == 0 && material_ptr) {
+        forward_key = material_ptr->get_pipeline_handle(ctx);
     }
     if (forward_key == 0) return 0;
 
     uint64_t perturb = 0;
-    if (auto* obj = interface_cast<IObject>(batch.shader_source.get())) {
+    if (auto* obj = interface_cast<IObject>(shader_source_ptr.get())) {
         Uid uid = obj->get_class_uid();
         perturb = uid.lo ^ uid.hi;
     }
@@ -53,9 +55,9 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     string_view base_fsrc;
     string composed_fsrc;
 
-    if (batch.material) {
-        auto* mat = interface_cast<IMaterial>(batch.material.get());
-        auto* src = interface_cast<IShaderSource>(batch.material.get());
+    if (material_ptr) {
+        auto* mat = interface_cast<IMaterial>(material_ptr.get());
+        auto* src = interface_cast<IShaderSource>(material_ptr.get());
         if (mat && src) {
             auto eval_src = src->get_source(shader_role::kEval);
             auto vertex_src = src->get_source(shader_role::kVertex);
@@ -74,8 +76,8 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     if (base_fsrc.empty()) {
         base_fsrc = default_gbuffer_fragment_src;
     }
-    if (vsrc.empty() && batch.shader_source) {
-        auto v = batch.shader_source->get_source(shader_role::kVertex);
+    if (vsrc.empty() && shader_source_ptr) {
+        auto v = shader_source_ptr->get_source(shader_role::kVertex);
         if (!v.empty()) vsrc = v;
     }
     if (vsrc.empty()) {
@@ -86,8 +88,8 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     composed.append(base_fsrc);
     composed.append(string_view("\n", 1));
     string_view discard_def =
-        batch.shader_source
-            ? batch.shader_source->get_source(shader_role::kDiscard)
+        shader_source_ptr
+            ? shader_source_ptr->get_source(shader_role::kDiscard)
             : string_view{};
     if (!discard_def.empty()) {
         // Role::Discard returns the full `void velk_visual_discard()`
@@ -98,7 +100,7 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
         composed.append(string_view("void velk_visual_discard() {}\n", 30));
     }
 
-    PipelineOptions po = batch.pipeline_options;
+    PipelineOptions po = batch.pipeline_options();
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
@@ -266,7 +268,7 @@ void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
     auto group_id = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
-    auto resolve = [&](const Batch& b) {
+    auto resolve = [&](const IBatch& b) {
         return resolve_or_compile_gbuffer(*ctx.render_ctx, b, group_id);
     };
     vector<DrawCall> gbuffer_draw_calls;

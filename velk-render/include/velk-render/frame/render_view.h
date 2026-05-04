@@ -4,7 +4,7 @@
 #include <velk/api/math_types.h>
 #include <velk/vector.h>
 
-#include <velk-render/frame/batch.h>
+#include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/render_types.h>
@@ -83,8 +83,8 @@ struct RenderView
     /// the camera has an environment. Forward path prepends one
     /// DrawCall built from this before its main batches; deferred and
     /// RT use the env via their compute shaders, not as a draw, and
-    /// ignore this. Default-constructed (empty material) when no env.
-    Batch env_batch;
+    /// ignore this. Null when the camera has no environment.
+    IBatch::Ptr env_batch;
 
     /// Scene lights for this view. `flags[1]` carries the registered
     /// shadow-tech id (or 0 for no shadow); both RT and deferred paths
@@ -95,7 +95,7 @@ struct RenderView
     /// span here is valid for the duration of the path's
     /// `build_passes` call and invalidated by the next view's prepare.
     /// Forward and Deferred paths consume; RT does not.
-    const vector<Batch>* batches = nullptr;
+    const vector<IBatch::Ptr>* batches = nullptr;
 
     /// RT primary-buffer shapes for this view. Each entry has its
     /// `material_id` / `material_data_addr` / `texture_id` / shape_kind

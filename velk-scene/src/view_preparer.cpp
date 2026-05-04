@@ -1,12 +1,14 @@
 #include "view_preparer.h"
 
 #include "batch_builder.h"
+#include "default_batch.h"
 #include "env_helper.h"
 #include "pipeline_options_helpers.h"
 #include "scene_collector.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
+#include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
 #include <velk-render/gpu_data.h>
@@ -228,28 +230,32 @@ void ViewPreparer::prepare_env(const IElement::Ptr& camera_element, FrameContext
     // Built here so the forward path doesn't need to reach back into
     // ICamera / IEnvironment. Deferred and RT ignore this batch.
     if (resolved.surface && env_mat && ctx.render_ctx) {
-        rv.env_batch.pipeline_key = 0;
-        rv.env_batch.texture_key = reinterpret_cast<uint64_t>(resolved.surface);
-        rv.env_batch.instance_stride = 4;
-        rv.env_batch.instance_count = 1;
-        rv.env_batch.instance_data.resize(4, 0);
-        rv.env_batch.material = env_mat;
-        if (auto quad = ctx.render_ctx->get_mesh_builder().get_unit_quad()) {
-            auto prims = quad->get_primitives();
-            if (prims.size() > 0) {
-                rv.env_batch.primitive = prims[0];
-                // Lazy compile in build_draw_calls reads
-                // pipeline_options off the batch — set topology to
-                // match the quad and pull cull/blend/depth from the
-                // env material's options. PipelineOptions defaults
-                // (TriangleList, alpha blend) would mis-compile the
-                // strip-quad and draw only one triangle.
-                rv.env_batch.pipeline_options =
-                    pipeline_options_from_storage(
+        auto env_batch_ptr = ::velk::instance().create<IBatch>(ClassId::DefaultBatch);
+        if (env_batch_ptr) {
+            auto* env_batch = static_cast<impl::DefaultBatch*>(env_batch_ptr.get());
+            env_batch->set_pipeline_key(0);
+            env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
+            env_batch->set_instance_stride(4);
+            env_batch->set_instance_count(1);
+            env_batch->mutable_instance_data().resize(4, 0);
+            env_batch->set_material(env_mat);
+            if (auto quad = ctx.render_ctx->get_mesh_builder().get_unit_quad()) {
+                auto prims = quad->get_primitives();
+                if (prims.size() > 0) {
+                    env_batch->set_primitive(prims[0]);
+                    // Lazy compile in build_draw_calls reads
+                    // pipeline_options off the batch — set topology to
+                    // match the quad and pull cull/blend/depth from the
+                    // env material's options. PipelineOptions defaults
+                    // (TriangleList, alpha blend) would mis-compile the
+                    // strip-quad and draw only one triangle.
+                    PipelineOptions po = pipeline_options_from_storage(
                         interface_cast<IObjectStorage>(env_mat.get()));
-                rv.env_batch.pipeline_options.topology =
-                    to_backend_topology(prims[0]->get_topology());
+                    po.topology = to_backend_topology(prims[0]->get_topology());
+                    env_batch->set_pipeline_options(po);
+                }
             }
+            rv.env_batch = std::move(env_batch_ptr);
         }
     }
 }

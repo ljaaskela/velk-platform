@@ -19,13 +19,16 @@ namespace {
 /// are present; the visual's source is the no-material fallback.
 /// Returns 0 to skip (no source / compile failure).
 PipelineId resolve_or_compile_forward(IRenderContext& ctx,
-                                      const Batch& batch,
+                                      const IBatch& batch,
                                       PixelFormat target_format)
 {
-    const bool use_material = (batch.material != nullptr);
+    auto material_ptr = batch.material();
+    auto shader_source_ptr = batch.shader_source();
+    const bool use_material = (material_ptr != nullptr);
+    PipelineOptions pipeline_options = batch.pipeline_options();
     uint64_t user_key = use_material
-        ? batch.material->get_pipeline_handle(ctx)
-        : batch.pipeline_key;
+        ? material_ptr->get_pipeline_handle(ctx)
+        : batch.pipeline_key();
 
     auto& pipeline_map = ctx.pipeline_map();
     if (auto it = pipeline_map.find(
@@ -36,8 +39,8 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
 
     uint64_t compiled_key = 0;
     if (use_material) {
-        if (auto* mat = interface_cast<IMaterial>(batch.material.get())) {
-            auto* src = interface_cast<IShaderSource>(batch.material.get());
+        if (auto* mat = interface_cast<IMaterial>(material_ptr.get())) {
+            auto* src = interface_cast<IShaderSource>(material_ptr.get());
             auto eval_src = src ? src->get_source(shader_role::kEval) : string_view{};
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto eval_fn = src ? src->get_fn_name(shader_role::kEval) : string_view{};
@@ -50,24 +53,24 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
                 compiled_key = ctx.compile_pipeline(
                     string_view(frag), vertex_src,
                     user_key, target_format, 0,
-                    batch.pipeline_options);
+                    pipeline_options);
             } else if (!frag_src.empty() && !vertex_src.empty()) {
                 compiled_key = ctx.compile_pipeline(
                     frag_src, vertex_src,
                     user_key, target_format, 0,
-                    batch.pipeline_options);
+                    pipeline_options);
             }
-            if (compiled_key && batch.material->get_pipeline_handle(ctx) == 0) {
-                batch.material->set_pipeline_handle(compiled_key);
+            if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
+                material_ptr->set_pipeline_handle(compiled_key);
             }
         }
-    } else if (batch.shader_source && user_key != 0) {
-        auto vsrc = batch.shader_source->get_source(shader_role::kVertex);
-        auto fsrc = batch.shader_source->get_source(shader_role::kFragment);
+    } else if (shader_source_ptr && user_key != 0) {
+        auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
+        auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
         compiled_key = ctx.compile_pipeline(
             fsrc, vsrc,
             user_key, target_format, 0,
-            batch.pipeline_options);
+            pipeline_options);
     }
 
     if (compiled_key == 0) return 0;
@@ -101,17 +104,16 @@ void ForwardPath::build_passes(ViewEntry& entry,
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto target_format = ctx.target_format;
 
-    auto resolve = [&](const Batch& b) {
+    auto resolve = [&](const IBatch& b) {
         return resolve_or_compile_forward(*ctx.render_ctx, b, target_format);
     };
 
     vector<DrawCall> draw_calls;
 
-    // Env first (no frustum cull — fullscreen). Empty material =>
+    // Env first (no frustum cull — fullscreen). Null env_batch means
     // no env on this view's camera.
-    if (render_view.env_batch.material) {
-        vector<Batch> env_batches;
-        env_batches.push_back(render_view.env_batch);
+    if (render_view.env_batch && render_view.env_batch->material()) {
+        vector<IBatch::Ptr> env_batches{render_view.env_batch};
         emit_draw_calls(
             draw_calls,
             env_batches, *ctx.frame_buffer, *ctx.resources,

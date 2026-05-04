@@ -5,7 +5,7 @@
 
 #include <unordered_map>
 
-#include <velk-render/frame/batch.h>
+#include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -61,7 +61,7 @@ public:
 private:
     struct ViewCache
     {
-        vector<Batch> batches;
+        vector<IBatch::Ptr> batches;
     };
     std::unordered_map<ViewEntry*, ViewCache> view_caches_;
 

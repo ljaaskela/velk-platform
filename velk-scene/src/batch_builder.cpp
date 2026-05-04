@@ -1,9 +1,11 @@
 #include "batch_builder.h"
 
+#include "default_batch.h"
 #include "pipeline_options_helpers.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
+#include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 #include <velk/string.h>
 
@@ -164,7 +166,7 @@ void BatchBuilder::rebuild_commands(IElement* element, IRenderContext* render_ct
     }
 }
 
-void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_batches)
+void BatchBuilder::rebuild_batches(const SceneState& state, vector<IBatch::Ptr>& out_batches)
 {
     VELK_PERF_SCOPE("renderer.rebuild_batches");
     out_batches.clear();
@@ -183,7 +185,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
     };
 
     auto emit_visuals = [&](const vector<IElement*>& entries, VisualPhase phase,
-                            vector<Batch>& target_batches,
+                            vector<IBatch::Ptr>& target_batches,
                             float offset_x = 0.f, float offset_y = 0.f) {
         uint64_t last_bkey = 0;
         size_t max_visuals = 0;
@@ -231,13 +233,16 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                                                    resolve_texture(de.material.get(), texture));
 
                     if (target_batches.empty() || bkey != last_bkey) {
-                        Batch batch;
-                        batch.pipeline_key = pipeline;
-                        batch.texture_key = texture;
-                        batch.instance_stride = de.instance_size;
-                        batch.material = de.material;
-                        batch.primitive = de.primitive;
-                        batch.shader_source = vc.shader_source;
+                        auto batch_ptr = ::velk::instance().create<IBatch>(
+                            ClassId::DefaultBatch);
+                        if (!batch_ptr) continue;
+                        auto* batch = static_cast<impl::DefaultBatch*>(batch_ptr.get());
+                        batch->set_pipeline_key(pipeline);
+                        batch->set_texture_key(texture);
+                        batch->set_instance_stride(de.instance_size);
+                        batch->set_material(de.material);
+                        batch->set_primitive(de.primitive);
+                        batch->set_shader_source(vc.shader_source);
 
                         // Capture pipeline options now so build_draw_calls
                         // can lazy-compile against any target_format
@@ -251,30 +256,32 @@ void BatchBuilder::rebuild_batches(const SceneState& state, vector<Batch>& out_b
                         } else if (vc.shader_source) {
                             opts_storage = interface_cast<IObjectStorage>(vc.shader_source.get());
                         }
-                        batch.pipeline_options = pipeline_options_from_storage(opts_storage);
+                        PipelineOptions po = pipeline_options_from_storage(opts_storage);
                         if (de.primitive) {
-                            batch.pipeline_options.topology =
-                                to_backend_topology(de.primitive->get_topology());
+                            po.topology = to_backend_topology(de.primitive->get_topology());
                         }
+                        batch->set_pipeline_options(po);
 
-                        target_batches.push_back(std::move(batch));
+                        target_batches.push_back(std::move(batch_ptr));
                         last_bkey = bkey;
                     }
 
-                    auto& batch = target_batches.back();
+                    auto* batch = static_cast<impl::DefaultBatch*>(
+                        target_batches.back().get());
+                    auto& instance_data = batch->mutable_instance_data();
 
-                    auto data_offset = batch.instance_data.size();
-                    batch.instance_data.resize(data_offset + de.instance_size);
-                    std::memcpy(batch.instance_data.data() + data_offset, de.instance_data,
+                    auto data_offset = instance_data.size();
+                    instance_data.resize(data_offset + de.instance_size);
+                    std::memcpy(instance_data.data() + data_offset, de.instance_data,
                                 de.instance_size);
 
                     // Overwrite the leading mat4 world_matrix slot. The
                     // visual leaves it zero-initialised; we fill it per
                     // instance so shaders get the correct transform.
-                    std::memcpy(batch.instance_data.data() + data_offset, world.m, sizeof(world.m));
+                    std::memcpy(instance_data.data() + data_offset, world.m, sizeof(world.m));
 
-                    batch.instance_count++;
-                    batch.world_aabb = aabb::merge(batch.world_aabb, elem_state->world_aabb);
+                    batch->set_instance_count(batch->instance_count() + 1);
+                    batch->set_world_aabb(aabb::merge(batch->world_aabb(), elem_state->world_aabb));
                 }
             }
         }

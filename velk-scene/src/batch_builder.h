@@ -4,7 +4,7 @@
 #include <velk/vector.h>
 
 #include <unordered_map>
-#include <velk-render/frame/batch.h>
+#include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
@@ -59,7 +59,7 @@ public:
         IElement* element = nullptr;
         vector<IElement*> before_entries;  // pre-order
         vector<IElement*> after_entries;   // post-order
-        vector<Batch> batches;
+        vector<IBatch::Ptr> batches;
     };
 
     /**
@@ -73,7 +73,7 @@ public:
     void rebuild_commands(IElement* element, IRenderContext* render_ctx);
 
     /** @brief Rebuilds batches from the visual list, pre-filtering render target subtrees. */
-    void rebuild_batches(const SceneState& state, vector<Batch>& out_batches);
+    void rebuild_batches(const SceneState& state, vector<IBatch::Ptr>& out_batches);
 
     /** @brief Removes an element from the cache. */
     void evict(IElement* element) { element_cache_.erase(element); }

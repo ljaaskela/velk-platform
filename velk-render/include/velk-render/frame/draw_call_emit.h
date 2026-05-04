@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
-#include <velk-render/frame/batch.h>
+#include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_draw_data.h>
@@ -110,7 +110,7 @@ inline uint64_t write_material_once(IProgram* prog,
 template <typename ResolvePipelineFn>
 inline void emit_draw_calls(
     vector<DrawCall>& out_calls,
-    const vector<Batch>& batches,
+    const vector<IBatch::Ptr>& batches,
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
     MaterialAddrCache& material_cache,
@@ -120,21 +120,25 @@ inline void emit_draw_calls(
 {
     VELK_PERF_SCOPE("renderer.emit_draw_calls");
 
-    for (auto& batch : batches) {
-        if (frustum && !::velk::render::aabb_in_frustum(*frustum, batch.world_aabb)) {
+    for (auto& batch_ptr : batches) {
+        if (!batch_ptr) continue;
+        const IBatch& batch = *batch_ptr;
+
+        if (frustum && !::velk::render::aabb_in_frustum(*frustum, batch.world_aabb())) {
             continue;
         }
 
         PipelineId pipeline = resolve_pipeline(batch);
         if (pipeline == 0) continue;
 
+        auto instance_bytes = batch.instance_data();
         uint64_t instances_addr =
-            frame_data.write(batch.instance_data.data(), batch.instance_data.size());
+            frame_data.write(instance_bytes.begin(), instance_bytes.size());
         if (!instances_addr) continue;
 
         uint32_t texture_id = 0;
-        if (batch.texture_key != 0) {
-            auto* tex = reinterpret_cast<ISurface*>(batch.texture_key);
+        if (batch.texture_key() != 0) {
+            auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
             texture_id = resources.find_texture(tex);
             if (texture_id == 0) {
                 uint64_t rt_id = get_render_target_id(tex);
@@ -142,7 +146,8 @@ inline void emit_draw_calls(
             }
         }
 
-        IMeshPrimitive* primitive = batch.primitive.get();
+        auto primitive_ptr = batch.primitive();
+        IMeshPrimitive* primitive = primitive_ptr.get();
         if (!primitive) continue;
         auto buffer = primitive->get_buffer();
         if (!buffer) continue;
@@ -161,7 +166,7 @@ inline void emit_draw_calls(
         DrawDataHeader header{};
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
-        header.instance_count = batch.instance_count;
+        header.instance_count = batch.instance_count();
         header.vbo_address = buffer->get_gpu_handle(GpuResourceKey::Default);
         if (!header.vbo_address) continue;
 
@@ -178,8 +183,9 @@ inline void emit_draw_calls(
             if (!header.uv1_address) continue;
         }
 
+        auto material_ptr = batch.material();
         uint64_t material_addr = detail::write_material_once(
-            batch.material.get(), frame_data,
+            material_ptr.get(), frame_data,
             static_cast<ITextureResolver*>(&resources), material_cache);
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
@@ -195,8 +201,8 @@ inline void emit_draw_calls(
 
         // Lazy-register the program's pipeline for deferred destruction.
         // The manager subscribes itself as observer internally.
-        if (batch.material) {
-            resources.register_pipeline(batch.material.get(), pipeline);
+        if (material_ptr) {
+            resources.register_pipeline(material_ptr.get(), pipeline);
         }
 
         DrawCall call{};
@@ -208,7 +214,7 @@ inline void emit_draw_calls(
         } else {
             call.vertex_count = primitive->get_vertex_count();
         }
-        call.instance_count = batch.instance_count;
+        call.instance_count = batch.instance_count();
         call.root_constants_size = sizeof(uint64_t);
         std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
 

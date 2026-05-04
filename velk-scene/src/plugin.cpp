@@ -1,6 +1,7 @@
 #include "plugin.h"
 
 #include "camera.h"
+#include "default_batch.h"
 #include "element.h"
 #include "renderer.h"
 #include "scene.h"
@@ -35,6 +36,7 @@ namespace velk {
     rv &= register_type<impl::CubeVisual>(velk);
     rv &= register_type<impl::SphereVisual>(velk);
     rv &= register_type<impl::MeshVisual>(velk);
+    rv &= register_type<impl::DefaultBatch>(velk);
     return rv;
 }
 
