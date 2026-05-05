@@ -113,15 +113,14 @@ layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
 // texture by index rather than declaring their own samplers.
 layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 
-// Per-view globals UBO. The renderer writes a small FrameGlobals block
-// into a per-view uniform buffer once per frame and binds it at
-// binding 4 before each pass; shaders read view-level state from
-// `view_globals` instead of dereferencing a per-draw GPU pointer.
-// Layout matches the FrameGlobals struct in gpu_data.h byte-for-byte
-// under scalarBlockLayout. Vertex, fragment, and compute stages may all
-// read it. Use this in preference to the per-draw `global_data`
-// buffer_reference for any view-level state.
-layout(set = 0, binding = 4, scalar) uniform ViewGlobalsBuffer {
+// Per-view FrameGlobals. The renderer writes one FrameGlobals record
+// into the per-frame staging buffer per view per frame and pushes its
+// GPU address into push-constant slot [0..8) at pass start. Each
+// shader's `layout(push_constant)` block must declare a `GlobalData
+// globals;` field at offset 0 to receive that address; shaders then
+// read view-level state via `globals.X`. Layout matches the FrameGlobals
+// struct in gpu_data.h byte-for-byte under scalar layout.
+layout(buffer_reference, scalar) readonly buffer GlobalData {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
@@ -132,7 +131,7 @@ layout(set = 0, binding = 4, scalar) uniform ViewGlobalsBuffer {
     uint present_counter;
     BvhNodeList bvh_nodes;
     RtShapeList bvh_shapes;
-} view_globals;
+};
 
 // Storage-image arrays for compute imageStore are declared locally
 // per-shader (rgba8 -> binding 1, rgba32f -> binding 2, rgba16f ->

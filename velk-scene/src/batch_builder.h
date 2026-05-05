@@ -87,11 +87,12 @@ public:
     void rebuild_commands(IElement* element, IRenderContext* render_ctx);
 
     /** @brief Rebuilds batches from the visual list, pre-filtering render
-     *         target subtrees. Also populates @p out_slots with the per-
-     *         element batch-slot records (used by the transform-only
-     *         fast path) and @p out_rtt_roots with the elements that
-     *         introduce an RTT subtree (so the fast path can detect when
-     *         an RTT root moves and fall back to a full rebuild). */
+     *         target subtrees. Each batch is a fresh `IBatch::Ptr` with
+     *         its own `[args(32)][count(16)][instance_data]` blob ready
+     *         for the renderer's standard buffer-upload pipeline. Also
+     *         populates @p out_slots with per-element batch-slot records
+     *         (used by the transform-only fast path) and @p out_rtt_roots
+     *         with elements that introduce an RTT subtree. */
     void rebuild_batches(const SceneState& state,
                          vector<IBatch::Ptr>& out_batches,
                          ElementSlotMap& out_slots,

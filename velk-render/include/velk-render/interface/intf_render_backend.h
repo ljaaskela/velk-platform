@@ -21,7 +21,7 @@ using TextureId = uint32_t; ///< Also the bindless shader index.
 using PipelineId = uint64_t;
 
 /// Handle for a multi-attachment render target group (MRT).
-/// Wraps a set of sampleable `TextureId`s sharing one Vulkan render
+/// Wraps a set of sampleable `TextureId`s sharing one backend render
 /// pass + framebuffer. Produced by `create_render_target_group`.
 /// Encoding: high bit set to disambiguate from surface / texture IDs
 /// in `begin_pass` dispatch.
@@ -123,33 +123,35 @@ struct ComputePipelineDesc
     IShader::Ptr compute; ///< Compute shader (SPIR-V).
 };
 
-/// Maximum push constant size in bytes. Vulkan's guaranteed minimum is
-/// 128; 256 is supported by every modern desktop GPU (NVIDIA Turing+,
-/// AMD RDNA2+, Intel Gen12+) and all tested AMD/NVIDIA mobile parts.
-/// Bumped so the RT push constants can carry both the shape buffer and
-/// the per-frame light buffer addresses in one dispatch.
+/// Maximum push constant size in bytes. The minimum guaranteed by
+/// modern GPU APIs is 128; 256 is supported by every modern desktop
+/// GPU (NVIDIA Turing+, AMD RDNA2+, Intel Gen12+) and all tested
+/// AMD/NVIDIA mobile parts. Bumped so the RT push constants can carry
+/// both the shape buffer and the per-frame light buffer addresses in
+/// one dispatch.
 inline constexpr size_t kMaxRootConstantsSize = 256;
 
 /// A single indirect draw call submitted to the backend.
 ///
-/// Always dispatched via `vkCmdDrawIndexedIndirectCount` (when @c indexed
-/// is true and `index_buffer` is bound) or `vkCmdDrawIndirectCount`
-/// (when @c indexed is false). The actual draw count is read from
+/// Always dispatched indirectly with the actual draw count read from
 /// `count_buffer` at GPU execution time, allowing future GPU-side
-/// culling to write the count without CPU involvement; today the CPU
-/// writes count = 1 and a single VkDraw{Indexed,}IndirectCommand record
-/// per batch into `args_buffer`.
+/// culling to write the count without CPU involvement. Today the CPU
+/// writes count = 1 and a single indirect-draw record per batch into
+/// `args_buffer`. Record layout (matches the GPU's draw-indirect
+/// hardware):
+///   - indexed:     `index_count, instance_count, first_index, vertex_offset, first_instance`
+///   - non-indexed: `vertex_count, instance_count, first_vertex, first_instance`
 struct DrawCall
 {
     PipelineId pipeline{};      ///< Which pipeline to bind.
-    bool indexed{false};        ///< true => VkDrawIndexedIndirectCommand, false => VkDrawIndirectCommand.
+    bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
     GpuBuffer index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
     uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
 
     GpuBuffer args_buffer{};          ///< Buffer holding indirect-draw records.
     uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
-    uint32_t args_stride{};           ///< sizeof(VkDraw{Indexed,}IndirectCommand). Stride between records.
+    uint32_t args_stride{};           ///< Bytes per indirect-draw record (5×u32 indexed, 4×u32 non-indexed).
 
     GpuBuffer count_buffer{};         ///< Buffer holding the uint32 actual draw count.
     uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
@@ -277,7 +279,8 @@ public:
     /** @brief Returns a persistently mapped CPU pointer to the buffer, or nullptr. */
     virtual void* map(GpuBuffer buffer) = 0;
 
-    /** @brief Returns the GPU virtual address for use in shaders via buffer_reference. */
+    /** @brief Returns the GPU virtual address for use in shaders via
+     *         buffer-reference / device-address reads. */
     virtual uint64_t gpu_address(GpuBuffer buffer) = 0;
 
     /// @}
@@ -297,7 +300,7 @@ public:
      * @brief Reads back a texture's pixels from the GPU into host memory.
      *
      * Synchronous: allocates a host-readable staging buffer, submits a
-     * `vkCmdCopyImageToBuffer` (mip 0 only), waits for completion, copies
+     * texture-to-buffer copy (mip 0 only), waits for completion, copies
      * the bytes into @p out_pixels, and tears the staging buffer down.
      * Restores the texture's prior layout so subsequent rendering is
      * unaffected. Intended for debug dumps and golden-image tests; do
@@ -318,7 +321,7 @@ public:
      * @brief Creates a multi-attachment render target group.
      *
      * Allocates one sampleable `TextureId` per entry in @p formats at
-     * `width × height`, and a shared Vulkan render pass + framebuffer
+     * `width × height`, and a shared backend render pass + framebuffer
      * binding all of them in the declared order. Shaders that draw to
      * the group declare `layout(location = N) out vec4` for each
      * attachment.
@@ -384,8 +387,8 @@ public:
     /**
      * @brief Begins a render pass targeting the given surface or texture.
      *
-     * For surface targets, acquires the swapchain image. Begins the Vulkan
-     * render pass and binds the bindless descriptor set.
+     * For surface targets, acquires the swapchain image. Begins the
+     * backend render pass and binds the bindless descriptor set.
      */
     virtual void begin_pass(uint64_t target_id) = 0;
 
@@ -411,11 +414,12 @@ public:
     /**
      * @brief Blits a source texture onto the swapchain image of @p surface_id.
      *
-     * Acquires the swapchain image if not already acquired this frame, records
-     * a vkCmdBlitImage that scales @p source into the destination rect, and
-     * transitions the swapchain image to PRESENT_SRC_KHR. The source texture
-     * must have been created with TextureUsage::Storage. Mutually exclusive
-     * with begin_pass on the same surface within a frame.
+     * Acquires the swapchain image if not already acquired this frame,
+     * records a scaling blit of @p source into the destination rect, and
+     * transitions the swapchain image to a present-ready layout. The
+     * source texture must have been created with TextureUsage::Storage.
+     * Mutually exclusive with begin_pass on the same surface within a
+     * frame.
      *
      * @param dst_rect Destination rect in surface pixels. Zero width/height
      *                 means "full surface".
@@ -451,14 +455,16 @@ public:
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
     /**
-     * @brief Updates descriptor binding 4 to point at a per-view ViewGlobals UBO range.
+     * @brief Pushes the per-view FrameGlobals GPU address into push
+     *        constant slot [0..8). Shaders dereference it via a
+     *        buffer-reference / device-address read of `GlobalData`.
      *
-     * Bound region is `(buffer, offset, range)`. Subsequent draws and
-     * dispatches see the updated UBO at `layout(set=0, binding=4)`. Call
-     * between passes (UPDATE_AFTER_BIND on this binding allows updates while
-     * descriptor set is bound). Pass `buffer == 0` to leave the binding as-is.
+     * Called once per pass by the graph executor. The per-draw / per-
+     * dispatch push constants in submit() / dispatch() write [8..) so
+     * the per-pass globals address persists across the pass's draws.
+     * Passing `addr == 0` is a no-op.
      */
-    virtual void bind_view_globals(GpuBuffer buffer, uint64_t offset, uint32_t range) = 0;
+    virtual void push_view_globals(uint64_t addr) = 0;
 
     /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
     virtual void end_frame() = 0;

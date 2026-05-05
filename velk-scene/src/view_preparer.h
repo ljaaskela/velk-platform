@@ -53,11 +53,37 @@ public:
                        BatchBuilder& batch_builder,
                        const IRenderPath::Needs& needs);
 
-    /// Releases the per-view batch cache for @p entry.
+    /// Releases the per-view batch cache for @p entry. Each batch
+    /// owns its own GpuBuffer; dropping the cache's IBatch::Ptrs
+    /// cascades to the resource manager's deferred-destroy queue.
     void on_view_removed(ViewEntry& entry);
 
     /// Releases all per-view caches. Called on Renderer shutdown.
     void clear();
+
+    // Diagnostic counters. Read by Renderer's optional per-second log
+    // and reset there after each report.
+    uint64_t diag_rebuild_count = 0;
+    uint64_t diag_fast_path_count = 0;
+    uint64_t diag_fast_path_failed = 0;
+
+    /// @name Diagnostic accessors. Used by Renderer's optional
+    ///       per-second log; all O(1) reads of internal state.
+    /// @{
+    size_t view_count() const { return view_caches_.size(); }
+    size_t total_batches() const
+    {
+        size_t n = 0;
+        for (auto& [k, v] : view_caches_) n += v.batches.size();
+        return n;
+    }
+    size_t total_element_slots() const
+    {
+        size_t n = 0;
+        for (auto& [k, v] : view_caches_) n += v.element_slots.size();
+        return n;
+    }
+    /// @}
 
 private:
     struct ViewCache
@@ -65,6 +91,12 @@ private:
         vector<IBatch::Ptr> batches;
         BatchBuilder::ElementSlotMap element_slots;
         std::unordered_set<IElement*> rtt_roots;
+        /// Cached forward-env batch + the IEnvironment* it was built
+        /// against. Reused across frames so prepare_env doesn't
+        /// allocate a fresh DefaultBatch every frame; rebuilt only
+        /// when the camera's environment attachment changes.
+        IBatch::Ptr env_batch;
+        const void* env_material_key = nullptr;
     };
     std::unordered_map<ViewEntry*, ViewCache> view_caches_;
 
@@ -72,8 +104,12 @@ private:
     /// @p scene_state's flags + dirty list permit incremental update
     /// (Layout-only changes, no structural mutations) and every dirty
     /// element was found in the cached slot map. Falls back to full
-    /// rebuild when this returns false.
-    bool try_update_transforms(ViewEntry& entry, const SceneState& scene_state);
+    /// rebuild when this returns false. update_instance_at writes
+    /// through each batch's mapped pointer directly into the same
+    /// host-coherent memory the GPU reads — fast path is valid for
+    /// transform-only churn because each batch owns its own buffer.
+    bool try_update_transforms(ViewEntry& entry,
+                               const SceneState& scene_state);
 
     /// Rebuilds the per-view raster batch cache when @p entry.batches_dirty
     /// is set, uploads any dirty batches' instance buffers via the
@@ -104,8 +140,11 @@ private:
                         RenderView& rv);
 
     /// Resolves the camera's environment (texture + material) into @p rv.env.
-    void prepare_env(const IElement::Ptr& camera_element, FrameContext& ctx,
-                     RenderView& rv);
+    /// Also stamps @p rv.env_batch from the per-view cache, rebuilding
+    /// only when the env material changes.
+    void prepare_env(ViewEntry& entry,
+                     const IElement::Ptr& camera_element,
+                     FrameContext& ctx, RenderView& rv);
 };
 
 } // namespace velk

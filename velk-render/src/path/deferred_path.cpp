@@ -295,9 +295,7 @@ void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
     gp->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
     gp->add_op(ops::EndPass{});
     gp->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-    gp->set_view_globals(render_view.view_globals_buffer,
-                          render_view.view_globals_offset,
-                          render_view.view_globals_range);
+    gp->set_view_globals_address(render_view.view_globals_address);
     graph.add_pass(std::move(gp));
 }
 
@@ -409,9 +407,7 @@ void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
     gp->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     gp->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));
     if (color_target) gp->add_write(interface_pointer_cast<IGpuResource>(color_target));
-    gp->set_view_globals(render_view.view_globals_buffer,
-                          render_view.view_globals_offset,
-                          render_view.view_globals_range);
+    gp->set_view_globals_address(render_view.view_globals_address);
     graph.add_pass(std::move(gp));
 }
 

@@ -63,19 +63,8 @@ public:
     void blit_group_depth_to_surface(RenderTargetGroup src_group, uint64_t surface_id,
                                      rect dst_rect) override;
     void barrier(PipelineStage src, PipelineStage dst) override;
-    void bind_view_globals(GpuBuffer buffer, uint64_t offset, uint32_t range) override;
+    void push_view_globals(uint64_t addr) override;
     void end_frame() override;
-
-private:
-    /// View-globals UBO state. Binding 4 is a UNIFORM_BUFFER_DYNAMIC; we
-    /// rebind the underlying buffer when it changes (typically once per
-    /// frame as the staging slot rotates) and supply the per-view offset
-    /// as a dynamic offset on every vkCmdBindDescriptorSets call. 0 means
-    /// "no view-globals bound yet"; bindless draws that never touch
-    /// binding 4 are unaffected (PARTIALLY_BOUND_BIT).
-    GpuBuffer view_globals_buffer_ = 0;
-    uint32_t  view_globals_dynamic_offset_ = 0;
-    uint32_t  view_globals_range_ = 0;
 
 public:
 

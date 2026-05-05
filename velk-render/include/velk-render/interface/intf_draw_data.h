@@ -16,8 +16,9 @@ namespace velk {
  *
  * The renderer writes `get_draw_data_size()` bytes of per-draw state
  * via `write_draw_data()` into the staging buffer immediately after
- * the `DrawDataHeader`. The shader reads this data via
- * `buffer_reference` from the draw data pointer.
+ * the `DrawDataHeader`. The shader reads this data via a
+ * buffer-reference / device-address dereference of the draw-data
+ * pointer.
  *
  * Typically implemented alongside `IMaterial` (material-side data)
  * but kept as a separate interface so programs that only contribute

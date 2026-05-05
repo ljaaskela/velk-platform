@@ -18,9 +18,9 @@ namespace velk {
  *
  * Layout inside the buffer: VBO bytes at offset 0, followed immediately
  * by IBO bytes at offset `get_ibo_offset()` (== `get_vbo_size()`).
- * A single underlying VkBuffer is allocated with SHADER_DEVICE_ADDRESS
- * (for bindless VBO reads) and INDEX_BUFFER usage (so the IBO half can
- * be bound via vkCmdBindIndexBuffer at `get_ibo_offset()`).
+ * A single underlying GPU buffer is allocated with shader device-
+ * address usage (for buffer-reference VBO reads) and index-buffer usage
+ * (so the IBO half can be bound for indexed draws at `get_ibo_offset()`).
  *
  * Primitives without an IBO (e.g. TriangleStrip unit quad) set
  * `ibo_size == 0`; the backend skips the index-bind and dispatches as
@@ -47,8 +47,8 @@ public:
     virtual size_t get_ibo_size() const = 0;
 
     /// Byte offset of the IBO region within the buffer. Always equals
-    /// `get_vbo_size()`; provided for callers that pass it to
-    /// `vkCmdBindIndexBuffer`.
+    /// `get_vbo_size()`; provided for callers that pass it as the
+    /// index-buffer offset to the backend's bind-index-buffer call.
     virtual size_t get_ibo_offset() const = 0;
 
     /// Partial VBO update: overwrites `size` bytes starting at

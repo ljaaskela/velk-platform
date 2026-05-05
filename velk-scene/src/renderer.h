@@ -156,6 +156,21 @@ private:
     /// overlay through `consume_last_prepare_gpu_wait_ns`.
     uint64_t last_prepare_gpu_wait_ns_ = 0;
 
+    // Diagnostic counters (opt-in via env var VELK_RENDER_DIAG=1).
+    // Every kDiagPeriod frames we dump rebuild / fast-path counts and
+    // sizes of caches that could leak. Helps narrow down "CPU time
+    // growing over time" symptoms without a real profiler.
+    struct DiagStats
+    {
+        uint64_t frames = 0;
+        uint64_t rebuild_count = 0;
+        uint64_t fast_path_count = 0;
+        uint64_t fast_path_failed = 0;
+    };
+    DiagStats diag_;
+    bool diag_enabled_ = false;
+    void log_diagnostics();
+
     // Shared visual-command / gpu-resource cache. Both the dirty-resource
     // upload in consume_scenes and the raster paths read from it, so it
     // lives here rather than inside a single sub-renderer.

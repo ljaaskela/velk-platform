@@ -131,15 +131,30 @@ inline void emit_draw_calls(
         PipelineId pipeline = resolve_pipeline(batch);
         if (pipeline == 0) continue;
 
-        // Persistent batch buffer: ViewPreparer::prepare_batches uploads
-        // dirty batches via the resource manager and stamps the GPU
-        // address onto the batch's IBuffer. Read it directly — no
-        // per-frame staging copy of (potentially large) instance data.
-        auto* batch_buf = interface_cast<IBuffer>(&batch);
-        uint64_t instances_addr = batch_buf
-            ? batch_buf->get_gpu_handle(GpuResourceKey::Default)
-            : 0;
-        if (!instances_addr) continue;
+        // Per-batch persistent pool slice when available — a single
+        // VkBuffer per view holds all batch slices, the slice was
+        // bump-allocated and filled during BatchBuilder rebuild, and
+        // transform-only frames write through the mapped pointer in
+        // place. Falls through to per-frame staging for batches without
+        // a slice (e.g. env_batch, which lives outside the pool).
+        // Each batch owns its own GpuBuffer with the
+        // [args(32)][count(16)][instance_data] layout. emit reads
+        // args/count at offsets 0 and 32 of that buffer; the vertex
+        // shader BDA-reads instances at storage_gpu_address + 48.
+        // Batches that haven't been allocated a backing buffer yet
+        // (env_batch, which lives outside the upload pipeline) fall
+        // through to per-frame staging.
+        const GpuBuffer storage_buffer = batch.storage_buffer();
+        const bool has_storage = (storage_buffer != 0 && batch.storage_gpu_address() != 0);
+        uint64_t instances_addr = 0;
+        if (has_storage) {
+            instances_addr = batch.storage_gpu_address() + BatchBufferLayout::kInstanceOffset;
+        } else {
+            auto instance_bytes = batch.instance_data();
+            instances_addr =
+                frame_data.write(instance_bytes.begin(), instance_bytes.size());
+            if (!instances_addr) continue;
+        }
 
         uint32_t texture_id = 0;
         if (batch.texture_key() != 0) {
@@ -210,50 +225,59 @@ inline void emit_draw_calls(
             resources.register_pipeline(material_ptr.get(), pipeline);
         }
 
-        // Always-indirect: write a single VkDraw{Indexed,}IndirectCommand
-        // record + a single uint32 count = 1 into the frame staging
-        // buffer. CPU-driven today; a future GPU culling pass will
-        // overwrite the count without changing the call shape.
+        // Always-indirect: pull args + count from the batch's own
+        // storage buffer when available; fall back to writing a record
+        // + uint32 count=1 into per-frame staging otherwise.
         DrawCall call{};
         call.pipeline = pipeline;
         call.indexed = (ibo_handle != 0);
         if (call.indexed) {
             call.index_buffer = ibo_handle;
             call.index_buffer_offset = ibo_offset;
-
-            struct {
-                uint32_t indexCount;
-                uint32_t instanceCount;
-                uint32_t firstIndex;
-                int32_t  vertexOffset;
-                uint32_t firstInstance;
-            } args{ primitive->get_index_count(), batch.instance_count(),
-                    0, 0, 0 };
-            uint64_t args_addr = frame_data.write(&args, sizeof(args));
-            if (!args_addr) continue;
-            call.args_buffer = frame_data.active_buffer();
-            call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
-            call.args_stride = sizeof(args);
+            call.args_stride = sizeof(uint32_t) * 5; // VkDrawIndexedIndirectCommand
         } else {
-            struct {
-                uint32_t vertexCount;
-                uint32_t instanceCount;
-                uint32_t firstVertex;
-                uint32_t firstInstance;
-            } args{ primitive->get_vertex_count(), batch.instance_count(),
-                    0, 0 };
-            uint64_t args_addr = frame_data.write(&args, sizeof(args));
-            if (!args_addr) continue;
-            call.args_buffer = frame_data.active_buffer();
-            call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
-            call.args_stride = sizeof(args);
+            call.args_stride = sizeof(uint32_t) * 4; // VkDrawIndirectCommand
         }
 
-        uint32_t count_value = 1;
-        uint64_t count_addr = frame_data.write(&count_value, sizeof(count_value), 4);
-        if (!count_addr) continue;
-        call.count_buffer = frame_data.active_buffer();
-        call.count_buffer_offset = count_addr - frame_data.active_buffer_base();
+        if (has_storage) {
+            call.args_buffer        = storage_buffer;
+            call.args_buffer_offset = BatchBufferLayout::kArgsOffset;
+            call.count_buffer        = storage_buffer;
+            call.count_buffer_offset = BatchBufferLayout::kCountOffset;
+        } else {
+            // Frame-staging fallback (env_batch et al.).
+            if (call.indexed) {
+                struct {
+                    uint32_t indexCount;
+                    uint32_t instanceCount;
+                    uint32_t firstIndex;
+                    int32_t  vertexOffset;
+                    uint32_t firstInstance;
+                } args{ primitive->get_index_count(), batch.instance_count(),
+                        0, 0, 0 };
+                uint64_t args_addr = frame_data.write(&args, sizeof(args));
+                if (!args_addr) continue;
+                call.args_buffer = frame_data.active_buffer();
+                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+            } else {
+                struct {
+                    uint32_t vertexCount;
+                    uint32_t instanceCount;
+                    uint32_t firstVertex;
+                    uint32_t firstInstance;
+                } args{ primitive->get_vertex_count(), batch.instance_count(),
+                        0, 0 };
+                uint64_t args_addr = frame_data.write(&args, sizeof(args));
+                if (!args_addr) continue;
+                call.args_buffer = frame_data.active_buffer();
+                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+            }
+            uint32_t count_value = 1;
+            uint64_t count_addr = frame_data.write(&count_value, sizeof(count_value), 4);
+            if (!count_addr) continue;
+            call.count_buffer = frame_data.active_buffer();
+            call.count_buffer_offset = count_addr - frame_data.active_buffer_base();
+        }
         call.max_draw_count = 1;
 
         call.root_constants_size = sizeof(uint64_t);

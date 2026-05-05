@@ -79,6 +79,22 @@ public:
 
     void shutdown() override;
 
+    size_t deferred_buffer_count() const override
+    {
+        std::lock_guard<std::mutex> lock(deferred_mutex_);
+        return deferred_buffers_.size();
+    }
+    size_t deferred_texture_count() const override
+    {
+        std::lock_guard<std::mutex> lock(deferred_mutex_);
+        return deferred_textures_.size();
+    }
+    size_t deferred_group_count() const override
+    {
+        std::lock_guard<std::mutex> lock(deferred_mutex_);
+        return deferred_groups_.size();
+    }
+
 private:
     struct DeferredTextureDestroy
     {
@@ -153,7 +169,7 @@ private:
     vector<DeferredGroupDestroy> deferred_groups_;
     vector<DeferredBufferDestroy> deferred_buffers_;
     vector<DeferredPipelineDestroy> deferred_pipelines_;
-    std::mutex deferred_mutex_;
+    mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
 
     /// Transient-pool state. Empty / inactive when `transient_mode_`

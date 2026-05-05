@@ -144,9 +144,7 @@ void ForwardPath::build_passes(ViewEntry& entry,
     if (color_target) {
         pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
-    pass->set_view_globals(render_view.view_globals_buffer,
-                           render_view.view_globals_offset,
-                           render_view.view_globals_range);
+    pass->set_view_globals_address(render_view.view_globals_address);
     graph.add_pass(std::move(pass));
 }
 

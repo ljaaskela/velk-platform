@@ -16,6 +16,36 @@
 namespace velk {
 
 /**
+ * @brief Persistent per-batch storage layout shared between producers
+ *        (BatchBuilder fills the prefix), the IBatch implementation
+ *        (`get_data` returns the contiguous blob), and consumers
+ *        (`emit_draw_calls` reads three offsets into the same buffer).
+ *
+ * Layout: `[args (32 B)][count (16 B)][instance_data (rest)]`.
+ *
+ * - args  (offset 0, 32 B) — indirect-draw command record (indexed
+ *   variant: index_count, instance_count, first_index, vertex_offset,
+ *   first_instance; non-indexed: vertex_count, instance_count,
+ *   first_vertex, first_instance). 16-byte aligned and oversized so
+ *   any future args struct fits.
+ * - count (offset 32, 16 B) — uint32 actual draw count consumed by
+ *   the backend's indirect-with-count draw; 16-byte aligned so the
+ *   instance-data slice that follows starts on a natural 16-byte
+ *   boundary.
+ * - instance_data (offset 48, rest) — per-instance bytes the vertex
+ *   shader reads via a buffer-reference dereference of
+ *   `storage_gpu_address() + kInstanceOffset`.
+ */
+struct BatchBufferLayout
+{
+    static constexpr size_t kArgsOffset     = 0;
+    static constexpr size_t kArgsSize       = 32;
+    static constexpr size_t kCountOffset    = kArgsOffset + kArgsSize;
+    static constexpr size_t kCountSize      = 16;
+    static constexpr size_t kInstanceOffset = kCountOffset + kCountSize;
+};
+
+/**
  * @brief One draw-able primitive instance group.
  *
  * Built scene-side (today by `BatchBuilder` in velk-scene) and consumed
@@ -28,8 +58,9 @@ namespace velk {
  * resolved through `IRenderContext::pipeline_map()`. `texture_key` is
  * the bindless-source ISurface address resolved at emit time.
  * `instance_data` carries per-instance bytes the vertex shader reads
- * via a `buffer_reference`. `world_aabb` is the union of every contained
- * instance's bounds, used by frustum culling at emit time.
+ * via a buffer-reference dereference. `world_aabb` is the union of
+ * every contained instance's bounds, used by frustum culling at emit
+ * time.
  */
 class IBatch
     : public Interface<IBatch, IInterface,
@@ -43,8 +74,8 @@ public:
     /// @brief Bindless-source ISurface address, or 0 when unused.
     virtual uint64_t texture_key() const = 0;
 
-    /// @brief Per-instance bulk bytes the vertex shader reads via
-    ///        buffer_reference.
+    /// @brief Per-instance bulk bytes the vertex shader reads via a
+    ///        buffer-reference dereference.
     virtual array_view<const uint8_t> instance_data() const = 0;
 
     /// @brief Bytes per instance in `instance_data`.
@@ -79,11 +110,29 @@ public:
     ///        matrix (or any transform-only payload) into an existing
     ///        slot without touching the rest of the batch. The byte
     ///        range overwritten is `[instance_index * instance_stride,
-    ///        instance_index * instance_stride + bytes.size())`.
+    ///        instance_index * instance_stride + bytes.size())` within
+    ///        the batch's persistent storage's instance-data region.
     ///        @p bytes.size() must be `<= instance_stride`. Out-of-range
     ///        slots are silently ignored.
     virtual void update_instance_at(uint32_t instance_index,
                                     array_view<const uint8_t> bytes) = 0;
+
+    /// @name Persistent per-batch storage — each batch owns its own
+    ///       backend buffer holding the `BatchBufferLayout` blob,
+    ///       allocated and uploaded by the renderer's standard buffer
+    ///       pipeline (`IGpuResourceManager::ensure_buffer_storage`).
+    ///       `emit_draw_calls` reads `storage_buffer()` for indirect
+    ///       args + count and dereferences
+    ///       `storage_gpu_address() + kInstanceOffset` for instance
+    ///       bytes (buffer-reference / device-address read).
+    /// @{
+    /// @brief Backend buffer handle (`GpuBuffer` is the abstract handle
+    ///        type the backend resolves to its native buffer object).
+    virtual GpuBuffer storage_buffer() const = 0;
+
+    /// @brief GPU virtual address of the start of the storage blob.
+    virtual uint64_t  storage_gpu_address() const = 0;
+    /// @}
 };
 
 } // namespace velk

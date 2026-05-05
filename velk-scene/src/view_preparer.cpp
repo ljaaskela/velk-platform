@@ -13,10 +13,8 @@
 
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_analytic_shape.h>
-#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_draw_data.h>
-#include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shadow_technique.h>
@@ -97,41 +95,50 @@ void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_sta
     auto& cache = view_caches_[&entry];
     if (entry.batches_dirty) {
         if (try_update_transforms(entry, scene_state)) {
+            ++diag_fast_path_count;
             entry.batches_dirty = false;
         } else {
+            ++diag_rebuild_count;
             batch_builder.rebuild_batches(scene_state, cache.batches,
                                           cache.element_slots, cache.rtt_roots);
             entry.batches_dirty = false;
         }
     }
 
-    // Upload any batches whose instance data changed this frame
-    // (rebuild filled them; fast-path patched matrices in place; either
-    // sets `is_dirty()`). The renderer's persistent buffer pipeline
-    // gives each batch a stable GPU address; emit_draw_calls reads it
-    // directly instead of writing instance bytes into per-frame staging.
+    // Per-batch buffer upload: each batch owns its [args][count]
+    // [instance_data] blob and implements IBuffer. ensure_buffer_storage
+    // allocates / resizes the backing GpuBuffer; on a fresh allocation
+    // we map it, copy the blob, and stamp the (handle, mapped) pair on
+    // the batch so update_instance_at can write through later. Pre-
+    // existing-handle batches with is_dirty (e.g. structural rebuilds
+    // reusing the same hive slot) re-upload through their existing
+    // mapping. ensure_buffer_storage's deferred-destroy on size change
+    // handles the case where a batch's instance count grows.
     if (ctx.resources && ctx.backend) {
-        for (auto& batch_ptr : cache.batches) {
-            auto* buf = interface_cast<IBuffer>(batch_ptr.get());
-            if (!buf || !buf->is_dirty()) continue;
-            size_t bsize = buf->get_data_size();
-            const uint8_t* bytes = buf->get_data();
-            if (!bytes || bsize == 0) {
-                buf->clear_dirty();
-                continue;
+        auto upload = [&](vector<IBatch::Ptr>& batches) {
+            for (auto& bp : batches) {
+                if (!bp) continue;
+                auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
+                if (!batch->is_dirty()) continue;
+                size_t blob_size = batch->get_data_size();
+                if (blob_size == 0) { batch->clear_dirty(); continue; }
+                GpuBufferDesc desc{};
+                desc.size = blob_size;
+                desc.cpu_writable = true;
+                auto* be = ctx.resources->ensure_buffer_storage(batch, desc);
+                if (!be || !be->handle) continue;
+                if (auto* dst = ctx.backend->map(be->handle)) {
+                    std::memcpy(dst, batch->get_data(), blob_size);
+                    batch->set_storage_mapping(be->handle, static_cast<uint8_t*>(dst));
+                }
+                batch->clear_dirty();
             }
-            GpuBufferDesc bdesc{};
-            bdesc.size = bsize;
-            bdesc.cpu_writable = true;
-            auto* be = ctx.resources->ensure_buffer_storage(buf, bdesc);
-            if (!be) continue;
-            if (auto* dst = ctx.backend->map(be->handle)) {
-                std::memcpy(dst, bytes, bsize);
-            }
-            buf->clear_dirty();
+        };
+        upload(cache.batches);
+        for (auto& rtp : batch_builder.render_target_passes()) {
+            upload(rtp.batches);
         }
     }
-
     rv.batches = &cache.batches;
 }
 
@@ -192,12 +199,7 @@ void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
     globals.bvh_nodes_addr = rv.bvh_nodes_addr;
     globals.bvh_shapes_addr = rv.bvh_shapes_addr;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
-    uint64_t globals_addr = ctx.frame_buffer->write(&globals, sizeof(globals));
-    if (globals_addr) {
-        rv.view_globals_buffer = ctx.frame_buffer->active_buffer();
-        rv.view_globals_offset = globals_addr - ctx.frame_buffer->active_buffer_base();
-        rv.view_globals_range  = sizeof(globals);
-    }
+    rv.view_globals_address = ctx.frame_buffer->write(&globals, sizeof(globals));
 }
 
 void ViewPreparer::prepare_lights(const SceneState& scene_state, FrameContext& ctx,
@@ -269,8 +271,9 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
         }, &sc);
 }
 
-void ViewPreparer::prepare_env(const IElement::Ptr& camera_element, FrameContext& ctx,
-                               RenderView& rv)
+void ViewPreparer::prepare_env(ViewEntry& entry,
+                               const IElement::Ptr& camera_element,
+                               FrameContext& ctx, RenderView& rv)
 {
     auto camera = ::velk::find_attachment<ICamera>(camera_element);
     if (!camera) return;
@@ -310,34 +313,54 @@ void ViewPreparer::prepare_env(const IElement::Ptr& camera_element, FrameContext
     // Forward-only env Batch (fullscreen quad with env material).
     // Built here so the forward path doesn't need to reach back into
     // ICamera / IEnvironment. Deferred and RT ignore this batch.
+    // Cached per-view: only rebuilt when the env material changes;
+    // otherwise we reuse the same IBatch::Ptr across frames so the
+    // hive doesn't allocate one per frame for every environment-bearing
+    // camera.
     if (resolved.surface && env_mat && ctx.render_ctx) {
-        auto env_batch_ptr = ::velk::instance().create<IBatch>(ClassId::DefaultBatch);
-        if (env_batch_ptr) {
-            auto* env_batch = static_cast<impl::DefaultBatch*>(env_batch_ptr.get());
-            env_batch->set_pipeline_key(0);
-            env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
-            env_batch->set_instance_stride(4);
-            env_batch->set_instance_count(1);
-            env_batch->mutable_instance_data().resize(4, 0);
-            env_batch->set_material(env_mat);
-            if (auto quad = ctx.render_ctx->get_mesh_builder().get_unit_quad()) {
-                auto prims = quad->get_primitives();
-                if (prims.size() > 0) {
-                    env_batch->set_primitive(prims[0]);
-                    // Lazy compile in build_draw_calls reads
-                    // pipeline_options off the batch — set topology to
-                    // match the quad and pull cull/blend/depth from the
-                    // env material's options. PipelineOptions defaults
-                    // (TriangleList, alpha blend) would mis-compile the
-                    // strip-quad and draw only one triangle.
-                    PipelineOptions po = pipeline_options_from_storage(
-                        interface_cast<IObjectStorage>(env_mat.get()));
-                    po.topology = to_backend_topology(prims[0]->get_topology());
-                    env_batch->set_pipeline_options(po);
+        auto& cache = view_caches_[&entry];
+        const void* mat_key = static_cast<const void*>(env_mat.get());
+        if (!cache.env_batch || cache.env_material_key != mat_key) {
+            auto env_batch_ptr = ::velk::instance().create<IBatch>(ClassId::DefaultBatch);
+            if (env_batch_ptr) {
+                auto* env_batch = static_cast<impl::DefaultBatch*>(env_batch_ptr.get());
+                env_batch->set_pipeline_key(0);
+                env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
+                env_batch->set_instance_stride(4);
+                env_batch->set_instance_count(1);
+                env_batch->mutable_instance_data().resize(4, 0);
+                env_batch->set_material(env_mat);
+                if (auto quad = ctx.render_ctx->get_mesh_builder().get_unit_quad()) {
+                    auto prims = quad->get_primitives();
+                    if (prims.size() > 0) {
+                        env_batch->set_primitive(prims[0]);
+                        // Lazy compile in build_draw_calls reads
+                        // pipeline_options off the batch — set topology
+                        // to match the quad and pull cull/blend/depth
+                        // from the env material's options. Defaults
+                        // (TriangleList, alpha blend) would mis-compile
+                        // the strip-quad and draw only one triangle.
+                        PipelineOptions po = pipeline_options_from_storage(
+                            interface_cast<IObjectStorage>(env_mat.get()));
+                        po.topology = to_backend_topology(prims[0]->get_topology());
+                        env_batch->set_pipeline_options(po);
+                    }
                 }
+                cache.env_batch = std::move(env_batch_ptr);
+                cache.env_material_key = mat_key;
             }
-            rv.env_batch = std::move(env_batch_ptr);
         }
+        // Refresh the per-view texture key in case the surface changed
+        // but the material identity didn't (rare, but cheap). The
+        // env_batch falls through to the per-frame staging fallback
+        // in emit_draw_calls (no pool slice) — it's a single fullscreen
+        // quad, the per-frame staging cost is trivial, and it sidesteps
+        // the question of where env_batch lives across pool resets.
+        if (cache.env_batch) {
+            auto* env_batch = static_cast<impl::DefaultBatch*>(cache.env_batch.get());
+            env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
+        }
+        rv.env_batch = cache.env_batch;
     }
 }
 
@@ -360,7 +383,7 @@ RenderView ViewPreparer::prepare(ViewEntry& entry,
     rv.bvh_node_count = ctx.bvh_node_count;
     rv.bvh_shape_count = ctx.bvh_shape_count;
     prepare_frame_globals(ctx, rv);
-    prepare_env(camera_element, ctx, rv);
+    prepare_env(entry, camera_element, ctx, rv);
 
     // Path-gated: skip the heavy scene walks when the path doesn't
     // declare a need for them.

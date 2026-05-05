@@ -55,22 +55,29 @@ layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
 
 // RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
-// are read directly from the `view_globals` UBO declared in the prelude.
+// are dereferenced via `globals.X`; the address is in push-constant
+// slot [0..8) (see velk.glsl GlobalData).
 
-layout(push_constant) uniform PC {
-    vec4 cam_pos;              // offset 0
-    uint output_image_id;      // 16
-    uint albedo_tex_id;        // 20
-    uint normal_tex_id;        // 24
-    uint worldpos_tex_id;      // 28
-    uint material_tex_id;      // 32
-    uint width;                // 36
-    uint height;               // 40
-    uint light_count;          // 44
-    uint env_texture_id;       // 48
-    uint shadow_debug_image_id;// 52  RGBA32F storage image; 0 = disabled
-    LightList lights;          // 56
-    _EnvParamsBuf env_params;  // 64
+// scalar layout: tight packing so the per-dispatch CPU struct (whose
+// `vec4 cam_pos` sits at offset 0 of the struct) lines up with the
+// GPU's view of cam_pos at offset 8 of the push-constant block. Default
+// std430 would round vec4 up to a 16-byte alignment and shift every
+// subsequent field by 8 bytes vs. what the CPU writes.
+layout(push_constant, scalar) uniform PC {
+    GlobalData globals;        // offset 0  (8 bytes, push_view_globals)
+    vec4 cam_pos;              // 8         (CPU push starts here)
+    uint output_image_id;      // 24
+    uint albedo_tex_id;        // 28
+    uint normal_tex_id;        // 32
+    uint worldpos_tex_id;      // 36
+    uint material_tex_id;      // 40
+    uint width;                // 44
+    uint height;               // 48
+    uint light_count;          // 52
+    uint env_texture_id;       // 56
+    uint shadow_debug_image_id;// 60  RGBA32F storage image; 0 = disabled
+    LightList lights;          // 64
+    _EnvParamsBuf env_params;  // 72
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -377,18 +384,18 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 // any realistic UI scene depth.
 bool trace_any_hit(Ray ray, float t_max)
 {
-    if (view_globals.bvh_node_count == 0u) return false;
+    if (pc.globals.bvh_node_count == 0u) return false;
     uint stack[32];
     int sp = 0;
-    stack[sp++] = view_globals.bvh_root;
+    stack[sp++] = pc.globals.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = view_globals.bvh_nodes.data[ni];
+        BvhNode node = pc.globals.bvh_nodes.data[ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = view_globals.bvh_shapes.data[node.first_shape + i];
+            RtShape s = pc.globals.bvh_shapes.data[node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -399,8 +406,8 @@ bool trace_any_hit(Ray ray, float t_max)
         // Falls back to natural order for non-binary or single-child
         // nodes (none today, but kept defensive).
         if (node.child_count == 2u) {
-            BvhNode l = view_globals.bvh_nodes.data[node.first_child];
-            BvhNode r = view_globals.bvh_nodes.data[node.first_child + 1u];
+            BvhNode l = pc.globals.bvh_nodes.data[node.first_child];
+            BvhNode r = pc.globals.bvh_nodes.data[node.first_child + 1u];
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -508,7 +515,7 @@ void main()
     // the environment. Falls back to black when the view has no env.
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
-        mat4 inv_vp = view_globals.inverse_view_projection;
+        mat4 inv_vp = pc.globals.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
         vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
@@ -615,7 +622,7 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         float ao = 1.0;
-        if (view_globals.bvh_node_count != 0u) {
+        if (pc.globals.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
             ao_r.origin = world_pos + N * 0.01;
@@ -669,7 +676,8 @@ void main()
 #include "velk.glsl"
 
 layout(push_constant) uniform PC {
-    uint src_tex_id;
+    GlobalData globals;        // [0..8) push_view_globals (unused here)
+    uint src_tex_id;           // [8..)  CPU push starts here
 } pc;
 
 layout(location = 0) in vec2 v_uv;
@@ -711,8 +719,12 @@ layout(buffer_reference, std430) readonly buffer LightList {
     Light data[];
 };
 
-layout(push_constant) uniform PC {
-    mat4 inv_view_projection;
+// scalar layout — see deferred-lighting PC above. Without it, the
+// mat4 after GlobalData would shift to offset 16 (std430 alignment)
+// and break the CPU/GPU push-constant offset agreement.
+layout(push_constant, scalar) uniform PC {
+    GlobalData globals;         // [0..8)  push_view_globals
+    mat4 inv_view_projection;   // [8..72) CPU push starts here
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
@@ -1320,7 +1332,7 @@ void main()
     uint shape_count = pc.extras.w;
     if (coord.x >= int(w) || coord.y >= int(h)) return;
 
-    rng_init(uvec2(coord), view_globals.present_counter);
+    rng_init(uvec2(coord), pc.globals.present_counter);
 
     // Per-pixel primary sample count. Each sample fires one jittered
     // primary ray through the painter-sorted loop; the results are

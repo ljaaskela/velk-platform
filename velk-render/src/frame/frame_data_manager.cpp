@@ -2,6 +2,8 @@
 
 #include <velk/api/velk.h>
 
+#include <velk-render/detail/intf_gpu_resource_manager_internal.h>
+
 #include <cstring>
 
 namespace velk {
@@ -46,7 +48,7 @@ void FrameDataManager::begin_frame(Slot& slot)
     overflow_ = false;
 }
 
-void FrameDataManager::ensure_capacity(IRenderBackend& backend)
+void FrameDataManager::ensure_capacity(IRenderBackend& backend, IGpuResourceManager& resources)
 {
     if (peak_usage_ <= buffer_size_ * 3 / 4) {
         return;
@@ -67,11 +69,11 @@ void FrameDataManager::ensure_capacity(IRenderBackend& backend)
     peak_usage_ = 0;
 
     if (active_ && active_->buffer_size < new_size) {
-        alloc_slot(*active_, backend);
+        alloc_slot(*active_, backend, resources);
     }
 }
 
-void FrameDataManager::grow(IRenderBackend& backend)
+void FrameDataManager::grow(IRenderBackend& backend, IGpuResourceManager& resources)
 {
     size_t new_size = buffer_size_ * 4;
     while (new_size < peak_usage_ * 2) {
@@ -86,13 +88,21 @@ void FrameDataManager::grow(IRenderBackend& backend)
 
     buffer_size_ = new_size;
     peak_usage_ = 0;
-    alloc_slot(*active_, backend);
+    alloc_slot(*active_, backend, resources);
 }
 
-void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& backend)
+void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources)
 {
     if (slot.handle) {
-        backend.destroy_buffer(slot.handle);
+        // Defer the old buffer's destruction through the resource
+        // manager's marker queue. Frame_data grows mid-prepare, *before*
+        // the upcoming submit signals — and a previous in-flight frame
+        // may still be reading the old buffer. Immediate destruction
+        // would dangle that reference. The pending marker covers the
+        // upcoming submit; the deferred queue drains it once the GPU
+        // is past that point.
+        defer_buffer_destroy(&resources, slot.handle,
+                             backend.pending_frame_completion_marker());
     }
     GpuBufferDesc desc;
     desc.size = buffer_size_;
@@ -103,20 +113,20 @@ void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& backend)
     slot.buffer_size = buffer_size_;
 }
 
-void FrameDataManager::init_slot(Slot& slot, IRenderBackend& backend)
+void FrameDataManager::init_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources)
 {
     if (buffer_size_ == 0) {
         return;
     }
-    alloc_slot(slot, backend);
+    alloc_slot(slot, backend, resources);
 }
 
-void FrameDataManager::ensure_slot(Slot& slot, IRenderBackend& backend)
+void FrameDataManager::ensure_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources)
 {
     if (slot.buffer_size >= buffer_size_) {
         return;
     }
-    alloc_slot(slot, backend);
+    alloc_slot(slot, backend, resources);
 }
 
 } // namespace velk

@@ -19,12 +19,12 @@ namespace velk {
 
 /// Per-frame global data written by the renderer, read by all shaders.
 ///
-/// Layout must match the `ViewGlobalsBuffer` UBO declaration in
+/// Layout must match the `GlobalData` buffer_reference declaration in
 /// velk.glsl (scalar layout). The view preparer writes one of these
-/// per view per frame into the per-frame staging buffer; the graph
-/// executor binds the relevant region as descriptor binding 4 before
-/// each pass, and shaders read view-level state (camera, viewport,
-/// BVH, present_counter) from `view_globals.X`.
+/// per view per frame into the per-frame staging buffer and stamps
+/// the resulting GPU address onto each IRenderPass; the graph executor
+/// pushes that address into push-constant slot [0..8) at pass start,
+/// and shaders dereference it as `globals.X`.
 struct FrameGlobals
 {
     float    view_projection[16];          ///< Combined view-projection matrix from the camera.

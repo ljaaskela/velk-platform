@@ -18,8 +18,8 @@ namespace velk {
  *
  * Objects that also implement `ISurface` (images, environment maps) are
  * uploaded via the backend's texture path (`upload_texture`). Plain IBuffer
- * objects are uploaded via `create_buffer` + `map` + memcpy and bound via
- * `buffer_reference` (GPU virtual address).
+ * objects are uploaded via `create_buffer` + `map` + memcpy and read by
+ * shaders via a buffer-reference / device-address dereference.
  *
  * Two lifecycles fit the same interface:
  *
@@ -66,7 +66,8 @@ public:
     // populates the address after `create_buffer` (and after any
     // size-change reallocation); materials read it via
     // `buffer->get_gpu_handle(GpuResourceKey::Default)` inside
-    // `write_gpu_data`.
+    // `write_gpu_data` and dereference it from shaders via a
+    // buffer-reference / device-address read.
 };
 
 /**

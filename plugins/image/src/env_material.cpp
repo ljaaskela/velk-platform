@@ -30,7 +30,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     OpaquePtr material;
 };
 
-layout(push_constant) uniform PC { DrawData root; };
+layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;
@@ -50,7 +50,7 @@ void main()
     // Reconstruct the corresponding world-space point on the far plane.
     // Y is flipped to match the rest of the pipeline's viewport.
     vec2 ndc = vec2(q.x * 2.0 - 1.0, (1.0 - q.y) * 2.0 - 1.0);
-    vec4 far_pt = view_globals.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec4 far_pt = globals.inverse_view_projection * vec4(ndc, 1.0, 1.0);
     v_world_pos = far_pt.xyz / far_pt.w;
 
     v_color = vec4(0.0);

@@ -11,6 +11,8 @@
 
 namespace velk {
 
+class IGpuResourceManager;
+
 /**
  * @brief Per-frame GPU staging buffer.
  *
@@ -54,20 +56,30 @@ public:
     /// @brief Reserves space without writing. Caller fills the returned ptr.
     virtual WriteResult reserve(size_t size, size_t alignment = 16) = 0;
 
-    /// @brief Allocates the initial GPU buffer for @p slot.
-    virtual void init_slot(Slot& slot, IRenderBackend& backend) = 0;
+    /// @brief Allocates the initial GPU buffer for @p slot. @p resources
+    ///        is used to defer destruction of any previous buffer
+    ///        attached to @p slot through the resource manager's
+    ///        completion-marker queue, so frame_data growth is safe even
+    ///        if a prior frame's submit is still reading the old buffer.
+    virtual void init_slot(Slot& slot,
+                           IRenderBackend& backend,
+                           IGpuResourceManager& resources) = 0;
 
     /// @brief Grows @p slot's buffer to the current target size if undersized.
-    virtual void ensure_slot(Slot& slot, IRenderBackend& backend) = 0;
+    virtual void ensure_slot(Slot& slot,
+                             IRenderBackend& backend,
+                             IGpuResourceManager& resources) = 0;
 
     /// @brief Sets @p slot active for the upcoming frame and resets the write offset.
     virtual void begin_frame(Slot& slot) = 0;
 
     /// @brief Doubles target size if peak usage approaches the limit.
-    virtual void ensure_capacity(IRenderBackend& backend) = 0;
+    virtual void ensure_capacity(IRenderBackend& backend,
+                                 IGpuResourceManager& resources) = 0;
 
     /// @brief Grows the active slot's buffer in response to an overflow.
-    virtual void grow(IRenderBackend& backend) = 0;
+    virtual void grow(IRenderBackend& backend,
+                      IGpuResourceManager& resources) = 0;
 
     /// @brief True iff the active frame has overflowed since begin_frame.
     virtual bool overflowed() const = 0;

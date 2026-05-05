@@ -58,16 +58,14 @@ struct RenderView
     int width = 0;
     int height = 0;
 
-    /// FrameGlobals block addressed as a UBO descriptor binding. The
-    /// view preparer writes a `FrameGlobals` record into the per-frame
-    /// staging buffer once per view and fills these fields. Producers
-    /// copy them into each GraphPass they emit; the graph executor
-    /// binds them at descriptor binding 4 (`ViewGlobalsBuffer`) before
-    /// the pass's ops. Shaders read view-level state from
-    /// `view_globals.X`. 0 / 0 / 0 when the viewport is degenerate.
-    GpuBuffer view_globals_buffer = 0;
-    uint64_t  view_globals_offset = 0;
-    uint32_t  view_globals_range  = 0;
+    /// FrameGlobals GPU address. The view preparer writes a
+    /// `FrameGlobals` record into the per-frame staging buffer once per
+    /// view; this is the GPU address of that record. Producers stamp
+    /// it onto each IRenderPass they emit; the graph executor pushes it
+    /// into push-constant slot [0..8) at pass start. Shaders read
+    /// view-level state via the `GlobalData` buffer_reference declared
+    /// in the velk.glsl prelude. 0 when the viewport is degenerate.
+    uint64_t view_globals_address = 0;
 
     /// Scene-wide BVH addresses (zero when the view's scene has no BVH).
     uint64_t bvh_nodes_addr = 0;

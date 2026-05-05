@@ -18,10 +18,10 @@ namespace velk {
  * @brief One pass added to the render graph.
  *
  * Carries an ordered sequence of GPU ops + explicit read/write resource
- * declarations + an optional per-view ViewGlobals UBO binding. The
- * graph's executor walks the ops 1:1 to backend methods; the graph's
- * compile step inspects ops + reads/writes to classify the pass and
- * insert pipeline barriers before consumers of prior writes.
+ * declarations + the per-pass FrameGlobals address. The graph's
+ * executor walks the ops 1:1 to backend methods; the graph's compile
+ * step inspects ops + reads/writes to classify the pass and insert
+ * pipeline barriers before consumers of prior writes.
  *
  * Ptr-based so the velk hive pools allocations and producer pipelines
  * can cache per-frame Ptr identity for future persistent-pass work.
@@ -52,13 +52,13 @@ public:
     /// Resources written by this pass.
     virtual array_view<const IGpuResource::Ptr> writes() const = 0;
 
-    /// Optional view-globals UBO binding for this pass. When
-    /// `view_globals_buffer() == 0`, the graph executor leaves the
-    /// previous view's binding intact (used for passes that don't read
-    /// view-level state, e.g. pure blits).
-    virtual GpuBuffer view_globals_buffer() const = 0;
-    virtual uint64_t  view_globals_offset() const = 0;
-    virtual uint32_t  view_globals_range()  const = 0;
+    /// Per-view FrameGlobals GPU address pushed into push-constant
+    /// slot [0..8) at pass start. Shaders dereference it as a
+    /// `GlobalData` buffer-reference / device-address read (declared
+    /// in the velk.glsl prelude). Returning 0 means the pass doesn't
+    /// bind a globals address (the executor leaves whatever was
+    /// previously pushed).
+    virtual uint64_t view_globals_address() const = 0;
 
     /// @name Producer mutators
     /// @{
@@ -75,12 +75,10 @@ public:
     /// scan.
     virtual void add_write(IGpuResource::Ptr resource) = 0;
 
-    /// Bind a per-view ViewGlobals UBO range for this pass. Pass
-    /// `buffer == 0` (default) for passes that don't read view-level
-    /// state — the executor leaves the previous binding intact.
-    virtual void set_view_globals(GpuBuffer buffer,
-                                  uint64_t offset,
-                                  uint32_t range) = 0;
+    /// Set the FrameGlobals GPU address pushed at pass start. Pass
+    /// 0 (default) for passes that don't touch view-level state — the
+    /// executor leaves whatever was previously pushed.
+    virtual void set_view_globals_address(uint64_t addr) = 0;
     /// @}
 };
 

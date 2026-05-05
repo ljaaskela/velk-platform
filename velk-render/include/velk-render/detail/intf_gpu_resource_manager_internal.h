@@ -73,6 +73,16 @@ public:
     /// and destroys all still-tracked backend handles. Uses the
     /// backend stored at `init()`.
     virtual void shutdown() = 0;
+
+    /// @name Diagnostic counters. Sizes of the deferred-destroy
+    ///       queues; non-zero is normal during steady-state churn,
+    ///       monotonically growing means the GPU isn't completing
+    ///       frames or the manager isn't draining.
+    /// @{
+    virtual size_t deferred_buffer_count() const = 0;
+    virtual size_t deferred_texture_count() const = 0;
+    virtual size_t deferred_group_count() const = 0;
+    /// @}
 };
 
 /// One-liner helpers that interface_cast a public-facing

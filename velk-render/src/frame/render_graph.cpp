@@ -176,9 +176,7 @@ void RenderGraph::compile()
 
 void RenderGraph::execute(::velk::IRenderBackend& backend)
 {
-    GpuBuffer last_vg_buffer = 0;
-    uint64_t  last_vg_offset = 0;
-    uint32_t  last_vg_range  = 0;
+    uint64_t last_vg_addr = 0;
 
     for (size_t i = 0; i < passes_.size(); ++i) {
         const ::velk::IRenderPass& gp = *passes_[i];
@@ -188,17 +186,10 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        GpuBuffer vg_buf = gp.view_globals_buffer();
-        uint64_t  vg_off = gp.view_globals_offset();
-        uint32_t  vg_rng = gp.view_globals_range();
-        if (vg_buf != 0 &&
-            (vg_buf != last_vg_buffer ||
-             vg_off != last_vg_offset ||
-             vg_rng != last_vg_range)) {
-            backend.bind_view_globals(vg_buf, vg_off, vg_rng);
-            last_vg_buffer = vg_buf;
-            last_vg_offset = vg_off;
-            last_vg_range  = vg_rng;
+        uint64_t vg_addr = gp.view_globals_address();
+        if (vg_addr != 0 && vg_addr != last_vg_addr) {
+            backend.push_view_globals(vg_addr);
+            last_vg_addr = vg_addr;
         }
 
         for (auto& op : gp.ops()) {

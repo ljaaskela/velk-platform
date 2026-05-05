@@ -386,6 +386,45 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
 
     emit_visuals(main_before, VisualPhase::BeforeChildren, out_batches);
     emit_visuals(main_after, VisualPhase::AfterChildren, out_batches);
+
+    // Per-batch finalize: pack each batch's [args(32)][count(16)]
+    // [instance_data] blob into its own storage_blob_ and mark it
+    // dirty. The renderer's standard buffer-upload pipeline (run by
+    // ViewPreparer::prepare_batches) allocates the backing GpuBuffer
+    // via ensure_buffer_storage and copies the blob.
+    auto finalize_batches = [](vector<IBatch::Ptr>& batches) {
+        for (auto& batch_ptr : batches) {
+            auto* batch = static_cast<impl::DefaultBatch*>(batch_ptr.get());
+            // Already-finalized batches (RTT batches dedup across views
+            // via find_or_make_pass) keep their existing blob; subsequent
+            // views skip re-finalizing.
+            if (batch->is_dirty()) continue;
+            if (batch->storage_buffer() != 0) continue;
+
+            // Sanity: stride * count must match instance_data exactly.
+            // Inconsistency would land bogus indirect args on GPU.
+            const size_t expected = static_cast<size_t>(batch->instance_stride())
+                                    * static_cast<size_t>(batch->instance_count());
+            if (batch->instance_data().size() != expected) {
+                VELK_LOG(W,
+                         "DefaultBatch::finalize: SKIP inconsistent shape "
+                         "stride=%u count=%u idata=%zu (expected %zu)",
+                         batch->instance_stride(), batch->instance_count(),
+                         batch->instance_data().size(), expected);
+                continue;
+            }
+
+            auto primitive = batch->primitive();
+            if (!primitive) continue;
+            auto buffer = primitive->get_buffer();
+            const bool indexed = buffer && buffer->get_ibo_size() > 0;
+            uint32_t prim_count = indexed ? primitive->get_index_count()
+                                          : primitive->get_vertex_count();
+            batch->finalize_storage(prim_count, indexed);
+        }
+    };
+    for (auto& rtp : render_target_passes_) finalize_batches(rtp.batches);
+    finalize_batches(out_batches);
 }
 
 // build_draw_calls and build_gbuffer_draw_calls moved to

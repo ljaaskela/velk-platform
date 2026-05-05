@@ -99,7 +99,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
-layout(push_constant) uniform PC { DrawData root; };
+layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -120,7 +120,7 @@ void main()
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - view_globals.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
 
@@ -135,7 +135,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
-layout(push_constant) uniform PC { DrawData root; };
+layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -164,7 +164,7 @@ void main()
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - view_globals.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
 

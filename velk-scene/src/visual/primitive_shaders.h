@@ -24,7 +24,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
 };
 
-layout(push_constant) uniform PC { DrawData root; };
+layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;
@@ -39,7 +39,7 @@ void main()
 
     vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
     vec4 world_pos_h = inst.world_matrix * local;
-    gl_Position = view_globals.view_projection * world_pos_h;
+    gl_Position = globals.view_projection * world_pos_h;
 
     v_color = inst.color;
     v_local_uv = v.uv;

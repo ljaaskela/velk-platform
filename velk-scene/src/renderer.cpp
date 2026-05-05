@@ -139,6 +139,8 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
 
     pipeline_map_ = &ctx->pipeline_map();
 
+    diag_enabled_ = false;
+
     // Instantiate the per-renderer plumbing through the type registry so
     // allocation participates in the hive. Held via interface Ptr; raw
     // typed pointers cache the concrete cast for slot/management methods
@@ -164,7 +166,7 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
 
     frame_buffer_->init();
     for (auto& slot : frame_slots_) {
-        frame_buffer_->init_slot(slot.buffer, *backend_);
+        frame_buffer_->init_slot(slot.buffer, *backend_, *resources_);
     }
 
     // One-shot upload of every context-owned default buffer. Draws
@@ -477,6 +479,17 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         }
         slot.graph->clear();
 
+        // The retry loop reuses caches that hold per-frame_data
+        // addresses. Attempt 1's cached addresses point into the OLD
+        // frame_data buffer; after grow, those addresses still resolve
+        // to OLD memory (which is deferred-destroyed but alive until
+        // the submit completes). Strictly correct, but skipping the
+        // retry-side reset hides bugs and wastes the OLD buffer's
+        // contents. Clear them so attempt 2 re-uploads cleanly into
+        // the NEW frame_data.
+        material_cache_.clear();
+        snippets_->begin_frame();
+
         FrameContext ctx = make_frame_context();
 
         // Scene-wide BVH. Each scene has a SceneBvh attachment on its
@@ -749,7 +762,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 E, "Renderer: frame buffer overflow after %d retries, dropping frame", kMaxRecordRetries);
             break;
         }
-        frame_buffer_->grow(*backend_);
+        frame_buffer_->grow(*backend_, *resources_);
     } // retry loop
 }
 
@@ -779,10 +792,10 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
     // If this slot's buffer is undersized (it was in-flight during a
     // previous regrow and was skipped), grow it now that it's safe.
-    frame_buffer_->ensure_slot(slot->buffer, *backend_);
+    frame_buffer_->ensure_slot(slot->buffer, *backend_, *resources_);
 
     // Prepare the staging buffer once for all views
-    frame_buffer_->ensure_capacity(*backend_);
+    frame_buffer_->ensure_capacity(*backend_, *resources_);
 
     if ((slot->id % 10000) == 0) {
         VELK_LOG(I,
@@ -897,6 +910,62 @@ void Renderer::present(Frame frame)
         slot_cv_.notify_one();
     }
     VELK_PERF_EVENT(Present);
+
+    if (diag_enabled_) {
+        ++diag_.frames;
+        constexpr uint64_t kDiagPeriod = 60;  // ~1s at 60fps
+        if (diag_.frames % kDiagPeriod == 0) log_diagnostics();
+    }
+}
+
+void Renderer::log_diagnostics()
+{
+    // Pull rebuild/fast-path counters out of the view preparer for this
+    // window and reset them — those are accumulated across all views.
+    uint64_t rebuilds   = view_preparer_.diag_rebuild_count;
+    uint64_t fast_paths = view_preparer_.diag_fast_path_count;
+    view_preparer_.diag_rebuild_count   = 0;
+    view_preparer_.diag_fast_path_count = 0;
+
+    // Resource manager / frame data sizes — anything that monotonically
+    // grows over time will surface here as a steadily-increasing number.
+    auto* mgr_internal = interface_cast<IGpuResourceManagerInternal>(resources_.get());
+    size_t deferred_buffers = mgr_internal ? mgr_internal->deferred_buffer_count() : 0;
+    size_t deferred_textures = mgr_internal ? mgr_internal->deferred_texture_count() : 0;
+    size_t deferred_groups = mgr_internal ? mgr_internal->deferred_group_count() : 0;
+
+    size_t fd_buffer_kb = frame_buffer_ ? frame_buffer_->get_buffer_size() / 1024 : 0;
+    size_t fd_peak_kb = frame_buffer_ ? frame_buffer_->get_peak_usage() / 1024 : 0;
+
+    size_t total_passes = 0;
+    for (auto& s : frame_slots_) {
+        if (s.graph) total_passes += s.graph->passes().size();
+    }
+
+    VELK_LOG(I,
+             "render.diag frames=%llu rebuilds=%llu fast_path=%llu "
+             "views=%zu batches=%zu element_slots=%zu "
+             "fd_size_kb=%zu fd_peak_kb=%zu "
+             "deferred(b=%zu t=%zu g=%zu) "
+             "graph_passes=%zu seen_pipelines=%zu "
+             "scratch=%zu views=%zu ",
+
+             static_cast<unsigned long long>(diag_.frames),
+             static_cast<unsigned long long>(rebuilds),
+             static_cast<unsigned long long>(fast_paths),
+             view_preparer_.view_count(),
+             view_preparer_.total_batches(),
+             view_preparer_.total_element_slots(),
+             fd_buffer_kb,
+             fd_peak_kb,
+             deferred_buffers,
+             deferred_textures,
+             deferred_groups,
+             total_passes,
+             seen_pipelines_.size(),
+             pipelines_scratch_.size(),
+             prepared_views_.size());
+    VELK_LOG(I, "bvh=%zu", scene_bvh_cache_.size());
 }
 
 void Renderer::render()
@@ -913,7 +982,7 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
     auto old_size = frame_slots_.size();
     frame_slots_.resize(count);
     for (auto i = old_size; i < count; ++i) {
-        frame_buffer_->init_slot(frame_slots_[i].buffer, *backend_);
+        frame_buffer_->init_slot(frame_slots_[i].buffer, *backend_, *resources_);
     }
     slot_cv_.notify_all();
 }

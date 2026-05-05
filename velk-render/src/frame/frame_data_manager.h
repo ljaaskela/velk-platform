@@ -25,12 +25,12 @@ public:
     uint64_t write(const void* data, size_t size, size_t alignment = 16) override;
     WriteResult reserve(size_t size, size_t alignment = 16) override;
 
-    void init_slot(Slot& slot, IRenderBackend& backend) override;
-    void ensure_slot(Slot& slot, IRenderBackend& backend) override;
+    void init_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources) override;
+    void ensure_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources) override;
 
     void begin_frame(Slot& slot) override;
-    void ensure_capacity(IRenderBackend& backend) override;
-    void grow(IRenderBackend& backend) override;
+    void ensure_capacity(IRenderBackend& backend, IGpuResourceManager& resources) override;
+    void grow(IRenderBackend& backend, IGpuResourceManager& resources) override;
 
     bool overflowed() const override { return overflow_; }
     size_t get_buffer_size() const override { return buffer_size_; }
@@ -40,7 +40,7 @@ public:
     uint64_t active_buffer_base() const override { return active_ ? active_->gpu_base : 0; }
 
 private:
-    void alloc_slot(Slot& slot, IRenderBackend& backend);
+    void alloc_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources);
 
     size_t buffer_size_ = 0;
     size_t write_offset_ = 0;

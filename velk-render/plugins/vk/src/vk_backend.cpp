@@ -3,6 +3,7 @@
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
 
+#include <cstdlib>
 #include <cstring>
 
 namespace velk::vk {
@@ -345,11 +346,23 @@ bool VkBackend::create_vk_instance()
 #endif
     };
 
-    vector<const char*> layers;
+    // Validation always on in debug; in release, opt in via
+    // VELK_VK_VALIDATION=1 so we can run release builds with validation
+    // when chasing a TDR that's too slow under debug.
+    bool enable_validation = false;
 #ifndef NDEBUG
-    layers.push_back("VK_LAYER_KHRONOS_validation");
-    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    enable_validation = true;
+#else
+    if (const char* v = std::getenv("VELK_VK_VALIDATION")) {
+        enable_validation = (v[0] == '1');
+    }
 #endif
+
+    vector<const char*> layers;
+    if (enable_validation) {
+        layers.push_back("VK_LAYER_KHRONOS_validation");
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
 
     VkInstanceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -659,9 +672,14 @@ bool VkBackend::create_bindless_descriptor()
     //   1: storage-image array for compute imageStore writes (rgba8-format)
     //   2: storage-image array for compute imageStore writes (rgba32f-format)
     //   3: storage-image array for compute imageStore writes (rgba16f-format)
-    // Only the LAST binding may use VARIABLE_DESCRIPTOR_COUNT, so binding 3
-    // carries that flag; bindings 0..2 use fixed counts.
-    VkDescriptorSetLayoutBinding bindings[5]{};
+    //
+    // Per-view FrameGlobals are NOT a descriptor — shaders dereference a
+    // GPU address pushed via push constants ([0..8) of the per-stage push
+    // range). That keeps the descriptor set spec-compliant when bindings
+    // 0..3 are flagged UPDATE_AFTER_BIND (which is required for the
+    // transient-pool path where bindless descriptors are written
+    // mid-command-buffer).
+    VkDescriptorSetLayoutBinding bindings[4]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[0].descriptorCount = kMaxBindlessTextures;
@@ -682,25 +700,7 @@ bool VkBackend::create_bindless_descriptor()
     bindings[3].descriptorCount = kMaxBindlessTextures;
     bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // ViewGlobals UBO: a per-view FrameGlobals block. Dynamic-uniform-buffer
-    // so a single descriptor binding can serve all views in a frame —
-    // each pass carries its own dynamic offset that the backend supplies
-    // to vkCmdBindDescriptorSets at bind time. Plain UPDATE_AFTER_BIND
-    // would race because GPU descriptor reads happen at draw-execute
-    // time, so multiple updates within one command buffer would collapse
-    // to last-writer-wins for all draws using the binding.
-    bindings[4].binding = 4;
-    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    bindings[4].descriptorCount = 1;
-    bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
-                             VK_SHADER_STAGE_FRAGMENT_BIT |
-                             VK_SHADER_STAGE_COMPUTE_BIT;
-
-    // UNIFORM_BUFFER_DYNAMIC (binding 4) is not allowed to use
-    // UPDATE_AFTER_BIND_BIT per the Vulkan spec; PARTIALLY_BOUND_BIT
-    // alone is sufficient and matches the per-frame "rebind buffer once,
-    // vary offset per pass" pattern.
-    VkDescriptorBindingFlags binding_flags[5] = {
+    VkDescriptorBindingFlags binding_flags[4] = {
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
@@ -709,19 +709,18 @@ bool VkBackend::create_bindless_descriptor()
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
     };
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flags_ci.bindingCount = 5;
+    flags_ci.bindingCount = 4;
     flags_ci.pBindingFlags = binding_flags;
 
     VkDescriptorSetLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layout_ci.pNext = &flags_ci;
     layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    layout_ci.bindingCount = 5;
+    layout_ci.bindingCount = 4;
     layout_ci.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &descriptor_layout_) != VK_SUCCESS) {
@@ -729,7 +728,7 @@ bool VkBackend::create_bindless_descriptor()
     }
 
     // Pool
-    VkDescriptorPoolSize pool_sizes[5]{};
+    VkDescriptorPoolSize pool_sizes[4]{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_sizes[0].descriptorCount = kMaxBindlessTextures;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -738,14 +737,12 @@ bool VkBackend::create_bindless_descriptor()
     pool_sizes[2].descriptorCount = kMaxBindlessTextures;
     pool_sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     pool_sizes[3].descriptorCount = kMaxBindlessTextures;
-    pool_sizes[4].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    pool_sizes[4].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_ci.maxSets = 1;
-    pool_ci.poolSizeCount = 5;
+    pool_ci.poolSizeCount = 4;
     pool_ci.pPoolSizes = pool_sizes;
 
     if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_) != VK_SUCCESS) {
@@ -2023,8 +2020,8 @@ void VkBackend::begin_pass(uint64_t target_id)
                                 0,
                                 1,
                                 &descriptor_set_,
-                                1,
-                                &view_globals_dynamic_offset_);
+                                0,
+                                nullptr);
         return;
     }
 
@@ -2105,8 +2102,8 @@ void VkBackend::begin_pass(uint64_t target_id)
                             0,
                             1,
                             &descriptor_set_,
-                            1,
-                            &view_globals_dynamic_offset_);
+                            0,
+                            nullptr);
 }
 
 void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
@@ -2141,10 +2138,14 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
         vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
 
         if (call.root_constants_size > 0) {
+            // Per-draw push lands at offset 8: bytes [0..8) are the
+            // per-pass FrameGlobals address pushed once at pass start
+            // by push_view_globals(). Per-draw bytes (typically the
+            // 8-byte DrawData address) follow at [8..).
             vkCmdPushConstants(sync.command_buffer,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,
-                               0,
+                               sizeof(uint64_t),
                                call.root_constants_size,
                                call.root_constants);
         }
@@ -2198,7 +2199,7 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
-                            1, &view_globals_dynamic_offset_);
+                            0, nullptr);
 
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
@@ -2214,10 +2215,11 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
         vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
 
         if (call.root_constants_size > 0) {
+            // Per-dispatch push lands at offset 8 (see submit() comment).
             vkCmdPushConstants(sync.command_buffer,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,
-                               0,
+                               sizeof(uint64_t),
                                call.root_constants_size,
                                call.root_constants);
         }
@@ -2595,39 +2597,12 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
         0, nullptr);
 }
 
-void VkBackend::bind_view_globals(GpuBuffer buffer, uint64_t offset, uint32_t range)
+void VkBackend::push_view_globals(uint64_t addr)
 {
-    if (buffer == 0 || range == 0) return;
-
-    // Buffer changes (typically once per frame as the staging slot
-    // rotates) require a fresh descriptor write; the per-view offset is
-    // supplied as a dynamic offset on every subsequent
-    // vkCmdBindDescriptorSets and does not need a descriptor update.
-    if (buffer != view_globals_buffer_ || range != view_globals_range_) {
-        auto it = buffers_.find(buffer);
-        if (it == buffers_.end()) return;
-
-        VkDescriptorBufferInfo buf_info{};
-        buf_info.buffer = it->second.buffer;
-        buf_info.offset = 0;
-        buf_info.range  = range;
-
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = descriptor_set_;
-        write.dstBinding = 4;
-        write.dstArrayElement = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        write.pBufferInfo = &buf_info;
-
-        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
-
-        view_globals_buffer_ = buffer;
-        view_globals_range_  = range;
-    }
-
-    view_globals_dynamic_offset_ = static_cast<uint32_t>(offset);
+    if (addr == 0) return;
+    auto& sync = frame_sync_[frame_sync_index_];
+    vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
+                       VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t), &addr);
 }
 
 void VkBackend::end_frame()
