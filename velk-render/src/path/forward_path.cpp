@@ -88,6 +88,35 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
 
 } // namespace
 
+ForwardPath::~ForwardPath()
+{
+    // Detach from every view we observed. The renderer's destruction
+    // order keeps IViewEntry::Ptrs alive past path destruction, so
+    // these calls are safe.
+    for (auto& [view, _] : cached_passes_) {
+        view->remove_render_state_observer(this);
+    }
+}
+
+void ForwardPath::on_render_state_changed(IRenderState* source,
+                                          RenderStateChange /*flags*/)
+{
+    auto* view = interface_cast<IViewEntry>(source);
+    if (!view) return;
+    auto it = cached_passes_.find(view);
+    if (it != cached_passes_.end()) {
+        it->second.dirty = true;
+    }
+}
+
+void ForwardPath::on_view_removed(IViewEntry& view, FrameContext& /*ctx*/)
+{
+    auto it = cached_passes_.find(&view);
+    if (it == cached_passes_.end()) return;
+    view.remove_render_state_observer(this);
+    cached_passes_.erase(it);
+}
+
 void ForwardPath::build_passes(IViewEntry& entry,
                                const RenderView& render_view,
                                IRenderTarget::Ptr color_target,
@@ -99,6 +128,30 @@ void ForwardPath::build_passes(IViewEntry& entry,
         return;
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
+
+    // Get-or-create + first-sight subscription. The pass is rebuilt
+    // only when `dirty` is set by `on_render_state_changed` (view's
+    // batch set changed); steady-state frames refresh only the
+    // per-frame `view_globals_address` on the cached pass.
+    auto [it, inserted] = cached_passes_.try_emplace(&entry);
+    auto& cache = it->second;
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
+    if (!cache.pass) {
+        cache.pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+        if (!cache.pass) return;
+        cache.dirty = true;
+    }
+
+    if (!cache.dirty) {
+        // Steady state: same Ptr, refresh only the per-frame view
+        // globals address (FrameGlobals lives in per-frame staging
+        // and rotates each frame).
+        cache.pass->set_view_globals_address(render_view.view_globals_address);
+        graph.add_pass(cache.pass);
+        return;
+    }
 
     const ::velk::render::Frustum* frustum_ptr =
         render_view.has_frustum ? &render_view.frustum : nullptr;
@@ -130,19 +183,19 @@ void ForwardPath::build_passes(IViewEntry& entry,
             default_uv1, resolve, frustum_ptr);
     }
 
-    auto pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-    if (!pass) return;
+    cache.pass->reset();
     uint64_t target_id = color_target
         ? color_target->get_gpu_handle(GpuResourceKey::Default)
         : 0;
-    pass->add_op(ops::BeginPass{target_id});
-    pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
-    pass->add_op(ops::EndPass{});
+    cache.pass->add_op(ops::BeginPass{target_id});
+    cache.pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
+    cache.pass->add_op(ops::EndPass{});
     if (color_target) {
-        pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
+        cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
-    pass->set_view_globals_address(render_view.view_globals_address);
-    graph.add_pass(std::move(pass));
+    cache.pass->set_view_globals_address(render_view.view_globals_address);
+    cache.dirty = false;
+    graph.add_pass(cache.pass);
 }
 
 } // namespace velk
