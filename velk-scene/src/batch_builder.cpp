@@ -388,18 +388,17 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     emit_visuals(main_after, VisualPhase::AfterChildren, out_batches);
 
     // Per-batch finalize: pack each batch's [args(32)][count(16)]
-    // [instance_data] blob into its own storage_blob_ and mark it
-    // dirty. The renderer's standard buffer-upload pipeline (run by
+    // [instance_data] blob into the composed storage IBuffer and mark
+    // it dirty. The renderer's standard buffer-upload pipeline (run by
     // ViewPreparer::prepare_batches) allocates the backing GpuBufferHandle
     // via ensure_buffer_storage and copies the blob.
     auto finalize_batches = [](vector<IBatch::Ptr>& batches) {
         for (auto& batch_ptr : batches) {
             auto* batch = static_cast<impl::DefaultBatch*>(batch_ptr.get());
             // Already-finalized batches (RTT batches dedup across views
-            // via find_or_make_pass) keep their existing blob; subsequent
-            // views skip re-finalizing.
-            if (batch->is_dirty()) continue;
-            if (batch->storage_buffer() != 0) continue;
+            // via find_or_make_pass; previously-uploaded batches retain
+            // their inner IBuffer) skip re-finalizing.
+            if (batch->storage_buffer() != nullptr) continue;
 
             // Sanity: stride * count must match instance_data exactly.
             // Inconsistency would land bogus indirect args on GPU.

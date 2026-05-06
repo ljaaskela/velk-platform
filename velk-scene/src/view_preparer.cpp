@@ -105,33 +105,34 @@ void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_sta
         }
     }
 
-    // Per-batch buffer upload: each batch owns its [args][count]
-    // [instance_data] blob and implements IBuffer. ensure_buffer_storage
-    // allocates / resizes the backing GpuBufferHandle; on a fresh allocation
-    // we map it, copy the blob, and stamp the (handle, mapped) pair on
-    // the batch so update_instance_at can write through later. Pre-
-    // existing-handle batches with is_dirty (e.g. structural rebuilds
-    // reusing the same hive slot) re-upload through their existing
-    // mapping. ensure_buffer_storage's deferred-destroy on size change
-    // handles the case where a batch's instance count grows.
+    // Per-batch buffer upload: each batch composes an IBuffer
+    // (impl::GpuBuffer) holding the [args][count][instance_data] blob.
+    // ensure_buffer_storage allocates / resizes the backing
+    // GpuBufferHandle on the inner IBuffer; on a fresh allocation we map
+    // it, copy the blob, and stamp the mapped pointer on the batch so
+    // update_instance_at can write through later. Inner buffers with
+    // is_dirty (e.g. structural rebuilds reusing the same hive slot)
+    // re-upload through their existing mapping. ensure_buffer_storage's
+    // deferred-destroy on size change handles instance-count growth.
     if (ctx.resources && ctx.backend) {
         auto upload = [&](vector<IBatch::Ptr>& batches) {
             for (auto& bp : batches) {
                 if (!bp) continue;
                 auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
-                if (!batch->is_dirty()) continue;
-                size_t blob_size = batch->get_data_size();
-                if (blob_size == 0) { batch->clear_dirty(); continue; }
+                IBuffer* sb = batch->storage_buffer();
+                if (!sb || !sb->is_dirty()) continue;
+                size_t blob_size = sb->get_data_size();
+                if (blob_size == 0) { sb->clear_dirty(); continue; }
                 GpuBufferDesc desc{};
                 desc.size = blob_size;
                 desc.cpu_writable = true;
-                auto* be = ctx.resources->ensure_buffer_storage(batch, desc);
+                auto* be = ctx.resources->ensure_buffer_storage(sb, desc);
                 if (!be || !be->handle) continue;
                 if (auto* dst = ctx.backend->map(be->handle)) {
-                    std::memcpy(dst, batch->get_data(), blob_size);
-                    batch->set_storage_mapping(be->handle, static_cast<uint8_t*>(dst));
+                    std::memcpy(dst, sb->get_data(), blob_size);
+                    batch->set_storage_mapping(static_cast<uint8_t*>(dst));
                 }
-                batch->clear_dirty();
+                sb->clear_dirty();
             }
         };
         upload(cache.batches);

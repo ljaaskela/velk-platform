@@ -34,6 +34,9 @@ inline constexpr Uid RtShadow{"a1b54a78-cb8c-4c26-9d4e-413648cb280f"};
 /** @brief Persistent IBuffer holding a program's per-draw data, cross-frame stable GPU address. */
 inline constexpr Uid ProgramDataBuffer{"5362a373-42bf-48b1-9537-1229f44d008d"};
 
+/** @brief Generic CPU-resident byte blob with a backend handle (composed by batches, etc). */
+inline constexpr Uid GpuBuffer{"fc36343d-5f1c-4cbf-8a9c-7ed736862525"};
+
 /** @brief Mesh container: an authored group of IMeshPrimitives plus aggregate bounds. */
 inline constexpr Uid Mesh{"d82485b9-7d93-4196-ae98-f22f6131f7c8"};
 

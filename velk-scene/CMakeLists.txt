@@ -36,6 +36,7 @@ add_library(velk_scene SHARED
     src/batch_builder.h
     src/batch_builder.cpp
     src/default_batch.h
+    src/default_batch.cpp
     src/pipeline_options_helpers.h
     src/env_helper.h
     src/env_helper.cpp

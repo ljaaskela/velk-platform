@@ -79,6 +79,7 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_window_surface.h
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h
+    include/velk-render/ext/gpu_buffer.h
     include/velk-render/interface/intf_gpu_resource.h
     include/velk-render/interface/intf_window_surface.h
     include/velk-render/interface/intf_image.h
@@ -110,6 +111,7 @@ add_library(velk_render SHARED
     src/frame/render_graph.h
     src/frame/render_graph.cpp
     include/velk-render/ext/default_render_pass.h
+    src/frame/default_render_pass.cpp
     src/frame/frame_data_manager.h
     src/frame/frame_data_manager.cpp
     src/frame/frame_snippet_registry.h

@@ -17,6 +17,7 @@
 #include "frame/frame_snippet_registry.h"
 #include "resource/gpu_resource_manager.h"
 #include "resource/program_data_buffer.h"
+#include <velk-render/ext/gpu_buffer.h>
 #include "render_context.h"
 #include "resource/render_texture.h"
 #include "technique/rt_shadow.h"
@@ -53,6 +54,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::MaterialOptions>(velk);
     rv &= register_type<impl::RtShadow>(velk);
     rv &= register_type<impl::ProgramDataBuffer>(velk);
+    rv &= register_type<impl::GpuBuffer>(velk);
     rv &= register_type<impl::Mesh>(velk);
     rv &= register_type<impl::MeshPrimitive>(velk);
     rv &= register_type<impl::MeshBuffer>(velk);

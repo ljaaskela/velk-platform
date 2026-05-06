@@ -137,15 +137,21 @@ inline void emit_draw_calls(
         // transform-only frames write through the mapped pointer in
         // place. Falls through to per-frame staging for batches without
         // a slice (e.g. env_batch, which lives outside the pool).
-        // Each batch owns its own GpuBufferHandle with the
+        // Each batch composes an IBuffer (impl::GpuBuffer) holding the
         // [args(32)][count(16)][instance_data] layout. emit reads
-        // args/count at offsets 0 and 32 of that buffer; the vertex
-        // shader BDA-reads instances at storage_gpu_address + 48.
-        // Batches that haven't been allocated a backing buffer yet
+        // args/count at offsets 0 and 32 of the resolved backend handle;
+        // the vertex shader BDA-reads instances at storage_gpu_address +
+        // 48. Batches that haven't been allocated a backing buffer yet
         // (env_batch, which lives outside the upload pipeline) fall
         // through to per-frame staging.
-        const GpuBufferHandle storage_buffer = batch.storage_buffer();
-        const bool has_storage = (storage_buffer != 0 && batch.storage_gpu_address() != 0);
+        IBuffer* storage_buf = batch.storage_buffer();
+        GpuBufferHandle storage_handle = 0;
+        if (storage_buf) {
+            if (auto* be = resources.find_buffer(storage_buf)) {
+                storage_handle = be->handle;
+            }
+        }
+        const bool has_storage = (storage_handle != 0 && batch.storage_gpu_address() != 0);
         uint64_t instances_addr = 0;
         if (has_storage) {
             instances_addr = batch.storage_gpu_address() + BatchBufferLayout::kInstanceOffset;
@@ -240,9 +246,9 @@ inline void emit_draw_calls(
         }
 
         if (has_storage) {
-            call.args_buffer        = storage_buffer;
+            call.args_buffer        = storage_handle;
             call.args_buffer_offset = BatchBufferLayout::kArgsOffset;
-            call.count_buffer        = storage_buffer;
+            call.count_buffer        = storage_handle;
             call.count_buffer_offset = BatchBufferLayout::kCountOffset;
         } else {
             // Frame-staging fallback (env_batch et al.).

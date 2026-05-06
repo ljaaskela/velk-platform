@@ -25,34 +25,15 @@ class DefaultRenderPass : public ext::ObjectCore<DefaultRenderPass, IRenderPass>
 public:
     VELK_CLASS_UID(ClassId::DefaultRenderPass, "DefaultRenderPass");
 
-    array_view<const GraphOp> ops() const override
-    {
-        return array_view<const GraphOp>(ops_.data(), ops_.size());
-    }
-    array_view<const IGpuResource::Ptr> reads() const override
-    {
-        return array_view<const IGpuResource::Ptr>(reads_.data(), reads_.size());
-    }
-    array_view<const IGpuResource::Ptr> writes() const override
-    {
-        return array_view<const IGpuResource::Ptr>(writes_.data(), writes_.size());
-    }
+    array_view<const GraphOp> ops() const override;
+    array_view<const IGpuResource::Ptr> reads() const override;
+    array_view<const IGpuResource::Ptr> writes() const override;
+    uint64_t view_globals_address() const override;
 
-    uint64_t view_globals_address() const override { return view_globals_address_; }
-
-    void add_op(GraphOp op) override { ops_.push_back(std::move(op)); }
-    void add_read(IGpuResource::Ptr resource) override
-    {
-        reads_.push_back(std::move(resource));
-    }
-    void add_write(IGpuResource::Ptr resource) override
-    {
-        writes_.push_back(std::move(resource));
-    }
-    void set_view_globals_address(uint64_t addr) override
-    {
-        view_globals_address_ = addr;
-    }
+    void add_op(GraphOp op) override;
+    void add_read(IGpuResource::Ptr resource) override;
+    void add_write(IGpuResource::Ptr resource) override;
+    void set_view_globals_address(uint64_t addr) override;
 
 private:
     vector<GraphOp> ops_;

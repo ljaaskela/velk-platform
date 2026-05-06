@@ -6,6 +6,7 @@
 #include <velk/interface/intf_interface.h>
 #include <velk/uid.h>
 
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -117,21 +118,23 @@ public:
     virtual void update_instance_at(uint32_t instance_index,
                                     array_view<const uint8_t> bytes) = 0;
 
-    /// @name Persistent per-batch storage — each batch owns its own
-    ///       backend buffer holding the `BatchBufferLayout` blob,
-    ///       allocated and uploaded by the renderer's standard buffer
-    ///       pipeline (`IGpuResourceManager::ensure_buffer_storage`).
-    ///       `emit_draw_calls` reads `storage_buffer()` for indirect
-    ///       args + count and dereferences
+    /// @name Persistent per-batch storage — each batch composes an
+    ///       `IBuffer` (an `impl::GpuBuffer` instance) holding the
+    ///       `BatchBufferLayout` blob, allocated and uploaded by the
+    ///       renderer's standard buffer pipeline
+    ///       (`IGpuResourceManager::ensure_buffer_storage`).
+    ///       `emit_draw_calls` resolves the backend handle via
+    ///       `IGpuResourceManager::find_buffer(storage_buffer())->handle`
+    ///       for indirect args + count, and dereferences
     ///       `storage_gpu_address() + kInstanceOffset` for instance
     ///       bytes (buffer-reference / device-address read).
     /// @{
-    /// @brief Backend buffer handle (`GpuBufferHandle` is the abstract handle
-    ///        type the backend resolves to its native buffer object).
-    virtual GpuBufferHandle storage_buffer() const = 0;
+    /// @brief Composed storage buffer. Lifetime is owned by the batch;
+    ///        consumers borrow the raw pointer.
+    virtual IBuffer* storage_buffer() const = 0;
 
     /// @brief GPU virtual address of the start of the storage blob.
-    virtual uint64_t  storage_gpu_address() const = 0;
+    virtual uint64_t storage_gpu_address() const = 0;
     /// @}
 };
 
