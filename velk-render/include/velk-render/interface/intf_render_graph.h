@@ -9,6 +9,7 @@
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/interface/intf_render_state.h>
 
 namespace velk {
 
@@ -34,7 +35,7 @@ namespace velk {
  * merging (Tier 3), pass-Ptr caching (see design-notes/persistent_passes.md).
  */
 class IRenderGraph
-    : public Interface<IRenderGraph, IInterface,
+    : public Interface<IRenderGraph, IRenderState,
                        VELK_UID("cd1a3708-c96f-4b81-8ed3-b68ce11d133e")>
 {
 public:

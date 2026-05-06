@@ -13,7 +13,7 @@
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -32,8 +32,8 @@ namespace velk {
  * path so trivial UI samples don't have to opt in explicitly.
  *
  * Per-view state: implementations typically keep an
- * `unordered_map<ViewEntry*, ViewState>` keyed by the stable
- * `ViewEntry*`. The renderer calls `on_view_removed` so paths can
+ * `unordered_map<IViewEntry*, ViewState>` keyed by the stable
+ * `IViewEntry*`. The renderer calls `on_view_removed` so paths can
  * release per-view GPU resources, and `shutdown` so paths can release
  * everything during renderer teardown.
  */
@@ -82,7 +82,7 @@ public:
      * resource flow and inserts barriers; paths don't need to think
      * about ordering with other paths or with RTT subtree passes.
      */
-    virtual void build_passes(ViewEntry& view,
+    virtual void build_passes(IViewEntry& view,
                               const RenderView& render_view,
                               IRenderTarget::Ptr color_target,
                               FrameContext& ctx,
@@ -106,7 +106,7 @@ public:
      * provided by `ext::RenderPath`.
      */
     virtual IGpuResource::Ptr find_named_output(string_view name,
-                                                ViewEntry* view) const = 0;
+                                                IViewEntry* view) const = 0;
 };
 
 } // namespace velk

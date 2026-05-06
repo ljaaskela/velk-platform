@@ -14,7 +14,7 @@
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/interface/intf_view_pipeline.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 #include <velk-render/detail/intf_gpu_resource_manager_internal.h>
 #include <velk-render/detail/intf_render_graph_internal.h>
 #include <velk-render/detail/intf_renderer_internal.h>
@@ -87,13 +87,13 @@ private:
 
     FrameSlot* claim_frame_slot();
     /// Scene-side per-view bookkeeping. `entry` is the velk-render-pure
-    /// ViewEntry handed to paths; `camera_element` is the IElement
+    /// IViewEntry handed to paths; `camera_element` is the IElement
     /// the entry was registered against (used by Renderer + ViewPreparer
     /// for camera/env lookups, never by paths).
     struct ViewSlot
     {
         IElement::Ptr camera_element;
-        ViewEntry entry;
+        IViewEntry::Ptr entry;
     };
 
     std::unordered_map<IScene*, SceneState> consume_scenes(const FrameDesc& desc);

@@ -128,7 +128,8 @@ add_library(velk_render SHARED
     # (render_path/) + ext:: CRTP helpers (ext/); concrete impls in src/path/
     include/velk-render/interface/intf_render_path.h
     include/velk-render/interface/intf_view_pipeline.h
-    include/velk-render/render_path/view_entry.h
+    include/velk-render/interface/intf_view_entry.h
+    src/render_path/view_entry.h
     include/velk-render/render_path/frame_context.h
     include/velk-render/ext/render_path.h
     include/velk-render/ext/view_pipeline.h

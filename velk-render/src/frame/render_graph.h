@@ -1,11 +1,10 @@
 #ifndef VELK_RENDER_RENDER_GRAPH_H
 #define VELK_RENDER_RENDER_GRAPH_H
 
-#include <velk/ext/core_object.h>
-
 #include <unordered_map>
 
 #include <velk-render/detail/intf_render_graph_internal.h>
+#include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_graph.h>
 #include <velk-render/plugin.h>
@@ -22,7 +21,7 @@ namespace velk::impl {
  * to a backend method via std::visit.
  */
 class RenderGraph final
-    : public ::velk::ext::ObjectCore<RenderGraph, ::velk::IRenderGraphInternal>
+    : public ::velk::ext::RenderState<RenderGraph, ::velk::IRenderGraphInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::RenderGraph, "RenderGraph");

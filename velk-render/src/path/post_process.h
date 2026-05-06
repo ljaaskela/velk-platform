@@ -21,7 +21,7 @@ namespace velk::impl {
  * effects; the container runs them sequentially, last child writing
  * directly to the container's `output`.
  *
- * Per-view state (intermediates) keyed off `ViewEntry*`, so one
+ * Per-view state (intermediates) keyed off `IViewEntry*`, so one
  * container Ptr can be attached to multiple pipelines / cameras and
  * serve all of them safely. `on_view_removed` releases just that
  * view's slot; `shutdown` clears everything.
@@ -39,13 +39,13 @@ class PostProcess final
 public:
     VELK_CLASS_UID(::velk::ClassId::Post::PostProcess, "PostProcess");
 
-    void emit(::velk::ViewEntry& view,
+    void emit(::velk::IViewEntry& view,
               ::velk::IRenderTarget::Ptr input,
               ::velk::IRenderTarget::Ptr output,
               ::velk::FrameContext& ctx,
               ::velk::IRenderGraph& graph) override;
 
-    void on_view_removed(::velk::ViewEntry& view, ::velk::FrameContext& ctx) override;
+    void on_view_removed(::velk::IViewEntry& view, ::velk::FrameContext& ctx) override;
     void shutdown(::velk::FrameContext& ctx) override;
 
 private:
@@ -57,9 +57,9 @@ private:
         ::velk::vector<::velk::IRenderTarget::Ptr> intermediates;
     };
 
-    std::unordered_map<::velk::ViewEntry*, ViewState> view_states_;
+    std::unordered_map<::velk::IViewEntry*, ViewState> view_states_;
 
-    ::velk::IRenderTarget::Ptr ensure_intermediate(::velk::ViewEntry& view,
+    ::velk::IRenderTarget::Ptr ensure_intermediate(::velk::IViewEntry& view,
                                                    size_t index,
                                                    int width, int height,
                                                    ::velk::FrameContext& ctx,

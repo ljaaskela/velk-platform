@@ -13,7 +13,7 @@
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_render_texture_group.h>
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -51,13 +51,13 @@ public:
         return n;
     }
 
-    void build_passes(ViewEntry& view,
+    void build_passes(IViewEntry& view,
                       const RenderView& render_view,
                       IRenderTarget::Ptr color_target,
                       FrameContext& ctx,
                       IRenderGraph& graph) override;
 
-    void on_view_removed(ViewEntry& view, FrameContext& ctx) override;
+    void on_view_removed(IViewEntry& view, FrameContext& ctx) override;
     void shutdown(FrameContext& ctx) override;
 
     /// Exposes per-view "gbuffer" (the IRenderTextureGroup),
@@ -65,7 +65,7 @@ public:
     /// attachment), "shadow.debug", and "output" outputs for debug
     /// overlays / readback. See `IRenderPath::find_named_output`.
     IGpuResource::Ptr find_named_output(string_view name,
-                                        ViewEntry* view) const override;
+                                        IViewEntry* view) const override;
 
 public:
     struct ViewState
@@ -86,7 +86,7 @@ public:
     };
 
 private:
-    std::unordered_map<ViewEntry*, ViewState> view_states_;
+    std::unordered_map<IViewEntry*, ViewState> view_states_;
 
     /// Compiled compute pipelines keyed by FNV hash of active intersect
     /// id set; each variant compiles once, kept across frames.
@@ -97,11 +97,11 @@ private:
     RenderTargetGroup ensure_gbuffer(ViewState& vs, int width, int height,
                                      FrameContext& ctx, IRenderGraph& graph);
 
-    void emit_gbuffer_pass(ViewEntry& view, ViewState& vs,
+    void emit_gbuffer_pass(IViewEntry& view, ViewState& vs,
                            const RenderView& render_view, FrameContext& ctx,
                            IRenderGraph& graph);
 
-    void emit_lighting_pass(ViewEntry& view, ViewState& vs,
+    void emit_lighting_pass(IViewEntry& view, ViewState& vs,
                             const RenderView& render_view,
                             IRenderTarget::Ptr color_target,
                             FrameContext& ctx,

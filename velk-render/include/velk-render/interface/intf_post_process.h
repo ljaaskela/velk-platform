@@ -7,7 +7,7 @@
 #include <velk-render/interface/intf_render_stage.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -21,7 +21,7 @@ namespace velk {
  * needed for ping-pong between effects.
  *
  * One IPostProcess Ptr can be attached to multiple `IViewPipeline`s;
- * per-view state keyed off `ViewEntry*` via the inherited
+ * per-view state keyed off `IViewEntry*` via the inherited
  * `IRenderStage` lifecycle hooks. A user can build a complex effect
  * setup once and apply it to every camera.
  *
@@ -50,7 +50,7 @@ public:
      * @param graph   The frame's render graph; passes are appended via
      *                `graph.add_pass(...)`.
      */
-    virtual void emit(ViewEntry& view,
+    virtual void emit(IViewEntry& view,
                       IRenderTarget::Ptr input,
                       IRenderTarget::Ptr output,
                       FrameContext& ctx,

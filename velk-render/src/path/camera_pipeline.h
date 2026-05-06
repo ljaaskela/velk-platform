@@ -37,13 +37,13 @@ public:
 
     ::velk::IRenderPath::Needs needs(const ::velk::FrameContext& ctx) const override;
 
-    void emit(::velk::ViewEntry& view,
+    void emit(::velk::IViewEntry& view,
               const ::velk::RenderView& render_view,
               ::velk::IRenderTarget::Ptr color_target,
               ::velk::FrameContext& ctx,
               ::velk::IRenderGraph& graph) override;
 
-    void on_view_removed(::velk::ViewEntry& view, ::velk::FrameContext& ctx) override;
+    void on_view_removed(::velk::IViewEntry& view, ::velk::FrameContext& ctx) override;
     void shutdown(::velk::FrameContext& ctx) override;
 
 private:
@@ -72,7 +72,7 @@ private:
         ::velk::IRenderTarget::Ptr path_output;
         ::velk::IRenderTarget::Ptr post_output;
     };
-    std::unordered_map<::velk::ViewEntry*, ViewState> view_states_;
+    std::unordered_map<::velk::IViewEntry*, ViewState> view_states_;
 
     ::velk::IRenderTarget::Ptr ensure_storage_target(
         ::velk::IRenderTarget::Ptr& slot,

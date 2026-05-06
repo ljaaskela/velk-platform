@@ -23,12 +23,12 @@ class RenderPath
 public:
     ::velk::IRenderPath::Needs needs() const override { return {}; }
 
-    void on_view_removed(::velk::ViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}
+    void on_view_removed(::velk::IViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}
 
     void shutdown(::velk::FrameContext& /*ctx*/) override {}
 
     ::velk::IGpuResource::Ptr find_named_output(::velk::string_view /*name*/,
-                                                ::velk::ViewEntry* /*view*/) const override
+                                                ::velk::IViewEntry* /*view*/) const override
     {
         return {};
     }

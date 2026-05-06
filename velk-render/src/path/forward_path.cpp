@@ -88,7 +88,7 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
 
 } // namespace
 
-void ForwardPath::build_passes(ViewEntry& entry,
+void ForwardPath::build_passes(IViewEntry& entry,
                                const RenderView& render_view,
                                IRenderTarget::Ptr color_target,
                                FrameContext& ctx,

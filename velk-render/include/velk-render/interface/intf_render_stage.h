@@ -5,7 +5,7 @@
 #include <velk/uid.h>
 
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -15,7 +15,7 @@ namespace velk {
  *
  * Stages are objects a view pipeline composes to produce GPU work for
  * one view. They typically maintain per-view state keyed off
- * `ViewEntry*` (caches, intermediate textures) and need lifecycle
+ * `IViewEntry*` (caches, intermediate textures) and need lifecycle
  * notifications when a view goes away or the renderer shuts down.
  *
  * The shared surface is just lifecycle. The actual production method
@@ -36,7 +36,7 @@ class IRenderStage
 {
 public:
     /** @brief Hook called when a view is removed. Release per-view state. */
-    virtual void on_view_removed(ViewEntry& view, FrameContext& ctx) = 0;
+    virtual void on_view_removed(IViewEntry& view, FrameContext& ctx) = 0;
 
     /** @brief Hook called on Renderer shutdown. Release all remaining state. */
     virtual void shutdown(FrameContext& ctx) = 0;

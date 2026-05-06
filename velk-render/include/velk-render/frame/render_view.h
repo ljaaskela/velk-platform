@@ -32,7 +32,7 @@ struct ViewEnv
  * `RenderView` is the path-facing input: everything a render path needs
  * to emit GPU passes for this view, with no further reach-back into
  * `IScene` / `IElement`. The scene-side `ViewPreparer` materializes it
- * from a `ViewEntry` + scene state once per view per frame.
+ * from a `IViewEntry` + scene state once per view per frame.
  *
  * Filled eagerly: every applicable field is populated regardless of
  * which path is going to consume it. Per-path declared `needs()` is a

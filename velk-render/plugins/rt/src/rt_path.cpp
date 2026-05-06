@@ -61,7 +61,7 @@ uint64_t RtPath::ensure_pipeline(FrameContext& ctx)
     return key;
 }
 
-void RtPath::build_passes(ViewEntry& entry,
+void RtPath::build_passes(IViewEntry& entry,
                              const RenderView& render_view,
                              IRenderTarget::Ptr color_target,
                              FrameContext& ctx,
@@ -245,7 +245,7 @@ void RtPath::build_passes(ViewEntry& entry,
     graph.add_pass(std::move(gp));
 }
 
-void RtPath::on_view_removed(ViewEntry& entry, FrameContext& /*ctx*/)
+void RtPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
 {
     // Erase the view state; vs.rt_output's Ptr drops, resource
     // manager auto-defers the backend handle.

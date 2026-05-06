@@ -14,12 +14,12 @@
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-scene/interface/intf_element.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
 /**
- * @brief Walks a `ViewEntry` + scene state and produces a flat `RenderView`.
+ * @brief Walks a `IViewEntry` + scene state and produces a flat `RenderView`.
  *
  * Centralises everything a path used to do for itself before emitting
  * GPU passes:
@@ -34,7 +34,7 @@ namespace velk {
  *
  * RT shape collection still lives on `RtPath` for now; migrates in 3.3.
  *
- * Lifetime: the per-view batch cache is keyed by `ViewEntry*`.
+ * Lifetime: the per-view batch cache is keyed by `IViewEntry*`.
  * `on_view_removed` releases it; `clear()` releases all (called on
  * Renderer shutdown).
  */
@@ -46,7 +46,7 @@ public:
     /// camera + env resolution but not exposed to paths). @p needs
     /// declares which optional collections (batches, shapes, lights)
     /// the active path will consume.
-    RenderView prepare(ViewEntry& entry,
+    RenderView prepare(IViewEntry& entry,
                        const IElement::Ptr& camera_element,
                        const SceneState& scene_state,
                        FrameContext& ctx,
@@ -56,7 +56,7 @@ public:
     /// Releases the per-view batch cache for @p entry. Each batch
     /// owns its own GpuBufferHandle; dropping the cache's IBatch::Ptrs
     /// cascades to the resource manager's deferred-destroy queue.
-    void on_view_removed(ViewEntry& entry);
+    void on_view_removed(IViewEntry& entry);
 
     /// Releases all per-view caches. Called on Renderer shutdown.
     void clear();
@@ -98,7 +98,7 @@ private:
         IBatch::Ptr env_batch;
         const void* env_material_key = nullptr;
     };
-    std::unordered_map<ViewEntry*, ViewCache> view_caches_;
+    std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
     /// Try the transform-only fast path for @p entry. Returns true if
     /// @p scene_state's flags + dirty list permit incremental update
@@ -108,21 +108,21 @@ private:
     /// through each batch's mapped pointer directly into the same
     /// host-coherent memory the GPU reads — fast path is valid for
     /// transform-only churn because each batch owns its own buffer.
-    bool try_update_transforms(ViewEntry& entry,
+    bool try_update_transforms(IViewEntry& entry,
                                const SceneState& scene_state);
 
     /// Rebuilds the per-view raster batch cache when @p entry.batches_dirty
     /// is set, uploads any dirty batches' instance buffers via the
     /// resource manager (giving each batch a stable GPU address), then
     /// points @p rv at the cache.
-    void prepare_batches(ViewEntry& entry, const SceneState& scene_state,
+    void prepare_batches(IViewEntry& entry, const SceneState& scene_state,
                          BatchBuilder& batch_builder, FrameContext& ctx,
                          RenderView& rv);
 
     /// Resolves the camera (or ortho fallback) into view-projection /
     /// inverse-VP / cam_pos / frustum on @p rv, using @p entry's
     /// surface size and viewport rect.
-    void prepare_camera(ViewEntry& entry, const IElement::Ptr& camera_element,
+    void prepare_camera(IViewEntry& entry, const IElement::Ptr& camera_element,
                         FrameContext& ctx, RenderView& rv);
 
     /// Writes the per-view FrameGlobals block to @p ctx.frame_buffer
@@ -142,7 +142,7 @@ private:
     /// Resolves the camera's environment (texture + material) into @p rv.env.
     /// Also stamps @p rv.env_batch from the per-view cache, rebuilding
     /// only when the env material changes.
-    void prepare_env(ViewEntry& entry,
+    void prepare_env(IViewEntry& entry,
                      const IElement::Ptr& camera_element,
                      FrameContext& ctx, RenderView& rv);
 };

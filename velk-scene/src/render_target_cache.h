@@ -4,7 +4,7 @@
 #include <velk-render/interface/intf_render_graph.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 #include <unordered_map>
 #include <velk-render/interface/intf_render_target.h>
@@ -75,10 +75,11 @@ private:
 
     std::unordered_map<IElement*, Entry> entries_;
 
-    /// Per-RTT scratch ViewEntry. Keyed by element pointer so paths
-    /// that key per-view state by `ViewEntry*` keep their state stable
-    /// across frames for the same RTT element.
-    std::unordered_map<IElement*, ViewEntry> view_entries_;
+    /// Per-RTT scratch IViewEntry. Keyed by element pointer so paths
+    /// that key per-view state by `IViewEntry*` keep their state stable
+    /// across frames for the same RTT element. Lazy-created on first
+    /// emit per element; hive-pooled.
+    std::unordered_map<IElement*, IViewEntry::Ptr> view_entries_;
 
     /// Lazy-instantiated ForwardPath used to render RTT subtrees.
     /// Holding the path here keeps every line of forward composition

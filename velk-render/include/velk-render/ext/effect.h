@@ -20,7 +20,7 @@ class Effect
     : public ObjectCore<FinalClass, ::velk::IEffect, ExtraInterfaces...>
 {
 public:
-    void on_view_removed(::velk::ViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}
+    void on_view_removed(::velk::IViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}
 
     void shutdown(::velk::FrameContext& /*ctx*/) override {}
 };

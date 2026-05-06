@@ -64,6 +64,9 @@ inline constexpr Uid RenderGraph{"cdeab6d1-97dc-480a-ae53-4eb0bc184baf"};
 /** @brief Default `IRenderPass` implementation. Hive-pooled per-frame pass produced by render-path pipelines. */
 inline constexpr Uid DefaultRenderPass{"ffc6e6c3-639a-461e-ad5c-7bc4ed902edf"};
 
+/** @brief Per-view observable carrier. Hive-pooled, implements `IRenderState`. */
+inline constexpr Uid ViewEntry{"65216ad5-c7f5-4c1a-88c2-e3545c128934"};
+
 namespace Path {
 
 /** @brief Forward shading: classic raster pass over scene batches. Default fallback. */

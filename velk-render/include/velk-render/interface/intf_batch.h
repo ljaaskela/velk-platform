@@ -10,6 +10,7 @@
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_state.h>
 #include <velk-render/interface/intf_shader_source.h>
 
 #include <cstdint>
@@ -64,7 +65,7 @@ struct BatchBufferLayout
  * time.
  */
 class IBatch
-    : public Interface<IBatch, IInterface,
+    : public Interface<IBatch, IRenderState,
                        VELK_UID("a8a39f1c-b3e5-4e5a-9d0e-c9c2dad6a2ef")>
 {
 public:

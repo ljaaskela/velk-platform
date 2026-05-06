@@ -7,7 +7,7 @@
 #include <velk-render/interface/intf_render_stage.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/render_path/frame_context.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -28,7 +28,7 @@ namespace velk {
  * pipelines, compute-only views.
  *
  * Sharing: an effect Ptr can be attached to multiple `IPostProcess`
- * containers. Per-view state (if any) keyed off `ViewEntry*` via the
+ * containers. Per-view state (if any) keyed off `IViewEntry*` via the
  * inherited `IRenderStage` lifecycle hooks.
  *
  * Chain: IInterface -> IRenderStage -> IEffect
@@ -49,7 +49,7 @@ public:
      * @param ctx     Shared per-frame context.
      * @param graph   Frame's render graph.
      */
-    virtual void emit(ViewEntry& view,
+    virtual void emit(IViewEntry& view,
                       IRenderTarget::Ptr input,
                       IRenderTarget::Ptr output,
                       FrameContext& ctx,

@@ -44,7 +44,7 @@ public:
  *   camera.add_post_process(post);
  *
  * One `PostProcess` Ptr can attach to multiple cameras / pipelines;
- * per-view state (intermediates) keys off `ViewEntry*` so views
+ * per-view state (intermediates) keys off `IViewEntry*` so views
  * stay isolated.
  */
 class PostProcess : public Object

@@ -152,11 +152,13 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_view.bvh_nodes_addr = ctx.bvh_nodes_addr;
         rt_view.bvh_shapes_addr = ctx.bvh_shapes_addr;
 
-        auto& entry = view_entries_[rtp.element];
-        entry.cached_width = rte.width;
-        entry.cached_height = rte.height;
+        auto& entry_ptr = view_entries_[rtp.element];
+        if (!entry_ptr) {
+            entry_ptr = ::velk::instance().create<IViewEntry>(ClassId::ViewEntry);
+        }
+        entry_ptr->set_cached_size(rte.width, rte.height);
 
-        forward_path_->build_passes(entry, rt_view, target, ctx, graph);
+        forward_path_->build_passes(*entry_ptr, rt_view, target, ctx, graph);
         rte.dirty = false;
     }
 

@@ -74,7 +74,7 @@ void CameraPipeline::release_view_state(ViewState& /*vs*/, ::velk::FrameContext&
     // resource manager observer chain.
 }
 
-void CameraPipeline::emit(::velk::ViewEntry& view,
+void CameraPipeline::emit(::velk::IViewEntry& view,
                           const ::velk::RenderView& render_view,
                           ::velk::IRenderTarget::Ptr color_target,
                           ::velk::FrameContext& ctx,
@@ -159,7 +159,7 @@ void CameraPipeline::emit(::velk::ViewEntry& view,
     ctx.target_format = saved_format;
 }
 
-void CameraPipeline::on_view_removed(::velk::ViewEntry& view, ::velk::FrameContext& ctx)
+void CameraPipeline::on_view_removed(::velk::IViewEntry& view, ::velk::FrameContext& ctx)
 {
     if (auto* path = resolve_path(ctx)) {
         path->on_view_removed(view, ctx);

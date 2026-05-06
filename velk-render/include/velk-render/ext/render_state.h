@@ -36,7 +36,7 @@ namespace velk::ext {
  */
 template <class FinalClass, class... Interfaces>
 class RenderState
-    : public ::velk::ext::ObjectCore<FinalClass, IRenderState, Interfaces...>
+    : public ::velk::ext::ObjectCore<FinalClass, Interfaces...>
 {
 public:
     void add_render_state_observer(IRenderStateObserver* obs) override

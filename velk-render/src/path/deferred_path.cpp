@@ -240,7 +240,7 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
     return group;
 }
 
-void DeferredPath::build_passes(ViewEntry& entry,
+void DeferredPath::build_passes(IViewEntry& entry,
                                 const RenderView& render_view,
                                 IRenderTarget::Ptr color_target,
                                 FrameContext& ctx,
@@ -263,7 +263,7 @@ void DeferredPath::build_passes(ViewEntry& entry,
                        vs.gbuffer_width, vs.gbuffer_height, graph);
 }
 
-void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
+void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                                      const RenderView& render_view, FrameContext& ctx,
                                      IRenderGraph& graph)
 {
@@ -299,7 +299,7 @@ void DeferredPath::emit_gbuffer_pass(ViewEntry& /*entry*/, ViewState& vs,
     graph.add_pass(std::move(gp));
 }
 
-void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
+void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       const RenderView& render_view,
                                       IRenderTarget::Ptr color_target,
                                       FrameContext& ctx,
@@ -411,7 +411,7 @@ void DeferredPath::emit_lighting_pass(ViewEntry& /*entry*/, ViewState& vs,
     graph.add_pass(std::move(gp));
 }
 
-void DeferredPath::on_view_removed(ViewEntry& entry, FrameContext& /*ctx*/)
+void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
 {
     // Erase the view state; gbuffer / deferred_output / shadow_debug
     // Ptrs drop, resource manager auto-defers the backend handles.
@@ -424,7 +424,7 @@ void DeferredPath::shutdown(FrameContext& /*ctx*/)
     compiled_pipelines_.clear();
 }
 
-IGpuResource::Ptr DeferredPath::find_named_output(string_view name, ViewEntry* view) const
+IGpuResource::Ptr DeferredPath::find_named_output(string_view name, IViewEntry* view) const
 {
     auto it = view_states_.find(view);
     if (it == view_states_.end()) return {};

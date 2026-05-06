@@ -10,7 +10,7 @@
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -62,14 +62,14 @@ public:
      *                     `graph.add_pass(...)`; the graph orders execution
      *                     and inserts barriers.
      */
-    virtual void emit(ViewEntry& view,
+    virtual void emit(IViewEntry& view,
                       const RenderView& render_view,
                       IRenderTarget::Ptr color_target,
                       FrameContext& ctx,
                       IRenderGraph& graph) = 0;
 
     /** @brief Hook called when a view is removed. Release per-view state. */
-    virtual void on_view_removed(ViewEntry& view, FrameContext& ctx) = 0;
+    virtual void on_view_removed(IViewEntry& view, FrameContext& ctx) = 0;
 
     /** @brief Hook called on Renderer shutdown. Release all remaining state. */
     virtual void shutdown(FrameContext& ctx) = 0;

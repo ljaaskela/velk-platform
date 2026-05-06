@@ -44,7 +44,7 @@ void build_ortho_projection(float* out, float width, float height)
 
 } // namespace
 
-bool ViewPreparer::try_update_transforms(ViewEntry& entry,
+bool ViewPreparer::try_update_transforms(IViewEntry& entry,
                                          const SceneState& scene_state)
 {
     auto cache_it = view_caches_.find(&entry);
@@ -88,20 +88,21 @@ bool ViewPreparer::try_update_transforms(ViewEntry& entry,
     return true;
 }
 
-void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_state,
+void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_state,
                                    BatchBuilder& batch_builder, FrameContext& ctx,
                                    RenderView& rv)
 {
     auto& cache = view_caches_[&entry];
-    if (entry.batches_dirty) {
+    if (entry.batches_dirty()) {
         if (try_update_transforms(entry, scene_state)) {
             ++diag_fast_path_count;
-            entry.batches_dirty = false;
+            entry.set_batches_dirty(false);
         } else {
             ++diag_rebuild_count;
             batch_builder.rebuild_batches(scene_state, cache.batches,
                                           cache.element_slots, cache.rtt_roots);
-            entry.batches_dirty = false;
+            entry.set_batches_dirty(false);
+            entry.notify_batches_changed();
         }
     }
 
@@ -143,17 +144,18 @@ void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_sta
     rv.batches = &cache.batches;
 }
 
-void ViewPreparer::prepare_camera(ViewEntry& entry, const IElement::Ptr& camera_element,
+void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera_element,
                                   FrameContext& /*ctx*/, RenderView& rv)
 {
-    auto sstate = read_state<IWindowSurface>(entry.surface);
+    auto sstate = read_state<IWindowSurface>(entry.surface());
     float sw = static_cast<float>(sstate ? sstate->size.x : 0);
     float sh = static_cast<float>(sstate ? sstate->size.y : 0);
-    bool has_viewport = entry.viewport.width > 0 && entry.viewport.height > 0;
-    float vp_x = has_viewport ? entry.viewport.x * sw : 0.f;
-    float vp_y = has_viewport ? entry.viewport.y * sh : 0.f;
-    float vp_w = has_viewport ? entry.viewport.width * sw : sw;
-    float vp_h = has_viewport ? entry.viewport.height * sh : sh;
+    rect vp = entry.viewport();
+    bool has_viewport = vp.width > 0 && vp.height > 0;
+    float vp_x = has_viewport ? vp.x * sw : 0.f;
+    float vp_y = has_viewport ? vp.y * sh : 0.f;
+    float vp_w = has_viewport ? vp.width * sw : sw;
+    float vp_h = has_viewport ? vp.height * sh : sh;
     rv.viewport = {vp_x, vp_y, vp_w, vp_h};
     rv.width = static_cast<int>(vp_w);
     rv.height = static_cast<int>(vp_h);
@@ -272,7 +274,7 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
         }, &sc);
 }
 
-void ViewPreparer::prepare_env(ViewEntry& entry,
+void ViewPreparer::prepare_env(IViewEntry& entry,
                                const IElement::Ptr& camera_element,
                                FrameContext& ctx, RenderView& rv)
 {
@@ -365,7 +367,7 @@ void ViewPreparer::prepare_env(ViewEntry& entry,
     }
 }
 
-RenderView ViewPreparer::prepare(ViewEntry& entry,
+RenderView ViewPreparer::prepare(IViewEntry& entry,
                                  const IElement::Ptr& camera_element,
                                  const SceneState& scene_state,
                                  FrameContext& ctx,
@@ -395,7 +397,7 @@ RenderView ViewPreparer::prepare(ViewEntry& entry,
     return rv;
 }
 
-void ViewPreparer::on_view_removed(ViewEntry& entry)
+void ViewPreparer::on_view_removed(IViewEntry& entry)
 {
     view_caches_.erase(&entry);
 }

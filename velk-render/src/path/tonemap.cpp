@@ -80,7 +80,7 @@ uint64_t Tonemap::ensure_pipeline(::velk::FrameContext& ctx)
     return kTonemapPipelineKey;
 }
 
-void Tonemap::emit(::velk::ViewEntry& /*view*/,
+void Tonemap::emit(::velk::IViewEntry& /*view*/,
                    ::velk::IRenderTarget::Ptr input,
                    ::velk::IRenderTarget::Ptr output,
                    ::velk::FrameContext& ctx,

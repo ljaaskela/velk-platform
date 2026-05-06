@@ -1,9 +1,9 @@
 #ifndef VELK_SCENE_DEFAULT_BATCH_H
 #define VELK_SCENE_DEFAULT_BATCH_H
 
-#include <velk/ext/core_object.h>
 #include <velk/vector.h>
 
+#include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-scene/plugin.h>
@@ -31,7 +31,7 @@ namespace velk::impl {
  * by the upload pass) directly into the same backing memory, so
  * transform-only updates don't need a re-upload.
  */
-class DefaultBatch : public ext::ObjectCore<DefaultBatch, IBatch>
+class DefaultBatch : public ::velk::ext::RenderState<DefaultBatch, IBatch>
 {
 public:
     VELK_CLASS_UID(ClassId::DefaultBatch, "DefaultBatch");

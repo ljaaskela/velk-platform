@@ -26,6 +26,8 @@
 #include "material/standard_material.h"
 #include "resource/surface.h"
 
+#include "render_path/view_entry.h"
+
 #include <velk/ext/any.h>
 #include <velk-render/render_types.h>
 
@@ -55,6 +57,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::RtShadow>(velk);
     rv &= register_type<impl::ProgramDataBuffer>(velk);
     rv &= register_type<impl::GpuBuffer>(velk);
+    rv &= register_type<impl::ViewEntry>(velk);
     rv &= register_type<impl::Mesh>(velk);
     rv &= register_type<impl::MeshPrimitive>(velk);
     rv &= register_type<impl::MeshBuffer>(velk);

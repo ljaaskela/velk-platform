@@ -11,7 +11,7 @@
 #include <velk-render/ext/render_path.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
-#include <velk-render/render_path/view_entry.h>
+#include <velk-render/interface/intf_view_entry.h>
 
 namespace velk {
 
@@ -36,7 +36,7 @@ public:
         return n;
     }
 
-    void build_passes(ViewEntry& view,
+    void build_passes(IViewEntry& view,
                       const RenderView& render_view,
                       IRenderTarget::Ptr color_target,
                       FrameContext& ctx,

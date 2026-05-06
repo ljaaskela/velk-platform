@@ -1,9 +1,9 @@
 #ifndef VELK_RENDER_EXT_DEFAULT_RENDER_PASS_H
 #define VELK_RENDER_EXT_DEFAULT_RENDER_PASS_H
 
-#include <velk/ext/core_object.h>
 #include <velk/vector.h>
 
+#include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/plugin.h>
 
@@ -20,7 +20,7 @@ namespace velk::impl {
  * concrete type so plugins outside velk-render can build passes through
  * the interface alone.
  */
-class DefaultRenderPass : public ext::ObjectCore<DefaultRenderPass, IRenderPass>
+class DefaultRenderPass : public ::velk::ext::RenderState<DefaultRenderPass, IRenderPass>
 {
 public:
     VELK_CLASS_UID(ClassId::DefaultRenderPass, "DefaultRenderPass");

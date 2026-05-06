@@ -218,23 +218,26 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurfac
             }
         }
     }
-    views_.push_back(ViewSlot{camera_element, ViewEntry{surface, viewport}});
+    auto entry = ::velk::instance().create<IViewEntry>(ClassId::ViewEntry);
+    entry->set_surface(surface);
+    entry->set_viewport(viewport);
+    views_.push_back(ViewSlot{camera_element, std::move(entry)});
 }
 
 void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface)
 {
     for (auto it = views_.begin(); it != views_.end(); ++it) {
-        if (it->camera_element == camera_element && it->entry.surface == surface) {
+        if (it->camera_element == camera_element && it->entry->surface() == surface) {
             if (backend_) {
                 FrameContext ctx = make_frame_context();
                 auto cam_trait = ::velk::find_attachment<ICamera>(it->camera_element);
                 ctx.view_camera_trait = cam_trait.get();
                 for (auto* pipeline : seen_pipelines_) {
-                    pipeline->on_view_removed(it->entry, ctx);
+                    pipeline->on_view_removed(*it->entry, ctx);
                 }
                 ctx.view_camera_trait = nullptr;
-                view_preparer_.on_view_removed(it->entry);
-                backend_->destroy_surface(get_render_target_id(it->entry.surface));
+                view_preparer_.on_view_removed(*it->entry);
+                backend_->destroy_surface(get_render_target_id(it->entry->surface()));
             }
             views_.erase(it);
             return;
@@ -268,7 +271,7 @@ bool Renderer::view_matches(const ViewSlot& slot, const FrameDesc& desc) const
         return true;
     }
     for (auto& vd : desc.views) {
-        if (vd.surface != slot.entry.surface) {
+        if (vd.surface != slot.entry->surface()) {
             continue;
         }
         if (vd.cameras.empty()) {
@@ -340,7 +343,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
         if (!view_matches(slot, desc)) {
             continue;
         }
-        auto& entry = slot.entry;
+        auto& entry = *slot.entry;
 
         auto scene_ptr = slot.camera_element->get_scene();
         auto* scene = interface_cast<IScene>(scene_ptr);
@@ -349,13 +352,12 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
         }
 
         // Handle surface resize
-        auto sstate = read_state<IWindowSurface>(entry.surface);
+        auto sstate = read_state<IWindowSurface>(entry.surface());
         if (sstate) {
-            if (sstate->size.x != entry.cached_width || sstate->size.y != entry.cached_height) {
-                entry.cached_width = sstate->size.x;
-                entry.cached_height = sstate->size.y;
-                backend_->resize_surface(get_render_target_id(entry.surface), sstate->size.x, sstate->size.y);
-                entry.batches_dirty = true;
+            if (sstate->size.x != entry.cached_width() || sstate->size.y != entry.cached_height()) {
+                entry.set_cached_size(sstate->size.x, sstate->size.y);
+                backend_->resize_surface(get_render_target_id(entry.surface()), sstate->size.x, sstate->size.y);
+                entry.set_batches_dirty(true);
                 RENDER_LOG("render: surface resized to %dx%d", sstate->size.x, sstate->size.y);
             }
         }
@@ -455,7 +457,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             for (auto& s : views_) {
                 auto sp = s.camera_element->get_scene();
                 if (interface_cast<IScene>(sp) == scene) {
-                    s.entry.batches_dirty = true;
+                    s.entry->set_batches_dirty(true);
                 }
             }
         }
@@ -703,7 +705,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             pv.bvh_root = ctx.bvh_root;
             pv.bvh_node_count = ctx.bvh_node_count;
             pv.bvh_shape_count = ctx.bvh_shape_count;
-            pv.render_view = view_preparer_.prepare(view_slot.entry,
+            pv.render_view = view_preparer_.prepare(*view_slot.entry,
                                                     view_slot.camera_element,
                                                     sit->second, ctx,
                                                     batch_builder_,
@@ -733,10 +735,10 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             ctx.view_camera_trait = pv.camera_trait.get();
 
             IRenderTarget::Ptr color_target =
-                interface_pointer_cast<IRenderTarget>(pv.slot->entry.surface);
+                interface_pointer_cast<IRenderTarget>(pv.slot->entry->surface());
             for (auto& p : pv.pipelines) {
                 seen_pipelines_.insert(p.get());
-                p->emit(pv.slot->entry, pv.render_view, color_target, ctx, *slot.graph);
+                p->emit(*pv.slot->entry, pv.render_view, color_target, ctx, *slot.graph);
             }
             ctx.view_camera_trait = nullptr;
         }
@@ -1005,13 +1007,13 @@ IGpuResource::Ptr Renderer::get_named_output(const IElement::Ptr& camera_element
 {
     for (auto& s : views_) {
         if (s.camera_element.get() != camera_element.get()) continue;
-        if (s.entry.surface.get() != surface.get()) continue;
+        if (s.entry->surface().get() != surface.get()) continue;
         auto cam_trait = ::velk::find_attachment<ICamera>(s.camera_element);
         auto path = cam_trait
                         ? ::velk::find_attachment<IRenderPath>(cam_trait.get())
                         : IRenderPath::Ptr{};
         if (!path) return {};
-        return path->find_named_output(name, const_cast<ViewEntry*>(&s.entry));
+        return path->find_named_output(name, s.entry.get());
     }
     return {};
 }
@@ -1051,7 +1053,7 @@ void Renderer::shutdown()
                 auto cam_trait = ::velk::find_attachment<ICamera>(s.camera_element);
                 ctx.view_camera_trait = cam_trait.get();
                 for (auto* pipeline : seen_pipelines_) {
-                    pipeline->on_view_removed(s.entry, ctx);
+                    pipeline->on_view_removed(*s.entry, ctx);
                 }
                 ctx.view_camera_trait = nullptr;
             }
@@ -1064,7 +1066,7 @@ void Renderer::shutdown()
         }
 
         for (auto& s : views_) {
-            backend_->destroy_surface(get_render_target_id(s.entry.surface));
+            backend_->destroy_surface(get_render_target_id(s.entry->surface()));
         }
 
         for (auto& slot : frame_slots_) {

@@ -38,6 +38,8 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
     // pointer — a size change forces ensure_buffer_storage to
     // reallocate, invalidating the prior map.
     storage_mapped_ = nullptr;
+
+    notify_render_state_changed(::velk::RenderStateChange::All);
 }
 
 void DefaultBatch::update_instance_at(uint32_t instance_index,

@@ -34,7 +34,7 @@ namespace {
 
 } // namespace
 
-void PostProcess::emit(::velk::ViewEntry& view,
+void PostProcess::emit(::velk::IViewEntry& view,
                       ::velk::IRenderTarget::Ptr input,
                       ::velk::IRenderTarget::Ptr output,
                       ::velk::FrameContext& ctx,
@@ -52,8 +52,8 @@ void PostProcess::emit(::velk::ViewEntry& view,
         w = static_cast<int>(dims.x);
         h = static_cast<int>(dims.y);
     }
-    if ((w <= 0 || h <= 0) && view.surface) {
-        if (auto state = ::velk::read_state<::velk::IWindowSurface>(view.surface)) {
+    if ((w <= 0 || h <= 0) && view.surface()) {
+        if (auto state = ::velk::read_state<::velk::IWindowSurface>(view.surface())) {
             w = state->size.x;
             h = state->size.y;
         }
@@ -94,7 +94,7 @@ void PostProcess::emit(::velk::ViewEntry& view,
 }
 
 ::velk::IRenderTarget::Ptr
-PostProcess::ensure_intermediate(::velk::ViewEntry& view,
+PostProcess::ensure_intermediate(::velk::IViewEntry& view,
                                  size_t index,
                                  int width, int height,
                                  ::velk::FrameContext& /*ctx*/,
@@ -125,7 +125,7 @@ void PostProcess::release_view_state(ViewState& /*vs*/, ::velk::FrameContext& /*
     // the backend handles via the resource manager observer chain.
 }
 
-void PostProcess::on_view_removed(::velk::ViewEntry& view,
+void PostProcess::on_view_removed(::velk::IViewEntry& view,
                                   ::velk::FrameContext& ctx)
 {
     auto it = view_states_.find(&view);

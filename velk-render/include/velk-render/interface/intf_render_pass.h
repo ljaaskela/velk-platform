@@ -9,6 +9,7 @@
 #include <velk-render/frame/render_pass.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_state.h>
 
 #include <cstdint>
 
@@ -34,7 +35,7 @@ namespace velk {
  * `RenderTargetGroup`) are out of scope.
  */
 class IRenderPass
-    : public Interface<IRenderPass, IInterface,
+    : public Interface<IRenderPass, IRenderState,
                        VELK_UID("ffc6e6c3-639a-461e-ad5c-7bc4ed902edf")>
 {
 public:

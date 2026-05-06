@@ -24,7 +24,7 @@ class Tonemap final
 public:
     VELK_CLASS_UID(::velk::ClassId::Effect::Tonemap, "Tonemap");
 
-    void emit(::velk::ViewEntry& view,
+    void emit(::velk::IViewEntry& view,
               ::velk::IRenderTarget::Ptr input,
               ::velk::IRenderTarget::Ptr output,
               ::velk::FrameContext& ctx,
