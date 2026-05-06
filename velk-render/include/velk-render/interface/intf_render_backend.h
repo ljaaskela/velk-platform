@@ -16,7 +16,7 @@ namespace velk {
 /// @name Handle types
 /// Opaque handles returned by the backend. 0 is null/invalid for all.
 /// @{
-using GpuBuffer = uint64_t;
+using GpuBufferHandle = uint64_t;
 using TextureId = uint32_t; ///< Also the bindless shader index.
 using PipelineId = uint64_t;
 
@@ -146,14 +146,14 @@ struct DrawCall
     PipelineId pipeline{};      ///< Which pipeline to bind.
     bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
-    GpuBuffer index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
+    GpuBufferHandle index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
     uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
 
-    GpuBuffer args_buffer{};          ///< Buffer holding indirect-draw records.
+    GpuBufferHandle args_buffer{};          ///< Buffer holding indirect-draw records.
     uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
     uint32_t args_stride{};           ///< Bytes per indirect-draw record (5×u32 indexed, 4×u32 non-indexed).
 
-    GpuBuffer count_buffer{};         ///< Buffer holding the uint32 actual draw count.
+    GpuBufferHandle count_buffer{};         ///< Buffer holding the uint32 actual draw count.
     uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
     uint32_t max_draw_count{1};       ///< Upper bound; backend issues min(count_buffer[0], max_draw_count) draws.
 
@@ -271,17 +271,17 @@ public:
     /// @{
 
     /** @brief Allocates a GPU buffer. Returns a handle, or 0 on failure. */
-    virtual GpuBuffer create_buffer(const GpuBufferDesc& desc) = 0;
+    virtual GpuBufferHandle create_buffer(const GpuBufferDesc& desc) = 0;
 
     /** @brief Frees a GPU buffer. */
-    virtual void destroy_buffer(GpuBuffer buffer) = 0;
+    virtual void destroy_buffer(GpuBufferHandle buffer) = 0;
 
     /** @brief Returns a persistently mapped CPU pointer to the buffer, or nullptr. */
-    virtual void* map(GpuBuffer buffer) = 0;
+    virtual void* map(GpuBufferHandle buffer) = 0;
 
     /** @brief Returns the GPU virtual address for use in shaders via
      *         buffer-reference / device-address reads. */
-    virtual uint64_t gpu_address(GpuBuffer buffer) = 0;
+    virtual uint64_t gpu_address(GpuBufferHandle buffer) = 0;
 
     /// @}
     /// @name Textures

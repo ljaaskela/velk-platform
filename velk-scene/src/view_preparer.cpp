@@ -107,7 +107,7 @@ void ViewPreparer::prepare_batches(ViewEntry& entry, const SceneState& scene_sta
 
     // Per-batch buffer upload: each batch owns its [args][count]
     // [instance_data] blob and implements IBuffer. ensure_buffer_storage
-    // allocates / resizes the backing GpuBuffer; on a fresh allocation
+    // allocates / resizes the backing GpuBufferHandle; on a fresh allocation
     // we map it, copy the blob, and stamp the (handle, mapped) pair on
     // the batch so update_instance_at can write through later. Pre-
     // existing-handle batches with is_dirty (e.g. structural rebuilds

@@ -69,7 +69,7 @@ public:
     void add_env_observer(const IBuffer::WeakPtr& res) override;
 
     void defer_texture_destroy(TextureId tid, uint64_t completion_marker) override;
-    void defer_buffer_destroy(GpuBuffer handle, uint64_t completion_marker) override;
+    void defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker) override;
     void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) override;
 
     void drain_deferred(IRenderBackend& backend) override;
@@ -103,7 +103,7 @@ private:
     };
     struct DeferredBufferDestroy
     {
-        GpuBuffer handle;
+        GpuBufferHandle handle;
         uint64_t completion_marker;
     };
     struct DeferredPipelineDestroy

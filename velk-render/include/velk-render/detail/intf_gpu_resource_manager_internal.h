@@ -56,7 +56,7 @@ public:
     /// marker for resources still referenced by the in-flight frame is
     /// `IRenderBackend::pending_frame_completion_marker()`.
     virtual void defer_texture_destroy(TextureId tid, uint64_t completion_marker) = 0;
-    virtual void defer_buffer_destroy(GpuBuffer handle, uint64_t completion_marker) = 0;
+    virtual void defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker) = 0;
     virtual void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) = 0;
 
     /// Drains entries whose completion marker has resolved.
@@ -100,7 +100,7 @@ inline void defer_texture_destroy(IGpuResourceManager* mgr,
 }
 
 inline void defer_buffer_destroy(IGpuResourceManager* mgr,
-                                 GpuBuffer handle, uint64_t marker)
+                                 GpuBufferHandle handle, uint64_t marker)
 {
     if (auto* in = interface_cast<IGpuResourceManagerInternal>(mgr)) {
         in->defer_buffer_destroy(handle, marker);

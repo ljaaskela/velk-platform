@@ -1096,7 +1096,7 @@ void VkBackend::destroy_swapchain(SurfaceData& sd)
 // GPU Memory
 // ============================================================================
 
-GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
+GpuBufferHandle VkBackend::create_buffer(const GpuBufferDesc& desc)
 {
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1128,12 +1128,12 @@ GpuBuffer VkBackend::create_buffer(const GpuBufferDesc& desc)
 
     bd.mapped = info.pMappedData;
 
-    GpuBuffer id = next_buffer_id_++;
+    GpuBufferHandle id = next_buffer_id_++;
     buffers_[id] = bd;
     return id;
 }
 
-void VkBackend::destroy_buffer(GpuBuffer buffer)
+void VkBackend::destroy_buffer(GpuBufferHandle buffer)
 {
     auto it = buffers_.find(buffer);
     if (it == buffers_.end()) {
@@ -1144,7 +1144,7 @@ void VkBackend::destroy_buffer(GpuBuffer buffer)
     buffers_.erase(it);
 }
 
-void* VkBackend::map(GpuBuffer buffer)
+void* VkBackend::map(GpuBufferHandle buffer)
 {
     auto it = buffers_.find(buffer);
     if (it == buffers_.end()) {
@@ -1153,7 +1153,7 @@ void* VkBackend::map(GpuBuffer buffer)
     return it->second.mapped;
 }
 
-uint64_t VkBackend::gpu_address(GpuBuffer buffer)
+uint64_t VkBackend::gpu_address(GpuBufferHandle buffer)
 {
     auto it = buffers_.find(buffer);
     if (it == buffers_.end()) {

@@ -390,7 +390,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     // Per-batch finalize: pack each batch's [args(32)][count(16)]
     // [instance_data] blob into its own storage_blob_ and mark it
     // dirty. The renderer's standard buffer-upload pipeline (run by
-    // ViewPreparer::prepare_batches) allocates the backing GpuBuffer
+    // ViewPreparer::prepare_batches) allocates the backing GpuBufferHandle
     // via ensure_buffer_storage and copies the blob.
     auto finalize_batches = [](vector<IBatch::Ptr>& batches) {
         for (auto& batch_ptr : batches) {

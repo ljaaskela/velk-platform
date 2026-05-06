@@ -31,7 +31,7 @@ public:
     /** @brief Persistently mapped GPU buffer for one in-flight frame. */
     struct Slot
     {
-        GpuBuffer handle{};
+        GpuBufferHandle handle{};
         void* ptr = nullptr;
         uint64_t gpu_base = 0;
         size_t buffer_size = 0;
@@ -88,7 +88,7 @@ public:
     virtual size_t get_peak_usage() const = 0;
 
     /// @brief Active slot's underlying GPU buffer. 0 if no slot is active.
-    virtual GpuBuffer active_buffer() const = 0;
+    virtual GpuBufferHandle active_buffer() const = 0;
 
     /// @brief Active slot's GPU base address. Subtract from a written
     ///        gpu_addr to get a buffer offset for descriptor binding.

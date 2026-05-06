@@ -137,14 +137,14 @@ inline void emit_draw_calls(
         // transform-only frames write through the mapped pointer in
         // place. Falls through to per-frame staging for batches without
         // a slice (e.g. env_batch, which lives outside the pool).
-        // Each batch owns its own GpuBuffer with the
+        // Each batch owns its own GpuBufferHandle with the
         // [args(32)][count(16)][instance_data] layout. emit reads
         // args/count at offsets 0 and 32 of that buffer; the vertex
         // shader BDA-reads instances at storage_gpu_address + 48.
         // Batches that haven't been allocated a backing buffer yet
         // (env_batch, which lives outside the upload pipeline) fall
         // through to per-frame staging.
-        const GpuBuffer storage_buffer = batch.storage_buffer();
+        const GpuBufferHandle storage_buffer = batch.storage_buffer();
         const bool has_storage = (storage_buffer != 0 && batch.storage_gpu_address() != 0);
         uint64_t instances_addr = 0;
         if (has_storage) {
@@ -174,7 +174,7 @@ inline void emit_draw_calls(
 
         // IBO half is optional: indexed draw when ibo_size > 0, plain
         // vkCmdDraw when 0 (e.g. TriangleStrip unit quad).
-        GpuBuffer ibo_handle = 0;
+        GpuBufferHandle ibo_handle = 0;
         size_t ibo_offset = 0;
         if (buffer->get_ibo_size() > 0) {
             auto* buf_entry = resources.find_buffer(buffer.get());

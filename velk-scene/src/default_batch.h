@@ -27,7 +27,7 @@ namespace velk::impl {
  * `clear_dirty()` flips the dirty bit. Lifetime: the IBatch::Ptr's
  * destructor cascades through `ext::GpuResource::~GpuResource()` to the
  * resource manager observer, which fence-tracks the underlying
- * `GpuBuffer` for deferred destruction.
+ * `GpuBufferHandle` for deferred destruction.
  *
  * `update_instance_at` writes through the cached mapped pointer (stamped
  * by the upload pass) directly into the same backing memory, so
@@ -84,10 +84,10 @@ public:
     }
 
     /// Renderer-side: called once after `ensure_buffer_storage` allocates
-    /// the backing GpuBuffer and the upload pass has memcpy'd the blob.
+    /// the backing GpuBufferHandle and the upload pass has memcpy'd the blob.
     /// Captures the handle + mapped pointer so `update_instance_at` can
     /// write through directly on subsequent transform-only frames.
-    void set_storage_mapping(GpuBuffer handle, uint8_t* mapped_ptr)
+    void set_storage_mapping(GpuBufferHandle handle, uint8_t* mapped_ptr)
     {
         storage_handle_ = handle;
         storage_mapped_ = mapped_ptr;
@@ -123,7 +123,7 @@ public:
         }
     }
 
-    GpuBuffer storage_buffer() const override { return storage_handle_; }
+    GpuBufferHandle storage_buffer() const override { return storage_handle_; }
     uint64_t  storage_gpu_address() const override
     {
         // ensure_buffer_storage stamps the GPU device address into our
@@ -160,10 +160,10 @@ private:
     bool storage_dirty_ = false;
 
     /// Cached after the first upload — `storage_handle_` is the
-    /// backend's GpuBuffer ID for indirect-args binding;
+    /// backend's GpuBufferHandle ID for indirect-args binding;
     /// `storage_mapped_` is the host-visible pointer for in-place
     /// transform updates.
-    GpuBuffer storage_handle_ = 0;
+    GpuBufferHandle storage_handle_ = 0;
     uint8_t* storage_mapped_ = nullptr;
 };
 

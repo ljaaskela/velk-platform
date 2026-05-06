@@ -36,7 +36,7 @@ public:
     size_t get_buffer_size() const override { return buffer_size_; }
     size_t get_peak_usage() const override { return peak_usage_; }
 
-    GpuBuffer active_buffer() const override { return active_ ? active_->handle : 0; }
+    GpuBufferHandle active_buffer() const override { return active_ ? active_->handle : 0; }
     uint64_t active_buffer_base() const override { return active_ ? active_->gpu_base : 0; }
 
 private:

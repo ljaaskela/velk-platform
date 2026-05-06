@@ -126,9 +126,9 @@ public:
     ///       `storage_gpu_address() + kInstanceOffset` for instance
     ///       bytes (buffer-reference / device-address read).
     /// @{
-    /// @brief Backend buffer handle (`GpuBuffer` is the abstract handle
+    /// @brief Backend buffer handle (`GpuBufferHandle` is the abstract handle
     ///        type the backend resolves to its native buffer object).
-    virtual GpuBuffer storage_buffer() const = 0;
+    virtual GpuBufferHandle storage_buffer() const = 0;
 
     /// @brief GPU virtual address of the start of the storage blob.
     virtual uint64_t  storage_gpu_address() const = 0;

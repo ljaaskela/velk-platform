@@ -32,10 +32,10 @@ public:
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
 
-    GpuBuffer create_buffer(const GpuBufferDesc& desc) override;
-    void destroy_buffer(GpuBuffer buffer) override;
-    void* map(GpuBuffer buffer) override;
-    uint64_t gpu_address(GpuBuffer buffer) override;
+    GpuBufferHandle create_buffer(const GpuBufferDesc& desc) override;
+    void destroy_buffer(GpuBufferHandle buffer) override;
+    void* map(GpuBufferHandle buffer) override;
+    uint64_t gpu_address(GpuBufferHandle buffer) override;
 
     TextureId create_texture(const TextureDesc& desc) override;
     void destroy_texture(TextureId texture) override;
@@ -202,8 +202,8 @@ private:
         size_t size = 0;
     };
 
-    std::unordered_map<GpuBuffer, BufferData> buffers_;
-    GpuBuffer next_buffer_id_ = 1;
+    std::unordered_map<GpuBufferHandle, BufferData> buffers_;
+    GpuBufferHandle next_buffer_id_ = 1;
 
     // Textures
     struct TextureData

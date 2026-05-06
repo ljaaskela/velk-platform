@@ -42,7 +42,7 @@ public:
     /** @brief Backend handle + size pair tracked per CPU IBuffer. */
     struct BufferEntry
     {
-        GpuBuffer handle{};
+        GpuBufferHandle handle{};
         size_t size = 0;
     };
 

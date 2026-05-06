@@ -299,7 +299,7 @@ void GpuResourceManager::defer_texture_destroy(TextureId tid, uint64_t completio
     deferred_textures_.push_back({tid, completion_marker});
 }
 
-void GpuResourceManager::defer_buffer_destroy(GpuBuffer handle, uint64_t completion_marker)
+void GpuResourceManager::defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
     deferred_buffers_.push_back({handle, completion_marker});

@@ -54,7 +54,7 @@ public:
                        const IRenderPath::Needs& needs);
 
     /// Releases the per-view batch cache for @p entry. Each batch
-    /// owns its own GpuBuffer; dropping the cache's IBatch::Ptrs
+    /// owns its own GpuBufferHandle; dropping the cache's IBatch::Ptrs
     /// cascades to the resource manager's deferred-destroy queue.
     void on_view_removed(ViewEntry& entry);
 
