@@ -71,6 +71,10 @@ private:
     };
 
     ::velk::vector<::velk::IRenderPass::Ptr> passes_;
+    /// Snapshot of the previous frame's `passes_` Ptr list, captured by
+    /// `clear()`. `compile()` short-circuits the barrier/state rebuild
+    /// when the new `passes_` matches it pass-Ptr-for-pass-Ptr.
+    ::velk::vector<::velk::IRenderPass::Ptr> prev_passes_;
     ::velk::vector<Barrier> barriers_;
     std::unordered_map<::velk::IGpuResource*, ResourceState> states_;
     std::unordered_map<::velk::IGpuResource*, bool> imported_;

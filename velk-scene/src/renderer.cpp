@@ -116,9 +116,26 @@ MaterialEval velk_default_material_eval() {
 }
 )";
 
+Renderer::Renderer()
+{
+    view_preparer_.add_render_state_observer(this);
+}
+
 Renderer::~Renderer()
 {
+    view_preparer_.remove_render_state_observer(this);
     Renderer::shutdown();
+}
+
+void Renderer::on_render_state_changed(IRenderState* /*source*/,
+                                       RenderStateChange /*flags*/)
+{
+    // Receives the bubbled-up notification chain
+    // (Batch -> View -> ViewPreparer -> Renderer). Today this just
+    // marks the renderer as having seen a change since the last frame
+    // start; future work that wants to skip per-frame setup
+    // (e.g. an idle-frame fast path) can read + clear the flag.
+    scene_state_dirty_ = true;
 }
 
 uint64_t Renderer::consume_last_prepare_gpu_wait_ns()

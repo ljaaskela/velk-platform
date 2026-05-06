@@ -34,6 +34,7 @@ public:
     void add_read(IGpuResource::Ptr resource) override;
     void add_write(IGpuResource::Ptr resource) override;
     void set_view_globals_address(uint64_t addr) override;
+    void reset() override;
 
 private:
     vector<GraphOp> ops_;

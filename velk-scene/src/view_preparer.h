@@ -8,13 +8,15 @@
 
 #include "batch_builder.h"
 
+#include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
-#include <velk-scene/interface/intf_element.h>
+#include <velk-render/interface/intf_render_state.h>
 #include <velk-render/interface/intf_view_entry.h>
+#include <velk-scene/interface/intf_element.h>
 
 namespace velk {
 
@@ -39,8 +41,11 @@ namespace velk {
  * Renderer shutdown).
  */
 class ViewPreparer
+    : public ::velk::ext::RenderState<ViewPreparer, IRenderState, IRenderStateObserver>
 {
 public:
+    ~ViewPreparer();
+
     /// Builds a `RenderView` for @p entry. @p camera_element is the
     /// scene-side camera the entry was registered against (needed for
     /// camera + env resolution but not exposed to paths). @p needs
@@ -60,6 +65,13 @@ public:
 
     /// Releases all per-view caches. Called on Renderer shutdown.
     void clear();
+
+    /// IRenderStateObserver — re-emits a child view's change event up
+    /// the chain so subscribers of this preparer (e.g. the renderer)
+    /// see the same notification flow without holding refs to each
+    /// individual view.
+    void on_render_state_changed(IRenderState* source,
+                                 RenderStateChange flags) override;
 
     // Diagnostic counters. Read by Renderer's optional per-second log
     // and reset there after each report.

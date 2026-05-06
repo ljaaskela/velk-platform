@@ -367,6 +367,16 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
     }
 }
 
+ViewPreparer::~ViewPreparer()
+{
+    // Renderer's destruction order guarantees view_preparer_ runs
+    // before views_, so the IViewEntry pointers in view_caches_ are
+    // still alive here. Detach so they don't notify a dead observer.
+    for (auto& [view_ptr, _] : view_caches_) {
+        view_ptr->remove_render_state_observer(this);
+    }
+}
+
 RenderView ViewPreparer::prepare(IViewEntry& entry,
                                  const IElement::Ptr& camera_element,
                                  const SceneState& scene_state,
@@ -375,6 +385,15 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
                                  const IRenderPath::Needs& needs)
 {
     VELK_PERF_SCOPE("renderer.view_prepare");
+
+    // First-sight subscription. Re-prepares for the same view reuse
+    // the cache entry and skip the add (RenderStateBase ignores
+    // duplicate adds anyway).
+    auto [it, inserted] = view_caches_.try_emplace(&entry);
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
+
     RenderView rv;
 
     // Always-on: viewport / camera / BVH addrs / frame globals upload /
@@ -399,12 +418,23 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
 
 void ViewPreparer::on_view_removed(IViewEntry& entry)
 {
-    view_caches_.erase(&entry);
+    if (view_caches_.erase(&entry) > 0) {
+        entry.remove_render_state_observer(this);
+    }
 }
 
 void ViewPreparer::clear()
 {
+    for (auto& [view_ptr, _] : view_caches_) {
+        view_ptr->remove_render_state_observer(this);
+    }
     view_caches_.clear();
+}
+
+void ViewPreparer::on_render_state_changed(IRenderState* /*source*/,
+                                           RenderStateChange flags)
+{
+    notify_render_state_changed(flags);
 }
 
 } // namespace velk

@@ -34,8 +34,21 @@ void RenderGraph::init(::velk::IRenderBackend* backend)
 
 void RenderGraph::clear()
 {
+    // Keep last frame's pass list around so `compile()` can detect a
+    // match and skip the barrier rebuild. `barriers_` is preserved for
+    // the same reason (reused on a short-circuit hit, overwritten on
+    // miss). `states_` is intermediate work for compile and isn't read
+    // by execute, so we clear it.
+    //
+    // Only snapshot when there's something to snapshot. The renderer
+    // calls `clear()` multiple times per frame (slot claim, build retry
+    // top, post-present cleanup); after the first one of a frame,
+    // `passes_` is empty and a second move would erase the prior
+    // snapshot.
+    if (!passes_.empty()) {
+        prev_passes_ = std::move(passes_);
+    }
     passes_.clear();
-    barriers_.clear();
     states_.clear();
     imported_.clear();
 }
@@ -87,6 +100,17 @@ RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 
 void RenderGraph::compile()
 {
+    // Short-circuit: when the pass Ptr list is identical to last
+    // frame's, the prior barriers_ (and resource state machine output
+    // it derives from) are still valid. Reuse them.
+    if (passes_.size() == prev_passes_.size()) {
+        bool match = true;
+        for (size_t i = 0; i < passes_.size(); ++i) {
+            if (passes_[i] != prev_passes_[i]) { match = false; break; }
+        }
+        if (match) return;
+    }
+
     barriers_.assign(passes_.size(), Barrier{});
     states_.clear();
 

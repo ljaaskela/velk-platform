@@ -42,4 +42,12 @@ void DefaultRenderPass::set_view_globals_address(uint64_t addr)
     view_globals_address_ = addr;
 }
 
+void DefaultRenderPass::reset()
+{
+    ops_.clear();
+    reads_.clear();
+    writes_.clear();
+    view_globals_address_ = 0;
+}
+
 } // namespace velk::impl

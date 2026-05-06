@@ -80,6 +80,14 @@ public:
     /// 0 (default) for passes that don't touch view-level state — the
     /// executor leaves whatever was previously pushed.
     virtual void set_view_globals_address(uint64_t addr) = 0;
+
+    /// Clear all ops, reads, writes, and the view-globals address.
+    /// Producers that cache an `IRenderPass::Ptr` across frames call
+    /// this at the top of each rebuild so the same Ptr identity
+    /// carries fresh contents — the graph's compile-time short-circuit
+    /// only fires when pass Ptrs match, so reusing the same Ptr is
+    /// what makes that path active.
+    virtual void reset() = 0;
     /// @}
 };
 

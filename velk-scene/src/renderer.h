@@ -10,6 +10,7 @@
 #include "render_target_cache.h"
 #include "view_preparer.h"
 #include <velk-render/interface/intf_render_graph.h>
+#include <velk-render/interface/intf_render_state.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
@@ -40,12 +41,20 @@
 
 namespace velk {
 
-class Renderer : public ::velk::ext::Object<Renderer, IRendererInternal, IRenderer>
+class Renderer : public ::velk::ext::Object<Renderer, IRendererInternal, IRenderer,
+                                            IRenderStateObserver>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::Renderer, "Renderer");
 
+    Renderer();
     ~Renderer() override;
+
+    // IRenderStateObserver — receives the bubbled-up "anything in any
+    // view changed" signal from `view_preparer_`. Sets a frame-level
+    // dirty flag that future short-circuit work will gate on.
+    void on_render_state_changed(IRenderState* source,
+                                 RenderStateChange flags) override;
 
     // IRendererInternal
     void set_backend(const IRenderBackend::Ptr& backend, IRenderContext* ctx) override;
@@ -207,6 +216,13 @@ private:
     // per frame and produces a flat `RenderView` that paths consume.
     // Owns the per-view raster batch cache.
     ViewPreparer view_preparer_;
+
+    /// Set by `on_render_state_changed` when the bubbled-up
+    /// notification chain (Batch -> View -> ViewPreparer -> Renderer)
+    /// fires. Consumers that want to short-circuit per-frame work on
+    /// "nothing changed" frames can read + clear this flag at the top
+    /// of `prepare`.
+    bool scene_state_dirty_ = true;
 
     // Set of pipelines the Renderer has dispatched to during this run.
     // Populated by build_frame_passes; iterated for lifecycle hooks
