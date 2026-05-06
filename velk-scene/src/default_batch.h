@@ -87,6 +87,7 @@ public:
 
     IBuffer* storage_buffer() const override { return storage_.get(); }
     uint64_t storage_gpu_address() const override;
+    uint8_t* storage_mapped() const override { return storage_mapped_; }
 
 private:
     uint64_t pipeline_key_ = 0;

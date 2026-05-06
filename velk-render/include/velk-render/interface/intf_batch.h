@@ -21,30 +21,41 @@ namespace velk {
  * @brief Persistent per-batch storage layout shared between producers
  *        (BatchBuilder fills the prefix), the IBatch implementation
  *        (`get_data` returns the contiguous blob), and consumers
- *        (`emit_draw_calls` reads three offsets into the same buffer).
+ *        (`emit_draw_calls` reads several offsets into the same buffer).
  *
- * Layout: `[args (32 B)][count (16 B)][instance_data (rest)]`.
+ * Layout: `[args (32 B)][count (16 B)][header (48 B)][material_ptr (8 B)][pad (8 B)][instance_data (rest)]`.
  *
- * - args  (offset 0, 32 B) — indirect-draw command record (indexed
- *   variant: index_count, instance_count, first_index, vertex_offset,
- *   first_instance; non-indexed: vertex_count, instance_count,
- *   first_vertex, first_instance). 16-byte aligned and oversized so
- *   any future args struct fits.
+ * - args  (offset 0, 32 B) — indirect-draw command record. 16-byte
+ *   aligned and oversized so any future args struct fits.
  * - count (offset 32, 16 B) — uint32 actual draw count consumed by
- *   the backend's indirect-with-count draw; 16-byte aligned so the
- *   instance-data slice that follows starts on a natural 16-byte
- *   boundary.
- * - instance_data (offset 48, rest) — per-instance bytes the vertex
+ *   the backend's indirect-with-count draw; 16-byte aligned.
+ * - header (offset 48, 48 B) — `DrawDataHeader` the shader receives
+ *   via push-constant. Persistent across frames; addresses inside
+ *   reference other persistent buffers (instance data, VBO, UV1) so
+ *   the value is stable until the batch is rebuilt or a referenced
+ *   buffer is reallocated.
+ * - material_ptr (offset 96, 8 B) — GPU pointer to the material's
+ *   persistent `IProgramDataBuffer`. Stable per material lifetime.
+ * - pad (offset 104, 8 B) — alignment so the instance-data slice
+ *   that follows starts on a natural 16-byte boundary.
+ * - instance_data (offset 112, rest) — per-instance bytes the vertex
  *   shader reads via a buffer-reference dereference of
  *   `storage_gpu_address() + kInstanceOffset`.
+ *
+ * The DrawCall's root_constants carry `storage_gpu_address() + kHeaderOffset`
+ * so the shader's push-constant pointer lands directly on the header.
  */
 struct BatchBufferLayout
 {
-    static constexpr size_t kArgsOffset     = 0;
-    static constexpr size_t kArgsSize       = 32;
-    static constexpr size_t kCountOffset    = kArgsOffset + kArgsSize;
-    static constexpr size_t kCountSize      = 16;
-    static constexpr size_t kInstanceOffset = kCountOffset + kCountSize;
+    static constexpr size_t kArgsOffset        = 0;
+    static constexpr size_t kArgsSize          = 32;
+    static constexpr size_t kCountOffset       = kArgsOffset + kArgsSize;
+    static constexpr size_t kCountSize         = 16;
+    static constexpr size_t kHeaderOffset      = kCountOffset + kCountSize;
+    static constexpr size_t kHeaderSize        = 48;
+    static constexpr size_t kMaterialPtrOffset = kHeaderOffset + kHeaderSize;
+    static constexpr size_t kMaterialPtrSize   = 8;
+    static constexpr size_t kInstanceOffset    = 112; // kMaterialPtrOffset + 16 (8 ptr + 8 pad)
 };
 
 /**
@@ -136,6 +147,15 @@ public:
 
     /// @brief GPU virtual address of the start of the storage blob.
     virtual uint64_t storage_gpu_address() const = 0;
+
+    /// @brief Host-visible mapped pointer to the storage blob, or
+    ///        `nullptr` if the buffer hasn't been allocated yet (e.g.
+    ///        env_batch with no persistent storage). Consumers use
+    ///        `BatchBufferLayout` offsets to write per-batch data
+    ///        (e.g. the `DrawDataHeader`) directly into the persistent
+    ///        buffer; writes are visible to the GPU on the next submit
+    ///        via host-coherent memory.
+    virtual uint8_t* storage_mapped() const = 0;
     /// @}
 };
 

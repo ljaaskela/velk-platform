@@ -161,16 +161,28 @@ inline void emit_draw_calls(
             }
         }
 
-        constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
-        size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
-
-        auto reservation = frame_data.reserve(total_size);
-        if (!reservation.ptr) continue;
-
-        auto* dst = static_cast<uint8_t*>(reservation.ptr);
-        uint64_t draw_data_addr = reservation.gpu_addr;
-        std::memcpy(dst, &header, sizeof(header));
-        std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
+        // Header + material_ptr destination: prefer the batch's own
+        // persistent storage (cross-frame stable address) when mapped.
+        // Falls back to per-frame staging for batches without backing
+        // storage (e.g. env_batch).
+        uint64_t draw_data_addr = 0;
+        uint8_t* persistent = batch.storage_mapped();
+        if (has_storage && persistent) {
+            std::memcpy(persistent + BatchBufferLayout::kHeaderOffset,
+                        &header, sizeof(header));
+            std::memcpy(persistent + BatchBufferLayout::kMaterialPtrOffset,
+                        &material_addr, sizeof(material_addr));
+            draw_data_addr = batch.storage_gpu_address() + BatchBufferLayout::kHeaderOffset;
+        } else {
+            constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
+            size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
+            auto reservation = frame_data.reserve(total_size);
+            if (!reservation.ptr) continue;
+            auto* dst = static_cast<uint8_t*>(reservation.ptr);
+            draw_data_addr = reservation.gpu_addr;
+            std::memcpy(dst, &header, sizeof(header));
+            std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
+        }
 
         // Lazy-register the program's pipeline for deferred destruction.
         // The manager subscribes itself as observer internally.
