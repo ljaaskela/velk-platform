@@ -185,9 +185,6 @@ private:
     // lives here rather than inside a single sub-renderer.
     BatchBuilder batch_builder_;
 
-    // Per-frame material upload dedup cache. Cleared once per frame by
-    // Renderer; exposed to paths via FrameContext::material_cache.
-    MaterialAddrCache material_cache_;
 
     // Frame data buffer (per-slot GPU staging). Slot lifecycle is on the
     // interface, so a single Ptr is sufficient.

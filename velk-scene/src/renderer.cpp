@@ -270,7 +270,6 @@ FrameContext Renderer::make_frame_context()
     ctx.frame_buffer = frame_buffer_.get();
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
-    ctx.material_cache = &material_cache_;
     ctx.pipeline_map = pipeline_map_;
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
@@ -506,7 +505,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // retry-side reset hides bugs and wastes the OLD buffer's
         // contents. Clear them so attempt 2 re-uploads cleanly into
         // the NEW frame_data.
-        material_cache_.clear();
         snippets_->begin_frame();
 
         FrameContext ctx = make_frame_context();
@@ -827,7 +825,6 @@ Frame Renderer::prepare(const FrameDesc& desc)
     auto consumed_scenes = consume_scenes(desc);
 
     batch_builder_.reset_frame_state();
-    material_cache_.clear();
     snippets_->begin_frame();
     build_frame_passes(desc, consumed_scenes, *slot);
 

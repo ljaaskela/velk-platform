@@ -7,7 +7,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <unordered_map>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/interface/intf_buffer.h>
@@ -18,68 +17,9 @@
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_surface.h>
-#include <velk-render/interface/intf_texture_resolver.h>
 #include <velk-render/render_types.h>
 
 namespace velk {
-
-/**
- * @brief Per-frame cache used to dedupe material upload work across
- *        batches that share an IProgram.
- *
- * `IRenderContext::build_draw_calls` (and any future draw-call emitters)
- * write a material's draw-data to the frame buffer once per unique
- * program per frame and reuse the cached GPU address for subsequent
- * batches. Pass a fresh (or `clear()`-ed) cache each frame so addresses
- * don't leak across frames.
- */
-struct MaterialAddrCache
-{
-    std::unordered_map<IProgram*, uint64_t> addrs;
-    void clear() { addrs.clear(); }
-};
-
-namespace detail {
-
-/// Header-only helper used by both `IRenderContext::build_draw_calls`
-/// (defined in render_context.cpp) and the still-in-velk-scene
-/// `BatchBuilder::build_gbuffer_draw_calls`. Writes a material's
-/// draw-data to the frame buffer once per unique IProgram, returns
-/// the cached GPU address on subsequent calls.
-inline uint64_t write_material_once(IProgram* prog,
-                                    IFrameDataManager& frame_data,
-                                    ITextureResolver* resolver,
-                                    MaterialAddrCache& cache)
-{
-    if (!prog) return 0;
-    auto it = cache.addrs.find(prog);
-    if (it != cache.addrs.end()) return it->second;
-
-    uint64_t addr = 0;
-    if (auto* dd = interface_cast<IDrawData>(prog)) {
-        size_t sz = dd->get_draw_data_size();
-        if (sz > 0 && (sz % 16) != 0) {
-            VELK_LOG(E,
-                     "Renderer: material get_draw_data_size (%zu) is not 16-byte aligned. "
-                     "Use VELK_GPU_STRUCT for your material data.",
-                     sz);
-        }
-        if (sz > 0) {
-            void* scratch = std::malloc(sz);
-            if (scratch) {
-                std::memset(scratch, 0, sz);
-                if (dd->write_draw_data(scratch, sz, resolver) == ReturnValue::Success) {
-                    addr = frame_data.write(scratch, sz);
-                }
-                std::free(scratch);
-            }
-        }
-    }
-    cache.addrs[prog] = addr;
-    return addr;
-}
-
-} // namespace detail
 
 /**
  * @brief Iterates batches and emits a `DrawCall` per batch.
@@ -113,7 +53,6 @@ inline void emit_draw_calls(
     const vector<IBatch::Ptr>& batches,
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
-    MaterialAddrCache& material_cache,
     IBuffer* default_uv1,
     ResolvePipelineFn resolve_pipeline,
     const ::velk::render::Frustum* frustum = nullptr)
@@ -209,10 +148,18 @@ inline void emit_draw_calls(
             if (!header.uv1_address) continue;
         }
 
+        // Material draw-data lives in a persistent IProgramDataBuffer
+        // owned by the material; ViewPreparer's per-batch upload sweep
+        // ensure_buffer_storage's it and uploads when dirty (same path
+        // as VBOs / IBOs / batch storage). Here we just read its stable
+        // GPU address.
         auto material_ptr = batch.material();
-        uint64_t material_addr = detail::write_material_once(
-            material_ptr.get(), frame_data,
-            static_cast<ITextureResolver*>(&resources), material_cache);
+        uint64_t material_addr = 0;
+        if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
+            if (auto buf = dd->get_data_buffer(static_cast<ITextureResolver*>(&resources))) {
+                material_addr = buf->get_gpu_handle(GpuResourceKey::Default);
+            }
+        }
 
         constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
         size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;

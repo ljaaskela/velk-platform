@@ -32,9 +32,6 @@ struct FrameContext
     IFrameDataManager* frame_buffer = nullptr;
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
-    /// Per-frame material upload dedup cache. Owned by Renderer;
-    /// passed to `IRenderContext::build_draw_calls` etc.
-    MaterialAddrCache* material_cache = nullptr;
     const PipelineCacheMap* pipeline_map = nullptr;
 
     /// Color attachment format the active path is writing into.

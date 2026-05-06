@@ -116,30 +116,57 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
     // re-upload through their existing mapping. ensure_buffer_storage's
     // deferred-destroy on size change handles instance-count growth.
     if (ctx.resources && ctx.backend) {
-        auto upload = [&](vector<IBatch::Ptr>& batches) {
-            for (auto& bp : batches) {
-                if (!bp) continue;
-                auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
-                IBuffer* sb = batch->storage_buffer();
-                if (!sb || !sb->is_dirty()) continue;
-                size_t blob_size = sb->get_data_size();
-                if (blob_size == 0) { sb->clear_dirty(); continue; }
-                GpuBufferDesc desc{};
-                desc.size = blob_size;
-                desc.cpu_writable = true;
-                auto* be = ctx.resources->ensure_buffer_storage(sb, desc);
-                if (!be || !be->handle) continue;
-                if (auto* dst = ctx.backend->map(be->handle)) {
-                    std::memcpy(dst, sb->get_data(), blob_size);
-                    batch->set_storage_mapping(static_cast<uint8_t*>(dst));
-                }
-                sb->clear_dirty();
+        // Generic dirty-buffer upload: ensure_buffer_storage allocates /
+        // resizes the backend buffer, map + memcpy when dirty, clear
+        // the flag. Used for both per-batch storage blobs and per-
+        // material persistent IBuffers.
+        auto upload_buffer = [&](IBuffer* buf) -> uint8_t* {
+            if (!buf || !buf->is_dirty()) return nullptr;
+            size_t blob_size = buf->get_data_size();
+            if (blob_size == 0) { buf->clear_dirty(); return nullptr; }
+            GpuBufferDesc desc{};
+            desc.size = blob_size;
+            desc.cpu_writable = true;
+            auto* be = ctx.resources->ensure_buffer_storage(buf, desc);
+            if (!be || !be->handle) return nullptr;
+            uint8_t* mapped = nullptr;
+            if (auto* dst = ctx.backend->map(be->handle)) {
+                std::memcpy(dst, buf->get_data(), blob_size);
+                mapped = static_cast<uint8_t*>(dst);
+            }
+            buf->clear_dirty();
+            return mapped;
+        };
+        auto upload_material = [&](const IBatch::Ptr& bp) {
+            if (!bp) return;
+            auto material_ptr = bp->material();
+            auto* dd = interface_cast<IDrawData>(material_ptr.get());
+            if (!dd) return;
+            // get_data_buffer re-serialises into the persistent buffer
+            // and flips dirty when bytes change; idempotent if already
+            // up-to-date. Multiple batches sharing one material upload
+            // at most once per frame (after the first call clears
+            // dirty, subsequent calls find !is_dirty and bail).
+            if (auto buf = dd->get_data_buffer(ctx.resources)) {
+                upload_buffer(buf.get());
             }
         };
-        upload(cache.batches);
+        auto upload_batch = [&](IBatch::Ptr& bp) {
+            if (!bp) return;
+            auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
+            if (auto* mapped = upload_buffer(batch->storage_buffer())) {
+                batch->set_storage_mapping(mapped);
+            }
+            upload_material(bp);
+        };
+        for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {
-            upload(rtp.batches);
+            for (auto& bp : rtp.batches) upload_batch(bp);
         }
+        // env_batch has no persistent storage of its own (instance
+        // bytes still go through per-frame staging), but its material's
+        // persistent data buffer needs the same upload sweep.
+        upload_material(rv.env_batch);
     }
     rv.batches = &cache.batches;
 }

@@ -94,7 +94,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                                FrameContext& ctx,
                                IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.frame_buffer || !ctx.material_cache
+    if (!ctx.backend || !ctx.frame_buffer
         || !ctx.pipeline_map || !ctx.render_ctx) {
         return;
     }
@@ -102,7 +102,6 @@ void ForwardPath::build_passes(IViewEntry& entry,
 
     const ::velk::render::Frustum* frustum_ptr =
         render_view.has_frustum ? &render_view.frustum : nullptr;
-    auto& mcache = *ctx.material_cache;
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto target_format = ctx.target_format;
@@ -120,7 +119,6 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             env_batches, *ctx.frame_buffer, *ctx.resources,
-            mcache,
             default_uv1, resolve, /*frustum=*/nullptr);
     }
 
@@ -129,7 +127,6 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-            mcache,
             default_uv1, resolve, frustum_ptr);
     }
 

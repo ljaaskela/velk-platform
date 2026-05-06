@@ -246,7 +246,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
                                 FrameContext& ctx,
                                 IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.frame_buffer || !ctx.material_cache || !ctx.pipeline_map) {
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.pipeline_map) {
         return;
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
@@ -281,7 +281,6 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         *render_view.batches,
         *ctx.frame_buffer,
         *ctx.resources,
-        *ctx.material_cache,
         default_uv1,
         resolve,
         render_view.has_frustum ? &render_view.frustum : nullptr);
