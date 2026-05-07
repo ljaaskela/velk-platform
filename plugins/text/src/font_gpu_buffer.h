@@ -58,6 +58,7 @@ public:
     const uint8_t* get_data() const override;
     bool is_dirty() const override;
     void clear_dirty() override;
+    bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
 
 private:
     FontBuffers* fb_ = nullptr;

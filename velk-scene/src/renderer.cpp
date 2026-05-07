@@ -576,7 +576,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 bool                    log;
             };
             BvhBuildState bvh_state{this, ctx, log_bvh_next_};
-            bvh->rebuild(scene, render_ctx_, *frame_buffer_, dirty,
+            bvh->rebuild(scene, ctx, dirty,
                 +[](void* u, ShapeSite& site) {
                     auto& s = *static_cast<BvhBuildState*>(u);
                     auto& ctx = s.ctx;

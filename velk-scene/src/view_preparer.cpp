@@ -259,33 +259,11 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
     // Stage the lights into the per-view persistent buffer. Stable GPU
     // address across frames; bytes update only on real change. Notify
     // observers so cached lighting/RT passes invalidate.
-    if (!ctx.resources || !ctx.backend) return;
     auto& cache = view_caches_[&entry];
-    if (!cache.lights_buffer) {
-        cache.lights_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
-        if (!cache.lights_buffer) return;
-    }
-    auto* lights_buf = cache.lights_buffer.get();
-    size_t bytes = rv.lights.size() * sizeof(GpuLight);
-    bool changed = lights_buf->write_diff(rv.lights.data(), bytes);
-
-    if (lights_buf->is_dirty() && bytes > 0) {
-        GpuBufferDesc desc{};
-        desc.size = bytes;
-        desc.cpu_writable = true;
-        if (auto* be = ctx.resources->ensure_buffer_storage(lights_buf, desc)) {
-            if (be->handle) {
-                if (auto* dst = ctx.backend->map(be->handle)) {
-                    std::memcpy(dst, lights_buf->get_data(), bytes);
-                }
-            }
-        }
-        lights_buf->clear_dirty();
-    }
-    rv.lights_addr = bytes > 0
-        ? cache.lights_buffer->get_gpu_handle(GpuResourceKey::Default)
-        : 0;
-    if (changed) entry.notify_view_changed();
+    auto staged = cache.lights_buffer.upload(
+        rv.lights.data(), rv.lights.size() * sizeof(GpuLight), ctx);
+    rv.lights_addr = staged.address;
+    if (staged.changed) entry.notify_view_changed();
 }
 
 void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
@@ -360,38 +338,19 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
     }
     // Fallback for env materials without a snippet: stage into a
     // per-view persistent buffer so the GPU address stays stable
-    // across frames. write_diff gates the upload (and downstream
-    // notify) on real change. Without persistence, env_data_addr
-    // would rotate per-frame through frame_buffer staging and force
-    // the cached lighting pass to rebuild every frame, racing with
-    // in-flight slots that share the cached IRenderPass::Ptr.
-    if (rv.env.data_addr == 0 && ctx.resources && ctx.backend) {
+    // across frames. Without persistence, env_data_addr would rotate
+    // per-frame through frame_buffer staging and force the cached
+    // lighting pass to rebuild every frame, racing with in-flight
+    // slots that share the cached IRenderPass::Ptr.
+    if (rv.env.data_addr == 0) {
         if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
             size_t sz = dd->get_draw_data_size();
             if (sz > 0) {
-                auto& cache = view_caches_[&entry];
-                if (!cache.env_data_buffer) {
-                    cache.env_data_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
-                }
                 vector<uint8_t> scratch(sz, 0);
-                if (cache.env_data_buffer
-                    && dd->write_draw_data(scratch.data(), sz) == ReturnValue::Success) {
-                    auto* env_buf = cache.env_data_buffer.get();
-                    env_buf->write_diff(scratch.data(), sz);
-                    if (env_buf->is_dirty()) {
-                        GpuBufferDesc desc{};
-                        desc.size = sz;
-                        desc.cpu_writable = true;
-                        if (auto* be = ctx.resources->ensure_buffer_storage(env_buf, desc)) {
-                            if (be->handle) {
-                                if (auto* dst = ctx.backend->map(be->handle)) {
-                                    std::memcpy(dst, env_buf->get_data(), sz);
-                                }
-                            }
-                        }
-                        env_buf->clear_dirty();
-                    }
-                    rv.env.data_addr = env_buf->get_gpu_handle(GpuResourceKey::Default);
+                if (dd->write_draw_data(scratch.data(), sz) == ReturnValue::Success) {
+                    auto& cache = view_caches_[&entry];
+                    rv.env.data_addr =
+                        cache.env_data_buffer.upload(scratch.data(), sz, ctx).address;
                 }
             }
         }

@@ -9,9 +9,9 @@
 
 #include "batch_builder.h"
 
+#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
-#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -148,19 +148,18 @@ private:
         };
         ChangeCache<EnvKey> env_change;
 
-        /// Per-view persistent lights buffer (an `impl::GpuBuffer`).
-        /// `prepare_lights` write_diffs the GpuLight array into it so
-        /// the device address on `RenderView::lights_addr` is stable
-        /// across frames; cached lighting/RT passes can embed it
-        /// without rotating each frame.
-        IBuffer::Ptr lights_buffer;
+        /// Per-view persistent lights buffer. `prepare_lights` uploads
+        /// the GpuLight array into it so the device address on
+        /// `RenderView::lights_addr` is stable across frames; cached
+        /// lighting/RT passes can embed it without rotating each frame.
+        PersistentBuffer lights_buffer;
 
         /// Per-view persistent env material data buffer. Used as the
         /// fallback when the env material has no snippet-resolved
         /// data buffer; replaces the per-frame `frame_buffer->write`
         /// path so `RenderView::env.data_addr` is stable across
         /// frames (cached lighting passes embed it).
-        IBuffer::Ptr env_data_buffer;
+        PersistentBuffer env_data_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
