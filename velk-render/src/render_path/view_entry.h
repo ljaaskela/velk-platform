@@ -35,7 +35,7 @@ public:
         cached_height_ = height;
     }
 
-    void notify_batches_changed() override
+    void notify_view_changed() override
     {
         notify_render_state_changed(::velk::RenderStateChange::All);
     }

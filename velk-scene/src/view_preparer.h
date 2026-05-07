@@ -1,6 +1,7 @@
 #ifndef VELK_UI_VIEW_PREPARER_H
 #define VELK_UI_VIEW_PREPARER_H
 
+#include <velk/api/change.h>
 #include <velk/vector.h>
 
 #include <unordered_map>
@@ -109,6 +110,21 @@ private:
         /// when the camera's environment attachment changes.
         IBatch::Ptr env_batch;
         const void* env_material_key = nullptr;
+        /// Camera fingerprint (view_projection + cam_pos). When the
+        /// cache reports a change, prepare_camera fires
+        /// `IViewEntry::notify_view_changed` so cached passes
+        /// invalidate on camera move (closes the latent
+        /// ForwardPath frustum-cull staleness).
+        struct CameraKey
+        {
+            mat4 view_projection;
+            vec3 cam_pos;
+            bool operator==(const CameraKey& rhs) const
+            {
+                return view_projection == rhs.view_projection && cam_pos == rhs.cam_pos;
+            }
+        };
+        ChangeCache<CameraKey> camera_change;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 

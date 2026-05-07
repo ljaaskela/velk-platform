@@ -102,7 +102,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             batch_builder.rebuild_batches(scene_state, cache.batches,
                                           cache.element_slots, cache.rtt_roots);
             entry.set_batches_dirty(false);
-            entry.notify_batches_changed();
+            entry.notify_view_changed();
         }
     }
 
@@ -206,6 +206,11 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
         std::memcpy(rv.view_projection.m, ortho, sizeof(ortho));
     }
     rv.inverse_view_projection = mat4::inverse(rv.view_projection);
+
+    auto& cache = view_caches_[&entry];
+    if (cache.camera_change.changed({rv.view_projection, rv.cam_pos})) {
+        entry.notify_view_changed();
+    }
 }
 
 void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)

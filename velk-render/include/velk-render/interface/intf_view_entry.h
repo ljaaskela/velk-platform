@@ -54,9 +54,10 @@ public:
     virtual void set_cached_size(int width, int height) = 0;
 
     /// Producer-side: fires `IRenderState::on_render_state_changed` on
-    /// all subscribers. Called by `ViewPreparer` after a successful
-    /// structural batch rebuild.
-    virtual void notify_batches_changed() = 0;
+    /// all subscribers. Called by `ViewPreparer` when anything that
+    /// affects the cached pass changes — structural batch rebuild or
+    /// camera move (frustum-cull output + FrameGlobals contents).
+    virtual void notify_view_changed() = 0;
 };
 
 } // namespace velk
