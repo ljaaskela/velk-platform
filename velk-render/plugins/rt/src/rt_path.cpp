@@ -174,10 +174,34 @@ void RtPath::build_passes(IViewEntry& entry,
         shapes = std::move(sorted_shapes);
     }
 
+    // Persistent per-view shapes buffer: write_diff to gate the upload
+    // (and the implicit address change) on real change. Stable GPU
+    // address so cached RT passes can embed it without rotating each
+    // frame. Camera move → re-sorted bytes → diff fires → upload.
     uint64_t shapes_addr = 0;
-    if (!shapes.empty()) {
-        shapes_addr = ctx.frame_buffer->write(
-            shapes.data(), shapes.size() * sizeof(RtShape));
+    if (!shapes.empty() && ctx.resources && ctx.backend) {
+        if (!vs.shapes_buffer) {
+            vs.shapes_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
+        }
+        if (vs.shapes_buffer) {
+            auto* shapes_buf = vs.shapes_buffer.get();
+            size_t bytes = shapes.size() * sizeof(RtShape);
+            shapes_buf->write_diff(shapes.data(), bytes);
+            if (shapes_buf->is_dirty()) {
+                GpuBufferDesc desc{};
+                desc.size = bytes;
+                desc.cpu_writable = true;
+                if (auto* be = ctx.resources->ensure_buffer_storage(shapes_buf, desc)) {
+                    if (be->handle) {
+                        if (auto* dst = ctx.backend->map(be->handle)) {
+                            std::memcpy(dst, shapes_buf->get_data(), bytes);
+                        }
+                    }
+                }
+                shapes_buf->clear_dirty();
+            }
+            shapes_addr = shapes_buf->get_gpu_handle(GpuResourceKey::Default);
+        }
     }
 
     VELK_GPU_STRUCT PushC {
