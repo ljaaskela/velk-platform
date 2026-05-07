@@ -80,6 +80,7 @@ add_library(velk_render SHARED
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h
     include/velk-render/ext/gpu_buffer.h
+    include/velk-render/ext/persistent_buffer.h
     include/velk-render/ext/render_state.h
     include/velk-render/interface/intf_render_state.h
     include/velk-render/interface/intf_gpu_resource.h

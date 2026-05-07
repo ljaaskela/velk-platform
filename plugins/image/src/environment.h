@@ -54,6 +54,7 @@ public:
     }
     bool is_dirty() const override { return dirty_; }
     void clear_dirty() override { dirty_ = false; }
+    bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
 
     // ISurface
     uvec2 get_dimensions() const override { return {static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)}; }

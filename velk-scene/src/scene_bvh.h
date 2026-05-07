@@ -6,8 +6,10 @@
 #include <velk/api/velk.h>
 #include <velk/ext/object.h>
 
-#include <velk-render/interface/intf_frame_data_manager.h>
+#include <velk-render/ext/persistent_buffer.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_bvh.h>
+#include <velk-render/render_path/frame_context.h>
 #include <velk-scene/plugin.h>
 
 namespace velk {
@@ -35,13 +37,14 @@ public:
     SceneBvh() = default;
 
     /**
-     * @brief Rebuilds the BVH from the scene tree, writing nodes and
-     *        shapes into @p frame_buffer to obtain GPU addresses for
-     *        this frame. When @p dirty is false and a cached build
-     *        from a previous frame exists, the tree walk is skipped
-     *        and the cached arrays are reused; only the frame-buffer
-     *        memcpy runs. Callers compute @p dirty from scene-level
-     *        change signals (redraw / removed lists).
+     * @brief Rebuilds the BVH from the scene tree, staging nodes /
+     *        shapes / mesh-instance data into per-bvh persistent
+     *        IBuffers so GPU addresses are stable across frames.
+     *        write_diff gates the upload (and the implicit address
+     *        change) on real byte change. When @p dirty is false and a
+     *        cached build exists, the tree walk is skipped and the
+     *        cached arrays are reused; the per-frame work reduces to
+     *        memcmp.
      *
      * The callback fires per emitted shape during a full rebuild so
      * the caller can fill material / texture / intersect fields.
@@ -50,7 +53,7 @@ public:
      * TextureIds) — scenes that invalidate those fields must force
      * @p dirty = true.
      */
-    void rebuild(IScene* scene, IRenderContext* ctx, IFrameDataManager& frame_buffer, bool dirty,
+    void rebuild(IScene* scene, FrameContext& ctx, bool dirty,
                  ShapeCb shape_cb, void* shape_user);
 
     /// Frame-local GPU addresses. Only valid for the frame in which
@@ -72,15 +75,8 @@ public:
         return false;
     }
 
-    IBuffer::Ptr get_nodes_buffer() const override
-    {
-        // TODO(m3): expose the persistent nodes IBuffer once the arena
-        // migration lands. Today the BVH lives in the per-frame buffer
-        // and the renderer reads `nodes_addr()` directly.
-        return nullptr;
-    }
-
-    IBuffer::Ptr get_shapes_buffer() const override { return nullptr; }
+    IBuffer::Ptr get_nodes_buffer() const override { return nodes_buffer_.buffer(); }
+    IBuffer::Ptr get_shapes_buffer() const override { return shapes_buffer_.buffer(); }
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
@@ -114,6 +110,15 @@ private:
     /// rebuild).
     vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
+
+    /// Persistent per-bvh GPU buffers backing nodes / shapes / mesh-
+    /// instance arrays. PersistentBuffer wraps the standard
+    /// "lazy-create + write_diff + ensure_buffer_storage + map+memcpy"
+    /// pipeline; addresses stay stable until the underlying buffer
+    /// reallocates (size change).
+    PersistentBuffer nodes_buffer_;
+    PersistentBuffer shapes_buffer_;
+    PersistentBuffer mesh_instances_buffer_;
 
     uint64_t nodes_addr_ = 0;
     uint64_t shapes_addr_ = 0;
