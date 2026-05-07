@@ -17,7 +17,7 @@
 #include "frame/frame_snippet_registry.h"
 #include "resource/gpu_resource_manager.h"
 #include "resource/program_data_buffer.h"
-#include <velk-render/ext/gpu_buffer.h>
+#include "resource/gpu_buffer.h"
 #include "render_context.h"
 #include "resource/render_texture.h"
 #include "technique/rt_shadow.h"

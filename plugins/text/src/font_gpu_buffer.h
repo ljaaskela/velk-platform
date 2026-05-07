@@ -59,6 +59,7 @@ public:
     bool is_dirty() const override;
     void clear_dirty() override;
     bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
+    bool write(size_t /*sz*/, WriteFn /*fn*/, void* /*ctx*/) override { return false; }
 
 private:
     FontBuffers* fb_ = nullptr;

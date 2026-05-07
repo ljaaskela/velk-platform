@@ -2,8 +2,8 @@
 
 #include <velk/api/velk.h>
 
-#include <velk-render/ext/gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/plugin.h>
 
 #include <cstring>
 
@@ -13,30 +13,32 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
 {
     if (!storage_) {
         storage_ = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
+        if (!storage_) return;
     }
-    // `storage_` is always a GpuBuffer (created via ClassId::GpuBuffer
-    // above); the cast is a hot-path internal-only access for
-    // `mutable_data()`.
-    auto* gpu = static_cast<GpuBuffer*>(storage_.get());
-    auto& blob = gpu->mutable_data();
-    blob.resize(Layout::kInstanceOffset + instance_data_.size());
 
-    if (indexed) {
-        uint32_t args[5] = { prim_count, instance_count_, 0u, 0u, 0u };
-        std::memcpy(blob.data() + Layout::kArgsOffset, args, sizeof(args));
-    } else {
-        uint32_t args[4] = { prim_count, instance_count_, 0u, 0u };
-        std::memcpy(blob.data() + Layout::kArgsOffset, args, sizeof(args));
-    }
-    uint32_t count = 1;
-    std::memcpy(blob.data() + Layout::kCountOffset, &count, sizeof(count));
-    if (!instance_data_.empty()) {
-        std::memcpy(blob.data() + Layout::kInstanceOffset,
-                    instance_data_.data(), instance_data_.size());
-    }
-    // mutable_data() already set the dirty flag. Reset cached mapped
-    // pointer — a size change forces ensure_buffer_storage to
-    // reallocate, invalidating the prior map.
+    // Fill the buffer in place via IBuffer::write — the impl supplies
+    // its own scratch, the lambda writes args/count/instance bytes
+    // directly into it, and the impl diff+dirty-tracks against the
+    // previous frame's blob.
+    size_t blob_size = Layout::kInstanceOffset + instance_data_.size();
+    storage_->write(blob_size, [&](void* dst, size_t /*n*/) {
+        auto* bytes = static_cast<uint8_t*>(dst);
+        if (indexed) {
+            uint32_t args[5] = { prim_count, instance_count_, 0u, 0u, 0u };
+            std::memcpy(bytes + Layout::kArgsOffset, args, sizeof(args));
+        } else {
+            uint32_t args[4] = { prim_count, instance_count_, 0u, 0u };
+            std::memcpy(bytes + Layout::kArgsOffset, args, sizeof(args));
+        }
+        uint32_t count = 1;
+        std::memcpy(bytes + Layout::kCountOffset, &count, sizeof(count));
+        if (!instance_data_.empty()) {
+            std::memcpy(bytes + Layout::kInstanceOffset,
+                        instance_data_.data(), instance_data_.size());
+        }
+    });
+    // Reset cached mapped pointer — a size change forces
+    // ensure_buffer_storage to reallocate, invalidating the prior map.
     storage_mapped_ = nullptr;
 
     notify_render_state_changed(::velk::RenderStateChange::All);
