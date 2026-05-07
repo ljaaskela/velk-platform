@@ -61,6 +61,21 @@ public:
      */
     virtual void clear_dirty() = 0;
 
+    /**
+     * @brief Memcmp-gated write of @p size bytes from @p bytes into the
+     *        buffer's CPU-resident store. Returns true if the bytes (or
+     *        size) actually differ from the current contents and the
+     *        buffer is now dirty; false on no-op. Lets callers gate
+     *        side effects (uploads, observer notifications) on real
+     *        change.
+     *
+     *        Specialised IBuffer implementations whose bytes come from
+     *        a private ingest path (texture pixels, font glyph atlas,
+     *        program-data callbacks) are not required to support this
+     *        and may return false unconditionally.
+     */
+    virtual bool write_diff(const void* bytes, size_t size) = 0;
+
     // GPU virtual address access goes through `IGpuResource::get_gpu_handle` /
     // `set_gpu_handle` with `GpuResourceKey::Default`. The renderer
     // populates the address after `create_buffer` (and after any

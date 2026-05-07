@@ -51,10 +51,11 @@ public:
 private:
     struct ViewState
     {
-        /// One intermediate per non-last effect. Refreshed each frame:
-        /// the prior Ptr is dropped and a new one acquired from the
-        /// graph's transient pool. Sized to the effect chain length.
+        /// One intermediate per non-last effect. Persistent: the same
+        /// Ptr is reused across frames so cached effect passes can
+        /// embed the texture id stably. Recreate only on size change.
         ::velk::vector<::velk::IRenderTarget::Ptr> intermediates;
+        ::velk::uvec2 intermediate_size{};
     };
 
     std::unordered_map<::velk::IViewEntry*, ViewState> view_states_;

@@ -127,12 +127,40 @@ private:
         };
         ChangeCache<CameraKey> camera_change;
 
+        /// Env fingerprint (texture id + material id + data address).
+        /// `prepare_env` resolves these from the snippet registry; on
+        /// the first frame the env material's persistent data buffer
+        /// may not have been uploaded yet → data_addr returns 0,
+        /// then becomes valid the next frame. The change signal lets
+        /// cached deferred-lighting / RT passes invalidate when env
+        /// state actually flips, not on a fixed schedule.
+        struct EnvKey
+        {
+            uint32_t texture_id;
+            uint32_t material_id;
+            uint64_t data_addr;
+            bool operator==(const EnvKey& rhs) const
+            {
+                return texture_id == rhs.texture_id
+                    && material_id == rhs.material_id
+                    && data_addr == rhs.data_addr;
+            }
+        };
+        ChangeCache<EnvKey> env_change;
+
         /// Per-view persistent lights buffer (an `impl::GpuBuffer`).
         /// `prepare_lights` write_diffs the GpuLight array into it so
         /// the device address on `RenderView::lights_addr` is stable
         /// across frames; cached lighting/RT passes can embed it
         /// without rotating each frame.
         IBuffer::Ptr lights_buffer;
+
+        /// Per-view persistent env material data buffer. Used as the
+        /// fallback when the env material has no snippet-resolved
+        /// data buffer; replaces the per-frame `frame_buffer->write`
+        /// path so `RenderView::env.data_addr` is stable across
+        /// frames (cached lighting passes embed it).
+        IBuffer::Ptr env_data_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 

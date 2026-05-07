@@ -11,7 +11,6 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
-#include <velk-render/ext/gpu_buffer.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_camera.h>
@@ -266,22 +265,22 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
         cache.lights_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
         if (!cache.lights_buffer) return;
     }
-    auto* gbuf = static_cast<impl::GpuBuffer*>(cache.lights_buffer.get());
+    auto* lights_buf = cache.lights_buffer.get();
     size_t bytes = rv.lights.size() * sizeof(GpuLight);
-    bool changed = gbuf->write_diff(rv.lights.data(), bytes);
+    bool changed = lights_buf->write_diff(rv.lights.data(), bytes);
 
-    if (gbuf->is_dirty() && bytes > 0) {
+    if (lights_buf->is_dirty() && bytes > 0) {
         GpuBufferDesc desc{};
         desc.size = bytes;
         desc.cpu_writable = true;
-        if (auto* be = ctx.resources->ensure_buffer_storage(cache.lights_buffer.get(), desc)) {
+        if (auto* be = ctx.resources->ensure_buffer_storage(lights_buf, desc)) {
             if (be->handle) {
                 if (auto* dst = ctx.backend->map(be->handle)) {
-                    std::memcpy(dst, gbuf->get_data(), bytes);
+                    std::memcpy(dst, lights_buf->get_data(), bytes);
                 }
             }
         }
-        gbuf->clear_dirty();
+        lights_buf->clear_dirty();
     }
     rv.lights_addr = bytes > 0
         ? cache.lights_buffer->get_gpu_handle(GpuResourceKey::Default)
@@ -359,19 +358,40 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
         rv.env.material_id = env_ref.mat_id;
         rv.env.data_addr = env_ref.mat_addr;
     }
-    // Fallback for env materials without a snippet: serialise into the
-    // frame scratch buffer. Single upload per frame.
-    if (rv.env.data_addr == 0 && ctx.frame_buffer) {
+    // Fallback for env materials without a snippet: stage into a
+    // per-view persistent buffer so the GPU address stays stable
+    // across frames. write_diff gates the upload (and downstream
+    // notify) on real change. Without persistence, env_data_addr
+    // would rotate per-frame through frame_buffer staging and force
+    // the cached lighting pass to rebuild every frame, racing with
+    // in-flight slots that share the cached IRenderPass::Ptr.
+    if (rv.env.data_addr == 0 && ctx.resources && ctx.backend) {
         if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
             size_t sz = dd->get_draw_data_size();
             if (sz > 0) {
-                void* scratch = std::malloc(sz);
-                if (scratch) {
-                    std::memset(scratch, 0, sz);
-                    if (dd->write_draw_data(scratch, sz) == ReturnValue::Success) {
-                        rv.env.data_addr = ctx.frame_buffer->write(scratch, sz);
+                auto& cache = view_caches_[&entry];
+                if (!cache.env_data_buffer) {
+                    cache.env_data_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
+                }
+                vector<uint8_t> scratch(sz, 0);
+                if (cache.env_data_buffer
+                    && dd->write_draw_data(scratch.data(), sz) == ReturnValue::Success) {
+                    auto* env_buf = cache.env_data_buffer.get();
+                    env_buf->write_diff(scratch.data(), sz);
+                    if (env_buf->is_dirty()) {
+                        GpuBufferDesc desc{};
+                        desc.size = sz;
+                        desc.cpu_writable = true;
+                        if (auto* be = ctx.resources->ensure_buffer_storage(env_buf, desc)) {
+                            if (be->handle) {
+                                if (auto* dst = ctx.backend->map(be->handle)) {
+                                    std::memcpy(dst, env_buf->get_data(), sz);
+                                }
+                            }
+                        }
+                        env_buf->clear_dirty();
                     }
-                    std::free(scratch);
+                    rv.env.data_addr = env_buf->get_gpu_handle(GpuResourceKey::Default);
                 }
             }
         }
@@ -428,6 +448,11 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
             env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
         }
         rv.env_batch = cache.env_batch;
+    }
+
+    auto& cache = view_caches_[&entry];
+    if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id, rv.env.data_addr})) {
+        entry.notify_view_changed();
     }
 }
 
