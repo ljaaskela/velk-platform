@@ -210,20 +210,24 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
 {
     if (width <= 0 || height <= 0) return 0;
 
+    if (vs.gbuffer && vs.gbuffer_width == width && vs.gbuffer_height == height) {
+        return vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
+    }
+
     TextureGroupDesc gdesc{};
     gdesc.formats = array_view<const PixelFormat>(
         kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
     gdesc.width = width;
     gdesc.height = height;
     gdesc.depth = DepthFormat::Default;
-    // Per-frame allocation: drop the prior Ptr (manager parks the
-    // group on its pool) and request a fresh one. Pool reuse kicks in
-    // once the parked entry's GPU work has retired.
     vs.gbuffer = graph.resources().create_render_texture_group(gdesc);
     if (!vs.gbuffer) return 0;
 
     vs.gbuffer_width = width;
     vs.gbuffer_height = height;
+    // Resize / first-time allocation invalidates any cached pass that
+    // referenced the previous group Ptr.
+    vs.gbuffer_dirty = true;
     auto group = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
 
     if (!vs.worldpos_alias) {
@@ -251,7 +255,11 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
 
-    auto& vs = view_states_[&entry];
+    auto [it, inserted] = view_states_.try_emplace(&entry);
+    auto& vs = it->second;
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
 
     auto gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (gbuffer_handle == 0) return;
@@ -269,6 +277,20 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
 {
     if (!render_view.batches) return;
 
+    if (!vs.cached_gbuffer_pass) {
+        vs.cached_gbuffer_pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+        if (!vs.cached_gbuffer_pass) return;
+        vs.gbuffer_dirty = true;
+    }
+
+    if (!vs.gbuffer_dirty) {
+        // Steady state: same Ptr, refresh only the per-frame view
+        // globals address.
+        vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
+        graph.add_pass(vs.cached_gbuffer_pass);
+        return;
+    }
+
     auto group_id = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
@@ -285,17 +307,17 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         resolve,
         render_view.has_frustum ? &render_view.frustum : nullptr);
 
-    auto gp = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-    if (!gp) return;
     rect viewport{0, 0,
                   static_cast<float>(vs.gbuffer_width),
                   static_cast<float>(vs.gbuffer_height)};
-    gp->add_op(ops::BeginPass{group_id});
-    gp->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
-    gp->add_op(ops::EndPass{});
-    gp->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-    gp->set_view_globals_address(render_view.view_globals_address);
-    graph.add_pass(std::move(gp));
+    vs.cached_gbuffer_pass->reset();
+    vs.cached_gbuffer_pass->add_op(ops::BeginPass{group_id});
+    vs.cached_gbuffer_pass->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
+    vs.cached_gbuffer_pass->add_op(ops::EndPass{});
+    vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+    vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
+    vs.gbuffer_dirty = false;
+    graph.add_pass(vs.cached_gbuffer_pass);
 }
 
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -410,15 +432,42 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     graph.add_pass(std::move(gp));
 }
 
+DeferredPath::~DeferredPath()
+{
+    // Detach from every view we observed. The renderer's destruction
+    // order keeps IViewEntry::Ptrs alive past path destruction, so
+    // these calls are safe.
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
+}
+
+void DeferredPath::on_render_state_changed(IRenderState* source,
+                                           RenderStateChange /*flags*/)
+{
+    auto* view = interface_cast<IViewEntry>(source);
+    if (!view) return;
+    auto it = view_states_.find(view);
+    if (it != view_states_.end()) {
+        it->second.gbuffer_dirty = true;
+    }
+}
+
 void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
 {
+    auto it = view_states_.find(&entry);
+    if (it == view_states_.end()) return;
+    entry.remove_render_state_observer(this);
     // Erase the view state; gbuffer / deferred_output / shadow_debug
     // Ptrs drop, resource manager auto-defers the backend handles.
-    view_states_.erase(&entry);
+    view_states_.erase(it);
 }
 
 void DeferredPath::shutdown(FrameContext& /*ctx*/)
 {
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
     view_states_.clear();
     compiled_pipelines_.clear();
 }
