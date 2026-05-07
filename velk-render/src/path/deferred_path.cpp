@@ -210,7 +210,8 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
 {
     if (width <= 0 || height <= 0) return 0;
 
-    if (vs.gbuffer && vs.gbuffer_width == width && vs.gbuffer_height == height) {
+    uvec2 want{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    if (vs.gbuffer && vs.gbuffer_size == want) {
         return vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
     }
 
@@ -223,8 +224,7 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
     vs.gbuffer = graph.resources().create_render_texture_group(gdesc);
     if (!vs.gbuffer) return 0;
 
-    vs.gbuffer_width = width;
-    vs.gbuffer_height = height;
+    vs.gbuffer_size = want;
     // Resize / first-time allocation invalidates any cached pass that
     // referenced the previous group Ptr.
     vs.gbuffer_dirty = true;
@@ -266,9 +266,10 @@ void DeferredPath::build_passes(IViewEntry& entry,
 
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
-    if (vs.gbuffer_width <= 0 || vs.gbuffer_height <= 0) return;
+    if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
-                       vs.gbuffer_width, vs.gbuffer_height, graph);
+                       static_cast<int>(vs.gbuffer_size.x),
+                       static_cast<int>(vs.gbuffer_size.y), graph);
 }
 
 void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -308,8 +309,8 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         render_view.has_frustum ? &render_view.frustum : nullptr);
 
     rect viewport{0, 0,
-                  static_cast<float>(vs.gbuffer_width),
-                  static_cast<float>(vs.gbuffer_height)};
+                  static_cast<float>(vs.gbuffer_size.x),
+                  static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
     vs.cached_gbuffer_pass->add_op(ops::BeginPass{group_id});
     vs.cached_gbuffer_pass->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
@@ -327,10 +328,11 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       int w, int h,
                                       IRenderGraph& graph)
 {
-    // Per-frame allocation: drop the prior Ptr (manager parks the
-    // handle on its pool) and request a fresh one each frame. Steady-
-    // state hits the pool once the parked handle's GPU work retires.
-    {
+    // Persistent allocation: keep the same Ptrs across frames so
+    // downstream PushC bindless ids and `add_write` resource refs stay
+    // stable. Recreate only on size change (or first-time).
+    uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+    if (!vs.deferred_output || vs.output_size != want) {
         TextureDesc td{};
         td.width = w;
         td.height = h;
@@ -343,7 +345,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     if (!vs.deferred_output) return;
 
-    {
+    if (!vs.shadow_debug || vs.output_size != want) {
         TextureDesc td{};
         td.width = w;
         td.height = h;
@@ -351,6 +353,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.usage = TextureUsage::Storage;
         vs.shadow_debug = graph.resources().create_render_texture(td);
     }
+    vs.output_size = want;
 
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
