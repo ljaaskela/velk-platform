@@ -371,12 +371,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // stamped flags[1] with the registered id; the deferred compute's
     // velk_eval_shadow switch is composed from the same registry, so
     // any tech ordering works.
-    uint64_t lights_addr = 0;
-    if (!render_view.lights.empty() && ctx.frame_buffer) {
-        lights_addr = ctx.frame_buffer->write(
-            render_view.lights.data(),
-            render_view.lights.size() * sizeof(GpuLight));
-    }
+    // Persistent per-view lights buffer staged by ViewPreparer; address
+    // is stable across frames so cached lighting passes can embed it.
+    uint64_t lights_addr = render_view.lights_addr;
 
     VELK_GPU_STRUCT PushC {
         float    cam_pos[4];

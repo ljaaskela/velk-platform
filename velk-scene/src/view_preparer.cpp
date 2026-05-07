@@ -11,6 +11,7 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-render/ext/gpu_buffer.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_camera.h>
@@ -237,8 +238,8 @@ void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
     rv.view_globals_address = ctx.frame_buffer->write(&globals, sizeof(globals));
 }
 
-void ViewPreparer::prepare_lights(const SceneState& scene_state, FrameContext& ctx,
-                                  RenderView& rv)
+void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,
+                                  FrameContext& ctx, RenderView& rv)
 {
     struct LightCollect {
         FrameContext& ctx;
@@ -255,6 +256,37 @@ void ViewPreparer::prepare_lights(const SceneState& scene_state, FrameContext& c
             }
             s.out.push_back(site.base);
         }, &lc);
+
+    // Stage the lights into the per-view persistent buffer. Stable GPU
+    // address across frames; bytes update only on real change. Notify
+    // observers so cached lighting/RT passes invalidate.
+    if (!ctx.resources || !ctx.backend) return;
+    auto& cache = view_caches_[&entry];
+    if (!cache.lights_buffer) {
+        cache.lights_buffer = ::velk::instance().create<IBuffer>(ClassId::GpuBuffer);
+        if (!cache.lights_buffer) return;
+    }
+    auto* gbuf = static_cast<impl::GpuBuffer*>(cache.lights_buffer.get());
+    size_t bytes = rv.lights.size() * sizeof(GpuLight);
+    bool changed = gbuf->write_diff(rv.lights.data(), bytes);
+
+    if (gbuf->is_dirty() && bytes > 0) {
+        GpuBufferDesc desc{};
+        desc.size = bytes;
+        desc.cpu_writable = true;
+        if (auto* be = ctx.resources->ensure_buffer_storage(cache.lights_buffer.get(), desc)) {
+            if (be->handle) {
+                if (auto* dst = ctx.backend->map(be->handle)) {
+                    std::memcpy(dst, gbuf->get_data(), bytes);
+                }
+            }
+        }
+        gbuf->clear_dirty();
+    }
+    rv.lights_addr = bytes > 0
+        ? cache.lights_buffer->get_gpu_handle(GpuResourceKey::Default)
+        : 0;
+    if (changed) entry.notify_view_changed();
 }
 
 void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
@@ -442,7 +474,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     // Path-gated: skip the heavy scene walks when the path doesn't
     // declare a need for them.
     if (needs.batches) prepare_batches(entry, scene_state, batch_builder, ctx, rv);
-    if (needs.lights)  prepare_lights(scene_state, ctx, rv);
+    if (needs.lights)  prepare_lights(entry, scene_state, ctx, rv);
     if (needs.shapes)  prepare_shapes(scene_state, ctx, rv);
 
     return rv;
