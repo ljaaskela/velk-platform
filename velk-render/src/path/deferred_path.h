@@ -10,6 +10,8 @@
 #include <velk-render/plugin.h>
 #include <velk-render/ext/render_path.h>
 #include <velk-render/interface/intf_render_path.h>
+#include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/interface/intf_render_state.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_render_texture_group.h>
 #include <velk-render/render_path/frame_context.h>
@@ -38,10 +40,12 @@ namespace velk {
  * deferred_output_tex, shadow_debug_tex) via the
  * `ViewState` struct.
  */
-class DeferredPath : public ext::RenderPath<DeferredPath>
+class DeferredPath : public ext::RenderPath<DeferredPath, IRenderStateObserver>
 {
 public:
     VELK_CLASS_UID(ClassId::Path::Deferred, "DeferredPath");
+
+    ~DeferredPath() override;
 
     Needs needs() const override
     {
@@ -59,6 +63,11 @@ public:
 
     void on_view_removed(IViewEntry& view, FrameContext& ctx) override;
     void shutdown(FrameContext& ctx) override;
+
+    // IRenderStateObserver — view's batch set or camera changed;
+    // invalidate the cached gbuffer pass for that view.
+    void on_render_state_changed(IRenderState* source,
+                                 RenderStateChange flags) override;
 
     /// Exposes per-view "gbuffer" (the IRenderTextureGroup),
     /// "gbuffer.worldpos" (a RenderTexture aliasing the worldpos
@@ -83,6 +92,15 @@ public:
         /// Does not own the GPU texture (the group does); exposed via
         /// find_named_output("gbuffer.worldpos") for debug readback.
         IRenderTarget::Ptr worldpos_alias;
+
+        /// Cached gbuffer pass. Stable Ptr across frames so the graph's
+        /// compile-time short-circuit can match. Rebuilt only when
+        /// `gbuffer_dirty` is set by `on_render_state_changed` or by
+        /// `ensure_gbuffer` recreating the gbuffer group on resize.
+        /// Lighting pass stays per-frame for now — Steps C/D land
+        /// stable inputs for it.
+        IRenderPass::Ptr cached_gbuffer_pass;
+        bool gbuffer_dirty = true;
     };
 
 private:
