@@ -8,6 +8,7 @@
 #include <velk-render/plugin.h>
 
 #include <cstdint>
+#include <cstring>
 
 namespace velk::impl {
 
@@ -60,6 +61,23 @@ public:
     /// reuploads correctly. Use sparingly; the typical mutation path is
     /// `mutable_data()`.
     void set_dirty() { dirty_ = true; }
+
+    /// Memcmp-gated write: replaces the blob with @p bytes only when
+    /// they differ from the current contents (or sizes mismatch).
+    /// Returns `true` when bytes were updated (and dirty was set),
+    /// `false` when the call was a no-op. Lets callers gate side
+    /// effects (e.g. observer notifications) on real change.
+    bool write_diff(const void* bytes, size_t size)
+    {
+        if (data_.size() == size
+            && (size == 0 || std::memcmp(data_.data(), bytes, size) == 0)) {
+            return false;
+        }
+        data_.resize(size);
+        if (size) std::memcpy(data_.data(), bytes, size);
+        dirty_ = true;
+        return true;
+    }
 
 private:
     ::velk::vector<uint8_t> data_;

@@ -11,6 +11,7 @@
 
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -125,6 +126,13 @@ private:
             }
         };
         ChangeCache<CameraKey> camera_change;
+
+        /// Per-view persistent lights buffer (an `impl::GpuBuffer`).
+        /// `prepare_lights` write_diffs the GpuLight array into it so
+        /// the device address on `RenderView::lights_addr` is stable
+        /// across frames; cached lighting/RT passes can embed it
+        /// without rotating each frame.
+        IBuffer::Ptr lights_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -159,8 +167,8 @@ private:
 
     /// Walks scene lights, registers each light's shadow tech with the
     /// snippet registry, and accumulates GpuLight records into @p rv.
-    void prepare_lights(const SceneState& scene_state, FrameContext& ctx,
-                        RenderView& rv);
+    void prepare_lights(IViewEntry& entry, const SceneState& scene_state,
+                        FrameContext& ctx, RenderView& rv);
 
     /// Walks scene shapes, resolves material / texture / intersect /
     /// mesh-data per shape, and accumulates RtShape records into @p rv.

@@ -96,12 +96,9 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
 
-    uint64_t lights_addr = 0;
-    if (!render_view.lights.empty()) {
-        lights_addr = ctx.frame_buffer->write(
-            render_view.lights.data(),
-            render_view.lights.size() * sizeof(GpuLight));
-    }
+    // Persistent per-view lights buffer staged by ViewPreparer; address
+    // is stable across frames so cached RT passes can embed it.
+    uint64_t lights_addr = render_view.lights_addr;
 
     // Make a working copy of the shapes so we can plane-sort without
     // affecting other consumers of render_view.shapes (today nobody
