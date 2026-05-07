@@ -1,4 +1,5 @@
 #include "path/forward_path.h"
+#include "path/material_pipeline.h"
 
 #include <velk/api/velk.h>
 #include <velk/string.h>
@@ -42,30 +43,24 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
 
     uint64_t compiled_key = 0;
     if (use_material) {
-        if (auto* mat = interface_cast<IMaterial>(material_ptr)) {
+        // Try the eval-snippet path first (material composed with the
+        // forward driver template). Falls back to a raw fragment
+        // source if the material declines the snippet path.
+        compiled_key = compile_material_forward_pipeline(
+            ctx, batch, target_format, user_key);
+        if (compiled_key == 0) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
-            auto eval_src = src ? src->get_source(shader_role::kEval) : string_view{};
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
-            auto eval_fn = src ? src->get_fn_name(shader_role::kEval) : string_view{};
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
-            if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
-                src->register_includes(ctx);
-                string frag = compose_eval_fragment(
-                    forward_fragment_driver_template, eval_src, eval_fn,
-                    mat->get_forward_discard_threshold());
-                compiled_key = ctx.compile_pipeline(
-                    string_view(frag), vertex_src,
-                    user_key, target_format, 0,
-                    pipeline_options);
-            } else if (!frag_src.empty() && !vertex_src.empty()) {
+            if (!frag_src.empty() && !vertex_src.empty()) {
                 compiled_key = ctx.compile_pipeline(
                     frag_src, vertex_src,
                     user_key, target_format, 0,
                     pipeline_options);
             }
-            if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
-                material_ptr->set_pipeline_handle(compiled_key);
-            }
+        }
+        if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
+            material_ptr->set_pipeline_handle(compiled_key);
         }
     } else if (shader_source_ptr && user_key != 0) {
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
