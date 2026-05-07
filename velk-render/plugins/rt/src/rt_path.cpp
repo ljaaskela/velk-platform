@@ -79,16 +79,18 @@ void RtPath::build_passes(IViewEntry& entry,
 
     auto& vs = view_states_[&entry];
 
-    // Per-frame allocation: drop the prior Ptr (manager parks the
-    // handle on its pool) and request a fresh one. Steady-state hits
-    // the pool once the parked handle's GPU work retires.
-    {
+    // Persistent allocation: keep the same Ptr across frames so
+    // downstream PushC bindless ids and `add_write` resource refs stay
+    // stable. Recreate only on size change (or first-time).
+    uvec2 want{static_cast<uint32_t>(vp_w), static_cast<uint32_t>(vp_h)};
+    if (!vs.rt_output || vs.output_size != want) {
         TextureDesc td{};
         td.width = vp_w;
         td.height = vp_h;
         td.format = PixelFormat::RGBA8;
         td.usage = TextureUsage::Storage;
         vs.rt_output = graph.resources().create_render_texture(td);
+        vs.output_size = want;
     }
     if (!vs.rt_output) {
         return;

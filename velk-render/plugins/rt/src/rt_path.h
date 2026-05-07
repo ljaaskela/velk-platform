@@ -51,6 +51,10 @@ private:
     struct ViewState
     {
         ::velk::IRenderTarget::Ptr rt_output;
+        // Cached size for rt_output. Recreate only on size change so
+        // downstream PushC bindless ids and `add_write` resource refs
+        // stay stable.
+        ::velk::uvec2 output_size{};
     };
 
     std::unordered_map<IViewEntry*, ViewState> view_states_;

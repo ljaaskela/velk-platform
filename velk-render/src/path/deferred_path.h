@@ -82,11 +82,13 @@ public:
         IRenderTextureGroup::Ptr gbuffer;
         // Recorded after gbuffer creation; consumed by emit_lighting_pass
         // and emit_gbuffer_pass for viewport sizing.
-        int gbuffer_width = 0;
-        int gbuffer_height = 0;
+        uvec2 gbuffer_size{};
 
         IRenderTarget::Ptr deferred_output;
         IRenderTarget::Ptr shadow_debug;
+        // Cached size for deferred_output + shadow_debug (both follow
+        // the lighting target dims). Recreate only on size change.
+        uvec2 output_size{};
 
         /// RenderTexture alias for the gbuffer worldpos attachment.
         /// Does not own the GPU texture (the group does); exposed via
