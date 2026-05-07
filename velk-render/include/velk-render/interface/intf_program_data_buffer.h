@@ -23,38 +23,11 @@ namespace velk {
  */
 class IProgramDataBuffer : public Interface<IProgramDataBuffer, IBuffer>
 {
-public:
-    /**
-     * @brief C-style writer callback. Receives the buffer's internal
-     *        scratch pointer and the requested size.
-     */
-    using WriteFn = void (*)(void* dst, size_t sz, void* ctx);
-
-    /**
-     * @brief Asks the buffer to (re)serialise @p sz bytes via @p fn.
-     *
-     * The buffer supplies the destination pointer (its own scratch),
-     * calls @p fn to fill it, then diffs against the previously
-     * committed bytes. Returns true if the committed content changed
-     * and the buffer is now dirty; false if identical (no re-upload
-     * needed).
-     */
-    virtual bool write(size_t sz, WriteFn fn, void* ctx) = 0;
-
-    /**
-     * @brief Lambda-friendly overload that forwards to the virtual.
-     *
-     * Usage:
-     *   pdb->write(sz, [&](void* dst, size_t n) { ... });
-     */
-    template <typename Writer>
-    bool write(size_t sz, Writer&& writer)
-    {
-        auto trampoline = [](void* dst, size_t n, void* ctx) {
-            (*static_cast<Writer*>(ctx))(dst, n);
-        };
-        return write(sz, trampoline, const_cast<Writer*>(&writer));
-    }
+    // No additional members. The data-fill API (`IBuffer::write`) and
+    // memcmp-gated write (`IBuffer::write_diff`) live on IBuffer; this
+    // interface remains as a typed cap so the renderer can demand a
+    // material's data buffer is hive-pooled / observable in the same
+    // way as ProgramDataBuffer (consumers don't need an extra method).
 };
 
 } // namespace velk

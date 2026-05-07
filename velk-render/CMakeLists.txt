@@ -40,6 +40,7 @@ add_library(velk_render SHARED
     # Concrete IGpuResource implementations
     src/resource/render_texture.h
     src/resource/render_texture_group.h
+    src/resource/gpu_buffer.h
     src/resource/program_data_buffer.h
     src/resource/program_data_buffer.cpp
     src/resource/gpu_resource_manager.h
@@ -79,7 +80,6 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_window_surface.h
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h
-    include/velk-render/ext/gpu_buffer.h
     include/velk-render/ext/persistent_buffer.h
     include/velk-render/ext/render_state.h
     include/velk-render/interface/intf_render_state.h
@@ -141,6 +141,7 @@ add_library(velk_render SHARED
     src/path/deferred_path.h
     src/path/deferred_path.cpp
     src/path/deferred_gbuffer.h
+    src/path/material_pipeline.h
     src/path/post_process.h
     src/path/post_process.cpp
     src/path/tonemap.h

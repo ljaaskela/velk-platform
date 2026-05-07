@@ -76,6 +76,46 @@ public:
      */
     virtual bool write_diff(const void* bytes, size_t size) = 0;
 
+    /**
+     * @brief C-style writer callback. Receives a writable destination
+     *        of @p sz bytes and the caller's @p ctx. Used by
+     *        `IBuffer::write` to let callers fill the buffer in place
+     *        without an intermediate scratch.
+     */
+    using WriteFn = void (*)(void* dst, size_t sz, void* ctx);
+
+    /**
+     * @brief Asks the buffer to (re)serialise @p sz bytes via @p fn.
+     *
+     * The buffer supplies the destination pointer (its own internal
+     * scratch zeroed to @p sz), calls @p fn to fill it, then memcmps
+     * against the previously committed bytes. Returns true if the
+     * committed content changed and the buffer is now dirty; false if
+     * identical (no re-upload needed).
+     *
+     * The point vs `write_diff`: callers that build the blob from
+     * multiple sources (offsets / ranges) can write straight into the
+     * buffer's own storage, avoiding the intermediate vector + memcpy
+     * pair.
+     *
+     * Implementations that don't support arbitrary writes (texture
+     * pixels, etc.) may return false unconditionally.
+     */
+    virtual bool write(size_t sz, WriteFn fn, void* ctx) = 0;
+
+    /**
+     * @brief Lambda-friendly overload of `write` that forwards to the
+     *        virtual through a trampoline.
+     */
+    template <typename Writer>
+    bool write(size_t sz, Writer&& writer)
+    {
+        auto trampoline = [](void* dst, size_t n, void* ctx) {
+            (*static_cast<Writer*>(ctx))(dst, n);
+        };
+        return this->write(sz, trampoline, const_cast<Writer*>(&writer));
+    }
+
     // GPU virtual address access goes through `IGpuResource::get_gpu_handle` /
     // `set_gpu_handle` with `GpuResourceKey::Default`. The renderer
     // populates the address after `create_buffer` (and after any
