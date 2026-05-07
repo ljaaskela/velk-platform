@@ -1,4 +1,5 @@
 #include "path/deferred_path.h"
+#include "path/material_pipeline.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
@@ -37,11 +38,37 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
+
+    // Forward cache key bootstrap: the gbuffer key is derived from the
+    // forward key, which is populated lazily by ForwardPath compiling
+    // the material. For deferred-only views (where ForwardPath never
+    // runs for this material) the helper compiles the forward variant
+    // here so the key is stable. Without it, the batch would be
+    // silently skipped from the gbuffer pass.
     uint64_t forward_key = batch.pipeline_key();
-    if (forward_key == 0 && material_ptr) {
-        forward_key = material_ptr->get_pipeline_handle(ctx);
+    if (forward_key == 0) {
+        forward_key = ensure_material_forward_key(ctx, batch);
     }
     if (forward_key == 0) return 0;
+
+    // Pull the material's eval snippet for the gbuffer compile below.
+    // Fast-path note: when ensure_material_forward_key just compiled,
+    // the same source is fetched twice — cheap (string_view copies),
+    // and keeps the helper composable.
+    auto* mat = material_ptr ? interface_cast<IMaterial>(material_ptr.get()) : nullptr;
+    auto* src = material_ptr ? interface_cast<IShaderSource>(material_ptr.get()) : nullptr;
+    string_view eval_src;
+    string_view vertex_src;
+    string_view eval_fn;
+    bool has_eval = false;
+    if (mat && src) {
+        eval_src = src->get_source(shader_role::kEval);
+        vertex_src = src->get_source(shader_role::kVertex);
+        eval_fn = src->get_fn_name(shader_role::kEval);
+        if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
+            has_eval = true;
+        }
+    }
 
     uint64_t perturb = 0;
     if (auto* obj = interface_cast<IObject>(shader_source_ptr.get())) {
@@ -58,24 +85,13 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     string_view vsrc;
     string_view base_fsrc;
     string composed_fsrc;
-
-    if (material_ptr) {
-        auto* mat = interface_cast<IMaterial>(material_ptr.get());
-        auto* src = interface_cast<IShaderSource>(material_ptr.get());
-        if (mat && src) {
-            auto eval_src = src->get_source(shader_role::kEval);
-            auto vertex_src = src->get_source(shader_role::kVertex);
-            auto eval_fn = src->get_fn_name(shader_role::kEval);
-            if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
-                src->register_includes(ctx);
-                composed_fsrc = compose_eval_fragment(
-                    deferred_fragment_driver_template,
-                    eval_src, eval_fn,
-                    mat->get_deferred_discard_threshold());
-                vsrc = vertex_src;
-                base_fsrc = string_view(composed_fsrc);
-            }
-        }
+    if (has_eval) {
+        composed_fsrc = compose_eval_fragment(
+            deferred_fragment_driver_template,
+            eval_src, eval_fn,
+            mat->get_deferred_discard_threshold());
+        vsrc = vertex_src;
+        base_fsrc = string_view(composed_fsrc);
     }
     if (base_fsrc.empty()) {
         base_fsrc = default_gbuffer_fragment_src;
