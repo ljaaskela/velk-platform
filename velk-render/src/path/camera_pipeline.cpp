@@ -49,21 +49,27 @@ CameraPipeline::CameraPipeline()
 
 ::velk::IRenderTarget::Ptr
 CameraPipeline::ensure_storage_target(::velk::IRenderTarget::Ptr& slot,
+                                      ::velk::uvec2& size_slot,
                                       int width, int height,
                                       ::velk::TextureUsage usage,
                                       ::velk::PixelFormat format,
                                       ::velk::FrameContext& /*ctx*/,
                                       ::velk::IRenderGraph& graph)
 {
+    ::velk::uvec2 want{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    if (slot && size_slot == want) return slot;
+
     ::velk::TextureDesc td{};
     td.width = width;
     td.height = height;
     td.format = format;
     td.usage = usage;
-    // Per-frame allocation: drop the prior Ptr (manager parks the
-    // handle on its pool) and request a fresh one. Pool reuse kicks
-    // in once the parked handle's GPU work has retired.
+    // Persistent allocation: keep the same Ptr / handle across frames
+    // so downstream cached passes (deferred lighting BlitToSurface,
+    // post-process effects) embed a stable target. Recreate only on
+    // size change.
     slot = graph.resources().create_render_texture(td);
+    if (slot) size_slot = want;
     return slot;
 }
 
@@ -120,10 +126,10 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
     ::velk::PixelFormat saved_format = ctx.target_format;
     ctx.target_format = ::velk::PixelFormat::RGBA16F;
 
-    auto path_target = ensure_storage_target(vs.path_output, w, h,
+    auto path_target = ensure_storage_target(vs.path_output, vs.path_size, w, h,
                                              ::velk::TextureUsage::RenderTarget,
                                              ::velk::PixelFormat::RGBA16F, ctx, graph);
-    auto post_target = ensure_storage_target(vs.post_output, w, h,
+    auto post_target = ensure_storage_target(vs.post_output, vs.post_size, w, h,
                                              ::velk::TextureUsage::Storage,
                                              ::velk::PixelFormat::RGBA16F, ctx, graph);
     if (!path_target || !post_target) {

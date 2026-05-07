@@ -65,6 +65,7 @@ public:
         return bytes_.empty() ? nullptr : bytes_.data();
     }
     bool is_dirty() const override { return dirty_; }
+    bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
     void clear_dirty() override
     {
         dirty_ = false;

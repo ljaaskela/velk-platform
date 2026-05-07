@@ -71,11 +71,19 @@ private:
     {
         ::velk::IRenderTarget::Ptr path_output;
         ::velk::IRenderTarget::Ptr post_output;
+        // Cached size for path_output + post_output. Recreate only on
+        // size change so downstream Ptrs / handles stay stable across
+        // frames (the deferred lighting pass caches the path_output
+        // texture id in BlitToSurface; rotating it would freeze the
+        // first frame on screen).
+        ::velk::uvec2 path_size{};
+        ::velk::uvec2 post_size{};
     };
     std::unordered_map<::velk::IViewEntry*, ViewState> view_states_;
 
     ::velk::IRenderTarget::Ptr ensure_storage_target(
         ::velk::IRenderTarget::Ptr& slot,
+        ::velk::uvec2& size_slot,
         int width, int height,
         ::velk::TextureUsage usage,
         ::velk::PixelFormat format,

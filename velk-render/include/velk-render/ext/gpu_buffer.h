@@ -62,12 +62,7 @@ public:
     /// `mutable_data()`.
     void set_dirty() { dirty_ = true; }
 
-    /// Memcmp-gated write: replaces the blob with @p bytes only when
-    /// they differ from the current contents (or sizes mismatch).
-    /// Returns `true` when bytes were updated (and dirty was set),
-    /// `false` when the call was a no-op. Lets callers gate side
-    /// effects (e.g. observer notifications) on real change.
-    bool write_diff(const void* bytes, size_t size)
+    bool write_diff(const void* bytes, size_t size) override
     {
         if (data_.size() == size
             && (size == 0 || std::memcmp(data_.data(), bytes, size) == 0)) {

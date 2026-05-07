@@ -106,14 +106,23 @@ PostProcess::ensure_intermediate(::velk::IViewEntry& view,
         vs.intermediates.resize(index + 1);
     }
 
+    ::velk::uvec2 want{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    // Resize wipes all intermediates so they re-allocate with the new
+    // size on first access; first-time / size mismatch path below
+    // creates this slot's texture.
+    if (vs.intermediate_size != want) {
+        for (auto& ptr : vs.intermediates) ptr.reset();
+        vs.intermediate_size = want;
+    }
+    if (vs.intermediates[index]) return vs.intermediates[index];
+
     ::velk::TextureDesc td{};
     td.width = width;
     td.height = height;
     td.format = ::velk::PixelFormat::RGBA8;
     td.usage = ::velk::TextureUsage::Storage;
-    // Drop the prior frame's Ptr (manager parks the handle on its
-    // pool) and request a fresh one. On a steady-state hit the pool
-    // re-issues the parked handle wrapped in a new shell.
+    // Persistent: the same Ptr is reused across frames so downstream
+    // cached effect passes can embed the texture id stably.
     vs.intermediates[index] = graph.resources().create_render_texture(td);
     return vs.intermediates[index];
 }

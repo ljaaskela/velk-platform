@@ -226,8 +226,10 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
 
     vs.gbuffer_size = want;
     // Resize / first-time allocation invalidates any cached pass that
-    // referenced the previous group Ptr.
+    // referenced the previous group Ptr (gbuffer attachments feed the
+    // lighting PushC too).
     vs.gbuffer_dirty = true;
+    vs.lighting_dirty = true;
     auto group = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
 
     if (!vs.worldpos_alias) {
@@ -330,7 +332,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
 {
     // Persistent allocation: keep the same Ptrs across frames so
     // downstream PushC bindless ids and `add_write` resource refs stay
-    // stable. Recreate only on size change (or first-time).
+    // stable. Recreate only on size change (or first-time). Recreation
+    // invalidates the cached lighting pass (PushC ids change).
     uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
     if (!vs.deferred_output || vs.output_size != want) {
         TextureDesc td{};
@@ -342,6 +345,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.format = PixelFormat::RGBA16F;
         td.usage = TextureUsage::Storage;
         vs.deferred_output = graph.resources().create_render_texture(td);
+        vs.lighting_dirty = true;
     }
     if (!vs.deferred_output) return;
 
@@ -352,6 +356,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.format = PixelFormat::RGBA32F;
         td.usage = TextureUsage::Storage;
         vs.shadow_debug = graph.resources().create_render_texture(td);
+        vs.lighting_dirty = true;
     }
     vs.output_size = want;
 
@@ -410,8 +415,20 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.lights_addr = lights_addr;
     pc.env_data_addr = render_view.env.data_addr;
 
-    auto gp = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-    if (!gp) return;
+    if (!vs.cached_lighting_pass) {
+        vs.cached_lighting_pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+        if (!vs.cached_lighting_pass) return;
+        vs.lighting_dirty = true;
+    }
+
+    if (!vs.lighting_dirty) {
+        // Steady state: same Ptr, refresh only the per-frame view
+        // globals address.
+        vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
+        graph.add_pass(vs.cached_lighting_pass);
+        return;
+    }
+
     DispatchCall dc{};
     dc.pipeline = pit->second;
     dc.groups_x = (w + 7) / 8;
@@ -419,17 +436,20 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     dc.groups_z = 1;
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
-    gp->add_op(ops::Dispatch{dc});
-    gp->add_op(ops::BlitToSurface{
+
+    vs.cached_lighting_pass->reset();
+    vs.cached_lighting_pass->add_op(ops::Dispatch{dc});
+    vs.cached_lighting_pass->add_op(ops::BlitToSurface{
         static_cast<TextureId>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
         color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
         render_view.viewport});
 
-    gp->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-    gp->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-    if (color_target) gp->add_write(interface_pointer_cast<IGpuResource>(color_target));
-    gp->set_view_globals_address(render_view.view_globals_address);
-    graph.add_pass(std::move(gp));
+    vs.cached_lighting_pass->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+    vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+    if (color_target) vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
+    vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
+    vs.lighting_dirty = false;
+    graph.add_pass(vs.cached_lighting_pass);
 }
 
 DeferredPath::~DeferredPath()
@@ -450,6 +470,7 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
     auto it = view_states_.find(view);
     if (it != view_states_.end()) {
         it->second.gbuffer_dirty = true;
+        it->second.lighting_dirty = true;
     }
 }
 

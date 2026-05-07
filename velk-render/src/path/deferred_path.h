@@ -99,10 +99,18 @@ public:
         /// compile-time short-circuit can match. Rebuilt only when
         /// `gbuffer_dirty` is set by `on_render_state_changed` or by
         /// `ensure_gbuffer` recreating the gbuffer group on resize.
-        /// Lighting pass stays per-frame for now — Steps C/D land
-        /// stable inputs for it.
         IRenderPass::Ptr cached_gbuffer_pass;
         bool gbuffer_dirty = true;
+
+        /// Cached lighting (compute + blit) pass. All PushC inputs are
+        /// stable across frames now: gbuffer attachments (Step B),
+        /// deferred_output / shadow_debug (Step C), lights_addr +
+        /// light_count via write_diff notification (Step D), cam_pos
+        /// notify via Step A. Rebuilt only when `lighting_dirty` is
+        /// set by `on_render_state_changed` (camera / batch / lights
+        /// change) or by gbuffer / output_size recreation.
+        IRenderPass::Ptr cached_lighting_pass;
+        bool lighting_dirty = true;
     };
 
 private:

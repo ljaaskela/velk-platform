@@ -37,6 +37,7 @@ public:
     }
     bool is_dirty() const override { return dirty_; }
     void clear_dirty() override { dirty_ = false; }
+    bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
 
 private:
     ::velk::vector<uint8_t> bytes_;    ///< Committed content visible to consumers.
