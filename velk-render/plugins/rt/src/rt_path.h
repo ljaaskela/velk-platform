@@ -8,6 +8,7 @@
 
 #include <velk-render/plugin.h>
 #include <velk-render/ext/render_path.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/interface/intf_view_entry.h>
@@ -55,6 +56,14 @@ private:
         // downstream PushC bindless ids and `add_write` resource refs
         // stay stable.
         ::velk::uvec2 output_size{};
+
+        /// Per-view persistent buffer holding the plane-sorted RtShape
+        /// list. write_diff'd each frame; stable GPU address so cached
+        /// RT passes (Step E4) can embed it without rotating per
+        /// frame. Sort order changes when the camera moves (depth
+        /// recomputed), at which point write_diff fires and the
+        /// upload happens; static-camera frames are no-op.
+        ::velk::IBuffer::Ptr shapes_buffer;
     };
 
     std::unordered_map<IViewEntry*, ViewState> view_states_;
