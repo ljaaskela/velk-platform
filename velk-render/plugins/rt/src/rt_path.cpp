@@ -77,11 +77,16 @@ void RtPath::build_passes(IViewEntry& entry,
     int vp_w = render_view.width;
     int vp_h = render_view.height;
 
-    auto& vs = view_states_[&entry];
+    auto [it, inserted] = view_states_.try_emplace(&entry);
+    auto& vs = it->second;
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
 
     // Persistent allocation: keep the same Ptr across frames so
     // downstream PushC bindless ids and `add_write` resource refs stay
-    // stable. Recreate only on size change (or first-time).
+    // stable. Recreate only on size change (or first-time). Recreation
+    // invalidates the cached RT pass (image_index in PushC changes).
     uvec2 want{static_cast<uint32_t>(vp_w), static_cast<uint32_t>(vp_h)};
     if (!vs.rt_output || vs.output_size != want) {
         TextureDesc td{};
@@ -91,6 +96,7 @@ void RtPath::build_passes(IViewEntry& entry,
         td.usage = TextureUsage::Storage;
         vs.rt_output = graph.resources().create_render_texture(td);
         vs.output_size = want;
+        vs.rt_dirty = true;
     }
     if (!vs.rt_output) {
         return;
@@ -176,9 +182,23 @@ void RtPath::build_passes(IViewEntry& entry,
 
     // Persistent per-view shapes buffer. Camera move re-sorts bytes,
     // PersistentBuffer signals changed → upload + new address. Static
-    // frames are a memcmp + no-op.
-    uint64_t shapes_addr = vs.shapes_buffer.upload(
-        shapes.data(), shapes.size() * sizeof(RtShape), ctx).address;
+    // frames are a memcmp + no-op. Real change → invalidate cached pass.
+    auto shapes_staged = vs.shapes_buffer.upload(
+        shapes.data(), shapes.size() * sizeof(RtShape), ctx);
+    uint64_t shapes_addr = shapes_staged.address;
+    if (shapes_staged.changed) vs.rt_dirty = true;
+
+    // Catch BVH / shape-count drift that doesn't flow through view
+    // notify (BVH lives at scene scope, not view).
+    if (vs.rt_change.changed({
+            render_view.bvh_nodes_addr,
+            render_view.bvh_shapes_addr,
+            shapes_addr,
+            render_view.bvh_root,
+            render_view.bvh_node_count,
+            static_cast<uint32_t>(shapes.size())})) {
+        vs.rt_dirty = true;
+    }
 
     VELK_GPU_STRUCT PushC {
         float inv_vp[16];
@@ -223,6 +243,20 @@ void RtPath::build_passes(IViewEntry& entry,
     pc.lights_addr = lights_addr;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
 
+    if (!vs.cached_rt_pass) {
+        vs.cached_rt_pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+        if (!vs.cached_rt_pass) return;
+        vs.rt_dirty = true;
+    }
+
+    if (!vs.rt_dirty) {
+        // Steady state: same Ptr, refresh only the per-frame view
+        // globals address.
+        vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);
+        graph.add_pass(vs.cached_rt_pass);
+        return;
+    }
+
     DispatchCall dc{};
     dc.pipeline = pit->second;
     dc.groups_x = (vp_w + 7) / 8;
@@ -231,28 +265,55 @@ void RtPath::build_passes(IViewEntry& entry,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
-    auto gp = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-    if (!gp) return;
-    gp->add_op(ops::Dispatch{dc});
-    gp->add_op(ops::BlitToSurface{
+    vs.cached_rt_pass->reset();
+    vs.cached_rt_pass->add_op(ops::Dispatch{dc});
+    vs.cached_rt_pass->add_op(ops::BlitToSurface{
         static_cast<TextureId>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default)),
         color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
         render_view.viewport});
-    gp->add_write(interface_pointer_cast<IGpuResource>(vs.rt_output));
-    if (color_target) gp->add_write(interface_pointer_cast<IGpuResource>(color_target));
-    gp->set_view_globals_address(render_view.view_globals_address);
-    graph.add_pass(std::move(gp));
+    vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(vs.rt_output));
+    if (color_target) vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
+    vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);
+    vs.rt_dirty = false;
+    graph.add_pass(vs.cached_rt_pass);
+}
+
+RtPath::~RtPath()
+{
+    // Detach from every view we observed. The renderer's destruction
+    // order keeps IViewEntry::Ptrs alive past path destruction, so
+    // these calls are safe.
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
+}
+
+void RtPath::on_render_state_changed(::velk::IRenderState* source,
+                                     ::velk::RenderStateChange /*flags*/)
+{
+    auto* view = interface_cast<IViewEntry>(source);
+    if (!view) return;
+    auto it = view_states_.find(view);
+    if (it != view_states_.end()) {
+        it->second.rt_dirty = true;
+    }
 }
 
 void RtPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
 {
+    auto it = view_states_.find(&entry);
+    if (it == view_states_.end()) return;
+    entry.remove_render_state_observer(this);
     // Erase the view state; vs.rt_output's Ptr drops, resource
     // manager auto-defers the backend handle.
-    view_states_.erase(&entry);
+    view_states_.erase(it);
 }
 
 void RtPath::shutdown(FrameContext& /*ctx*/)
 {
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
     view_states_.clear();
 }
 
