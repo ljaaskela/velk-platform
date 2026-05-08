@@ -215,9 +215,9 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
     }
 }
 
-void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
+void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, RenderView& rv)
 {
-    if (rv.width <= 0 || rv.height <= 0 || !ctx.frame_buffer) return;
+    if (rv.width <= 0 || rv.height <= 0 || !ctx.backend || !ctx.resources) return;
 
     FrameGlobals globals{};
     std::memcpy(globals.view_projection, rv.view_projection.m, sizeof(rv.view_projection.m));
@@ -236,7 +236,23 @@ void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
     globals.bvh_nodes_addr = rv.bvh_nodes_addr;
     globals.bvh_shapes_addr = rv.bvh_shapes_addr;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
-    rv.view_globals_address = ctx.frame_buffer->write(&globals, sizeof(globals));
+
+    auto& cache = view_caches_[&entry];
+    const uint32_t slot_count = ctx.backend->frame_overlap();
+    const size_t slot_size = sizeof(FrameGlobals);
+    const size_t total_size = slot_count * slot_size;
+    const uint32_t slot = ctx.backend->current_frame_slot();
+
+    if (cache.view_globals_cpu_slots.size() != total_size) {
+        cache.view_globals_cpu_slots.assign(total_size, 0);
+    }
+    std::memcpy(cache.view_globals_cpu_slots.data() + slot * slot_size,
+                &globals, slot_size);
+
+    auto result = cache.view_globals_buffer.upload(
+        cache.view_globals_cpu_slots.data(), total_size, ctx);
+    if (!result.address) return;
+    rv.view_globals_address = result.address + slot * slot_size;
 }
 
 void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,
@@ -450,7 +466,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     rv.bvh_root = ctx.bvh_root;
     rv.bvh_node_count = ctx.bvh_node_count;
     rv.bvh_shape_count = ctx.bvh_shape_count;
-    prepare_frame_globals(ctx, rv);
+    prepare_frame_globals(entry, ctx, rv);
     prepare_env(entry, camera_element, ctx, rv);
 
     // Path-gated: skip the heavy scene walks when the path doesn't

@@ -160,6 +160,18 @@ private:
         /// path so `RenderView::env.data_addr` is stable across
         /// frames (cached lighting passes embed it).
         PersistentBuffer env_data_buffer;
+
+        /// Per-view persistent FrameGlobals ring buffer, sized
+        /// `frame_overlap() * sizeof(FrameGlobals)`. Each frame writes
+        /// the new globals into `cpu_slots[current_slot]` and uploads
+        /// the full ring; only the current slot actually changes, so
+        /// `write_diff` triggers a small mapped memcpy. The base BDA
+        /// stays stable; the per-slot BDA is `base + slot*size`,
+        /// stable across cycles of `frame_overlap` frames. Cached
+        /// secondaries that bake one slot's BDA replay correctly when
+        /// that slot is current.
+        PersistentBuffer view_globals_buffer;
+        ::velk::vector<uint8_t> view_globals_cpu_slots;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -190,7 +202,7 @@ private:
 
     /// Writes the per-view FrameGlobals block to @p ctx.frame_buffer
     /// and stores its GPU address on @p rv.
-    void prepare_frame_globals(FrameContext& ctx, RenderView& rv);
+    void prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, RenderView& rv);
 
     /// Walks scene lights, registers each light's shadow tech with the
     /// snippet registry, and accumulates GpuLight records into @p rv.
