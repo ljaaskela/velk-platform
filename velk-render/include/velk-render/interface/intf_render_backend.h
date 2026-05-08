@@ -267,6 +267,13 @@ public:
     /** @brief Recreates the swapchain for the given surface at the new dimensions. */
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
+    /// True if @p id refers to a swapchain surface; false for textures
+    /// or unknown ids. Producers consult this to decide whether a
+    /// blit destination can be baked into a cached secondary command
+    /// buffer (textures: yes; surfaces: no, because per-frame
+    /// swapchain image acquisition can't be recorded once).
+    virtual bool is_surface(uint64_t id) const = 0;
+
     /// @}
     /// @name GPU Memory
     /// @{

@@ -73,24 +73,19 @@ void VkCommandBuffer::begin_recording()
     bi.pInheritanceInfo = &inh;
     vkBeginCommandBuffer(cmd_, &bi);
 
-    // Per Vulkan, secondary command buffers don't inherit descriptor
-    // bindings from the primary that vkCmdExecuteCommands them. Bind
-    // the bindless graphics set here at the top of each secondary.
-    //
-    // The FrameGlobals BDA at push offset [0..8) is NOT pushed here:
-    // it rotates per-frame, and a recorded secondary would freeze a
-    // stale value into its bytecode and dereference a freed staging
-    // address on subsequent frames. The render-graph executor pushes
-    // it on the primary before each `vkCmdExecuteCommands`; the
-    // secondary's commands see the primary's push state at execute
-    // time provided the secondary doesn't itself touch offset [0..8).
-    if (inherit_render_pass_ != VK_NULL_HANDLE) {
-        vkCmdBindDescriptorSets(cmd_,
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                backend_->pipeline_layout_,
-                                0, 1, &backend_->descriptor_set_,
-                                0, nullptr);
-    }
+    // Secondary command buffers inherit no state from the primary.
+    // Bind the bindless descriptor set for the buffer's bind point.
+    // Producers push view-globals via the explicit push_view_globals
+    // op at recording time, against the slot's stable per-view ring
+    // buffer BDA.
+    const VkPipelineBindPoint bind_point = (inherit_render_pass_ != VK_NULL_HANDLE)
+        ? VK_PIPELINE_BIND_POINT_GRAPHICS
+        : VK_PIPELINE_BIND_POINT_COMPUTE;
+    vkCmdBindDescriptorSets(cmd_,
+                            bind_point,
+                            backend_->pipeline_layout_,
+                            0, 1, &backend_->descriptor_set_,
+                            0, nullptr);
 }
 
 void VkCommandBuffer::end_recording()
@@ -140,15 +135,35 @@ void VkCommandBuffer::record_draws(::velk::array_view<const ::velk::DrawCall> ca
     backend_->record_draw_loop(cmd_, calls);
 }
 
-// S4.2.3a: dispatch / blit recordings are not used yet — producers
-// continue to emit `ops::Dispatch` / `ops::BlitToSurface` ops which
-// the executor routes through `VkBackend::dispatch` / `blit_to_surface`
-// directly. These methods become real implementations when the
-// compute / post-process producers migrate (S4.2.4 / S4.2.5).
-void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& /*call*/) {}
-void VkCommandBuffer::record_blit_to_surface(
-    ::velk::TextureId /*source*/, uint64_t /*surface_id*/, ::velk::rect /*dst_rect*/)
+void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& call)
 {
+    if (cmd_ == VK_NULL_HANDLE || !backend_) return;
+    RENDER_LOG("vk.cmdbuf.record_dispatch this=%p cb=%p pipeline=%llu",
+               (void*)this, (void*)cmd_, (unsigned long long)call.pipeline);
+    backend_->record_dispatch_call(cmd_, call);
+
+    // Standard compute->fragment barrier so subsequent samples of the
+    // dispatch's storage-image writes see the result. Mirrors the
+    // legacy `VkBackend::dispatch` trailing barrier; baked into the
+    // secondary so cached executes carry their own sync.
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd_,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+void VkCommandBuffer::record_blit_to_surface(
+    ::velk::TextureId source, uint64_t target_id, ::velk::rect dst_rect)
+{
+    if (cmd_ == VK_NULL_HANDLE || !backend_) return;
+    RENDER_LOG("vk.cmdbuf.record_blit_to_surface this=%p cb=%p src=%u target=%llu",
+               (void*)this, (void*)cmd_,
+               source, (unsigned long long)target_id);
+    backend_->record_blit_to_texture(cmd_, source, target_id, dst_rect);
 }
 void VkCommandBuffer::record_blit_group_depth_to_surface(
     ::velk::RenderTargetGroup /*src_group*/, uint64_t /*surface_id*/,

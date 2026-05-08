@@ -2350,6 +2350,26 @@ void VkBackend::end_pass()
     current_framebuffer_ = VK_NULL_HANDLE;
 }
 
+void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
+{
+    auto pit = pipelines_.find(call.pipeline);
+    if (pit == pipelines_.end()) return;
+    if (pit->second.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) return;
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
+
+    if (call.root_constants_size > 0) {
+        vkCmdPushConstants(cb,
+                           pipeline_layout_,
+                           VK_SHADER_STAGE_ALL,
+                           sizeof(uint64_t),
+                           call.root_constants_size,
+                           call.root_constants);
+    }
+
+    vkCmdDispatch(cb, call.groups_x, call.groups_y, call.groups_z);
+}
+
 void VkBackend::dispatch(array_view<const DispatchCall> calls)
 {
     VELK_PERF_SCOPE("vk.dispatch");
@@ -2375,35 +2395,126 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
     }
 
     for (size_t i = 0; i < calls.size(); ++i) {
-        const auto& call = calls[i];
-
-        auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) {
-            continue;
-        }
-        if (pit->second.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
-            continue;
-        }
-
-        vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
-
-        if (call.root_constants_size > 0) {
-            // Per-dispatch push lands at offset 8 (see submit() comment).
-            vkCmdPushConstants(sync.command_buffer,
-                               pipeline_layout_,
-                               VK_SHADER_STAGE_ALL,
-                               sizeof(uint64_t),
-                               call.root_constants_size,
-                               call.root_constants);
-        }
-
-        vkCmdDispatch(sync.command_buffer, call.groups_x, call.groups_y, call.groups_z);
+        record_dispatch_call(sync.command_buffer, calls[i]);
     }
 
     // Ensure storage-image writes from compute are visible to subsequent
     // sampled reads in graphics passes. Over-synchronizes if callers want
     // to chain multiple dispatch batches, but safe as a default.
     barrier(PipelineStage::ComputeShader, PipelineStage::FragmentShader);
+}
+
+bool VkBackend::record_blit_to_texture(::VkCommandBuffer cb, TextureId source,
+                                       uint64_t target_id, rect dst_rect)
+{
+    auto tit = textures_.find(source);
+    if (tit == textures_.end()) return false;
+    auto& td = tit->second;
+
+    auto dst_tit = textures_.find(static_cast<TextureId>(target_id));
+    if (dst_tit == textures_.end()) return false;
+    auto& dtd = dst_tit->second;
+
+    VkImage dst_image = dtd.image;
+    int dst_w = dtd.width;
+    int dst_h = dtd.height;
+    VkImageLayout dst_old_layout = dtd.current_layout;
+    VkImageLayout dst_final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAccessFlags dst_old_access = (dst_old_layout == VK_IMAGE_LAYOUT_GENERAL)
+                                       ? VK_ACCESS_SHADER_WRITE_BIT
+                                       : VK_ACCESS_SHADER_READ_BIT;
+    dtd.current_layout = dst_final_layout;
+
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = dst_old_layout;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst_image;
+    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_dst.subresourceRange.levelCount = 1;
+    to_dst.subresourceRange.layerCount = 1;
+    to_dst.srcAccessMask = dst_old_access;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageLayout src_canonical_layout = td.current_layout;
+    VkImageMemoryBarrier to_src{};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.oldLayout = src_canonical_layout;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = td.image;
+    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_src.subresourceRange.levelCount = 1;
+    to_src.subresourceRange.layerCount = 1;
+    to_src.srcAccessMask = (src_canonical_layout == VK_IMAGE_LAYOUT_GENERAL)
+                               ? VK_ACCESS_SHADER_WRITE_BIT
+                               : VK_ACCESS_SHADER_READ_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    VkImageMemoryBarrier pre[2] = {to_dst, to_src};
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, pre);
+
+    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
+    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
+    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
+    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
+    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
+        dx0 = 0; dy0 = 0; dx1 = dst_w; dy1 = dst_h;
+    }
+
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[1] = {td.width, td.height, 1};
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[0] = {dx0, dy0, 0};
+    blit.dstOffsets[1] = {dx1, dy1, 1};
+
+    vkCmdBlitImage(cb,
+                   td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_LINEAR);
+
+    VkImageMemoryBarrier to_final{};
+    to_final.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_final.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_final.newLayout = dst_final_layout;
+    to_final.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_final.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_final.image = dst_image;
+    to_final.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_final.subresourceRange.levelCount = 1;
+    to_final.subresourceRange.layerCount = 1;
+    to_final.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_final.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkImageMemoryBarrier to_general{};
+    to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_general.newLayout = src_canonical_layout;
+    to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.image = td.image;
+    to_general.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_general.subresourceRange.levelCount = 1;
+    to_general.subresourceRange.layerCount = 1;
+    to_general.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_general.dstAccessMask = 0;
+
+    VkImageMemoryBarrier post[2] = {to_final, to_general};
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                             | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, post);
+    return true;
 }
 
 void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_rect)

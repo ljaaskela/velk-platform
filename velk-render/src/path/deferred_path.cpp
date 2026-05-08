@@ -330,9 +330,24 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.x),
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
-    vs.cached_gbuffer_pass->add_op(ops::BeginPass{group_id});
-    vs.cached_gbuffer_pass->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
-    vs.cached_gbuffer_pass->add_op(ops::EndPass{});
+
+    // Record one secondary per frame slot, each pushing its slot's
+    // stable view-globals BDA. See ForwardPath for the same pattern.
+    const uint32_t slot_count = ctx.backend->frame_overlap();
+    const uint32_t current_slot = ctx.backend->current_frame_slot();
+    const uint64_t base_addr =
+        render_view.view_globals_address - current_slot * sizeof(FrameGlobals);
+    for (uint32_t slot = 0; slot < slot_count; ++slot) {
+        auto cmd = ctx.backend->create_command_buffer(group_id);
+        if (!cmd) continue;
+        cmd->begin_recording();
+        cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+        cmd->set_viewport(viewport);
+        cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
+        cmd->end_recording();
+        vs.cached_gbuffer_pass->set_command_buffer(slot, std::move(cmd));
+    }
+    vs.cached_gbuffer_pass->set_target_id(group_id);
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
     vs.gbuffer_dirty = false;
@@ -453,12 +468,40 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
+    const TextureId src_id = static_cast<TextureId>(
+        vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
+    const uint64_t blit_target =
+        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0;
+
     vs.cached_lighting_pass->reset();
-    vs.cached_lighting_pass->add_op(ops::Dispatch{dc});
-    vs.cached_lighting_pass->add_op(ops::BlitToSurface{
-        static_cast<TextureId>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
-        render_view.viewport});
+
+    // Surface destinations need per-frame swapchain acquisition that
+    // can't be baked into a cached secondary; fall back to legacy ops
+    // in that case. Texture destinations (post-process path_target)
+    // are fully cacheable.
+    const bool can_cache = (blit_target != 0)
+        && !ctx.backend->is_surface(blit_target);
+    if (can_cache) {
+        const uint32_t slot_count = ctx.backend->frame_overlap();
+        const uint32_t current_slot = ctx.backend->current_frame_slot();
+        const uint64_t base_addr =
+            render_view.view_globals_address - current_slot * sizeof(FrameGlobals);
+        for (uint32_t slot = 0; slot < slot_count; ++slot) {
+            auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
+            if (!cmd) continue;
+            cmd->begin_recording();
+            cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+            cmd->record_dispatch(dc);
+            cmd->record_blit_to_surface(src_id, blit_target, render_view.viewport);
+            cmd->end_recording();
+            vs.cached_lighting_pass->set_command_buffer(slot, std::move(cmd));
+        }
+        vs.cached_lighting_pass->set_target_id(0);
+    } else {
+        vs.cached_lighting_pass->add_op(ops::Dispatch{dc});
+        vs.cached_lighting_pass->add_op(ops::BlitToSurface{
+            src_id, blit_target, render_view.viewport});
+    }
 
     vs.cached_lighting_pass->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));

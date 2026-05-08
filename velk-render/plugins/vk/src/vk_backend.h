@@ -33,6 +33,10 @@ public:
     uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
+    bool is_surface(uint64_t id) const override
+    {
+        return surfaces_.find(id) != surfaces_.end();
+    }
 
     GpuBufferHandle create_buffer(const GpuBufferDesc& desc) override;
     void destroy_buffer(GpuBufferHandle buffer) override;
@@ -88,6 +92,20 @@ public:
     /// optional BindIndexBuffer + Draw*IndirectCount per call.
     void record_draw_loop(::VkCommandBuffer cb,
                           array_view<const DrawCall> calls);
+
+    /// Records BindPipeline + PushConstants + vkCmdDispatch into @p cb
+    /// for one compute call. Shared by `VkCommandBuffer::record_dispatch`
+    /// (producer-recorded path) and the legacy `dispatch`.
+    void record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call);
+
+    /// Records the layout-transition + vkCmdBlitImage + final-layout
+    /// transition sequence for blitting a texture into a destination
+    /// texture (NOT a surface). Surface-destination blits require
+    /// per-frame swapchain acquisition state and remain on the legacy
+    /// `blit_to_surface` primary path. Returns false if the target is
+    /// not a texture (caller should fall back to legacy).
+    bool record_blit_to_texture(::VkCommandBuffer cb, TextureId source,
+                                uint64_t target_id, rect dst_rect);
 
     /// Allocates a SECONDARY VkCommandBuffer from the current frame
     /// slot's transient pool. Used by the legacy `submit` path.
