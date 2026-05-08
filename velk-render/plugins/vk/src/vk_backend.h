@@ -12,6 +12,8 @@
 
 namespace velk::vk {
 
+class VkCommandBuffer;
+
 class VkBackend : public ext::Object<VkBackend, IRenderBackend>
 {
 public:
@@ -62,6 +64,42 @@ public:
     void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect) override;
     void blit_group_depth_to_surface(RenderTargetGroup src_group, uint64_t surface_id,
                                      rect dst_rect) override;
+
+    IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) override;
+    void execute(const IGpuCommandBuffer::Ptr& cmd) override;
+
+    // VkCommandBuffer needs access to internal lookup maps + handles
+    // to record vkCmd* against producer-recorded draw calls.
+    friend class VkCommandBuffer;
+
+    /// Looks up the render pass (compatible with the renderpass used
+    /// at execute time) for inheritance info on a SECONDARY command
+    /// buffer. Returns `VK_NULL_HANDLE` if @p target_id is unknown
+    /// (caller falls back to a non-renderpass cmd buffer).
+    VkRenderPass find_render_pass_for_target(uint64_t target_id);
+
+    /// Per-draw `vkCmd*` recording loop, shared by
+    /// `VkCommandBuffer::record_draws` (producer-recorded path) and
+    /// the legacy `submit` (which records into a transient secondary
+    /// every frame). Looks up pipeline / buffer handles in the
+    /// backend's maps and emits BindPipeline + PushConstants +
+    /// optional BindIndexBuffer + Draw*IndirectCount per call.
+    void record_draw_loop(::VkCommandBuffer cb,
+                          array_view<const DrawCall> calls);
+
+    /// Allocates a SECONDARY VkCommandBuffer from the current frame
+    /// slot's transient pool. Used by the legacy `submit` path.
+    /// Buffers allocated here are reset wholesale at the next
+    /// `begin_frame` for this slot.
+    ::VkCommandBuffer acquire_transient_secondary();
+
+    /// Defers `vkFreeCommandBuffers` for a persistent-pool secondary
+    /// to the next time the current frame slot rolls around — i.e.
+    /// after `kFrameOverlap` more frame submissions have all
+    /// completed. Called by `VkCommandBuffer::~VkCommandBuffer` when
+    /// a producer drops its Ptr, since the GPU may still be running
+    /// commands from the last submission that referenced it.
+    void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
     void push_view_globals(uint64_t addr) override;
     void end_frame() override;
@@ -93,16 +131,52 @@ private:
     // engine may still reference the previous frame's semaphores.
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
+    /// Long-lived pool for SECONDARY command buffers held by producers
+    /// across frames (cached IRenderPass cmd buffers via
+    /// `IGpuCommandBuffer`). Allocations from this pool persist until
+    /// the producer drops the cmd buffer Ptr; the impl's destructor
+    /// frees back here.
+    VkCommandPool persistent_secondary_pool_ = VK_NULL_HANDLE;
+
     static constexpr uint32_t kFrameOverlap = 3;
 
     // Per-frame-in-flight sync: fence + command buffer.
     struct FrameSync
     {
         VkFence fence = VK_NULL_HANDLE;
-        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        // Qualified `::VkCommandBuffer` everywhere — `VkCommandBuffer`
+        // resolves to our impl class inside `velk::vk`.
+        ::VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        /// Per-slot pool for transient SECONDARY command buffers used
+        /// by the legacy `submit()` path (which records into a fresh
+        /// secondary each frame and immediately executes it). Reset
+        /// at the top of each `begin_frame` for this slot.
+        VkCommandPool transient_secondary_pool = VK_NULL_HANDLE;
+        ::velk::vector<::VkCommandBuffer> transient_secondaries;
+        size_t transient_secondary_cursor = 0;
+        /// Persistent-pool secondaries queued for free at this slot
+        /// when their owning `IGpuCommandBuffer` Ptr drops. Drained at
+        /// the top of `begin_frame` for this slot, after the slot's
+        /// fence has fired — guarantees kFrameOverlap frames of
+        /// in-flight grace before vkFreeCommandBuffers runs.
+        ::velk::vector<::VkCommandBuffer> deferred_persistent_frees;
     };
     FrameSync frame_sync_[kFrameOverlap]{};
     uint32_t frame_sync_index_ = 0;
+
+    /// Tracked at `begin_pass` so `submit()` and
+    /// `create_command_buffer()` can populate `VkCommandBufferInheritanceInfo`
+    /// for the SECONDARY recordings. Framebuffer is technically optional
+    /// in inheritance info but some drivers (AMD especially on MRT
+    /// renderpasses) misbehave when it's VK_NULL_HANDLE.
+    VkRenderPass current_render_pass_ = VK_NULL_HANDLE;
+    VkFramebuffer current_framebuffer_ = VK_NULL_HANDLE;
+
+    /// Cached FrameGlobals BDA pushed by `push_view_globals` on the primary.
+    /// Secondary command buffers do NOT inherit push-constant state, so the
+    /// per-frame view-globals address must be re-pushed inside each
+    /// secondary before any draw uses it.
+    uint64_t last_view_globals_addr_ = 0;
 
     // Per-swapchain-image semaphores to avoid present engine conflicts.
     // Indexed by the acquired image index, not the frame sync index.
@@ -279,9 +353,9 @@ private:
     bool create_swapchain(SurfaceData& sd);
     void destroy_swapchain(SurfaceData& sd);
 
-    VkCommandBuffer begin_one_shot_commands();
-    void end_one_shot_commands(VkCommandBuffer cb);
-    void transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+    ::VkCommandBuffer begin_one_shot_commands();
+    void end_one_shot_commands(::VkCommandBuffer cb);
+    void transition_image_layout(::VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
                                  VkImageLayout new_layout, uint32_t mip_levels = 1);
 };
 

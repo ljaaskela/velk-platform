@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/render_types.h>
 
@@ -398,6 +399,27 @@ public:
      * @param viewport Viewport and scissor rect. Zero width/height means full target.
      */
     virtual void submit(array_view<const DrawCall> calls, rect viewport = {}) = 0;
+
+    /**
+     * @brief Allocates a `IGpuCommandBuffer` compatible with
+     *        @p target_id. Producers record once when their pass
+     *        content changes; the graph executor replays via
+     *        `execute(cmd)` each frame.
+     *
+     * @param target_id Target the cmd buffer will play inside. For
+     *                  Vulkan secondaries this resolves to the
+     *                  render pass used during inheritance setup.
+     *                  Pass `0` for compute / transfer cmd buffers
+     *                  that play outside any render pass.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) = 0;
+
+    /**
+     * @brief Replays a recorded command buffer in the active frame.
+     *        For raster cmd buffers, must be called between
+     *        `begin_pass` / `end_pass` on a compatible target.
+     */
+    virtual void execute(const IGpuCommandBuffer::Ptr& cmd) = 0;
 
     /** @brief Ends the current render pass. */
     virtual void end_pass() = 0;

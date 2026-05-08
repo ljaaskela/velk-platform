@@ -7,6 +7,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/frame/render_pass.h>
+#include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_state.h>
@@ -88,6 +89,24 @@ public:
     /// only fires when pass Ptrs match, so reusing the same Ptr is
     /// what makes that path active.
     virtual void reset() = 0;
+
+    /// Pre-recorded command buffer for this pass. Null when the pass
+    /// uses the legacy `add_op` / `ops()` flow; the executor falls
+    /// back to walking the op list. When non-null, the executor
+    /// calls `IRenderBackend::execute(cmd)` and skips the op walk.
+    /// `reset()` drops the cmd buffer Ptr — producers re-create or
+    /// re-record on rebuild.
+    virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;
+    virtual void set_command_buffer(IGpuCommandBuffer::Ptr cmd) = 0;
+
+    /// Target id for cmd-buffer-bearing raster passes. The executor
+    /// wraps `execute(cmd)` in `begin_pass(target) / end_pass()` so
+    /// the secondary command buffer's `vkCmdExecuteCommands` runs
+    /// inside an active render pass on the primary. Zero for
+    /// compute / blit passes (cmd buffer recorded outside any
+    /// render pass).
+    virtual uint64_t target_id() const = 0;
+    virtual void set_target_id(uint64_t target_id) = 0;
     /// @}
 };
 

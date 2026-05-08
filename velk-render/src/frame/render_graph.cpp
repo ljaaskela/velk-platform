@@ -1,5 +1,6 @@
 #include "frame/render_graph.h"
 
+#include <velk/api/perf.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_interface.h>
 
@@ -7,6 +8,12 @@
 #include <velk-render/plugin.h>
 
 namespace velk::impl {
+
+#ifdef VELK_RENDER_DEBUG
+#define RENDER_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define RENDER_LOG(...) ((void)0)
+#endif
 
 void RenderGraph::init(::velk::IRenderBackend* backend)
 {
@@ -93,6 +100,7 @@ RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 
 void RenderGraph::compile()
 {
+    VELK_PERF_SCOPE("renderer.graph_compile");
     // Short-circuit: when the pass Ptr list is identical to last
     // successful compile's, the prior barriers_ (and resource state
     // machine output it derives from) are still valid. Reuse them.
@@ -199,20 +207,52 @@ void RenderGraph::compile()
 
 void RenderGraph::execute(::velk::IRenderBackend& backend)
 {
+    VELK_PERF_SCOPE("renderer.graph_execute");
     uint64_t last_vg_addr = 0;
+
+    RENDER_LOG("graph.execute passes=%zu", passes_.size());
 
     for (size_t i = 0; i < passes_.size(); ++i) {
         const ::velk::IRenderPass& gp = *passes_[i];
         auto& barrier = barriers_[i];
 
         if (barrier.emit) {
+            RENDER_LOG("graph.barrier src=%d dst=%d", (int)barrier.src, (int)barrier.dst);
             backend.barrier(barrier.src, barrier.dst);
         }
 
         uint64_t vg_addr = gp.view_globals_address();
-        if (vg_addr != 0 && vg_addr != last_vg_addr) {
+        RENDER_LOG("graph.pass[%zu] vg=0x%llx target=%llu has_cmd=%d ops=%zu",
+                   i, (unsigned long long)vg_addr,
+                   (unsigned long long)gp.target_id(),
+                   gp.command_buffer() ? 1 : 0,
+                   gp.ops().size());
+
+        // Push view-globals on the primary at the top of every pass,
+        // no dedup. After any pass — cmd-buffer or legacy — the
+        // primary's push state may be undefined (the legacy `submit`
+        // path records into its own secondary too), so any saving from
+        // dedup-by-addr is wrong here. The push itself is 8 bytes,
+        // cheap.
+        if (vg_addr != 0) {
             backend.push_view_globals(vg_addr);
             last_vg_addr = vg_addr;
+        }
+
+        // Cmd-buffer-bearing pass: replay the pre-recorded buffer
+        // and skip the GraphOp walk. During the migration window
+        // both paths coexist; producers that haven't moved yet keep
+        // emitting ops and fall through below.
+        if (auto cmd = gp.command_buffer()) {
+            uint64_t target = gp.target_id();
+            if (target != 0) {
+                backend.begin_pass(target);
+                backend.execute(cmd);
+                backend.end_pass();
+            } else {
+                backend.execute(cmd);
+            }
+            continue;
         }
 
         for (auto& op : gp.ops()) {

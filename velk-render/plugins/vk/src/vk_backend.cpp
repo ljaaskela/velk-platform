@@ -1,5 +1,7 @@
 #include "vk_backend.h"
 
+#include "vk_command_buffer.h"
+
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
 
@@ -7,6 +9,12 @@
 #include <cstring>
 
 namespace velk::vk {
+
+#ifdef VELK_RENDER_DEBUG
+#define RENDER_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define RENDER_LOG(...) ((void)0)
+#endif
 
 namespace {
 
@@ -312,6 +320,19 @@ void VkBackend::shutdown()
         vkDestroySemaphore(device_, frame_timeline_, nullptr);
         frame_timeline_ = VK_NULL_HANDLE;
     }
+    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
+        // Pool destruction frees all buffers in the pool — the deferred
+        // queue would dangle. Clear it explicitly first.
+        frame_sync_[i].deferred_persistent_frees.clear();
+        if (frame_sync_[i].transient_secondary_pool) {
+            vkDestroyCommandPool(device_, frame_sync_[i].transient_secondary_pool, nullptr);
+            frame_sync_[i].transient_secondary_pool = VK_NULL_HANDLE;
+        }
+    }
+    if (persistent_secondary_pool_) {
+        vkDestroyCommandPool(device_, persistent_secondary_pool_, nullptr);
+        persistent_secondary_pool_ = VK_NULL_HANDLE;
+    }
     vkDestroyCommandPool(device_, command_pool_, nullptr);
 
     vmaDestroyAllocator(allocator_);
@@ -540,12 +561,34 @@ bool VkBackend::create_command_pool()
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = kFrameOverlap;
 
-    VkCommandBuffer cbs[kFrameOverlap];
+    ::VkCommandBuffer cbs[kFrameOverlap];
     if (vkAllocateCommandBuffers(device_, &alloc_info, cbs) != VK_SUCCESS) {
         return false;
     }
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         frame_sync_[i].command_buffer = cbs[i];
+    }
+
+    // Long-lived secondary pool: producers' cached cmd buffers
+    // (`create_command_buffer`) outlive any one frame, so the pool
+    // is not reset between frames. Individual buffers are freed on
+    // `IGpuCommandBuffer` destruction.
+    VkCommandPoolCreateInfo spci = ci;
+    spci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(device_, &spci, nullptr, &persistent_secondary_pool_) != VK_SUCCESS) {
+        return false;
+    }
+
+    // Per-slot transient pools: legacy `submit()` allocates one
+    // SECONDARY here per call, records, executes. The whole pool
+    // resets at the top of the slot's next `begin_frame`.
+    VkCommandPoolCreateInfo tpci = ci;
+    tpci.flags = 0;  // pool-level reset only.
+    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
+        if (vkCreateCommandPool(device_, &tpci, nullptr,
+                                &frame_sync_[i].transient_secondary_pool) != VK_SUCCESS) {
+            return false;
+        }
     }
 
     return true;
@@ -1946,20 +1989,56 @@ void VkBackend::begin_frame()
     vkResetFences(device_, 1, &sync.fence);
     vkResetCommandBuffer(sync.command_buffer, 0);
 
+    RENDER_LOG("vk.begin_frame slot=%u primary=%p deferred_frees=%zu",
+               frame_sync_index_, (void*)sync.command_buffer,
+               sync.deferred_persistent_frees.size());
+
+    // Reset the slot's transient secondary pool — frees every
+    // `submit()`-allocated SECONDARY recorded last time this slot
+    // ran. Cursor restarts from 0 so this frame's `submit()`s
+    // re-use the slab.
+    if (sync.transient_secondary_pool) {
+        vkResetCommandPool(device_, sync.transient_secondary_pool, 0);
+        sync.transient_secondary_cursor = 0;
+    }
+
+    // Drain persistent-pool secondaries deferred when this slot last
+    // ran. The slot's fence above guarantees their last submission has
+    // completed.
+    if (!sync.deferred_persistent_frees.empty()) {
+        vkFreeCommandBuffers(device_, persistent_secondary_pool_,
+                             static_cast<uint32_t>(sync.deferred_persistent_frees.size()),
+                             sync.deferred_persistent_frees.data());
+        sync.deferred_persistent_frees.clear();
+    }
+
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(sync.command_buffer, &begin_info);
+
+    // Compute descriptor set: bound here on the primary because
+    // `dispatch` records `vkCmd*` inline on the primary (compute is
+    // outside any renderpass, so SECONDARY contents doesn't apply).
+    // Graphics rebinds happen inside each secondary command buffer
+    // (Vulkan spec: secondaries don't inherit descriptor bindings).
+    vkCmdBindDescriptorSets(sync.command_buffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline_layout_,
+                            0, 1, &descriptor_set_,
+                            0, nullptr);
 
     frame_open_ = true;
     present_surface_id_ = 0;
     surface_has_clear_ = false;
     cleared_textures_.clear();
     cleared_render_target_groups_.clear();
+    current_render_pass_ = VK_NULL_HANDLE;
 }
 
 void VkBackend::begin_pass(uint64_t target_id)
 {
+    VELK_PERF_SCOPE("vk.begin_pass");
     auto& sync = frame_sync_[frame_sync_index_];
     VkRenderPass rp = VK_NULL_HANDLE;
     VkFramebuffer fb = VK_NULL_HANDLE;
@@ -2012,16 +2091,13 @@ void VkBackend::begin_pass(uint64_t target_id)
         rp_begin.clearValueCount = clear_count;
         rp_begin.pClearValues = clear_values.data();
 
-        vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindDescriptorSets(sync.command_buffer,
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline_layout_,
-                                0,
-                                1,
-                                &descriptor_set_,
-                                0,
-                                nullptr);
+        vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
+                             VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        current_render_pass_ = rp;
+        current_framebuffer_ = fb;
+        RENDER_LOG("vk.begin_pass GROUP target=%llu rp=%p fb=%p extent=%dx%d",
+                   (unsigned long long)target_id, (void*)rp, (void*)fb,
+                   current_target_width_, current_target_height_);
         return;
     }
 
@@ -2093,22 +2169,151 @@ void VkBackend::begin_pass(uint64_t target_id)
     rp_begin.clearValueCount = target_has_depth ? 2u : 1u;
     rp_begin.pClearValues = clear_values;
 
-    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
+                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+    current_render_pass_ = rp;
+    current_framebuffer_ = fb;
+    RENDER_LOG("vk.begin_pass target=%llu rp=%p fb=%p extent=%dx%d depth=%d",
+               (unsigned long long)target_id, (void*)rp, (void*)fb,
+               current_target_width_, current_target_height_, target_has_depth ? 1 : 0);
+}
 
-    // Bind bindless descriptor set
-    vkCmdBindDescriptorSets(sync.command_buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipeline_layout_,
-                            0,
-                            1,
-                            &descriptor_set_,
-                            0,
-                            nullptr);
+void VkBackend::record_draw_loop(::VkCommandBuffer cb,
+                                 array_view<const DrawCall> calls)
+{
+    RENDER_LOG("vk.record_draw_loop cb=%p calls=%zu",
+               (void*)cb, calls.size());
+    for (size_t i = 0; i < calls.size(); ++i) {
+        const auto& call = calls[i];
+
+        auto pit = pipelines_.find(call.pipeline);
+        if (pit == pipelines_.end()) {
+            RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%llu MISSING",
+                       i, (unsigned long long)call.pipeline);
+            continue;
+        }
+
+        RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%llu vkpipe=%p indexed=%d args=%llu+%llu count=%llu+%llu rc_size=%u",
+                   i, (unsigned long long)call.pipeline, (void*)pit->second.pipeline,
+                   call.indexed ? 1 : 0,
+                   (unsigned long long)call.args_buffer, (unsigned long long)call.args_buffer_offset,
+                   (unsigned long long)call.count_buffer, (unsigned long long)call.count_buffer_offset,
+                   call.root_constants_size);
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
+
+        if (call.root_constants_size > 0) {
+            // Per-draw push lands at offset 8: bytes [0..8) are the
+            // per-pass FrameGlobals address pushed once at pass start
+            // by push_view_globals(). Per-draw bytes (typically the
+            // 8-byte DrawData address) follow at [8..).
+            vkCmdPushConstants(cb,
+                               pipeline_layout_,
+                               VK_SHADER_STAGE_ALL,
+                               sizeof(uint64_t),
+                               call.root_constants_size,
+                               call.root_constants);
+        }
+
+        auto args_it = buffers_.find(call.args_buffer);
+        auto count_it = buffers_.find(call.count_buffer);
+        if (args_it == buffers_.end() || count_it == buffers_.end()) continue;
+        VkBuffer args_vk = args_it->second.buffer;
+        VkBuffer count_vk = count_it->second.buffer;
+
+        if (call.indexed) {
+            auto bit = buffers_.find(call.index_buffer);
+            if (bit == buffers_.end()) continue;
+            vkCmdBindIndexBuffer(cb, bit->second.buffer,
+                                 call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexedIndirectCount(cb,
+                                          args_vk, call.args_buffer_offset,
+                                          count_vk, call.count_buffer_offset,
+                                          call.max_draw_count, call.args_stride);
+        } else {
+            vkCmdDrawIndirectCount(cb,
+                                   args_vk, call.args_buffer_offset,
+                                   count_vk, call.count_buffer_offset,
+                                   call.max_draw_count, call.args_stride);
+        }
+    }
+}
+
+void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
+{
+    if (cb == VK_NULL_HANDLE) return;
+    // Queue at the slot that was last used (one before current in
+    // round-robin). Its next drain happens kFrameOverlap-1 frames from
+    // now, by which point every frame that referenced this secondary
+    // has been submitted AND its fence signaled. Queueing at the
+    // current slot would drain at the upcoming begin_frame, whose
+    // fence only guarantees work from kFrameOverlap frames ago — a
+    // recently-submitted frame's GPU work referencing the secondary
+    // could still be in flight when vkFreeCommandBuffers ran.
+    uint32_t target_slot =
+        (frame_sync_index_ + kFrameOverlap - 1) % kFrameOverlap;
+    frame_sync_[target_slot].deferred_persistent_frees.push_back(cb);
+    RENDER_LOG("vk.defer_free cb=%p current_slot=%u queue_slot=%u",
+               (void*)cb, frame_sync_index_, target_slot);
+}
+
+::VkCommandBuffer VkBackend::acquire_transient_secondary()
+{
+    auto& sync = frame_sync_[frame_sync_index_];
+    if (sync.transient_secondary_cursor < sync.transient_secondaries.size()) {
+        // Reuse the slab slot: vkBeginCommandBuffer resets it
+        // implicitly at recording time (pool was created with
+        // RESET_COMMAND_BUFFER_BIT).
+        return sync.transient_secondaries[sync.transient_secondary_cursor++];
+    }
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = sync.transient_secondary_pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    ai.commandBufferCount = 1;
+    ::VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(device_, &ai, &cb) != VK_SUCCESS) return VK_NULL_HANDLE;
+    sync.transient_secondaries.push_back(cb);
+    ++sync.transient_secondary_cursor;
+    return cb;
 }
 
 void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
 {
-    auto& sync = frame_sync_[frame_sync_index_];
+    VELK_PERF_SCOPE("vk.submit");
+    if (current_render_pass_ == VK_NULL_HANDLE) return;
+
+    ::VkCommandBuffer secondary = acquire_transient_secondary();
+    if (secondary == VK_NULL_HANDLE) return;
+
+    VkCommandBufferInheritanceInfo inh{};
+    inh.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+    inh.renderPass = current_render_pass_;
+    inh.subpass = 0;
+    inh.framebuffer = current_framebuffer_;
+
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+    bi.pInheritanceInfo = &inh;
+    vkBeginCommandBuffer(secondary, &bi);
+
+    // Secondary cmd buffers don't inherit descriptor bindings from
+    // the primary; bind the bindless graphics set here. The
+    // transient secondary is recorded fresh each frame so the
+    // current frame's view-globals BDA is captured at recording
+    // time and is correct on this single-frame execute.
+    vkCmdBindDescriptorSets(secondary,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline_layout_,
+                            0, 1, &descriptor_set_,
+                            0, nullptr);
+
+    if (last_view_globals_addr_ != 0) {
+        vkCmdPushConstants(secondary, pipeline_layout_,
+                           VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t),
+                           &last_view_globals_addr_);
+    }
 
     {
         float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(current_target_width_);
@@ -2120,86 +2325,54 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
         viewport.width = vp_w;
         viewport.height = vp_h;
         viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(sync.command_buffer, 0, 1, &viewport);
+        vkCmdSetViewport(secondary, 0, 1, &viewport);
 
         VkRect2D scissor{};
         scissor.offset = {static_cast<int32_t>(vp.x), static_cast<int32_t>(vp.y)};
         scissor.extent = {static_cast<uint32_t>(vp_w), static_cast<uint32_t>(vp_h)};
-        vkCmdSetScissor(sync.command_buffer, 0, 1, &scissor);
+        vkCmdSetScissor(secondary, 0, 1, &scissor);
     }
-    for (size_t i = 0; i < calls.size(); ++i) {
-        const auto& call = calls[i];
 
-        auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) {
-            continue;
-        }
+    record_draw_loop(secondary, calls);
+    vkEndCommandBuffer(secondary);
 
-        vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
-
-        if (call.root_constants_size > 0) {
-            // Per-draw push lands at offset 8: bytes [0..8) are the
-            // per-pass FrameGlobals address pushed once at pass start
-            // by push_view_globals(). Per-draw bytes (typically the
-            // 8-byte DrawData address) follow at [8..).
-            vkCmdPushConstants(sync.command_buffer,
-                               pipeline_layout_,
-                               VK_SHADER_STAGE_ALL,
-                               sizeof(uint64_t),
-                               call.root_constants_size,
-                               call.root_constants);
-        }
-
-        // Resolve indirect-draw buffers.
-        auto args_it = buffers_.find(call.args_buffer);
-        auto count_it = buffers_.find(call.count_buffer);
-        if (args_it == buffers_.end() || count_it == buffers_.end()) {
-            continue;
-        }
-        VkBuffer args_vk = args_it->second.buffer;
-        VkBuffer count_vk = count_it->second.buffer;
-
-        if (call.indexed) {
-            auto bit = buffers_.find(call.index_buffer);
-            if (bit == buffers_.end()) {
-                continue;
-            }
-            vkCmdBindIndexBuffer(sync.command_buffer, bit->second.buffer,
-                                 call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexedIndirectCount(sync.command_buffer,
-                                          args_vk, call.args_buffer_offset,
-                                          count_vk, call.count_buffer_offset,
-                                          call.max_draw_count, call.args_stride);
-        } else {
-            vkCmdDrawIndirectCount(sync.command_buffer,
-                                   args_vk, call.args_buffer_offset,
-                                   count_vk, call.count_buffer_offset,
-                                   call.max_draw_count, call.args_stride);
-        }
-    }
+    auto& sync = frame_sync_[frame_sync_index_];
+    vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
 void VkBackend::end_pass()
 {
     auto& sync = frame_sync_[frame_sync_index_];
     vkCmdEndRenderPass(sync.command_buffer);
+    RENDER_LOG("vk.end_pass");
     current_surface_ = 0;
+    current_render_pass_ = VK_NULL_HANDLE;
+    current_framebuffer_ = VK_NULL_HANDLE;
 }
 
 void VkBackend::dispatch(array_view<const DispatchCall> calls)
 {
+    VELK_PERF_SCOPE("vk.dispatch");
     if (calls.empty()) {
         return;
     }
     auto& sync = frame_sync_[frame_sync_index_];
 
-    // Bind the bindless descriptor set for the compute bind point so the
-    // shader can sample textures / read the global texture array.
+    // After any vkCmdExecuteCommands on the primary, ALL primary state
+    // is undefined per Vulkan spec — not just state the secondary
+    // touched. So the compute descriptor binding from begin_frame
+    // and any push constants pushed by push_view_globals may be
+    // invalid by the time we get here. Rebind + re-push.
     vkCmdBindDescriptorSets(sync.command_buffer,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
                             0, nullptr);
+    if (last_view_globals_addr_ != 0) {
+        vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
+                           VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t),
+                           &last_view_globals_addr_);
+    }
 
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
@@ -2235,6 +2408,7 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
 
 void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_rect)
 {
+    VELK_PERF_SCOPE("vk.blit_to_surface");
     auto& sync = frame_sync_[frame_sync_index_];
 
     auto tit = textures_.find(source);
@@ -2600,9 +2774,59 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
 void VkBackend::push_view_globals(uint64_t addr)
 {
     if (addr == 0) return;
+    last_view_globals_addr_ = addr;
     auto& sync = frame_sync_[frame_sync_index_];
+    RENDER_LOG("vk.push_view_globals primary=%p addr=0x%llx",
+               (void*)sync.command_buffer, (unsigned long long)addr);
     vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
                        VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t), &addr);
+}
+
+VkRenderPass VkBackend::find_render_pass_for_target(uint64_t target_id)
+{
+    if (target_id == 0) return VK_NULL_HANDLE;
+    if (is_render_target_group(target_id)) {
+        auto git = render_target_groups_.find(target_id);
+        if (git != render_target_groups_.end()) {
+            return git->second.render_pass;
+        }
+        return VK_NULL_HANDLE;
+    }
+    auto sit = surfaces_.find(target_id);
+    if (sit != surfaces_.end()) {
+        return sit->second.render_pass;
+    }
+    auto tit = textures_.find(static_cast<TextureId>(target_id));
+    if (tit != textures_.end() && tit->second.is_renderable) {
+        return tit->second.render_pass;
+    }
+    return VK_NULL_HANDLE;
+}
+
+::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(uint64_t target_id)
+{
+    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
+        ::velk::ClassId::VkCommandBuffer);
+    VkRenderPass rp = find_render_pass_for_target(target_id);
+    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
+        impl->init(this, rp);
+    }
+    RENDER_LOG("vk.create_command_buffer target=%llu rp=%p ptr=%p",
+               (unsigned long long)target_id, (void*)rp, (void*)cmd.get());
+    return cmd;
+}
+
+void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
+{
+    if (!cmd) return;
+    auto* impl = static_cast<VkCommandBuffer*>(cmd.get());
+    ::VkCommandBuffer secondary = impl->handle();
+    if (!secondary) return;
+    auto& sync = frame_sync_[frame_sync_index_];
+    RENDER_LOG("vk.execute primary=%p secondary=%p current_rp=%p",
+               (void*)sync.command_buffer, (void*)secondary,
+               (void*)current_render_pass_);
+    vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
 void VkBackend::end_frame()
@@ -2721,7 +2945,7 @@ bool VkBackend::is_frame_complete(uint64_t marker) const
 // Utility
 // ============================================================================
 
-VkCommandBuffer VkBackend::begin_one_shot_commands()
+::VkCommandBuffer VkBackend::begin_one_shot_commands()
 {
     VkCommandBufferAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -2729,7 +2953,7 @@ VkCommandBuffer VkBackend::begin_one_shot_commands()
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = 1;
 
-    VkCommandBuffer cb;
+    ::VkCommandBuffer cb;
     vkAllocateCommandBuffers(device_, &alloc_info, &cb);
 
     VkCommandBufferBeginInfo begin_info{};
@@ -2740,7 +2964,7 @@ VkCommandBuffer VkBackend::begin_one_shot_commands()
     return cb;
 }
 
-void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
+void VkBackend::end_one_shot_commands(::VkCommandBuffer cb)
 {
     vkEndCommandBuffer(cb);
 
@@ -2755,7 +2979,7 @@ void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
     vkFreeCommandBuffers(device_, command_pool_, 1, &cb);
 }
 
-void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+void VkBackend::transition_image_layout(::VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
                                         VkImageLayout new_layout, uint32_t mip_levels)
 {
     VkImageMemoryBarrier barrier{};

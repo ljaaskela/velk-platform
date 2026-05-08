@@ -3,6 +3,8 @@ find_package(Vulkan REQUIRED)
 add_library(velk_vk SHARED
     src/vk_backend.h
     src/vk_backend.cpp
+    src/vk_command_buffer.h
+    src/vk_command_buffer.cpp
     src/vk_plugin.h
     src/vk_plugin.cpp
     src/volk_impl.c
@@ -19,3 +21,7 @@ target_include_directories(velk_vk
 )
 
 target_compile_definitions(velk_vk PRIVATE VELK_EXPORTS VK_NO_PROTOTYPES)
+
+if(VELK_RENDER_DEBUG)
+    target_compile_definitions(velk_vk PRIVATE VELK_RENDER_DEBUG)
+endif()

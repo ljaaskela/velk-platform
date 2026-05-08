@@ -12,6 +12,7 @@ namespace velk {
 namespace ClassId {
 
 inline constexpr Uid VkBackend{"f7a23c01-8e4d-4b19-a652-1d3f09b7e5c8"};
+inline constexpr Uid VkCommandBuffer{"d64c732b-d642-4c4a-8baa-963af4e0b27e"};
 
 } // namespace ClassId
 

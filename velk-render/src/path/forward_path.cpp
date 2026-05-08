@@ -16,6 +16,12 @@
 
 namespace velk {
 
+#ifdef VELK_RENDER_DEBUG
+#define RENDER_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define RENDER_LOG(...) ((void)0)
+#endif
+
 namespace {
 
 /// Resolves (or lazy-compiles) the forward-rendering pipeline for a
@@ -144,6 +150,10 @@ void ForwardPath::build_passes(IViewEntry& entry,
         // globals address (FrameGlobals lives in per-frame staging
         // and rotates each frame).
         cache.pass->set_view_globals_address(render_view.view_globals_address);
+        RENDER_LOG("forward.cached view=%p pass=%p target=%llu vg=0x%llx",
+                   (void*)&entry, (void*)cache.pass.get(),
+                   (unsigned long long)cache.pass->target_id(),
+                   (unsigned long long)render_view.view_globals_address);
         graph.add_pass(cache.pass);
         return;
     }
@@ -182,6 +192,14 @@ void ForwardPath::build_passes(IViewEntry& entry,
     uint64_t target_id = color_target
         ? color_target->get_gpu_handle(GpuResourceKey::Default)
         : 0;
+
+    // DIAGNOSTIC: revert to legacy GraphOp path to isolate whether
+    // the cached-secondary mechanism is what's TDR-ing. Keeps the
+    // IGpuCommandBuffer infrastructure in place but stops using it
+    // from ForwardPath so the executor takes the legacy branch.
+    RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
+               (void*)&entry, (unsigned long long)target_id,
+               draw_calls.size());
     cache.pass->add_op(ops::BeginPass{target_id});
     cache.pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
     cache.pass->add_op(ops::EndPass{});

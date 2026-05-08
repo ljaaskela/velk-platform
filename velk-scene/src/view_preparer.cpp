@@ -116,6 +116,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
     // re-upload through their existing mapping. ensure_buffer_storage's
     // deferred-destroy on size change handles instance-count growth.
     if (ctx.resources && ctx.backend) {
+        VELK_PERF_SCOPE("renderer.upload_sweep");
         // Generic dirty-buffer upload: ensure_buffer_storage allocates /
         // resizes the backend buffer, map + memcpy when dirty, clear
         // the flag. Used for both per-batch storage blobs and per-
@@ -142,6 +143,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             auto material_ptr = bp->material();
             auto* dd = interface_cast<IDrawData>(material_ptr.get());
             if (!dd) return;
+            VELK_PERF_SCOPE("renderer.upload_material");
             // get_data_buffer re-serialises into the persistent buffer
             // and flips dirty when bytes change; idempotent if already
             // up-to-date. Multiple batches sharing one material upload
@@ -397,11 +399,7 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
             }
         }
         // Refresh the per-view texture key in case the surface changed
-        // but the material identity didn't (rare, but cheap). The
-        // env_batch falls through to the per-frame staging fallback
-        // in emit_draw_calls (no pool slice) — it's a single fullscreen
-        // quad, the per-frame staging cost is trivial, and it sidesteps
-        // the question of where env_batch lives across pool resets.
+        // but the material identity didn't (rare, but cheap).
         if (cache.env_batch) {
             auto* env_batch = static_cast<impl::DefaultBatch*>(cache.env_batch.get());
             env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
