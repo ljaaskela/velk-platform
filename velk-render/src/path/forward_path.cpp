@@ -6,6 +6,7 @@
 
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/frame/raster_shaders.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_render_target.h>
@@ -193,16 +194,31 @@ void ForwardPath::build_passes(IViewEntry& entry,
         ? color_target->get_gpu_handle(GpuResourceKey::Default)
         : 0;
 
-    // DIAGNOSTIC: revert to legacy GraphOp path to isolate whether
-    // the cached-secondary mechanism is what's TDR-ing. Keeps the
-    // IGpuCommandBuffer infrastructure in place but stops using it
-    // from ForwardPath so the executor takes the legacy branch.
+    // Record one secondary cmd buffer per in-flight frame slot. Each
+    // secondary bakes its slot's stable view-globals BDA at offset
+    // [0..8) — required because secondaries don't inherit push state
+    // from the primary, and view_globals_address itself rotates per
+    // slot (per-view persistent ring buffer in ViewPreparer). The
+    // executor selects `command_buffer(backend.current_frame_slot())`
+    // each frame so the right slot's secondary executes.
     RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
                (void*)&entry, (unsigned long long)target_id,
                draw_calls.size());
-    cache.pass->add_op(ops::BeginPass{target_id});
-    cache.pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
-    cache.pass->add_op(ops::EndPass{});
+    const uint32_t slot_count = ctx.backend->frame_overlap();
+    const uint64_t current_slot_addr = render_view.view_globals_address;
+    const uint32_t current_slot = ctx.backend->current_frame_slot();
+    const uint64_t base_addr = current_slot_addr - current_slot * sizeof(FrameGlobals);
+    for (uint32_t slot = 0; slot < slot_count; ++slot) {
+        auto cmd = ctx.backend->create_command_buffer(target_id);
+        if (!cmd) continue;
+        cmd->begin_recording();
+        cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+        cmd->set_viewport(render_view.viewport);
+        cmd->record_draws({draw_calls.data(), draw_calls.size()});
+        cmd->end_recording();
+        cache.pass->set_command_buffer(slot, std::move(cmd));
+    }
+    cache.pass->set_target_id(target_id);
     if (color_target) {
         cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }

@@ -1,6 +1,8 @@
 #ifndef VELK_UI_RENDER_TARGET_CACHE_H
 #define VELK_UI_RENDER_TARGET_CACHE_H
 
+#include <velk-render/ext/persistent_buffer.h>
+#include <velk/vector.h>
 #include <velk-render/interface/intf_render_graph.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/render_path/frame_context.h>
@@ -80,6 +82,20 @@ private:
     /// across frames for the same RTT element. Lazy-created on first
     /// emit per element; hive-pooled.
     std::unordered_map<IElement*, IViewEntry::Ptr> view_entries_;
+
+    /// Per-RTT persistent FrameGlobals ring buffer + CPU shadow,
+    /// matching `ViewPreparer::ViewCache::view_globals_buffer`. Each
+    /// frame slot writes its globals at `slot * sizeof(FrameGlobals)`;
+    /// the per-slot BDA `base + slot*size` is stable across cycles of
+    /// `frame_overlap` frames so cached secondary cmd buffers can bake
+    /// it. Without this, ForwardPath's per-slot push_view_globals
+    /// computations would be on top of a per-frame-staging address.
+    struct ViewGlobals
+    {
+        PersistentBuffer buffer;
+        ::velk::vector<uint8_t> cpu_slots;
+    };
+    std::unordered_map<IElement*, ViewGlobals> view_globals_;
 
     /// Lazy-instantiated ForwardPath used to render RTT subtrees.
     /// Holding the path here keeps every line of forward composition

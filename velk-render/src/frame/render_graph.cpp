@@ -225,7 +225,7 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         RENDER_LOG("graph.pass[%zu] vg=0x%llx target=%llu has_cmd=%d ops=%zu",
                    i, (unsigned long long)vg_addr,
                    (unsigned long long)gp.target_id(),
-                   gp.command_buffer() ? 1 : 0,
+                   gp.command_buffer(backend.current_frame_slot()) ? 1 : 0,
                    gp.ops().size());
 
         // Push view-globals on the primary at the top of every pass,

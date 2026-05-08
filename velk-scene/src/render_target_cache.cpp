@@ -144,8 +144,27 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
                             static_cast<float>(rte.height)};
         rt_view.width = rte.width;
         rt_view.height = rte.height;
-        rt_view.view_globals_address =
-            ctx.frame_buffer->write(&rt_globals, sizeof(rt_globals));
+        // Per-RTT persistent FrameGlobals ring; matches
+        // ViewPreparer::prepare_frame_globals so ForwardPath sees a
+        // stable base BDA + slot offset instead of a per-frame-staging
+        // address that would dangle in the secondaries it bakes.
+        if (ctx.backend) {
+            const uint32_t slot_count = ctx.backend->frame_overlap();
+            const size_t slot_size = sizeof(FrameGlobals);
+            const size_t total_size = slot_count * slot_size;
+            const uint32_t slot = ctx.backend->current_frame_slot();
+
+            auto& vg = view_globals_[rtp.element];
+            if (vg.cpu_slots.size() != total_size) {
+                vg.cpu_slots.assign(total_size, 0);
+            }
+            std::memcpy(vg.cpu_slots.data() + slot * slot_size,
+                        &rt_globals, slot_size);
+
+            auto result = vg.buffer.upload(vg.cpu_slots.data(), total_size, ctx);
+            rt_view.view_globals_address =
+                result.address ? result.address + slot * slot_size : 0;
+        }
         rt_view.bvh_root = ctx.bvh_root;
         rt_view.bvh_node_count = ctx.bvh_node_count;
         rt_view.bvh_shape_count = ctx.bvh_shape_count;

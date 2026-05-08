@@ -45,6 +45,7 @@ public:
     void begin_recording() override;
     void end_recording() override;
     void set_viewport(::velk::rect viewport) override;
+    void push_view_globals(uint64_t addr) override;
     void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_dispatch(const ::velk::DispatchCall& call) override;
     void record_blit_to_surface(::velk::TextureId source,
