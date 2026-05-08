@@ -90,14 +90,16 @@ public:
     /// what makes that path active.
     virtual void reset() = 0;
 
-    /// Pre-recorded command buffer for this pass. Null when the pass
-    /// uses the legacy `add_op` / `ops()` flow; the executor falls
-    /// back to walking the op list. When non-null, the executor
-    /// calls `IRenderBackend::execute(cmd)` and skips the op walk.
-    /// `reset()` drops the cmd buffer Ptr — producers re-create or
-    /// re-record on rebuild.
-    virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;
-    virtual void set_command_buffer(IGpuCommandBuffer::Ptr cmd) = 0;
+    /// Per-frame-slot pre-recorded command buffers, indexed by
+    /// `[0, IRenderBackend::frame_overlap())`. Producers record one
+    /// secondary per slot, each baked against that slot's stable
+    /// view-globals BDA (see `prepare_frame_globals`); the executor
+    /// picks `command_buffer(backend.current_frame_slot())` at execute
+    /// time. Returns null when the pass uses the legacy
+    /// `add_op` / `ops()` flow, in which case the executor walks the
+    /// op list. `reset()` drops every slot's cmd buffer Ptr.
+    virtual IGpuCommandBuffer::Ptr command_buffer(uint32_t slot) const = 0;
+    virtual void set_command_buffer(uint32_t slot, IGpuCommandBuffer::Ptr cmd) = 0;
 
     /// Target id for cmd-buffer-bearing raster passes. The executor
     /// wraps `execute(cmd)` in `begin_pass(target) / end_pass()` so

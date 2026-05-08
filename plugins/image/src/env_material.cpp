@@ -38,6 +38,7 @@ layout(location = 2) flat out vec2 v_size;
 layout(location = 3) out vec3 v_world_pos;
 layout(location = 4) out vec3 v_world_normal;
 layout(location = 5) flat out uint v_shape_param;
+layout(location = 6) out vec2 v_uv1;
 
 void main()
 {
@@ -58,6 +59,7 @@ void main()
     v_size = vec2(0.0);
     v_world_normal = vec3(0.0);
     v_shape_param = 0u;
+    v_uv1 = vec2(0.0);
 }
 )";
 

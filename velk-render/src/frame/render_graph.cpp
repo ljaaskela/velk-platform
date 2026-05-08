@@ -240,10 +240,11 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         }
 
         // Cmd-buffer-bearing pass: replay the pre-recorded buffer
-        // and skip the GraphOp walk. During the migration window
-        // both paths coexist; producers that haven't moved yet keep
-        // emitting ops and fall through below.
-        if (auto cmd = gp.command_buffer()) {
+        // for the current frame slot and skip the GraphOp walk.
+        // During the migration window both paths coexist; producers
+        // that haven't moved yet keep emitting ops and fall through
+        // below.
+        if (auto cmd = gp.command_buffer(backend.current_frame_slot())) {
             uint64_t target = gp.target_id();
             if (target != 0) {
                 backend.begin_pass(target);

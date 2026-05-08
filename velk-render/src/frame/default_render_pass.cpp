@@ -48,7 +48,7 @@ void DefaultRenderPass::reset()
     reads_.clear();
     writes_.clear();
     view_globals_address_ = 0;
-    command_buffer_.reset();
+    command_buffers_.clear();
     target_id_ = 0;
 }
 
