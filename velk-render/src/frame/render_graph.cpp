@@ -223,15 +223,14 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d ops=%zu",
                    i,
                    (unsigned long long)gp.target_id(),
-                   gp.command_buffer(backend.current_frame_slot()) ? 1 : 0,
+                   gp.command_buffer() ? 1 : 0,
                    gp.ops().size());
 
-        // Cmd-buffer-bearing pass: replay the pre-recorded buffer
-        // for the current frame slot and skip the GraphOp walk.
+        // Cmd-buffer-bearing pass: replay the pre-recorded buffer.
         // During the migration window both paths coexist; producers
         // that haven't moved yet keep emitting ops and fall through
         // below.
-        if (auto cmd = gp.command_buffer(backend.current_frame_slot())) {
+        if (auto cmd = gp.command_buffer()) {
             uint64_t target = gp.target_id();
             if (target != 0) {
                 backend.begin_pass(target);

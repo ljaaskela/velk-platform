@@ -76,8 +76,6 @@ public:
     PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) override;
     void destroy_pipeline(PipelineId pipeline) override;
 
-    uint32_t frame_overlap() const override { return kFrameOverlap; }
-    uint32_t current_frame_slot() const override { return frame_sync_index_; }
     void begin_frame() override;
     void begin_pass(uint64_t target_id) override;
     void submit(array_view<const DrawCall> calls, rect viewport) override;

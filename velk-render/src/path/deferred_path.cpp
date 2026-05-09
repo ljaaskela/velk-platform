@@ -332,15 +332,12 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
 
-    const uint32_t slot_count = ctx.backend->frame_overlap();
-    for (uint32_t slot = 0; slot < slot_count; ++slot) {
-        auto cmd = ctx.backend->create_command_buffer(group_id);
-        if (!cmd) continue;
+    if (auto cmd = ctx.backend->create_command_buffer(group_id)) {
         cmd->begin_recording();
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
         cmd->end_recording();
-        vs.cached_gbuffer_pass->set_command_buffer(slot, std::move(cmd));
+        vs.cached_gbuffer_pass->set_command_buffer(std::move(cmd));
     }
     vs.cached_gbuffer_pass->set_target_id(group_id);
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
@@ -479,15 +476,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     const bool can_cache = (blit_target != 0)
         && !ctx.backend->is_surface(blit_target);
     if (can_cache) {
-        const uint32_t slot_count = ctx.backend->frame_overlap();
-        for (uint32_t slot = 0; slot < slot_count; ++slot) {
-            auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
-            if (!cmd) continue;
+        if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
             cmd->begin_recording();
             cmd->record_dispatch(dc);
             cmd->record_blit_to_surface(src_id, blit_target, render_view.viewport);
             cmd->end_recording();
-            vs.cached_lighting_pass->set_command_buffer(slot, std::move(cmd));
+            vs.cached_lighting_pass->set_command_buffer(std::move(cmd));
         }
         vs.cached_lighting_pass->set_target_id(0);
     } else {

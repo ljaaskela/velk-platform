@@ -400,18 +400,6 @@ public:
     /// @name Frame submission
     /// @{
 
-    /// Number of in-flight frame slots the backend cycles through.
-    /// Producers caching per-slot resources (e.g. `IGpuCommandBuffer`s
-    /// recorded against per-slot view-globals BDAs) size their slot
-    /// arrays from this. Constant for the backend's lifetime.
-    virtual uint32_t frame_overlap() const = 0;
-
-    /// Slot index `[0, frame_overlap())` for the upcoming or currently
-    /// open frame. Updated by `begin_frame` so producers and the graph
-    /// executor pick the right per-slot cached resources. Calling this
-    /// outside a frame returns the slot the next `begin_frame` will use.
-    virtual uint32_t current_frame_slot() const = 0;
-
     /** @brief Begins a new frame: waits for GPU fence and starts command buffer recording. */
     virtual void begin_frame() = 0;
 

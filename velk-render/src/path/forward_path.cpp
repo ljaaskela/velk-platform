@@ -206,15 +206,12 @@ void ForwardPath::build_passes(IViewEntry& entry,
     RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
                (void*)&entry, (unsigned long long)target_id,
                draw_calls.size());
-    const uint32_t slot_count = ctx.backend->frame_overlap();
-    for (uint32_t slot = 0; slot < slot_count; ++slot) {
-        auto cmd = ctx.backend->create_command_buffer(target_id);
-        if (!cmd) continue;
+    if (auto cmd = ctx.backend->create_command_buffer(target_id)) {
         cmd->begin_recording();
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
         cmd->end_recording();
-        cache.pass->set_command_buffer(slot, std::move(cmd));
+        cache.pass->set_command_buffer(std::move(cmd));
     }
     cache.pass->set_target_id(target_id);
     if (color_target) {

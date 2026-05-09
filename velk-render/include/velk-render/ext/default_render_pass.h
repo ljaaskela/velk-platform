@@ -29,20 +29,16 @@ public:
     array_view<const IGpuResource::Ptr> reads() const override;
     array_view<const IGpuResource::Ptr> writes() const override;
     uint64_t view_globals_address() const override;
-    IGpuCommandBuffer::Ptr command_buffer(uint32_t slot) const override
-    {
-        return slot < command_buffers_.size() ? command_buffers_[slot] : nullptr;
-    }
+    IGpuCommandBuffer::Ptr command_buffer() const override { return command_buffer_; }
     uint64_t target_id() const override { return target_id_; }
 
     void add_op(GraphOp op) override;
     void add_read(IGpuResource::Ptr resource) override;
     void add_write(IGpuResource::Ptr resource) override;
     void set_view_globals_address(uint64_t addr) override;
-    void set_command_buffer(uint32_t slot, IGpuCommandBuffer::Ptr cmd) override
+    void set_command_buffer(IGpuCommandBuffer::Ptr cmd) override
     {
-        if (slot >= command_buffers_.size()) command_buffers_.resize(slot + 1);
-        command_buffers_[slot] = std::move(cmd);
+        command_buffer_ = std::move(cmd);
     }
     void set_target_id(uint64_t target_id) override { target_id_ = target_id; }
     void reset() override;
@@ -52,7 +48,7 @@ private:
     vector<IGpuResource::Ptr> reads_;
     vector<IGpuResource::Ptr> writes_;
     uint64_t view_globals_address_ = 0;
-    vector<IGpuCommandBuffer::Ptr> command_buffers_;
+    IGpuCommandBuffer::Ptr command_buffer_;
     uint64_t target_id_ = 0;
 };
 
