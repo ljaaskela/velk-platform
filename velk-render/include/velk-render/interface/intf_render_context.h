@@ -65,7 +65,7 @@ struct PipelineCacheKeyHash
 };
 
 using PipelineCacheMap =
-    std::unordered_map<PipelineCacheKey, PipelineId, PipelineCacheKeyHash>;
+    std::unordered_map<PipelineCacheKey, IGpuPipeline::Ptr, PipelineCacheKeyHash>;
 
 /**
  * @brief Owns the render backend and provides rendering infrastructure.

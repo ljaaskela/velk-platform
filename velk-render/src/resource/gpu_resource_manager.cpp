@@ -287,36 +287,15 @@ GpuResourceManager::ensure_buffer_storage(IBuffer* buf, const GpuBufferDesc& des
     return be;
 }
 
-bool GpuResourceManager::register_pipeline(IProgram* prog, PipelineId pid)
-{
-    if (!prog || !pid) {
-        return false;
-    }
-    auto [it, inserted] = pipeline_map_.emplace(prog, pid);
-    if (inserted) {
-        // First registration: subscribe so dropping the program
-        // auto-defers the pipeline for destroy.
-        prog->add_gpu_resource_observer(this);
-    }
-    return inserted;
-}
-
 void GpuResourceManager::add_env_observer(const IBuffer::WeakPtr& res)
 {
     observed_env_resources_.push_back(res);
 }
 
-
 void GpuResourceManager::defer_texture_destroy(TextureId tid, uint64_t completion_marker)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
     deferred_textures_.push_back({tid, completion_marker});
-}
-
-void GpuResourceManager::defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker)
-{
-    std::lock_guard<std::mutex> lock(deferred_mutex_);
-    deferred_pipelines_.push_back({pid, completion_marker});
 }
 
 void GpuResourceManager::drain_deferred(IRenderBackend& backend)
@@ -366,14 +345,6 @@ void GpuResourceManager::drain_deferred(IRenderBackend& backend)
         }
     }
 
-    for (auto it = deferred_pipelines_.begin(); it != deferred_pipelines_.end();) {
-        if (backend.is_frame_complete(it->completion_marker)) {
-            backend.destroy_pipeline(it->pid);
-            it = deferred_pipelines_.erase(it);
-        } else {
-            ++it;
-        }
-    }
 }
 
 void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
@@ -445,23 +416,15 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
         buffer_map_.erase(buf);
     }
 
-    if (auto* gb = interface_cast<IGpuBuffer>(resource)) {
-        auto tit = tracked_gpu_buffers_.find(resource);
-        if (tit != tracked_gpu_buffers_.end()) {
-            if (backend_) {
-                backend_->defer_destroy_gpu_buffer(gb, completion_marker);
-            }
-            tracked_gpu_buffers_.erase(tit);
-        }
-    }
+    // IGpuBuffer destruction is driven by ~VkGpuBuffer (which defers
+    // VMA destroy via the backend marker queue while the derived
+    // vtable is still intact). The manager just drops its tracking
+    // entry — calling virtual methods on @p resource here would hit
+    // pure-virtual stubs since the derived dtor body has already
+    // run by the time the observer chain notifies.
+    tracked_gpu_buffers_.erase(resource);
 
-    if (auto* prog = interface_cast<IProgram>(resource)) {
-        auto it = pipeline_map_.find(prog);
-        if (it != pipeline_map_.end()) {
-            deferred_pipelines_.push_back({it->second, completion_marker});
-            pipeline_map_.erase(it);
-        }
-    }
+    (void)completion_marker;
 }
 
 void GpuResourceManager::shutdown()
@@ -507,10 +470,6 @@ void GpuResourceManager::shutdown()
             backend_->destroy_render_target_group(d.handle);
         }
         deferred_groups_.clear();
-        for (auto& d : deferred_pipelines_) {
-            backend_->destroy_pipeline(d.pid);
-        }
-        deferred_pipelines_.clear();
     }
 
     for (auto& [key, tid] : texture_map_) {
@@ -544,12 +503,6 @@ void GpuResourceManager::shutdown()
         unregister(res, this);
     }
     tracked_gpu_buffers_.clear();
-
-    for (auto& [key, pid] : pipeline_map_) {
-        backend_->destroy_pipeline(pid);
-        unregister(key, this);
-    }
-    pipeline_map_.clear();
 }
 
 } // namespace velk

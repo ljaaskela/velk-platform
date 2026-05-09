@@ -227,7 +227,7 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
     desc.fragment = frag_shader;
     desc.options = options;
 
-    PipelineId pid = backend_->create_pipeline(desc, target_format, target_group);
+    auto pid = backend_->create_pipeline(desc, target_format, target_group);
     if (!pid) {
         return 0;
     }
@@ -235,7 +235,7 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
     if (key == 0) {
         key = next_pipeline_key_++;
     }
-    pipeline_map_[PipelineCacheKey{key, target_format, target_group}] = pid;
+    pipeline_map_[PipelineCacheKey{key, target_format, target_group}] = std::move(pid);
     return key;
 }
 
@@ -258,7 +258,7 @@ uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute,
     ComputePipelineDesc desc;
     desc.compute = compute;
 
-    PipelineId pid = backend_->create_compute_pipeline(desc);
+    auto pid = backend_->create_compute_pipeline(desc);
     if (!pid) {
         return 0;
     }
@@ -269,7 +269,7 @@ uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute,
     // Compute pipelines are render-pass independent; key under the
     // default (Surface, group 0) tuple so call sites can look them up
     // with just the user_key.
-    pipeline_map_[PipelineCacheKey{key, PixelFormat::Surface, 0}] = pid;
+    pipeline_map_[PipelineCacheKey{key, PixelFormat::Surface, 0}] = std::move(pid);
     return key;
 }
 

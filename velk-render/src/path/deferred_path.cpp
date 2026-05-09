@@ -32,9 +32,9 @@ namespace {
 /// class perturbation derived from the shader-source class uid; that
 /// way two visuals sharing a material still get distinct pipelines
 /// with the right `velk_visual_discard` body. Returns 0 to skip.
-PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                      const IBatch& batch,
-                                      RenderTargetGroup target_group)
+IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
+                                         const IBatch& batch,
+                                         RenderTargetGroup target_group)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -49,7 +49,7 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     if (forward_key == 0) {
         forward_key = ensure_material_forward_key(ctx, batch);
     }
-    if (forward_key == 0) return 0;
+    if (forward_key == 0) return nullptr;
 
     // Pull the material's eval snippet for the gbuffer compile below.
     // Fast-path note: when ensure_material_forward_key just compiled,
@@ -79,7 +79,7 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     auto& pipeline_map = ctx.pipeline_map();
     PipelineCacheKey gkey{gbuffer_key, PixelFormat::Surface, target_group};
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
 
     string_view vsrc;
@@ -124,9 +124,14 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    return ctx.compile_pipeline(
+    uint64_t compiled = ctx.compile_pipeline(
         string_view(composed), vsrc,
         gbuffer_key, PixelFormat::Surface, target_group, po);
+    if (!compiled) return nullptr;
+    if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
+        return it->second.get();
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -455,7 +460,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
 
     DispatchCall dc{};
-    dc.pipeline = pit->second;
+    dc.pipeline = pit->second.get();
     dc.groups_x = (w + 7) / 8;
     dc.groups_y = (h + 7) / 8;
     dc.groups_z = 1;

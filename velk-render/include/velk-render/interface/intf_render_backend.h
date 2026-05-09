@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_command_buffer.h>
+#include <velk-render/interface/intf_gpu_pipeline.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/render_types.h>
 
@@ -19,7 +20,6 @@ namespace velk {
 /// Opaque handles returned by the backend. 0 is null/invalid for all.
 /// @{
 using TextureId = uint32_t; ///< Also the bindless shader index.
-using PipelineId = uint64_t;
 
 /// Handle for a multi-attachment render target group (MRT).
 /// Wraps a set of sampleable `TextureId`s sharing one backend render
@@ -147,7 +147,7 @@ inline constexpr size_t kMaxRootConstantsSize = 256;
 ///   - non-indexed: `vertex_count, instance_count, first_vertex, first_instance`
 struct DrawCall
 {
-    PipelineId pipeline{};      ///< Which pipeline to bind.
+    IGpuPipeline* pipeline{};   ///< Which pipeline to bind. Lifetime owned by the renderer's pipeline cache.
     bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
     IGpuBuffer* index_buffer{};       ///< Index buffer to bind. Required when `indexed`.
@@ -169,7 +169,7 @@ struct DrawCall
 /// A single compute dispatch submitted to the backend.
 struct DispatchCall
 {
-    PipelineId pipeline{};           ///< Which compute pipeline to bind.
+    IGpuPipeline* pipeline{};        ///< Which compute pipeline to bind. Lifetime owned by the cache.
     uint32_t groups_x{1};            ///< Work group count in X.
     uint32_t groups_y{1};            ///< Work group count in Y.
     uint32_t groups_z{1};            ///< Work group count in Z.
@@ -302,6 +302,17 @@ public:
     virtual void defer_destroy_gpu_buffer(IGpuBuffer* gb,
                                           uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
+    /**
+     * @brief Records an in-place update of @p size bytes at @p offset
+     *        on the backend's per-frame primary command stream. Backs
+     *        `IGpuBuffer::update` so concrete buffer impls don't need
+     *        to know about backend internals.
+     */
+    virtual void record_buffer_update(IGpuBuffer& target,
+                                      size_t offset,
+                                      size_t size,
+                                      const void* data) = 0;
+
     /// @}
     /// @name Textures
     /// @{
@@ -386,15 +397,19 @@ public:
      *        the render pass of the given MRT group; in that case
      *        @p target_format is ignored (group attachments are fixed).
      */
-    virtual PipelineId create_pipeline(const PipelineDesc& desc,
-                                       PixelFormat target_format = PixelFormat::Surface,
-                                       RenderTargetGroup target_group = 0) = 0;
+    virtual IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
+                                              PixelFormat target_format = PixelFormat::Surface,
+                                              RenderTargetGroup target_group = 0) = 0;
 
-    /** @brief Creates a compute pipeline from a compute shader. Returns a handle. */
-    virtual PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
+    /** @brief Creates a compute pipeline from a compute shader. */
+    virtual IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 
-    /** @brief Destroys a pipeline (graphics or compute). */
-    virtual void destroy_pipeline(PipelineId pipeline) = 0;
+    /**
+     * @brief Queues an `IGpuPipeline`'s native handle for destruction
+     *        once the GPU is past the current pending frame. Called
+     *        by `~VkGpuPipeline` when its owning Ptr drops.
+     */
+    virtual void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) = 0;
 
     /// @}
     /// @name Frame submission

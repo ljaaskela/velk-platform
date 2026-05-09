@@ -42,22 +42,8 @@ public:
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     void defer_destroy_gpu_buffer(IGpuBuffer* gb,
                                   uint64_t completion_marker) override;
-
-    /// Per-frame primary command buffer; valid between begin_frame
-    /// and end_frame. `VkGpuBuffer::update` records
-    /// `vkCmdUpdateBuffer` against this.
-    ::VkCommandBuffer primary_cb() const
-    {
-        return frame_sync_[frame_sync_index_].command_buffer;
-    }
-
-    /// Marks that a `vkCmdUpdateBuffer` was recorded this frame so
-    /// `begin_pass` emits a single TRANSFER → SHADER_READ barrier
-    /// before the first secondary execute.
-    void mark_pending_buffer_update_barrier()
-    {
-        pending_buffer_update_barrier_ = true;
-    }
+    void record_buffer_update(IGpuBuffer& target, size_t offset,
+                              size_t size, const void* data) override;
 
     TextureId create_texture(const TextureDesc& desc) override;
     void destroy_texture(TextureId texture) override;
@@ -70,11 +56,11 @@ public:
     TextureId get_render_target_group_attachment(
         RenderTargetGroup group, uint32_t index) const override;
 
-    PipelineId create_pipeline(const PipelineDesc& desc,
-                               PixelFormat target_format = PixelFormat::Surface,
-                               RenderTargetGroup target_group = 0) override;
-    PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) override;
-    void destroy_pipeline(PipelineId pipeline) override;
+    IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
+                                      PixelFormat target_format = PixelFormat::Surface,
+                                      RenderTargetGroup target_group = 0) override;
+    IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) override;
+    void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) override;
 
     void begin_frame() override;
     void begin_pass(uint64_t target_id) override;
@@ -362,15 +348,17 @@ private:
     std::unordered_map<RenderTargetGroup, RenderTargetGroupData> render_target_groups_;
     uint64_t next_render_target_group_id_ = 1;
 
-    // Pipelines
-    struct PipelineEntry
+    /// Pending `vkDestroyPipeline` calls keyed by the
+    /// frame-completion marker captured at drop time.
+    struct DeferredGpuPipelineDestroy
     {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        ::VkPipeline pipeline;
+        uint64_t     completion_marker;
     };
+    ::velk::vector<DeferredGpuPipelineDestroy> deferred_gpu_pipelines_;
+    std::mutex deferred_gpu_pipelines_mutex_;
 
-    std::unordered_map<PipelineId, PipelineEntry> pipelines_;
-    PipelineId next_pipeline_id_ = 1;
+    void drain_deferred_pipelines();
 
     bool initialized_ = false;
 

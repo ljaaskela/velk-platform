@@ -99,11 +99,6 @@ public:
     virtual BufferEntry* ensure_buffer_storage(IBuffer* buf,
                                                const GpuBufferDesc& desc) = 0;
 
-    /// Idempotent. Returns true if the program was newly registered,
-    /// false if it was already tracked. Subscription happens internally
-    /// — callers don't need to add the manager as observer themselves.
-    virtual bool register_pipeline(IProgram* prog, PipelineId pid) = 0;
-
     // Environment resource bookkeeping (textures referenced by env material;
     // not tracked through the element cache so they need a sidecar list).
     // Unsubscription happens automatically inside `shutdown()` on the

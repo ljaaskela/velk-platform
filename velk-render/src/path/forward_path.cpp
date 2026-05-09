@@ -29,9 +29,9 @@ namespace {
 /// batch. Material wins over the visual's IShaderSource when both
 /// are present; the visual's source is the no-material fallback.
 /// Returns 0 to skip (no source / compile failure).
-PipelineId resolve_or_compile_forward(IRenderContext& ctx,
-                                      const IBatch& batch,
-                                      PixelFormat target_format)
+IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
+                                         const IBatch& batch,
+                                         PixelFormat target_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -45,7 +45,7 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
     if (auto it = pipeline_map.find(
             PipelineCacheKey{user_key, target_format, 0});
         it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
 
     uint64_t compiled_key = 0;
@@ -78,14 +78,14 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
             pipeline_options);
     }
 
-    if (compiled_key == 0) return 0;
+    if (compiled_key == 0) return nullptr;
 
     if (auto it = pipeline_map.find(
             PipelineCacheKey{compiled_key, target_format, 0});
         it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
-    return 0;
+    return nullptr;
 }
 
 } // namespace

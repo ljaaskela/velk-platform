@@ -2,6 +2,7 @@
 
 #include "vk_command_buffer.h"
 #include "vk_gpu_buffer.h"
+#include "vk_gpu_pipeline.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
@@ -239,12 +240,6 @@ void VkBackend::shutdown()
 
     vkDeviceWaitIdle(device_);
 
-    // Destroy pipelines
-    for (auto& [id, pd] : pipelines_) {
-        vkDestroyPipeline(device_, pd.pipeline, nullptr);
-    }
-    pipelines_.clear();
-
     // Destroy MRT render target groups. Must run before textures_ since
     // group attachments are regular TextureIds owned by the group; the
     // group destroyer cascades to destroy_texture on each attachment.
@@ -284,6 +279,13 @@ void VkBackend::shutdown()
             vmaDestroyBuffer(allocator_, d.buffer, d.allocation);
         }
         deferred_gpu_buffers_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+        for (auto& d : deferred_gpu_pipelines_) {
+            vkDestroyPipeline(device_, d.pipeline, nullptr);
+        }
+        deferred_gpu_pipelines_.clear();
     }
 
     // Destroy surfaces
@@ -1179,13 +1181,26 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
 
     auto gb = ::velk::instance().create<::velk::IGpuBuffer>(
         ::velk::ClassId::VkGpuBuffer);
-    if (!gb) {
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(gb.get());
+    if (!vk_gb) {
         vmaDestroyBuffer(allocator_, buffer, allocation);
         return {};
     }
-    static_cast<VkGpuBuffer*>(gb.get())
-        ->init(this, buffer, allocation, info.pMappedData, desc.size, address);
+    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size, address);
     return gb;
+}
+
+void VkBackend::record_buffer_update(IGpuBuffer& target, size_t offset,
+                                     size_t size, const void* data)
+{
+    if (size == 0 || !data) return;
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(&target);
+    if (!vk_gb) return;
+    ::VkBuffer buffer = vk_gb->vk_buffer();
+    if (buffer == VK_NULL_HANDLE) return;
+    auto& sync = frame_sync_[frame_sync_index_];
+    vkCmdUpdateBuffer(sync.command_buffer, buffer, offset, size, data);
+    pending_buffer_update_barrier_ = true;
 }
 
 void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
@@ -1194,7 +1209,8 @@ void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_mar
     if (completion_marker == kDefaultCompletionMarker) {
         completion_marker = frame_completion_marker();
     }
-    auto* vk_gb = static_cast<VkGpuBuffer*>(gb);
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(gb);
+    if (!vk_gb) return;
     ::VkBuffer buffer = vk_gb->vk_buffer();
     VmaAllocation allocation = vk_gb->vk_allocation();
     if (buffer == VK_NULL_HANDLE) return;
@@ -1704,13 +1720,13 @@ VkRenderPass VkBackend::get_or_create_single_attachment_render_pass(VkFormat col
     return rp;
 }
 
-PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
-                                      PixelFormat target_format,
-                                      RenderTargetGroup target_group)
+IGpuPipeline::Ptr VkBackend::create_pipeline(const PipelineDesc& desc,
+                                             PixelFormat target_format,
+                                             RenderTargetGroup target_group)
 {
     if (!default_render_pass_) {
         VELK_LOG(E, "VkBackend: cannot create pipeline without a render pass");
-        return 0;
+        return {};
     }
     VELK_PERF_SCOPE("vk.create_pipeline");
     VkRenderPass render_pass = default_render_pass_;
@@ -1721,7 +1737,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
         auto git = render_target_groups_.find(target_group);
         if (git == render_target_groups_.end()) {
             VELK_LOG(E, "VkBackend: create_pipeline: unknown render target group");
-            return 0;
+            return {};
         }
         render_pass = git->second.render_pass;
         color_attachment_count = static_cast<uint32_t>(git->second.attachments.size());
@@ -1733,11 +1749,11 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
         VkFormat vk_color = vk_format_for(target_format);
         if (vk_color == VK_FORMAT_UNDEFINED) {
             VELK_LOG(E, "VkBackend: create_pipeline: unsupported target_format");
-            return 0;
+            return {};
         }
         render_pass = get_or_create_single_attachment_render_pass(vk_color);
         if (!render_pass) {
-            return 0;
+            return {};
         }
     }
 
@@ -1750,7 +1766,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     VkShaderModule vert_module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(device_, &vert_ci, nullptr, &vert_module) != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create vertex shader module");
-        return 0;
+        return {};
     }
 
     VkShaderModuleCreateInfo frag_ci{};
@@ -1762,7 +1778,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     if (vkCreateShaderModule(device_, &frag_ci, nullptr, &frag_module) != VK_SUCCESS) {
         vkDestroyShaderModule(device_, vert_module, nullptr);
         VELK_LOG(E, "VkBackend: failed to create fragment shader module");
-        return 0;
+        return {};
     }
 
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -1892,41 +1908,47 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     pipeline_ci.renderPass = render_pass;
     pipeline_ci.subpass = 0;
 
-    PipelineEntry pe{};
+    VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult pipeline_result;
     {
         VELK_PERF_SCOPE("vk.vkCreateGraphicsPipelines");
         pipeline_result = vkCreateGraphicsPipelines(
-            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline);
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
     }
     if (pipeline_result != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create graphics pipeline");
         vkDestroyShaderModule(device_, vert_module, nullptr);
         vkDestroyShaderModule(device_, frag_module, nullptr);
-        return 0;
+        return {};
     }
 
     // Shader modules can be destroyed after pipeline creation
     vkDestroyShaderModule(device_, vert_module, nullptr);
     vkDestroyShaderModule(device_, frag_module, nullptr);
 
-    PipelineId id = next_pipeline_id_++;
-    pipelines_[id] = pe;
-    return id;
+    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
+        ::velk::ClassId::VkGpuPipeline);
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
+    if (!vk_gp) {
+        vkDestroyPipeline(device_, pipeline, nullptr);
+        return {};
+    }
+    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    return gp;
 }
 
-PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
+IGpuPipeline::Ptr VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
 {
     if (!desc.compute) {
         VELK_LOG(E, "VkBackend: create_compute_pipeline requires a compute shader");
-        return 0;
+        return {};
     }
     VELK_PERF_SCOPE("vk.create_compute_pipeline");
 
     auto code = desc.compute->get_data();
     if (code.empty()) {
         VELK_LOG(E, "VkBackend: create_compute_pipeline got empty SPIR-V");
-        return 0;
+        return {};
     }
 
     VkShaderModuleCreateInfo sm_ci{};
@@ -1937,7 +1959,7 @@ PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
     VkShaderModule cs_module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(device_, &sm_ci, nullptr, &cs_module) != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create compute shader module");
-        return 0;
+        return {};
     }
 
     VkPipelineShaderStageCreateInfo stage{};
@@ -1951,36 +1973,54 @@ PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
     pipeline_ci.stage = stage;
     pipeline_ci.layout = pipeline_layout_;
 
-    PipelineEntry pe{};
-    pe.bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult pipeline_result;
     {
         VELK_PERF_SCOPE("vk.vkCreateComputePipelines");
         pipeline_result = vkCreateComputePipelines(
-            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline);
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
     }
 
     vkDestroyShaderModule(device_, cs_module, nullptr);
 
     if (pipeline_result != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create compute pipeline");
-        return 0;
+        return {};
     }
 
-    PipelineId id = next_pipeline_id_++;
-    pipelines_[id] = pe;
-    return id;
+    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
+        ::velk::ClassId::VkGpuPipeline);
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
+    if (!vk_gp) {
+        vkDestroyPipeline(device_, pipeline, nullptr);
+        return {};
+    }
+    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_COMPUTE);
+    return gp;
 }
 
-void VkBackend::destroy_pipeline(PipelineId pipeline)
+void VkBackend::defer_destroy_gpu_pipeline(IGpuPipeline* pipeline)
 {
-    auto it = pipelines_.find(pipeline);
-    if (it == pipelines_.end()) {
-        return;
-    }
+    if (!pipeline) return;
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(pipeline);
+    if (!vk_gp) return;
+    ::VkPipeline vk_pipe = vk_gp->vk_pipeline();
+    if (vk_pipe == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+    deferred_gpu_pipelines_.push_back({vk_pipe, pending_frame_completion_marker()});
+}
 
-    vkDestroyPipeline(device_, it->second.pipeline, nullptr);
-    pipelines_.erase(it);
+void VkBackend::drain_deferred_pipelines()
+{
+    std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+    for (auto it = deferred_gpu_pipelines_.begin(); it != deferred_gpu_pipelines_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            vkDestroyPipeline(device_, it->pipeline, nullptr);
+            it = deferred_gpu_pipelines_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ============================================================================
@@ -2018,6 +2058,7 @@ void VkBackend::begin_frame()
     }
 
     drain_deferred_buffers();
+    drain_deferred_pipelines();
 
     pending_buffer_update_barrier_ = false;
 
@@ -2209,21 +2250,21 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
 
-        auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) {
-            RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%llu MISSING",
-                       i, (unsigned long long)call.pipeline);
+        auto* pipe = interface_cast<IVkGpuPipeline>(call.pipeline);
+        if (!pipe) {
+            RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%p MISSING",
+                       i, (void*)call.pipeline);
             continue;
         }
 
-        RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%llu vkpipe=%p indexed=%d args=%llu+%llu count=%llu+%llu rc_size=%u",
-                   i, (unsigned long long)call.pipeline, (void*)pit->second.pipeline,
+        RENDER_LOG("vk.record_draw_loop[%zu] vkpipe=%p indexed=%d args=%p+%llu count=%p+%llu rc_size=%u",
+                   i, (void*)pipe->vk_pipeline(),
                    call.indexed ? 1 : 0,
-                   (unsigned long long)call.args_buffer, (unsigned long long)call.args_buffer_offset,
-                   (unsigned long long)call.count_buffer, (unsigned long long)call.count_buffer_offset,
+                   (void*)call.args_buffer, (unsigned long long)call.args_buffer_offset,
+                   (void*)call.count_buffer, (unsigned long long)call.count_buffer_offset,
                    call.root_constants_size);
 
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->vk_pipeline());
 
         if (call.root_constants_size > 0) {
             // Per-draw push at offset 0: the 8-byte DrawData address
@@ -2239,13 +2280,16 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
                                call.root_constants);
         }
 
-        if (!call.args_buffer || !call.count_buffer) continue;
-        VkBuffer args_vk = static_cast<VkGpuBuffer*>(call.args_buffer)->vk_buffer();
-        VkBuffer count_vk = static_cast<VkGpuBuffer*>(call.count_buffer)->vk_buffer();
+        auto* args_gb = interface_cast<IVkGpuBuffer>(call.args_buffer);
+        auto* count_gb = interface_cast<IVkGpuBuffer>(call.count_buffer);
+        if (!args_gb || !count_gb) continue;
+        VkBuffer args_vk = args_gb->vk_buffer();
+        VkBuffer count_vk = count_gb->vk_buffer();
 
         if (call.indexed) {
-            if (!call.index_buffer) continue;
-            VkBuffer ibo_vk = static_cast<VkGpuBuffer*>(call.index_buffer)->vk_buffer();
+            auto* ibo_gb = interface_cast<IVkGpuBuffer>(call.index_buffer);
+            if (!ibo_gb) continue;
+            VkBuffer ibo_vk = ibo_gb->vk_buffer();
             vkCmdBindIndexBuffer(cb, ibo_vk,
                                  call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexedIndirectCount(cb,
@@ -2368,11 +2412,11 @@ void VkBackend::end_pass()
 
 void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
 {
-    auto pit = pipelines_.find(call.pipeline);
-    if (pit == pipelines_.end()) return;
-    if (pit->second.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) return;
+    auto* pipe = interface_cast<IVkGpuPipeline>(call.pipeline);
+    if (!pipe) return;
+    if (pipe->vk_bind_point() != VK_PIPELINE_BIND_POINT_COMPUTE) return;
 
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->vk_pipeline());
 
     if (call.root_constants_size > 0) {
         vkCmdPushConstants(cb,

@@ -10,7 +10,23 @@
 
 namespace velk::vk {
 
-class VkBackend;
+/**
+ * @brief Backend-internal sibling of `IGpuBuffer` exposing the
+ *        Vulkan handles. `record_draw_loop` and friends
+ *        `interface_cast` to this to extract `VkBuffer` without
+ *        depending on the concrete `VkGpuBuffer` type.
+ */
+class IVkGpuBuffer
+    : public ::velk::Interface<IVkGpuBuffer, ::velk::IInterface,
+                               VELK_UID("af838c8c-b166-49b0-81db-d13faeb11db4")>
+{
+public:
+    virtual void init(::velk::IRenderBackend* backend,
+                      ::VkBuffer buffer, VmaAllocation allocation,
+                      void* mapped, size_t size, uint64_t address) = 0;
+    virtual ::VkBuffer    vk_buffer()     const = 0;
+    virtual VmaAllocation vk_allocation() const = 0;
+};
 
 /**
  * @brief Vulkan-backed `IGpuBuffer`. Owns one VkBuffer + VmaAllocation
@@ -22,16 +38,13 @@ class VkBackend;
  * is reclaimed.
  */
 class VkGpuBuffer
-    : public ::velk::ext::GpuResource<VkGpuBuffer, ::velk::IGpuBuffer>
+    : public ::velk::ext::GpuResource<VkGpuBuffer, ::velk::IGpuBuffer, IVkGpuBuffer>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::VkGpuBuffer, "VkGpuBuffer");
 
     VkGpuBuffer() = default;
     ~VkGpuBuffer() override;
-
-    void init(IRenderBackend* backend, ::VkBuffer buffer, VmaAllocation allocation, void* mapped, size_t size,
-              uint64_t address);
 
     // IGpuResource
     ::velk::GpuResourceType get_type() const override
@@ -45,11 +58,15 @@ public:
     void*    map() override               { return mapped_; }
     void     update(size_t offset, size_t size, const void* data) override;
 
-    ::VkBuffer    vk_buffer()     const { return buffer_; }
-    VmaAllocation vk_allocation() const { return allocation_; }
+    // IVkGpuBuffer
+    void init(::velk::IRenderBackend* backend,
+              ::VkBuffer buffer, VmaAllocation allocation,
+              void* mapped, size_t size, uint64_t address) override;
+    ::VkBuffer    vk_buffer()     const override { return buffer_; }
+    VmaAllocation vk_allocation() const override { return allocation_; }
 
 private:
-    IRenderBackend* backend_ = nullptr;
+    ::velk::IRenderBackend* backend_ = nullptr;
     ::VkBuffer    buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     void*         mapped_ = nullptr;

@@ -68,8 +68,8 @@ inline void emit_draw_calls(
             continue;
         }
 
-        PipelineId pipeline = resolve_pipeline(batch);
-        if (pipeline == 0) continue;
+        IGpuPipeline* pipeline = resolve_pipeline(batch);
+        if (!pipeline) continue;
 
         // Per-batch persistent pool slice when available — a single
         // VkBuffer per view holds all batch slices, the slice was
@@ -186,12 +186,6 @@ inline void emit_draw_calls(
             draw_data_addr = reservation.gpu_addr;
             std::memcpy(dst, &header, sizeof(header));
             std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
-        }
-
-        // Lazy-register the program's pipeline for deferred destruction.
-        // The manager subscribes itself as observer internally.
-        if (material_ptr) {
-            resources.register_pipeline(material_ptr.get(), pipeline);
         }
 
         // Always-indirect: pull args + count from the batch's own

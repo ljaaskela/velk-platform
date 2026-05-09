@@ -65,12 +65,9 @@ public:
     void unregister_buffer(IBuffer* buf) override;
     BufferEntry* ensure_buffer_storage(IBuffer* buf, const GpuBufferDesc& desc) override;
 
-    bool register_pipeline(IProgram* prog, PipelineId pid) override;
-
     void add_env_observer(const IBuffer::WeakPtr& res) override;
 
     void defer_texture_destroy(TextureId tid, uint64_t completion_marker) override;
-    void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) override;
 
     void drain_deferred(IRenderBackend& backend) override;
 
@@ -94,11 +91,6 @@ private:
     struct DeferredTextureDestroy
     {
         TextureId tid;
-        uint64_t completion_marker;
-    };
-    struct DeferredPipelineDestroy
-    {
-        PipelineId pid;
         uint64_t completion_marker;
     };
     struct DeferredGroupDestroy
@@ -158,10 +150,8 @@ private:
     /// pointers; populated on creation, removed by the observer
     /// callback on destruction. Owning Ptrs live with the callers.
     std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
-    std::unordered_map<IProgram*, PipelineId> pipeline_map_;
     vector<DeferredTextureDestroy> deferred_textures_;
     vector<DeferredGroupDestroy> deferred_groups_;
-    vector<DeferredPipelineDestroy> deferred_pipelines_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
 

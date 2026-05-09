@@ -260,7 +260,7 @@ void RtPath::build_passes(IViewEntry& entry,
     }
 
     DispatchCall dc{};
-    dc.pipeline = pit->second;
+    dc.pipeline = pit->second.get();
     dc.groups_x = (vp_w + 7) / 8;
     dc.groups_y = (vp_h + 7) / 8;
     dc.groups_z = 1;

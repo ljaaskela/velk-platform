@@ -118,7 +118,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     pc.height = dims.y;
 
     ::velk::DispatchCall dc{};
-    dc.pipeline = pit->second;
+    dc.pipeline = pit->second.get();
     dc.groups_x = (dims.x + 7) / 8;
     dc.groups_y = (dims.y + 7) / 8;
     dc.groups_z = 1;
