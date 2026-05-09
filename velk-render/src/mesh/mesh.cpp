@@ -80,7 +80,7 @@ ReturnValue MeshPrimitive::write_draw_data(void* out, size_t size,
     if (!buffer_) return ReturnValue::Fail;
 
     MeshStaticData s{};
-    s.buffer_addr   = buffer_->get_gpu_handle(GpuResourceKey::Default);
+    s.buffer_addr   = get_gpu_address(buffer_);
     s.vbo_offset    = 0;  // IBO entries are global vertex indices in our
                           // gltf-imported meshes; vb base = buffer base.
     s.ibo_offset    = static_cast<uint32_t>(buffer_->get_ibo_offset()) + index_offset_;

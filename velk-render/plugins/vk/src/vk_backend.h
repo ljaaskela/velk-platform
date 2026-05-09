@@ -4,6 +4,7 @@
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
+#include <mutex>
 #include <unordered_map>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/plugins/vk/plugin.h>
@@ -38,10 +39,9 @@ public:
         return surfaces_.find(id) != surfaces_.end();
     }
 
-    GpuBufferHandle create_buffer(const GpuBufferDesc& desc) override;
-    void destroy_buffer(GpuBufferHandle buffer) override;
-    void* map(GpuBufferHandle buffer) override;
-    uint64_t gpu_address(GpuBufferHandle buffer) override;
+    IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
+    void defer_destroy_gpu_buffer(IGpuBuffer* gb,
+                                  uint64_t completion_marker) override;
 
     TextureId create_texture(const TextureDesc& desc) override;
     void destroy_texture(TextureId texture) override;
@@ -287,17 +287,19 @@ private:
     vector<TextureId> cleared_textures_;   ///< Textures that have been cleared this frame.
     vector<RenderTargetGroup> cleared_render_target_groups_; ///< MRT groups already cleared this frame.
 
-    // Buffers
-    struct BufferData
+    /// Pending `vmaDestroyBuffer` calls keyed by the
+    /// frame-completion marker captured at drop time.
+    struct DeferredGpuBufferDestroy
     {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-        void* mapped = nullptr;
-        size_t size = 0;
+        ::VkBuffer    buffer;
+        VmaAllocation allocation;
+        uint64_t      completion_marker;
     };
+    ::velk::vector<DeferredGpuBufferDestroy> deferred_gpu_buffers_;
+    std::mutex deferred_gpu_buffers_mutex_;
 
-    std::unordered_map<GpuBufferHandle, BufferData> buffers_;
-    GpuBufferHandle next_buffer_id_ = 1;
+    /// Releases entries whose completion marker has been signalled.
+    void drain_deferred_buffers();
 
     // Textures
     struct TextureData

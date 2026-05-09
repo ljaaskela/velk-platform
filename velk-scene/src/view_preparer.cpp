@@ -129,11 +129,13 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             desc.size = blob_size;
             desc.cpu_writable = true;
             auto* be = ctx.resources->ensure_buffer_storage(buf, desc);
-            if (!be || !be->handle) return nullptr;
+            if (!be) return nullptr;
             uint8_t* mapped = nullptr;
-            if (auto* dst = ctx.backend->map(be->handle)) {
-                std::memcpy(dst, buf->get_data(), blob_size);
-                mapped = static_cast<uint8_t*>(dst);
+            if (auto gb = be->buffer.lock()) {
+                if (auto* dst = gb->map()) {
+                    std::memcpy(dst, buf->get_data(), blob_size);
+                    mapped = static_cast<uint8_t*>(dst);
+                }
             }
             buf->clear_dirty();
             return mapped;

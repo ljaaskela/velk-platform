@@ -47,6 +47,7 @@ public:
     // IGpuResourceManager
     void init(IRenderBackend* backend) override;
     void enable_transient_pool() override;
+    IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) override;
@@ -69,7 +70,6 @@ public:
     void add_env_observer(const IBuffer::WeakPtr& res) override;
 
     void defer_texture_destroy(TextureId tid, uint64_t completion_marker) override;
-    void defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker) override;
     void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) override;
 
     void drain_deferred(IRenderBackend& backend) override;
@@ -79,11 +79,6 @@ public:
 
     void shutdown() override;
 
-    size_t deferred_buffer_count() const override
-    {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        return deferred_buffers_.size();
-    }
     size_t deferred_texture_count() const override
     {
         std::lock_guard<std::mutex> lock(deferred_mutex_);
@@ -99,11 +94,6 @@ private:
     struct DeferredTextureDestroy
     {
         TextureId tid;
-        uint64_t completion_marker;
-    };
-    struct DeferredBufferDestroy
-    {
-        GpuBufferHandle handle;
         uint64_t completion_marker;
     };
     struct DeferredPipelineDestroy
@@ -164,10 +154,13 @@ private:
     std::unordered_map<ISurface*, TextureId> texture_map_;
     std::unordered_map<ISurface*, RenderTargetGroup> group_map_;
     std::unordered_map<IBuffer*, BufferEntry> buffer_map_;
+    /// Live IGpuBuffers handed out by `create_gpu_buffer`. Raw
+    /// pointers; populated on creation, removed by the observer
+    /// callback on destruction. Owning Ptrs live with the callers.
+    std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
     std::unordered_map<IProgram*, PipelineId> pipeline_map_;
     vector<DeferredTextureDestroy> deferred_textures_;
     vector<DeferredGroupDestroy> deferred_groups_;
-    vector<DeferredBufferDestroy> deferred_buffers_;
     vector<DeferredPipelineDestroy> deferred_pipelines_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;

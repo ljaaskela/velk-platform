@@ -1,6 +1,7 @@
 #include "vk_backend.h"
 
 #include "vk_command_buffer.h"
+#include "vk_gpu_buffer.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
@@ -276,11 +277,14 @@ void VkBackend::shutdown()
     }
     textures_.clear();
 
-    // Destroy buffers
-    for (auto& [id, bd] : buffers_) {
-        vmaDestroyBuffer(allocator_, bd.buffer, bd.allocation);
+    // vkDeviceWaitIdle above lets pending VMA destroys run unconditionally.
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+        for (auto& d : deferred_gpu_buffers_) {
+            vmaDestroyBuffer(allocator_, d.buffer, d.allocation);
+        }
+        deferred_gpu_buffers_.clear();
     }
-    buffers_.clear();
 
     // Destroy surfaces
     for (auto& [id, sd] : surfaces_) {
@@ -1139,7 +1143,7 @@ void VkBackend::destroy_swapchain(SurfaceData& sd)
 // GPU Memory
 // ============================================================================
 
-GpuBufferHandle VkBackend::create_buffer(const GpuBufferDesc& desc)
+IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
 {
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1160,54 +1164,55 @@ GpuBufferHandle VkBackend::create_buffer(const GpuBufferDesc& desc)
         alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     }
 
-    BufferData bd{};
-    bd.size = desc.size;
-
+    ::VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
     VmaAllocationInfo info{};
-    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &bd.buffer, &bd.allocation, &info) != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create buffer (%zu bytes)", desc.size);
-        return 0;
-    }
-
-    bd.mapped = info.pMappedData;
-
-    GpuBufferHandle id = next_buffer_id_++;
-    buffers_[id] = bd;
-    return id;
-}
-
-void VkBackend::destroy_buffer(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return;
-    }
-
-    vmaDestroyBuffer(allocator_, it->second.buffer, it->second.allocation);
-    buffers_.erase(it);
-}
-
-void* VkBackend::map(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return nullptr;
-    }
-    return it->second.mapped;
-}
-
-uint64_t VkBackend::gpu_address(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return 0;
+    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &buffer, &allocation, &info) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create gpu buffer (%zu bytes)", desc.size);
+        return {};
     }
 
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-    addr_info.buffer = it->second.buffer;
+    addr_info.buffer = buffer;
+    uint64_t address = vkGetBufferDeviceAddress(device_, &addr_info);
 
-    return vkGetBufferDeviceAddress(device_, &addr_info);
+    auto gb = ::velk::instance().create<::velk::IGpuBuffer>(
+        ::velk::ClassId::VkGpuBuffer);
+    if (!gb) {
+        vmaDestroyBuffer(allocator_, buffer, allocation);
+        return {};
+    }
+    static_cast<VkGpuBuffer*>(gb.get())
+        ->init(this, buffer, allocation, info.pMappedData, desc.size, address);
+    return gb;
+}
+
+void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
+{
+    if (!gb) return;
+    if (completion_marker == kDefaultCompletionMarker) {
+        completion_marker = frame_completion_marker();
+    }
+    auto* vk_gb = static_cast<VkGpuBuffer*>(gb);
+    ::VkBuffer buffer = vk_gb->vk_buffer();
+    VmaAllocation allocation = vk_gb->vk_allocation();
+    if (buffer == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+    deferred_gpu_buffers_.push_back({buffer, allocation, completion_marker});
+}
+
+void VkBackend::drain_deferred_buffers()
+{
+    std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+    for (auto it = deferred_gpu_buffers_.begin(); it != deferred_gpu_buffers_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            vmaDestroyBuffer(allocator_, it->buffer, it->allocation);
+            it = deferred_gpu_buffers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ============================================================================
@@ -2012,6 +2017,8 @@ void VkBackend::begin_frame()
         sync.deferred_persistent_frees.clear();
     }
 
+    drain_deferred_buffers();
+
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -2215,16 +2222,14 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
                                call.root_constants);
         }
 
-        auto args_it = buffers_.find(call.args_buffer);
-        auto count_it = buffers_.find(call.count_buffer);
-        if (args_it == buffers_.end() || count_it == buffers_.end()) continue;
-        VkBuffer args_vk = args_it->second.buffer;
-        VkBuffer count_vk = count_it->second.buffer;
+        if (!call.args_buffer || !call.count_buffer) continue;
+        VkBuffer args_vk = static_cast<VkGpuBuffer*>(call.args_buffer)->vk_buffer();
+        VkBuffer count_vk = static_cast<VkGpuBuffer*>(call.count_buffer)->vk_buffer();
 
         if (call.indexed) {
-            auto bit = buffers_.find(call.index_buffer);
-            if (bit == buffers_.end()) continue;
-            vkCmdBindIndexBuffer(cb, bit->second.buffer,
+            if (!call.index_buffer) continue;
+            VkBuffer ibo_vk = static_cast<VkGpuBuffer*>(call.index_buffer)->vk_buffer();
+            vkCmdBindIndexBuffer(cb, ibo_vk,
                                  call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexedIndirectCount(cb,
                                           args_vk, call.args_buffer_offset,

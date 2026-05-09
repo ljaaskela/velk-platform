@@ -2,6 +2,7 @@
 #define VELK_RENDER_MESH_BUFFER_H
 
 #include <velk-render/ext/gpu_buffer.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/plugin.h>
 
@@ -22,7 +23,10 @@ namespace velk::impl {
  * zero size and skips the `INDEX_BUFFER` usage bit.
  */
 class MeshBuffer
-    : public ::velk::ext::GpuBuffer<MeshBuffer, ::velk::IMeshBuffer>
+    : public ::velk::ext::GpuBuffer<MeshBuffer,
+                                    ::velk::IMeshBuffer,
+                                    ::velk::IGpuBuffer,
+                                    ::velk::IGpuBufferStorageOwner>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::MeshBuffer, "MeshBuffer");

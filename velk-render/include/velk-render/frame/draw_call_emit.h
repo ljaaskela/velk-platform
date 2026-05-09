@@ -84,13 +84,15 @@ inline void emit_draw_calls(
         // (env_batch, which lives outside the upload pipeline) fall
         // through to per-frame staging.
         IBuffer* storage_buf = batch.storage_buffer();
-        GpuBufferHandle storage_handle = 0;
+        IGpuBuffer* storage_gb = nullptr;
         if (storage_buf) {
             if (auto* be = resources.find_buffer(storage_buf)) {
-                storage_handle = be->handle;
+                if (auto sgb = be->buffer.lock()) {
+                    storage_gb = sgb.get();
+                }
             }
         }
-        const bool has_storage = (storage_handle != 0 && batch.storage_gpu_address() != 0);
+        const bool has_storage = (storage_gb != nullptr && batch.storage_gpu_address() != 0);
         uint64_t instances_addr = 0;
         if (has_storage) {
             instances_addr = batch.storage_gpu_address() + BatchBufferLayout::kInstanceOffset;
@@ -119,12 +121,14 @@ inline void emit_draw_calls(
 
         // IBO half is optional: indexed draw when ibo_size > 0, plain
         // vkCmdDraw when 0 (e.g. TriangleStrip unit quad).
-        GpuBufferHandle ibo_handle = 0;
+        IGpuBuffer* ibo_gb = nullptr;
         size_t ibo_offset = 0;
         if (buffer->get_ibo_size() > 0) {
             auto* buf_entry = resources.find_buffer(buffer.get());
-            if (!buf_entry || !buf_entry->handle) continue;
-            ibo_handle = buf_entry->handle;
+            if (!buf_entry) continue;
+            auto igb = buf_entry->buffer.lock();
+            if (!igb) continue;
+            ibo_gb = igb.get();
             ibo_offset = buffer->get_ibo_offset();
         }
 
@@ -132,18 +136,16 @@ inline void emit_draw_calls(
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
-        header.vbo_address = buffer->get_gpu_handle(GpuResourceKey::Default);
+        header.vbo_address = get_gpu_address(buffer);
         if (!header.vbo_address) continue;
 
         if (auto uv1 = primitive->get_uv1_buffer()) {
-            uint64_t uv1_base = uv1->get_gpu_handle(GpuResourceKey::Default);
+            uint64_t uv1_base = get_gpu_address(uv1);
             if (!uv1_base) continue;
             header.uv1_address = uv1_base + primitive->get_uv1_offset();
             header.uv1_enabled = 1;
         } else {
-            header.uv1_address = default_uv1
-                ? default_uv1->get_gpu_handle(GpuResourceKey::Default)
-                : 0;
+            header.uv1_address = get_gpu_address(default_uv1);
             header.uv1_enabled = 0;
             if (!header.uv1_address) continue;
         }
@@ -157,7 +159,7 @@ inline void emit_draw_calls(
         uint64_t material_addr = 0;
         if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
             if (auto buf = dd->get_data_buffer(static_cast<ITextureResolver*>(&resources))) {
-                material_addr = buf->get_gpu_handle(GpuResourceKey::Default);
+                material_addr = get_gpu_address(buf);
             }
         }
 
@@ -195,9 +197,9 @@ inline void emit_draw_calls(
         // + uint32 count=1 into per-frame staging otherwise.
         DrawCall call{};
         call.pipeline = pipeline;
-        call.indexed = (ibo_handle != 0);
+        call.indexed = (ibo_gb != nullptr);
         if (call.indexed) {
-            call.index_buffer = ibo_handle;
+            call.index_buffer = ibo_gb;
             call.index_buffer_offset = ibo_offset;
             call.args_stride = sizeof(uint32_t) * 5; // VkDrawIndexedIndirectCommand
         } else {
@@ -205,9 +207,9 @@ inline void emit_draw_calls(
         }
 
         if (has_storage) {
-            call.args_buffer        = storage_handle;
+            call.args_buffer        = storage_gb;
             call.args_buffer_offset = BatchBufferLayout::kArgsOffset;
-            call.count_buffer        = storage_handle;
+            call.count_buffer        = storage_gb;
             call.count_buffer_offset = BatchBufferLayout::kCountOffset;
         } else {
             // Frame-staging fallback (env_batch et al.).

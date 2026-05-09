@@ -39,12 +39,20 @@ class IGpuResourceManager
       public ITextureResolver
 {
 public:
-    /** @brief Backend handle + size pair tracked per CPU IBuffer. */
+    /** @brief GPU storage tracked per CPU IBuffer. The IBuffer
+     *         wrapper owns the strong ref; the manager keeps a
+     *         non-owning view so it can lock + introspect without
+     *         extending lifetime. */
     struct BufferEntry
     {
-        GpuBufferHandle handle{};
-        size_t size = 0;
+        IGpuBuffer::WeakPtr buffer;
+        size_t              size{};
     };
+
+    /// Allocates a managed GPU buffer. The manager observes the
+    /// returned IGpuBuffer for lifetime tracking; dropping the last
+    /// Ptr defers the backend allocation for destruction.
+    virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
 
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last

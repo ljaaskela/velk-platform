@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/render_types.h>
@@ -17,7 +18,6 @@ namespace velk {
 /// @name Handle types
 /// Opaque handles returned by the backend. 0 is null/invalid for all.
 /// @{
-using GpuBufferHandle = uint64_t;
 using TextureId = uint32_t; ///< Also the bindless shader index.
 using PipelineId = uint64_t;
 
@@ -27,6 +27,9 @@ using PipelineId = uint64_t;
 /// Encoding: high bit set to disambiguate from surface / texture IDs
 /// in `begin_pass` dispatch.
 using RenderTargetGroup = uint64_t;
+
+/// "Unknown" frame completion marker.
+inline constexpr uint64_t kDefaultCompletionMarker = uint64_t(-1);
 
 inline constexpr uint64_t kRenderTargetGroupTag = 0x4000000000000000ULL;
 inline constexpr bool is_render_target_group(uint64_t id)
@@ -147,14 +150,14 @@ struct DrawCall
     PipelineId pipeline{};      ///< Which pipeline to bind.
     bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
-    GpuBufferHandle index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
+    IGpuBuffer* index_buffer{};       ///< Index buffer to bind. Required when `indexed`.
     uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
 
-    GpuBufferHandle args_buffer{};          ///< Buffer holding indirect-draw records.
+    IGpuBuffer* args_buffer{};        ///< Buffer holding indirect-draw records.
     uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
     uint32_t args_stride{};           ///< Bytes per indirect-draw record (5×u32 indexed, 4×u32 non-indexed).
 
-    GpuBufferHandle count_buffer{};         ///< Buffer holding the uint32 actual draw count.
+    IGpuBuffer* count_buffer{};       ///< Buffer holding the uint32 actual draw count.
     uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
     uint32_t max_draw_count{1};       ///< Upper bound; backend issues min(count_buffer[0], max_draw_count) draws.
 
@@ -278,18 +281,26 @@ public:
     /// @name GPU Memory
     /// @{
 
-    /** @brief Allocates a GPU buffer. Returns a handle, or 0 on failure. */
-    virtual GpuBufferHandle create_buffer(const GpuBufferDesc& desc) = 0;
+    /**
+     * @brief Low-level GPU buffer allocation. Producers should use
+     *        `IGpuResourceManager::create_gpu_buffer` so the manager
+     *        observes the buffer's lifetime and orchestrates its
+     *        destruction.
+     */
+    virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
 
-    /** @brief Frees a GPU buffer. */
-    virtual void destroy_buffer(GpuBufferHandle buffer) = 0;
-
-    /** @brief Returns a persistently mapped CPU pointer to the buffer, or nullptr. */
-    virtual void* map(GpuBufferHandle buffer) = 0;
-
-    /** @brief Returns the GPU virtual address for use in shaders via
-     *         buffer-reference / device-address reads. */
-    virtual uint64_t gpu_address(GpuBufferHandle buffer) = 0;
+    /**
+     * @brief Queues @p gb's underlying GPU memory for destruction
+     *        once @p completion_marker has been signalled. Called by
+     *        the resource manager from its observer callback when an
+     *        IGpuBuffer's last Ptr drops. Must read out @p gb's
+     *        backend handles synchronously (the wrapper object goes
+     *        away once the observer chain unwinds).
+     * @note  If @p completion_marker = kDefaultCompletionMarker, implementation should use
+     *        IRenderBackend::frame_completion_marker() as the destruction frame.
+     */
+    virtual void defer_destroy_gpu_buffer(IGpuBuffer* gb,
+                                          uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
     /// @}
     /// @name Textures

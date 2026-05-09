@@ -142,7 +142,7 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                     if (!prim_state) continue;
                     auto buf = prim_ptr->get_buffer();
                     if (!buf) continue;
-                    uint64_t buffer_addr = buf->get_gpu_handle(GpuResourceKey::Default);
+                    uint64_t buffer_addr = get_gpu_address(buf);
                     if (buffer_addr == 0) continue;
                     uint32_t v_count = prim_ptr->get_vertex_count();
                     uint32_t i_count = prim_ptr->get_index_count();

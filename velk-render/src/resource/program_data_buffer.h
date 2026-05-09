@@ -2,6 +2,7 @@
 #define VELK_RENDER_PROGRAM_DATA_BUFFER_H
 
 #include <velk-render/ext/gpu_buffer.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_program_data_buffer.h>
 #include <velk-render/plugin.h>
 
@@ -14,7 +15,10 @@ namespace velk::impl {
  *        specifically. All behaviour inherited from `ext::GpuBuffer`.
  */
 class ProgramDataBuffer
-    : public ::velk::ext::GpuBuffer<ProgramDataBuffer, ::velk::IProgramDataBuffer>
+    : public ::velk::ext::GpuBuffer<ProgramDataBuffer,
+                                    ::velk::IProgramDataBuffer,
+                                    ::velk::IGpuBuffer,
+                                    ::velk::IGpuBufferStorageOwner>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::ProgramDataBuffer, "ProgramDataBuffer");

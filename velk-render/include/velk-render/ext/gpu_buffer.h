@@ -5,8 +5,10 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 
 namespace velk::ext {
 
@@ -33,25 +35,31 @@ namespace velk::ext {
  *
  * Usage:
  * ```cpp
- * class GpuBuffer : public ext::GpuBuffer<GpuBuffer, IBuffer> {
+ * class GpuBuffer
+ *     : public ext::GpuBuffer<GpuBuffer, IBuffer, IGpuBuffer, IGpuBufferStorageOwner> {
  *   public:
  *     VELK_CLASS_UID(ClassId::GpuBuffer, "GpuBuffer");
  * };
- *
- * class ProgramDataBuffer
- *     : public ext::GpuBuffer<ProgramDataBuffer, IProgramDataBuffer> {
- *   public:
- *     VELK_CLASS_UID(ClassId::ProgramDataBuffer, "ProgramDataBuffer");
- * };
  * ```
  *
- * The interface chain must include something that derives from `IBuffer`.
+ * The interface chain must include `IBuffer`, `IGpuBuffer`, and
+ * `IGpuBufferStorageOwner` (in any order alongside any specialised
+ * sub-interface like `IProgramDataBuffer` or `IMeshBuffer`).
  */
 template <class FinalClass, class... Interfaces>
 class GpuBuffer : public GpuResource<FinalClass, Interfaces...>
 {
 public:
     ::velk::GpuResourceType get_type() const override { return ::velk::GpuResourceType::Buffer; }
+
+    // IGpuBuffer (null-safe forwards to the attached storage)
+    size_t   size_bytes() const override { return gpu_buffer_ ? gpu_buffer_->size_bytes() : 0; }
+    uint64_t gpu_address() const override { return gpu_buffer_ ? gpu_buffer_->gpu_address() : 0; }
+    void*    map() override          { return gpu_buffer_ ? gpu_buffer_->map() : nullptr; }
+
+    // IGpuBufferStorageOwner
+    void attach_gpu_buffer(IGpuBuffer::Ptr gb) override { gpu_buffer_ = std::move(gb); }
+    const IGpuBuffer::Ptr& gpu_buffer() const { return gpu_buffer_; }
 
     // IBuffer
     size_t get_data_size() const override { return data_.size(); }
@@ -108,6 +116,9 @@ protected:
     void set_dirty() { dirty_ = true; }
 
 private:
+    /// GPU-side storage. Null until attached via `attach_gpu_buffer`.
+    IGpuBuffer::Ptr gpu_buffer_;
+
     /// Committed bytes published via `get_data`.
     ::velk::vector<uint8_t> data_;
 

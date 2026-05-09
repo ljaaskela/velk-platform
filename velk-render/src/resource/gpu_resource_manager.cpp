@@ -1,6 +1,7 @@
 #include "gpu_resource_manager.h"
 
 #include <velk/api/velk.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/plugin.h>
 
 namespace velk {
@@ -18,6 +19,16 @@ void GpuResourceManager::init(IRenderBackend* backend)
 void GpuResourceManager::enable_transient_pool()
 {
     transient_mode_ = true;
+}
+
+IGpuBuffer::Ptr GpuResourceManager::create_gpu_buffer(const GpuBufferDesc& desc)
+{
+    if (!backend_) return {};
+    auto gb = backend_->create_gpu_buffer(desc);
+    if (!gb) return {};
+    tracked_gpu_buffers_[gb.get()] = gb.get();
+    gb->add_gpu_resource_observer(this);
+    return gb;
 }
 
 bool GpuResourceManager::transient_desc_matches(const TextureDesc& a, const TextureDesc& b)
@@ -234,13 +245,13 @@ IGpuResourceManager::BufferEntry* GpuResourceManager::find_buffer(IBuffer* buf)
 void GpuResourceManager::register_buffer(IBuffer* buf, const BufferEntry& entry)
 {
     if (!buf) return;
-    // Note: doesn't populate `buf->set_gpu_handle(Default, ...)`. For
-    // BDA-style buffers the renderer follows up with
-    // `set_gpu_handle(Default, backend->gpu_address(entry.handle))`
-    // — the GPU virtual address, not the backend handle.
     buffer_map_[buf] = entry;
-    // Subscribe so dropping the wrapper auto-defers the handle.
-    buf->add_gpu_resource_observer(this);
+    // Subscribe so dropping the wrapper drops our entry too. IBuffer
+    // doesn't extend IGpuResource directly; concrete impls implement
+    // it via IGpuBuffer or ISurface (or both).
+    if (auto* gr = interface_cast<IGpuResource>(buf)) {
+        gr->add_gpu_resource_observer(this);
+    }
 }
 
 void GpuResourceManager::unregister_buffer(IBuffer* buf)
@@ -252,23 +263,26 @@ IGpuResourceManager::BufferEntry*
 GpuResourceManager::ensure_buffer_storage(IBuffer* buf, const GpuBufferDesc& desc)
 {
     if (!buf || !backend_) return nullptr;
+    auto* owner = interface_cast<IGpuBufferStorageOwner>(buf);
+    if (!owner) return nullptr;        // pure CPU IBuffer; no GPU storage
+
     auto* be = find_buffer(buf);
     if (be && be->size != desc.size) {
-        defer_buffer_destroy(be->handle, backend_->pending_frame_completion_marker());
+        owner->attach_gpu_buffer({});
         unregister_buffer(buf);
         be = nullptr;
     }
     if (!be) {
+        IGpuBuffer::Ptr gb = create_gpu_buffer(desc);
+        if (!gb) return nullptr;
+
         BufferEntry entry{};
-        entry.handle = backend_->create_buffer(desc);
-        if (!entry.handle) return nullptr;
+        entry.buffer = gb;
         entry.size = desc.size;
         register_buffer(buf, entry);
+        owner->attach_gpu_buffer(std::move(gb));
+
         be = find_buffer(buf);
-        if (be) {
-            buf->set_gpu_handle(GpuResourceKey::Default,
-                                backend_->gpu_address(entry.handle));
-        }
     }
     return be;
 }
@@ -297,12 +311,6 @@ void GpuResourceManager::defer_texture_destroy(TextureId tid, uint64_t completio
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
     deferred_textures_.push_back({tid, completion_marker});
-}
-
-void GpuResourceManager::defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker)
-{
-    std::lock_guard<std::mutex> lock(deferred_mutex_);
-    deferred_buffers_.push_back({handle, completion_marker});
 }
 
 void GpuResourceManager::defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker)
@@ -353,15 +361,6 @@ void GpuResourceManager::drain_deferred(IRenderBackend& backend)
         if (backend.is_frame_complete(it->completion_marker)) {
             backend.destroy_render_target_group(it->handle);
             it = deferred_groups_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    for (auto it = deferred_buffers_.begin(); it != deferred_buffers_.end();) {
-        if (backend.is_frame_complete(it->completion_marker)) {
-            backend.destroy_buffer(it->handle);
-            it = deferred_buffers_.erase(it);
         } else {
             ++it;
         }
@@ -443,10 +442,16 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
     }
 
     if (auto* buf = interface_cast<IBuffer>(resource)) {
-        auto it = buffer_map_.find(buf);
-        if (it != buffer_map_.end()) {
-            deferred_buffers_.push_back({it->second.handle, completion_marker});
-            buffer_map_.erase(it);
+        buffer_map_.erase(buf);
+    }
+
+    if (auto* gb = interface_cast<IGpuBuffer>(resource)) {
+        auto tit = tracked_gpu_buffers_.find(resource);
+        if (tit != tracked_gpu_buffers_.end()) {
+            if (backend_) {
+                backend_->defer_destroy_gpu_buffer(gb, completion_marker);
+            }
+            tracked_gpu_buffers_.erase(tit);
         }
     }
 
@@ -473,7 +478,7 @@ void GpuResourceManager::shutdown()
     // dtors (which may run later) don't reach a dead manager.
     for (auto& weak : observed_env_resources_) {
         if (auto key = weak.lock()) {
-            unregister(key.get(), this);
+            unregister(interface_cast<IGpuResource>(key.get()), this);
         }
     }
     observed_env_resources_.clear();
@@ -502,10 +507,6 @@ void GpuResourceManager::shutdown()
             backend_->destroy_render_target_group(d.handle);
         }
         deferred_groups_.clear();
-        for (auto& d : deferred_buffers_) {
-            backend_->destroy_buffer(d.handle);
-        }
-        deferred_buffers_.clear();
         for (auto& d : deferred_pipelines_) {
             backend_->destroy_pipeline(d.pid);
         }
@@ -524,11 +525,25 @@ void GpuResourceManager::shutdown()
     }
     group_map_.clear();
 
+    // Detach GPU storage from each tracked IBuffer while the backend
+    // is still alive. Plugin-held IBuffers (e.g. Font's glyph buffers
+    // in the text plugin singleton) outlive the manager; without this
+    // their inner IGpuBuffer Ptr would only drop later, past
+    // ~VkBackend.
     for (auto& [key, entry] : buffer_map_) {
-        backend_->destroy_buffer(entry.handle);
-        unregister(key, this);
+        unregister(interface_cast<IGpuResource>(key), this);
+        if (auto* owner = interface_cast<IGpuBufferStorageOwner>(key)) {
+            owner->attach_gpu_buffer({});
+        }
     }
     buffer_map_.clear();
+
+    // Late ~VkGpuBuffer calls then take the unmanaged path and defer
+    // themselves; deferring here would double-free.
+    for (auto& [res, gb] : tracked_gpu_buffers_) {
+        unregister(res, this);
+    }
+    tracked_gpu_buffers_.clear();
 
     for (auto& [key, pid] : pipeline_map_) {
         backend_->destroy_pipeline(pid);

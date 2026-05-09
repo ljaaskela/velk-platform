@@ -201,8 +201,10 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         bdesc.cpu_writable = true;
         auto* be = resources_->ensure_buffer_storage(buf, bdesc);
         if (!be) return;
-        if (auto* dst = backend_->map(be->handle)) {
-            std::memcpy(dst, bytes, bsize);
+        if (auto gb = be->buffer.lock()) {
+            if (auto* dst = gb->map()) {
+                std::memcpy(dst, bytes, bsize);
+            }
         }
         buf->clear_dirty();
     };
@@ -459,8 +461,10 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                         }
                         auto* be = resources_->ensure_buffer_storage(buf, bdesc);
                         if (!be) continue;
-                        if (auto* dst = backend_->map(be->handle)) {
-                            std::memcpy(dst, bytes, bsize);
+                        if (auto gb = be->buffer.lock()) {
+                            if (auto* dst = gb->map()) {
+                                std::memcpy(dst, bytes, bsize);
+                            }
                         }
                         buf->clear_dirty();
                         resources_uploaded = true;
@@ -622,7 +626,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                         if (s.log && site.mesh_primitive) {
                             auto* mp = site.mesh_primitive;
                             auto buf = mp->get_buffer();
-                            uint64_t buffer_addr = buf ? buf->get_gpu_handle(GpuResourceKey::Default) : 0;
+                            uint64_t buffer_addr = get_gpu_address(buf);
                             uint32_t i_count = mp->get_index_count();
                             uint32_t v_stride = mp->get_vertex_stride();
                             uint32_t triangle_count = i_count / 3u;
@@ -946,7 +950,6 @@ void Renderer::log_diagnostics()
     // Resource manager / frame data sizes — anything that monotonically
     // grows over time will surface here as a steadily-increasing number.
     auto* mgr_internal = interface_cast<IGpuResourceManagerInternal>(resources_.get());
-    size_t deferred_buffers = mgr_internal ? mgr_internal->deferred_buffer_count() : 0;
     size_t deferred_textures = mgr_internal ? mgr_internal->deferred_texture_count() : 0;
     size_t deferred_groups = mgr_internal ? mgr_internal->deferred_group_count() : 0;
 
@@ -962,7 +965,7 @@ void Renderer::log_diagnostics()
              "render.diag frames=%llu rebuilds=%llu fast_path=%llu "
              "views=%zu batches=%zu element_slots=%zu "
              "fd_size_kb=%zu fd_peak_kb=%zu "
-             "deferred(b=%zu t=%zu g=%zu) "
+             "deferred(t=%zu g=%zu) "
              "graph_passes=%zu seen_pipelines=%zu "
              "scratch=%zu views=%zu ",
 
@@ -974,7 +977,6 @@ void Renderer::log_diagnostics()
              view_preparer_.total_element_slots(),
              fd_buffer_kb,
              fd_peak_kb,
-             deferred_buffers,
              deferred_textures,
              deferred_groups,
              total_passes,
@@ -1051,7 +1053,9 @@ void Renderer::shutdown()
             for (auto& [elem, cache] : batch_builder_.element_cache()) {
                 for (auto& weak : cache.gpu_resources) {
                     if (auto res = weak.lock()) {
-                        res->remove_gpu_resource_observer(obs);
+                        if (auto* gr = interface_cast<IGpuResource>(res.get())) {
+                            gr->remove_gpu_resource_observer(obs);
+                        }
                     }
                 }
             }
@@ -1084,10 +1088,7 @@ void Renderer::shutdown()
         }
 
         for (auto& slot : frame_slots_) {
-            if (slot.buffer.handle) {
-                backend_->destroy_buffer(slot.buffer.handle);
-                slot.buffer.handle = 0;
-            }
+            slot.buffer.buffer.reset();
         }
 
         backend_ = nullptr;

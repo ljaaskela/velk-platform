@@ -83,6 +83,12 @@ public:
         gpu_observers_.push_back(obs);
     }
 
+    bool is_managed() const override
+    {
+        std::lock_guard<std::mutex> lock(gpu_observers_mutex_);
+        return !gpu_observers_.empty();
+    }
+
     /// Removes an observer. Safe if the observer was never added.
     void remove_gpu_resource_observer(IGpuResourceObserver* obs) override
     {
