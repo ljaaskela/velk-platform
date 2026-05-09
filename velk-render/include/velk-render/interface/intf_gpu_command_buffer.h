@@ -70,16 +70,6 @@ public:
     /// from the current target's dims).
     virtual void set_viewport(rect viewport) = 0;
 
-    /// Record a push of the FrameGlobals device address into push
-    /// constant range `[0..8)`. Captured at recording time and
-    /// replayed every execute, so the address must be stable across
-    /// the lifetime of the cmd buffer — typically a per-slot offset
-    /// into a per-view persistent FrameGlobals ring buffer (see
-    /// `ViewPreparer::prepare_frame_globals`). Required because
-    /// secondary cmd buffers do not inherit push-constant state from
-    /// the primary that executes them.
-    virtual void push_view_globals(uint64_t addr) = 0;
-
     /// Record the given draw calls into the buffer. Each `DrawCall`
     /// is bound + drawn in order (BindPipeline + PushConstants +
     /// optional BindIndexBuffer + DrawIndirectCount).

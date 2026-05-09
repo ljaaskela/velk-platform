@@ -118,15 +118,6 @@ void VkCommandBuffer::set_viewport(::velk::rect viewport)
     vkCmdSetScissor(cmd_, 0, 1, &scissor);
 }
 
-void VkCommandBuffer::push_view_globals(uint64_t addr)
-{
-    if (cmd_ == VK_NULL_HANDLE || !backend_) return;
-    RENDER_LOG("vk.cmdbuf.push_view_globals this=%p cb=%p addr=0x%llx",
-               (void*)this, (void*)cmd_, (unsigned long long)addr);
-    vkCmdPushConstants(cmd_, backend_->pipeline_layout_,
-                       VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t), &addr);
-}
-
 void VkCommandBuffer::record_draws(::velk::array_view<const ::velk::DrawCall> calls)
 {
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;

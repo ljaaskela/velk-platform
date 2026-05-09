@@ -323,6 +323,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         *ctx.frame_buffer,
         *ctx.resources,
         default_uv1,
+        render_view.view_globals_address,
         resolve,
         render_view.has_frustum ? &render_view.frustum : nullptr);
 
@@ -336,7 +337,6 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         auto cmd = ctx.backend->create_command_buffer(group_id);
         if (!cmd) continue;
         cmd->begin_recording();
-        cmd->push_view_globals(render_view.view_globals_address);
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
         cmd->end_recording();
@@ -407,6 +407,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uint64_t lights_addr = render_view.lights_addr;
 
     VELK_GPU_STRUCT PushC {
+        uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
         float    cam_pos[4];
         uint32_t output_image_id;
         uint32_t albedo_tex_id;
@@ -424,6 +425,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     static_assert(sizeof(PushC) == 80, "Deferred PushC layout mismatch");
 
     PushC pc{};
+    pc.globals = render_view.view_globals_address;
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;
     pc.cam_pos[2] = render_view.cam_pos.z;
@@ -482,7 +484,6 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
             if (!cmd) continue;
             cmd->begin_recording();
-            cmd->push_view_globals(render_view.view_globals_address);
             cmd->record_dispatch(dc);
             cmd->record_blit_to_surface(src_id, blit_target, render_view.viewport);
             cmd->end_recording();

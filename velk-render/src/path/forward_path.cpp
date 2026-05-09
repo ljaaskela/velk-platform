@@ -178,7 +178,8 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             env_batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, resolve, /*frustum=*/nullptr);
+            default_uv1, render_view.view_globals_address,
+            resolve, /*frustum=*/nullptr);
     }
 
     // Main scene batches.
@@ -186,7 +187,8 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, resolve, frustum_ptr);
+            default_uv1, render_view.view_globals_address,
+            resolve, frustum_ptr);
     }
 
     cache.pass->reset();
@@ -209,7 +211,6 @@ void ForwardPath::build_passes(IViewEntry& entry,
         auto cmd = ctx.backend->create_command_buffer(target_id);
         if (!cmd) continue;
         cmd->begin_recording();
-        cmd->push_view_globals(render_view.view_globals_address);
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
         cmd->end_recording();

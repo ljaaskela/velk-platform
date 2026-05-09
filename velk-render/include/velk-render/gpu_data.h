@@ -54,7 +54,7 @@ static_assert(sizeof(FrameGlobals) == 192, "FrameGlobals layout must match velk.
  */
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t _reserved0;        ///< Reserved 8 bytes; keeps the header at 48 bytes so material data following the header begins on a 16-byte boundary in std430 layout.
+    uint64_t globals_addr;      ///< Buffer-reference to the per-view FrameGlobals; shaders deref this to construct `globals`.
     uint64_t instances_address; ///< GPU pointer to the instance data array.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.

@@ -201,6 +201,7 @@ void RtPath::build_passes(IViewEntry& entry,
     }
 
     VELK_GPU_STRUCT PushC {
+        uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
         float inv_vp[16];
         float cam_pos[4];
         uint32_t image_index;
@@ -223,6 +224,7 @@ void RtPath::build_passes(IViewEntry& entry,
     };
 
     PushC pc{};
+    pc.globals = render_view.view_globals_address;
     std::memcpy(pc.inv_vp, render_view.inverse_view_projection.m, sizeof(pc.inv_vp));
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;

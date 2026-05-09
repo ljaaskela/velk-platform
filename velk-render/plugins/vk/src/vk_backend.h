@@ -137,7 +137,6 @@ public:
     /// commands from the last submission that referenced it.
     void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
-    void push_view_globals(uint64_t addr) override;
     void end_frame() override;
 
 public:
@@ -208,13 +207,7 @@ private:
     VkRenderPass current_render_pass_ = VK_NULL_HANDLE;
     VkFramebuffer current_framebuffer_ = VK_NULL_HANDLE;
 
-    /// Cached FrameGlobals BDA pushed by `push_view_globals` on the primary.
-    /// Secondary command buffers do NOT inherit push-constant state, so the
-    /// per-frame view-globals address must be re-pushed inside each
-    /// secondary before any draw uses it.
-    uint64_t last_view_globals_addr_ = 0;
-
-    /// Set by `mark_pending_buffer_update_barrier`; consumed by the
+/// Set by `mark_pending_buffer_update_barrier`; consumed by the
     /// next `begin_pass` to emit a single TRANSFER → SHADER_READ
     /// barrier covering all `vkCmdUpdateBuffer`s recorded this frame.
     bool pending_buffer_update_barrier_ = false;

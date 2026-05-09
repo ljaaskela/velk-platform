@@ -208,7 +208,6 @@ void RenderGraph::compile()
 void RenderGraph::execute(::velk::IRenderBackend& backend)
 {
     VELK_PERF_SCOPE("renderer.graph_execute");
-    uint64_t last_vg_addr = 0;
 
     RENDER_LOG("graph.execute passes=%zu", passes_.size());
 
@@ -221,23 +220,11 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        uint64_t vg_addr = gp.view_globals_address();
-        RENDER_LOG("graph.pass[%zu] vg=0x%llx target=%llu has_cmd=%d ops=%zu",
-                   i, (unsigned long long)vg_addr,
+        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d ops=%zu",
+                   i,
                    (unsigned long long)gp.target_id(),
                    gp.command_buffer(backend.current_frame_slot()) ? 1 : 0,
                    gp.ops().size());
-
-        // Push view-globals on the primary at the top of every pass,
-        // no dedup. After any pass — cmd-buffer or legacy — the
-        // primary's push state may be undefined (the legacy `submit`
-        // path records into its own secondary too), so any saving from
-        // dedup-by-addr is wrong here. The push itself is 8 bytes,
-        // cheap.
-        if (vg_addr != 0) {
-            backend.push_view_globals(vg_addr);
-            last_vg_addr = vg_addr;
-        }
 
         // Cmd-buffer-bearing pass: replay the pre-recorded buffer
         // for the current frame slot and skip the GraphOp walk.

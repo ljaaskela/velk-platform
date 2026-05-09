@@ -2226,14 +2226,15 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
 
         if (call.root_constants_size > 0) {
-            // Per-draw push lands at offset 8: bytes [0..8) are the
-            // per-pass FrameGlobals address pushed once at pass start
-            // by push_view_globals(). Per-draw bytes (typically the
-            // 8-byte DrawData address) follow at [8..).
+            // Per-draw push at offset 0: the 8-byte DrawData address
+            // (root pointer). The DrawData header carries
+            // `globals_addr` so shaders synthesise globals via a
+            // buffer-reference cast on `root.globals_addr` — no
+            // separate FrameGlobals push needed for graphics.
             vkCmdPushConstants(cb,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,
-                               sizeof(uint64_t),
+                               0,
                                call.root_constants_size,
                                call.root_constants);
         }
@@ -2330,12 +2331,6 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
                             0, 1, &descriptor_set_,
                             0, nullptr);
 
-    if (last_view_globals_addr_ != 0) {
-        vkCmdPushConstants(secondary, pipeline_layout_,
-                           VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t),
-                           &last_view_globals_addr_);
-    }
-
     {
         float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(current_target_width_);
         float vp_h = (vp.height > 0) ? vp.height : static_cast<float>(current_target_height_);
@@ -2383,7 +2378,7 @@ void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& c
         vkCmdPushConstants(cb,
                            pipeline_layout_,
                            VK_SHADER_STAGE_ALL,
-                           sizeof(uint64_t),
+                           0,
                            call.root_constants_size,
                            call.root_constants);
     }
@@ -2400,20 +2395,13 @@ void VkBackend::dispatch(array_view<const DispatchCall> calls)
     auto& sync = frame_sync_[frame_sync_index_];
 
     // After any vkCmdExecuteCommands on the primary, ALL primary state
-    // is undefined per Vulkan spec — not just state the secondary
-    // touched. So the compute descriptor binding from begin_frame
-    // and any push constants pushed by push_view_globals may be
-    // invalid by the time we get here. Rebind + re-push.
+    // is undefined per Vulkan spec — rebind the compute descriptor.
+    // Push constants are re-pushed per dispatch by record_dispatch_call.
     vkCmdBindDescriptorSets(sync.command_buffer,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
                             0, nullptr);
-    if (last_view_globals_addr_ != 0) {
-        vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
-                           VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t),
-                           &last_view_globals_addr_);
-    }
 
     for (size_t i = 0; i < calls.size(); ++i) {
         record_dispatch_call(sync.command_buffer, calls[i]);
@@ -2901,17 +2889,6 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
         1, &mem_barrier,
         0, nullptr,
         0, nullptr);
-}
-
-void VkBackend::push_view_globals(uint64_t addr)
-{
-    if (addr == 0) return;
-    last_view_globals_addr_ = addr;
-    auto& sync = frame_sync_[frame_sync_index_];
-    RENDER_LOG("vk.push_view_globals primary=%p addr=0x%llx",
-               (void*)sync.command_buffer, (unsigned long long)addr);
-    vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
-                       VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t), &addr);
 }
 
 VkRenderPass VkBackend::find_render_pass_for_target(uint64_t target_id)

@@ -31,8 +31,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform image2D gStorageImagesF16[];
 
 layout(push_constant) uniform PC {
-    GlobalData globals;        // [0..8) push_view_globals (unused here)
-    uint input_tex_id;         // [8..)  CPU push starts here
+    uint input_tex_id;
     uint output_image_id;
     uint width;
     uint height;

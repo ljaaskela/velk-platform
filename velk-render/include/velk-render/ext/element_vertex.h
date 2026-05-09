@@ -33,7 +33,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     OpaquePtr material;
 };
 
-layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
+layout(push_constant) uniform PC { DrawData root; };
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;
@@ -45,6 +45,7 @@ layout(location = 6) out vec2 v_uv1;
 
 void main()
 {
+    GlobalData globals = velk_global_data(root);
     VelkVertex3D v = velk_vertex3d(root);
     ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
 

@@ -506,18 +506,6 @@ public:
      */
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
-    /**
-     * @brief Pushes the per-view FrameGlobals GPU address into push
-     *        constant slot [0..8). Shaders dereference it via a
-     *        buffer-reference / device-address read of `GlobalData`.
-     *
-     * Called once per pass by the graph executor. The per-draw / per-
-     * dispatch push constants in submit() / dispatch() write [8..) so
-     * the per-pass globals address persists across the pass's draws.
-     * Passing `addr == 0` is a no-op.
-     */
-    virtual void push_view_globals(uint64_t addr) = 0;
-
     /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
     virtual void end_frame() = 0;
 

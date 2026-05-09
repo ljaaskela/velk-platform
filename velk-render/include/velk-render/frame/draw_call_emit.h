@@ -54,6 +54,7 @@ inline void emit_draw_calls(
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
     IBuffer* default_uv1,
+    uint64_t view_globals_address,
     ResolvePipelineFn resolve_pipeline,
     const ::velk::render::Frustum* frustum = nullptr)
 {
@@ -133,6 +134,7 @@ inline void emit_draw_calls(
         }
 
         DrawDataHeader header{};
+        header.globals_addr = view_globals_address;
         header.instances_address = instances_addr;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
