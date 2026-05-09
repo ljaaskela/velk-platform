@@ -201,7 +201,7 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
 
 uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                             uint64_t key, PixelFormat target_format,
-                                            RenderTargetGroup target_group,
+                                            IRenderTextureGroup* target_group,
                                             const PipelineOptions& options)
 {
     if (!initialized_ || !backend_) {
@@ -241,7 +241,7 @@ uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IS
 
 uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
                                              uint64_t key, PixelFormat target_format,
-                                             RenderTargetGroup target_group,
+                                             IRenderTextureGroup* target_group,
                                              const PipelineOptions& options)
 {
     auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);

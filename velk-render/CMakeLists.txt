@@ -39,7 +39,6 @@ add_library(velk_render SHARED
 
     # Concrete IGpuResource implementations
     src/resource/render_texture.h
-    src/resource/render_texture_group.h
     include/velk-render/ext/gpu_buffer.h
     src/resource/gpu_buffer.h
     src/resource/program_data_buffer.h

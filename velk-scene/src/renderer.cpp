@@ -437,9 +437,9 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                             tdesc.height = th;
                             tdesc.format = surf->format();
                             tdesc.sampler = surf->get_sampler_desc();
-                            TextureId tid = resources_->ensure_texture_storage(surf, tdesc);
-                            if (tid != 0) {
-                                backend_->upload_texture(tid, pixels, tw, th);
+                            IGpuTexture* tex = resources_->ensure_texture_storage(surf, tdesc);
+                            if (tex) {
+                                backend_->upload_texture(*tex, pixels, tw, th);
                                 buf->clear_dirty();
                                 resources_uploaded = true;
                             }
@@ -593,7 +593,9 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     if (site.draw_entry && site.draw_entry->texture_key != 0) {
                         auto* surf = reinterpret_cast<ISurface*>(
                             static_cast<uintptr_t>(site.draw_entry->texture_key));
-                        tex_id = self.resources_->find_texture(surf);
+                        if (auto* gt = self.resources_->find_texture(surf)) {
+                            tex_id = get_texture_id(gt);
+                        }
                         if (tex_id == 0) {
                             uint64_t rt_id = get_render_target_id(surf);
                             if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
@@ -765,11 +767,11 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // Debug overlays: tail-appended so they blit on top of whatever
         // the view passes produced on the target surface.
         for (auto& ov : debug_overlays_) {
-            if (!ov.surface || ov.texture_id == 0) continue;
+            if (!ov.surface || !ov.texture) continue;
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
             gp->add_op(ops::BlitToSurface{
-                ov.texture_id,
+                ov.texture,
                 ov.surface->get_gpu_handle(GpuResourceKey::Default),
                 ov.dst_rect});
             slot.graph->add_pass(std::move(gp));
@@ -1010,10 +1012,10 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
 }
 
 void Renderer::add_debug_overlay(const IWindowSurface::Ptr& surface,
-                                  TextureId texture_id,
+                                  IGpuTexture* texture,
                                   const rect& dst_rect)
 {
-    debug_overlays_.push_back({surface, texture_id, dst_rect});
+    debug_overlays_.push_back({surface, texture, dst_rect});
 }
 
 void Renderer::clear_debug_overlays()

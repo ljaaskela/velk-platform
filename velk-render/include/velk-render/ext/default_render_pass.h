@@ -31,6 +31,8 @@ public:
     uint64_t view_globals_address() const override;
     IGpuCommandBuffer::Ptr command_buffer() const override { return command_buffer_; }
     uint64_t target_id() const override { return target_id_; }
+    IGpuTexture* target_texture() const override { return target_texture_; }
+    IRenderTextureGroup* target_group() const override { return target_group_; }
 
     void add_op(GraphOp op) override;
     void add_read(IGpuResource::Ptr resource) override;
@@ -41,6 +43,8 @@ public:
         command_buffer_ = std::move(cmd);
     }
     void set_target_id(uint64_t target_id) override { target_id_ = target_id; }
+    void set_target_texture(IGpuTexture* texture) override { target_texture_ = texture; }
+    void set_target_group(IRenderTextureGroup* group) override { target_group_ = group; }
     void reset() override;
 
 private:
@@ -50,6 +54,8 @@ private:
     uint64_t view_globals_address_ = 0;
     IGpuCommandBuffer::Ptr command_buffer_;
     uint64_t target_id_ = 0;
+    IGpuTexture* target_texture_ = nullptr;
+    IRenderTextureGroup* target_group_ = nullptr;
 };
 
 } // namespace velk::impl

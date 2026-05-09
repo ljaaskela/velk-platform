@@ -128,7 +128,7 @@ public:
      * sub-renderer toggle for each.
      */
     virtual void add_debug_overlay(const IWindowSurface::Ptr& surface,
-                                   TextureId texture_id,
+                                   IGpuTexture* texture,
                                    const rect& dst_rect) = 0;
 
     /** @brief Removes all debug overlays previously added. */

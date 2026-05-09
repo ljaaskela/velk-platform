@@ -11,6 +11,8 @@
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_gpu_pipeline.h>
+#include <velk-render/interface/intf_gpu_texture.h>
+#include <velk-render/interface/intf_render_texture_group.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/render_types.h>
 
@@ -21,21 +23,8 @@ namespace velk {
 /// @{
 using TextureId = uint32_t; ///< Also the bindless shader index.
 
-/// Handle for a multi-attachment render target group (MRT).
-/// Wraps a set of sampleable `TextureId`s sharing one backend render
-/// pass + framebuffer. Produced by `create_render_target_group`.
-/// Encoding: high bit set to disambiguate from surface / texture IDs
-/// in `begin_pass` dispatch.
-using RenderTargetGroup = uint64_t;
-
 /// "Unknown" frame completion marker.
 inline constexpr uint64_t kDefaultCompletionMarker = uint64_t(-1);
-
-inline constexpr uint64_t kRenderTargetGroupTag = 0x4000000000000000ULL;
-inline constexpr bool is_render_target_group(uint64_t id)
-{
-    return (id & kRenderTargetGroupTag) != 0;
-}
 /// @}
 
 // PixelFormat moved to render_types.h alongside sibling format enums
@@ -317,14 +306,23 @@ public:
     /// @name Textures
     /// @{
 
-    /** @brief Creates a texture and assigns a bindless index. Returns the TextureId. */
-    virtual TextureId create_texture(const TextureDesc& desc) = 0;
+    /** @brief Creates a texture and assigns a bindless index. Lifetime
+     *         is managed via Ptr; the returned `IGpuTexture` defers its
+     *         backend handles for destroy when the last Ptr drops. */
+    virtual IGpuTexture::Ptr create_texture(const TextureDesc& desc) = 0;
 
-    /** @brief Destroys a texture and frees its bindless slot. */
-    virtual void destroy_texture(TextureId texture) = 0;
+    /**
+     * @brief Queues an `IGpuTexture`'s native handles (image / view /
+     *        allocation / framebuffer / render passes / bindless slot)
+     *        for destruction once the GPU is past the current pending
+     *        frame. Called by `~VkGpuTexture` / `~VkRenderTexture` when
+     *        their owning Ptr drops.
+     */
+    virtual void defer_destroy_gpu_texture(IGpuTexture* texture,
+                                           uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
     /** @brief Uploads pixel data to a texture via a staging buffer. */
-    virtual void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) = 0;
+    virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
 
     /**
      * @brief Reads back a texture's pixels from the GPU into host memory.
@@ -336,11 +334,11 @@ public:
      * unaffected. Intended for debug dumps and golden-image tests; do
      * not call inside a hot frame.
      *
-     * @return false if the texture id is unknown or the staging
-     *         allocation fails. On success, @p out_pixels contains
-     *         `width * height * bytes_per_pixel(format)` bytes.
+     * @return false if the staging allocation fails. On success,
+     *         @p out_pixels contains `width * height *
+     *         bytes_per_pixel(format)` bytes.
      */
-    virtual bool read_texture(TextureId texture, vector<uint8_t>& out_pixels,
+    virtual bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
                               PixelFormat& out_format, uvec2& out_dims) = 0;
 
     /// @}
@@ -350,35 +348,27 @@ public:
     /**
      * @brief Creates a multi-attachment render target group.
      *
-     * Allocates one sampleable `TextureId` per entry in @p formats at
+     * Allocates one sampleable `IGpuTexture` per entry in @p formats at
      * `width × height`, and a shared backend render pass + framebuffer
      * binding all of them in the declared order. Shaders that draw to
      * the group declare `layout(location = N) out vec4` for each
      * attachment.
      *
-     * The returned handle is the target passed to `begin_pass`. Each
-     * attachment's `TextureId` is available via
-     * `get_render_target_group_attachment(group, i)` — sample them
-     * like any other bindless texture once the pass has ended.
-     *
-     * @return a `RenderTargetGroup` handle (high bit set), or 0 on failure.
+     * Lifetime is managed via Ptr; the returned `IRenderTextureGroup`
+     * defers its backend handles for destroy when the last Ptr drops
+     * (cascading through each attachment's deferred destroy too).
      */
-    virtual RenderTargetGroup create_render_target_group(const TextureGroupDesc& desc) = 0;
-
-    /** @brief Destroys a render target group, its attachments, render pass, and framebuffer. */
-    virtual void destroy_render_target_group(RenderTargetGroup group) = 0;
+    virtual IRenderTextureGroup::Ptr create_render_target_group(const TextureGroupDesc& desc) = 0;
 
     /**
-     * @brief Returns the `TextureId` of attachment `index` in the group.
-     *
-     * The texture is sampleable in shaders (bindless) once the group's
-     * render pass has ended and the attachment has been transitioned
-     * to `SHADER_READ_ONLY_OPTIMAL` (done automatically by `end_pass`).
-     *
-     * @return 0 if the group or index is invalid.
+     * @brief Queues an `IRenderTextureGroup`'s native handles for
+     *        destruction once the GPU is past the current pending
+     *        frame. Called by `~VkRenderTargetGroup` when its owning
+     *        Ptr drops.
      */
-    virtual TextureId get_render_target_group_attachment(
-        RenderTargetGroup group, uint32_t index) const = 0;
+    virtual void defer_destroy_gpu_render_target_group(
+        IRenderTextureGroup* group,
+        uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
     /// @}
     /// @name Pipelines
@@ -393,13 +383,13 @@ public:
      *        Explicit formats (e.g. `RGBA16F` for HDR) get a per-format
      *        single-attachment render pass cached internally so the
      *        pipeline is render-pass compatible with the target.
-     * @param target_group If non-zero, the pipeline is compiled against
+     * @param target_group If non-null, the pipeline is compiled against
      *        the render pass of the given MRT group; in that case
      *        @p target_format is ignored (group attachments are fixed).
      */
     virtual IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
                                               PixelFormat target_format = PixelFormat::Surface,
-                                              RenderTargetGroup target_group = 0) = 0;
+                                              IRenderTextureGroup* target_group = nullptr) = 0;
 
     /** @brief Creates a compute pipeline from a compute shader. */
     virtual IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
@@ -419,12 +409,27 @@ public:
     virtual void begin_frame() = 0;
 
     /**
-     * @brief Begins a render pass targeting the given surface or texture.
+     * @brief Begins a render pass targeting the given surface or MRT group.
      *
      * For surface targets, acquires the swapchain image. Begins the
-     * backend render pass and binds the bindless descriptor set.
+     * backend render pass and binds the bindless descriptor set. Use
+     * the `IGpuTexture&` overload for renderable-texture targets.
      */
     virtual void begin_pass(uint64_t target_id) = 0;
+
+    /**
+     * @brief Begins a render pass targeting a renderable texture.
+     *
+     * The texture must have been created with TextureUsage::RenderTarget
+     * or ColorAttachment. Begins the backend render pass and binds the
+     * bindless descriptor set.
+     */
+    virtual void begin_pass(IGpuTexture& target) = 0;
+
+    /**
+     * @brief Begins a render pass targeting an MRT group.
+     */
+    virtual void begin_pass(IRenderTextureGroup& target) = 0;
 
     /**
      * @brief Records draw calls into the current render pass.
@@ -446,6 +451,19 @@ public:
      *                  that play outside any render pass.
      */
     virtual IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) = 0;
+
+    /**
+     * @brief Allocates a `IGpuCommandBuffer` compatible with rendering
+     *        into @p target. Mirror of the `uint64_t` overload for
+     *        renderable-texture targets.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) = 0;
+
+    /**
+     * @brief Allocates an `IGpuCommandBuffer` compatible with rendering
+     *        into the given MRT group.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) = 0;
 
     /**
      * @brief Replays a recorded command buffer in the active frame.
@@ -479,7 +497,15 @@ public:
      * @param dst_rect Destination rect in surface pixels. Zero width/height
      *                 means "full surface".
      */
-    virtual void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect = {}) = 0;
+    virtual void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect = {}) = 0;
+
+    /**
+     * @brief Blits @p source into @p dest. Both textures must have been
+     *        created with renderable / storage / color-attachment usage.
+     *        Source layout is restored after the blit; dest ends in
+     *        SHADER_READ_ONLY so subsequent samples bind cleanly.
+     */
+    virtual void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect = {}) = 0;
 
     /**
      * @brief Copies the depth attachment of an MRT render target group into
@@ -497,7 +523,7 @@ public:
      * @param dst_rect Destination rect in surface pixels. Zero width/height
      *                 means "full surface".
      */
-    virtual void blit_group_depth_to_surface(RenderTargetGroup src_group,
+    virtual void blit_group_depth_to_surface(IRenderTextureGroup& src_group,
                                              uint64_t surface_id,
                                              rect dst_rect = {}) = 0;
 

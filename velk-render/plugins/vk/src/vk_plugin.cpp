@@ -4,6 +4,8 @@
 #include "vk_command_buffer.h"
 #include "vk_gpu_buffer.h"
 #include "vk_gpu_pipeline.h"
+#include "vk_gpu_texture.h"
+#include "vk_render_target_group.h"
 
 namespace velk::vk {
 
@@ -17,7 +19,13 @@ ReturnValue VkPlugin::initialize(IVelk& velk, PluginConfig&)
     if (rv != ReturnValue::Success) return rv;
     rv = register_type<VkGpuBuffer>(velk);
     if (rv != ReturnValue::Success) return rv;
-    return register_type<VkGpuPipeline>(velk);
+    rv = register_type<VkGpuPipeline>(velk);
+    if (rv != ReturnValue::Success) return rv;
+    rv = register_type<VkGpuTexture>(velk);
+    if (rv != ReturnValue::Success) return rv;
+    rv = register_type<VkRenderTexture>(velk);
+    if (rv != ReturnValue::Success) return rv;
+    return register_type<VkRenderTargetGroup>(velk);
 }
 
 ReturnValue VkPlugin::shutdown(IVelk&)

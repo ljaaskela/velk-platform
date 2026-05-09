@@ -47,11 +47,14 @@ public:
     void set_viewport(::velk::rect viewport) override;
 void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_dispatch(const ::velk::DispatchCall& call) override;
-    void record_blit_to_surface(::velk::TextureId source,
+    void record_blit_to_surface(::velk::IGpuTexture& source,
                                 uint64_t surface_id,
                                 ::velk::rect dst_rect) override;
+    void record_blit_to_texture(::velk::IGpuTexture& source,
+                                ::velk::IGpuTexture& dest,
+                                ::velk::rect dst_rect) override;
     void record_blit_group_depth_to_surface(
-        ::velk::RenderTargetGroup src_group,
+        ::velk::IRenderTextureGroup& src_group,
         uint64_t surface_id,
         ::velk::rect dst_rect) override;
 

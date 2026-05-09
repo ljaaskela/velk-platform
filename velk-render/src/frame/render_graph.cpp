@@ -231,8 +231,19 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         // that haven't moved yet keep emitting ops and fall through
         // below.
         if (auto cmd = gp.command_buffer()) {
-            uint64_t target = gp.target_id();
-            if (target != 0) {
+            // Group/texture targets route through their typed overloads;
+            // surface targets stay on the uint64 overload. Compute /
+            // blit cmd buffers leave all three unset and skip the
+            // begin_pass / end_pass wrap.
+            if (auto* group = gp.target_group()) {
+                backend.begin_pass(*group);
+                backend.execute(cmd);
+                backend.end_pass();
+            } else if (auto* tex = gp.target_texture()) {
+                backend.begin_pass(*tex);
+                backend.execute(cmd);
+                backend.end_pass();
+            } else if (uint64_t target = gp.target_id()) {
                 backend.begin_pass(target);
                 backend.execute(cmd);
                 backend.end_pass();
@@ -255,11 +266,15 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
                 } else if constexpr (std::is_same_v<T, ::velk::ops::Dispatch>) {
                     backend.dispatch({&o.call, 1});
                 } else if constexpr (std::is_same_v<T, ::velk::ops::BlitToSurface>) {
-                    backend.blit_to_surface(o.source, o.surface_id, o.dst_rect);
+                    if (o.source) backend.blit_to_surface(*o.source, o.surface_id, o.dst_rect);
+                } else if constexpr (std::is_same_v<T, ::velk::ops::BlitToTexture>) {
+                    if (o.source && o.dest) backend.blit_to_texture(*o.source, *o.dest, o.dst_rect);
                 } else if constexpr (std::is_same_v<T,
                                                     ::velk::ops::BlitGroupDepthToSurface>) {
-                    backend.blit_group_depth_to_surface(
-                        o.src_group, o.surface_id, o.dst_rect);
+                    if (o.src_group) {
+                        backend.blit_group_depth_to_surface(
+                            *o.src_group, o.surface_id, o.dst_rect);
+                    }
                 }
             }, op);
         }

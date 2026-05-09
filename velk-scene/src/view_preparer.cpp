@@ -304,7 +304,9 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
             if (site.draw_entry && site.draw_entry->texture_key != 0) {
                 auto* surf = reinterpret_cast<ISurface*>(
                     static_cast<uintptr_t>(site.draw_entry->texture_key));
-                tex_id = ctx.resources->find_texture(surf);
+                if (auto* gt = ctx.resources->find_texture(surf)) {
+                    tex_id = get_texture_id(gt);
+                }
                 if (tex_id == 0) {
                     uint64_t rt_id = get_render_target_id(surf);
                     if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);

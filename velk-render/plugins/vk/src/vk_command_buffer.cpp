@@ -2,6 +2,8 @@
 
 #include "vk_backend.h"
 
+#include <velk-render/interface/intf_gpu_texture.h>
+
 #include <velk/api/velk.h>
 
 #include <cstring>
@@ -148,16 +150,24 @@ void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& call)
 }
 
 void VkCommandBuffer::record_blit_to_surface(
-    ::velk::TextureId source, uint64_t target_id, ::velk::rect dst_rect)
+    ::velk::IGpuTexture& /*source*/, uint64_t /*target_id*/, ::velk::rect /*dst_rect*/)
+{
+    // Surface destinations require per-frame swapchain acquisition that
+    // can't be baked into a cached secondary; producers route surface
+    // blits through ops::BlitToSurface on the legacy primary path.
+}
+
+void VkCommandBuffer::record_blit_to_texture(
+    ::velk::IGpuTexture& source, ::velk::IGpuTexture& dest, ::velk::rect dst_rect)
 {
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;
-    RENDER_LOG("vk.cmdbuf.record_blit_to_surface this=%p cb=%p src=%u target=%llu",
+    RENDER_LOG("vk.cmdbuf.record_blit_to_texture this=%p cb=%p src=%u dst=%u",
                (void*)this, (void*)cmd_,
-               source, (unsigned long long)target_id);
-    backend_->record_blit_to_texture(cmd_, source, target_id, dst_rect);
+               ::velk::get_texture_id(&source), ::velk::get_texture_id(&dest));
+    backend_->record_blit_to_texture(cmd_, source, dest, dst_rect);
 }
 void VkCommandBuffer::record_blit_group_depth_to_surface(
-    ::velk::RenderTargetGroup /*src_group*/, uint64_t /*surface_id*/,
+    ::velk::IRenderTextureGroup& /*src_group*/, uint64_t /*surface_id*/,
     ::velk::rect /*dst_rect*/)
 {
 }

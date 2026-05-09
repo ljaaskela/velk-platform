@@ -148,9 +148,9 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
     // Final blit from post-process output to the actual surface.
     auto blit = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
     if (blit) {
+        ::velk::IGpuTexture* post_tex = graph.resources().find_texture(post_target.get());
         blit->add_op(::velk::ops::BlitToSurface{
-            static_cast<::velk::TextureId>(
-                post_target->get_gpu_handle(::velk::GpuResourceKey::Default)),
+            post_tex,
             color_target
                 ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
                 : 0,

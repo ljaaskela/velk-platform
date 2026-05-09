@@ -16,8 +16,9 @@ namespace velk {
 // `IGpuCommandBuffer::Ptr` — keep the forward decls.
 struct DrawCall;
 struct DispatchCall;
+class IGpuTexture;
+class IRenderTextureGroup;
 using TextureId = uint32_t;
-using RenderTargetGroup = uint64_t;
 
 
 /**
@@ -85,14 +86,21 @@ public:
 
     /// Record a blit from a storage texture into a surface (or a
     /// renderable texture used as a surface stand-in).
-    virtual void record_blit_to_surface(TextureId source,
+    virtual void record_blit_to_surface(IGpuTexture& source,
                                         uint64_t surface_id,
+                                        rect dst_rect) = 0;
+
+    /// Record a blit from a storage / renderable texture into another
+    /// renderable / sampleable texture. Source layout restored; dest
+    /// ends in SHADER_READ_ONLY.
+    virtual void record_blit_to_texture(IGpuTexture& source,
+                                        IGpuTexture& dest,
                                         rect dst_rect) = 0;
 
     /// Record a blit of a render-target group's depth attachment
     /// into a surface.
     virtual void record_blit_group_depth_to_surface(
-        RenderTargetGroup src_group,
+        IRenderTextureGroup& src_group,
         uint64_t surface_id,
         rect dst_rect) = 0;
 

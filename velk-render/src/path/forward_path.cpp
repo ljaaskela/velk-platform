@@ -192,9 +192,25 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
 
     cache.pass->reset();
-    uint64_t target_id = color_target
-        ? color_target->get_gpu_handle(GpuResourceKey::Default)
-        : 0;
+    // Surface targets carry their swapchain id in get_gpu_handle(Default);
+    // RTT targets carry the bindless TextureId (which begin_pass(uint64)
+    // no longer dispatches on). For RTT we look up the IGpuTexture and
+    // route through the IGpuTexture& overloads via target_texture.
+    // Per-graph transient pool owns deferred/post-process intermediates;
+    // the renderer's persistent manager owns user-supplied RenderTextures
+    // from RenderTargetCache. Check both.
+    uint64_t target_id = 0;
+    IGpuTexture* target_texture = nullptr;
+    if (color_target) {
+        target_texture = graph.resources().find_texture(color_target.get());
+        if (!target_texture && ctx.resources) {
+            target_texture = ctx.resources->find_texture(color_target.get());
+        }
+        if (!target_texture) {
+            // Surface (or untracked target): fall back to the uint64 path.
+            target_id = color_target->get_gpu_handle(GpuResourceKey::Default);
+        }
+    }
 
     // Record one secondary cmd buffer per in-flight frame slot. Each
     // secondary bakes its slot's stable view-globals BDA at offset
@@ -206,7 +222,12 @@ void ForwardPath::build_passes(IViewEntry& entry,
     RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
                (void*)&entry, (unsigned long long)target_id,
                draw_calls.size());
-    if (auto cmd = ctx.backend->create_command_buffer(target_id)) {
+    // Texture targets route through the IGpuTexture& overload so the
+    // backend derives the inheritance render pass from the wrapper.
+    IGpuCommandBuffer::Ptr cmd = target_texture
+        ? ctx.backend->create_command_buffer(*target_texture)
+        : ctx.backend->create_command_buffer(target_id);
+    if (cmd) {
         cmd->begin_recording();
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
@@ -214,6 +235,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.pass->set_command_buffer(std::move(cmd));
     }
     cache.pass->set_target_id(target_id);
+    cache.pass->set_target_texture(target_texture);
     if (color_target) {
         cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }

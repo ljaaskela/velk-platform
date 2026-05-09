@@ -107,7 +107,9 @@ inline void emit_draw_calls(
         uint32_t texture_id = 0;
         if (batch.texture_key() != 0) {
             auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
-            texture_id = resources.find_texture(tex);
+            if (auto* gt = resources.find_texture(tex)) {
+                texture_id = get_texture_id(gt);
+            }
             if (texture_id == 0) {
                 uint64_t rt_id = get_render_target_id(tex);
                 if (rt_id != 0) texture_id = static_cast<uint32_t>(rt_id);

@@ -9,6 +9,10 @@ add_library(velk_vk SHARED
     src/vk_gpu_buffer.cpp
     src/vk_gpu_pipeline.h
     src/vk_gpu_pipeline.cpp
+    src/vk_gpu_texture.h
+    src/vk_gpu_texture.cpp
+    src/vk_render_target_group.h
+    src/vk_render_target_group.cpp
     src/vk_plugin.h
     src/vk_plugin.cpp
     src/volk_impl.c

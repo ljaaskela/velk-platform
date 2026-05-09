@@ -69,7 +69,7 @@ public:
     void render() override;
     void set_max_frames_in_flight(uint32_t count) override;
     void add_debug_overlay(const IWindowSurface::Ptr& surface,
-                           TextureId texture_id,
+                           IGpuTexture* texture,
                            const rect& dst_rect) override;
     void clear_debug_overlays() override;
     IGpuResource::Ptr get_named_output(const IElement::Ptr& camera_element,
@@ -125,7 +125,7 @@ private:
 
     struct DebugOverlay {
         IWindowSurface::Ptr surface;
-        TextureId texture_id = 0;
+        IGpuTexture* texture = nullptr;
         rect dst_rect{};
     };
     vector<DebugOverlay> debug_overlays_;

@@ -267,12 +267,21 @@ void RtPath::build_passes(IViewEntry& entry,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
+    IGpuTexture* rt_tex = graph.resources().find_texture(vs.rt_output.get());
+    IGpuTexture* dst_tex = color_target
+        ? graph.resources().find_texture(color_target.get())
+        : nullptr;
     vs.cached_rt_pass->reset();
     vs.cached_rt_pass->add_op(ops::Dispatch{dc});
-    vs.cached_rt_pass->add_op(ops::BlitToSurface{
-        static_cast<TextureId>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default)),
-        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
-        render_view.viewport});
+    if (dst_tex) {
+        vs.cached_rt_pass->add_op(ops::BlitToTexture{
+            rt_tex, dst_tex, render_view.viewport});
+    } else {
+        vs.cached_rt_pass->add_op(ops::BlitToSurface{
+            rt_tex,
+            color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
+            render_view.viewport});
+    }
     vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(vs.rt_output));
     if (color_target) vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);

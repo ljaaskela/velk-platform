@@ -32,7 +32,7 @@ namespace velk::render::debug {
  *
  * @return true if both the readback and the file write succeeded.
  */
-inline bool dump_texture(IRenderBackend& backend, TextureId texture,
+inline bool dump_texture(IRenderBackend& backend, IGpuTexture& texture,
                          const IImageWriter& writer, string_view path_no_ext)
 {
     vector<uint8_t> pixels;
@@ -78,7 +78,7 @@ inline bool dump_texture(IRenderBackend& backend, TextureId texture,
  * @return number of unique tuples observed (capped if exceeded; the
  *  count itself is uncapped).
  */
-inline size_t log_unique_uvec4_pixels(IRenderBackend& backend, TextureId texture,
+inline size_t log_unique_uvec4_pixels(IRenderBackend& backend, IGpuTexture& texture,
                                       string_view label,
                                       size_t max_unique = 64)
 {

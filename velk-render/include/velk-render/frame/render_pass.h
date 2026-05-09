@@ -50,10 +50,23 @@ struct Dispatch
 };
 
 /// `IRenderBackend::blit_to_surface(source, surface_id, dst_rect)`.
+/// The source IGpuTexture must outlive op execution; producers hold an
+/// owning Ptr in their cached pass state alongside the op list.
 struct BlitToSurface
 {
-    TextureId source = 0;
+    IGpuTexture* source = nullptr;
     uint64_t surface_id = 0;
+    rect dst_rect{};
+};
+
+/// `IRenderBackend::blit_to_texture(source, dest, dst_rect)`. Used when
+/// a non-cached pass needs to copy a storage texture into another
+/// renderable / sampleable texture (post-process intermediate, RTT
+/// composite, etc.). Both Ptrs must outlive op execution.
+struct BlitToTexture
+{
+    IGpuTexture* source = nullptr;
+    IGpuTexture* dest = nullptr;
     rect dst_rect{};
 };
 
@@ -62,7 +75,7 @@ struct BlitToSurface
 /// into the swapchain's depth buffer for forward overlays.
 struct BlitGroupDepthToSurface
 {
-    RenderTargetGroup src_group = 0;
+    IRenderTextureGroup* src_group = nullptr;
     uint64_t surface_id = 0;
     rect dst_rect{};
 };
@@ -75,6 +88,7 @@ using GraphOp = std::variant<
     ops::EndPass,
     ops::Dispatch,
     ops::BlitToSurface,
+    ops::BlitToTexture,
     ops::BlitGroupDepthToSurface>;
 
 } // namespace velk

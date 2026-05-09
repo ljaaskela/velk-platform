@@ -64,38 +64,28 @@ GpuResourceManager::store_group_desc(const TextureGroupDesc& d)
 }
 
 IRenderTarget::Ptr
-GpuResourceManager::wrap_pooled_texture(TextureId tid, const TextureDesc& desc)
+GpuResourceManager::wrap_pooled_texture(IGpuTexture::Ptr tex, const TextureDesc& desc)
 {
     auto rt = instance().create<IRenderTarget>(ClassId::RenderTexture);
     if (!rt) return {};
     rt->set_size(desc.width, desc.height);
     rt->set_format(desc.format);
-    register_texture(rt.get(), tid);
+    register_texture(rt.get(), std::move(tex));
     rt->add_gpu_resource_observer(this);
     transient_texture_descs_[rt.get()] = desc;
     return rt;
 }
 
 IRenderTextureGroup::Ptr
-GpuResourceManager::wrap_pooled_group(RenderTargetGroup group, const StoredGroupDesc& desc)
+GpuResourceManager::wrap_pooled_group(IRenderTextureGroup::Ptr /*group*/,
+                                      const StoredGroupDesc& /*desc*/)
 {
-    auto rtg = instance().create<IRenderTextureGroup>(ClassId::RenderTextureGroup);
-    if (!rtg) return {};
-    rtg->set_size(static_cast<uint32_t>(desc.width), static_cast<uint32_t>(desc.height));
-    rtg->set_format(desc.formats[0]);
-    rtg->set_depth_format(desc.depth);
-    rtg->set_gpu_handle(GpuResourceKey::Default, group);
-    for (uint32_t i = 0; i < desc.formats.size(); ++i) {
-        rtg->set_attachment(
-            i, static_cast<TextureId>(backend_->get_render_target_group_attachment(group, i)));
-    }
-    if (auto* surf = interface_cast<ISurface>(rtg.get())) {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        group_map_[surf] = group;
-    }
-    rtg->add_gpu_resource_observer(this);
-    transient_group_descs_[rtg.get()] = desc;
-    return rtg;
+    // Transient pool for groups was retired in Slice B; the underlying
+    // wrapper now lives behind an IRenderTextureGroup::Ptr whose dtor
+    // auto-defers, so we can't park it for reuse via the observer
+    // pattern (the wrapper destruction is the trigger). Returning
+    // empty causes the create path to allocate fresh.
+    return {};
 }
 
 void GpuResourceManager::on_gpu_resource_destroyed(IGpuResource* resource)
@@ -115,33 +105,34 @@ IRenderTarget::Ptr GpuResourceManager::create_render_texture(const TextureDesc& 
              it != transient_pool_textures_.end(); ++it) {
             if (!transient_desc_matches(it->desc, desc)) continue;
             if (!backend_->is_frame_complete(it->completion_marker)) continue;
-            TextureId tid = it->handle;
+            IGpuTexture::Ptr tex = std::move(it->handle);
             transient_pool_textures_.erase(it);
-            if (auto rt = wrap_pooled_texture(tid, desc)) return rt;
-            // Wrap failure: return the handle to the deferred-destroy path.
-            defer_texture_destroy(tid, backend_->pending_frame_completion_marker());
+            if (auto rt = wrap_pooled_texture(std::move(tex), desc)) return rt;
+            // Wrap failure: dropping `tex` defers via ~VkRenderTexture.
             break;
         }
     }
 
-    TextureId tid = backend_->create_texture(desc);
-    if (tid == 0) return {};
+    auto tex = backend_->create_texture(desc);
+    if (!tex) return {};
 
     auto rt = instance().create<IRenderTarget>(ClassId::RenderTexture);
     if (!rt) {
-        backend_->destroy_texture(tid);
+        // Dropping `tex` here defers via ~VkRenderTexture.
         return {};
     }
     rt->set_size(desc.width, desc.height);
     rt->set_format(desc.format);
 
-    // Registers the texture in texture_map_ keyed by ISurface* (the rt
-    // itself) AND stamps `gpu_handle(Default) = tid` on the resource.
-    register_texture(rt.get(), tid);
+    // Registers the IGpuTexture::Ptr in texture_map_ keyed by ISurface*
+    // (the rt itself) AND stamps `gpu_handle(Default) = bindless` on the
+    // wrapper.
+    register_texture(rt.get(), std::move(tex));
 
     // Subscribe the renderer's observer so the rt's dtor triggers
-    // on_resource_destroyed, which auto-defers `tid` for destroy with
-    // the current pending_frame_completion_marker().
+    // on_resource_destroyed, which drops the IGpuTexture::Ptr (and
+    // ~VkRenderTexture defers via the backend marker queue) or parks
+    // it on the transient pool.
     rt->add_gpu_resource_observer(this);
 
     if (transient_mode_) {
@@ -155,66 +146,31 @@ IRenderTextureGroup::Ptr GpuResourceManager::create_render_texture_group(
 {
     if (!backend_ || desc.formats.empty() || desc.width <= 0 || desc.height <= 0) return {};
 
-    if (transient_mode_) {
-        for (auto it = transient_pool_groups_.begin();
-             it != transient_pool_groups_.end(); ++it) {
-            if (!transient_group_matches(it->desc, desc)) continue;
-            if (!backend_->is_frame_complete(it->completion_marker)) continue;
-            StoredGroupDesc stored = std::move(it->desc);
-            RenderTargetGroup group = it->handle;
-            transient_pool_groups_.erase(it);
-            if (auto rtg = wrap_pooled_group(group, stored)) return rtg;
-            // Wrap failure: hand the group to the deferred-destroy path.
-            std::lock_guard<std::mutex> lock(deferred_mutex_);
-            deferred_groups_.push_back({group, backend_->pending_frame_completion_marker()});
-            break;
-        }
-    }
-
-    auto group = backend_->create_render_target_group(desc);
-    if (group == 0) return {};
-
-    auto rtg = instance().create<IRenderTextureGroup>(ClassId::RenderTextureGroup);
+    auto rtg = backend_->create_render_target_group(desc);
     if (!rtg) {
-        backend_->destroy_render_target_group(group);
         return {};
-    }
-    rtg->set_size(static_cast<uint32_t>(desc.width), static_cast<uint32_t>(desc.height));
-    rtg->set_format(desc.formats[0]);
-    rtg->set_depth_format(desc.depth);
-    rtg->set_gpu_handle(GpuResourceKey::Default, group);
-    for (uint32_t i = 0; i < desc.formats.size(); ++i) {
-        rtg->set_attachment(
-            i, static_cast<TextureId>(backend_->get_render_target_group_attachment(group, i)));
     }
 
     // Track for lifecycle: on_resource_destroyed looks up the group
-    // handle by ISurface* and enqueues for deferred destroy.
-    auto* surf = interface_cast<ISurface>(rtg.get());
-    if (surf) {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        group_map_[surf] = group;
-    }
-    rtg->add_gpu_resource_observer(this);
-
-    if (transient_mode_) {
-        transient_group_descs_[rtg.get()] = store_group_desc(desc);
-    }
+    // Lifecycle: the user's IRenderTextureGroup::Ptr is the only strong
+    // ref; ~VkRenderTargetGroup defers backend handles for destroy. No
+    // manager-side observer needed.
     return rtg;
 }
 
-TextureId GpuResourceManager::find_texture(ISurface* surf) const
+IGpuTexture* GpuResourceManager::find_texture(ISurface* surf) const
 {
     auto it = texture_map_.find(surf);
-    return it != texture_map_.end() ? it->second : 0;
+    return it != texture_map_.end() ? it->second.get() : nullptr;
 }
 
-void GpuResourceManager::register_texture(ISurface* surf, TextureId tid)
+void GpuResourceManager::register_texture(ISurface* surf, IGpuTexture::Ptr tex)
 {
     if (!surf) return;
-    texture_map_[surf] = tid;
+    const TextureId tid = get_texture_id(tex);
     surf->set_gpu_handle(GpuResourceKey::Default, static_cast<uint64_t>(tid));
-    // Subscribe so dropping the wrapper auto-defers `tid` for destroy.
+    texture_map_[surf] = std::move(tex);
+    // Subscribe so dropping the wrapper auto-drops the texture entry.
     // Idempotent: re-registration on resize doesn't double-subscribe.
     surf->add_gpu_resource_observer(this);
 }
@@ -224,16 +180,15 @@ void GpuResourceManager::unregister_texture(ISurface* surf)
     texture_map_.erase(surf);
 }
 
-TextureId GpuResourceManager::ensure_texture_storage(ISurface* surf, const TextureDesc& desc)
+IGpuTexture* GpuResourceManager::ensure_texture_storage(ISurface* surf, const TextureDesc& desc)
 {
-    if (!surf || !backend_) return 0;
-    TextureId tid = find_texture(surf);
-    if (tid == 0) {
-        tid = backend_->create_texture(desc);
-        if (tid == 0) return 0;
-        register_texture(surf, tid);
-    }
-    return tid;
+    if (!surf || !backend_) return nullptr;
+    if (auto* existing = find_texture(surf)) return existing;
+    auto tex = backend_->create_texture(desc);
+    if (!tex) return nullptr;
+    IGpuTexture* raw = tex.get();
+    register_texture(surf, std::move(tex));
+    return raw;
 }
 
 IGpuResourceManager::BufferEntry* GpuResourceManager::find_buffer(IBuffer* buf)
@@ -292,59 +247,25 @@ void GpuResourceManager::add_env_observer(const IBuffer::WeakPtr& res)
     observed_env_resources_.push_back(res);
 }
 
-void GpuResourceManager::defer_texture_destroy(TextureId tid, uint64_t completion_marker)
-{
-    std::lock_guard<std::mutex> lock(deferred_mutex_);
-    deferred_textures_.push_back({tid, completion_marker});
-}
-
-void GpuResourceManager::drain_deferred(IRenderBackend& backend)
+void GpuResourceManager::drain_deferred(IRenderBackend& /*backend*/)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
 
-    // Transient-pool tick: age idle entries; fall through to deferred
-    // destroy after `kMaxIdleFrames` consecutive idle ticks.
+    // Transient-pool tick: age idle texture entries; drop the Ptr after
+    // `kMaxIdleFrames` consecutive idle ticks, which routes through
+    // ~VkRenderTexture -> backend defer queue. Groups no longer pool
+    // (Slice B); their lifecycle is direct via Ptr drop.
     if (transient_mode_) {
         for (auto it = transient_pool_textures_.begin();
              it != transient_pool_textures_.end();) {
             it->idle_frames++;
             if (it->idle_frames >= kMaxIdleFrames) {
-                deferred_textures_.push_back({it->handle, it->completion_marker});
                 it = transient_pool_textures_.erase(it);
             } else {
                 ++it;
             }
         }
-        for (auto it = transient_pool_groups_.begin();
-             it != transient_pool_groups_.end();) {
-            it->idle_frames++;
-            if (it->idle_frames >= kMaxIdleFrames) {
-                deferred_groups_.push_back({it->handle, it->completion_marker});
-                it = transient_pool_groups_.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
-
-    for (auto it = deferred_textures_.begin(); it != deferred_textures_.end();) {
-        if (backend.is_frame_complete(it->completion_marker)) {
-            backend.destroy_texture(it->tid);
-            it = deferred_textures_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    for (auto it = deferred_groups_.begin(); it != deferred_groups_.end();) {
-        if (backend.is_frame_complete(it->completion_marker)) {
-            backend.destroy_render_target_group(it->handle);
-            it = deferred_groups_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
 }
 
 void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
@@ -366,26 +287,8 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
                     auto it = texture_map_.find(surf);
                     if (it != texture_map_.end()) {
                         transient_pool_textures_.push_back(
-                            {desc, it->second, completion_marker, 0});
+                            {desc, std::move(it->second), completion_marker, 0});
                         texture_map_.erase(it);
-                        return;
-                    }
-                }
-            }
-        }
-        {
-            auto gd = transient_group_descs_.find(resource);
-            if (gd != transient_group_descs_.end()) {
-                StoredGroupDesc desc = std::move(gd->second);
-                transient_group_descs_.erase(gd);
-
-                std::lock_guard<std::mutex> lock(deferred_mutex_);
-                if (auto* surf = interface_cast<ISurface>(resource)) {
-                    auto it = group_map_.find(surf);
-                    if (it != group_map_.end()) {
-                        transient_pool_groups_.push_back(
-                            {std::move(desc), it->second, completion_marker, 0});
-                        group_map_.erase(it);
                         return;
                     }
                 }
@@ -397,16 +300,10 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
     std::lock_guard<std::mutex> lock(deferred_mutex_);
 
     if (auto* surf = interface_cast<ISurface>(resource)) {
-        // Render-target group: cascading destroy frees its attachments.
-        auto git = group_map_.find(surf);
-        if (git != group_map_.end()) {
-            deferred_groups_.push_back({git->second, completion_marker});
-            group_map_.erase(git);
-            return;
-        }
         auto it = texture_map_.find(surf);
         if (it != texture_map_.end()) {
-            deferred_textures_.push_back({it->second, completion_marker});
+            // Dropping the Ptr triggers ~VkRenderTexture which defers
+            // backend handles via the backend's marker queue.
             texture_map_.erase(it);
             return;
         }
@@ -449,40 +346,19 @@ void GpuResourceManager::shutdown()
     {
         std::lock_guard<std::mutex> lock(deferred_mutex_);
 
-        // Fold any still-parked transient pool entries into the
-        // deferred queues so the destroys below clean them up too.
-        for (auto& pe : transient_pool_textures_) {
-            deferred_textures_.push_back({pe.handle, pe.completion_marker});
-        }
+        // Drop transient-pool texture Ptrs (~VkRenderTexture defers via
+        // the backend marker queue).
         transient_pool_textures_.clear();
-        for (auto& pe : transient_pool_groups_) {
-            deferred_groups_.push_back({pe.handle, pe.completion_marker});
-        }
-        transient_pool_groups_.clear();
         transient_texture_descs_.clear();
-        transient_group_descs_.clear();
-
-        for (auto& d : deferred_textures_) {
-            backend_->destroy_texture(d.tid);
-        }
-        deferred_textures_.clear();
-        for (auto& d : deferred_groups_) {
-            backend_->destroy_render_target_group(d.handle);
-        }
-        deferred_groups_.clear();
     }
 
-    for (auto& [key, tid] : texture_map_) {
-        backend_->destroy_texture(tid);
+    // Dropping each Ptr triggers ~VkRenderTexture which defers backend
+    // handles. The renderer's `wait_idle` call before us guarantees
+    // those defers can be drained immediately afterwards.
+    for (auto& [key, _] : texture_map_) {
         unregister(key, this);
     }
     texture_map_.clear();
-
-    for (auto& [key, group] : group_map_) {
-        backend_->destroy_render_target_group(group);
-        unregister(key, this);
-    }
-    group_map_.clear();
 
     // Detach GPU storage from each tracked IBuffer while the backend
     // is still alive. Plugin-held IBuffers (e.g. Font's glyph buffers
