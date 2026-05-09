@@ -811,6 +811,14 @@ Frame Renderer::prepare(const FrameDesc& desc)
     auto* slot = claim_frame_slot();
     active_slot_ = slot;
 
+    // Begin the backend frame here so anything that runs during
+    // `build_frame_passes` (e.g. `IGpuBuffer::update` from
+    // `prepare_frame_globals`) sees an open frame.
+    {
+        VELK_PERF_SCOPE("renderer.wait_vsync");
+        backend_->begin_frame();
+    }
+
     // If this slot's buffer is undersized (it was in-flight during a
     // previous regrow and was skipped), grow it now that it's safe.
     frame_buffer_->ensure_slot(slot->buffer, *backend_, *resources_);
@@ -907,11 +915,7 @@ void Renderer::present(Frame frame)
             }
         }
 
-        // Submit all passes within a single frame
-        {
-            VELK_PERF_SCOPE("renderer.wait_vsync");
-            backend_->begin_frame();
-        }
+        // Backend frame was opened by `prepare`; just compile + execute + end here.
         target->graph->compile();
         {
             VELK_PERF_SCOPE("renderer.submit");

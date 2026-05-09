@@ -44,7 +44,10 @@ public:
  * each (re)allocation, then read by `TextMaterial::write_gpu_data` to emit
  * the buffer references the shader binds via `buffer_reference`.
  */
-class FontGpuBuffer : public ::velk::ext::GpuResource<FontGpuBuffer, IBuffer, IFontGpuBufferInternal>
+class FontGpuBuffer
+    : public ::velk::ext::GpuResource<FontGpuBuffer,
+                                      IBuffer, IGpuBuffer, IGpuBufferStorageOwner,
+                                      IFontGpuBufferInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::FontGpuBuffer, "FontGpuBuffer");
@@ -60,6 +63,10 @@ public:
     size_t   size_bytes() const override { return gpu_buffer_ ? gpu_buffer_->size_bytes() : 0; }
     uint64_t gpu_address() const override { return gpu_buffer_ ? gpu_buffer_->gpu_address() : 0; }
     void*    map() override          { return gpu_buffer_ ? gpu_buffer_->map() : nullptr; }
+    void     update(size_t offset, size_t size, const void* data) override
+    {
+        if (gpu_buffer_) gpu_buffer_->update(offset, size, data);
+    }
 
     // IBuffer
     size_t get_data_size() const override;

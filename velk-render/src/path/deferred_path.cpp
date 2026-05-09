@@ -331,17 +331,12 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
 
-    // Record one secondary per frame slot, each pushing its slot's
-    // stable view-globals BDA. See ForwardPath for the same pattern.
     const uint32_t slot_count = ctx.backend->frame_overlap();
-    const uint32_t current_slot = ctx.backend->current_frame_slot();
-    const uint64_t base_addr =
-        render_view.view_globals_address - current_slot * sizeof(FrameGlobals);
     for (uint32_t slot = 0; slot < slot_count; ++slot) {
         auto cmd = ctx.backend->create_command_buffer(group_id);
         if (!cmd) continue;
         cmd->begin_recording();
-        cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+        cmd->push_view_globals(render_view.view_globals_address);
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
         cmd->end_recording();
@@ -483,14 +478,11 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         && !ctx.backend->is_surface(blit_target);
     if (can_cache) {
         const uint32_t slot_count = ctx.backend->frame_overlap();
-        const uint32_t current_slot = ctx.backend->current_frame_slot();
-        const uint64_t base_addr =
-            render_view.view_globals_address - current_slot * sizeof(FrameGlobals);
         for (uint32_t slot = 0; slot < slot_count; ++slot) {
             auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
             if (!cmd) continue;
             cmd->begin_recording();
-            cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+            cmd->push_view_globals(render_view.view_globals_address);
             cmd->record_dispatch(dc);
             cmd->record_blit_to_surface(src_id, blit_target, render_view.viewport);
             cmd->end_recording();

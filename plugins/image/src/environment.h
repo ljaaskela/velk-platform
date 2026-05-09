@@ -46,12 +46,6 @@ public:
     bool is_persistent() const override { return persistent_; }
     void set_persistent(bool value) override { persistent_ = value; }
 
-    // IGpuBuffer (Environment's GPU side is a texture; never attached)
-    size_t   size_bytes() const override  { return 0; }
-    uint64_t gpu_address() const override { return 0; }
-    void*    map() override               { return nullptr; }
-    void     attach_gpu_buffer(IGpuBuffer::Ptr) override {}
-
     // IBuffer
     size_t get_data_size() const override { return pixels_.size(); }
     const uint8_t* get_data() const override

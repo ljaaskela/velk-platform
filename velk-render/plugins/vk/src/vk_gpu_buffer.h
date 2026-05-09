@@ -43,6 +43,7 @@ public:
     size_t   size_bytes() const override  { return size_; }
     uint64_t gpu_address() const override { return address_; }
     void*    map() override               { return mapped_; }
+    void     update(size_t offset, size_t size, const void* data) override;
 
     ::VkBuffer    vk_buffer()     const { return buffer_; }
     VmaAllocation vk_allocation() const { return allocation_; }

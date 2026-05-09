@@ -43,6 +43,22 @@ public:
     void defer_destroy_gpu_buffer(IGpuBuffer* gb,
                                   uint64_t completion_marker) override;
 
+    /// Per-frame primary command buffer; valid between begin_frame
+    /// and end_frame. `VkGpuBuffer::update` records
+    /// `vkCmdUpdateBuffer` against this.
+    ::VkCommandBuffer primary_cb() const
+    {
+        return frame_sync_[frame_sync_index_].command_buffer;
+    }
+
+    /// Marks that a `vkCmdUpdateBuffer` was recorded this frame so
+    /// `begin_pass` emits a single TRANSFER → SHADER_READ barrier
+    /// before the first secondary execute.
+    void mark_pending_buffer_update_barrier()
+    {
+        pending_buffer_update_barrier_ = true;
+    }
+
     TextureId create_texture(const TextureDesc& desc) override;
     void destroy_texture(TextureId texture) override;
     void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) override;
@@ -197,6 +213,11 @@ private:
     /// per-frame view-globals address must be re-pushed inside each
     /// secondary before any draw uses it.
     uint64_t last_view_globals_addr_ = 0;
+
+    /// Set by `mark_pending_buffer_update_barrier`; consumed by the
+    /// next `begin_pass` to emit a single TRANSFER → SHADER_READ
+    /// barrier covering all `vkCmdUpdateBuffer`s recorded this frame.
+    bool pending_buffer_update_barrier_ = false;
 
     // Per-swapchain-image semaphores to avoid present engine conflicts.
     // Indexed by the acquired image index, not the frame sync index.

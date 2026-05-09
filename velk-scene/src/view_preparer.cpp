@@ -240,21 +240,15 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];
-    const uint32_t slot_count = ctx.backend->frame_overlap();
-    const size_t slot_size = sizeof(FrameGlobals);
-    const size_t total_size = slot_count * slot_size;
-    const uint32_t slot = ctx.backend->current_frame_slot();
-
-    if (cache.view_globals_cpu_slots.size() != total_size) {
-        cache.view_globals_cpu_slots.assign(total_size, 0);
+    if (!cache.view_globals_buffer) {
+        GpuBufferDesc desc{};
+        desc.size = sizeof(FrameGlobals);
+        desc.cpu_writable = false;
+        cache.view_globals_buffer = ctx.resources->create_gpu_buffer(desc);
+        if (!cache.view_globals_buffer) return;
     }
-    std::memcpy(cache.view_globals_cpu_slots.data() + slot * slot_size,
-                &globals, slot_size);
-
-    auto result = cache.view_globals_buffer.upload(
-        cache.view_globals_cpu_slots.data(), total_size, ctx);
-    if (!result.address) return;
-    rv.view_globals_address = result.address + slot * slot_size;
+    cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
+    rv.view_globals_address = cache.view_globals_buffer->gpu_address();
 }
 
 void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,

@@ -205,14 +205,11 @@ void ForwardPath::build_passes(IViewEntry& entry,
                (void*)&entry, (unsigned long long)target_id,
                draw_calls.size());
     const uint32_t slot_count = ctx.backend->frame_overlap();
-    const uint64_t current_slot_addr = render_view.view_globals_address;
-    const uint32_t current_slot = ctx.backend->current_frame_slot();
-    const uint64_t base_addr = current_slot_addr - current_slot * sizeof(FrameGlobals);
     for (uint32_t slot = 0; slot < slot_count; ++slot) {
         auto cmd = ctx.backend->create_command_buffer(target_id);
         if (!cmd) continue;
         cmd->begin_recording();
-        cmd->push_view_globals(base_addr + slot * sizeof(FrameGlobals));
+        cmd->push_view_globals(render_view.view_globals_address);
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
         cmd->end_recording();

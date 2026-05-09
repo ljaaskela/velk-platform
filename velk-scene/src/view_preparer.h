@@ -12,6 +12,7 @@
 #include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -161,17 +162,11 @@ private:
         /// frames (cached lighting passes embed it).
         PersistentBuffer env_data_buffer;
 
-        /// Per-view persistent FrameGlobals ring buffer, sized
-        /// `frame_overlap() * sizeof(FrameGlobals)`. Each frame writes
-        /// the new globals into `cpu_slots[current_slot]` and uploads
-        /// the full ring; only the current slot actually changes, so
-        /// `write_diff` triggers a small mapped memcpy. The base BDA
-        /// stays stable; the per-slot BDA is `base + slot*size`,
-        /// stable across cycles of `frame_overlap` frames. Cached
-        /// secondaries that bake one slot's BDA replay correctly when
-        /// that slot is current.
-        PersistentBuffer view_globals_buffer;
-        ::velk::vector<uint8_t> view_globals_cpu_slots;
+        /// Per-view FrameGlobals storage. Single 192-byte device-local
+        /// allocation; `prepare_frame_globals` updates it in place each
+        /// frame via `IGpuBuffer::update`. BDA is stable across the
+        /// view's lifetime, so cached secondaries can bake it once.
+        IGpuBuffer::Ptr view_globals_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 

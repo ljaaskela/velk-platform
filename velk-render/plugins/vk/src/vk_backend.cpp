@@ -2019,6 +2019,8 @@ void VkBackend::begin_frame()
 
     drain_deferred_buffers();
 
+    pending_buffer_update_barrier_ = false;
+
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -2047,6 +2049,20 @@ void VkBackend::begin_pass(uint64_t target_id)
 {
     VELK_PERF_SCOPE("vk.begin_pass");
     auto& sync = frame_sync_[frame_sync_index_];
+
+    if (pending_buffer_update_barrier_) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        pending_buffer_update_barrier_ = false;
+    }
+
     VkRenderPass rp = VK_NULL_HANDLE;
     VkFramebuffer fb = VK_NULL_HANDLE;
     uint32_t group_attachment_count = 0;

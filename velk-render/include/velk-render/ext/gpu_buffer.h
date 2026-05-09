@@ -56,6 +56,10 @@ public:
     size_t   size_bytes() const override { return gpu_buffer_ ? gpu_buffer_->size_bytes() : 0; }
     uint64_t gpu_address() const override { return gpu_buffer_ ? gpu_buffer_->gpu_address() : 0; }
     void*    map() override          { return gpu_buffer_ ? gpu_buffer_->map() : nullptr; }
+    void     update(size_t offset, size_t size, const void* data) override
+    {
+        if (gpu_buffer_) gpu_buffer_->update(offset, size, data);
+    }
 
     // IGpuBufferStorageOwner
     void attach_gpu_buffer(IGpuBuffer::Ptr gb) override { gpu_buffer_ = std::move(gb); }

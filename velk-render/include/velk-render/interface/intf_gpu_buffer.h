@@ -32,6 +32,12 @@ public:
     /// Persistent CPU mapping for host-visible allocations; nullptr
     /// when device-local.
     virtual void* map() = 0;
+
+    /// Schedules an in-place update of @p size bytes at @p offset.
+    /// @p data is copied; the caller may release it on return. The
+    /// new bytes are guaranteed visible to subsequent shader reads
+    /// in this frame.
+    virtual void update(size_t offset, size_t size, const void* data) = 0;
 };
 
 /**
