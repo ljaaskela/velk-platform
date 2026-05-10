@@ -432,13 +432,6 @@ public:
     virtual void begin_pass(IRenderTextureGroup& target) = 0;
 
     /**
-     * @brief Records draw calls into the current render pass.
-     * @param calls    Draw calls to record.
-     * @param viewport Viewport and scissor rect. Zero width/height means full target.
-     */
-    virtual void submit(array_view<const DrawCall> calls, rect viewport = {}) = 0;
-
-    /**
      * @brief Allocates a `IGpuCommandBuffer` compatible with
      *        @p target_id. Producers record once when their pass
      *        content changes; the graph executor replays via
@@ -476,15 +469,6 @@ public:
     virtual void end_pass() = 0;
 
     /**
-     * @brief Records compute dispatches outside of any render pass.
-     *
-     * Call between frames (after begin_frame, outside any begin_pass/end_pass
-     * window). Emits a memory barrier before sampled reads of storage-image
-     * outputs in subsequent graphics passes.
-     */
-    virtual void dispatch(array_view<const DispatchCall> calls) = 0;
-
-    /**
      * @brief Blits a source texture onto the swapchain image of @p surface_id.
      *
      * Acquires the swapchain image if not already acquired this frame,
@@ -506,26 +490,6 @@ public:
      *        SHADER_READ_ONLY so subsequent samples bind cleanly.
      */
     virtual void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect = {}) = 0;
-
-    /**
-     * @brief Copies the depth attachment of an MRT render target group into
-     *        the surface's depth buffer.
-     *
-     * Used by the deferred compositor to plumb the G-buffer's depth into the
-     * swapchain so subsequent forward draws onto the surface can depth-test
-     * against the deferred scene. Source group must have been created with a
-     * depth attachment; destination surface must have been created with
-     * SurfaceDesc::depth != None.
-     *
-     * No-op if either side lacks a depth attachment. Handles layout
-     * transitions; leaves both images back in DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
-     *
-     * @param dst_rect Destination rect in surface pixels. Zero width/height
-     *                 means "full surface".
-     */
-    virtual void blit_group_depth_to_surface(IRenderTextureGroup& src_group,
-                                             uint64_t surface_id,
-                                             rect dst_rect = {}) = 0;
 
     /**
      * @brief Inserts a pipeline barrier between passes.

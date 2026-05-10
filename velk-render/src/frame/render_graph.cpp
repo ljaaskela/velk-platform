@@ -75,26 +75,19 @@ void RenderGraph::add_pass(::velk::IRenderPass::Ptr pass)
 
 RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 {
-    // Last-op-wins: the post-pass resource state matches the kind of
-    // the last work-doing op. Submit -> ColorWrite (raster); Dispatch
-    // alone -> Storage (compute); BlitToSurface (with or without a
-    // preceding Dispatch) -> ColorWrite (blit destination ends up in
-    // a color-attachment-readable layout).
-    bool has_submit = false;
-    bool has_dispatch = false;
-    bool has_blit = false;
-    for (auto& op : pass.ops()) {
-        if (std::holds_alternative<::velk::ops::Submit>(op)) has_submit = true;
-        else if (std::holds_alternative<::velk::ops::Dispatch>(op)) has_dispatch = true;
-        else if (std::holds_alternative<::velk::ops::BlitToSurface>(op)
-                 || std::holds_alternative<::velk::ops::BlitGroupDepthToSurface>(op)) {
-            has_blit = true;
+    // Surface-blit seam → Blit (post-pass dest in color-attachment layout).
+    // Cmd buffer with a target_id / target_texture / target_group → Raster.
+    // Cmd buffer alone (no target) → Compute (compute dispatch, possibly
+    //   followed by an in-cmd-buffer record_blit_to_texture; the post-
+    //   pass writes list reflects what was written).
+    // Empty / barrier-only pass → Raster as a default barrier dst.
+    if (pass.surface_blit_source() != nullptr) return PassClass::Blit;
+    if (pass.command_buffer()) {
+        if (pass.target_group() || pass.target_texture() || pass.target_id() != 0) {
+            return PassClass::Raster;
         }
+        return PassClass::Compute;
     }
-    if (has_blit) return PassClass::Blit;
-    if (has_submit) return PassClass::Raster;
-    if (has_dispatch) return PassClass::Compute;
-    // Empty / barrier-only pass: treat as Raster for default barrier dst.
     return PassClass::Raster;
 }
 
@@ -141,25 +134,17 @@ void RenderGraph::compile()
         return ResourceState::ColorWrite;
     };
 
-    /// Raster passes that target an RTT texture write a fresh target
-    /// without sampling prior graph resources. Skip the pre-pass barrier
-    /// for them (matches old `reads_textures(Raster, raster_to_texture)`).
+    /// Raster passes that target an RTT texture / MRT group write a
+    /// fresh target without sampling prior graph resources. Skip the
+    /// pre-pass barrier for them (matches old behaviour where the skip
+    /// fired only when the raster pass declared writes).
     auto skip_pre_barrier = [](const ::velk::IRenderPass& pass, PassClass c) {
         if (c != PassClass::Raster) return false;
-        for (auto& op : pass.ops()) {
-            if (auto* bp = std::get_if<::velk::ops::BeginPass>(&op)) {
-                // A BeginPass on a non-zero target could be either a
-                // surface or an RTT texture; raster-into-texture is the
-                // case we want to skip. We can't tell the difference
-                // from the target_id alone (both encode as uint64), so
-                // err on the conservative side: only skip when there's
-                // a write declared (which is the RTT case — RenderTarget
-                // RTT path always pushes its target into writes).
-                (void)bp;
-                return !pass.writes().empty();
-            }
+        if (!pass.command_buffer()) return false;
+        if (!pass.target_group() && !pass.target_texture() && pass.target_id() == 0) {
+            return false;
         }
-        return false;
+        return !pass.writes().empty();
     };
 
     for (size_t i = 0; i < passes_.size(); ++i) {
@@ -220,16 +205,22 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d ops=%zu",
+        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d surface_blit=%d",
                    i,
                    (unsigned long long)gp.target_id(),
                    gp.command_buffer() ? 1 : 0,
-                   gp.ops().size());
+                   gp.surface_blit_source() ? 1 : 0);
 
-        // Cmd-buffer-bearing pass: replay the pre-recorded buffer.
-        // During the migration window both paths coexist; producers
-        // that haven't moved yet keep emitting ops and fall through
-        // below.
+        // Surface-blit seam: per-frame swapchain blit; can't be baked
+        // into a cached secondary, recorded onto the primary every
+        // frame inside the backend.
+        if (auto* src = gp.surface_blit_source()) {
+            backend.blit_to_surface(*src,
+                                    gp.surface_blit_surface_id(),
+                                    gp.surface_blit_rect());
+            continue;
+        }
+
         if (auto cmd = gp.command_buffer()) {
             // Group/texture targets route through their typed overloads;
             // surface targets stay on the uint64 overload. Compute /
@@ -250,33 +241,6 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             } else {
                 backend.execute(cmd);
             }
-            continue;
-        }
-
-        for (auto& op : gp.ops()) {
-            std::visit([&](auto& o) {
-                using T = std::decay_t<decltype(o)>;
-                if constexpr (std::is_same_v<T, ::velk::ops::BeginPass>) {
-                    backend.begin_pass(o.target_id);
-                } else if constexpr (std::is_same_v<T, ::velk::ops::Submit>) {
-                    backend.submit({o.draw_calls.data(), o.draw_calls.size()},
-                                   o.viewport);
-                } else if constexpr (std::is_same_v<T, ::velk::ops::EndPass>) {
-                    backend.end_pass();
-                } else if constexpr (std::is_same_v<T, ::velk::ops::Dispatch>) {
-                    backend.dispatch({&o.call, 1});
-                } else if constexpr (std::is_same_v<T, ::velk::ops::BlitToSurface>) {
-                    if (o.source) backend.blit_to_surface(*o.source, o.surface_id, o.dst_rect);
-                } else if constexpr (std::is_same_v<T, ::velk::ops::BlitToTexture>) {
-                    if (o.source && o.dest) backend.blit_to_texture(*o.source, *o.dest, o.dst_rect);
-                } else if constexpr (std::is_same_v<T,
-                                                    ::velk::ops::BlitGroupDepthToSurface>) {
-                    if (o.src_group) {
-                        backend.blit_group_depth_to_surface(
-                            *o.src_group, o.surface_id, o.dst_rect);
-                    }
-                }
-            }, op);
         }
     }
 }

@@ -68,13 +68,9 @@ public:
     void begin_pass(uint64_t target_id) override;
     void begin_pass(IGpuTexture& target) override;
     void begin_pass(IRenderTextureGroup& target) override;
-    void submit(array_view<const DrawCall> calls, rect viewport) override;
     void end_pass() override;
-    void dispatch(array_view<const DispatchCall> calls) override;
     void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect) override;
     void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect) override;
-    void blit_group_depth_to_surface(IRenderTextureGroup& src_group, uint64_t surface_id,
-                                     rect dst_rect) override;
 
     IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) override;
     IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) override;

@@ -83,6 +83,12 @@ private:
         ::velk::IRenderPass::Ptr cached_rt_pass;
         bool rt_dirty = true;
 
+        /// Cached surface-blit pass, set only when color_target is a
+        /// swapchain surface. cached_rt_pass dispatches into rt_output;
+        /// this pass routes IRenderBackend::blit_to_surface for the
+        /// per-frame swapchain copy.
+        ::velk::IRenderPass::Ptr cached_surface_blit_pass;
+
         /// PushC fingerprint covering inputs not propagated through
         /// the view notify cascade (BVH addresses + shape_count +
         /// shapes_addr). When BVH or shape topology changes mid-run

@@ -84,25 +84,12 @@ public:
     /// Record a compute dispatch.
     virtual void record_dispatch(const DispatchCall& call) = 0;
 
-    /// Record a blit from a storage texture into a surface (or a
-    /// renderable texture used as a surface stand-in).
-    virtual void record_blit_to_surface(IGpuTexture& source,
-                                        uint64_t surface_id,
-                                        rect dst_rect) = 0;
-
     /// Record a blit from a storage / renderable texture into another
     /// renderable / sampleable texture. Source layout restored; dest
     /// ends in SHADER_READ_ONLY.
     virtual void record_blit_to_texture(IGpuTexture& source,
                                         IGpuTexture& dest,
                                         rect dst_rect) = 0;
-
-    /// Record a blit of a render-target group's depth attachment
-    /// into a surface.
-    virtual void record_blit_group_depth_to_surface(
-        IRenderTextureGroup& src_group,
-        uint64_t surface_id,
-        rect dst_rect) = 0;
 
     /// @}
 };

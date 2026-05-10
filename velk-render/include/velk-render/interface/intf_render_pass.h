@@ -6,7 +6,6 @@
 #include <velk/uid.h>
 #include <velk/vector.h>
 
-#include <velk-render/frame/render_pass.h>
 #include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -19,35 +18,26 @@ namespace velk {
 /**
  * @brief One pass added to the render graph.
  *
- * Carries an ordered sequence of GPU ops + explicit read/write resource
- * declarations + the per-pass FrameGlobals address. The graph's
- * executor walks the ops 1:1 to backend methods; the graph's compile
- * step inspects ops + reads/writes to classify the pass and insert
- * pipeline barriers before consumers of prior writes.
+ * Carries a pre-recorded GPU command buffer (or a surface_blit seam)
+ * + explicit read/write resource declarations + the per-pass
+ * FrameGlobals address. The graph's compile step inspects the seams
+ * + reads/writes to classify the pass and insert pipeline barriers
+ * before consumers of prior writes.
  *
  * Ptr-based so the velk hive pools allocations and producer pipelines
- * can cache per-frame Ptr identity for future persistent-pass work.
+ * can cache per-frame Ptr identity for persistent-pass work.
  *
  * Bindless texture reads from materials are NOT declared — they're
  * invisible to the graph and stay fence-synced at the descriptor-set
  * level. Tier 1 tracks resources at coarse granularity: gbuffer
  * attachments are tracked through the group resource (not per-
- * attachment), and non-Ptr handles (raw `TextureId`,
- * `RenderTargetGroup`) are out of scope.
+ * attachment).
  */
 class IRenderPass
     : public Interface<IRenderPass, IRenderState,
                        VELK_UID("ffc6e6c3-639a-461e-ad5c-7bc4ed902edf")>
 {
 public:
-    /// Ordered ops executed in sequence. Typical shapes:
-    ///   - Raster pass:        BeginPass, Submit, EndPass
-    ///   - GBuffer fill:       BeginPass, Submit, EndPass (target_id is the group handle)
-    ///   - Compute dispatch:   Dispatch
-    ///   - Compute + blit:     Dispatch, BlitToSurface[, BlitGroupDepthToSurface]
-    ///   - Pure blit:          BlitToSurface
-    virtual array_view<const GraphOp> ops() const = 0;
-
     /// Resources read by this pass.
     virtual array_view<const IGpuResource::Ptr> reads() const = 0;
 
@@ -64,9 +54,6 @@ public:
 
     /// @name Producer mutators
     /// @{
-    /// Append one GPU op to the pass's op stream. Order matters: the
-    /// graph executor walks the stream verbatim.
-    virtual void add_op(GraphOp op) = 0;
 
     /// Declare a resource the pass reads. Inserted into the dependency
     /// state machine so prior writers get a barrier before this pass.
@@ -82,21 +69,19 @@ public:
     /// executor leaves whatever was previously pushed.
     virtual void set_view_globals_address(uint64_t addr) = 0;
 
-    /// Clear all ops, reads, writes, and the view-globals address.
-    /// Producers that cache an `IRenderPass::Ptr` across frames call
-    /// this at the top of each rebuild so the same Ptr identity
-    /// carries fresh contents — the graph's compile-time short-circuit
-    /// only fires when pass Ptrs match, so reusing the same Ptr is
-    /// what makes that path active.
+    /// Clear reads, writes, command buffer, target seams, surface-blit
+    /// seam, and the view-globals address. Producers that cache an
+    /// `IRenderPass::Ptr` across frames call this at the top of each
+    /// rebuild so the same Ptr identity carries fresh contents — the
+    /// graph's compile-time short-circuit only fires when pass Ptrs
+    /// match, so reusing the same Ptr is what makes that path active.
     virtual void reset() = 0;
 
     /// Pre-recorded secondary command buffer for this pass. Producers
     /// record once and the executor replays it every frame; per-view
     /// FrameGlobals BDAs are stable across frames (see
     /// `prepare_frame_globals`) so the same secondary is correct on
-    /// every replay. Returns null when the pass uses the legacy
-    /// `add_op` / `ops()` flow, in which case the executor walks the
-    /// op list. `reset()` drops the cmd buffer Ptr.
+    /// every replay. `reset()` drops the cmd buffer Ptr.
     virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;
     virtual void set_command_buffer(IGpuCommandBuffer::Ptr cmd) = 0;
 
@@ -124,6 +109,22 @@ public:
     /// `set_target_id` / `set_target_texture`.
     virtual IRenderTextureGroup* target_group() const = 0;
     virtual void set_target_group(IRenderTextureGroup* group) = 0;
+
+    /// Surface-blit seam. When `surface_blit_source()` is non-null the
+    /// executor calls `IRenderBackend::blit_to_surface` directly,
+    /// bypassing the cmd-buffer / target dispatch entirely. Mutually
+    /// exclusive with command_buffer + the three target seams. Used
+    /// for the per-frame swapchain blit (CameraPipeline final stage,
+    /// DeferredPath / RtPath surface dest) — the swapchain image
+    /// changes per frame so this can't be baked into a secondary cmd
+    /// buffer; it's recorded onto the primary every frame inside the
+    /// backend.
+    virtual IGpuTexture* surface_blit_source() const = 0;
+    virtual uint64_t surface_blit_surface_id() const = 0;
+    virtual rect surface_blit_rect() const = 0;
+    virtual void set_surface_blit(IGpuTexture* source,
+                                  uint64_t surface_id,
+                                  rect dst_rect) = 0;
     /// @}
 };
 

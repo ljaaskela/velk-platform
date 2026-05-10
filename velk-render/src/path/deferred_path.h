@@ -113,6 +113,13 @@ public:
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
+
+        /// Cached surface-blit pass, set only when color_target is a
+        /// swapchain surface. The cached_lighting_pass cmd buffer
+        /// dispatches into deferred_output; this pass routes
+        /// IRenderBackend::blit_to_surface for the per-frame swapchain
+        /// copy. Rebuilt under the same lighting_dirty signal.
+        IRenderPass::Ptr cached_surface_blit_pass;
     };
 
 private:

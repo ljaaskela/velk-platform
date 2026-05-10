@@ -770,10 +770,10 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             if (!ov.surface || !ov.texture) continue;
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
-            gp->add_op(ops::BlitToSurface{
+            gp->set_surface_blit(
                 ov.texture,
                 ov.surface->get_gpu_handle(GpuResourceKey::Default),
-                ov.dst_rect});
+                ov.dst_rect);
             slot.graph->add_pass(std::move(gp));
         }
 

@@ -119,7 +119,6 @@ add_library(velk_render SHARED
     src/frame/frame_data_manager.cpp
     src/frame/frame_snippet_registry.h
     src/frame/frame_snippet_registry.cpp
-    include/velk-render/frame/render_pass.h
     include/velk-render/frame/draw_call_emit.h
     include/velk-render/frame/raster_shaders.h
     include/velk-render/frame/compute_shaders.h

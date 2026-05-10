@@ -149,14 +149,6 @@ void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& call)
                          0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
-void VkCommandBuffer::record_blit_to_surface(
-    ::velk::IGpuTexture& /*source*/, uint64_t /*target_id*/, ::velk::rect /*dst_rect*/)
-{
-    // Surface destinations require per-frame swapchain acquisition that
-    // can't be baked into a cached secondary; producers route surface
-    // blits through ops::BlitToSurface on the legacy primary path.
-}
-
 void VkCommandBuffer::record_blit_to_texture(
     ::velk::IGpuTexture& source, ::velk::IGpuTexture& dest, ::velk::rect dst_rect)
 {
@@ -165,11 +157,6 @@ void VkCommandBuffer::record_blit_to_texture(
                (void*)this, (void*)cmd_,
                ::velk::get_texture_id(&source), ::velk::get_texture_id(&dest));
     backend_->record_blit_to_texture(cmd_, source, dest, dst_rect);
-}
-void VkCommandBuffer::record_blit_group_depth_to_surface(
-    ::velk::IRenderTextureGroup& /*src_group*/, uint64_t /*surface_id*/,
-    ::velk::rect /*dst_rect*/)
-{
 }
 
 } // namespace velk::vk

@@ -74,9 +74,16 @@ void PostProcess::emit(::velk::IViewEntry& view,
         if (!passthrough) return;
         ::velk::IGpuTexture* input_tex = graph.resources().find_texture(input.get());
         ::velk::IGpuTexture* output_tex = graph.resources().find_texture(output.get());
-        passthrough->add_op(::velk::ops::BlitToTexture{
-            input_tex, output_tex,
-            {0, 0, static_cast<float>(w), static_cast<float>(h)}});
+        if (input_tex && output_tex && ctx.backend) {
+            if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+                cmd->begin_recording();
+                cmd->record_blit_to_texture(*input_tex, *output_tex,
+                    {0, 0, static_cast<float>(w), static_cast<float>(h)});
+                cmd->end_recording();
+                passthrough->set_command_buffer(std::move(cmd));
+            }
+            passthrough->set_target_id(0);
+        }
         passthrough->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
         passthrough->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
         graph.add_pass(std::move(passthrough));
