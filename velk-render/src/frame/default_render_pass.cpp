@@ -38,9 +38,6 @@ void DefaultRenderPass::reset()
     writes_.clear();
     view_globals_address_ = 0;
     command_buffer_.reset();
-    target_id_ = 0;
-    target_texture_ = nullptr;
-    target_group_ = nullptr;
 }
 
 } // namespace velk::impl

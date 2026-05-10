@@ -180,9 +180,8 @@ void ForwardPath::build_passes(IViewEntry& entry,
         // globals address (FrameGlobals lives in per-frame staging
         // and rotates each frame).
         cache.pass->set_view_globals_address(render_view.view_globals_address);
-        RENDER_LOG("forward.cached view=%p pass=%p target=%llu vg=0x%llx",
+        RENDER_LOG("forward.cached view=%p pass=%p vg=0x%llx",
                    (void*)&entry, (void*)cache.pass.get(),
-                   (unsigned long long)cache.pass->target_id(),
                    (unsigned long long)render_view.view_globals_address);
         graph.add_pass(cache.pass);
         return;
@@ -251,7 +250,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
 
     // Self-contained dynamic-rendering secondary: attachments bound
     // inline at record time, executor doesn't wrap in begin_pass.
-    IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
+    IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer();
     if (cmd) {
         ColorAttachment color{};
         color.texture = target_texture;

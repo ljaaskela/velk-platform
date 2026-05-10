@@ -31,10 +31,9 @@ VkCommandBuffer::~VkCommandBuffer()
     }
 }
 
-void VkCommandBuffer::init(VkBackend* backend, ::VkRenderPass inherit_render_pass)
+void VkCommandBuffer::init(VkBackend* backend)
 {
     backend_ = backend;
-    inherit_render_pass_ = inherit_render_pass;
 }
 
 void VkCommandBuffer::begin_recording()
@@ -51,16 +50,17 @@ void VkCommandBuffer::begin_recording()
             return;
         }
     }
-    RENDER_LOG("vk.cmdbuf.begin_recording this=%p cb=%p inherit_rp=%p",
-               (void*)this, (void*)cmd_, (void*)inherit_render_pass_);
+    RENDER_LOG("vk.cmdbuf.begin_recording this=%p cb=%p", (void*)this, (void*)cmd_);
 
     // Pool created with RESET_COMMAND_BUFFER_BIT, so vkBeginCommandBuffer
     // implicitly resets the buffer on a re-begin.
+    //
+    // S6.6: secondaries are self-contained dynamic-rendering — they
+    // call vkCmdBeginRendering / vkCmdEndRendering inside
+    // record_begin_rendering / record_end_rendering. No inheritance
+    // render pass; no RENDER_PASS_CONTINUE_BIT.
     VkCommandBufferInheritanceInfo inh{};
     inh.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
-    inh.renderPass = inherit_render_pass_;
-    inh.subpass = 0;
-    inh.framebuffer = VK_NULL_HANDLE;
 
     // SIMULTANEOUS_USE_BIT: the same persistent secondary can be
     // referenced by primaries from up to kFrameOverlap concurrent
@@ -69,23 +69,15 @@ void VkCommandBuffer::begin_recording()
     // doesn't guarantee.
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
-        | ((inherit_render_pass_ != VK_NULL_HANDLE)
-            ? VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT
-            : 0u);
+    bi.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
     bi.pInheritanceInfo = &inh;
     vkBeginCommandBuffer(cmd_, &bi);
 
-    // Secondary command buffers inherit no state from the primary.
-    // Bind the bindless descriptor set for the buffer's bind point.
-    // Per-view FrameGlobals are reached via DrawData.globals_addr
-    // (see render_architecture_cleanup.md S5.3) — stable BDA, no
-    // explicit push-constant.
-    const VkPipelineBindPoint bind_point = (inherit_render_pass_ != VK_NULL_HANDLE)
-        ? VK_PIPELINE_BIND_POINT_GRAPHICS
-        : VK_PIPELINE_BIND_POINT_COMPUTE;
+    // Secondary command buffers inherit no state from the primary;
+    // bind the bindless descriptor set. COMPUTE bind initially —
+    // record_begin_rendering rebinds GRAPHICS for raster passes.
     vkCmdBindDescriptorSets(cmd_,
-                            bind_point,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
                             0, nullptr);
@@ -100,12 +92,8 @@ void VkCommandBuffer::end_recording()
 void VkCommandBuffer::set_viewport(::velk::rect viewport)
 {
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;
-    float vp_w = (viewport.width > 0)
-        ? viewport.width
-        : static_cast<float>(backend_->current_target_width_);
-    float vp_h = (viewport.height > 0)
-        ? viewport.height
-        : static_cast<float>(backend_->current_target_height_);
+    float vp_w = viewport.width;
+    float vp_h = viewport.height;
 
     VkViewport vp{};
     vp.x = viewport.x;

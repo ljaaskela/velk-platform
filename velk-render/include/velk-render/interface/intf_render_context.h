@@ -108,35 +108,6 @@ public:
                                         uint64_t key = 0) = 0;
 
     /**
-     * @brief Creates a pipeline from compiled shaders.
-     *
-     * If vertex or fragment is nullptr, the registered default is used.
-     * If @p key is 0, a new key is auto-assigned. Otherwise the given key is used.
-     * Returns the pipeline key, or 0 on failure.
-     */
-    virtual uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
-                                     uint64_t key = 0,
-                                     PixelFormat target_format = PixelFormat::Surface,
-                                     IRenderTextureGroup* target_group = nullptr,
-                                     const PipelineOptions& options = {}) = 0;
-
-    /**
-     * @brief Convenience: compiles GLSL shaders and creates the pipeline in one call.
-     *
-     * Empty sources are substituted with the registered defaults.
-     * @p target_format is the color attachment format the pipeline will
-     * render into (`Surface` to follow the swapchain). When
-     * @p target_group is non-zero the pipeline is compiled against that
-     * MRT group's render pass; otherwise against the single-attachment
-     * render pass for @p target_format.
-     */
-    virtual uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
-                                      uint64_t key = 0,
-                                      PixelFormat target_format = PixelFormat::Surface,
-                                      IRenderTextureGroup* target_group = nullptr,
-                                      const PipelineOptions& options = {}) = 0;
-
-    /**
      * @brief S6 dynamic-rendering compile path.
      *
      * Mirrors `compile_pipeline` but produces a pipeline compiled

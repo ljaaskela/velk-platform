@@ -53,9 +53,6 @@ public:
     void defer_destroy_gpu_render_target_group(IRenderTextureGroup* group,
                                                uint64_t completion_marker) override;
 
-    IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
-                                      PixelFormat target_format = PixelFormat::Surface,
-                                      IRenderTextureGroup* target_group = nullptr) override;
     IGpuPipeline::Ptr create_pipeline_dynamic(
         const PipelineDesc& desc,
         array_view<const PixelFormat> color_formats,
@@ -68,26 +65,14 @@ public:
                                                      DepthFormat format) override;
 
     void begin_frame() override;
-    void begin_pass(uint64_t target_id) override;
-    void begin_pass(IGpuTexture& target) override;
-    void begin_pass(IRenderTextureGroup& target) override;
-    void end_pass() override;
     void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect) override;
 
-    IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) override;
-    IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) override;
-    IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) override;
+    IGpuCommandBuffer::Ptr create_command_buffer() override;
     void execute(const IGpuCommandBuffer::Ptr& cmd) override;
 
     // VkCommandBuffer needs access to internal lookup maps + handles
     // to record vkCmd* against producer-recorded draw calls.
     friend class VkCommandBuffer;
-
-    /// Looks up the render pass (compatible with the renderpass used
-    /// at execute time) for inheritance info on a SECONDARY command
-    /// buffer. Returns `VK_NULL_HANDLE` if @p target_id is unknown
-    /// (caller falls back to a non-renderpass cmd buffer).
-    VkRenderPass find_render_pass_for_target(uint64_t target_id);
 
     /// Per-draw `vkCmd*` recording loop. Called by
     /// `VkCommandBuffer::record_draws` to emit BindPipeline +
@@ -226,45 +211,25 @@ private:
     // Shared pipeline layout (push constants + bindless set)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
 
-    // Default render pass (created at init from the initial surface format,
-    // used for pipeline creation before any swapchain exists). If any
-    // surface has a depth attachment, the default render pass is recreated
-    // with a matching depth attachment so pipelines targeting surfaces are
-    // compatible with depth-enabled render passes.
-    VkRenderPass default_render_pass_ = VK_NULL_HANDLE;
+    /// Format the swapchain renders at; used by create_texture
+    /// (TextureUsage::RenderTarget with PixelFormat::Surface) so RTT
+    /// textures targeting the swap chain (RenderTargetCache) match.
     VkFormat default_surface_format_ = VK_FORMAT_UNDEFINED;
-    VkFormat default_depth_format_ = VK_FORMAT_UNDEFINED; ///< VK_FORMAT_UNDEFINED = no depth.
 
-    /// Per-color-format single-attachment, no-depth render passes used
-    /// to compile pipelines that render into format-explicit RTTs (HDR
-    /// path target etc.). `Surface` callers go through `default_render_pass_`
-    /// and are not stored here. Created lazily on first request.
-    std::unordered_map<VkFormat, VkRenderPass> single_attachment_render_passes_;
-    VkRenderPass get_or_create_single_attachment_render_pass(VkFormat color_format);
-
-    // Surfaces
+    // Surfaces — post-S6.4, the swapchain images are only used as
+    // transfer destinations for the per-surface composite blit at
+    // end_frame. No render pass / framebuffer / surface depth.
     struct SurfaceData
     {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-        VkRenderPass render_pass = VK_NULL_HANDLE;       ///< loadOp=CLEAR (first pass)
-        VkRenderPass load_render_pass = VK_NULL_HANDLE;  ///< loadOp=LOAD (subsequent passes)
         vector<VkImage> images;
         vector<VkImageView> image_views;
-        vector<VkFramebuffer> framebuffers;
         VkFormat image_format = VK_FORMAT_UNDEFINED;
         int width = 0;
         int height = 0;
         uint32_t image_index = 0;
         UpdateRate update_rate = UpdateRate::VSync;
-
-        // Depth attachment (one per swapchain image; DepthFormat::None means
-        // none of these are populated and the render pass has no depth).
-        DepthFormat depth_format = DepthFormat::None;
-        VkFormat depth_vk_format = VK_FORMAT_UNDEFINED;
-        vector<VkImage> depth_images;
-        vector<VkImageView> depth_views;
-        vector<VmaAllocation> depth_allocations;
 
         /// Per-surface composite intermediate (S6.4 — see
         /// design-notes/render_dynamic_rendering.md). Producers render
@@ -281,13 +246,9 @@ private:
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
     uint64_t next_surface_id_ = 1;
-    uint64_t current_surface_ = 0;          ///< Surface active in the current render pass (0 if texture target).
     uint64_t present_surface_id_ = 0;     ///< Surface to present in end_frame (0 = headless).
     uint32_t present_acquire_sem_idx_ = 0; ///< Acquire semaphore index used for the surface pass.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame.
-    bool surface_has_clear_ = false;       ///< True after first pass on a surface (subsequent passes use LOAD).
-    int current_target_width_ = 0;         ///< Width of the current render pass target.
-    int current_target_height_ = 0;        ///< Height of the current render pass target.
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 
     /// Pending `vmaDestroyBuffer` calls keyed by the

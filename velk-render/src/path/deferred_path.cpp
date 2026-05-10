@@ -346,7 +346,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
     // S6.3: gbuffer raster runs as a self-contained dynamic-rendering
     // secondary. Attachments bound inline via `record_begin_rendering`;
     // executor doesn't wrap in begin_pass / end_pass.
-    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+    if (auto cmd = ctx.backend->create_command_buffer()) {
         constexpr uint32_t kColorCount = static_cast<uint32_t>(GBufferAttachment::Count);
         ColorAttachment colors[kColorCount]{};
         for (uint32_t i = 0; i < kColorCount; ++i) {
@@ -523,7 +523,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
     vs.cached_lighting_pass->reset();
-    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+    if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
         cmd->record_dispatch(dc);
         if (src_tex && dst_tex) {

@@ -148,7 +148,7 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
             auto blit_pass = ::velk::instance().create<::velk::IRenderPass>(
                 ::velk::ClassId::DefaultRenderPass);
             if (blit_pass) {
-                if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+                if (auto cmd = ctx.backend->create_command_buffer()) {
                     cmd->begin_recording();
                     cmd->record_blit_to_texture(*post_tex, *swap_tex, render_view.viewport);
                     cmd->end_recording();

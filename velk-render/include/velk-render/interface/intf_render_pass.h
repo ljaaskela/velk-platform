@@ -82,33 +82,13 @@ public:
     /// FrameGlobals BDAs are stable across frames (see
     /// `prepare_frame_globals`) so the same secondary is correct on
     /// every replay. `reset()` drops the cmd buffer Ptr.
+    ///
+    /// All raster passes are self-contained dynamic-rendering
+    /// secondaries (S6) — they call `record_begin_rendering` /
+    /// `record_end_rendering` internally; the executor doesn't wrap
+    /// the replay in any begin_pass / end_pass.
     virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;
     virtual void set_command_buffer(IGpuCommandBuffer::Ptr cmd) = 0;
-
-    /// Target id for cmd-buffer-bearing raster passes whose target is
-    /// a window surface or MRT group. The executor wraps `execute(cmd)`
-    /// in `begin_pass(target_id) / end_pass()` so the secondary command
-    /// buffer's `vkCmdExecuteCommands` runs inside an active render
-    /// pass on the primary. Zero for compute / blit passes (cmd buffer
-    /// recorded outside any render pass) and for texture-target raster
-    /// passes (use `set_target_texture` instead).
-    virtual uint64_t target_id() const = 0;
-    virtual void set_target_id(uint64_t target_id) = 0;
-
-    /// Target IGpuTexture for cmd-buffer-bearing raster passes whose
-    /// target is a renderable texture. Mutually exclusive with
-    /// `set_target_id` and `set_target_group`; whichever is set non-
-    /// default routes the `begin_pass` dispatch. Caller must keep the
-    /// texture alive (the pass's writes/reads list typically owns the
-    /// wrapper).
-    virtual IGpuTexture* target_texture() const = 0;
-    virtual void set_target_texture(IGpuTexture* texture) = 0;
-
-    /// Target MRT group for cmd-buffer-bearing raster passes whose
-    /// target is an `IRenderTextureGroup`. Mutually exclusive with
-    /// `set_target_id` / `set_target_texture`.
-    virtual IRenderTextureGroup* target_group() const = 0;
-    virtual void set_target_group(IRenderTextureGroup* group) = 0;
     /// @}
 };
 

@@ -777,7 +777,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             if (!swap_tex) continue;
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
-            if (auto cmd = backend_->create_command_buffer(/*target_id=*/0)) {
+            if (auto cmd = backend_->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->record_blit_to_texture(*ov.texture, *swap_tex, ov.dst_rect);
                 cmd->end_recording();

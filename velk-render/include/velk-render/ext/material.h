@@ -177,35 +177,6 @@ public:
     }
 
 protected:
-    /**
-     * @brief Compiles shaders from source on first call and caches the pipeline handle.
-     * @param fragment_source Fragment shader GLSL source.
-     * @param vertex_source  Vertex shader GLSL source (empty = use registered default).
-     */
-    uint64_t ensure_pipeline(IRenderContext& ctx, string_view fragment_source, string_view vertex_source = {})
-    {
-        if (!has_pipeline_handle()) {
-            this->set_gpu_handle(GpuResourceKey::Default,
-                                 ctx.compile_pipeline(fragment_source, vertex_source));
-        }
-        return this->get_gpu_handle(GpuResourceKey::Default);
-    }
-
-    /**
-     * @brief Creates a pipeline from pre-compiled shaders on first call and caches the handle.
-     * @param fragment Compiled fragment shader (nullptr = use registered default).
-     * @param vertex   Compiled vertex shader (nullptr = use registered default).
-     */
-    uint64_t ensure_pipeline(IRenderContext& ctx, const IShader::Ptr& fragment,
-                             const IShader::Ptr& vertex = {})
-    {
-        if (!has_pipeline_handle()) {
-            this->set_gpu_handle(GpuResourceKey::Default,
-                                 ctx.create_pipeline(vertex, fragment));
-        }
-        return this->get_gpu_handle(GpuResourceKey::Default);
-    }
-
     /** @brief Returns true if the pipeline handle has already been created. */
     bool has_pipeline_handle() const
     {

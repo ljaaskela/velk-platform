@@ -286,7 +286,7 @@ void RtPath::build_passes(IViewEntry& entry,
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
     vs.cached_rt_pass->reset();
-    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+    if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
         cmd->record_dispatch(dc);
         if (rt_tex && dst_tex) {

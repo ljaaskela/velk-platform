@@ -32,10 +32,10 @@ public:
     VkCommandBuffer() = default;
     ~VkCommandBuffer() override;
 
-    /// Configures the cmd buffer with backend reference + the render
-    /// pass it'll be recorded against (or `VK_NULL_HANDLE` for
-    /// outside-renderpass cmd buffers).
-    void init(VkBackend* backend, VkRenderPass inherit_render_pass);
+    /// Configures the cmd buffer with backend reference.
+    /// All cmd buffers are self-contained dynamic-rendering secondaries
+    /// (S6); no inheritance render pass needed.
+    void init(VkBackend* backend);
 
     // IGpuCommandBuffer
     void begin_recording() override;
@@ -57,7 +57,6 @@ void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
 private:
     VkBackend* backend_ = nullptr;
     ::VkCommandBuffer cmd_ = VK_NULL_HANDLE;
-    ::VkRenderPass inherit_render_pass_ = VK_NULL_HANDLE;
 
     /// Attachment textures captured between `record_begin_rendering`
     /// and `record_end_rendering` so the matching end-side layout

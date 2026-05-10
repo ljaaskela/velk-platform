@@ -396,23 +396,6 @@ public:
     /// @{
 
     /**
-     * @brief Creates a graphics pipeline from SPIR-V shaders. Returns a handle.
-     *
-     * @param target_format Color attachment format the pipeline will
-     *        render into. `Surface` follows the swapchain (default,
-     *        used by direct-to-swapchain and surface-format RTT).
-     *        Explicit formats (e.g. `RGBA16F` for HDR) get a per-format
-     *        single-attachment render pass cached internally so the
-     *        pipeline is render-pass compatible with the target.
-     * @param target_group If non-null, the pipeline is compiled against
-     *        the render pass of the given MRT group; in that case
-     *        @p target_format is ignored (group attachments are fixed).
-     */
-    virtual IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
-                                              PixelFormat target_format = PixelFormat::Surface,
-                                              IRenderTextureGroup* target_group = nullptr) = 0;
-
-    /**
      * @brief Creates a graphics pipeline against dynamic-rendering attachment
      *        formats (S6 — see design-notes/render_dynamic_rendering.md).
      *
@@ -448,64 +431,23 @@ public:
     virtual void begin_frame() = 0;
 
     /**
-     * @brief Begins a render pass targeting the given surface or MRT group.
+     * @brief Allocates a self-contained `IGpuCommandBuffer` (S6 dynamic
+     *        rendering — see design-notes/render_dynamic_rendering.md).
      *
-     * For surface targets, acquires the swapchain image. Begins the
-     * backend render pass and binds the bindless descriptor set. Use
-     * the `IGpuTexture&` overload for renderable-texture targets.
+     * Producers record once when their pass content changes; the graph
+     * executor replays via `execute(cmd)` each frame. Raster passes
+     * call `record_begin_rendering` / `record_end_rendering` inside
+     * the cmd buffer to bind attachments at record time. Compute /
+     * blit passes record outside any rendering scope.
      */
-    virtual void begin_pass(uint64_t target_id) = 0;
-
-    /**
-     * @brief Begins a render pass targeting a renderable texture.
-     *
-     * The texture must have been created with TextureUsage::RenderTarget
-     * or ColorAttachment. Begins the backend render pass and binds the
-     * bindless descriptor set.
-     */
-    virtual void begin_pass(IGpuTexture& target) = 0;
-
-    /**
-     * @brief Begins a render pass targeting an MRT group.
-     */
-    virtual void begin_pass(IRenderTextureGroup& target) = 0;
-
-    /**
-     * @brief Allocates a `IGpuCommandBuffer` compatible with
-     *        @p target_id. Producers record once when their pass
-     *        content changes; the graph executor replays via
-     *        `execute(cmd)` each frame.
-     *
-     * @param target_id Target the cmd buffer will play inside. For
-     *                  Vulkan secondaries this resolves to the
-     *                  render pass used during inheritance setup.
-     *                  Pass `0` for compute / transfer cmd buffers
-     *                  that play outside any render pass.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) = 0;
-
-    /**
-     * @brief Allocates a `IGpuCommandBuffer` compatible with rendering
-     *        into @p target. Mirror of the `uint64_t` overload for
-     *        renderable-texture targets.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) = 0;
-
-    /**
-     * @brief Allocates an `IGpuCommandBuffer` compatible with rendering
-     *        into the given MRT group.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) = 0;
+    virtual IGpuCommandBuffer::Ptr create_command_buffer() = 0;
 
     /**
      * @brief Replays a recorded command buffer in the active frame.
-     *        For raster cmd buffers, must be called between
-     *        `begin_pass` / `end_pass` on a compatible target.
+     *        Always called outside any rendering scope on the primary;
+     *        the secondary internally manages its own scope.
      */
     virtual void execute(const IGpuCommandBuffer::Ptr& cmd) = 0;
-
-    /** @brief Ends the current render pass. */
-    virtual void end_pass() = 0;
 
     /**
      * @brief Blits @p source into @p dest. Both textures must have been

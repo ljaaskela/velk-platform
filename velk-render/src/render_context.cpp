@@ -199,56 +199,6 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
     return shader;
 }
 
-uint64_t RenderContextImpl::create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
-                                            uint64_t key, PixelFormat target_format,
-                                            IRenderTextureGroup* target_group,
-                                            const PipelineOptions& options)
-{
-    if (!initialized_ || !backend_) {
-        return 0;
-    }
-
-    const auto& vert_shader = vertex ? vertex : default_vertex_shader_;
-    const auto& frag_shader = fragment ? fragment : default_fragment_shader_;
-    if (!vert_shader || !frag_shader) {
-        VELK_LOG(E, "create_pipeline: missing vertex or fragment shader");
-        return 0;
-    }
-
-    auto vert_data = vert_shader->get_data();
-    auto frag_data = frag_shader->get_data();
-    if (vert_data.empty() || frag_data.empty()) {
-        VELK_LOG(E, "create_pipeline: empty shader bytecode");
-        return 0;
-    }
-
-    PipelineDesc desc;
-    desc.vertex = vert_shader;
-    desc.fragment = frag_shader;
-    desc.options = options;
-
-    auto pid = backend_->create_pipeline(desc, target_format, target_group);
-    if (!pid) {
-        return 0;
-    }
-
-    if (key == 0) {
-        key = next_pipeline_key_++;
-    }
-    pipeline_map_[PipelineCacheKey{key, target_format, target_group}] = std::move(pid);
-    return key;
-}
-
-uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string_view vertex_source,
-                                             uint64_t key, PixelFormat target_format,
-                                             IRenderTextureGroup* target_group,
-                                             const PipelineOptions& options)
-{
-    auto vert = vertex_source.empty() ? nullptr : compile_shader(vertex_source, ShaderStage::Vertex);
-    auto frag = fragment_source.empty() ? nullptr : compile_shader(fragment_source, ShaderStage::Fragment);
-    return create_pipeline(vert, frag, key, target_format, target_group, options);
-}
-
 uint64_t RenderContextImpl::compile_pipeline_dynamic(
     string_view fragment_source, string_view vertex_source,
     uint64_t key, array_view<const PixelFormat> color_formats,

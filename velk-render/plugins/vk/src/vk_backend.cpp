@@ -177,53 +177,15 @@ bool VkBackend::init(void* params)
         return false;
     }
 
-    // Create a default render pass from the initial surface format.
-    // This is needed so pipelines can be created before a swapchain exists.
+    // Cache the swapchain's preferred color format up front so
+    // create_texture(TextureUsage::RenderTarget) with PixelFormat::Surface
+    // can match the swap (legacy RenderTargetCache RTT path).
     if (initial_surface) {
         default_surface_format_ = choose_surface_format(physical_device_, initial_surface);
-        VkAttachmentDescription color_att{};
-        color_att.format = default_surface_format_;
-        color_att.samples = VK_SAMPLE_COUNT_1_BIT;
-        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        color_att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        VkAttachmentReference color_ref{};
-        color_ref.attachment = 0;
-        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_ref;
-
-        VkSubpassDependency dep{};
-        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo rp_ci{};
-        rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rp_ci.attachmentCount = 1;
-        rp_ci.pAttachments = &color_att;
-        rp_ci.subpassCount = 1;
-        rp_ci.pSubpasses = &subpass;
-        rp_ci.dependencyCount = 1;
-        rp_ci.pDependencies = &dep;
-
-        if (vkCreateRenderPass(device_, &rp_ci, nullptr, &default_render_pass_) != VK_SUCCESS) {
-            VELK_LOG(E, "VkBackend: failed to create default render pass");
-            return false;
-        }
     }
 
     initialized_ = true;
-    VELK_LOG(I, "VkBackend: initialized (Vulkan 1.2, BDA + bindless)");
+    VELK_LOG(I, "VkBackend: initialized (Vulkan 1.3, BDA + bindless + dynamic rendering)");
     return true;
 }
 
@@ -287,13 +249,6 @@ void VkBackend::shutdown()
     }
     surfaces_.clear();
 
-    if (default_render_pass_) {
-        vkDestroyRenderPass(device_, default_render_pass_, nullptr);
-    }
-    for (auto& [fmt, rp] : single_attachment_render_passes_) {
-        vkDestroyRenderPass(device_, rp, nullptr);
-    }
-    single_attachment_render_passes_.clear();
     vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptor_layout_, nullptr);
     vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
@@ -823,10 +778,6 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
             sd.width = desc.width;
             sd.height = desc.height;
             sd.update_rate = desc.update_rate;
-            sd.depth_format = desc.depth;
-            sd.depth_vk_format = (desc.depth == DepthFormat::Default)
-                                     ? VK_FORMAT_D32_SFLOAT
-                                     : VK_FORMAT_UNDEFINED;
             if (!create_swapchain(sd)) {
                 return 0;
             }
@@ -1011,155 +962,11 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
         vkCreateImageView(device_, &view_ci, nullptr, &sd.image_views[i]);
     }
 
-    // Depth images (one per swapchain image so frames-in-flight don't race).
-    const bool has_depth = sd.depth_format != DepthFormat::None;
-    if (has_depth) {
-        sd.depth_images.resize(img_count, VK_NULL_HANDLE);
-        sd.depth_views.resize(img_count, VK_NULL_HANDLE);
-        sd.depth_allocations.resize(img_count, VK_NULL_HANDLE);
-
-        for (uint32_t i = 0; i < img_count; ++i) {
-            VkImageCreateInfo ici{};
-            ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            ici.imageType = VK_IMAGE_TYPE_2D;
-            ici.format = sd.depth_vk_format;
-            ici.extent = { extent.width, extent.height, 1 };
-            ici.mipLevels = 1;
-            ici.arrayLayers = 1;
-            ici.samples = VK_SAMPLE_COUNT_1_BIT;
-            ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-            ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
-                        | VK_IMAGE_USAGE_TRANSFER_DST_BIT; // target of deferred-composite depth blit
-            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-            vmaCreateImage(allocator_, &ici, &aci,
-                           &sd.depth_images[i], &sd.depth_allocations[i], nullptr);
-
-            VkImageViewCreateInfo dv_ci{};
-            dv_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            dv_ci.image = sd.depth_images[i];
-            dv_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            dv_ci.format = sd.depth_vk_format;
-            dv_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            dv_ci.subresourceRange.levelCount = 1;
-            dv_ci.subresourceRange.layerCount = 1;
-            vkCreateImageView(device_, &dv_ci, nullptr, &sd.depth_views[i]);
-        }
-    }
-
-    // Render pass
-    VkAttachmentDescription atts[2]{};
-    atts[0].format = sd.image_format;
-    atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    atts[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    VkAttachmentReference color_ref{};
-    color_ref.attachment = 0;
-    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depth_ref{};
-    if (has_depth) {
-        atts[1].format = sd.depth_vk_format;
-        atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        depth_ref.attachment = 1;
-        depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-    subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
-
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        | (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
-
-    VkRenderPassCreateInfo rp_ci{};
-    rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_ci.attachmentCount = has_depth ? 2u : 1u;
-    rp_ci.pAttachments = atts;
-    rp_ci.subpassCount = 1;
-    rp_ci.pSubpasses = &subpass;
-    rp_ci.dependencyCount = 1;
-    rp_ci.pDependencies = &dep;
-
-    vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.render_pass);
-
-    // Load render pass (for subsequent passes on the same surface within a frame).
-    // Color is preserved (LOAD). Depth is cleared because not every path
-    // leading to a load pass populates depth (e.g. RT blit_to_surface) —
-    // keeping CLEAR means the pass is usable whether depth was populated
-    // or not.
-    atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    atts[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    if (has_depth) {
-        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    }
-    vkCreateRenderPass(device_, &rp_ci, nullptr, &sd.load_render_pass);
-
-    // Framebuffers
-    sd.framebuffers.resize(img_count);
-    for (uint32_t i = 0; i < img_count; ++i) {
-        VkImageView fb_atts[2] = { sd.image_views[i],
-                                   has_depth ? sd.depth_views[i] : VK_NULL_HANDLE };
-
-        VkFramebufferCreateInfo fb_ci{};
-        fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_ci.renderPass = sd.render_pass;
-        fb_ci.attachmentCount = has_depth ? 2u : 1u;
-        fb_ci.pAttachments = fb_atts;
-        fb_ci.width = extent.width;
-        fb_ci.height = extent.height;
-        fb_ci.layers = 1;
-
-        vkCreateFramebuffer(device_, &fb_ci, nullptr, &sd.framebuffers[i]);
-    }
-
-    // If this is the first surface with depth and the default render pass
-    // has no depth, recreate the default render pass with depth so
-    // pipelines compiled against it remain render-pass-compatible with
-    // this surface's depth-enabled render pass.
-    if (has_depth && default_depth_format_ == VK_FORMAT_UNDEFINED) {
-        if (default_render_pass_) {
-            vkDestroyRenderPass(device_, default_render_pass_, nullptr);
-            default_render_pass_ = VK_NULL_HANDLE;
-        }
-        default_depth_format_ = sd.depth_vk_format;
-
-        VkAttachmentDescription datts[2] = { atts[0], atts[1] };
-        datts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        datts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        datts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        datts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        VkRenderPassCreateInfo drp_ci = rp_ci;
-        drp_ci.pAttachments = datts;
-        vkCreateRenderPass(device_, &drp_ci, nullptr, &default_render_pass_);
-    }
-
+    // S6.6: post-S6.4, surfaces no longer need their own render pass /
+    // framebuffer / depth attachment. Producers render to the per-surface
+    // composite (allocated separately in create_surface_composite); the
+    // backend blits composite → swap image at end_frame. The swap images
+    // themselves are only used as transfer destinations.
     return true;
 }
 
@@ -1246,39 +1053,14 @@ void VkBackend::destroy_surface_composite(SurfaceData& sd)
 void VkBackend::destroy_swapchain(SurfaceData& sd)
 {
     destroy_surface_composite(sd);
-    for (auto fb : sd.framebuffers) {
-        vkDestroyFramebuffer(device_, fb, nullptr);
-    }
     for (auto iv : sd.image_views) {
         vkDestroyImageView(device_, iv, nullptr);
-    }
-    if (sd.render_pass) {
-        vkDestroyRenderPass(device_, sd.render_pass, nullptr);
-    }
-    if (sd.load_render_pass) {
-        vkDestroyRenderPass(device_, sd.load_render_pass, nullptr);
     }
     if (sd.swapchain) {
         vkDestroySwapchainKHR(device_, sd.swapchain, nullptr);
     }
-
-    for (size_t i = 0; i < sd.depth_views.size(); ++i) {
-        if (sd.depth_views[i]) {
-            vkDestroyImageView(device_, sd.depth_views[i], nullptr);
-        }
-        if (sd.depth_images[i] && sd.depth_allocations[i]) {
-            vmaDestroyImage(allocator_, sd.depth_images[i], sd.depth_allocations[i]);
-        }
-    }
-    sd.depth_views.clear();
-    sd.depth_images.clear();
-    sd.depth_allocations.clear();
-
-    sd.framebuffers.clear();
     sd.image_views.clear();
     sd.images.clear();
-    sd.render_pass = VK_NULL_HANDLE;
-    sd.load_render_pass = VK_NULL_HANDLE;
     sd.swapchain = VK_NULL_HANDLE;
 }
 
@@ -1790,274 +1572,6 @@ bool VkBackend::read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
 // Pipelines
 // ============================================================================
 
-VkRenderPass VkBackend::get_or_create_single_attachment_render_pass(VkFormat color_format)
-{
-    auto it = single_attachment_render_passes_.find(color_format);
-    if (it != single_attachment_render_passes_.end()) {
-        return it->second;
-    }
-
-    // Single color attachment, no depth, identical structure to the
-    // standalone RTT render pass in create_texture (line 1234 area) so
-    // pipelines compiled here are render-pass compatible with rendering
-    // into create_texture's RTT for the same format.
-    VkAttachmentDescription color_att{};
-    color_att.format = color_format;
-    color_att.samples = VK_SAMPLE_COUNT_1_BIT;
-    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color_att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkAttachmentReference color_ref{};
-    color_ref.attachment = 0;
-    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    VkRenderPassCreateInfo rp_ci{};
-    rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_ci.attachmentCount = 1;
-    rp_ci.pAttachments = &color_att;
-    rp_ci.subpassCount = 1;
-    rp_ci.pSubpasses = &subpass;
-    rp_ci.dependencyCount = 1;
-    rp_ci.pDependencies = &dep;
-
-    VkRenderPass rp = VK_NULL_HANDLE;
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &rp) != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create single-attachment render pass");
-        return VK_NULL_HANDLE;
-    }
-    single_attachment_render_passes_[color_format] = rp;
-    return rp;
-}
-
-IGpuPipeline::Ptr VkBackend::create_pipeline(const PipelineDesc& desc,
-                                             PixelFormat target_format,
-                                             IRenderTextureGroup* target_group)
-{
-    if (!default_render_pass_) {
-        VELK_LOG(E, "VkBackend: cannot create pipeline without a render pass");
-        return {};
-    }
-    VELK_PERF_SCOPE("vk.create_pipeline");
-    VkRenderPass render_pass = default_render_pass_;
-    uint32_t color_attachment_count = 1;
-    IVkRenderTargetGroup* vk_group = target_group
-        ? interface_cast<IVkRenderTargetGroup>(target_group)
-        : nullptr;
-    if (vk_group) {
-        // MRT path: group's render pass dictates attachment count + formats.
-        // target_format is ignored here.
-        render_pass = vk_group->vk_render_pass();
-        color_attachment_count = static_cast<uint32_t>(vk_group->vk_attachment_count());
-    } else if (target_format != PixelFormat::Surface) {
-        // Single-attachment, no-depth render pass for an explicit color
-        // format (HDR path target, format-explicit RTT). Pipelines
-        // compiled here are render-pass compatible with create_texture's
-        // standalone RTT render pass (also single-color, no depth).
-        VkFormat vk_color = vk_format_for(target_format);
-        if (vk_color == VK_FORMAT_UNDEFINED) {
-            VELK_LOG(E, "VkBackend: create_pipeline: unsupported target_format");
-            return {};
-        }
-        render_pass = get_or_create_single_attachment_render_pass(vk_color);
-        if (!render_pass) {
-            return {};
-        }
-    }
-
-    // Shader modules
-    VkShaderModuleCreateInfo vert_ci{};
-    vert_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    vert_ci.codeSize = desc.get_vertex_size();
-    vert_ci.pCode = desc.get_vertex_data().begin();
-
-    VkShaderModule vert_module = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device_, &vert_ci, nullptr, &vert_module) != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create vertex shader module");
-        return {};
-    }
-
-    VkShaderModuleCreateInfo frag_ci{};
-    frag_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    frag_ci.codeSize = desc.get_fragment_size();
-    frag_ci.pCode = desc.get_fragment_data().begin();
-
-    VkShaderModule frag_module = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device_, &frag_ci, nullptr, &frag_module) != VK_SUCCESS) {
-        vkDestroyShaderModule(device_, vert_module, nullptr);
-        VELK_LOG(E, "VkBackend: failed to create fragment shader module");
-        return {};
-    }
-
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert_module;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag_module;
-    stages[1].pName = "main";
-
-    // Empty vertex input (vertex pulling via BDA)
-    VkPipelineVertexInputStateCreateInfo vertex_input{};
-    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-
-    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
-    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    input_assembly.topology = (desc.options.topology == Topology::TriangleStrip)
-        ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-        : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkPipelineViewportStateCreateInfo viewport_state{};
-    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewport_state.viewportCount = 1;
-    viewport_state.scissorCount = 1;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    switch (desc.options.cull_mode) {
-    case CullMode::None:  rasterizer.cullMode = VK_CULL_MODE_NONE;     break;
-    case CullMode::Back:  rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; break;
-    case CullMode::Front: rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; break;
-    }
-    rasterizer.frontFace = (desc.options.front_face == FrontFace::Clockwise)
-        ? VK_FRONT_FACE_CLOCKWISE
-        : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    VkPipelineMultisampleStateCreateInfo multisample{};
-    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    // Blending: MRT render passes (G-buffer) always write opaque; for
-    // single-attachment passes, honor the material's requested blend mode.
-    bool blend_enabled = (vk_group == nullptr) && (desc.options.blend_mode == BlendMode::Alpha);
-
-    VkPipelineColorBlendAttachmentState blend_att{};
-    blend_att.blendEnable = blend_enabled ? VK_TRUE : VK_FALSE;
-    blend_att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blend_att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend_att.colorBlendOp = VK_BLEND_OP_ADD;
-    blend_att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend_att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend_att.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-    // For MRT groups (G-buffer fills) we want opaque writes on all
-    // attachments. Replicate the single blend_att across N attachments.
-    vector<VkPipelineColorBlendAttachmentState> blend_atts(color_attachment_count, blend_att);
-
-    VkPipelineColorBlendStateCreateInfo blend{};
-    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = color_attachment_count;
-    blend.pAttachments = blend_atts.data();
-
-    VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic{};
-    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamic.dynamicStateCount = 2;
-    dynamic.pDynamicStates = dynamic_states;
-
-    // Depth-stencil state. Only attached when the target render pass
-    // actually has a depth attachment. For target_group != 0 the group
-    // carries its own depth_vk_format; for the swapchain path
-    // default_depth_format_ is populated by create_swapchain.
-    // A material with depth_test=Disabled drawn into a depth-enabled pass
-    // silently has depth testing off — this is the "(a) ignore" edge case.
-    bool target_has_depth = false;
-    if (!vk_group) {
-        // Surface follows the swapchain's default render pass (which may
-        // carry depth); explicit non-surface formats use the single-color
-        // no-depth cache, so depth state must be omitted for those.
-        if (target_format == PixelFormat::Surface) {
-            target_has_depth = (default_depth_format_ != VK_FORMAT_UNDEFINED);
-        }
-    } else {
-        target_has_depth = (vk_group->vk_depth_format() != VK_FORMAT_UNDEFINED);
-    }
-
-    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
-    if (target_has_depth) {
-        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depth_stencil.depthTestEnable = (desc.options.depth_test != CompareOp::Disabled) ? VK_TRUE : VK_FALSE;
-        depth_stencil.depthWriteEnable = desc.options.depth_write ? VK_TRUE : VK_FALSE;
-        switch (desc.options.depth_test) {
-        case CompareOp::Never:        depth_stencil.depthCompareOp = VK_COMPARE_OP_NEVER;            break;
-        case CompareOp::Less:         depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;             break;
-        case CompareOp::Equal:        depth_stencil.depthCompareOp = VK_COMPARE_OP_EQUAL;            break;
-        case CompareOp::LessEqual:    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;    break;
-        case CompareOp::Greater:      depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER;          break;
-        case CompareOp::NotEqual:     depth_stencil.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;        break;
-        case CompareOp::GreaterEqual: depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
-        case CompareOp::Always:       depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
-        case CompareOp::Disabled:     depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
-        }
-        depth_stencil.minDepthBounds = 0.0f;
-        depth_stencil.maxDepthBounds = 1.0f;
-    }
-
-    VkGraphicsPipelineCreateInfo pipeline_ci{};
-    pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipeline_ci.stageCount = 2;
-    pipeline_ci.pStages = stages;
-    pipeline_ci.pVertexInputState = &vertex_input;
-    pipeline_ci.pInputAssemblyState = &input_assembly;
-    pipeline_ci.pViewportState = &viewport_state;
-    pipeline_ci.pRasterizationState = &rasterizer;
-    pipeline_ci.pMultisampleState = &multisample;
-    pipeline_ci.pDepthStencilState = target_has_depth ? &depth_stencil : nullptr;
-    pipeline_ci.pColorBlendState = &blend;
-    pipeline_ci.pDynamicState = &dynamic;
-    pipeline_ci.layout = pipeline_layout_;
-    pipeline_ci.renderPass = render_pass;
-    pipeline_ci.subpass = 0;
-
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkResult pipeline_result;
-    {
-        VELK_PERF_SCOPE("vk.vkCreateGraphicsPipelines");
-        pipeline_result = vkCreateGraphicsPipelines(
-            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
-    }
-    if (pipeline_result != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create graphics pipeline");
-        vkDestroyShaderModule(device_, vert_module, nullptr);
-        vkDestroyShaderModule(device_, frag_module, nullptr);
-        return {};
-    }
-
-    // Shader modules can be destroyed after pipeline creation
-    vkDestroyShaderModule(device_, vert_module, nullptr);
-    vkDestroyShaderModule(device_, frag_module, nullptr);
-
-    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
-        ::velk::ClassId::VkGpuPipeline);
-    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
-    if (!vk_gp) {
-        vkDestroyPipeline(device_, pipeline, nullptr);
-        return {};
-    }
-    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS);
-    return gp;
-}
-
 IGpuPipeline::Ptr VkBackend::create_pipeline_dynamic(
     const PipelineDesc& desc,
     array_view<const PixelFormat> color_formats,
@@ -2499,276 +2013,19 @@ void VkBackend::begin_frame()
 
     frame_open_ = true;
     present_surface_id_ = 0;
-    surface_has_clear_ = false;
     for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
     for (auto* g  : live_render_target_groups_) g->mark_cleared_this_frame(false);
-    current_render_pass_ = VK_NULL_HANDLE;
 
     // S6.4: surface composites need a fresh "canvas" per frame, but
     // the actual clear is deferred to the first acquire_swapchain_texture
-    // call this frame — by that point any pending resize_surface (which
-    // recreates the composite) has already fired during the renderer's
-    // build phase. Clearing in begin_frame would record vkCmd* on the
-    // primary referencing a composite VkImage that resize might destroy
+    // call this frame, by which point any pending resize_surface (which
+    // recreates the composite) has fired during the renderer's build
+    // phase. Clearing in begin_frame would record vkCmd* on the primary
+    // referencing a composite VkImage that resize might destroy
     // mid-frame, invalidating the primary cmd buffer.
     for (auto& [surface_id, sd] : surfaces_) {
         sd.composite_acquired_this_frame = false;
     }
-#if 0  // moved to acquire_swapchain_texture (first-acquire-this-frame)
-    for (auto& [surface_id, sd] : surfaces_) {
-        if (!sd.composite) continue;
-        auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
-        if (!surf_tex) continue;
-        const VkImage img = surf_tex->vk_image();
-        if (img == VK_NULL_HANDLE) continue;
-
-        // Transition UNDEFINED/SHADER_READ_ONLY → TRANSFER_DST_OPTIMAL,
-        // clear, then back to COLOR_ATTACHMENT_OPTIMAL ready for the
-        // first record_begin_rendering's LOAD. The barrier oldLayout
-        // must match what was actually left at end of last frame:
-        // record_end_rendering's transition_image leaves color
-        // attachments in SHADER_READ_ONLY (or UNDEFINED on first frame).
-        const VkImageLayout old_layout = surf_tex->vk_current_layout();
-
-        VkImageMemoryBarrier to_dst{};
-        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        to_dst.oldLayout = old_layout;
-        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_dst.image = img;
-        to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        to_dst.subresourceRange.levelCount = 1;
-        to_dst.subresourceRange.layerCount = 1;
-        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(sync.command_buffer,
-                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                 | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &to_dst);
-
-        VkClearColorValue clear{};
-        clear.float32[0] = 0.f;
-        clear.float32[1] = 0.f;
-        clear.float32[2] = 0.f;
-        clear.float32[3] = 0.f;
-        VkImageSubresourceRange range{};
-        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        range.levelCount = 1;
-        range.layerCount = 1;
-        vkCmdClearColorImage(sync.command_buffer, img,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &clear, 1, &range);
-
-        // Leave composite in SHADER_READ_ONLY post-clear: cached
-        // record_begin_rendering barriers were baked as
-        // SHADER_READ_ONLY → COLOR_ATTACHMENT_OPTIMAL (the layout
-        // record_end_rendering leaves color attachments in). Keeping
-        // begin_frame's exit layout consistent means cached cmd
-        // buffers replay correctly from frame 1 on.
-        VkImageMemoryBarrier to_read{};
-        to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_read.image = img;
-        to_read.subresourceRange = range;
-        to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(sync.command_buffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &to_read);
-        surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-#endif
-}
-
-void VkBackend::begin_pass(uint64_t target_id)
-{
-    VELK_PERF_SCOPE("vk.begin_pass");
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    if (pending_buffer_update_barrier_) {
-        VkMemoryBarrier mb{};
-        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(sync.command_buffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
-                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
-        pending_buffer_update_barrier_ = false;
-    }
-
-    VkRenderPass rp = VK_NULL_HANDLE;
-    VkFramebuffer fb = VK_NULL_HANDLE;
-    bool target_has_depth = false;
-
-    // begin_pass(uint64_t) only handles surfaces now; groups dispatch
-    // through the IRenderTextureGroup& overload, textures through
-    // IGpuTexture&.
-    auto sit = surfaces_.find(target_id);
-    if (sit != surfaces_.end()) {
-        auto& sd = sit->second;
-        current_surface_ = target_id;
-
-        // Only acquire the swapchain image once per frame per surface
-        if (present_surface_id_ != target_id) {
-            present_surface_id_ = target_id;
-
-            present_acquire_sem_idx_ = acquire_semaphore_index_;
-            VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-            acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
-
-            VkResult result = vkAcquireNextImageKHR(
-                device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-                current_surface_ = 0;
-                return;
-            }
-        }
-
-        rp = surface_has_clear_ ? sd.load_render_pass : sd.render_pass;
-        fb = sd.framebuffers[sd.image_index];
-        current_target_width_ = sd.width;
-        current_target_height_ = sd.height;
-        target_has_depth = (sd.depth_format != DepthFormat::None);
-        surface_has_clear_ = true;
-    } else {
-        // begin_pass(uint64_t) only handles surfaces and MRT groups now.
-        // Renderable textures route through the IGpuTexture& overload.
-        return;
-    }
-
-    VkRenderPassBeginInfo rp_begin{};
-    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderPass = rp;
-    rp_begin.framebuffer = fb;
-    rp_begin.renderArea.extent = {static_cast<uint32_t>(current_target_width_),
-                                  static_cast<uint32_t>(current_target_height_)};
-
-    VkClearValue clear_values[2]{};
-    clear_values[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-    clear_values[1].depthStencil = {1.0f, 0};
-    rp_begin.clearValueCount = target_has_depth ? 2u : 1u;
-    rp_begin.pClearValues = clear_values;
-
-    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
-                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-    current_render_pass_ = rp;
-    current_framebuffer_ = fb;
-    RENDER_LOG("vk.begin_pass target=%llu rp=%p fb=%p extent=%dx%d depth=%d",
-               (unsigned long long)target_id, (void*)rp, (void*)fb,
-               current_target_width_, current_target_height_, target_has_depth ? 1 : 0);
-}
-
-void VkBackend::begin_pass(IGpuTexture& target)
-{
-    VELK_PERF_SCOPE("vk.begin_pass");
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    if (pending_buffer_update_barrier_) {
-        VkMemoryBarrier mb{};
-        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(sync.command_buffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
-                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
-        pending_buffer_update_barrier_ = false;
-    }
-
-    auto* vk_t = interface_cast<IVkGpuTexture>(&target);
-    if (!vk_t || vk_t->vk_render_pass() == VK_NULL_HANDLE) return;
-
-    current_surface_ = 0;
-    const bool already_cleared = vk_t->was_cleared_this_frame();
-    VkRenderPass rp = already_cleared ? vk_t->vk_load_render_pass()
-                                      : vk_t->vk_render_pass();
-    VkFramebuffer fb = vk_t->vk_framebuffer();
-    const uvec2 dims = target.get_dimensions();
-    current_target_width_ = static_cast<int>(dims.x);
-    current_target_height_ = static_cast<int>(dims.y);
-    if (!already_cleared) vk_t->mark_cleared_this_frame(true);
-
-    VkRenderPassBeginInfo rp_begin{};
-    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderPass = rp;
-    rp_begin.framebuffer = fb;
-    rp_begin.renderArea.extent = {dims.x, dims.y};
-    VkClearValue clear_value{};
-    clear_value.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-    rp_begin.clearValueCount = 1;
-    rp_begin.pClearValues = &clear_value;
-
-    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
-                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-    current_render_pass_ = rp;
-    current_framebuffer_ = fb;
-    RENDER_LOG("vk.begin_pass TEX rp=%p fb=%p extent=%ux%u",
-               (void*)rp, (void*)fb, dims.x, dims.y);
-}
-
-void VkBackend::begin_pass(IRenderTextureGroup& target)
-{
-    VELK_PERF_SCOPE("vk.begin_pass");
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    if (pending_buffer_update_barrier_) {
-        VkMemoryBarrier mb{};
-        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(sync.command_buffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
-                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
-        pending_buffer_update_barrier_ = false;
-    }
-
-    auto* vk_group = interface_cast<IVkRenderTargetGroup>(&target);
-    if (!vk_group || vk_group->vk_render_pass() == VK_NULL_HANDLE) return;
-
-    current_surface_ = 0;
-    const bool already_cleared = vk_group->was_cleared_this_frame();
-    VkRenderPass rp = already_cleared ? vk_group->vk_load_render_pass()
-                                      : vk_group->vk_render_pass();
-    VkFramebuffer fb = vk_group->vk_framebuffer();
-    const uvec2 dims = target.get_dimensions();
-    current_target_width_  = static_cast<int>(dims.x);
-    current_target_height_ = static_cast<int>(dims.y);
-    if (!already_cleared) vk_group->mark_cleared_this_frame(true);
-
-    const uint32_t color_count = static_cast<uint32_t>(vk_group->vk_attachment_count());
-    const bool group_has_depth = (vk_group->vk_depth_format() != VK_FORMAT_UNDEFINED);
-    const uint32_t clear_count = color_count + (group_has_depth ? 1u : 0u);
-    vector<VkClearValue> clear_values(clear_count);
-    for (uint32_t i = 0; i < color_count; ++i) {
-        clear_values[i].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-    }
-    if (group_has_depth) clear_values[color_count].depthStencil = {1.0f, 0};
-
-    VkRenderPassBeginInfo rp_begin{};
-    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderPass = rp;
-    rp_begin.framebuffer = fb;
-    rp_begin.renderArea.extent = {dims.x, dims.y};
-    rp_begin.clearValueCount = clear_count;
-    rp_begin.pClearValues = clear_values.data();
-
-    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
-                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-    current_render_pass_ = rp;
-    current_framebuffer_ = fb;
-    RENDER_LOG("vk.begin_pass GROUP rp=%p fb=%p extent=%ux%u",
-               (void*)rp, (void*)fb, dims.x, dims.y);
 }
 
 void VkBackend::record_draw_loop(::VkCommandBuffer cb,
@@ -2850,16 +2107,6 @@ void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
     frame_sync_[target_slot].deferred_persistent_frees.push_back(cb);
     RENDER_LOG("vk.defer_free cb=%p current_slot=%u queue_slot=%u",
                (void*)cb, frame_sync_index_, target_slot);
-}
-
-void VkBackend::end_pass()
-{
-    auto& sync = frame_sync_[frame_sync_index_];
-    vkCmdEndRenderPass(sync.command_buffer);
-    RENDER_LOG("vk.end_pass");
-    current_surface_ = 0;
-    current_render_pass_ = VK_NULL_HANDLE;
-    current_framebuffer_ = VK_NULL_HANDLE;
 }
 
 void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
@@ -3009,162 +2256,6 @@ void VkBackend::blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst
     record_blit_to_texture(sync.command_buffer, source, dest, dst_rect);
 }
 
-#if 0  // S6.4: replaced by emit_surface_present_blit (end_frame composite-to-swap).
-void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect dst_rect)
-{
-    VELK_PERF_SCOPE("vk.blit_to_surface");
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    auto* src_vk = interface_cast<IVkGpuTexture>(&source);
-    if (!src_vk || src_vk->vk_image() == VK_NULL_HANDLE) return;
-    const VkImage src_image = src_vk->vk_image();
-    int src_w = 0, src_h = 0;
-    {
-        auto sd = source.get_dimensions();
-        src_w = static_cast<int>(sd.x);
-        src_h = static_cast<int>(sd.y);
-    }
-
-    auto sit = surfaces_.find(target_id);
-    if (sit == surfaces_.end()) return;
-    const bool dst_is_surface = true;
-
-    VkImage dst_image = VK_NULL_HANDLE;
-    int dst_w = 0;
-    int dst_h = 0;
-    VkImageLayout dst_old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageLayout dst_final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    VkAccessFlags dst_old_access = 0;
-
-    {
-        auto& sd = sit->second;
-        if (present_surface_id_ != target_id) {
-            present_surface_id_ = target_id;
-            present_acquire_sem_idx_ = acquire_semaphore_index_;
-            VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-            acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
-
-            VkResult result = vkAcquireNextImageKHR(
-                device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-                present_surface_id_ = 0;
-                return;
-            }
-        }
-        dst_image = sd.images[sd.image_index];
-        dst_w = sd.width;
-        dst_h = sd.height;
-    }
-
-    // Destination: oldLayout -> TRANSFER_DST_OPTIMAL
-    VkImageMemoryBarrier to_dst{};
-    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_dst.oldLayout = dst_old_layout;
-    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_dst.image = dst_image;
-    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    to_dst.subresourceRange.levelCount = 1;
-    to_dst.subresourceRange.layerCount = 1;
-    to_dst.srcAccessMask = dst_old_access;
-    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    // Source texture: current layout -> TRANSFER_SRC_OPTIMAL. Works for
-    // both storage images (current = GENERAL, written by compute) and
-    // render-target attachments (current = SHADER_READ_ONLY_OPTIMAL,
-    // sampled by prior passes).
-    VkImageLayout src_canonical_layout = src_vk->vk_current_layout();
-    VkImageMemoryBarrier to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_src.oldLayout = src_canonical_layout;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = src_image;
-    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    to_src.subresourceRange.levelCount = 1;
-    to_src.subresourceRange.layerCount = 1;
-    to_src.srcAccessMask = (src_canonical_layout == VK_IMAGE_LAYOUT_GENERAL)
-                               ? VK_ACCESS_SHADER_WRITE_BIT
-                               : VK_ACCESS_SHADER_READ_BIT;
-    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-    VkImageMemoryBarrier pre[2] = {to_dst, to_src};
-    vkCmdPipelineBarrier(sync.command_buffer,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, pre);
-
-    // Resolve destination rect; default (zero size) means full target.
-    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
-    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
-    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
-    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
-    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
-        dx0 = 0;
-        dy0 = 0;
-        dx1 = dst_w;
-        dy1 = dst_h;
-    }
-
-    VkImageBlit blit{};
-    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1] = {src_w, src_h, 1};
-    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[0] = {dx0, dy0, 0};
-    blit.dstOffsets[1] = {dx1, dy1, 1};
-
-    vkCmdBlitImage(sync.command_buffer,
-                   src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blit, VK_FILTER_LINEAR);
-
-    // Destination: TRANSFER_DST_OPTIMAL -> final layout (PRESENT_SRC for
-    // swapchains, SHADER_READ_ONLY for textures so following sample
-    // passes don't need an extra transition).
-    VkImageMemoryBarrier to_final{};
-    to_final.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_final.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    to_final.newLayout = dst_final_layout;
-    to_final.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_final.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_final.image = dst_image;
-    to_final.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    to_final.subresourceRange.levelCount = 1;
-    to_final.subresourceRange.layerCount = 1;
-    to_final.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    to_final.dstAccessMask = dst_is_surface ? 0 : VK_ACCESS_SHADER_READ_BIT;
-
-    // Source texture: TRANSFER_SRC_OPTIMAL -> canonical layout.
-    VkImageMemoryBarrier to_general{};
-    to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_general.newLayout = src_canonical_layout;
-    to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_general.image = src_image;
-    to_general.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    to_general.subresourceRange.levelCount = 1;
-    to_general.subresourceRange.layerCount = 1;
-    to_general.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    to_general.dstAccessMask = 0;
-
-    VkImageMemoryBarrier post[2] = {to_final, to_general};
-    vkCmdPipelineBarrier(sync.command_buffer,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         dst_is_surface ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
-                                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                                              | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, post);
-
-    if (dst_is_surface) {
-        surface_has_clear_ = true;
-    }
-}
-#endif
 
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
 {
@@ -3206,54 +2297,14 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
         0, nullptr);
 }
 
-VkRenderPass VkBackend::find_render_pass_for_target(uint64_t target_id)
-{
-    if (target_id == 0) return VK_NULL_HANDLE;
-    auto sit = surfaces_.find(target_id);
-    if (sit != surfaces_.end()) {
-        return sit->second.render_pass;
-    }
-    return VK_NULL_HANDLE;
-}
-
-::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(uint64_t target_id)
+::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer()
 {
     auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
         ::velk::ClassId::VkCommandBuffer);
-    VkRenderPass rp = find_render_pass_for_target(target_id);
     if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
-        impl->init(this, rp);
+        impl->init(this);
     }
-    RENDER_LOG("vk.create_command_buffer target=%llu rp=%p ptr=%p",
-               (unsigned long long)target_id, (void*)rp, (void*)cmd.get());
-    return cmd;
-}
-
-::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(IGpuTexture& target)
-{
-    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
-        ::velk::ClassId::VkCommandBuffer);
-    auto* vk_t = interface_cast<IVkGpuTexture>(&target);
-    VkRenderPass rp = vk_t ? vk_t->vk_render_pass() : VK_NULL_HANDLE;
-    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
-        impl->init(this, rp);
-    }
-    RENDER_LOG("vk.create_command_buffer TEX rp=%p ptr=%p",
-               (void*)rp, (void*)cmd.get());
-    return cmd;
-}
-
-::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(IRenderTextureGroup& target)
-{
-    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
-        ::velk::ClassId::VkCommandBuffer);
-    auto* vk_g = interface_cast<IVkRenderTargetGroup>(&target);
-    VkRenderPass rp = vk_g ? vk_g->vk_render_pass() : VK_NULL_HANDLE;
-    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
-        impl->init(this, rp);
-    }
-    RENDER_LOG("vk.create_command_buffer GROUP rp=%p ptr=%p",
-               (void*)rp, (void*)cmd.get());
+    RENDER_LOG("vk.create_command_buffer ptr=%p", (void*)cmd.get());
     return cmd;
 }
 
@@ -3264,9 +2315,26 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     ::VkCommandBuffer secondary = impl->handle();
     if (!secondary) return;
     auto& sync = frame_sync_[frame_sync_index_];
-    RENDER_LOG("vk.execute primary=%p secondary=%p current_rp=%p",
-               (void*)sync.command_buffer, (void*)secondary,
-               (void*)current_render_pass_);
+
+    // Flush any pending vkCmdUpdateBuffer writes before secondary reads
+    // them (view globals etc). Begin_pass used to host this barrier;
+    // post-S6.6 it lives at the only remaining point where producer
+    // work hits the primary.
+    if (pending_buffer_update_barrier_) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        pending_buffer_update_barrier_ = false;
+    }
+
+    RENDER_LOG("vk.execute primary=%p secondary=%p",
+               (void*)sync.command_buffer, (void*)secondary);
     vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
