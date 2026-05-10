@@ -288,10 +288,12 @@ void RtPath::build_passes(IViewEntry& entry,
     vs.cached_rt_pass->reset();
     if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
+        cmd->push_label("RtPath");
         cmd->record_dispatch(dc);
         if (rt_tex && dst_tex) {
             cmd->record_blit_to_texture(*rt_tex, *dst_tex, render_view.viewport);
         }
+        cmd->pop_label();
         cmd->end_recording();
         vs.cached_rt_pass->set_command_buffer(std::move(cmd));
     }

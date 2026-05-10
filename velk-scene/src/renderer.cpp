@@ -779,7 +779,9 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             if (!gp) continue;
             if (auto cmd = backend_->create_command_buffer()) {
                 cmd->begin_recording();
+                cmd->push_label("DebugOverlay");
                 cmd->record_blit_to_texture(*ov.texture, *swap_tex, ov.dst_rect);
+                cmd->pop_label();
                 cmd->end_recording();
                 gp->set_command_buffer(std::move(cmd));
             }

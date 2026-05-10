@@ -40,6 +40,8 @@ public:
     // IGpuCommandBuffer
     void begin_recording() override;
     void end_recording() override;
+    void push_label(const char* name) override;
+    void pop_label() override;
     void set_viewport(::velk::rect viewport) override;
 void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_dispatch(const ::velk::DispatchCall& call) override;

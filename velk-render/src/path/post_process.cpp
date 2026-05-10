@@ -77,8 +77,10 @@ void PostProcess::emit(::velk::IViewEntry& view,
         if (input_tex && output_tex && ctx.backend) {
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
+                cmd->push_label("PostProcess: passthrough");
                 cmd->record_blit_to_texture(*input_tex, *output_tex,
                     {0, 0, static_cast<float>(w), static_cast<float>(h)});
+                cmd->pop_label();
                 cmd->end_recording();
                 passthrough->set_command_buffer(std::move(cmd));
             }

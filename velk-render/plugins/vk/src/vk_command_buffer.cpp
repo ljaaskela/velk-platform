@@ -89,6 +89,18 @@ void VkCommandBuffer::end_recording()
     vkEndCommandBuffer(cmd_);
 }
 
+void VkCommandBuffer::push_label(const char* name)
+{
+    if (cmd_ == VK_NULL_HANDLE) return;
+    VkBackend::cmd_push_label(cmd_, name);
+}
+
+void VkCommandBuffer::pop_label()
+{
+    if (cmd_ == VK_NULL_HANDLE) return;
+    VkBackend::cmd_pop_label(cmd_);
+}
+
 void VkCommandBuffer::set_viewport(::velk::rect viewport)
 {
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;

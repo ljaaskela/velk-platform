@@ -77,6 +77,21 @@ public:
     /// `IRenderBackend::execute`.
     virtual void end_recording() = 0;
 
+    /// @name Debug labels.
+    ///
+    /// Push a labeled region inside the cmd buffer. RenderDoc / Nsight
+    /// group nested events under the label name; useful for marking
+    /// per-producer phases ("ForwardPath: opaque", "Tonemap"). Calls
+    /// no-op when the backend's debug-utils extension isn't loaded.
+    /// Pairs must nest properly: every push needs a matching pop
+    /// before `end_recording`.
+    /// @{
+
+    virtual void push_label(const char* name) = 0;
+    virtual void pop_label() = 0;
+
+    /// @}
+
     /// @name Inside-renderpass commands.
     ///
     /// Valid only on cmd buffers created with a non-zero target_id

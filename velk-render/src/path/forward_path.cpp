@@ -269,12 +269,14 @@ void ForwardPath::build_passes(IViewEntry& entry,
         }
 
         cmd->begin_recording();
+        cmd->push_label("ForwardPath");
         cmd->record_begin_rendering(
             array_view<const ColorAttachment>(&color, 1),
             depth_texture ? &depth_att : nullptr);
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
         cmd->record_end_rendering();
+        cmd->pop_label();
         cmd->end_recording();
         cache.pass->set_command_buffer(std::move(cmd));
     }

@@ -364,12 +364,14 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         depth_att.clear_stencil = 0;
 
         cmd->begin_recording();
+        cmd->push_label("DeferredPath: gbuffer");
         cmd->record_begin_rendering(
             array_view<const ColorAttachment>(colors, kColorCount),
             depth_att.texture ? &depth_att : nullptr);
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
         cmd->record_end_rendering();
+        cmd->pop_label();
         cmd->end_recording();
         vs.cached_gbuffer_pass->set_command_buffer(std::move(cmd));
     }
@@ -525,10 +527,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     vs.cached_lighting_pass->reset();
     if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
+        cmd->push_label("DeferredPath: lighting");
         cmd->record_dispatch(dc);
         if (src_tex && dst_tex) {
             cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
         }
+        cmd->pop_label();
         cmd->end_recording();
         vs.cached_lighting_pass->set_command_buffer(std::move(cmd));
     }

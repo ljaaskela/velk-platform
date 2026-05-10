@@ -150,7 +150,9 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
             if (blit_pass) {
                 if (auto cmd = ctx.backend->create_command_buffer()) {
                     cmd->begin_recording();
+                    cmd->push_label("CameraPipeline: post -> composite");
                     cmd->record_blit_to_texture(*post_tex, *swap_tex, render_view.viewport);
+                    cmd->pop_label();
                     cmd->end_recording();
                     blit_pass->set_command_buffer(std::move(cmd));
                 }

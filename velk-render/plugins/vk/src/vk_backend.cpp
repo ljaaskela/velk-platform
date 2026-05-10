@@ -20,6 +20,21 @@ namespace velk::vk {
 #define RENDER_LOG(...) ((void)0)
 #endif
 
+void VkBackend::cmd_push_label(::VkCommandBuffer cb, const char* name)
+{
+    if (!vkCmdBeginDebugUtilsLabelEXT) return;
+    VkDebugUtilsLabelEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    info.pLabelName = name;
+    vkCmdBeginDebugUtilsLabelEXT(cb, &info);
+}
+
+void VkBackend::cmd_pop_label(::VkCommandBuffer cb)
+{
+    if (!vkCmdEndDebugUtilsLabelEXT) return;
+    vkCmdEndDebugUtilsLabelEXT(cb);
+}
+
 namespace {
 
 VkFormat vk_format_for(PixelFormat f)
@@ -304,6 +319,10 @@ bool VkBackend::create_vk_instance()
 #ifdef _WIN32
         "VK_KHR_win32_surface",
 #endif
+        // Always enabled: debug-utils labels are free when no debugger
+        // is attached and let RenderDoc / Nsight group events by our
+        // pass names instead of falling back to confused auto-grouping.
+        VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
     };
 
     // Validation always on in debug; in release, opt in via
@@ -321,7 +340,6 @@ bool VkBackend::create_vk_instance()
     vector<const char*> layers;
     if (enable_validation) {
         layers.push_back("VK_LAYER_KHRONOS_validation");
-        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
     VkInstanceCreateInfo ci{};
@@ -831,6 +849,7 @@ IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)
         auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
         if (surf_tex && surf_tex->vk_image() != VK_NULL_HANDLE) {
             auto& sync = frame_sync_[frame_sync_index_];
+            cmd_push_label(sync.command_buffer, "Composite Clear");
             const VkImage img = surf_tex->vk_image();
             const VkImageLayout old_layout = surf_tex->vk_current_layout();
 
@@ -880,6 +899,7 @@ IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)
                                      | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  0, 0, nullptr, 0, nullptr, 1, &to_read);
             surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            cmd_pop_label(sync.command_buffer);
         }
     }
 
@@ -1982,6 +2002,8 @@ void VkBackend::begin_frame()
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(sync.command_buffer, &begin_info);
 
+    cmd_push_label(sync.command_buffer, "Frame");
+
     // Compute descriptor set: bound here on the primary because
     // `dispatch` records `vkCmd*` inline on the primary (compute is
     // outside any renderpass, so SECONDARY contents doesn't apply).
@@ -2436,10 +2458,13 @@ void VkBackend::end_frame()
     // acquired this frame. Sets present_surface_id_ as a side effect.
     for (auto& [surface_id, sd] : surfaces_) {
         if (sd.composite_acquired_this_frame) {
+            cmd_push_label(sync.command_buffer, "Composite -> Swap");
             emit_surface_present_blit(surface_id, sd);
+            cmd_pop_label(sync.command_buffer);
         }
     }
 
+    cmd_pop_label(sync.command_buffer);  // "Frame"
     vkEndCommandBuffer(sync.command_buffer);
 
     // Allocate this submit's timeline value. The signal value rides

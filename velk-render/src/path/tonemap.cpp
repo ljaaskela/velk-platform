@@ -129,7 +129,9 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     if (!gp) return;
     if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
+        cmd->push_label("Tonemap");
         cmd->record_dispatch(dc);
+        cmd->pop_label();
         cmd->end_recording();
         gp->set_command_buffer(std::move(cmd));
     }

@@ -109,6 +109,15 @@ public:
     void barrier(PipelineStage src, PipelineStage dst) override;
     void end_frame() override;
 
+    /// @name Debug-utils label helpers.
+    /// Wrap the VK_EXT_debug_utils calls so call sites don't have to
+    /// build VkDebugUtilsLabelEXT structs or null-check the function
+    /// pointer. No-op when the extension isn't available.
+    /// @{
+    static void cmd_push_label(::VkCommandBuffer cb, const char* name);
+    static void cmd_pop_label(::VkCommandBuffer cb);
+    /// @}
+
 public:
 
 private:
