@@ -28,10 +28,13 @@ namespace {
 /// Resolves (or lazy-compiles) the forward-rendering pipeline for a
 /// batch. Material wins over the visual's IShaderSource when both
 /// are present; the visual's source is the no-material fallback.
-/// Returns 0 to skip (no source / compile failure).
+/// All pipelines compile against dynamic-rendering attachment formats
+/// (S6 — see design-notes/render_dynamic_rendering.md). Returns 0 to
+/// skip (no source / compile failure).
 IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
                                          const IBatch& batch,
-                                         PixelFormat target_format)
+                                         PixelFormat target_format,
+                                         DepthFormat depth_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -50,19 +53,19 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
 
     uint64_t compiled_key = 0;
     if (use_material) {
-        // Try the eval-snippet path first (material composed with the
-        // forward driver template). Falls back to a raw fragment
-        // source if the material declines the snippet path.
-        compiled_key = compile_material_forward_pipeline(
-            ctx, batch, target_format, user_key);
+        compiled_key = compile_material_forward_pipeline_dynamic(
+            ctx, batch, target_format, depth_format, user_key);
         if (compiled_key == 0) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
             if (!frag_src.empty() && !vertex_src.empty()) {
-                compiled_key = ctx.compile_pipeline(
+                PixelFormat formats[1] = {target_format};
+                compiled_key = ctx.compile_pipeline_dynamic(
                     frag_src, vertex_src,
-                    user_key, target_format, 0,
+                    user_key,
+                    array_view<const PixelFormat>(formats, 1),
+                    depth_format,
                     pipeline_options);
             }
         }
@@ -72,9 +75,12 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
     } else if (shader_source_ptr && user_key != 0) {
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
         auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
-        compiled_key = ctx.compile_pipeline(
+        PixelFormat formats[1] = {target_format};
+        compiled_key = ctx.compile_pipeline_dynamic(
             fsrc, vsrc,
-            user_key, target_format, 0,
+            user_key,
+            array_view<const PixelFormat>(formats, 1),
+            depth_format,
             pipeline_options);
     }
 
@@ -146,14 +152,36 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.dirty = true;
     }
 
+    // S6.4: color_target may be the per-surface composite (a real
+    // IGpuTexture-castable wrapper) or a RenderTexture proxy from
+    // RenderTargetCache (not IGpuTexture; needs find_texture lookup).
+    IGpuTexture* target_texture = nullptr;
+    if (color_target) {
+        target_texture = interface_cast<IGpuTexture>(color_target.get());
+        if (!target_texture) {
+            target_texture = graph.resources().find_texture(color_target.get());
+            if (!target_texture && ctx.resources) {
+                target_texture = ctx.resources->find_texture(color_target.get());
+            }
+        }
+    }
+    if (!target_texture) return;
+
+    // Resize detection: if the target's IGpuTexture* changed (e.g.,
+    // surface composite recreated on resize, RTT resized), the cached
+    // cmd buffer's baked VkImage handles are stale and must re-record.
+    if (target_texture != cache.last_target_texture) {
+        cache.dirty = true;
+        cache.last_target_texture = target_texture;
+    }
+
     if (!cache.dirty) {
         // Steady state: same Ptr, refresh only the per-frame view
         // globals address (FrameGlobals lives in per-frame staging
         // and rotates each frame).
         cache.pass->set_view_globals_address(render_view.view_globals_address);
-        RENDER_LOG("forward.cached view=%p pass=%p target=%llu vg=0x%llx",
+        RENDER_LOG("forward.cached view=%p pass=%p vg=0x%llx",
                    (void*)&entry, (void*)cache.pass.get(),
-                   (unsigned long long)cache.pass->target_id(),
                    (unsigned long long)render_view.view_globals_address);
         graph.add_pass(cache.pass);
         return;
@@ -165,8 +193,32 @@ void ForwardPath::build_passes(IViewEntry& entry,
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto target_format = ctx.target_format;
 
+    // Pair-depth allocation: only when the color_target is tagged with
+    // a depth format (CameraPipeline does this for its path_color).
+    // RTT cache leaves depth_format=None and gets no depth attachment.
+    const DepthFormat target_depth_format = color_target
+        ? color_target->get_depth_format()
+        : DepthFormat::None;
+    const uvec2 target_size = target_texture->get_dimensions();
+    if (target_depth_format != DepthFormat::None) {
+        if (!cache.depth_texture || cache.depth_size != target_size) {
+            cache.depth_texture = ctx.backend->create_depth_attachment_texture(
+                static_cast<int>(target_size.x),
+                static_cast<int>(target_size.y),
+                target_depth_format);
+            cache.depth_size = target_size;
+            cache.dirty = true;
+        }
+    } else if (cache.depth_texture) {
+        cache.depth_texture.reset();
+        cache.depth_size = uvec2{};
+        cache.dirty = true;
+    }
+    IGpuTexture* depth_texture = cache.depth_texture.get();
+
     auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_forward(*ctx.render_ctx, b, target_format);
+        return resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
+                                          target_depth_format);
     };
 
     vector<DrawCall> draw_calls;
@@ -192,50 +244,43 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
 
     cache.pass->reset();
-    // Surface targets carry their swapchain id in get_gpu_handle(Default);
-    // RTT targets carry the bindless TextureId (which begin_pass(uint64)
-    // no longer dispatches on). For RTT we look up the IGpuTexture and
-    // route through the IGpuTexture& overloads via target_texture.
-    // Per-graph transient pool owns deferred/post-process intermediates;
-    // the renderer's persistent manager owns user-supplied RenderTextures
-    // from RenderTargetCache. Check both.
-    uint64_t target_id = 0;
-    IGpuTexture* target_texture = nullptr;
-    if (color_target) {
-        target_texture = graph.resources().find_texture(color_target.get());
-        if (!target_texture && ctx.resources) {
-            target_texture = ctx.resources->find_texture(color_target.get());
-        }
-        if (!target_texture) {
-            // Surface (or untracked target): fall back to the uint64 path.
-            target_id = color_target->get_gpu_handle(GpuResourceKey::Default);
-        }
-    }
 
-    // Record one secondary cmd buffer per in-flight frame slot. Each
-    // secondary bakes its slot's stable view-globals BDA at offset
-    // [0..8) — required because secondaries don't inherit push state
-    // from the primary, and view_globals_address itself rotates per
-    // slot (per-view persistent ring buffer in ViewPreparer). The
-    // executor selects `command_buffer(backend.current_frame_slot())`
-    // each frame so the right slot's secondary executes.
-    RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
-               (void*)&entry, (unsigned long long)target_id,
-               draw_calls.size());
-    // Texture targets route through the IGpuTexture& overload so the
-    // backend derives the inheritance render pass from the wrapper.
-    IGpuCommandBuffer::Ptr cmd = target_texture
-        ? ctx.backend->create_command_buffer(*target_texture)
-        : ctx.backend->create_command_buffer(target_id);
+    RENDER_LOG("forward.rebuild view=%p draws=%zu depth=%d",
+               (void*)&entry, draw_calls.size(), depth_texture ? 1 : 0);
+
+    // Self-contained dynamic-rendering secondary: attachments bound
+    // inline at record time, executor doesn't wrap in begin_pass.
+    IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer();
     if (cmd) {
+        ColorAttachment color{};
+        color.texture = target_texture;
+        color.clear = true;
+        color.clear_color[0] = 0.f;
+        color.clear_color[1] = 0.f;
+        color.clear_color[2] = 0.f;
+        color.clear_color[3] = 0.f;
+
+        DepthAttachment depth_att{};
+        if (depth_texture) {
+            depth_att.texture = depth_texture;
+            depth_att.clear = true;
+            depth_att.clear_depth = 1.0f;
+            depth_att.clear_stencil = 0;
+        }
+
         cmd->begin_recording();
+        cmd->push_label("ForwardPath");
+        cmd->record_begin_rendering(
+            array_view<const ColorAttachment>(&color, 1),
+            depth_texture ? &depth_att : nullptr);
         cmd->set_viewport(render_view.viewport);
         cmd->record_draws({draw_calls.data(), draw_calls.size()});
+        cmd->record_end_rendering();
+        cmd->pop_label();
         cmd->end_recording();
         cache.pass->set_command_buffer(std::move(cmd));
     }
-    cache.pass->set_target_id(target_id);
-    cache.pass->set_target_texture(target_texture);
+
     if (color_target) {
         cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }

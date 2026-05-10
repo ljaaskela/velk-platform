@@ -50,7 +50,6 @@ enum class DepthFormat : uint8_t
 /// Pixel format for textures.
 enum class PixelFormat : uint8_t
 {
-    Surface,    ///< Sentinel: resolves to the swapchain's chosen format. Used where a render target or pipeline wants to follow the surface format.
     RGBA8,      ///< 4 bytes per pixel, linear color.
     RGBA8_SRGB, ///< 4 bytes per pixel, sRGB-tagged (auto-linearised on sample).
     R8,         ///< 1 byte per pixel, glyph atlases.

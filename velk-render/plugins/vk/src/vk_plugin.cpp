@@ -25,7 +25,9 @@ ReturnValue VkPlugin::initialize(IVelk& velk, PluginConfig&)
     if (rv != ReturnValue::Success) return rv;
     rv = register_type<VkRenderTexture>(velk);
     if (rv != ReturnValue::Success) return rv;
-    return register_type<VkRenderTargetGroup>(velk);
+    rv = register_type<VkRenderTargetGroup>(velk);
+    if (rv != ReturnValue::Success) return rv;
+    return register_type<VkSurfaceTexture>(velk);
 }
 
 ReturnValue VkPlugin::shutdown(IVelk&)

@@ -113,13 +113,11 @@ struct ComputePipelineDesc
     IShader::Ptr compute; ///< Compute shader (SPIR-V).
 };
 
-/// Maximum push constant size in bytes. The minimum guaranteed by
-/// modern GPU APIs is 128; 256 is supported by every modern desktop
-/// GPU (NVIDIA Turing+, AMD RDNA2+, Intel Gen12+) and all tested
-/// AMD/NVIDIA mobile parts. Bumped so the RT push constants can carry
-/// both the shape buffer and the per-frame light buffer addresses in
-/// one dispatch.
-inline constexpr size_t kMaxRootConstantsSize = 256;
+/// Maximum push constant size in bytes. Vulkan's spec-guaranteed
+/// minimum is 128; we sit at that floor so any conformant driver works.
+/// Larger payloads (e.g. RT per-dispatch state) live in IGpuBuffer-
+/// backed root structs reached through an 8-byte BDA in push constants.
+inline constexpr size_t kMaxRootConstantsSize = 128;
 
 /// A single indirect draw call submitted to the backend.
 ///
@@ -256,12 +254,23 @@ public:
     /** @brief Recreates the swapchain for the given surface at the new dimensions. */
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
-    /// True if @p id refers to a swapchain surface; false for textures
-    /// or unknown ids. Producers consult this to decide whether a
-    /// blit destination can be baked into a cached secondary command
-    /// buffer (textures: yes; surfaces: no, because per-frame
-    /// swapchain image acquisition can't be recorded once).
-    virtual bool is_surface(uint64_t id) const = 0;
+    /**
+     * @brief Returns the per-surface composite intermediate as a
+     *        renderable texture (S6.4 — see
+     *        design-notes/render_dynamic_rendering.md).
+     *
+     * Producers render to the returned target as if it were any
+     * regular `IGpuTexture`. The backend tracks which surfaces were
+     * rendered to and emits a final composite-to-swap blit at
+     * `end_frame`. Multi-view-to-same-surface is handled internally
+     * (first view loadOp respected; subsequent records overridden to
+     * LOAD so draws stack).
+     *
+     * Stable Ptr: same wrapper across frames, recreated only on
+     * surface resize. Cached cmd buffers that capture the wrapper's
+     * IGpuTexture* / VkImage* / VkImageView remain valid.
+     */
+    virtual IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) = 0;
 
     /// @}
     /// @name GPU Memory
@@ -318,6 +327,19 @@ public:
     virtual void defer_destroy_gpu_texture(IGpuTexture* texture,
                                            uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
+    /**
+     * @brief Allocates a standalone depth attachment as an `IGpuTexture`.
+     *
+     * Returned texture has `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT`
+     * (no `SAMPLED_BIT` — depth is bound for record_begin_rendering, not
+     * sampled through the bindless heap). Lifetime via Ptr; backend
+     * defers destroy when the last Ptr drops. Used by paths that own
+     * their color attachment separately and need a paired depth (S6.5
+     * — see design-notes/render_dynamic_rendering.md).
+     */
+    virtual IGpuTexture::Ptr create_depth_attachment_texture(
+        int width, int height, DepthFormat format) = 0;
+
     /** @brief Uploads pixel data to a texture via a staging buffer. */
     virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
 
@@ -372,21 +394,22 @@ public:
     /// @{
 
     /**
-     * @brief Creates a graphics pipeline from SPIR-V shaders. Returns a handle.
+     * @brief Creates a graphics pipeline against dynamic-rendering attachment
+     *        formats (S6 — see design-notes/render_dynamic_rendering.md).
      *
-     * @param target_format Color attachment format the pipeline will
-     *        render into. `Surface` follows the swapchain (default,
-     *        used by direct-to-swapchain and surface-format RTT).
-     *        Explicit formats (e.g. `RGBA16F` for HDR) get a per-format
-     *        single-attachment render pass cached internally so the
-     *        pipeline is render-pass compatible with the target.
-     * @param target_group If non-null, the pipeline is compiled against
-     *        the render pass of the given MRT group; in that case
-     *        @p target_format is ignored (group attachments are fixed).
+     * Pipelines compiled this way are render-pass-agnostic and run inside
+     * a `vkCmdBeginRendering` scope opened by `IGpuCommandBuffer::record_begin_rendering`
+     * with attachments matching the declared formats (count + ordering).
+     *
+     * @param color_formats Color attachment formats in declaration order (must
+     *                      match the cmd-buffer's `record_begin_rendering` color list).
+     * @param depth_format  Depth attachment format, or `DepthFormat::None` for
+     *                      no depth.
      */
-    virtual IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
-                                              PixelFormat target_format = PixelFormat::Surface,
-                                              IRenderTextureGroup* target_group = nullptr) = 0;
+    virtual IGpuPipeline::Ptr create_pipeline_dynamic(
+        const PipelineDesc& desc,
+        array_view<const PixelFormat> color_formats,
+        DepthFormat depth_format) = 0;
 
     /** @brief Creates a compute pipeline from a compute shader. */
     virtual IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
@@ -406,79 +429,23 @@ public:
     virtual void begin_frame() = 0;
 
     /**
-     * @brief Begins a render pass targeting the given surface or MRT group.
+     * @brief Allocates a self-contained `IGpuCommandBuffer` (S6 dynamic
+     *        rendering — see design-notes/render_dynamic_rendering.md).
      *
-     * For surface targets, acquires the swapchain image. Begins the
-     * backend render pass and binds the bindless descriptor set. Use
-     * the `IGpuTexture&` overload for renderable-texture targets.
+     * Producers record once when their pass content changes; the graph
+     * executor replays via `execute(cmd)` each frame. Raster passes
+     * call `record_begin_rendering` / `record_end_rendering` inside
+     * the cmd buffer to bind attachments at record time. Compute /
+     * blit passes record outside any rendering scope.
      */
-    virtual void begin_pass(uint64_t target_id) = 0;
-
-    /**
-     * @brief Begins a render pass targeting a renderable texture.
-     *
-     * The texture must have been created with TextureUsage::RenderTarget
-     * or ColorAttachment. Begins the backend render pass and binds the
-     * bindless descriptor set.
-     */
-    virtual void begin_pass(IGpuTexture& target) = 0;
-
-    /**
-     * @brief Begins a render pass targeting an MRT group.
-     */
-    virtual void begin_pass(IRenderTextureGroup& target) = 0;
-
-    /**
-     * @brief Allocates a `IGpuCommandBuffer` compatible with
-     *        @p target_id. Producers record once when their pass
-     *        content changes; the graph executor replays via
-     *        `execute(cmd)` each frame.
-     *
-     * @param target_id Target the cmd buffer will play inside. For
-     *                  Vulkan secondaries this resolves to the
-     *                  render pass used during inheritance setup.
-     *                  Pass `0` for compute / transfer cmd buffers
-     *                  that play outside any render pass.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) = 0;
-
-    /**
-     * @brief Allocates a `IGpuCommandBuffer` compatible with rendering
-     *        into @p target. Mirror of the `uint64_t` overload for
-     *        renderable-texture targets.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) = 0;
-
-    /**
-     * @brief Allocates an `IGpuCommandBuffer` compatible with rendering
-     *        into the given MRT group.
-     */
-    virtual IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) = 0;
+    virtual IGpuCommandBuffer::Ptr create_command_buffer() = 0;
 
     /**
      * @brief Replays a recorded command buffer in the active frame.
-     *        For raster cmd buffers, must be called between
-     *        `begin_pass` / `end_pass` on a compatible target.
+     *        Always called outside any rendering scope on the primary;
+     *        the secondary internally manages its own scope.
      */
     virtual void execute(const IGpuCommandBuffer::Ptr& cmd) = 0;
-
-    /** @brief Ends the current render pass. */
-    virtual void end_pass() = 0;
-
-    /**
-     * @brief Blits a source texture onto the swapchain image of @p surface_id.
-     *
-     * Acquires the swapchain image if not already acquired this frame,
-     * records a scaling blit of @p source into the destination rect, and
-     * transitions the swapchain image to a present-ready layout. The
-     * source texture must have been created with TextureUsage::Storage.
-     * Mutually exclusive with begin_pass on the same surface within a
-     * frame.
-     *
-     * @param dst_rect Destination rect in surface pixels. Zero width/height
-     *                 means "full surface".
-     */
-    virtual void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect = {}) = 0;
 
     /**
      * @brief Blits @p source into @p dest. Both textures must have been

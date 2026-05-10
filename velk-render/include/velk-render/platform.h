@@ -18,6 +18,7 @@ inline constexpr Uid VkGpuPipeline{"f801dbb1-c4bd-42a1-9b91-fe2c160bdd50"};
 inline constexpr Uid VkGpuTexture{"dc12dbce-96b3-4246-8006-f1548ca86d5c"};
 inline constexpr Uid VkRenderTexture{"b6c5c183-125f-44b5-9fe6-b9bd1ba394a9"};
 inline constexpr Uid VkRenderTargetGroup{"c4290016-93ef-4f9e-b884-d7e01be4f458"};
+inline constexpr Uid VkSurfaceTexture{"becc4ba6-172c-4c7f-9288-5f03782f4717"};
 
 } // namespace ClassId
 

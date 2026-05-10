@@ -69,13 +69,13 @@ private:
     /// Both are storage textures; both lazy-allocate / resize.
     struct ViewState
     {
+        /// HDR path target for the post-process flow only. Unused when
+        /// no post-process is attached — in that case the path renders
+        /// directly to the surface composite acquired from the backend.
         ::velk::IRenderTarget::Ptr path_output;
+        /// Post-process intermediate (storage texture; tonemap and
+        /// other compute effects write here).
         ::velk::IRenderTarget::Ptr post_output;
-        // Cached size for path_output + post_output. Recreate only on
-        // size change so downstream Ptrs / handles stay stable across
-        // frames (the deferred lighting pass caches the path_output
-        // texture id in BlitToSurface; rotating it would freeze the
-        // first frame on screen).
         ::velk::uvec2 path_size{};
         ::velk::uvec2 post_size{};
     };

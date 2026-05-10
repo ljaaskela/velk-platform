@@ -765,15 +765,26 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         }
 
         // Debug overlays: tail-appended so they blit on top of whatever
-        // the view passes produced on the target surface.
+        // the view passes produced on the target surface composite.
+        // Backend's end_frame composite-to-swap blit picks up whatever
+        // we left in the composite.
         for (auto& ov : debug_overlays_) {
-            if (!ov.surface || !ov.texture) continue;
+            if (!ov.surface || !ov.texture || !backend_) continue;
+            auto swap_target = backend_->acquire_swapchain_texture(
+                ov.surface->get_gpu_handle(GpuResourceKey::Default));
+            if (!swap_target) continue;
+            auto* swap_tex = interface_cast<IGpuTexture>(swap_target.get());
+            if (!swap_tex) continue;
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
-            gp->set_surface_blit(
-                ov.texture,
-                ov.surface->get_gpu_handle(GpuResourceKey::Default),
-                ov.dst_rect);
+            if (auto cmd = backend_->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("DebugOverlay");
+                cmd->record_blit_to_texture(*ov.texture, *swap_tex, ov.dst_rect);
+                cmd->pop_label();
+                cmd->end_recording();
+                gp->set_command_buffer(std::move(cmd));
+            }
             slot.graph->add_pass(std::move(gp));
         }
 

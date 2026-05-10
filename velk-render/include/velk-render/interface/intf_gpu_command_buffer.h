@@ -20,6 +20,24 @@ class IGpuTexture;
 class IRenderTextureGroup;
 using TextureId = uint32_t;
 
+/// One color attachment for `record_begin_rendering` (S6 dynamic
+/// rendering — see design-notes/render_dynamic_rendering.md).
+struct ColorAttachment
+{
+    IGpuTexture* texture = nullptr;       ///< Renderable / storage texture to draw into.
+    bool clear = true;                    ///< true → clear at begin; false → load existing.
+    float clear_color[4] = {0, 0, 0, 1};  ///< Used when clear == true.
+};
+
+/// Optional depth attachment for `record_begin_rendering`.
+struct DepthAttachment
+{
+    IGpuTexture* texture = nullptr;       ///< Depth (or depth-stencil) texture.
+    bool clear = true;
+    float clear_depth = 1.0f;
+    uint32_t clear_stencil = 0;
+};
+
 
 /**
  * @brief Pre-recorded sequence of GPU commands.
@@ -59,6 +77,21 @@ public:
     /// `IRenderBackend::execute`.
     virtual void end_recording() = 0;
 
+    /// @name Debug labels.
+    ///
+    /// Push a labeled region inside the cmd buffer. RenderDoc / Nsight
+    /// group nested events under the label name; useful for marking
+    /// per-producer phases ("ForwardPath: opaque", "Tonemap"). Calls
+    /// no-op when the backend's debug-utils extension isn't loaded.
+    /// Pairs must nest properly: every push needs a matching pop
+    /// before `end_recording`.
+    /// @{
+
+    virtual void push_label(const char* name) = 0;
+    virtual void pop_label() = 0;
+
+    /// @}
+
     /// @name Inside-renderpass commands.
     ///
     /// Valid only on cmd buffers created with a non-zero target_id
@@ -75,6 +108,31 @@ public:
     /// is bound + drawn in order (BindPipeline + PushConstants +
     /// optional BindIndexBuffer + DrawIndirectCount).
     virtual void record_draws(array_view<const DrawCall> calls) = 0;
+
+    /// @}
+
+    /// @name Dynamic rendering (S6 — design-notes/render_dynamic_rendering.md)
+    ///
+    /// Producer-driven attachment binding via `vkCmdBeginRendering` /
+    /// `vkCmdEndRendering`. Replaces the legacy
+    /// `IRenderBackend::begin_pass` overloads + render-pass /
+    /// framebuffer cache plumbing. The cmd buffer becomes
+    /// self-contained: producers record begin → draws → end inside
+    /// one secondary, no inheritance render pass required.
+    /// @{
+
+    /// Begin a dynamic-rendering pass into @p colors (and optional
+    /// @p depth). All textures must have been created with
+    /// renderable / color-attachment / storage usage; depth must be
+    /// a depth-format texture. Layout transitions to / from
+    /// COLOR_ATTACHMENT_OPTIMAL / DEPTH_ATTACHMENT_OPTIMAL are
+    /// handled by the backend.
+    virtual void record_begin_rendering(
+        array_view<const ColorAttachment> colors,
+        const DepthAttachment* depth) = 0;
+
+    /// End a dynamic-rendering pass started with `record_begin_rendering`.
+    virtual void record_end_rendering() = 0;
 
     /// @}
 

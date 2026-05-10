@@ -95,7 +95,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
     auto pit = ctx.pipeline_map->find(
-        ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::Surface, 0});
+        ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::RGBA8, 0});
     if (pit == ctx.pipeline_map->end()) return;
 
     /// Push constant layout matches the shader's `PC` block above.
@@ -127,13 +127,14 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
 
     auto gp = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
     if (!gp) return;
-    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+    if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
+        cmd->push_label("Tonemap");
         cmd->record_dispatch(dc);
+        cmd->pop_label();
         cmd->end_recording();
         gp->set_command_buffer(std::move(cmd));
     }
-    gp->set_target_id(0);
     gp->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
     gp->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
     graph.add_pass(std::move(gp));

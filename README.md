@@ -16,7 +16,7 @@ The user-facing entry point. Wraps render context creation, window management, p
 
 Bindless GPU rendering abstraction:
 * Minimal backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls.
-* Includes a Vulkan 1.2 backend (`velk::vk`) with BDA and bindless descriptors.
+* Includes a Vulkan 1.3 backend (`velk::vk`) with BDA, bindless descriptors, and dynamic rendering.
 
 ### Scene model + renderer ([velk-scene](velk-scene/))
 

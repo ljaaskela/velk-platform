@@ -77,7 +77,10 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     }
     uint64_t gbuffer_key = forward_key ^ perturb;
     auto& pipeline_map = ctx.pipeline_map();
-    PipelineCacheKey gkey{gbuffer_key, PixelFormat::Surface, target_group};
+    // Cache lookup must match the format axis compile_pipeline_dynamic
+    // uses when it stores: color_formats[0] (Albedo = RGBA8). Earlier
+    // legacy path used PixelFormat::Surface here; that's stale post-S6.3.
+    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], target_group};
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
         return it->second.get();
     }
@@ -124,9 +127,16 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    uint64_t compiled = ctx.compile_pipeline(
+    // S6.3: gbuffer compiles via dynamic rendering against the kGBufferFormats
+    // attachment formats + DepthFormat::Default. cache_group differentiates
+    // gbuffer pipelines from forward ones using the same user_key.
+    uint64_t compiled = ctx.compile_pipeline_dynamic(
         string_view(composed), vsrc,
-        gbuffer_key, PixelFormat::Surface, target_group, po);
+        gbuffer_key,
+        array_view<const PixelFormat>(
+            kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count)),
+        DepthFormat::Default,
+        po, target_group);
     if (!compiled) return nullptr;
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
         return it->second.get();
@@ -333,14 +343,39 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
 
-    if (auto cmd = ctx.backend->create_command_buffer(*group)) {
+    // S6.3: gbuffer raster runs as a self-contained dynamic-rendering
+    // secondary. Attachments bound inline via `record_begin_rendering`;
+    // executor doesn't wrap in begin_pass / end_pass.
+    if (auto cmd = ctx.backend->create_command_buffer()) {
+        constexpr uint32_t kColorCount = static_cast<uint32_t>(GBufferAttachment::Count);
+        ColorAttachment colors[kColorCount]{};
+        for (uint32_t i = 0; i < kColorCount; ++i) {
+            colors[i].texture = group->attachment_texture(i);
+            colors[i].clear = true;
+            colors[i].clear_color[0] = 0.f;
+            colors[i].clear_color[1] = 0.f;
+            colors[i].clear_color[2] = 0.f;
+            colors[i].clear_color[3] = 0.f;
+        }
+        DepthAttachment depth_att{};
+        depth_att.texture = group->depth_attachment();
+        depth_att.clear = true;
+        depth_att.clear_depth = 1.0f;
+        depth_att.clear_stencil = 0;
+
         cmd->begin_recording();
+        cmd->push_label("DeferredPath: gbuffer");
+        cmd->record_begin_rendering(
+            array_view<const ColorAttachment>(colors, kColorCount),
+            depth_att.texture ? &depth_att : nullptr);
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
+        cmd->record_end_rendering();
+        cmd->pop_label();
         cmd->end_recording();
         vs.cached_gbuffer_pass->set_command_buffer(std::move(cmd));
     }
-    vs.cached_gbuffer_pass->set_target_group(group);
+    // Self-contained cmd buffer; no target_* seam.
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
     vs.gbuffer_dirty = false;
@@ -389,7 +424,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
     auto pit = ctx.pipeline_map->find(
-        PipelineCacheKey{pipeline_key, PixelFormat::Surface, 0});
+        PipelineCacheKey{pipeline_key, PixelFormat::RGBA8, 0});
     if (pit == ctx.pipeline_map->end()) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
@@ -449,14 +484,35 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
+    // S6.4: color_target is always an IGpuTexture-castable wrapper.
+    // VkSurfaceTexture (the per-surface composite) is itself an
+    // IGpuTexture; the legacy RenderTexture proxy is not, so fall
+    // back to find_texture for that case.
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) {
+            dst_tex = graph.resources().find_texture(color_target.get());
+            if (!dst_tex && ctx.resources) {
+                dst_tex = ctx.resources->find_texture(color_target.get());
+            }
+        }
+    }
+    // Resize detection: the cached lighting cmd buffer bakes the dst
+    // VkImage handle. If the composite was recreated (resize), the
+    // baked handle is stale and the cmd buffer must re-record.
+    if (dst_tex != vs.last_dst_texture) {
+        vs.lighting_dirty = true;
+        vs.last_dst_texture = dst_tex;
+    }
+
     if (!vs.lighting_dirty) {
-        // Steady state: same Ptrs, refresh only the per-frame view
+        // Steady state: same Ptr, refresh only the per-frame view
         // globals address.
         vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
         graph.add_pass(vs.cached_lighting_pass);
-        if (vs.cached_surface_blit_pass) {
-            graph.add_pass(vs.cached_surface_blit_pass);
-        }
         return;
     }
 
@@ -468,59 +524,26 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
-    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
-    const uint64_t blit_target =
-        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0;
-    const bool dst_is_surface = (blit_target != 0)
-        && ctx.backend->is_surface(blit_target);
-    IGpuTexture* dst_tex = (color_target && !dst_is_surface)
-        ? graph.resources().find_texture(color_target.get())
-        : nullptr;
-
     vs.cached_lighting_pass->reset();
-    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+    if (auto cmd = ctx.backend->create_command_buffer()) {
         cmd->begin_recording();
+        cmd->push_label("DeferredPath: lighting");
         cmd->record_dispatch(dc);
-        // Texture-target case: blit folded into the same cmd buffer.
-        // Surface-target case: blit_to_surface goes into the sibling
-        // surface-blit pass below.
         if (src_tex && dst_tex) {
             cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
         }
+        cmd->pop_label();
         cmd->end_recording();
         vs.cached_lighting_pass->set_command_buffer(std::move(cmd));
     }
-    vs.cached_lighting_pass->set_target_id(0);
     vs.cached_lighting_pass->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-    if (dst_tex) {
+    if (color_target) {
         vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
     vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
-
-    if (dst_is_surface && src_tex) {
-        if (!vs.cached_surface_blit_pass) {
-            vs.cached_surface_blit_pass =
-                ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-        }
-        if (vs.cached_surface_blit_pass) {
-            vs.cached_surface_blit_pass->reset();
-            vs.cached_surface_blit_pass->set_surface_blit(
-                src_tex, blit_target, render_view.viewport);
-            vs.cached_surface_blit_pass->add_read(
-                interface_pointer_cast<IGpuResource>(vs.deferred_output));
-            vs.cached_surface_blit_pass->add_write(
-                interface_pointer_cast<IGpuResource>(color_target));
-        }
-    } else {
-        vs.cached_surface_blit_pass.reset();
-    }
-
     vs.lighting_dirty = false;
     graph.add_pass(vs.cached_lighting_pass);
-    if (vs.cached_surface_blit_pass) {
-        graph.add_pass(vs.cached_surface_blit_pass);
-    }
 }
 
 DeferredPath::~DeferredPath()

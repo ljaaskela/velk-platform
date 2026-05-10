@@ -17,15 +17,16 @@ namespace velk {
  *
  * Composes the forward fragment shader from the material's IShaderSource
  * (eval source + eval entry point + `forward_fragment_driver_template`)
- * and calls `IRenderContext::compile_pipeline`. Returns the cache key
- * the call produced (also usable as the value the renderer caches the
- * compiled pipeline under at `(key, target_format, target_group=0)`).
+ * and calls `IRenderContext::compile_pipeline_dynamic`. Returns the
+ * cache key the call produced (also usable as the value the renderer
+ * caches the compiled pipeline under at `(key, color_format, nullptr)`).
  *
  * Returns 0 if the material lacks an eval/vertex source pair.
  */
-inline uint64_t compile_material_forward_pipeline(
+inline uint64_t compile_material_forward_pipeline_dynamic(
     IRenderContext& ctx, const IBatch& batch,
-    PixelFormat target_format, uint64_t user_key)
+    PixelFormat color_format, DepthFormat depth_format,
+    uint64_t user_key)
 {
     auto material_ptr = batch.material();
     if (!material_ptr) return 0;
@@ -40,9 +41,12 @@ inline uint64_t compile_material_forward_pipeline(
     string frag = compose_eval_fragment(
         forward_fragment_driver_template, eval_src, eval_fn,
         mat->get_forward_discard_threshold());
-    return ctx.compile_pipeline(
+    PixelFormat formats[1] = {color_format};
+    return ctx.compile_pipeline_dynamic(
         string_view(frag), vertex_src,
-        user_key, target_format, /*target_group=*/0,
+        user_key,
+        array_view<const PixelFormat>(formats, 1),
+        depth_format,
         batch.pipeline_options());
 }
 
@@ -58,8 +62,9 @@ inline uint64_t compile_material_forward_pipeline(
  * stay 0 and the gbuffer / RT paths would silently skip the batch.
  *
  * This helper bridges that gap: if the key is 0, it compiles the
- * forward variant at `PixelFormat::Surface` and caches the resulting
- * key on the material. Subsequent calls return it directly.
+ * forward variant against the surface composite's RGBA16F + Default
+ * depth (matches CameraPipeline's path target) and caches the
+ * resulting key on the material. Subsequent calls return it directly.
  *
  * Returns 0 if the material lacks the source needed to compile.
  */
@@ -69,8 +74,9 @@ inline uint64_t ensure_material_forward_key(IRenderContext& ctx, const IBatch& b
     if (!material_ptr) return 0;
     uint64_t key = material_ptr->get_pipeline_handle(ctx);
     if (key != 0) return key;
-    uint64_t compiled = compile_material_forward_pipeline(
-        ctx, batch, PixelFormat::Surface, /*user_key=*/0);
+    uint64_t compiled = compile_material_forward_pipeline_dynamic(
+        ctx, batch, PixelFormat::RGBA16F, DepthFormat::Default,
+        /*user_key=*/0);
     if (compiled != 0) {
         material_ptr->set_pipeline_handle(compiled);
     }

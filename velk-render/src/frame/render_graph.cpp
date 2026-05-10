@@ -75,19 +75,15 @@ void RenderGraph::add_pass(::velk::IRenderPass::Ptr pass)
 
 RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 {
-    // Surface-blit seam → Blit (post-pass dest in color-attachment layout).
-    // Cmd buffer with a target_id / target_texture / target_group → Raster.
-    // Cmd buffer alone (no target) → Compute (compute dispatch, possibly
-    //   followed by an in-cmd-buffer record_blit_to_texture; the post-
-    //   pass writes list reflects what was written).
+    // S6.6: every cmd-buffer-bearing pass is self-contained — the
+    // secondary internally calls record_begin_rendering for raster or
+    // record_dispatch / record_blit_to_texture for compute-style. The
+    // graph can't distinguish raster from compute by looking at the
+    // pass's outer state. Treat all cmd-buffer passes as Compute for
+    // pre-pass barrier purposes (consumer stage = ComputeShader, which
+    // covers both raster's vertex pulling and compute reads).
     // Empty / barrier-only pass → Raster as a default barrier dst.
-    if (pass.surface_blit_source() != nullptr) return PassClass::Blit;
-    if (pass.command_buffer()) {
-        if (pass.target_group() || pass.target_texture() || pass.target_id() != 0) {
-            return PassClass::Raster;
-        }
-        return PassClass::Compute;
-    }
+    if (pass.command_buffer()) return PassClass::Compute;
     return PassClass::Raster;
 }
 
@@ -134,17 +130,15 @@ void RenderGraph::compile()
         return ResourceState::ColorWrite;
     };
 
-    /// Raster passes that target an RTT texture / MRT group write a
-    /// fresh target without sampling prior graph resources. Skip the
-    /// pre-pass barrier for them (matches old behaviour where the skip
-    /// fired only when the raster pass declared writes).
-    auto skip_pre_barrier = [](const ::velk::IRenderPass& pass, PassClass c) {
-        if (c != PassClass::Raster) return false;
-        if (!pass.command_buffer()) return false;
-        if (!pass.target_group() && !pass.target_texture() && pass.target_id() == 0) {
-            return false;
-        }
-        return !pass.writes().empty();
+    /// S6.6: with target_* seams gone, raster passes are no longer
+    /// distinguishable from compute at the graph level. The
+    /// skip_pre_barrier optimization (used to suppress the pre-pass
+    /// barrier when a raster pass declared writes against a fresh
+    /// RTT) doesn't have a clean signal anymore. Always emit
+    /// pre-pass barriers; the over-sync is one extra memory barrier
+    /// per pass per frame. Revisit if profiling shows it matters.
+    auto skip_pre_barrier = [](const ::velk::IRenderPass&, PassClass) {
+        return false;
     };
 
     for (size_t i = 0; i < passes_.size(); ++i) {
@@ -205,42 +199,14 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d surface_blit=%d",
-                   i,
-                   (unsigned long long)gp.target_id(),
-                   gp.command_buffer() ? 1 : 0,
-                   gp.surface_blit_source() ? 1 : 0);
-
-        // Surface-blit seam: per-frame swapchain blit; can't be baked
-        // into a cached secondary, recorded onto the primary every
-        // frame inside the backend.
-        if (auto* src = gp.surface_blit_source()) {
-            backend.blit_to_surface(*src,
-                                    gp.surface_blit_surface_id(),
-                                    gp.surface_blit_rect());
-            continue;
-        }
+        RENDER_LOG("graph.pass[%zu] has_cmd=%d", i, gp.command_buffer() ? 1 : 0);
 
         if (auto cmd = gp.command_buffer()) {
-            // Group/texture targets route through their typed overloads;
-            // surface targets stay on the uint64 overload. Compute /
-            // blit cmd buffers leave all three unset and skip the
-            // begin_pass / end_pass wrap.
-            if (auto* group = gp.target_group()) {
-                backend.begin_pass(*group);
-                backend.execute(cmd);
-                backend.end_pass();
-            } else if (auto* tex = gp.target_texture()) {
-                backend.begin_pass(*tex);
-                backend.execute(cmd);
-                backend.end_pass();
-            } else if (uint64_t target = gp.target_id()) {
-                backend.begin_pass(target);
-                backend.execute(cmd);
-                backend.end_pass();
-            } else {
-                backend.execute(cmd);
-            }
+            // S6.6: every cmd-buffer pass is self-contained — raster
+            // passes call record_begin_rendering / record_end_rendering
+            // internally; compute / blit passes leave the rendering
+            // scope alone. Executor never wraps in begin_pass/end_pass.
+            backend.execute(cmd);
         }
     }
 }

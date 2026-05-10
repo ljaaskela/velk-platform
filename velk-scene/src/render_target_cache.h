@@ -72,7 +72,7 @@ private:
         IRenderTarget::WeakPtr target;
         int width = 0;
         int height = 0;
-        PixelFormat format = PixelFormat::Surface;
+        PixelFormat format = PixelFormat::RGBA8;
         bool dirty = true;
     };
 

@@ -25,12 +25,10 @@ class IVkRenderTargetGroup
 public:
     virtual void init(::velk::IRenderBackend* backend,
                       ::velk::vector<::velk::IGpuTexture::Ptr> attachments,
+                      ::velk::IGpuTexture::Ptr depth_attachment,
                       ::VkRenderPass render_pass,
                       ::VkRenderPass load_render_pass,
                       ::VkFramebuffer framebuffer,
-                      ::VkImage depth_image,
-                      ::VkImageView depth_view,
-                      VmaAllocation depth_allocation,
                       ::VkFormat depth_vk_format,
                       ::velk::uvec2 dimensions,
                       ::velk::PixelFormat color_format,
@@ -39,9 +37,6 @@ public:
     virtual ::VkRenderPass  vk_render_pass()      const = 0;
     virtual ::VkRenderPass  vk_load_render_pass() const = 0;
     virtual ::VkFramebuffer vk_framebuffer()      const = 0;
-    virtual ::VkImage       vk_depth_image()      const = 0;
-    virtual ::VkImageView   vk_depth_view()       const = 0;
-    virtual VmaAllocation   vk_depth_allocation() const = 0;
     virtual ::VkFormat      vk_depth_format()     const = 0;
     virtual size_t          vk_attachment_count() const = 0;
 
@@ -90,15 +85,17 @@ public:
     {
         return index < attachments_.size() ? attachments_[index].get() : nullptr;
     }
+    ::velk::IGpuTexture* depth_attachment() const override
+    {
+        return depth_attachment_.get();
+    }
     // IVkRenderTargetGroup
     void init(::velk::IRenderBackend* backend,
               ::velk::vector<::velk::IGpuTexture::Ptr> attachments,
+              ::velk::IGpuTexture::Ptr depth_attachment,
               ::VkRenderPass render_pass,
               ::VkRenderPass load_render_pass,
               ::VkFramebuffer framebuffer,
-              ::VkImage depth_image,
-              ::VkImageView depth_view,
-              VmaAllocation depth_allocation,
               ::VkFormat depth_vk_format,
               ::velk::uvec2 dimensions,
               ::velk::PixelFormat color_format,
@@ -107,9 +104,6 @@ public:
     ::VkRenderPass  vk_render_pass()      const override { return render_pass_; }
     ::VkRenderPass  vk_load_render_pass() const override { return load_render_pass_; }
     ::VkFramebuffer vk_framebuffer()      const override { return framebuffer_; }
-    ::VkImage       vk_depth_image()      const override { return depth_image_; }
-    ::VkImageView   vk_depth_view()       const override { return depth_view_; }
-    VmaAllocation   vk_depth_allocation() const override { return depth_allocation_; }
     ::VkFormat      vk_depth_format()     const override { return depth_vk_format_; }
     size_t          vk_attachment_count() const override { return attachments_.size(); }
     bool was_cleared_this_frame() const override { return cleared_this_frame_; }
@@ -118,12 +112,15 @@ public:
 private:
     ::velk::IRenderBackend* backend_ = nullptr;
     ::velk::vector<::velk::IGpuTexture::Ptr> attachments_;
+    /// Depth attachment as a real IGpuTexture::Ptr so dynamic rendering
+    /// (S6 — record_begin_rendering) can bind it via the same shape as
+    /// color attachments. Dropping the group's last Ptr cascades to the
+    /// depth wrapper's destructor, which defers via the standard
+    /// IGpuTexture observer chain. nullptr when DepthFormat::None.
+    ::velk::IGpuTexture::Ptr depth_attachment_;
     ::VkRenderPass  render_pass_      = VK_NULL_HANDLE;
     ::VkRenderPass  load_render_pass_ = VK_NULL_HANDLE;
     ::VkFramebuffer framebuffer_      = VK_NULL_HANDLE;
-    ::VkImage       depth_image_      = VK_NULL_HANDLE;
-    ::VkImageView   depth_view_       = VK_NULL_HANDLE;
-    VmaAllocation   depth_allocation_ = VK_NULL_HANDLE;
     ::VkFormat      depth_vk_format_  = VK_FORMAT_UNDEFINED;
     ::velk::uvec2       dimensions_{};
     ::velk::PixelFormat format_       = ::velk::PixelFormat::RGBA8;
