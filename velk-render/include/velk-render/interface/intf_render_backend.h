@@ -388,6 +388,24 @@ public:
                                               PixelFormat target_format = PixelFormat::Surface,
                                               IRenderTextureGroup* target_group = nullptr) = 0;
 
+    /**
+     * @brief Creates a graphics pipeline against dynamic-rendering attachment
+     *        formats (S6 — see design-notes/render_dynamic_rendering.md).
+     *
+     * Pipelines compiled this way are render-pass-agnostic and run inside
+     * a `vkCmdBeginRendering` scope opened by `IGpuCommandBuffer::record_begin_rendering`
+     * with attachments matching the declared formats (count + ordering).
+     *
+     * @param color_formats Color attachment formats in declaration order (must
+     *                      match the cmd-buffer's `record_begin_rendering` color list).
+     * @param depth_format  Depth attachment format, or `DepthFormat::None` for
+     *                      no depth.
+     */
+    virtual IGpuPipeline::Ptr create_pipeline_dynamic(
+        const PipelineDesc& desc,
+        array_view<const PixelFormat> color_formats,
+        DepthFormat depth_format) = 0;
+
     /** @brief Creates a compute pipeline from a compute shader. */
     virtual IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 

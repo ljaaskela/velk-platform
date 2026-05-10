@@ -46,6 +46,10 @@ void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_blit_to_texture(::velk::IGpuTexture& source,
                                 ::velk::IGpuTexture& dest,
                                 ::velk::rect dst_rect) override;
+    void record_begin_rendering(
+        ::velk::array_view<const ::velk::ColorAttachment> colors,
+        const ::velk::DepthAttachment* depth) override;
+    void record_end_rendering() override;
 
     /// Backend access for the executor (`VkBackend::execute`).
     ::VkCommandBuffer handle() const { return cmd_; }
@@ -54,6 +58,15 @@ private:
     VkBackend* backend_ = nullptr;
     ::VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     ::VkRenderPass inherit_render_pass_ = VK_NULL_HANDLE;
+
+    /// Attachment textures captured between `record_begin_rendering`
+    /// and `record_end_rendering` so the matching end-side layout
+    /// transitions can run without re-walking the input list. Capacity
+    /// matches the begin side; raise if future producers need more.
+    static constexpr uint32_t kMaxRenderingColors = 8;
+    ::velk::IGpuTexture* rendering_color_textures_[kMaxRenderingColors]{};
+    ::velk::IGpuTexture* rendering_depth_texture_ = nullptr;
+    uint32_t rendering_color_count_ = 0;
 };
 
 } // namespace velk::vk

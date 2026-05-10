@@ -59,6 +59,10 @@ public:
     IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
                                       PixelFormat target_format = PixelFormat::Surface,
                                       IRenderTextureGroup* target_group = nullptr) override;
+    IGpuPipeline::Ptr create_pipeline_dynamic(
+        const PipelineDesc& desc,
+        array_view<const PixelFormat> color_formats,
+        DepthFormat depth_format) override;
     IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) override;
     void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) override;
     void defer_destroy_gpu_texture(IGpuTexture* texture,

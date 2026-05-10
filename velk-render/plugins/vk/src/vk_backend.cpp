@@ -352,7 +352,7 @@ bool VkBackend::create_vk_instance()
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "velk-ui";
-    app_info.apiVersion = VK_API_VERSION_1_2;
+    app_info.apiVersion = VK_API_VERSION_1_3;
 
     vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
@@ -495,6 +495,15 @@ bool VkBackend::create_device()
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     features12.timelineSemaphore = VK_TRUE;
 
+    // Vulkan 1.3 features: dynamic rendering (S6 design — see
+    // design-notes/render_dynamic_rendering.md). Lets vkCmdBeginRendering
+    // bind attachments inline at record time without VkRenderPass /
+    // VkFramebuffer objects.
+    VkPhysicalDeviceVulkan13Features features13{};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.dynamicRendering = VK_TRUE;
+    features12.pNext = &features13;
+
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features12;
@@ -528,7 +537,7 @@ bool VkBackend::create_allocator()
     ci.physicalDevice = physical_device_;
     ci.device = device_;
     ci.instance = instance_;
-    ci.vulkanApiVersion = VK_API_VERSION_1_2;
+    ci.vulkanApiVersion = VK_API_VERSION_1_3;
     ci.pVulkanFunctions = &vma_funcs;
 
     if (vmaCreateAllocator(&ci, &allocator_) != VK_SUCCESS) {
@@ -1879,6 +1888,202 @@ IGpuPipeline::Ptr VkBackend::create_pipeline(const PipelineDesc& desc,
     }
 
     // Shader modules can be destroyed after pipeline creation
+    vkDestroyShaderModule(device_, vert_module, nullptr);
+    vkDestroyShaderModule(device_, frag_module, nullptr);
+
+    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
+        ::velk::ClassId::VkGpuPipeline);
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
+    if (!vk_gp) {
+        vkDestroyPipeline(device_, pipeline, nullptr);
+        return {};
+    }
+    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    return gp;
+}
+
+IGpuPipeline::Ptr VkBackend::create_pipeline_dynamic(
+    const PipelineDesc& desc,
+    array_view<const PixelFormat> color_formats,
+    DepthFormat depth_format)
+{
+    VELK_PERF_SCOPE("vk.create_pipeline_dynamic");
+
+    // Resolve color formats and depth format up front. Mirrors
+    // create_pipeline's path but without a VkRenderPass — pipelines
+    // declare their attachment formats via VkPipelineRenderingCreateInfo
+    // pNext'd into VkGraphicsPipelineCreateInfo.
+    constexpr size_t kMaxColors = 8;
+    if (color_formats.size() > kMaxColors) {
+        VELK_LOG(E, "VkBackend: create_pipeline_dynamic: too many color attachments");
+        return {};
+    }
+    VkFormat vk_color_formats[kMaxColors]{};
+    for (size_t i = 0; i < color_formats.size(); ++i) {
+        vk_color_formats[i] = vk_format_for(color_formats[i]);
+        if (vk_color_formats[i] == VK_FORMAT_UNDEFINED) {
+            VELK_LOG(E, "VkBackend: create_pipeline_dynamic: unsupported color format");
+            return {};
+        }
+    }
+    const VkFormat vk_depth_format = (depth_format == DepthFormat::Default)
+                                         ? VK_FORMAT_D32_SFLOAT
+                                         : VK_FORMAT_UNDEFINED;
+    const uint32_t color_attachment_count = static_cast<uint32_t>(color_formats.size());
+    const bool target_has_depth = (vk_depth_format != VK_FORMAT_UNDEFINED);
+
+    // Shader modules
+    VkShaderModuleCreateInfo vert_ci{};
+    vert_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vert_ci.codeSize = desc.get_vertex_size();
+    vert_ci.pCode = desc.get_vertex_data().begin();
+
+    VkShaderModule vert_module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device_, &vert_ci, nullptr, &vert_module) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create vertex shader module");
+        return {};
+    }
+
+    VkShaderModuleCreateInfo frag_ci{};
+    frag_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    frag_ci.codeSize = desc.get_fragment_size();
+    frag_ci.pCode = desc.get_fragment_data().begin();
+
+    VkShaderModule frag_module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device_, &frag_ci, nullptr, &frag_module) != VK_SUCCESS) {
+        vkDestroyShaderModule(device_, vert_module, nullptr);
+        VELK_LOG(E, "VkBackend: failed to create fragment shader module");
+        return {};
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert_module;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag_module;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = (desc.options.topology == Topology::TriangleStrip)
+        ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+        : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    switch (desc.options.cull_mode) {
+    case CullMode::None:  rasterizer.cullMode = VK_CULL_MODE_NONE;     break;
+    case CullMode::Back:  rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; break;
+    case CullMode::Front: rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; break;
+    }
+    rasterizer.frontFace = (desc.options.front_face == FrontFace::Clockwise)
+        ? VK_FRONT_FACE_CLOCKWISE
+        : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Blend: same policy as legacy create_pipeline — opaque on MRT
+    // (color_attachment_count > 1), alpha-honoring on single-color.
+    const bool blend_enabled = (color_attachment_count == 1)
+        && (desc.options.blend_mode == BlendMode::Alpha);
+
+    VkPipelineColorBlendAttachmentState blend_att{};
+    blend_att.blendEnable = blend_enabled ? VK_TRUE : VK_FALSE;
+    blend_att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend_att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_att.colorBlendOp = VK_BLEND_OP_ADD;
+    blend_att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend_att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_att.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    vector<VkPipelineColorBlendAttachmentState> blend_atts(color_attachment_count, blend_att);
+
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = color_attachment_count;
+    blend.pAttachments = blend_atts.data();
+
+    VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+    if (target_has_depth) {
+        depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depth_stencil.depthTestEnable = (desc.options.depth_test != CompareOp::Disabled) ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthWriteEnable = desc.options.depth_write ? VK_TRUE : VK_FALSE;
+        switch (desc.options.depth_test) {
+        case CompareOp::Never:        depth_stencil.depthCompareOp = VK_COMPARE_OP_NEVER;            break;
+        case CompareOp::Less:         depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;             break;
+        case CompareOp::Equal:        depth_stencil.depthCompareOp = VK_COMPARE_OP_EQUAL;            break;
+        case CompareOp::LessEqual:    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;    break;
+        case CompareOp::Greater:      depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER;          break;
+        case CompareOp::NotEqual:     depth_stencil.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;        break;
+        case CompareOp::GreaterEqual: depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+        case CompareOp::Always:       depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
+        case CompareOp::Disabled:     depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
+        }
+        depth_stencil.minDepthBounds = 0.0f;
+        depth_stencil.maxDepthBounds = 1.0f;
+    }
+
+    // Dynamic-rendering hookup: attachment formats ride in via pNext.
+    VkPipelineRenderingCreateInfo rendering_ci{};
+    rendering_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering_ci.colorAttachmentCount = color_attachment_count;
+    rendering_ci.pColorAttachmentFormats = (color_attachment_count > 0) ? vk_color_formats : nullptr;
+    rendering_ci.depthAttachmentFormat = vk_depth_format;
+    rendering_ci.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo pipeline_ci{};
+    pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_ci.pNext = &rendering_ci;
+    pipeline_ci.stageCount = 2;
+    pipeline_ci.pStages = stages;
+    pipeline_ci.pVertexInputState = &vertex_input;
+    pipeline_ci.pInputAssemblyState = &input_assembly;
+    pipeline_ci.pViewportState = &viewport_state;
+    pipeline_ci.pRasterizationState = &rasterizer;
+    pipeline_ci.pMultisampleState = &multisample;
+    pipeline_ci.pDepthStencilState = target_has_depth ? &depth_stencil : nullptr;
+    pipeline_ci.pColorBlendState = &blend;
+    pipeline_ci.pDynamicState = &dynamic;
+    pipeline_ci.layout = pipeline_layout_;
+    pipeline_ci.renderPass = VK_NULL_HANDLE;
+    pipeline_ci.subpass = 0;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult pipeline_result;
+    {
+        VELK_PERF_SCOPE("vk.vkCreateGraphicsPipelines");
+        pipeline_result = vkCreateGraphicsPipelines(
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
+    }
+    if (pipeline_result != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create dynamic-rendering pipeline");
+        vkDestroyShaderModule(device_, vert_module, nullptr);
+        vkDestroyShaderModule(device_, frag_module, nullptr);
+        return {};
+    }
+
     vkDestroyShaderModule(device_, vert_module, nullptr);
     vkDestroyShaderModule(device_, frag_module, nullptr);
 
