@@ -95,7 +95,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
     auto pit = ctx.pipeline_map->find(
-        ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::Surface, 0});
+        ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::RGBA8, 0});
     if (pit == ctx.pipeline_map->end()) return;
 
     /// Push constant layout matches the shader's `PC` block above.

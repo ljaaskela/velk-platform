@@ -31,16 +31,16 @@ namespace velk {
  * - `user_key`: stable id chosen by the caller (visual / material /
  *   built-in `PipelineKey::*`) or auto-assigned when 0.
  * - `target_format`: the color attachment format the pipeline was
- *   compiled against. `PixelFormat::Surface` for swapchain / RTT
- *   targets that follow the surface; explicit format for HDR or
- *   other non-default render targets.
+ *   compiled against (RGBA8, RGBA8_SRGB, RGBA16F, ...). For pipelines
+ *   that don't render into a color attachment (compute, blit), use
+ *   the canonical `RGBA8` placeholder so the cache key is deterministic.
  * - `target_group`: non-zero for MRT (G-buffer) variants. Compute
  *   pipelines and forward raster pipelines use 0.
  */
 struct PipelineCacheKey
 {
     uint64_t user_key = 0;
-    PixelFormat target_format = PixelFormat::Surface;
+    PixelFormat target_format = PixelFormat::RGBA8;
     IRenderTextureGroup* target_group = nullptr;
 
     bool operator==(const PipelineCacheKey& o) const noexcept

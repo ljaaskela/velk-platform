@@ -236,7 +236,7 @@ uint64_t RenderContextImpl::compile_pipeline_dynamic(
     // differentiates MRT pipelines from single-color forward ones using
     // the same user_key.
     PixelFormat cache_format = color_formats.empty()
-        ? PixelFormat::Surface
+        ? PixelFormat::RGBA8
         : color_formats[0];
     pipeline_map_[PipelineCacheKey{key, cache_format, cache_group}] = std::move(pid);
     return key;
@@ -259,10 +259,10 @@ uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute,
     if (key == 0) {
         key = next_pipeline_key_++;
     }
-    // Compute pipelines are render-pass independent; key under the
-    // default (Surface, group 0) tuple so call sites can look them up
-    // with just the user_key.
-    pipeline_map_[PipelineCacheKey{key, PixelFormat::Surface, 0}] = std::move(pid);
+    // Compute pipelines are render-pass independent; key under a
+    // canonical (RGBA8, group 0) placeholder tuple so call sites look
+    // them up with just the user_key.
+    pipeline_map_[PipelineCacheKey{key, PixelFormat::RGBA8, 0}] = std::move(pid);
     return key;
 }
 

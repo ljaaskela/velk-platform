@@ -211,11 +211,6 @@ private:
     // Shared pipeline layout (push constants + bindless set)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
 
-    /// Format the swapchain renders at; used by create_texture
-    /// (TextureUsage::RenderTarget with PixelFormat::Surface) so RTT
-    /// textures targeting the swap chain (RenderTargetCache) match.
-    VkFormat default_surface_format_ = VK_FORMAT_UNDEFINED;
-
     // Surfaces — post-S6.4, the swapchain images are only used as
     // transfer destinations for the per-surface composite blit at
     // end_frame. No render pass / framebuffer / surface depth.

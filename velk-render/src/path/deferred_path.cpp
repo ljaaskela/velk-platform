@@ -422,7 +422,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
     auto pit = ctx.pipeline_map->find(
-        PipelineCacheKey{pipeline_key, PixelFormat::Surface, 0});
+        PipelineCacheKey{pipeline_key, PixelFormat::RGBA8, 0});
     if (pit == ctx.pipeline_map->end()) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));

@@ -30,7 +30,6 @@ VkFormat vk_format_for(PixelFormat f)
         case PixelFormat::RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
         case PixelFormat::RGBA16F:    return VK_FORMAT_R16G16B16A16_SFLOAT;
         case PixelFormat::RGBA32F:    return VK_FORMAT_R32G32B32A32_SFLOAT;
-        case PixelFormat::Surface:    break; // Caller resolves the sentinel.
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -175,13 +174,6 @@ bool VkBackend::init(void* params)
     }
     if (!create_pipeline_layout()) {
         return false;
-    }
-
-    // Cache the swapchain's preferred color format up front so
-    // create_texture(TextureUsage::RenderTarget) with PixelFormat::Surface
-    // can match the swap (legacy RenderTargetCache RTT path).
-    if (initial_surface) {
-        default_surface_format_ = choose_surface_format(physical_device_, initial_surface);
     }
 
     initialized_ = true;
@@ -1161,16 +1153,6 @@ void VkBackend::drain_deferred_buffers()
 IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
 {
     VkFormat vk_format = vk_format_for(desc.format);
-    if (desc.format == PixelFormat::Surface) {
-        // Sentinel: follow the swapchain's chosen format. Used by the
-        // default LDR RenderTarget path so pipelines compiled against
-        // the swapchain render pass remain compatible.
-        if (default_surface_format_ != VK_FORMAT_UNDEFINED) {
-            vk_format = default_surface_format_;
-        } else {
-            vk_format = VK_FORMAT_R8G8B8A8_UNORM;
-        }
-    }
     const bool is_color_attachment = (desc.usage == TextureUsage::ColorAttachment);
     const bool is_render_target = (desc.usage == TextureUsage::RenderTarget);
     const bool is_renderable = is_render_target || is_color_attachment;

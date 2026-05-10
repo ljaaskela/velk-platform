@@ -116,7 +116,7 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
     auto pit = ctx.pipeline_map->find(
-        PipelineCacheKey{rt_pipeline_key, PixelFormat::Surface, 0});
+        PipelineCacheKey{rt_pipeline_key, PixelFormat::RGBA8, 0});
     if (pit == ctx.pipeline_map->end()) {
         return;
     }
