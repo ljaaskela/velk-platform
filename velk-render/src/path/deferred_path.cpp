@@ -32,9 +32,9 @@ namespace {
 /// class perturbation derived from the shader-source class uid; that
 /// way two visuals sharing a material still get distinct pipelines
 /// with the right `velk_visual_discard` body. Returns 0 to skip.
-PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                      const IBatch& batch,
-                                      RenderTargetGroup target_group)
+IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
+                                         const IBatch& batch,
+                                         IRenderTextureGroup* target_group)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -49,7 +49,7 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     if (forward_key == 0) {
         forward_key = ensure_material_forward_key(ctx, batch);
     }
-    if (forward_key == 0) return 0;
+    if (forward_key == 0) return nullptr;
 
     // Pull the material's eval snippet for the gbuffer compile below.
     // Fast-path note: when ensure_material_forward_key just compiled,
@@ -79,7 +79,7 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     auto& pipeline_map = ctx.pipeline_map();
     PipelineCacheKey gkey{gbuffer_key, PixelFormat::Surface, target_group};
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
 
     string_view vsrc;
@@ -124,9 +124,14 @@ PipelineId resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    return ctx.compile_pipeline(
+    uint64_t compiled = ctx.compile_pipeline(
         string_view(composed), vsrc,
         gbuffer_key, PixelFormat::Surface, target_group, po);
+    if (!compiled) return nullptr;
+    if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
+        return it->second.get();
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -220,15 +225,15 @@ uint64_t DeferredPath::ensure_pipeline(FrameContext& ctx)
     return key;
 }
 
-RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,
-                                               FrameContext& /*ctx*/,
-                                               IRenderGraph& graph)
+IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,
+                                                  FrameContext& /*ctx*/,
+                                                  IRenderGraph& graph)
 {
-    if (width <= 0 || height <= 0) return 0;
+    if (width <= 0 || height <= 0) return nullptr;
 
     uvec2 want{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     if (vs.gbuffer && vs.gbuffer_size == want) {
-        return vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
+        return vs.gbuffer.get();
     }
 
     TextureGroupDesc gdesc{};
@@ -238,15 +243,11 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
     gdesc.height = height;
     gdesc.depth = DepthFormat::Default;
     vs.gbuffer = graph.resources().create_render_texture_group(gdesc);
-    if (!vs.gbuffer) return 0;
+    if (!vs.gbuffer) return nullptr;
 
     vs.gbuffer_size = want;
-    // Resize / first-time allocation invalidates any cached pass that
-    // referenced the previous group Ptr (gbuffer attachments feed the
-    // lighting PushC too).
     vs.gbuffer_dirty = true;
     vs.lighting_dirty = true;
-    auto group = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
 
     if (!vs.worldpos_alias) {
         vs.worldpos_alias = instance().create<IRenderTarget>(ClassId::RenderTexture);
@@ -259,7 +260,7 @@ RenderTargetGroup DeferredPath::ensure_gbuffer(ViewState& vs, int width, int hei
         vs.worldpos_alias->set_size(static_cast<uint32_t>(width),
                                     static_cast<uint32_t>(height));
     }
-    return group;
+    return vs.gbuffer.get();
 }
 
 void DeferredPath::build_passes(IViewEntry& entry,
@@ -279,8 +280,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
         entry.add_render_state_observer(this);
     }
 
-    auto gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
-    if (gbuffer_handle == 0) return;
+    auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
+    if (!gbuffer_handle) return;
 
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
@@ -310,11 +311,11 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         return;
     }
 
-    auto group_id = vs.gbuffer->get_gpu_handle(GpuResourceKey::Default);
+    IRenderTextureGroup* group = vs.gbuffer.get();
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_gbuffer(*ctx.render_ctx, b, group_id);
+        return resolve_or_compile_gbuffer(*ctx.render_ctx, b, group);
     };
     vector<DrawCall> gbuffer_draw_calls;
     emit_draw_calls(
@@ -323,6 +324,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
         *ctx.frame_buffer,
         *ctx.resources,
         default_uv1,
+        render_view.view_globals_address,
         resolve,
         render_view.has_frustum ? &render_view.frustum : nullptr);
 
@@ -330,9 +332,15 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.x),
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
-    vs.cached_gbuffer_pass->add_op(ops::BeginPass{group_id});
-    vs.cached_gbuffer_pass->add_op(ops::Submit{viewport, std::move(gbuffer_draw_calls)});
-    vs.cached_gbuffer_pass->add_op(ops::EndPass{});
+
+    if (auto cmd = ctx.backend->create_command_buffer(*group)) {
+        cmd->begin_recording();
+        cmd->set_viewport(viewport);
+        cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
+        cmd->end_recording();
+        vs.cached_gbuffer_pass->set_command_buffer(std::move(cmd));
+    }
+    vs.cached_gbuffer_pass->set_target_group(group);
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
     vs.gbuffer_dirty = false;
@@ -361,6 +369,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.format = PixelFormat::RGBA16F;
         td.usage = TextureUsage::Storage;
         vs.deferred_output = graph.resources().create_render_texture(td);
+        vs.deferred_output_tex = graph.resources().find_texture(vs.deferred_output.get());
         vs.lighting_dirty = true;
     }
     if (!vs.deferred_output) return;
@@ -372,6 +381,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.format = PixelFormat::RGBA32F;
         td.usage = TextureUsage::Storage;
         vs.shadow_debug = graph.resources().create_render_texture(td);
+        vs.shadow_debug_tex = graph.resources().find_texture(vs.shadow_debug.get());
         vs.lighting_dirty = true;
     }
     vs.output_size = want;
@@ -397,6 +407,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uint64_t lights_addr = render_view.lights_addr;
 
     VELK_GPU_STRUCT PushC {
+        uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
         float    cam_pos[4];
         uint32_t output_image_id;
         uint32_t albedo_tex_id;
@@ -414,6 +425,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     static_assert(sizeof(PushC) == 80, "Deferred PushC layout mismatch");
 
     PushC pc{};
+    pc.globals = render_view.view_globals_address;
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;
     pc.cam_pos[2] = render_view.cam_pos.z;
@@ -438,34 +450,77 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
 
     if (!vs.lighting_dirty) {
-        // Steady state: same Ptr, refresh only the per-frame view
+        // Steady state: same Ptrs, refresh only the per-frame view
         // globals address.
         vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
         graph.add_pass(vs.cached_lighting_pass);
+        if (vs.cached_surface_blit_pass) {
+            graph.add_pass(vs.cached_surface_blit_pass);
+        }
         return;
     }
 
     DispatchCall dc{};
-    dc.pipeline = pit->second;
+    dc.pipeline = pit->second.get();
     dc.groups_x = (w + 7) / 8;
     dc.groups_y = (h + 7) / 8;
     dc.groups_z = 1;
     dc.root_constants_size = sizeof(PushC);
     std::memcpy(dc.root_constants, &pc, sizeof(PushC));
 
-    vs.cached_lighting_pass->reset();
-    vs.cached_lighting_pass->add_op(ops::Dispatch{dc});
-    vs.cached_lighting_pass->add_op(ops::BlitToSurface{
-        static_cast<TextureId>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0,
-        render_view.viewport});
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    const uint64_t blit_target =
+        color_target ? color_target->get_gpu_handle(GpuResourceKey::Default) : 0;
+    const bool dst_is_surface = (blit_target != 0)
+        && ctx.backend->is_surface(blit_target);
+    IGpuTexture* dst_tex = (color_target && !dst_is_surface)
+        ? graph.resources().find_texture(color_target.get())
+        : nullptr;
 
+    vs.cached_lighting_pass->reset();
+    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+        cmd->begin_recording();
+        cmd->record_dispatch(dc);
+        // Texture-target case: blit folded into the same cmd buffer.
+        // Surface-target case: blit_to_surface goes into the sibling
+        // surface-blit pass below.
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->end_recording();
+        vs.cached_lighting_pass->set_command_buffer(std::move(cmd));
+    }
+    vs.cached_lighting_pass->set_target_id(0);
     vs.cached_lighting_pass->add_read(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-    if (color_target) vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
+    if (dst_tex) {
+        vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
+    }
     vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
+
+    if (dst_is_surface && src_tex) {
+        if (!vs.cached_surface_blit_pass) {
+            vs.cached_surface_blit_pass =
+                ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
+        }
+        if (vs.cached_surface_blit_pass) {
+            vs.cached_surface_blit_pass->reset();
+            vs.cached_surface_blit_pass->set_surface_blit(
+                src_tex, blit_target, render_view.viewport);
+            vs.cached_surface_blit_pass->add_read(
+                interface_pointer_cast<IGpuResource>(vs.deferred_output));
+            vs.cached_surface_blit_pass->add_write(
+                interface_pointer_cast<IGpuResource>(color_target));
+        }
+    } else {
+        vs.cached_surface_blit_pass.reset();
+    }
+
     vs.lighting_dirty = false;
     graph.add_pass(vs.cached_lighting_pass);
+    if (vs.cached_surface_blit_pass) {
+        graph.add_pass(vs.cached_surface_blit_pass);
+    }
 }
 
 DeferredPath::~DeferredPath()
@@ -517,14 +572,23 @@ IGpuResource::Ptr DeferredPath::find_named_output(string_view name, IViewEntry* 
     if (name == "gbuffer") {
         return interface_pointer_cast<IGpuResource>(vs.gbuffer);
     }
+    auto wrap = [](IGpuTexture* tex) -> IGpuResource::Ptr {
+        return tex ? IGpuResource::Ptr(static_cast<IGpuResource*>(tex))
+                   : IGpuResource::Ptr{};
+    };
     if (name == "gbuffer.worldpos") {
-        return interface_pointer_cast<IGpuResource>(vs.worldpos_alias);
+        // Return the underlying IGpuTexture (cast as IGpuResource) so
+        // debug code can `interface_cast<IGpuTexture>` and dump it.
+        return wrap(vs.gbuffer
+                ? vs.gbuffer->attachment_texture(
+                      static_cast<uint32_t>(GBufferAttachment::WorldPos))
+                : nullptr);
     }
     if (name == "shadow.debug") {
-        return interface_pointer_cast<IGpuResource>(vs.shadow_debug);
+        return wrap(vs.shadow_debug_tex);
     }
     if (name == "output") {
-        return interface_pointer_cast<IGpuResource>(vs.deferred_output);
+        return wrap(vs.deferred_output_tex);
     }
     return {};
 }

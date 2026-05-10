@@ -26,7 +26,6 @@ inline constexpr Uid MaterialOptions{"791cbf4f-7a8b-4343-b12a-a278fc46393e"};
 
 inline constexpr Uid Shader{"1e766d8e-917b-419f-8262-14fbfb8fbb16"};
 inline constexpr Uid RenderTexture{"ed3e9c55-9227-4c93-8c96-1759452e741f"};
-inline constexpr Uid RenderTextureGroup{"e7e18400-dbd9-4ef4-bbbb-3b36f71fbf83"};
 
 /** @brief Ray-traced shadow technique. Stub snippet; real body traces against the shared shape buffer. */
 inline constexpr Uid RtShadow{"a1b54a78-cb8c-4c26-9d4e-413648cb280f"};

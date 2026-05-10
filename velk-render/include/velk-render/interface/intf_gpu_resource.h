@@ -103,6 +103,17 @@ public:
     virtual void remove_gpu_resource_observer(IGpuResourceObserver* obs) = 0;
 
     /**
+     * @brief True iff at least one observer is registered.
+     *
+     * Concrete resources branch on this in their destructor:
+     * managed resources let the observer (typically the
+     * `GpuResourceManager`) drive destruction; unmanaged ones
+     * (allocated directly via the backend, bypassing the manager)
+     * free themselves.
+     */
+    virtual bool is_managed() const = 0;
+
+    /**
      * @brief Returns a backend handle for this resource keyed by @p key.
      *
      * `GpuResourceKey::Default` (0) is the resource's primary handle —

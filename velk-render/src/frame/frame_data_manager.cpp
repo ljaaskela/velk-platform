@@ -91,25 +91,20 @@ void FrameDataManager::grow(IRenderBackend& backend, IGpuResourceManager& resour
     alloc_slot(*active_, backend, resources);
 }
 
-void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources)
+void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& /*backend*/, IGpuResourceManager& resources)
 {
-    if (slot.handle) {
-        // Defer the old buffer's destruction through the resource
-        // manager's marker queue. Frame_data grows mid-prepare, *before*
-        // the upcoming submit signals — and a previous in-flight frame
-        // may still be reading the old buffer. Immediate destruction
-        // would dangle that reference. The pending marker covers the
-        // upcoming submit; the deferred queue drains it once the GPU
-        // is past that point.
-        defer_buffer_destroy(&resources, slot.handle,
-                             backend.pending_frame_completion_marker());
-    }
+    // Drop the prior buffer's Ptr; ~VkGpuBuffer defers the VMA
+    // destroy through the backend's pending-frame-marker queue,
+    // covering any in-flight frame still reading from it.
+    slot.buffer.reset();
+
     GpuBufferDesc desc;
     desc.size = buffer_size_;
     desc.cpu_writable = true;
-    slot.handle = backend.create_buffer(desc);
-    slot.ptr = backend.map(slot.handle);
-    slot.gpu_base = backend.gpu_address(slot.handle);
+    slot.buffer = resources.create_gpu_buffer(desc);
+    if (!slot.buffer) return;
+    slot.ptr = slot.buffer->map();
+    slot.gpu_base = slot.buffer->gpu_address();
     slot.buffer_size = buffer_size_;
 }
 

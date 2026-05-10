@@ -1,6 +1,9 @@
 #ifndef VELK_UI_RENDER_TARGET_CACHE_H
 #define VELK_UI_RENDER_TARGET_CACHE_H
 
+#include <velk-render/ext/persistent_buffer.h>
+#include <velk/vector.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_render_graph.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/render_path/frame_context.h>
@@ -80,6 +83,11 @@ private:
     /// across frames for the same RTT element. Lazy-created on first
     /// emit per element; hive-pooled.
     std::unordered_map<IElement*, IViewEntry::Ptr> view_entries_;
+
+    /// Per-RTT FrameGlobals storage. Single 192-byte device-local
+    /// allocation per RTT element; updated in place each frame via
+    /// `IGpuBuffer::update`. BDA stable across the RTT's lifetime.
+    std::unordered_map<IElement*, IGpuBuffer::Ptr> view_globals_;
 
     /// Lazy-instantiated ForwardPath used to render RTT subtrees.
     /// Holding the path here keeps every line of forward composition

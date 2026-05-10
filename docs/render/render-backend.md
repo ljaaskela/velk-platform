@@ -93,7 +93,7 @@ The following methods from `IRenderBackend` give the renderer everything it need
 | Textures | `create_texture`, `destroy_texture`, `upload_texture` |
 | MRT groups | `create_render_target_group`, `destroy_render_target_group`, `get_render_target_group_attachment` |
 | Pipelines | `create_pipeline`, `create_compute_pipeline`, `destroy_pipeline` |
-| Frame lifecycle | `begin_frame`, `begin_pass`, `submit`, `end_pass`, `dispatch`, `blit_to_surface`, `blit_group_depth_to_surface`, `barrier`, `end_frame` |
+| Frame lifecycle | `begin_frame`, `begin_pass`, `end_pass`, `create_command_buffer`, `execute`, `blit_to_surface`, `blit_to_texture`, `barrier`, `end_frame` |
 
 **Memory** is the foundation:
 * `create_buffer`: Allocate a GPU buffer (`GpuBufferDesc` sets size, CPU-writable flag, index-buffer usage).
@@ -133,12 +133,12 @@ The UI renderer registers default vertex and fragment shaders during setup. This
 **Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair around zero or more passes and dispatches:
 
 * `begin_frame`: Waits on the GPU fence for the slot being reused, then starts command buffer recording. Does not acquire the swapchain image (that happens lazily inside `begin_pass` or `blit_to_surface`).
-* `begin_pass`: Begins a render pass targeting a surface, an MRT group, or a single render-target texture (the target kind is encoded in the ID). For surface targets, acquires the swapchain image if not already acquired this frame, binds the bindless descriptor set.
-* `submit`: Records `DrawCall`s into the current render pass. Takes an optional viewport rect (zero width/height means "full target"). `DrawCall` supports both indexed (`vkCmdDrawIndexed`) and non-indexed (`vkCmdDraw`) draws; the backend picks based on whether `index_buffer` is non-zero.
+* `begin_pass`: Begins a render pass targeting a surface (uint64 overload), a render-target texture (`IGpuTexture&` overload), or an MRT group (`IRenderTextureGroup&` overload). For surface targets, acquires the swapchain image if not already acquired this frame, binds the bindless descriptor set.
 * `end_pass`: Ends the current render pass. MRT attachments are transitioned to `SHADER_READ_ONLY_OPTIMAL` so the compositor can sample them.
-* `dispatch`: Records compute dispatches outside any render pass. Used for ray-trace fill, deferred lighting, shadow resolve. Emits a memory barrier before any subsequent graphics pass samples storage-image outputs.
-* `blit_to_surface`: Blits a storage texture onto a surface's swapchain image. Used by the RT / deferred compositor to deliver the final image; mutually exclusive with `begin_pass` on the same surface within a frame.
-* `blit_group_depth_to_surface`: Copies an MRT group's depth attachment into a surface's depth buffer so subsequent forward passes can depth-test against the deferred scene.
+* `create_command_buffer`: Allocates an `IGpuCommandBuffer` that producers record once (draws / dispatches / texture blits) and the executor replays each frame. Three overloads mirroring `begin_pass`.
+* `execute`: Replays a recorded command buffer in the active frame. Raster cmd buffers must be called between matching `begin_pass` / `end_pass`.
+* `blit_to_surface`: Blits a storage texture onto a surface's swapchain image. Used by the surface-blit seam on `IRenderPass` for the per-frame swapchain copy (CameraPipeline final stage, surface-target render paths). Cannot be baked into a cached secondary because swapchain image acquisition is per-frame.
+* `blit_to_texture`: Blits between two textures. Used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies.
 * `barrier`: Inserts a pipeline barrier between passes — call between `end_pass` and the next `begin_pass` when a pass reads output from the previous one.
 * `end_frame`: Ends command recording, submits to the GPU queue, and presents any surfaces that were rendered into this frame.
 

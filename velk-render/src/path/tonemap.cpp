@@ -31,8 +31,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform image2D gStorageImagesF16[];
 
 layout(push_constant) uniform PC {
-    GlobalData globals;        // [0..8) push_view_globals (unused here)
-    uint input_tex_id;         // [8..)  CPU push starts here
+    uint input_tex_id;
     uint output_image_id;
     uint width;
     uint height;
@@ -119,7 +118,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     pc.height = dims.y;
 
     ::velk::DispatchCall dc{};
-    dc.pipeline = pit->second;
+    dc.pipeline = pit->second.get();
     dc.groups_x = (dims.x + 7) / 8;
     dc.groups_y = (dims.y + 7) / 8;
     dc.groups_z = 1;
@@ -128,7 +127,13 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
 
     auto gp = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
     if (!gp) return;
-    gp->add_op(::velk::ops::Dispatch{dc});
+    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+        cmd->begin_recording();
+        cmd->record_dispatch(dc);
+        cmd->end_recording();
+        gp->set_command_buffer(std::move(cmd));
+    }
+    gp->set_target_id(0);
     gp->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
     gp->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
     graph.add_pass(std::move(gp));

@@ -63,15 +63,15 @@ public:
             desc.size = size;
             desc.cpu_writable = true;
             if (auto* be = ctx.resources->ensure_buffer_storage(buf, desc)) {
-                if (be->handle) {
-                    if (auto* dst = ctx.backend->map(be->handle)) {
+                if (auto gb = be->buffer.lock()) {
+                    if (auto* dst = gb->map()) {
                         std::memcpy(dst, buf->get_data(), size);
                     }
                 }
             }
             buf->clear_dirty();
         }
-        return {buf->get_gpu_handle(GpuResourceKey::Default), changed};
+        return {get_gpu_address(buf), changed};
     }
 
     /// Underlying IBuffer (for consumers that need the IBuffer::Ptr,

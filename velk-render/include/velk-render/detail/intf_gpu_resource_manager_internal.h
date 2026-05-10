@@ -50,15 +50,6 @@ public:
     /// default mode.
     virtual void enable_transient_pool() = 0;
 
-    /// Deferred destruction. The handle is enqueued and only destroyed
-    /// once GPU work tagged with `completion_marker` has finished
-    /// (queried via `IRenderBackend::is_frame_complete`). The right
-    /// marker for resources still referenced by the in-flight frame is
-    /// `IRenderBackend::pending_frame_completion_marker()`.
-    virtual void defer_texture_destroy(TextureId tid, uint64_t completion_marker) = 0;
-    virtual void defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker) = 0;
-    virtual void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) = 0;
-
     /// Drains entries whose completion marker has resolved.
     virtual void drain_deferred(IRenderBackend& backend) = 0;
 
@@ -79,7 +70,6 @@ public:
     ///       monotonically growing means the GPU isn't completing
     ///       frames or the manager isn't draining.
     /// @{
-    virtual size_t deferred_buffer_count() const = 0;
     virtual size_t deferred_texture_count() const = 0;
     virtual size_t deferred_group_count() const = 0;
     /// @}
@@ -91,30 +81,6 @@ public:
 /// instead of holding an `IGpuResourceManagerInternal*` separately.
 /// No-op when the cast fails (defensive; should not happen since the
 /// concrete manager implements both interfaces).
-inline void defer_texture_destroy(IGpuResourceManager* mgr,
-                                  TextureId tid, uint64_t marker)
-{
-    if (auto* in = interface_cast<IGpuResourceManagerInternal>(mgr)) {
-        in->defer_texture_destroy(tid, marker);
-    }
-}
-
-inline void defer_buffer_destroy(IGpuResourceManager* mgr,
-                                 GpuBufferHandle handle, uint64_t marker)
-{
-    if (auto* in = interface_cast<IGpuResourceManagerInternal>(mgr)) {
-        in->defer_buffer_destroy(handle, marker);
-    }
-}
-
-inline void defer_pipeline_destroy(IGpuResourceManager* mgr,
-                                   PipelineId pid, uint64_t marker)
-{
-    if (auto* in = interface_cast<IGpuResourceManagerInternal>(mgr)) {
-        in->defer_pipeline_destroy(pid, marker);
-    }
-}
-
 inline void drain_deferred(IGpuResourceManager* mgr, IRenderBackend& backend)
 {
     if (auto* in = interface_cast<IGpuResourceManagerInternal>(mgr)) {

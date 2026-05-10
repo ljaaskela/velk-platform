@@ -4,6 +4,7 @@
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
+#include <mutex>
 #include <unordered_map>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/plugins/vk/plugin.h>
@@ -11,6 +12,10 @@
 #include <volk/volk.h>
 
 namespace velk::vk {
+
+class VkCommandBuffer;
+class IVkGpuTexture;
+class IVkRenderTargetGroup;
 
 class VkBackend : public ext::Object<VkBackend, IRenderBackend>
 {
@@ -31,39 +36,90 @@ public:
     uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
+    bool is_surface(uint64_t id) const override
+    {
+        return surfaces_.find(id) != surfaces_.end();
+    }
 
-    GpuBufferHandle create_buffer(const GpuBufferDesc& desc) override;
-    void destroy_buffer(GpuBufferHandle buffer) override;
-    void* map(GpuBufferHandle buffer) override;
-    uint64_t gpu_address(GpuBufferHandle buffer) override;
+    IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
+    void defer_destroy_gpu_buffer(IGpuBuffer* gb,
+                                  uint64_t completion_marker) override;
+    void record_buffer_update(IGpuBuffer& target, size_t offset,
+                              size_t size, const void* data) override;
 
-    TextureId create_texture(const TextureDesc& desc) override;
-    void destroy_texture(TextureId texture) override;
-    void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) override;
-    bool read_texture(TextureId texture, vector<uint8_t>& out_pixels,
+    IGpuTexture::Ptr create_texture(const TextureDesc& desc) override;
+    void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) override;
+    bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
                       PixelFormat& out_format, uvec2& out_dims) override;
 
-    RenderTargetGroup create_render_target_group(const TextureGroupDesc& desc) override;
-    void destroy_render_target_group(RenderTargetGroup group) override;
-    TextureId get_render_target_group_attachment(
-        RenderTargetGroup group, uint32_t index) const override;
+    IRenderTextureGroup::Ptr create_render_target_group(const TextureGroupDesc& desc) override;
+    void defer_destroy_gpu_render_target_group(IRenderTextureGroup* group,
+                                               uint64_t completion_marker) override;
 
-    PipelineId create_pipeline(const PipelineDesc& desc,
-                               PixelFormat target_format = PixelFormat::Surface,
-                               RenderTargetGroup target_group = 0) override;
-    PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) override;
-    void destroy_pipeline(PipelineId pipeline) override;
+    IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
+                                      PixelFormat target_format = PixelFormat::Surface,
+                                      IRenderTextureGroup* target_group = nullptr) override;
+    IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) override;
+    void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) override;
+    void defer_destroy_gpu_texture(IGpuTexture* texture,
+                                   uint64_t completion_marker) override;
 
     void begin_frame() override;
     void begin_pass(uint64_t target_id) override;
-    void submit(array_view<const DrawCall> calls, rect viewport) override;
+    void begin_pass(IGpuTexture& target) override;
+    void begin_pass(IRenderTextureGroup& target) override;
     void end_pass() override;
-    void dispatch(array_view<const DispatchCall> calls) override;
-    void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect) override;
-    void blit_group_depth_to_surface(RenderTargetGroup src_group, uint64_t surface_id,
-                                     rect dst_rect) override;
+    void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect) override;
+    void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect) override;
+
+    IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) override;
+    IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) override;
+    IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) override;
+    void execute(const IGpuCommandBuffer::Ptr& cmd) override;
+
+    // VkCommandBuffer needs access to internal lookup maps + handles
+    // to record vkCmd* against producer-recorded draw calls.
+    friend class VkCommandBuffer;
+
+    /// Looks up the render pass (compatible with the renderpass used
+    /// at execute time) for inheritance info on a SECONDARY command
+    /// buffer. Returns `VK_NULL_HANDLE` if @p target_id is unknown
+    /// (caller falls back to a non-renderpass cmd buffer).
+    VkRenderPass find_render_pass_for_target(uint64_t target_id);
+
+    /// Per-draw `vkCmd*` recording loop. Called by
+    /// `VkCommandBuffer::record_draws` to emit BindPipeline +
+    /// PushConstants + optional BindIndexBuffer + Draw*IndirectCount
+    /// per call against the backend's pipeline / buffer maps.
+    void record_draw_loop(::VkCommandBuffer cb,
+                          array_view<const DrawCall> calls);
+
+    /// Records BindPipeline + PushConstants + vkCmdDispatch into @p cb
+    /// for one compute call. Shared by `VkCommandBuffer::record_dispatch`
+    /// (producer-recorded path) and the legacy `dispatch`.
+    void record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call);
+
+    /// Records the layout-transition + vkCmdBlitImage + final-layout
+    /// transition sequence for blitting a texture into a destination
+    /// texture (NOT a surface). Surface-destination blits require
+    /// per-frame swapchain acquisition state and remain on the legacy
+    /// `blit_to_surface` primary path. Returns false if the target id
+    /// does not resolve to a known texture.
+    /// Records the layout-transition + vkCmdBlitImage + final-layout
+    /// transition sequence for blitting one IGpuTexture into another.
+    /// Surface destinations live on the legacy primary blit_to_surface
+    /// path (per-frame swapchain acquisition can't be baked in).
+    void record_blit_to_texture(::VkCommandBuffer cb, IGpuTexture& source,
+                                IGpuTexture& dest, rect dst_rect);
+
+    /// Defers `vkFreeCommandBuffers` for a persistent-pool secondary
+    /// to the next time the current frame slot rolls around — i.e.
+    /// after `kFrameOverlap` more frame submissions have all
+    /// completed. Called by `VkCommandBuffer::~VkCommandBuffer` when
+    /// a producer drops its Ptr, since the GPU may still be running
+    /// commands from the last submission that referenced it.
+    void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
-    void push_view_globals(uint64_t addr) override;
     void end_frame() override;
 
 public:
@@ -93,16 +149,44 @@ private:
     // engine may still reference the previous frame's semaphores.
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
+    /// Long-lived pool for SECONDARY command buffers held by producers
+    /// across frames (cached IRenderPass cmd buffers via
+    /// `IGpuCommandBuffer`). Allocations from this pool persist until
+    /// the producer drops the cmd buffer Ptr; the impl's destructor
+    /// frees back here.
+    VkCommandPool persistent_secondary_pool_ = VK_NULL_HANDLE;
+
     static constexpr uint32_t kFrameOverlap = 3;
 
     // Per-frame-in-flight sync: fence + command buffer.
     struct FrameSync
     {
         VkFence fence = VK_NULL_HANDLE;
-        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        // Qualified `::VkCommandBuffer` everywhere — `VkCommandBuffer`
+        // resolves to our impl class inside `velk::vk`.
+        ::VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        /// Persistent-pool secondaries queued for free at this slot
+        /// when their owning `IGpuCommandBuffer` Ptr drops. Drained at
+        /// the top of `begin_frame` for this slot, after the slot's
+        /// fence has fired — guarantees kFrameOverlap frames of
+        /// in-flight grace before vkFreeCommandBuffers runs.
+        ::velk::vector<::VkCommandBuffer> deferred_persistent_frees;
     };
     FrameSync frame_sync_[kFrameOverlap]{};
     uint32_t frame_sync_index_ = 0;
+
+    /// Tracked at `begin_pass` so `submit()` and
+    /// `create_command_buffer()` can populate `VkCommandBufferInheritanceInfo`
+    /// for the SECONDARY recordings. Framebuffer is technically optional
+    /// in inheritance info but some drivers (AMD especially on MRT
+    /// renderpasses) misbehave when it's VK_NULL_HANDLE.
+    VkRenderPass current_render_pass_ = VK_NULL_HANDLE;
+    VkFramebuffer current_framebuffer_ = VK_NULL_HANDLE;
+
+/// Set by `mark_pending_buffer_update_barrier`; consumed by the
+    /// next `begin_pass` to emit a single TRANSFER → SHADER_READ
+    /// barrier covering all `vkCmdUpdateBuffer`s recorded this frame.
+    bool pending_buffer_update_barrier_ = false;
 
     // Per-swapchain-image semaphores to avoid present engine conflicts.
     // Indexed by the acquired image index, not the frame sync index.
@@ -190,79 +274,82 @@ private:
     bool surface_has_clear_ = false;       ///< True after first pass on a surface (subsequent passes use LOAD).
     int current_target_width_ = 0;         ///< Width of the current render pass target.
     int current_target_height_ = 0;        ///< Height of the current render pass target.
-    vector<TextureId> cleared_textures_;   ///< Textures that have been cleared this frame.
-    vector<RenderTargetGroup> cleared_render_target_groups_; ///< MRT groups already cleared this frame.
+    vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 
-    // Buffers
-    struct BufferData
+    /// Pending `vmaDestroyBuffer` calls keyed by the
+    /// frame-completion marker captured at drop time.
+    struct DeferredGpuBufferDestroy
     {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-        void* mapped = nullptr;
-        size_t size = 0;
+        ::VkBuffer    buffer;
+        VmaAllocation allocation;
+        uint64_t      completion_marker;
     };
+    ::velk::vector<DeferredGpuBufferDestroy> deferred_gpu_buffers_;
+    std::mutex deferred_gpu_buffers_mutex_;
 
-    std::unordered_map<GpuBufferHandle, BufferData> buffers_;
-    GpuBufferHandle next_buffer_id_ = 1;
+    /// Releases entries whose completion marker has been signalled.
+    void drain_deferred_buffers();
 
-    // Textures
-    struct TextureData
+    // Textures: state lives entirely on the VkGpuTexture / VkRenderTexture
+    // wrappers. Backend keeps one non-owning sidecar:
+    //  * `live_render_targets_` — list of renderable wrappers walked at
+    //    `begin_frame` to clear their per-frame "cleared" flag.
+    vector<IVkGpuTexture*> live_render_targets_;
+
+    // MRT render target groups: state lives on `VkRenderTargetGroup`
+    // wrappers (mirrors the texture pattern). The backend keeps no
+    // owning map; lifecycle flows through Ptr drops.
+
+    /// Pending `vkDestroyPipeline` calls keyed by the
+    /// frame-completion marker captured at drop time.
+    struct DeferredGpuPipelineDestroy
     {
-        VkImage image = VK_NULL_HANDLE;
-        VkImageView view = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-        uint32_t bindless_index = 0;
-        int width = 0;
-        int height = 0;
-        PixelFormat format = PixelFormat::RGBA8;
-        bool is_renderable = false;
-        uint32_t mip_levels = 1;
-        // Current image layout for cross-pass operations (e.g. blits).
-        // Storage textures land at GENERAL after their initial transition;
-        // render-target attachments sit at SHADER_READ_ONLY_OPTIMAL between
-        // passes via the render pass finalLayout. blit_to_surface saves,
-        // uses, and restores this value so it works for both kinds.
-        VkImageLayout current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        VkRenderPass render_pass = VK_NULL_HANDLE;
-        VkRenderPass load_render_pass = VK_NULL_HANDLE;
+        ::VkPipeline pipeline;
+        uint64_t     completion_marker;
     };
+    ::velk::vector<DeferredGpuPipelineDestroy> deferred_gpu_pipelines_;
+    std::mutex deferred_gpu_pipelines_mutex_;
 
-    std::unordered_map<TextureId, TextureData> textures_;
+    void drain_deferred_pipelines();
 
-    // MRT render target groups: N sampleable attachments sharing one
-    // render pass + framebuffer. Individual attachments are regular
-    // TextureIds (also tracked in textures_) so shaders can sample
-    // them after the group's pass ends.
-    struct RenderTargetGroupData
+    /// Pending texture-resource frees keyed by completion marker.
+    /// Captured in `defer_destroy_gpu_texture` from a dying
+    /// VkGpuTexture / VkRenderTexture. Slot is leaked for now (matches
+    /// current backend behaviour — `next_bindless_index_` is monotonic).
+    struct DeferredGpuTextureDestroy
     {
-        vector<TextureId> attachments;
-        vector<VkFormat> vk_formats;
-        VkRenderPass render_pass = VK_NULL_HANDLE;      ///< loadOp=CLEAR
-        VkRenderPass load_render_pass = VK_NULL_HANDLE; ///< loadOp=LOAD
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        int width = 0;
-        int height = 0;
-
-        // Optional depth attachment. VK_FORMAT_UNDEFINED means no depth.
-        VkFormat depth_vk_format = VK_FORMAT_UNDEFINED;
-        VkImage depth_image = VK_NULL_HANDLE;
-        VkImageView depth_view = VK_NULL_HANDLE;
-        VmaAllocation depth_allocation = VK_NULL_HANDLE;
+        ::VkImage         image;
+        ::VkImageView     view;
+        VmaAllocation     allocation;
+        ::VkFramebuffer   framebuffer;
+        ::VkRenderPass    render_pass;
+        ::VkRenderPass    load_render_pass;
+        uint64_t          completion_marker;
     };
+    ::velk::vector<DeferredGpuTextureDestroy> deferred_gpu_textures_;
+    std::mutex deferred_gpu_textures_mutex_;
 
-    std::unordered_map<RenderTargetGroup, RenderTargetGroupData> render_target_groups_;
-    uint64_t next_render_target_group_id_ = 1;
+    void drain_deferred_textures();
 
-    // Pipelines
-    struct PipelineEntry
+    /// Pending render-target-group frees keyed by completion marker.
+    /// Captured in `defer_destroy_gpu_render_target_group` from a dying
+    /// VkRenderTargetGroup. Attachment Ptrs already dropped through the
+    /// wrapper's destructor before this entry was queued, so we only
+    /// own the render pass / framebuffer / depth resources.
+    struct DeferredGpuRenderTargetGroupDestroy
     {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        ::VkRenderPass  render_pass;
+        ::VkRenderPass  load_render_pass;
+        ::VkFramebuffer framebuffer;
+        ::VkImage       depth_image;
+        ::VkImageView   depth_view;
+        VmaAllocation   depth_allocation;
+        uint64_t        completion_marker;
     };
+    ::velk::vector<DeferredGpuRenderTargetGroupDestroy> deferred_gpu_render_target_groups_;
+    std::mutex deferred_gpu_render_target_groups_mutex_;
 
-    std::unordered_map<PipelineId, PipelineEntry> pipelines_;
-    PipelineId next_pipeline_id_ = 1;
+    void drain_deferred_render_target_groups();
 
     bool initialized_ = false;
 
@@ -279,9 +366,9 @@ private:
     bool create_swapchain(SurfaceData& sd);
     void destroy_swapchain(SurfaceData& sd);
 
-    VkCommandBuffer begin_one_shot_commands();
-    void end_one_shot_commands(VkCommandBuffer cb);
-    void transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+    ::VkCommandBuffer begin_one_shot_commands();
+    void end_one_shot_commands(::VkCommandBuffer cb);
+    void transition_image_layout(::VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
                                  VkImageLayout new_layout, uint32_t mip_levels = 1);
 };
 

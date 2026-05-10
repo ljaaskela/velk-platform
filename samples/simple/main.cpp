@@ -200,12 +200,13 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     CheckerParams material;
 };
 
-layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
+layout(push_constant) uniform PC { DrawData root; };
 
 layout(location = 0) out vec2 v_local_uv;
 
 void main()
 {
+    GlobalData globals = velk_global_data(root);
     vec2 q = velk_vertex3d(root).position.xy;
     ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
@@ -229,7 +230,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     CheckerParams material;
 };
 
-layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
+layout(push_constant) uniform PC { DrawData root; };
 
 layout(location = 0) in vec2 v_local_uv;
 layout(location = 0) out vec4 frag_color;

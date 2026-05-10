@@ -64,7 +64,7 @@ layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
 // std430 would round vec4 up to a 16-byte alignment and shift every
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // offset 0  (8 bytes, push_view_globals)
+    GlobalData globals;        // offset 0  (8 bytes, FrameGlobals BDA)
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -676,7 +676,7 @@ void main()
 #include "velk.glsl"
 
 layout(push_constant) uniform PC {
-    GlobalData globals;        // [0..8) push_view_globals (unused here)
+    GlobalData globals;        // [0..8) FrameGlobals BDA (unused here)
     uint src_tex_id;           // [8..)  CPU push starts here
 } pc;
 
@@ -723,7 +723,7 @@ layout(buffer_reference, std430) readonly buffer LightList {
 // mat4 after GlobalData would shift to offset 16 (std430 alignment)
 // and break the CPU/GPU push-constant offset agreement.
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;         // [0..8)  push_view_globals
+    GlobalData globals;         // [0..8)  FrameGlobals BDA
     mat4 inv_view_projection;   // [8..72) CPU push starts here
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count

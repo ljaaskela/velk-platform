@@ -36,17 +36,18 @@ public:
     TextureId resolve(ISurface* surf) const override
     {
         if (!surf) return 0;
-        TextureId tid = find_texture(surf);
-        if (tid == 0) {
-            uint64_t rt_id = ::velk::get_render_target_id(surf);
-            if (rt_id != 0) tid = static_cast<TextureId>(rt_id);
+        if (auto* gt = find_texture(surf)) {
+            return get_texture_id(gt);
         }
-        return tid;
+        uint64_t rt_id = ::velk::get_render_target_id(surf);
+        if (rt_id != 0) return static_cast<TextureId>(rt_id);
+        return 0;
     }
 
     // IGpuResourceManager
     void init(IRenderBackend* backend) override;
     void enable_transient_pool() override;
+    IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) override;
@@ -54,23 +55,17 @@ public:
     // IGpuResourceObserver
     void on_gpu_resource_destroyed(IGpuResource* resource) override;
 
-    TextureId find_texture(ISurface* surf) const override;
-    void register_texture(ISurface* surf, TextureId tid) override;
+    IGpuTexture* find_texture(ISurface* surf) const override;
+    void register_texture(ISurface* surf, IGpuTexture::Ptr tex) override;
     void unregister_texture(ISurface* surf) override;
-    TextureId ensure_texture_storage(ISurface* surf, const TextureDesc& desc) override;
+    IGpuTexture* ensure_texture_storage(ISurface* surf, const TextureDesc& desc) override;
 
     BufferEntry* find_buffer(IBuffer* buf) override;
     void register_buffer(IBuffer* buf, const BufferEntry& entry) override;
     void unregister_buffer(IBuffer* buf) override;
     BufferEntry* ensure_buffer_storage(IBuffer* buf, const GpuBufferDesc& desc) override;
 
-    bool register_pipeline(IProgram* prog, PipelineId pid) override;
-
     void add_env_observer(const IBuffer::WeakPtr& res) override;
-
-    void defer_texture_destroy(TextureId tid, uint64_t completion_marker) override;
-    void defer_buffer_destroy(GpuBufferHandle handle, uint64_t completion_marker) override;
-    void defer_pipeline_destroy(PipelineId pid, uint64_t completion_marker) override;
 
     void drain_deferred(IRenderBackend& backend) override;
 
@@ -79,43 +74,10 @@ public:
 
     void shutdown() override;
 
-    size_t deferred_buffer_count() const override
-    {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        return deferred_buffers_.size();
-    }
-    size_t deferred_texture_count() const override
-    {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        return deferred_textures_.size();
-    }
-    size_t deferred_group_count() const override
-    {
-        std::lock_guard<std::mutex> lock(deferred_mutex_);
-        return deferred_groups_.size();
-    }
+    size_t deferred_texture_count() const override { return 0; }
+    size_t deferred_group_count() const override { return 0; }
 
 private:
-    struct DeferredTextureDestroy
-    {
-        TextureId tid;
-        uint64_t completion_marker;
-    };
-    struct DeferredBufferDestroy
-    {
-        GpuBufferHandle handle;
-        uint64_t completion_marker;
-    };
-    struct DeferredPipelineDestroy
-    {
-        PipelineId pid;
-        uint64_t completion_marker;
-    };
-    struct DeferredGroupDestroy
-    {
-        RenderTargetGroup handle;
-        uint64_t completion_marker;
-    };
 
     /// Number of consecutive `drain_deferred` ticks an idle transient
     /// pool entry may survive before falling through to deferred
@@ -135,7 +97,7 @@ private:
     struct PooledTexture
     {
         TextureDesc desc;
-        TextureId handle;
+        IGpuTexture::Ptr handle;
         uint64_t completion_marker;
         uint32_t idle_frames;
     };
@@ -143,7 +105,7 @@ private:
     struct PooledGroup
     {
         StoredGroupDesc desc;
-        RenderTargetGroup handle;
+        IRenderTextureGroup::Ptr handle;
         uint64_t completion_marker;
         uint32_t idle_frames;
     };
@@ -152,23 +114,22 @@ private:
     static bool transient_group_matches(const StoredGroupDesc& a, const TextureGroupDesc& b);
     static StoredGroupDesc store_group_desc(const TextureGroupDesc& d);
 
-    /// Wraps an already-allocated `TextureId` in a fresh `IRenderTarget`
-    /// shell, registers it for tracking, and subscribes the observer.
-    /// Mirrors the tail of `create_render_texture` past backend allocation.
-    IRenderTarget::Ptr wrap_pooled_texture(TextureId tid, const TextureDesc& desc);
-    IRenderTextureGroup::Ptr wrap_pooled_group(RenderTargetGroup group,
+    /// Wraps an already-allocated `IGpuTexture::Ptr` in a fresh
+    /// `IRenderTarget` shell, registers it for tracking, and subscribes
+    /// the observer. Mirrors the tail of `create_render_texture` past
+    /// backend allocation.
+    IRenderTarget::Ptr wrap_pooled_texture(IGpuTexture::Ptr tex, const TextureDesc& desc);
+    IRenderTextureGroup::Ptr wrap_pooled_group(IRenderTextureGroup::Ptr group,
                                                const StoredGroupDesc& desc);
 
     IRenderBackend* backend_ = nullptr;
 
-    std::unordered_map<ISurface*, TextureId> texture_map_;
-    std::unordered_map<ISurface*, RenderTargetGroup> group_map_;
+    std::unordered_map<ISurface*, IGpuTexture::Ptr> texture_map_;
     std::unordered_map<IBuffer*, BufferEntry> buffer_map_;
-    std::unordered_map<IProgram*, PipelineId> pipeline_map_;
-    vector<DeferredTextureDestroy> deferred_textures_;
-    vector<DeferredGroupDestroy> deferred_groups_;
-    vector<DeferredBufferDestroy> deferred_buffers_;
-    vector<DeferredPipelineDestroy> deferred_pipelines_;
+    /// Live IGpuBuffers handed out by `create_gpu_buffer`. Raw
+    /// pointers; populated on creation, removed by the observer
+    /// callback on destruction. Owning Ptrs live with the callers.
+    std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
 

@@ -39,7 +39,6 @@ add_library(velk_render SHARED
 
     # Concrete IGpuResource implementations
     src/resource/render_texture.h
-    src/resource/render_texture_group.h
     include/velk-render/ext/gpu_buffer.h
     src/resource/gpu_buffer.h
     src/resource/program_data_buffer.h
@@ -63,6 +62,7 @@ add_library(velk_render SHARED
     include/velk-render/gpu_data.h
     include/velk-render/interface/intf_batch.h
     include/velk-render/interface/intf_buffer.h
+    include/velk-render/interface/intf_gpu_command_buffer.h
     include/velk-render/interface/intf_render_backend.h
     include/velk-render/interface/intf_render_context.h
     include/velk-render/interface/intf_surface.h
@@ -119,7 +119,6 @@ add_library(velk_render SHARED
     src/frame/frame_data_manager.cpp
     src/frame/frame_snippet_registry.h
     src/frame/frame_snippet_registry.cpp
-    include/velk-render/frame/render_pass.h
     include/velk-render/frame/draw_call_emit.h
     include/velk-render/frame/raster_shaders.h
     include/velk-render/frame/compute_shaders.h

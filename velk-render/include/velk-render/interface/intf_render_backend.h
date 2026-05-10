@@ -8,6 +8,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <velk-render/interface/intf_gpu_buffer.h>
+#include <velk-render/interface/intf_gpu_command_buffer.h>
+#include <velk-render/interface/intf_gpu_pipeline.h>
+#include <velk-render/interface/intf_gpu_texture.h>
+#include <velk-render/interface/intf_render_texture_group.h>
 #include <velk-render/interface/intf_shader.h>
 #include <velk-render/render_types.h>
 
@@ -16,26 +21,11 @@ namespace velk {
 /// @name Handle types
 /// Opaque handles returned by the backend. 0 is null/invalid for all.
 /// @{
-using GpuBufferHandle = uint64_t;
 using TextureId = uint32_t; ///< Also the bindless shader index.
-using PipelineId = uint64_t;
 
-/// Handle for a multi-attachment render target group (MRT).
-/// Wraps a set of sampleable `TextureId`s sharing one backend render
-/// pass + framebuffer. Produced by `create_render_target_group`.
-/// Encoding: high bit set to disambiguate from surface / texture IDs
-/// in `begin_pass` dispatch.
-using RenderTargetGroup = uint64_t;
-
-inline constexpr uint64_t kRenderTargetGroupTag = 0x4000000000000000ULL;
-inline constexpr bool is_render_target_group(uint64_t id)
-{
-    return (id & kRenderTargetGroupTag) != 0;
-}
+/// "Unknown" frame completion marker.
+inline constexpr uint64_t kDefaultCompletionMarker = uint64_t(-1);
 /// @}
-
-// PixelFormat moved to render_types.h alongside sibling format enums
-// (DepthFormat etc.); included transitively via the headers above.
 
 /// Describes a GPU buffer to create.
 struct GpuBufferDesc
@@ -143,17 +133,17 @@ inline constexpr size_t kMaxRootConstantsSize = 256;
 ///   - non-indexed: `vertex_count, instance_count, first_vertex, first_instance`
 struct DrawCall
 {
-    PipelineId pipeline{};      ///< Which pipeline to bind.
+    IGpuPipeline* pipeline{};   ///< Which pipeline to bind. Lifetime owned by the renderer's pipeline cache.
     bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
-    GpuBufferHandle index_buffer{};         ///< Index buffer to bind. Required when `indexed`.
+    IGpuBuffer* index_buffer{};       ///< Index buffer to bind. Required when `indexed`.
     uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
 
-    GpuBufferHandle args_buffer{};          ///< Buffer holding indirect-draw records.
+    IGpuBuffer* args_buffer{};        ///< Buffer holding indirect-draw records.
     uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
     uint32_t args_stride{};           ///< Bytes per indirect-draw record (5×u32 indexed, 4×u32 non-indexed).
 
-    GpuBufferHandle count_buffer{};         ///< Buffer holding the uint32 actual draw count.
+    IGpuBuffer* count_buffer{};       ///< Buffer holding the uint32 actual draw count.
     uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
     uint32_t max_draw_count{1};       ///< Upper bound; backend issues min(count_buffer[0], max_draw_count) draws.
 
@@ -165,7 +155,7 @@ struct DrawCall
 /// A single compute dispatch submitted to the backend.
 struct DispatchCall
 {
-    PipelineId pipeline{};           ///< Which compute pipeline to bind.
+    IGpuPipeline* pipeline{};        ///< Which compute pipeline to bind. Lifetime owned by the cache.
     uint32_t groups_x{1};            ///< Work group count in X.
     uint32_t groups_y{1};            ///< Work group count in Y.
     uint32_t groups_z{1};            ///< Work group count in Z.
@@ -266,35 +256,70 @@ public:
     /** @brief Recreates the swapchain for the given surface at the new dimensions. */
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
+    /// True if @p id refers to a swapchain surface; false for textures
+    /// or unknown ids. Producers consult this to decide whether a
+    /// blit destination can be baked into a cached secondary command
+    /// buffer (textures: yes; surfaces: no, because per-frame
+    /// swapchain image acquisition can't be recorded once).
+    virtual bool is_surface(uint64_t id) const = 0;
+
     /// @}
     /// @name GPU Memory
     /// @{
 
-    /** @brief Allocates a GPU buffer. Returns a handle, or 0 on failure. */
-    virtual GpuBufferHandle create_buffer(const GpuBufferDesc& desc) = 0;
+    /**
+     * @brief Low-level GPU buffer allocation. Producers should use
+     *        `IGpuResourceManager::create_gpu_buffer` so the manager
+     *        observes the buffer's lifetime and orchestrates its
+     *        destruction.
+     */
+    virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
 
-    /** @brief Frees a GPU buffer. */
-    virtual void destroy_buffer(GpuBufferHandle buffer) = 0;
+    /**
+     * @brief Queues @p gb's underlying GPU memory for destruction
+     *        once @p completion_marker has been signalled. Called by
+     *        the resource manager from its observer callback when an
+     *        IGpuBuffer's last Ptr drops. Must read out @p gb's
+     *        backend handles synchronously (the wrapper object goes
+     *        away once the observer chain unwinds).
+     * @note  If @p completion_marker = kDefaultCompletionMarker, implementation should use
+     *        IRenderBackend::frame_completion_marker() as the destruction frame.
+     */
+    virtual void defer_destroy_gpu_buffer(IGpuBuffer* gb,
+                                          uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
-    /** @brief Returns a persistently mapped CPU pointer to the buffer, or nullptr. */
-    virtual void* map(GpuBufferHandle buffer) = 0;
-
-    /** @brief Returns the GPU virtual address for use in shaders via
-     *         buffer-reference / device-address reads. */
-    virtual uint64_t gpu_address(GpuBufferHandle buffer) = 0;
+    /**
+     * @brief Records an in-place update of @p size bytes at @p offset
+     *        on the backend's per-frame primary command stream. Backs
+     *        `IGpuBuffer::update` so concrete buffer impls don't need
+     *        to know about backend internals.
+     */
+    virtual void record_buffer_update(IGpuBuffer& target,
+                                      size_t offset,
+                                      size_t size,
+                                      const void* data) = 0;
 
     /// @}
     /// @name Textures
     /// @{
 
-    /** @brief Creates a texture and assigns a bindless index. Returns the TextureId. */
-    virtual TextureId create_texture(const TextureDesc& desc) = 0;
+    /** @brief Creates a texture and assigns a bindless index. Lifetime
+     *         is managed via Ptr; the returned `IGpuTexture` defers its
+     *         backend handles for destroy when the last Ptr drops. */
+    virtual IGpuTexture::Ptr create_texture(const TextureDesc& desc) = 0;
 
-    /** @brief Destroys a texture and frees its bindless slot. */
-    virtual void destroy_texture(TextureId texture) = 0;
+    /**
+     * @brief Queues an `IGpuTexture`'s native handles (image / view /
+     *        allocation / framebuffer / render passes / bindless slot)
+     *        for destruction once the GPU is past the current pending
+     *        frame. Called by `~VkGpuTexture` / `~VkRenderTexture` when
+     *        their owning Ptr drops.
+     */
+    virtual void defer_destroy_gpu_texture(IGpuTexture* texture,
+                                           uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
     /** @brief Uploads pixel data to a texture via a staging buffer. */
-    virtual void upload_texture(TextureId texture, const uint8_t* pixels, int width, int height) = 0;
+    virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
 
     /**
      * @brief Reads back a texture's pixels from the GPU into host memory.
@@ -306,11 +331,11 @@ public:
      * unaffected. Intended for debug dumps and golden-image tests; do
      * not call inside a hot frame.
      *
-     * @return false if the texture id is unknown or the staging
-     *         allocation fails. On success, @p out_pixels contains
-     *         `width * height * bytes_per_pixel(format)` bytes.
+     * @return false if the staging allocation fails. On success,
+     *         @p out_pixels contains `width * height *
+     *         bytes_per_pixel(format)` bytes.
      */
-    virtual bool read_texture(TextureId texture, vector<uint8_t>& out_pixels,
+    virtual bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
                               PixelFormat& out_format, uvec2& out_dims) = 0;
 
     /// @}
@@ -320,35 +345,27 @@ public:
     /**
      * @brief Creates a multi-attachment render target group.
      *
-     * Allocates one sampleable `TextureId` per entry in @p formats at
+     * Allocates one sampleable `IGpuTexture` per entry in @p formats at
      * `width × height`, and a shared backend render pass + framebuffer
      * binding all of them in the declared order. Shaders that draw to
      * the group declare `layout(location = N) out vec4` for each
      * attachment.
      *
-     * The returned handle is the target passed to `begin_pass`. Each
-     * attachment's `TextureId` is available via
-     * `get_render_target_group_attachment(group, i)` — sample them
-     * like any other bindless texture once the pass has ended.
-     *
-     * @return a `RenderTargetGroup` handle (high bit set), or 0 on failure.
+     * Lifetime is managed via Ptr; the returned `IRenderTextureGroup`
+     * defers its backend handles for destroy when the last Ptr drops
+     * (cascading through each attachment's deferred destroy too).
      */
-    virtual RenderTargetGroup create_render_target_group(const TextureGroupDesc& desc) = 0;
-
-    /** @brief Destroys a render target group, its attachments, render pass, and framebuffer. */
-    virtual void destroy_render_target_group(RenderTargetGroup group) = 0;
+    virtual IRenderTextureGroup::Ptr create_render_target_group(const TextureGroupDesc& desc) = 0;
 
     /**
-     * @brief Returns the `TextureId` of attachment `index` in the group.
-     *
-     * The texture is sampleable in shaders (bindless) once the group's
-     * render pass has ended and the attachment has been transitioned
-     * to `SHADER_READ_ONLY_OPTIMAL` (done automatically by `end_pass`).
-     *
-     * @return 0 if the group or index is invalid.
+     * @brief Queues an `IRenderTextureGroup`'s native handles for
+     *        destruction once the GPU is past the current pending
+     *        frame. Called by `~VkRenderTargetGroup` when its owning
+     *        Ptr drops.
      */
-    virtual TextureId get_render_target_group_attachment(
-        RenderTargetGroup group, uint32_t index) const = 0;
+    virtual void defer_destroy_gpu_render_target_group(
+        IRenderTextureGroup* group,
+        uint64_t completion_marker = kDefaultCompletionMarker) = 0;
 
     /// @}
     /// @name Pipelines
@@ -363,19 +380,23 @@ public:
      *        Explicit formats (e.g. `RGBA16F` for HDR) get a per-format
      *        single-attachment render pass cached internally so the
      *        pipeline is render-pass compatible with the target.
-     * @param target_group If non-zero, the pipeline is compiled against
+     * @param target_group If non-null, the pipeline is compiled against
      *        the render pass of the given MRT group; in that case
      *        @p target_format is ignored (group attachments are fixed).
      */
-    virtual PipelineId create_pipeline(const PipelineDesc& desc,
-                                       PixelFormat target_format = PixelFormat::Surface,
-                                       RenderTargetGroup target_group = 0) = 0;
+    virtual IGpuPipeline::Ptr create_pipeline(const PipelineDesc& desc,
+                                              PixelFormat target_format = PixelFormat::Surface,
+                                              IRenderTextureGroup* target_group = nullptr) = 0;
 
-    /** @brief Creates a compute pipeline from a compute shader. Returns a handle. */
-    virtual PipelineId create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
+    /** @brief Creates a compute pipeline from a compute shader. */
+    virtual IGpuPipeline::Ptr create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 
-    /** @brief Destroys a pipeline (graphics or compute). */
-    virtual void destroy_pipeline(PipelineId pipeline) = 0;
+    /**
+     * @brief Queues an `IGpuPipeline`'s native handle for destruction
+     *        once the GPU is past the current pending frame. Called
+     *        by `~VkGpuPipeline` when its owning Ptr drops.
+     */
+    virtual void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) = 0;
 
     /// @}
     /// @name Frame submission
@@ -385,31 +406,64 @@ public:
     virtual void begin_frame() = 0;
 
     /**
-     * @brief Begins a render pass targeting the given surface or texture.
+     * @brief Begins a render pass targeting the given surface or MRT group.
      *
      * For surface targets, acquires the swapchain image. Begins the
-     * backend render pass and binds the bindless descriptor set.
+     * backend render pass and binds the bindless descriptor set. Use
+     * the `IGpuTexture&` overload for renderable-texture targets.
      */
     virtual void begin_pass(uint64_t target_id) = 0;
 
     /**
-     * @brief Records draw calls into the current render pass.
-     * @param calls    Draw calls to record.
-     * @param viewport Viewport and scissor rect. Zero width/height means full target.
+     * @brief Begins a render pass targeting a renderable texture.
+     *
+     * The texture must have been created with TextureUsage::RenderTarget
+     * or ColorAttachment. Begins the backend render pass and binds the
+     * bindless descriptor set.
      */
-    virtual void submit(array_view<const DrawCall> calls, rect viewport = {}) = 0;
+    virtual void begin_pass(IGpuTexture& target) = 0;
+
+    /**
+     * @brief Begins a render pass targeting an MRT group.
+     */
+    virtual void begin_pass(IRenderTextureGroup& target) = 0;
+
+    /**
+     * @brief Allocates a `IGpuCommandBuffer` compatible with
+     *        @p target_id. Producers record once when their pass
+     *        content changes; the graph executor replays via
+     *        `execute(cmd)` each frame.
+     *
+     * @param target_id Target the cmd buffer will play inside. For
+     *                  Vulkan secondaries this resolves to the
+     *                  render pass used during inheritance setup.
+     *                  Pass `0` for compute / transfer cmd buffers
+     *                  that play outside any render pass.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) = 0;
+
+    /**
+     * @brief Allocates a `IGpuCommandBuffer` compatible with rendering
+     *        into @p target. Mirror of the `uint64_t` overload for
+     *        renderable-texture targets.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(IGpuTexture& target) = 0;
+
+    /**
+     * @brief Allocates an `IGpuCommandBuffer` compatible with rendering
+     *        into the given MRT group.
+     */
+    virtual IGpuCommandBuffer::Ptr create_command_buffer(IRenderTextureGroup& target) = 0;
+
+    /**
+     * @brief Replays a recorded command buffer in the active frame.
+     *        For raster cmd buffers, must be called between
+     *        `begin_pass` / `end_pass` on a compatible target.
+     */
+    virtual void execute(const IGpuCommandBuffer::Ptr& cmd) = 0;
 
     /** @brief Ends the current render pass. */
     virtual void end_pass() = 0;
-
-    /**
-     * @brief Records compute dispatches outside of any render pass.
-     *
-     * Call between frames (after begin_frame, outside any begin_pass/end_pass
-     * window). Emits a memory barrier before sampled reads of storage-image
-     * outputs in subsequent graphics passes.
-     */
-    virtual void dispatch(array_view<const DispatchCall> calls) = 0;
 
     /**
      * @brief Blits a source texture onto the swapchain image of @p surface_id.
@@ -424,27 +478,15 @@ public:
      * @param dst_rect Destination rect in surface pixels. Zero width/height
      *                 means "full surface".
      */
-    virtual void blit_to_surface(TextureId source, uint64_t surface_id, rect dst_rect = {}) = 0;
+    virtual void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect = {}) = 0;
 
     /**
-     * @brief Copies the depth attachment of an MRT render target group into
-     *        the surface's depth buffer.
-     *
-     * Used by the deferred compositor to plumb the G-buffer's depth into the
-     * swapchain so subsequent forward draws onto the surface can depth-test
-     * against the deferred scene. Source group must have been created with a
-     * depth attachment; destination surface must have been created with
-     * SurfaceDesc::depth != None.
-     *
-     * No-op if either side lacks a depth attachment. Handles layout
-     * transitions; leaves both images back in DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
-     *
-     * @param dst_rect Destination rect in surface pixels. Zero width/height
-     *                 means "full surface".
+     * @brief Blits @p source into @p dest. Both textures must have been
+     *        created with renderable / storage / color-attachment usage.
+     *        Source layout is restored after the blit; dest ends in
+     *        SHADER_READ_ONLY so subsequent samples bind cleanly.
      */
-    virtual void blit_group_depth_to_surface(RenderTargetGroup src_group,
-                                             uint64_t surface_id,
-                                             rect dst_rect = {}) = 0;
+    virtual void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect = {}) = 0;
 
     /**
      * @brief Inserts a pipeline barrier between passes.
@@ -453,18 +495,6 @@ public:
      * GPU work (e.g. after rendering to a texture and before sampling it).
      */
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
-
-    /**
-     * @brief Pushes the per-view FrameGlobals GPU address into push
-     *        constant slot [0..8). Shaders dereference it via a
-     *        buffer-reference / device-address read of `GlobalData`.
-     *
-     * Called once per pass by the graph executor. The per-draw / per-
-     * dispatch push constants in submit() / dispatch() write [8..) so
-     * the per-pass globals address persists across the pass's draws.
-     * Passing `addr == 0` is a no-op.
-     */
-    virtual void push_view_globals(uint64_t addr) = 0;
 
     /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
     virtual void end_frame() = 0;

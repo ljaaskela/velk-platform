@@ -12,6 +12,7 @@
 #include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -160,6 +161,12 @@ private:
         /// path so `RenderView::env.data_addr` is stable across
         /// frames (cached lighting passes embed it).
         PersistentBuffer env_data_buffer;
+
+        /// Per-view FrameGlobals storage. Single 192-byte device-local
+        /// allocation; `prepare_frame_globals` updates it in place each
+        /// frame via `IGpuBuffer::update`. BDA is stable across the
+        /// view's lifetime, so cached secondaries can bake it once.
+        IGpuBuffer::Ptr view_globals_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -190,7 +197,7 @@ private:
 
     /// Writes the per-view FrameGlobals block to @p ctx.frame_buffer
     /// and stores its GPU address on @p rv.
-    void prepare_frame_globals(FrameContext& ctx, RenderView& rv);
+    void prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, RenderView& rv);
 
     /// Walks scene lights, registers each light's shadow tech with the
     /// snippet registry, and accumulates GpuLight records into @p rv.

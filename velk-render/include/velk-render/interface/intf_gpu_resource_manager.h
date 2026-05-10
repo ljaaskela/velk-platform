@@ -39,12 +39,20 @@ class IGpuResourceManager
       public ITextureResolver
 {
 public:
-    /** @brief Backend handle + size pair tracked per CPU IBuffer. */
+    /** @brief GPU storage tracked per CPU IBuffer. The IBuffer
+     *         wrapper owns the strong ref; the manager keeps a
+     *         non-owning view so it can lock + introspect without
+     *         extending lifetime. */
     struct BufferEntry
     {
-        GpuBufferHandle handle{};
-        size_t size = 0;
+        IGpuBuffer::WeakPtr buffer;
+        size_t              size{};
     };
+
+    /// Allocates a managed GPU buffer. The manager observes the
+    /// returned IGpuBuffer for lifetime tracking; dropping the last
+    /// Ptr defers the backend allocation for destruction.
+    virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
 
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last
@@ -62,19 +70,21 @@ public:
     virtual IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) = 0;
 
-    // Texture mapping
-    virtual TextureId find_texture(ISurface* surf) const = 0;
-    virtual void register_texture(ISurface* surf, TextureId tid) = 0;
+    // Texture mapping. The manager owns the IGpuTexture::Ptr keyed by
+    // ISurface*; lookups return a non-owning view valid until the
+    // surface is unregistered (or destroyed).
+    virtual IGpuTexture* find_texture(ISurface* surf) const = 0;
+    virtual void register_texture(ISurface* surf, IGpuTexture::Ptr tex) = 0;
     virtual void unregister_texture(ISurface* surf) = 0;
 
     /// Ensures @p surf has a backend texture allocated and registered.
-    /// Returns the existing TextureId on cache hit; allocates fresh +
+    /// Returns the existing IGpuTexture* on cache hit; allocates fresh +
     /// registers + stamps `set_gpu_handle(Default, ...)` on first sight;
-    /// returns 0 on backend allocation failure. The pixel upload itself
-    /// remains the caller's responsibility (this only resolves the
-    /// backend handle; CPU bytes -> GPU is a separate step).
-    virtual TextureId ensure_texture_storage(ISurface* surf,
-                                             const TextureDesc& desc) = 0;
+    /// returns nullptr on backend allocation failure. The pixel upload
+    /// itself remains the caller's responsibility (this only resolves
+    /// the backend handle; CPU bytes -> GPU is a separate step).
+    virtual IGpuTexture* ensure_texture_storage(ISurface* surf,
+                                                const TextureDesc& desc) = 0;
 
     // Buffer mapping
     virtual BufferEntry* find_buffer(IBuffer* buf) = 0;
@@ -90,11 +100,6 @@ public:
     /// nullptr on backend allocation failure.
     virtual BufferEntry* ensure_buffer_storage(IBuffer* buf,
                                                const GpuBufferDesc& desc) = 0;
-
-    /// Idempotent. Returns true if the program was newly registered,
-    /// false if it was already tracked. Subscription happens internally
-    /// — callers don't need to add the manager as observer themselves.
-    virtual bool register_pipeline(IProgram* prog, PipelineId pid) = 0;
 
     // Environment resource bookkeeping (textures referenced by env material;
     // not tracked through the element cache so they need a sidecar list).

@@ -72,11 +72,18 @@ void PostProcess::emit(::velk::IViewEntry& view,
         auto passthrough = ::velk::instance().create<::velk::IRenderPass>(
             ::velk::ClassId::DefaultRenderPass);
         if (!passthrough) return;
-        passthrough->add_op(::velk::ops::BlitToSurface{
-            static_cast<::velk::TextureId>(
-                input->get_gpu_handle(::velk::GpuResourceKey::Default)),
-            output->get_gpu_handle(::velk::GpuResourceKey::Default),
-            {0, 0, static_cast<float>(w), static_cast<float>(h)}});
+        ::velk::IGpuTexture* input_tex = graph.resources().find_texture(input.get());
+        ::velk::IGpuTexture* output_tex = graph.resources().find_texture(output.get());
+        if (input_tex && output_tex && ctx.backend) {
+            if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+                cmd->begin_recording();
+                cmd->record_blit_to_texture(*input_tex, *output_tex,
+                    {0, 0, static_cast<float>(w), static_cast<float>(h)});
+                cmd->end_recording();
+                passthrough->set_command_buffer(std::move(cmd));
+            }
+            passthrough->set_target_id(0);
+        }
         passthrough->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
         passthrough->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
         graph.add_pass(std::move(passthrough));

@@ -314,28 +314,20 @@ int main(int /*argc*/, char* /*argv*/[])
 
         auto worldpos_out = renderer->get_named_output(
             camera_3d, window_surface, "gbuffer.worldpos");
-        velk::TextureId worldpos_id = worldpos_out
-            ? static_cast<velk::TextureId>(
-                  worldpos_out->get_gpu_handle(velk::GpuResourceKey::Default))
-            : 0;
-        if (worldpos_id != 0) {
+        if (auto* worldpos_tex = interface_cast<velk::IGpuTexture>(worldpos_out.get())) {
             bool ok = velk::render::debug::dump_texture(
-                *backend, worldpos_id, *image_writer, "dumps/worldpos");
+                *backend, *worldpos_tex, *image_writer, "dumps/worldpos");
             VELK_LOG(I, "fluent: WorldPos dump %s", ok ? "ok" : "FAILED");
         }
 
         auto shadow_out = renderer->get_named_output(
             camera_3d, window_surface, "shadow.debug");
-        velk::TextureId shadow_dbg_id = shadow_out
-            ? static_cast<velk::TextureId>(
-                shadow_out->get_gpu_handle(velk::GpuResourceKey::Default))
-            : 0;
-        if (shadow_dbg_id != 0) {
+        if (auto* shadow_tex = interface_cast<velk::IGpuTexture>(shadow_out.get())) {
             bool ok = velk::render::debug::dump_texture(
-                *backend, shadow_dbg_id, *image_writer, "dumps/shadow_debug");
+                *backend, *shadow_tex, *image_writer, "dumps/shadow_debug");
             VELK_LOG(I, "fluent: shadow_debug dump %s", ok ? "ok" : "FAILED");
             velk::render::debug::log_unique_uvec4_pixels(
-                *backend, shadow_dbg_id, "shadow_debug");
+                *backend, *shadow_tex, "shadow_debug");
         }
     });
 
@@ -407,10 +399,9 @@ int main(int /*argc*/, char* /*argv*/[])
                 ? static_cast<uint32_t>(gbuffer_group->attachment_count())
                 : 0;
             for (uint32_t i = 0; i < att_count; ++i) {
-                velk::TextureId tid = gbuffer_group->attachment(i);
-                if (tid != 0) {
+                if (auto* tex = gbuffer_group->attachment_texture(i)) {
                     renderer->add_debug_overlay(
-                        window_surface, tid,
+                        window_surface, tex,
                         {col_x, i * thumb_h, kThumbW, thumb_h});
                 }
             }

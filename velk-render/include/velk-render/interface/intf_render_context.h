@@ -41,7 +41,7 @@ struct PipelineCacheKey
 {
     uint64_t user_key = 0;
     PixelFormat target_format = PixelFormat::Surface;
-    RenderTargetGroup target_group = 0;
+    IRenderTextureGroup* target_group = nullptr;
 
     bool operator==(const PipelineCacheKey& o) const noexcept
     {
@@ -58,14 +58,14 @@ struct PipelineCacheKeyHash
         size_t h = std::hash<uint64_t>{}(k.user_key);
         h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<uint64_t>{}(static_cast<uint64_t>(k.target_group))
+        h ^= std::hash<void*>{}(static_cast<void*>(k.target_group))
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         return h;
     }
 };
 
 using PipelineCacheMap =
-    std::unordered_map<PipelineCacheKey, PipelineId, PipelineCacheKeyHash>;
+    std::unordered_map<PipelineCacheKey, IGpuPipeline::Ptr, PipelineCacheKeyHash>;
 
 /**
  * @brief Owns the render backend and provides rendering infrastructure.
@@ -117,7 +117,7 @@ public:
     virtual uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                                      uint64_t key = 0,
                                      PixelFormat target_format = PixelFormat::Surface,
-                                     RenderTargetGroup target_group = 0,
+                                     IRenderTextureGroup* target_group = nullptr,
                                      const PipelineOptions& options = {}) = 0;
 
     /**
@@ -133,7 +133,7 @@ public:
     virtual uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                                       uint64_t key = 0,
                                       PixelFormat target_format = PixelFormat::Surface,
-                                      RenderTargetGroup target_group = 0,
+                                      IRenderTextureGroup* target_group = nullptr,
                                       const PipelineOptions& options = {}) = 0;
 
     /**

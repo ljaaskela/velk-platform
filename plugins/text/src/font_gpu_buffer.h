@@ -7,6 +7,9 @@
 
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
+
+#include <utility>
 #include <velk-ui/plugins/text/plugin.h>
 
 namespace velk::ui {
@@ -41,7 +44,10 @@ public:
  * each (re)allocation, then read by `TextMaterial::write_gpu_data` to emit
  * the buffer references the shader binds via `buffer_reference`.
  */
-class FontGpuBuffer : public ::velk::ext::GpuResource<FontGpuBuffer, IBuffer, IFontGpuBufferInternal>
+class FontGpuBuffer
+    : public ::velk::ext::GpuResource<FontGpuBuffer,
+                                      IBuffer, IGpuBuffer, IGpuBufferStorageOwner,
+                                      IFontGpuBufferInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::FontGpuBuffer, "FontGpuBuffer");
@@ -53,6 +59,15 @@ public:
     // IFontGpuBufferInternal
     void init(FontBuffers* fb, FontGpuBufferRole role) override;
 
+    // IGpuBuffer (forwards to inner storage attached by the resource manager)
+    size_t   size_bytes() const override { return gpu_buffer_ ? gpu_buffer_->size_bytes() : 0; }
+    uint64_t gpu_address() const override { return gpu_buffer_ ? gpu_buffer_->gpu_address() : 0; }
+    void*    map() override          { return gpu_buffer_ ? gpu_buffer_->map() : nullptr; }
+    void     update(size_t offset, size_t size, const void* data) override
+    {
+        if (gpu_buffer_) gpu_buffer_->update(offset, size, data);
+    }
+
     // IBuffer
     size_t get_data_size() const override;
     const uint8_t* get_data() const override;
@@ -60,8 +75,10 @@ public:
     void clear_dirty() override;
     bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
     bool write(size_t /*sz*/, WriteFn /*fn*/, void* /*ctx*/) override { return false; }
+    void attach_gpu_buffer(IGpuBuffer::Ptr gb) override { gpu_buffer_ = std::move(gb); }
 
 private:
+    IGpuBuffer::Ptr gpu_buffer_;
     FontBuffers* fb_ = nullptr;
     FontGpuBufferRole role_ = FontGpuBufferRole::Curves;
 };

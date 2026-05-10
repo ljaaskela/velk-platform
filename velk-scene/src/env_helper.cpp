@@ -49,7 +49,7 @@ EnvResolved ensure_env_ready(ICamera& camera, FrameContext& ctx)
         int tw = static_cast<int>(sz.x);
         int th = static_cast<int>(sz.y);
         if (pixels && tw > 0 && th > 0) {
-            const bool first_time = ctx.resources->find_texture(surf) == 0;
+            const bool first_time = ctx.resources->find_texture(surf) == nullptr;
             TextureDesc desc{};
             desc.width = tw;
             desc.height = th;
@@ -60,8 +60,8 @@ EnvResolved ensure_env_ready(ICamera& camera, FrameContext& ctx)
             // Backend bilinear-downsamples at upload time; a proper
             // GGX prefilter is a future upgrade.
             desc.mip_levels = compute_mip_levels(tw, th);
-            TextureId tid = ctx.resources->ensure_texture_storage(surf, desc);
-            if (tid != 0) {
+            IGpuTexture* tex = ctx.resources->ensure_texture_storage(surf, desc);
+            if (tex) {
                 if (first_time) {
                     // Track for shutdown unsubscribe. The observer
                     // subscription itself is handled inside
@@ -71,7 +71,7 @@ EnvResolved ensure_env_ready(ICamera& camera, FrameContext& ctx)
                         ctx.resources->add_env_observer(buf_ptr);
                     }
                 }
-                ctx.backend->upload_texture(tid, pixels, tw, th);
+                ctx.backend->upload_texture(*tex, pixels, tw, th);
             }
             buf->clear_dirty();
         }
@@ -79,7 +79,9 @@ EnvResolved ensure_env_ready(ICamera& camera, FrameContext& ctx)
 
     out.env = env_ptr.get();
     out.surface = surf;
-    out.texture_id = ctx.resources->find_texture(surf);
+    if (auto* tex = ctx.resources->find_texture(surf)) {
+        out.texture_id = get_texture_id(tex);
+    }
     return out;
 }
 

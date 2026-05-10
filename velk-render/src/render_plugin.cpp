@@ -7,7 +7,6 @@
 #include "frame/render_graph.h"
 
 #include <velk-render/ext/default_render_pass.h>
-#include "resource/render_texture_group.h"
 #include "path/tonemap.h"
 #include "material/material_property.h"
 #include "mesh/mesh.h"
@@ -44,7 +43,6 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Shader>(velk);
     rv &= register_type<WindowSurface>(velk);
     rv &= register_type<RenderTexture>(velk);
-    rv &= register_type<impl::RenderTextureGroup>(velk);
     rv &= register_type<impl::ShaderMaterial>(velk);
     rv &= register_type<impl::StandardMaterial>(velk);
     rv &= register_type<impl::BaseColorProperty>(velk);

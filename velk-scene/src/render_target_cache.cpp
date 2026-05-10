@@ -63,32 +63,31 @@ void RenderTargetCache::ensure(FrameContext& ctx, BatchBuilder& batch_builder)
         PixelFormat fmt = target->format();
 
         auto& rte = entries_[rtp.element];
-        TextureId existing = static_cast<TextureId>(
-            target->get_gpu_handle(GpuResourceKey::Default));
+        bool has_existing = (target->get_gpu_handle(GpuResourceKey::Default) != 0);
 
-        // Resize / format-change: defer-destroy the old handle and
-        // realloc into the same wrapper. The wrapper's lifetime stays
-        // owned by the user; only the backend handle cycles.
-        if (existing != 0 &&
+        // Resize / format-change: drop the old texture (manager's Ptr
+        // drop defers via the backend marker queue) and realloc into
+        // the same wrapper. Only the backend handle cycles; the user
+        // keeps holding `target`.
+        if (has_existing &&
             (rte.width != w || rte.height != h || rte.format != fmt)) {
-            defer_texture_destroy(ctx.resources, existing, ctx.defer_marker);
-            target->set_gpu_handle(GpuResourceKey::Default, 0);
             ctx.resources->unregister_texture(target.get());
-            existing = 0;
+            target->set_gpu_handle(GpuResourceKey::Default, 0);
+            has_existing = false;
         }
 
-        if (existing == 0) {
+        if (!has_existing) {
             TextureDesc tdesc{};
             tdesc.width = w;
             tdesc.height = h;
             tdesc.format = fmt;
             tdesc.usage = TextureUsage::RenderTarget;
-            TextureId tid = ctx.resources->ensure_texture_storage(target.get(), tdesc);
-            if (tid == 0) continue;
+            IGpuTexture* tex = ctx.resources->ensure_texture_storage(target.get(), tdesc);
+            if (!tex) continue;
             target->set_size(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
             // Observer subscription is handled inside register_texture
             // (called by ensure_texture_storage); when the user's last
-            // reference drops, the manager auto-defers the backend handle.
+            // reference drops, the manager drops its IGpuTexture::Ptr.
             rte.target = target;
             rte.width = w;
             rte.height = h;
@@ -144,8 +143,19 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
                             static_cast<float>(rte.height)};
         rt_view.width = rte.width;
         rt_view.height = rte.height;
-        rt_view.view_globals_address =
-            ctx.frame_buffer->write(&rt_globals, sizeof(rt_globals));
+        if (ctx.backend && ctx.resources) {
+            auto& vg = view_globals_[rtp.element];
+            if (!vg) {
+                GpuBufferDesc desc{};
+                desc.size = sizeof(FrameGlobals);
+                desc.cpu_writable = false;
+                vg = ctx.resources->create_gpu_buffer(desc);
+            }
+            if (vg) {
+                vg->update(0, sizeof(FrameGlobals), &rt_globals);
+                rt_view.view_globals_address = vg->gpu_address();
+            }
+        }
         rt_view.bvh_root = ctx.bvh_root;
         rt_view.bvh_node_count = ctx.bvh_node_count;
         rt_view.bvh_shape_count = ctx.bvh_shape_count;

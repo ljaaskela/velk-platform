@@ -2,11 +2,6 @@
 
 namespace velk::impl {
 
-array_view<const GraphOp> DefaultRenderPass::ops() const
-{
-    return array_view<const GraphOp>(ops_.data(), ops_.size());
-}
-
 array_view<const IGpuResource::Ptr> DefaultRenderPass::reads() const
 {
     return array_view<const IGpuResource::Ptr>(reads_.data(), reads_.size());
@@ -20,11 +15,6 @@ array_view<const IGpuResource::Ptr> DefaultRenderPass::writes() const
 uint64_t DefaultRenderPass::view_globals_address() const
 {
     return view_globals_address_;
-}
-
-void DefaultRenderPass::add_op(GraphOp op)
-{
-    ops_.push_back(std::move(op));
 }
 
 void DefaultRenderPass::add_read(IGpuResource::Ptr resource)
@@ -44,10 +34,16 @@ void DefaultRenderPass::set_view_globals_address(uint64_t addr)
 
 void DefaultRenderPass::reset()
 {
-    ops_.clear();
     reads_.clear();
     writes_.clear();
     view_globals_address_ = 0;
+    command_buffer_.reset();
+    target_id_ = 0;
+    target_texture_ = nullptr;
+    target_group_ = nullptr;
+    surface_blit_source_ = nullptr;
+    surface_blit_surface_id_ = 0;
+    surface_blit_rect_ = rect{};
 }
 
 } // namespace velk::impl

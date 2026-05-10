@@ -116,6 +116,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
     // re-upload through their existing mapping. ensure_buffer_storage's
     // deferred-destroy on size change handles instance-count growth.
     if (ctx.resources && ctx.backend) {
+        VELK_PERF_SCOPE("renderer.upload_sweep");
         // Generic dirty-buffer upload: ensure_buffer_storage allocates /
         // resizes the backend buffer, map + memcpy when dirty, clear
         // the flag. Used for both per-batch storage blobs and per-
@@ -128,11 +129,13 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             desc.size = blob_size;
             desc.cpu_writable = true;
             auto* be = ctx.resources->ensure_buffer_storage(buf, desc);
-            if (!be || !be->handle) return nullptr;
+            if (!be) return nullptr;
             uint8_t* mapped = nullptr;
-            if (auto* dst = ctx.backend->map(be->handle)) {
-                std::memcpy(dst, buf->get_data(), blob_size);
-                mapped = static_cast<uint8_t*>(dst);
+            if (auto gb = be->buffer.lock()) {
+                if (auto* dst = gb->map()) {
+                    std::memcpy(dst, buf->get_data(), blob_size);
+                    mapped = static_cast<uint8_t*>(dst);
+                }
             }
             buf->clear_dirty();
             return mapped;
@@ -142,6 +145,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             auto material_ptr = bp->material();
             auto* dd = interface_cast<IDrawData>(material_ptr.get());
             if (!dd) return;
+            VELK_PERF_SCOPE("renderer.upload_material");
             // get_data_buffer re-serialises into the persistent buffer
             // and flips dirty when bytes change; idempotent if already
             // up-to-date. Multiple batches sharing one material upload
@@ -213,9 +217,9 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
     }
 }
 
-void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
+void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, RenderView& rv)
 {
-    if (rv.width <= 0 || rv.height <= 0 || !ctx.frame_buffer) return;
+    if (rv.width <= 0 || rv.height <= 0 || !ctx.backend || !ctx.resources) return;
 
     FrameGlobals globals{};
     std::memcpy(globals.view_projection, rv.view_projection.m, sizeof(rv.view_projection.m));
@@ -234,7 +238,17 @@ void ViewPreparer::prepare_frame_globals(FrameContext& ctx, RenderView& rv)
     globals.bvh_nodes_addr = rv.bvh_nodes_addr;
     globals.bvh_shapes_addr = rv.bvh_shapes_addr;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
-    rv.view_globals_address = ctx.frame_buffer->write(&globals, sizeof(globals));
+
+    auto& cache = view_caches_[&entry];
+    if (!cache.view_globals_buffer) {
+        GpuBufferDesc desc{};
+        desc.size = sizeof(FrameGlobals);
+        desc.cpu_writable = false;
+        cache.view_globals_buffer = ctx.resources->create_gpu_buffer(desc);
+        if (!cache.view_globals_buffer) return;
+    }
+    cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
+    rv.view_globals_address = cache.view_globals_buffer->gpu_address();
 }
 
 void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,
@@ -290,7 +304,9 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
             if (site.draw_entry && site.draw_entry->texture_key != 0) {
                 auto* surf = reinterpret_cast<ISurface*>(
                     static_cast<uintptr_t>(site.draw_entry->texture_key));
-                tex_id = ctx.resources->find_texture(surf);
+                if (auto* gt = ctx.resources->find_texture(surf)) {
+                    tex_id = get_texture_id(gt);
+                }
                 if (tex_id == 0) {
                     uint64_t rt_id = get_render_target_id(surf);
                     if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
@@ -397,11 +413,7 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
             }
         }
         // Refresh the per-view texture key in case the surface changed
-        // but the material identity didn't (rare, but cheap). The
-        // env_batch falls through to the per-frame staging fallback
-        // in emit_draw_calls (no pool slice) — it's a single fullscreen
-        // quad, the per-frame staging cost is trivial, and it sidesteps
-        // the question of where env_batch lives across pool resets.
+        // but the material identity didn't (rare, but cheap).
         if (cache.env_batch) {
             auto* env_batch = static_cast<impl::DefaultBatch*>(cache.env_batch.get());
             env_batch->set_texture_key(reinterpret_cast<uint64_t>(resolved.surface));
@@ -452,7 +464,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     rv.bvh_root = ctx.bvh_root;
     rv.bvh_node_count = ctx.bvh_node_count;
     rv.bvh_shape_count = ctx.bvh_shape_count;
-    prepare_frame_globals(ctx, rv);
+    prepare_frame_globals(entry, ctx, rv);
     prepare_env(entry, camera_element, ctx, rv);
 
     // Path-gated: skip the heavy scene walks when the path doesn't

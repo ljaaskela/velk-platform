@@ -146,15 +146,17 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
     post->emit(view, path_target, post_target, ctx, graph);
 
     // Final blit from post-process output to the actual surface.
+    // Surface blit goes through the IRenderPass surface_blit seam,
+    // which the executor routes to IRenderBackend::blit_to_surface
+    // every frame (the swapchain image acquisition can't be baked
+    // into a cached secondary).
     auto blit = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
     if (blit) {
-        blit->add_op(::velk::ops::BlitToSurface{
-            static_cast<::velk::TextureId>(
-                post_target->get_gpu_handle(::velk::GpuResourceKey::Default)),
-            color_target
-                ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
-                : 0,
-            render_view.viewport});
+        ::velk::IGpuTexture* post_tex = graph.resources().find_texture(post_target.get());
+        const uint64_t surface_id = color_target
+            ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
+            : 0;
+        blit->set_surface_blit(post_tex, surface_id, render_view.viewport);
         blit->add_read(post_target);
         if (color_target) {
             blit->add_write(color_target);

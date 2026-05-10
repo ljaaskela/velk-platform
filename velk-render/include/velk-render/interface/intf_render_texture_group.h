@@ -36,19 +36,15 @@ public:
     /// Releases all cached attachment ids.
     virtual void clear_attachments() = 0;
 
-    /// Returns the bindless `TextureId` of attachment @p index. Wraps
-    /// `get_gpu_handle(index + 1)`; key 0 is reserved for the group
-    /// bind handle.
+    /// Backing IGpuTexture for attachment @p index. Returns nullptr if
+    /// the wrapper hasn't been populated.
+    virtual class IGpuTexture* attachment_texture(uint32_t index) const = 0;
+
+    /// Returns the bindless `TextureId` of attachment @p index. Derived
+    /// from `attachment_texture(i)`'s default gpu_handle.
     TextureId attachment(uint32_t index) const
     {
-        return static_cast<TextureId>(get_gpu_handle(static_cast<uint64_t>(index) + 1));
-    }
-
-    /// Caches the bindless `TextureId` for attachment @p index. Wraps
-    /// `set_gpu_handle(index + 1, id)`.
-    void set_attachment(uint32_t index, TextureId id)
-    {
-        set_gpu_handle(static_cast<uint64_t>(index) + 1, static_cast<uint64_t>(id));
+        return get_texture_id(attachment_texture(index));
     }
 };
 

@@ -25,12 +25,12 @@ public:
     uint64_t create_pipeline(const IShader::Ptr& vertex, const IShader::Ptr& fragment,
                              uint64_t key = 0,
                              PixelFormat target_format = PixelFormat::Surface,
-                             RenderTargetGroup target_group = 0,
+                             IRenderTextureGroup* target_group = nullptr,
                              const PipelineOptions& options = {}) override;
     uint64_t compile_pipeline(string_view fragment_source, string_view vertex_source,
                               uint64_t key = 0,
                               PixelFormat target_format = PixelFormat::Surface,
-                              RenderTargetGroup target_group = 0,
+                              IRenderTextureGroup* target_group = nullptr,
                               const PipelineOptions& options = {}) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;

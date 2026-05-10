@@ -1,5 +1,11 @@
 #include "vk_backend.h"
 
+#include "vk_command_buffer.h"
+#include "vk_gpu_buffer.h"
+#include "vk_gpu_pipeline.h"
+#include "vk_gpu_texture.h"
+#include "vk_render_target_group.h"
+
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
 
@@ -7,6 +13,12 @@
 #include <cstring>
 
 namespace velk::vk {
+
+#ifdef VELK_RENDER_DEBUG
+#define RENDER_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define RENDER_LOG(...) ((void)0)
+#endif
 
 namespace {
 
@@ -230,49 +242,43 @@ void VkBackend::shutdown()
 
     vkDeviceWaitIdle(device_);
 
-    // Destroy pipelines
-    for (auto& [id, pd] : pipelines_) {
-        vkDestroyPipeline(device_, pd.pipeline, nullptr);
-    }
-    pipelines_.clear();
-
-    // Destroy MRT render target groups. Must run before textures_ since
-    // group attachments are regular TextureIds owned by the group; the
-    // group destroyer cascades to destroy_texture on each attachment.
-    for (auto& [id, gd] : render_target_groups_) {
-        if (gd.framebuffer)       vkDestroyFramebuffer(device_, gd.framebuffer, nullptr);
-        if (gd.render_pass)       vkDestroyRenderPass(device_, gd.render_pass, nullptr);
-        if (gd.load_render_pass)  vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
-        if (gd.depth_view)        vkDestroyImageView(device_, gd.depth_view, nullptr);
-        if (gd.depth_image)       vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
-        for (auto a : gd.attachments) {
-            auto tit = textures_.find(a);
-            if (tit == textures_.end()) continue;
-            auto& td = tit->second;
-            if (td.view)  vkDestroyImageView(device_, td.view, nullptr);
-            if (td.image) vmaDestroyImage(allocator_, td.image, td.allocation);
-            textures_.erase(tit);
+    // vkDeviceWaitIdle above lets pending VMA destroys run unconditionally.
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+        for (auto& d : deferred_gpu_buffers_) {
+            vmaDestroyBuffer(allocator_, d.buffer, d.allocation);
         }
+        deferred_gpu_buffers_.clear();
     }
-    render_target_groups_.clear();
-
-    // Destroy textures
-    for (auto& [id, td] : textures_) {
-        if (td.is_renderable) {
-            vkDestroyFramebuffer(device_, td.framebuffer, nullptr);
-            vkDestroyRenderPass(device_, td.render_pass, nullptr);
-            vkDestroyRenderPass(device_, td.load_render_pass, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+        for (auto& d : deferred_gpu_pipelines_) {
+            vkDestroyPipeline(device_, d.pipeline, nullptr);
         }
-        vkDestroyImageView(device_, td.view, nullptr);
-        vmaDestroyImage(allocator_, td.image, td.allocation);
+        deferred_gpu_pipelines_.clear();
     }
-    textures_.clear();
-
-    // Destroy buffers
-    for (auto& [id, bd] : buffers_) {
-        vmaDestroyBuffer(allocator_, bd.buffer, bd.allocation);
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
+        for (auto& d : deferred_gpu_textures_) {
+            if (d.framebuffer)      vkDestroyFramebuffer(device_, d.framebuffer, nullptr);
+            if (d.render_pass)      vkDestroyRenderPass(device_, d.render_pass, nullptr);
+            if (d.load_render_pass) vkDestroyRenderPass(device_, d.load_render_pass, nullptr);
+            if (d.view)             vkDestroyImageView(device_, d.view, nullptr);
+            if (d.image)            vmaDestroyImage(allocator_, d.image, d.allocation);
+        }
+        deferred_gpu_textures_.clear();
     }
-    buffers_.clear();
+    {
+        std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
+        for (auto& d : deferred_gpu_render_target_groups_) {
+            if (d.framebuffer)      vkDestroyFramebuffer(device_, d.framebuffer, nullptr);
+            if (d.render_pass)      vkDestroyRenderPass(device_, d.render_pass, nullptr);
+            if (d.load_render_pass) vkDestroyRenderPass(device_, d.load_render_pass, nullptr);
+            if (d.depth_view)       vkDestroyImageView(device_, d.depth_view, nullptr);
+            if (d.depth_image)      vmaDestroyImage(allocator_, d.depth_image, d.depth_allocation);
+        }
+        deferred_gpu_render_target_groups_.clear();
+    }
 
     // Destroy surfaces
     for (auto& [id, sd] : surfaces_) {
@@ -311,6 +317,15 @@ void VkBackend::shutdown()
     if (frame_timeline_) {
         vkDestroySemaphore(device_, frame_timeline_, nullptr);
         frame_timeline_ = VK_NULL_HANDLE;
+    }
+    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
+        // Pool destruction frees all buffers in the pool — the deferred
+        // queue would dangle. Clear it explicitly first.
+        frame_sync_[i].deferred_persistent_frees.clear();
+    }
+    if (persistent_secondary_pool_) {
+        vkDestroyCommandPool(device_, persistent_secondary_pool_, nullptr);
+        persistent_secondary_pool_ = VK_NULL_HANDLE;
     }
     vkDestroyCommandPool(device_, command_pool_, nullptr);
 
@@ -540,12 +555,22 @@ bool VkBackend::create_command_pool()
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = kFrameOverlap;
 
-    VkCommandBuffer cbs[kFrameOverlap];
+    ::VkCommandBuffer cbs[kFrameOverlap];
     if (vkAllocateCommandBuffers(device_, &alloc_info, cbs) != VK_SUCCESS) {
         return false;
     }
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         frame_sync_[i].command_buffer = cbs[i];
+    }
+
+    // Long-lived secondary pool: producers' cached cmd buffers
+    // (`create_command_buffer`) outlive any one frame, so the pool
+    // is not reset between frames. Individual buffers are freed on
+    // `IGpuCommandBuffer` destruction.
+    VkCommandPoolCreateInfo spci = ci;
+    spci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(device_, &spci, nullptr, &persistent_secondary_pool_) != VK_SUCCESS) {
+        return false;
     }
 
     return true;
@@ -1096,7 +1121,7 @@ void VkBackend::destroy_swapchain(SurfaceData& sd)
 // GPU Memory
 // ============================================================================
 
-GpuBufferHandle VkBackend::create_buffer(const GpuBufferDesc& desc)
+IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
 {
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1117,68 +1142,77 @@ GpuBufferHandle VkBackend::create_buffer(const GpuBufferDesc& desc)
         alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     }
 
-    BufferData bd{};
-    bd.size = desc.size;
-
+    ::VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
     VmaAllocationInfo info{};
-    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &bd.buffer, &bd.allocation, &info) != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create buffer (%zu bytes)", desc.size);
-        return 0;
-    }
-
-    bd.mapped = info.pMappedData;
-
-    GpuBufferHandle id = next_buffer_id_++;
-    buffers_[id] = bd;
-    return id;
-}
-
-void VkBackend::destroy_buffer(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return;
-    }
-
-    vmaDestroyBuffer(allocator_, it->second.buffer, it->second.allocation);
-    buffers_.erase(it);
-}
-
-void* VkBackend::map(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return nullptr;
-    }
-    return it->second.mapped;
-}
-
-uint64_t VkBackend::gpu_address(GpuBufferHandle buffer)
-{
-    auto it = buffers_.find(buffer);
-    if (it == buffers_.end()) {
-        return 0;
+    if (vmaCreateBuffer(allocator_, &buf_ci, &alloc_ci, &buffer, &allocation, &info) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to create gpu buffer (%zu bytes)", desc.size);
+        return {};
     }
 
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-    addr_info.buffer = it->second.buffer;
+    addr_info.buffer = buffer;
+    uint64_t address = vkGetBufferDeviceAddress(device_, &addr_info);
 
-    return vkGetBufferDeviceAddress(device_, &addr_info);
+    auto gb = ::velk::instance().create<::velk::IGpuBuffer>(
+        ::velk::ClassId::VkGpuBuffer);
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(gb.get());
+    if (!vk_gb) {
+        vmaDestroyBuffer(allocator_, buffer, allocation);
+        return {};
+    }
+    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size, address);
+    return gb;
+}
+
+void VkBackend::record_buffer_update(IGpuBuffer& target, size_t offset,
+                                     size_t size, const void* data)
+{
+    if (size == 0 || !data) return;
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(&target);
+    if (!vk_gb) return;
+    ::VkBuffer buffer = vk_gb->vk_buffer();
+    if (buffer == VK_NULL_HANDLE) return;
+    auto& sync = frame_sync_[frame_sync_index_];
+    vkCmdUpdateBuffer(sync.command_buffer, buffer, offset, size, data);
+    pending_buffer_update_barrier_ = true;
+}
+
+void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
+{
+    if (!gb) return;
+    if (completion_marker == kDefaultCompletionMarker) {
+        completion_marker = frame_completion_marker();
+    }
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(gb);
+    if (!vk_gb) return;
+    ::VkBuffer buffer = vk_gb->vk_buffer();
+    VmaAllocation allocation = vk_gb->vk_allocation();
+    if (buffer == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+    deferred_gpu_buffers_.push_back({buffer, allocation, completion_marker});
+}
+
+void VkBackend::drain_deferred_buffers()
+{
+    std::lock_guard<std::mutex> lock(deferred_gpu_buffers_mutex_);
+    for (auto it = deferred_gpu_buffers_.begin(); it != deferred_gpu_buffers_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            vmaDestroyBuffer(allocator_, it->buffer, it->allocation);
+            it = deferred_gpu_buffers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ============================================================================
 // Textures
 // ============================================================================
 
-TextureId VkBackend::create_texture(const TextureDesc& desc)
+IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
 {
-    TextureData td{};
-    td.width = desc.width;
-    td.height = desc.height;
-    td.format = desc.format;
-    td.bindless_index = next_bindless_index_++;
-
     VkFormat vk_format = vk_format_for(desc.format);
     if (desc.format == PixelFormat::Surface) {
         // Sentinel: follow the swapchain's chosen format. Used by the
@@ -1191,6 +1225,8 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         }
     }
     const bool is_color_attachment = (desc.usage == TextureUsage::ColorAttachment);
+    const bool is_render_target = (desc.usage == TextureUsage::RenderTarget);
+    const bool is_renderable = is_render_target || is_color_attachment;
 
     uint32_t mip_levels = desc.mip_levels > 0 ? static_cast<uint32_t>(desc.mip_levels) : 1u;
 
@@ -1205,13 +1241,10 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     img_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     img_ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (mip_levels > 1) {
-        // Mip chain is generated post-upload via blit-downsample; each
-        // mip serves as a blit source for the next level.
         img_ci.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
-    if (desc.usage == TextureUsage::RenderTarget || is_color_attachment) {
+    if (is_renderable) {
         img_ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        td.is_renderable = true;
     }
     if (desc.usage == TextureUsage::Storage) {
         img_ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1220,86 +1253,74 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
     VmaAllocationCreateInfo alloc_ci{};
     alloc_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-    if (vmaCreateImage(allocator_, &img_ci, &alloc_ci, &td.image, &td.allocation, nullptr) != VK_SUCCESS) {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    if (vmaCreateImage(allocator_, &img_ci, &alloc_ci, &image, &allocation, nullptr) != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create texture image");
-        return 0;
+        return {};
     }
 
-    // Image view spans all mip levels so textureLod() can reach any of them.
+    VkImageView view = VK_NULL_HANDLE;
     VkImageViewCreateInfo view_ci{};
     view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_ci.image = td.image;
+    view_ci.image = image;
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_ci.format = vk_format;
     view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     view_ci.subresourceRange.levelCount = mip_levels;
     view_ci.subresourceRange.layerCount = 1;
+    vkCreateImageView(device_, &view_ci, nullptr, &view);
 
-    vkCreateImageView(device_, &view_ci, nullptr, &td.view);
-
-    // Initial layout: GENERAL for storage textures (compute writes them in
-    // that layout and the bindless sampler can still read them there);
-    // SHADER_READ_ONLY_OPTIMAL for everything else.
     VkImageLayout initial_layout = (desc.usage == TextureUsage::Storage)
         ? VK_IMAGE_LAYOUT_GENERAL
         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     auto cb = begin_one_shot_commands();
-    transition_image_layout(cb, td.image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout, mip_levels);
+    transition_image_layout(cb, image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout, mip_levels);
     end_one_shot_commands(cb);
-    td.current_layout = initial_layout;
-    td.mip_levels = mip_levels;
 
-    // Update bindless sampler descriptor (binding 0). Per-texture sampler
-    // matches desc.sampler exactly; the cache returns one VkSampler per
-    // distinct addressing/filter combination.
+    const uint32_t bindless_index = next_bindless_index_++;
+
     VkDescriptorImageInfo sampler_info{};
     sampler_info.sampler = get_or_create_sampler(desc.sampler);
-    sampler_info.imageView = td.view;
+    sampler_info.imageView = view;
     sampler_info.imageLayout = initial_layout;
 
     VkWriteDescriptorSet sampler_write{};
     sampler_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     sampler_write.dstSet = descriptor_set_;
     sampler_write.dstBinding = 0;
-    sampler_write.dstArrayElement = td.bindless_index;
+    sampler_write.dstArrayElement = bindless_index;
     sampler_write.descriptorCount = 1;
     sampler_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sampler_write.pImageInfo = &sampler_info;
-
     vkUpdateDescriptorSets(device_, 1, &sampler_write, 0, nullptr);
 
-    // For storage textures, also register as a storage image so compute
-    // shaders can imageStore via the same bindless_index. Per-format
-    // bindings are required because Vulkan's image-format compatibility
-    // rules forbid writing through a view of a different format class:
-    //   binding 1 — rgba8   (image2D rgba8 in GLSL, gStorageImages)
-    //   binding 2 — rgba32f (image2D rgba32f, gStorageImagesF32)
-    //   binding 3 — rgba16f (image2D rgba16f, gStorageImagesF16)
     if (desc.usage == TextureUsage::Storage) {
-        uint32_t storage_binding = 1; // RGBA8 default
+        uint32_t storage_binding = 1;
         if (desc.format == PixelFormat::RGBA32F) storage_binding = 2;
         else if (desc.format == PixelFormat::RGBA16F) storage_binding = 3;
 
         VkDescriptorImageInfo storage_info{};
-        storage_info.imageView = td.view;
+        storage_info.imageView = view;
         storage_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet storage_write{};
         storage_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         storage_write.dstSet = descriptor_set_;
         storage_write.dstBinding = storage_binding;
-        storage_write.dstArrayElement = td.bindless_index;
+        storage_write.dstArrayElement = bindless_index;
         storage_write.descriptorCount = 1;
         storage_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         storage_write.pImageInfo = &storage_info;
-
         vkUpdateDescriptorSets(device_, 1, &storage_write, 0, nullptr);
     }
 
-    // Create a standalone render pass and framebuffer for single-attachment
-    // render target textures (RTT path). MRT group attachments share their
-    // group's render pass + framebuffer and skip this.
-    if (td.is_renderable && !is_color_attachment) {
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkRenderPass load_render_pass = VK_NULL_HANDLE;
+    if (is_render_target) {
+        // Single-attachment RTT: standalone render pass + framebuffer.
+        // MRT group attachments share the group's render pass and skip this.
         VkAttachmentDescription color_att{};
         color_att.format = vk_format;
         color_att.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1335,61 +1356,62 @@ TextureId VkBackend::create_texture(const TextureDesc& desc)
         rp_ci.dependencyCount = 1;
         rp_ci.pDependencies = &dep;
 
-        vkCreateRenderPass(device_, &rp_ci, nullptr, &td.render_pass);
+        vkCreateRenderPass(device_, &rp_ci, nullptr, &render_pass);
 
-        // Load render pass (subsequent passes on the same texture within a frame)
         color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color_att.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCreateRenderPass(device_, &rp_ci, nullptr, &td.load_render_pass);
+        vkCreateRenderPass(device_, &rp_ci, nullptr, &load_render_pass);
 
-        // Framebuffer
         VkFramebufferCreateInfo fb_ci{};
         fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_ci.renderPass = td.render_pass;
+        fb_ci.renderPass = render_pass;
         fb_ci.attachmentCount = 1;
-        fb_ci.pAttachments = &td.view;
+        fb_ci.pAttachments = &view;
         fb_ci.width = static_cast<uint32_t>(desc.width);
         fb_ci.height = static_cast<uint32_t>(desc.height);
         fb_ci.layers = 1;
-
-        vkCreateFramebuffer(device_, &fb_ci, nullptr, &td.framebuffer);
+        vkCreateFramebuffer(device_, &fb_ci, nullptr, &framebuffer);
     }
 
-    TextureId id = td.bindless_index;
-    textures_[id] = td;
-    return id;
+    const uvec2 dims{static_cast<uint32_t>(desc.width), static_cast<uint32_t>(desc.height)};
+
+    if (is_renderable) {
+        auto rt = ::velk::instance().create<IGpuTexture>(ClassId::VkRenderTexture);
+        if (!rt) return {};
+        auto* vk_rt = interface_cast<IVkGpuTexture>(rt.get());
+        if (!vk_rt) return {};
+        vk_rt->init_render_target(this, image, view, allocation, bindless_index,
+                                  mip_levels, initial_layout, dims, desc.format,
+                                  desc.sampler, framebuffer, render_pass,
+                                  load_render_pass);
+        if (auto* rt_target = interface_cast<IRenderTarget>(rt.get())) {
+            rt_target->set_size(static_cast<uint32_t>(desc.width),
+                                static_cast<uint32_t>(desc.height));
+            rt_target->set_format(desc.format);
+        }
+        live_render_targets_.push_back(vk_rt);
+        return rt;
+    }
+
+    auto t = ::velk::instance().create<IGpuTexture>(ClassId::VkGpuTexture);
+    if (!t) return {};
+    auto* vk_t = interface_cast<IVkGpuTexture>(t.get());
+    if (!vk_t) return {};
+    vk_t->init_sampled(this, image, view, allocation, bindless_index, mip_levels,
+                       initial_layout, dims, desc.format, desc.sampler);
+    return t;
 }
 
-void VkBackend::destroy_texture(TextureId texture)
+void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height)
 {
-    auto it = textures_.find(texture);
-    if (it == textures_.end()) {
-        return;
-    }
+    auto* vk_t = interface_cast<IVkGpuTexture>(&texture);
+    if (!vk_t || vk_t->vk_image() == VK_NULL_HANDLE) return;
 
-    auto& td = it->second;
-    if (td.is_renderable) {
-        vkDestroyFramebuffer(device_, td.framebuffer, nullptr);
-        vkDestroyRenderPass(device_, td.render_pass, nullptr);
-        vkDestroyRenderPass(device_, td.load_render_pass, nullptr);
-    }
-    vkDestroyImageView(device_, td.view, nullptr);
-    vmaDestroyImage(allocator_, td.image, td.allocation);
-    textures_.erase(it);
-}
-
-void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int width, int height)
-{
-    auto it = textures_.find(texture);
-    if (it == textures_.end()) {
-        return;
-    }
-
-    auto& td = it->second;
+    PixelFormat fmt = texture.format();
     size_t bpp = 4;
-    if (td.format == PixelFormat::R8) bpp = 1;
-    else if (td.format == PixelFormat::RGBA16F) bpp = 8;
-    else if (td.format == PixelFormat::RGBA32F) bpp = 16;
+    if (fmt == PixelFormat::R8) bpp = 1;
+    else if (fmt == PixelFormat::RGBA16F) bpp = 8;
+    else if (fmt == PixelFormat::RGBA32F) bpp = 16;
     size_t data_size = static_cast<size_t>(width) * height * bpp;
 
     // Create staging buffer
@@ -1417,11 +1439,12 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
 
     auto cb = begin_one_shot_commands();
 
-    const uint32_t mip_levels = td.mip_levels;
+    const uint32_t mip_levels = vk_t->vk_mip_levels();
+    const VkImage image = vk_t->vk_image();
 
     // Transition all mip levels to TRANSFER_DST for the initial upload.
     transition_image_layout(
-        cb, td.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        cb, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mip_levels);
 
     // Upload the source pixels to mip 0.
@@ -1430,7 +1453,7 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
     region.imageSubresource.mipLevel = 0;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-    vkCmdCopyBufferToImage(cb, staging, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     if (mip_levels > 1) {
         // Generate the rest of the chain by progressively blitting from
@@ -1447,7 +1470,7 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
             bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bar.image = td.image;
+            bar.image = image;
             bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             bar.subresourceRange.baseMipLevel = i - 1;
             bar.subresourceRange.levelCount = 1;
@@ -1468,8 +1491,8 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
             blit.dstSubresource.mipLevel = i;
             blit.dstSubresource.layerCount = 1;
             blit.dstOffsets[1] = {next_w, next_h, 1};
-            vkCmdBlitImage(cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            vkCmdBlitImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blit, VK_FILTER_LINEAR);
 
             // Source mip now fully written + read; move to SHADER_READ_ONLY.
@@ -1492,7 +1515,7 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
         tail.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         tail.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         tail.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        tail.image = td.image;
+        tail.image = image;
         tail.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         tail.subresourceRange.baseMipLevel = mip_levels - 1;
         tail.subresourceRange.levelCount = 1;
@@ -1504,7 +1527,7 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
     } else {
         // Single-level image: flip mip 0 back to sampling layout.
         transition_image_layout(
-            cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
     }
 
@@ -1513,20 +1536,19 @@ void VkBackend::upload_texture(TextureId texture, const uint8_t* pixels, int wid
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 
-bool VkBackend::read_texture(TextureId texture, vector<uint8_t>& out_pixels,
+bool VkBackend::read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
                              PixelFormat& out_format, uvec2& out_dims)
 {
-    auto it = textures_.find(texture);
-    if (it == textures_.end()) {
-        return false;
-    }
-    auto& td = it->second;
+    auto* vk_t = interface_cast<IVkGpuTexture>(&texture);
+    if (!vk_t || vk_t->vk_image() == VK_NULL_HANDLE) return false;
 
+    const PixelFormat fmt = texture.format();
+    const uvec2 dims = texture.get_dimensions();
     size_t bpp = 4;
-    if (td.format == PixelFormat::R8) bpp = 1;
-    else if (td.format == PixelFormat::RGBA16F) bpp = 8;
-    else if (td.format == PixelFormat::RGBA32F) bpp = 16;
-    const size_t data_size = static_cast<size_t>(td.width) * td.height * bpp;
+    if (fmt == PixelFormat::R8) bpp = 1;
+    else if (fmt == PixelFormat::RGBA16F) bpp = 8;
+    else if (fmt == PixelFormat::RGBA32F) bpp = 16;
+    const size_t data_size = static_cast<size_t>(dims.x) * dims.y * bpp;
 
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1553,7 +1575,9 @@ bool VkBackend::read_texture(TextureId texture, vector<uint8_t>& out_pixels,
 
     auto cb = begin_one_shot_commands();
 
-    const VkImageLayout original_layout = td.current_layout;
+    const VkImage image = vk_t->vk_image();
+    const VkImageLayout original_layout = vk_t->vk_current_layout();
+    const uint32_t mip_levels = vk_t->vk_mip_levels();
 
     // Use a permissive image barrier rather than the generic
     // transition_image_layout helper, which doesn't cover the
@@ -1565,9 +1589,9 @@ bool VkBackend::read_texture(TextureId texture, vector<uint8_t>& out_pixels,
         b.newLayout = to;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = td.image;
+        b.image = image;
         b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        b.subresourceRange.levelCount = td.mip_levels;
+        b.subresourceRange.levelCount = mip_levels;
         b.subresourceRange.layerCount = 1;
         b.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1581,8 +1605,8 @@ bool VkBackend::read_texture(TextureId texture, vector<uint8_t>& out_pixels,
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.mipLevel = 0;
     region.imageSubresource.layerCount = 1;
-    region.imageExtent = {static_cast<uint32_t>(td.width), static_cast<uint32_t>(td.height), 1};
-    vkCmdCopyImageToBuffer(cb, td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+    region.imageExtent = {dims.x, dims.y, 1};
+    vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
     image_barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, original_layout);
 
@@ -1590,8 +1614,8 @@ bool VkBackend::read_texture(TextureId texture, vector<uint8_t>& out_pixels,
 
     out_pixels.resize(data_size);
     std::memcpy(out_pixels.data(), staging_info.pMappedData, data_size);
-    out_format = td.format;
-    out_dims = {static_cast<uint32_t>(td.width), static_cast<uint32_t>(td.height)};
+    out_format = fmt;
+    out_dims = dims;
 
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
     return true;
@@ -1656,27 +1680,25 @@ VkRenderPass VkBackend::get_or_create_single_attachment_render_pass(VkFormat col
     return rp;
 }
 
-PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
-                                      PixelFormat target_format,
-                                      RenderTargetGroup target_group)
+IGpuPipeline::Ptr VkBackend::create_pipeline(const PipelineDesc& desc,
+                                             PixelFormat target_format,
+                                             IRenderTextureGroup* target_group)
 {
     if (!default_render_pass_) {
         VELK_LOG(E, "VkBackend: cannot create pipeline without a render pass");
-        return 0;
+        return {};
     }
     VELK_PERF_SCOPE("vk.create_pipeline");
     VkRenderPass render_pass = default_render_pass_;
     uint32_t color_attachment_count = 1;
-    if (target_group != 0) {
+    IVkRenderTargetGroup* vk_group = target_group
+        ? interface_cast<IVkRenderTargetGroup>(target_group)
+        : nullptr;
+    if (vk_group) {
         // MRT path: group's render pass dictates attachment count + formats.
         // target_format is ignored here.
-        auto git = render_target_groups_.find(target_group);
-        if (git == render_target_groups_.end()) {
-            VELK_LOG(E, "VkBackend: create_pipeline: unknown render target group");
-            return 0;
-        }
-        render_pass = git->second.render_pass;
-        color_attachment_count = static_cast<uint32_t>(git->second.attachments.size());
+        render_pass = vk_group->vk_render_pass();
+        color_attachment_count = static_cast<uint32_t>(vk_group->vk_attachment_count());
     } else if (target_format != PixelFormat::Surface) {
         // Single-attachment, no-depth render pass for an explicit color
         // format (HDR path target, format-explicit RTT). Pipelines
@@ -1685,11 +1707,11 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
         VkFormat vk_color = vk_format_for(target_format);
         if (vk_color == VK_FORMAT_UNDEFINED) {
             VELK_LOG(E, "VkBackend: create_pipeline: unsupported target_format");
-            return 0;
+            return {};
         }
         render_pass = get_or_create_single_attachment_render_pass(vk_color);
         if (!render_pass) {
-            return 0;
+            return {};
         }
     }
 
@@ -1702,7 +1724,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     VkShaderModule vert_module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(device_, &vert_ci, nullptr, &vert_module) != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create vertex shader module");
-        return 0;
+        return {};
     }
 
     VkShaderModuleCreateInfo frag_ci{};
@@ -1714,7 +1736,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     if (vkCreateShaderModule(device_, &frag_ci, nullptr, &frag_module) != VK_SUCCESS) {
         vkDestroyShaderModule(device_, vert_module, nullptr);
         VELK_LOG(E, "VkBackend: failed to create fragment shader module");
-        return 0;
+        return {};
     }
 
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -1760,7 +1782,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
 
     // Blending: MRT render passes (G-buffer) always write opaque; for
     // single-attachment passes, honor the material's requested blend mode.
-    bool blend_enabled = (target_group == 0) && (desc.options.blend_mode == BlendMode::Alpha);
+    bool blend_enabled = (vk_group == nullptr) && (desc.options.blend_mode == BlendMode::Alpha);
 
     VkPipelineColorBlendAttachmentState blend_att{};
     blend_att.blendEnable = blend_enabled ? VK_TRUE : VK_FALSE;
@@ -1795,7 +1817,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     // A material with depth_test=Disabled drawn into a depth-enabled pass
     // silently has depth testing off — this is the "(a) ignore" edge case.
     bool target_has_depth = false;
-    if (target_group == 0) {
+    if (!vk_group) {
         // Surface follows the swapchain's default render pass (which may
         // carry depth); explicit non-surface formats use the single-color
         // no-depth cache, so depth state must be omitted for those.
@@ -1803,9 +1825,7 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
             target_has_depth = (default_depth_format_ != VK_FORMAT_UNDEFINED);
         }
     } else {
-        auto git = render_target_groups_.find(target_group);
-        target_has_depth = (git != render_target_groups_.end())
-                           && (git->second.depth_vk_format != VK_FORMAT_UNDEFINED);
+        target_has_depth = (vk_group->vk_depth_format() != VK_FORMAT_UNDEFINED);
     }
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
@@ -1844,41 +1864,47 @@ PipelineId VkBackend::create_pipeline(const PipelineDesc& desc,
     pipeline_ci.renderPass = render_pass;
     pipeline_ci.subpass = 0;
 
-    PipelineEntry pe{};
+    VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult pipeline_result;
     {
         VELK_PERF_SCOPE("vk.vkCreateGraphicsPipelines");
         pipeline_result = vkCreateGraphicsPipelines(
-            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline);
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
     }
     if (pipeline_result != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create graphics pipeline");
         vkDestroyShaderModule(device_, vert_module, nullptr);
         vkDestroyShaderModule(device_, frag_module, nullptr);
-        return 0;
+        return {};
     }
 
     // Shader modules can be destroyed after pipeline creation
     vkDestroyShaderModule(device_, vert_module, nullptr);
     vkDestroyShaderModule(device_, frag_module, nullptr);
 
-    PipelineId id = next_pipeline_id_++;
-    pipelines_[id] = pe;
-    return id;
+    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
+        ::velk::ClassId::VkGpuPipeline);
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
+    if (!vk_gp) {
+        vkDestroyPipeline(device_, pipeline, nullptr);
+        return {};
+    }
+    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    return gp;
 }
 
-PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
+IGpuPipeline::Ptr VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
 {
     if (!desc.compute) {
         VELK_LOG(E, "VkBackend: create_compute_pipeline requires a compute shader");
-        return 0;
+        return {};
     }
     VELK_PERF_SCOPE("vk.create_compute_pipeline");
 
     auto code = desc.compute->get_data();
     if (code.empty()) {
         VELK_LOG(E, "VkBackend: create_compute_pipeline got empty SPIR-V");
-        return 0;
+        return {};
     }
 
     VkShaderModuleCreateInfo sm_ci{};
@@ -1889,7 +1915,7 @@ PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
     VkShaderModule cs_module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(device_, &sm_ci, nullptr, &cs_module) != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create compute shader module");
-        return 0;
+        return {};
     }
 
     VkPipelineShaderStageCreateInfo stage{};
@@ -1903,36 +1929,97 @@ PipelineId VkBackend::create_compute_pipeline(const ComputePipelineDesc& desc)
     pipeline_ci.stage = stage;
     pipeline_ci.layout = pipeline_layout_;
 
-    PipelineEntry pe{};
-    pe.bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult pipeline_result;
     {
         VELK_PERF_SCOPE("vk.vkCreateComputePipelines");
         pipeline_result = vkCreateComputePipelines(
-            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pe.pipeline);
+            device_, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &pipeline);
     }
 
     vkDestroyShaderModule(device_, cs_module, nullptr);
 
     if (pipeline_result != VK_SUCCESS) {
         VELK_LOG(E, "VkBackend: failed to create compute pipeline");
-        return 0;
+        return {};
     }
 
-    PipelineId id = next_pipeline_id_++;
-    pipelines_[id] = pe;
-    return id;
+    auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
+        ::velk::ClassId::VkGpuPipeline);
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
+    if (!vk_gp) {
+        vkDestroyPipeline(device_, pipeline, nullptr);
+        return {};
+    }
+    vk_gp->init(this, pipeline, VK_PIPELINE_BIND_POINT_COMPUTE);
+    return gp;
 }
 
-void VkBackend::destroy_pipeline(PipelineId pipeline)
+void VkBackend::defer_destroy_gpu_pipeline(IGpuPipeline* pipeline)
 {
-    auto it = pipelines_.find(pipeline);
-    if (it == pipelines_.end()) {
-        return;
-    }
+    if (!pipeline) return;
+    auto* vk_gp = interface_cast<IVkGpuPipeline>(pipeline);
+    if (!vk_gp) return;
+    ::VkPipeline vk_pipe = vk_gp->vk_pipeline();
+    if (vk_pipe == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+    deferred_gpu_pipelines_.push_back({vk_pipe, pending_frame_completion_marker()});
+}
 
-    vkDestroyPipeline(device_, it->second.pipeline, nullptr);
-    pipelines_.erase(it);
+void VkBackend::drain_deferred_pipelines()
+{
+    std::lock_guard<std::mutex> lock(deferred_gpu_pipelines_mutex_);
+    for (auto it = deferred_gpu_pipelines_.begin(); it != deferred_gpu_pipelines_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            vkDestroyPipeline(device_, it->pipeline, nullptr);
+            it = deferred_gpu_pipelines_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void VkBackend::defer_destroy_gpu_texture(IGpuTexture* texture,
+                                          uint64_t completion_marker)
+{
+    if (!texture) return;
+    auto* vk_t = interface_cast<IVkGpuTexture>(texture);
+    if (!vk_t) return;
+    if (vk_t->vk_image() == VK_NULL_HANDLE) return;
+    if (completion_marker == kDefaultCompletionMarker) {
+        completion_marker = pending_frame_completion_marker();
+    }
+    for (auto it = live_render_targets_.begin(); it != live_render_targets_.end(); ++it) {
+        if (*it == vk_t) { live_render_targets_.erase(it); break; }
+    }
+    DeferredGpuTextureDestroy entry{
+        vk_t->vk_image(),
+        vk_t->vk_view(),
+        vk_t->vk_allocation(),
+        vk_t->vk_framebuffer(),
+        vk_t->vk_render_pass(),
+        vk_t->vk_load_render_pass(),
+        completion_marker,
+    };
+    std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
+    deferred_gpu_textures_.push_back(entry);
+}
+
+void VkBackend::drain_deferred_textures()
+{
+    std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
+    for (auto it = deferred_gpu_textures_.begin(); it != deferred_gpu_textures_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            if (it->framebuffer)      vkDestroyFramebuffer(device_, it->framebuffer, nullptr);
+            if (it->render_pass)      vkDestroyRenderPass(device_, it->render_pass, nullptr);
+            if (it->load_render_pass) vkDestroyRenderPass(device_, it->load_render_pass, nullptr);
+            if (it->view)             vkDestroyImageView(device_, it->view, nullptr);
+            if (it->image)            vmaDestroyImage(allocator_, it->image, it->allocation);
+            it = deferred_gpu_textures_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ============================================================================
@@ -1946,86 +2033,76 @@ void VkBackend::begin_frame()
     vkResetFences(device_, 1, &sync.fence);
     vkResetCommandBuffer(sync.command_buffer, 0);
 
+    RENDER_LOG("vk.begin_frame slot=%u primary=%p deferred_frees=%zu",
+               frame_sync_index_, (void*)sync.command_buffer,
+               sync.deferred_persistent_frees.size());
+
+    // Drain persistent-pool secondaries deferred when this slot last
+    // ran. The slot's fence above guarantees their last submission has
+    // completed.
+    if (!sync.deferred_persistent_frees.empty()) {
+        vkFreeCommandBuffers(device_, persistent_secondary_pool_,
+                             static_cast<uint32_t>(sync.deferred_persistent_frees.size()),
+                             sync.deferred_persistent_frees.data());
+        sync.deferred_persistent_frees.clear();
+    }
+
+    drain_deferred_buffers();
+    drain_deferred_pipelines();
+    drain_deferred_textures();
+    drain_deferred_render_target_groups();
+
+    pending_buffer_update_barrier_ = false;
+
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(sync.command_buffer, &begin_info);
 
+    // Compute descriptor set: bound here on the primary because
+    // `dispatch` records `vkCmd*` inline on the primary (compute is
+    // outside any renderpass, so SECONDARY contents doesn't apply).
+    // Graphics rebinds happen inside each secondary command buffer
+    // (Vulkan spec: secondaries don't inherit descriptor bindings).
+    vkCmdBindDescriptorSets(sync.command_buffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline_layout_,
+                            0, 1, &descriptor_set_,
+                            0, nullptr);
+
     frame_open_ = true;
     present_surface_id_ = 0;
     surface_has_clear_ = false;
-    cleared_textures_.clear();
-    cleared_render_target_groups_.clear();
+    for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
+    for (auto* g  : live_render_target_groups_) g->mark_cleared_this_frame(false);
+    current_render_pass_ = VK_NULL_HANDLE;
 }
 
 void VkBackend::begin_pass(uint64_t target_id)
 {
+    VELK_PERF_SCOPE("vk.begin_pass");
     auto& sync = frame_sync_[frame_sync_index_];
-    VkRenderPass rp = VK_NULL_HANDLE;
-    VkFramebuffer fb = VK_NULL_HANDLE;
-    uint32_t group_attachment_count = 0;
-    bool target_has_depth = false;
 
-    // MRT group dispatch: high bit set => RenderTargetGroup handle.
-    if (is_render_target_group(target_id)) {
-        auto git = render_target_groups_.find(target_id);
-        if (git == render_target_groups_.end()) {
-            return;
-        }
-        auto& gd = git->second;
-        current_surface_ = 0;
-
-        bool already_cleared = false;
-        for (auto id : cleared_render_target_groups_) {
-            if (id == target_id) { already_cleared = true; break; }
-        }
-        rp = already_cleared ? gd.load_render_pass : gd.render_pass;
-        fb = gd.framebuffer;
-        current_target_width_ = gd.width;
-        current_target_height_ = gd.height;
-        group_attachment_count = static_cast<uint32_t>(gd.attachments.size());
-        const bool group_has_depth = gd.depth_vk_format != VK_FORMAT_UNDEFINED;
-
-        if (!already_cleared) {
-            cleared_render_target_groups_.push_back(target_id);
-        }
-
-        VkRenderPassBeginInfo rp_begin{};
-        rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rp_begin.renderPass = rp;
-        rp_begin.framebuffer = fb;
-        rp_begin.renderArea.extent = {static_cast<uint32_t>(current_target_width_),
-                                      static_cast<uint32_t>(current_target_height_)};
-
-        // One zero-clear per color attachment, plus one depth clear if
-        // the group has a depth attachment. The LOAD variant ignores
-        // color clear values (loadOp=LOAD) but still clears depth, so
-        // the array must be sized for the worst case.
-        const uint32_t clear_count = group_attachment_count + (group_has_depth ? 1u : 0u);
-        vector<VkClearValue> clear_values(clear_count);
-        for (uint32_t i = 0; i < group_attachment_count; ++i) {
-            clear_values[i].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-        }
-        if (group_has_depth) {
-            clear_values[group_attachment_count].depthStencil = {1.0f, 0};
-        }
-        rp_begin.clearValueCount = clear_count;
-        rp_begin.pClearValues = clear_values.data();
-
-        vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindDescriptorSets(sync.command_buffer,
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline_layout_,
-                                0,
-                                1,
-                                &descriptor_set_,
-                                0,
-                                nullptr);
-        return;
+    if (pending_buffer_update_barrier_) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        pending_buffer_update_barrier_ = false;
     }
 
-    // Try surface
+    VkRenderPass rp = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    bool target_has_depth = false;
+
+    // begin_pass(uint64_t) only handles surfaces now; groups dispatch
+    // through the IRenderTextureGroup& overload, textures through
+    // IGpuTexture&.
     auto sit = surfaces_.find(target_id);
     if (sit != surfaces_.end()) {
         auto& sd = sit->second;
@@ -2054,30 +2131,9 @@ void VkBackend::begin_pass(uint64_t target_id)
         target_has_depth = (sd.depth_format != DepthFormat::None);
         surface_has_clear_ = true;
     } else {
-        // Try texture render target
-        auto tit = textures_.find(static_cast<TextureId>(target_id));
-        if (tit == textures_.end() || !tit->second.is_renderable) {
-            return;
-        }
-        auto& td = tit->second;
-        current_surface_ = 0;
-
-        bool already_cleared = false;
-        for (auto id : cleared_textures_) {
-            if (id == static_cast<TextureId>(target_id)) {
-                already_cleared = true;
-                break;
-            }
-        }
-
-        rp = already_cleared ? td.load_render_pass : td.render_pass;
-        fb = td.framebuffer;
-        current_target_width_ = td.width;
-        current_target_height_ = td.height;
-
-        if (!already_cleared) {
-            cleared_textures_.push_back(static_cast<TextureId>(target_id));
-        }
+        // begin_pass(uint64_t) only handles surfaces and MRT groups now.
+        // Renderable textures route through the IGpuTexture& overload.
+        return;
     }
 
     VkRenderPassBeginInfo rp_begin{};
@@ -2093,85 +2149,176 @@ void VkBackend::begin_pass(uint64_t target_id)
     rp_begin.clearValueCount = target_has_depth ? 2u : 1u;
     rp_begin.pClearValues = clear_values;
 
-    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-
-    // Bind bindless descriptor set
-    vkCmdBindDescriptorSets(sync.command_buffer,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipeline_layout_,
-                            0,
-                            1,
-                            &descriptor_set_,
-                            0,
-                            nullptr);
+    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
+                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+    current_render_pass_ = rp;
+    current_framebuffer_ = fb;
+    RENDER_LOG("vk.begin_pass target=%llu rp=%p fb=%p extent=%dx%d depth=%d",
+               (unsigned long long)target_id, (void*)rp, (void*)fb,
+               current_target_width_, current_target_height_, target_has_depth ? 1 : 0);
 }
 
-void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
+void VkBackend::begin_pass(IGpuTexture& target)
 {
+    VELK_PERF_SCOPE("vk.begin_pass");
     auto& sync = frame_sync_[frame_sync_index_];
 
-    {
-        float vp_w = (vp.width > 0) ? vp.width : static_cast<float>(current_target_width_);
-        float vp_h = (vp.height > 0) ? vp.height : static_cast<float>(current_target_height_);
-
-        VkViewport viewport{};
-        viewport.x = vp.x;
-        viewport.y = vp.y;
-        viewport.width = vp_w;
-        viewport.height = vp_h;
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(sync.command_buffer, 0, 1, &viewport);
-
-        VkRect2D scissor{};
-        scissor.offset = {static_cast<int32_t>(vp.x), static_cast<int32_t>(vp.y)};
-        scissor.extent = {static_cast<uint32_t>(vp_w), static_cast<uint32_t>(vp_h)};
-        vkCmdSetScissor(sync.command_buffer, 0, 1, &scissor);
+    if (pending_buffer_update_barrier_) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        pending_buffer_update_barrier_ = false;
     }
+
+    auto* vk_t = interface_cast<IVkGpuTexture>(&target);
+    if (!vk_t || vk_t->vk_render_pass() == VK_NULL_HANDLE) return;
+
+    current_surface_ = 0;
+    const bool already_cleared = vk_t->was_cleared_this_frame();
+    VkRenderPass rp = already_cleared ? vk_t->vk_load_render_pass()
+                                      : vk_t->vk_render_pass();
+    VkFramebuffer fb = vk_t->vk_framebuffer();
+    const uvec2 dims = target.get_dimensions();
+    current_target_width_ = static_cast<int>(dims.x);
+    current_target_height_ = static_cast<int>(dims.y);
+    if (!already_cleared) vk_t->mark_cleared_this_frame(true);
+
+    VkRenderPassBeginInfo rp_begin{};
+    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rp_begin.renderPass = rp;
+    rp_begin.framebuffer = fb;
+    rp_begin.renderArea.extent = {dims.x, dims.y};
+    VkClearValue clear_value{};
+    clear_value.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    rp_begin.clearValueCount = 1;
+    rp_begin.pClearValues = &clear_value;
+
+    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
+                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+    current_render_pass_ = rp;
+    current_framebuffer_ = fb;
+    RENDER_LOG("vk.begin_pass TEX rp=%p fb=%p extent=%ux%u",
+               (void*)rp, (void*)fb, dims.x, dims.y);
+}
+
+void VkBackend::begin_pass(IRenderTextureGroup& target)
+{
+    VELK_PERF_SCOPE("vk.begin_pass");
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    if (pending_buffer_update_barrier_) {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        pending_buffer_update_barrier_ = false;
+    }
+
+    auto* vk_group = interface_cast<IVkRenderTargetGroup>(&target);
+    if (!vk_group || vk_group->vk_render_pass() == VK_NULL_HANDLE) return;
+
+    current_surface_ = 0;
+    const bool already_cleared = vk_group->was_cleared_this_frame();
+    VkRenderPass rp = already_cleared ? vk_group->vk_load_render_pass()
+                                      : vk_group->vk_render_pass();
+    VkFramebuffer fb = vk_group->vk_framebuffer();
+    const uvec2 dims = target.get_dimensions();
+    current_target_width_  = static_cast<int>(dims.x);
+    current_target_height_ = static_cast<int>(dims.y);
+    if (!already_cleared) vk_group->mark_cleared_this_frame(true);
+
+    const uint32_t color_count = static_cast<uint32_t>(vk_group->vk_attachment_count());
+    const bool group_has_depth = (vk_group->vk_depth_format() != VK_FORMAT_UNDEFINED);
+    const uint32_t clear_count = color_count + (group_has_depth ? 1u : 0u);
+    vector<VkClearValue> clear_values(clear_count);
+    for (uint32_t i = 0; i < color_count; ++i) {
+        clear_values[i].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    }
+    if (group_has_depth) clear_values[color_count].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo rp_begin{};
+    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rp_begin.renderPass = rp;
+    rp_begin.framebuffer = fb;
+    rp_begin.renderArea.extent = {dims.x, dims.y};
+    rp_begin.clearValueCount = clear_count;
+    rp_begin.pClearValues = clear_values.data();
+
+    vkCmdBeginRenderPass(sync.command_buffer, &rp_begin,
+                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+    current_render_pass_ = rp;
+    current_framebuffer_ = fb;
+    RENDER_LOG("vk.begin_pass GROUP rp=%p fb=%p extent=%ux%u",
+               (void*)rp, (void*)fb, dims.x, dims.y);
+}
+
+void VkBackend::record_draw_loop(::VkCommandBuffer cb,
+                                 array_view<const DrawCall> calls)
+{
+    RENDER_LOG("vk.record_draw_loop cb=%p calls=%zu",
+               (void*)cb, calls.size());
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
 
-        auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) {
+        auto* pipe = interface_cast<IVkGpuPipeline>(call.pipeline);
+        if (!pipe) {
+            RENDER_LOG("vk.record_draw_loop[%zu] pipeline=%p MISSING",
+                       i, (void*)call.pipeline);
             continue;
         }
 
-        vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pit->second.pipeline);
+        RENDER_LOG("vk.record_draw_loop[%zu] vkpipe=%p indexed=%d args=%p+%llu count=%p+%llu rc_size=%u",
+                   i, (void*)pipe->vk_pipeline(),
+                   call.indexed ? 1 : 0,
+                   (void*)call.args_buffer, (unsigned long long)call.args_buffer_offset,
+                   (void*)call.count_buffer, (unsigned long long)call.count_buffer_offset,
+                   call.root_constants_size);
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->vk_pipeline());
 
         if (call.root_constants_size > 0) {
-            // Per-draw push lands at offset 8: bytes [0..8) are the
-            // per-pass FrameGlobals address pushed once at pass start
-            // by push_view_globals(). Per-draw bytes (typically the
-            // 8-byte DrawData address) follow at [8..).
-            vkCmdPushConstants(sync.command_buffer,
+            // Per-draw push at offset 0: the 8-byte DrawData address
+            // (root pointer). The DrawData header carries
+            // `globals_addr` so shaders synthesise globals via a
+            // buffer-reference cast on `root.globals_addr` — no
+            // separate FrameGlobals push needed for graphics.
+            vkCmdPushConstants(cb,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,
-                               sizeof(uint64_t),
+                               0,
                                call.root_constants_size,
                                call.root_constants);
         }
 
-        // Resolve indirect-draw buffers.
-        auto args_it = buffers_.find(call.args_buffer);
-        auto count_it = buffers_.find(call.count_buffer);
-        if (args_it == buffers_.end() || count_it == buffers_.end()) {
-            continue;
-        }
-        VkBuffer args_vk = args_it->second.buffer;
-        VkBuffer count_vk = count_it->second.buffer;
+        auto* args_gb = interface_cast<IVkGpuBuffer>(call.args_buffer);
+        auto* count_gb = interface_cast<IVkGpuBuffer>(call.count_buffer);
+        if (!args_gb || !count_gb) continue;
+        VkBuffer args_vk = args_gb->vk_buffer();
+        VkBuffer count_vk = count_gb->vk_buffer();
 
         if (call.indexed) {
-            auto bit = buffers_.find(call.index_buffer);
-            if (bit == buffers_.end()) {
-                continue;
-            }
-            vkCmdBindIndexBuffer(sync.command_buffer, bit->second.buffer,
+            auto* ibo_gb = interface_cast<IVkGpuBuffer>(call.index_buffer);
+            if (!ibo_gb) continue;
+            VkBuffer ibo_vk = ibo_gb->vk_buffer();
+            vkCmdBindIndexBuffer(cb, ibo_vk,
                                  call.index_buffer_offset, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexedIndirectCount(sync.command_buffer,
+            vkCmdDrawIndexedIndirectCount(cb,
                                           args_vk, call.args_buffer_offset,
                                           count_vk, call.count_buffer_offset,
                                           call.max_draw_count, call.args_stride);
         } else {
-            vkCmdDrawIndirectCount(sync.command_buffer,
+            vkCmdDrawIndirectCount(cb,
                                    args_vk, call.args_buffer_offset,
                                    count_vk, call.count_buffer_offset,
                                    call.max_draw_count, call.args_stride);
@@ -2179,86 +2326,203 @@ void VkBackend::submit(array_view<const DrawCall> calls, rect vp)
     }
 }
 
+void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
+{
+    if (cb == VK_NULL_HANDLE) return;
+    // Queue at the slot that was last used (one before current in
+    // round-robin). Its next drain happens kFrameOverlap-1 frames from
+    // now, by which point every frame that referenced this secondary
+    // has been submitted AND its fence signaled. Queueing at the
+    // current slot would drain at the upcoming begin_frame, whose
+    // fence only guarantees work from kFrameOverlap frames ago — a
+    // recently-submitted frame's GPU work referencing the secondary
+    // could still be in flight when vkFreeCommandBuffers ran.
+    uint32_t target_slot =
+        (frame_sync_index_ + kFrameOverlap - 1) % kFrameOverlap;
+    frame_sync_[target_slot].deferred_persistent_frees.push_back(cb);
+    RENDER_LOG("vk.defer_free cb=%p current_slot=%u queue_slot=%u",
+               (void*)cb, frame_sync_index_, target_slot);
+}
+
 void VkBackend::end_pass()
 {
     auto& sync = frame_sync_[frame_sync_index_];
     vkCmdEndRenderPass(sync.command_buffer);
+    RENDER_LOG("vk.end_pass");
     current_surface_ = 0;
+    current_render_pass_ = VK_NULL_HANDLE;
+    current_framebuffer_ = VK_NULL_HANDLE;
 }
 
-void VkBackend::dispatch(array_view<const DispatchCall> calls)
+void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
 {
-    if (calls.empty()) {
-        return;
-    }
-    auto& sync = frame_sync_[frame_sync_index_];
+    auto* pipe = interface_cast<IVkGpuPipeline>(call.pipeline);
+    if (!pipe) return;
+    if (pipe->vk_bind_point() != VK_PIPELINE_BIND_POINT_COMPUTE) return;
 
-    // Bind the bindless descriptor set for the compute bind point so the
-    // shader can sample textures / read the global texture array.
-    vkCmdBindDescriptorSets(sync.command_buffer,
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipeline_layout_,
-                            0, 1, &descriptor_set_,
-                            0, nullptr);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->vk_pipeline());
 
-    for (size_t i = 0; i < calls.size(); ++i) {
-        const auto& call = calls[i];
-
-        auto pit = pipelines_.find(call.pipeline);
-        if (pit == pipelines_.end()) {
-            continue;
-        }
-        if (pit->second.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
-            continue;
-        }
-
-        vkCmdBindPipeline(sync.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pit->second.pipeline);
-
-        if (call.root_constants_size > 0) {
-            // Per-dispatch push lands at offset 8 (see submit() comment).
-            vkCmdPushConstants(sync.command_buffer,
-                               pipeline_layout_,
-                               VK_SHADER_STAGE_ALL,
-                               sizeof(uint64_t),
-                               call.root_constants_size,
-                               call.root_constants);
-        }
-
-        vkCmdDispatch(sync.command_buffer, call.groups_x, call.groups_y, call.groups_z);
+    if (call.root_constants_size > 0) {
+        vkCmdPushConstants(cb,
+                           pipeline_layout_,
+                           VK_SHADER_STAGE_ALL,
+                           0,
+                           call.root_constants_size,
+                           call.root_constants);
     }
 
-    // Ensure storage-image writes from compute are visible to subsequent
-    // sampled reads in graphics passes. Over-synchronizes if callers want
-    // to chain multiple dispatch batches, but safe as a default.
-    barrier(PipelineStage::ComputeShader, PipelineStage::FragmentShader);
+    vkCmdDispatch(cb, call.groups_x, call.groups_y, call.groups_z);
 }
 
-void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_rect)
+void VkBackend::record_blit_to_texture(::VkCommandBuffer cb, IGpuTexture& source,
+                                       IGpuTexture& dest, rect dst_rect)
 {
+    auto* src_vk = interface_cast<IVkGpuTexture>(&source);
+    auto* dst_vk = interface_cast<IVkGpuTexture>(&dest);
+    if (!src_vk || src_vk->vk_image() == VK_NULL_HANDLE) return;
+    if (!dst_vk || dst_vk->vk_image() == VK_NULL_HANDLE) return;
+
+    const VkImage src_image = src_vk->vk_image();
+    VkImage dst_image = dst_vk->vk_image();
+    int dst_w = 0, dst_h = 0;
+    {
+        auto d = dest.get_dimensions();
+        dst_w = static_cast<int>(d.x);
+        dst_h = static_cast<int>(d.y);
+    }
+    VkImageLayout dst_old_layout = dst_vk->vk_current_layout();
+    VkImageLayout dst_final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAccessFlags dst_old_access = (dst_old_layout == VK_IMAGE_LAYOUT_GENERAL)
+                                       ? VK_ACCESS_SHADER_WRITE_BIT
+                                       : VK_ACCESS_SHADER_READ_BIT;
+    dst_vk->set_vk_current_layout(dst_final_layout);
+
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = dst_old_layout;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst_image;
+    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_dst.subresourceRange.levelCount = 1;
+    to_dst.subresourceRange.layerCount = 1;
+    to_dst.srcAccessMask = dst_old_access;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageLayout src_canonical_layout = src_vk->vk_current_layout();
+    int src_w = 0, src_h = 0;
+    {
+        auto d = source.get_dimensions();
+        src_w = static_cast<int>(d.x);
+        src_h = static_cast<int>(d.y);
+    }
+    VkImageMemoryBarrier to_src{};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.oldLayout = src_canonical_layout;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = src_image;
+    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_src.subresourceRange.levelCount = 1;
+    to_src.subresourceRange.layerCount = 1;
+    to_src.srcAccessMask = (src_canonical_layout == VK_IMAGE_LAYOUT_GENERAL)
+                               ? VK_ACCESS_SHADER_WRITE_BIT
+                               : VK_ACCESS_SHADER_READ_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    VkImageMemoryBarrier pre[2] = {to_dst, to_src};
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, pre);
+
+    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
+    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
+    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
+    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
+    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
+        dx0 = 0; dy0 = 0; dx1 = dst_w; dy1 = dst_h;
+    }
+
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[1] = {src_w, src_h, 1};
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[0] = {dx0, dy0, 0};
+    blit.dstOffsets[1] = {dx1, dy1, 1};
+
+    vkCmdBlitImage(cb,
+                   src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_LINEAR);
+
+    VkImageMemoryBarrier to_final{};
+    to_final.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_final.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_final.newLayout = dst_final_layout;
+    to_final.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_final.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_final.image = dst_image;
+    to_final.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_final.subresourceRange.levelCount = 1;
+    to_final.subresourceRange.layerCount = 1;
+    to_final.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_final.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkImageMemoryBarrier to_general{};
+    to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_general.newLayout = src_canonical_layout;
+    to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_general.image = src_image;
+    to_general.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_general.subresourceRange.levelCount = 1;
+    to_general.subresourceRange.layerCount = 1;
+    to_general.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_general.dstAccessMask = 0;
+
+    VkImageMemoryBarrier post[2] = {to_final, to_general};
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                             | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, post);
+}
+
+void VkBackend::blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect)
+{
+    VELK_PERF_SCOPE("vk.blit_to_texture");
+    auto& sync = frame_sync_[frame_sync_index_];
+    record_blit_to_texture(sync.command_buffer, source, dest, dst_rect);
+}
+
+void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect dst_rect)
+{
+    VELK_PERF_SCOPE("vk.blit_to_surface");
     auto& sync = frame_sync_[frame_sync_index_];
 
-    auto tit = textures_.find(source);
-    if (tit == textures_.end()) {
-        return;
+    auto* src_vk = interface_cast<IVkGpuTexture>(&source);
+    if (!src_vk || src_vk->vk_image() == VK_NULL_HANDLE) return;
+    const VkImage src_image = src_vk->vk_image();
+    int src_w = 0, src_h = 0;
+    {
+        auto sd = source.get_dimensions();
+        src_w = static_cast<int>(sd.x);
+        src_h = static_cast<int>(sd.y);
     }
-    auto& td = tit->second;
 
     /// `target_id` may refer to a window surface (the original use
     /// case — blit composited result to swapchain) or a renderable
     /// texture (post-process pipeline routes deferred / forward path
     /// output through an intermediate target before tonemap reads it).
-    /// Surface destinations require swapchain acquisition + present-
-    /// layout transition; texture destinations are layout-tracked the
-    /// same way ordinary render passes are.
     auto sit = surfaces_.find(target_id);
-    auto dst_tit = textures_.end();
-    if (sit == surfaces_.end()) {
-        dst_tit = textures_.find(static_cast<TextureId>(target_id));
-        if (dst_tit == textures_.end()) {
-            return;
-        }
-    }
-    const bool dst_is_surface = (sit != surfaces_.end());
+    if (sit == surfaces_.end()) return;
+    const bool dst_is_surface = true;
 
     VkImage dst_image = VK_NULL_HANDLE;
     int dst_w = 0;
@@ -2267,7 +2531,7 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
     VkImageLayout dst_final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     VkAccessFlags dst_old_access = 0;
 
-    if (dst_is_surface) {
+    {
         auto& sd = sit->second;
         // Acquire swapchain image once per frame per surface (mirrors begin_pass).
         if (present_surface_id_ != target_id) {
@@ -2286,23 +2550,6 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
         dst_image = sd.images[sd.image_index];
         dst_w = sd.width;
         dst_h = sd.height;
-        dst_old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        dst_final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        dst_old_access = 0;
-    } else {
-        auto& dtd = dst_tit->second;
-        dst_image = dtd.image;
-        dst_w = dtd.width;
-        dst_h = dtd.height;
-        dst_old_layout = dtd.current_layout;
-        // After the blit we leave the texture in SHADER_READ_ONLY so
-        // subsequent passes (tonemap sampling, etc.) bind it cleanly
-        // without an extra transition.
-        dst_final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        dst_old_access = (dst_old_layout == VK_IMAGE_LAYOUT_GENERAL)
-                             ? VK_ACCESS_SHADER_WRITE_BIT
-                             : VK_ACCESS_SHADER_READ_BIT;
-        dtd.current_layout = dst_final_layout;
     }
 
     // Destination: oldLayout -> TRANSFER_DST_OPTIMAL
@@ -2323,14 +2570,14 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
     // both storage images (current = GENERAL, written by compute) and
     // render-target attachments (current = SHADER_READ_ONLY_OPTIMAL,
     // sampled by prior passes).
-    VkImageLayout src_canonical_layout = td.current_layout;
+    VkImageLayout src_canonical_layout = src_vk->vk_current_layout();
     VkImageMemoryBarrier to_src{};
     to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     to_src.oldLayout = src_canonical_layout;
     to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = td.image;
+    to_src.image = src_image;
     to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     to_src.subresourceRange.levelCount = 1;
     to_src.subresourceRange.layerCount = 1;
@@ -2360,14 +2607,14 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1] = {td.width, td.height, 1};
+    blit.srcOffsets[1] = {src_w, src_h, 1};
     blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.dstSubresource.layerCount = 1;
     blit.dstOffsets[0] = {dx0, dy0, 0};
     blit.dstOffsets[1] = {dx1, dy1, 1};
 
     vkCmdBlitImage(sync.command_buffer,
-                   td.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &blit, VK_FILTER_LINEAR);
 
@@ -2394,7 +2641,7 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
     to_general.newLayout = src_canonical_layout;
     to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_general.image = td.image;
+    to_general.image = src_image;
     to_general.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     to_general.subresourceRange.levelCount = 1;
     to_general.subresourceRange.layerCount = 1;
@@ -2418,144 +2665,6 @@ void VkBackend::blit_to_surface(TextureId source, uint64_t target_id, rect dst_r
     }
 }
 
-void VkBackend::blit_group_depth_to_surface(RenderTargetGroup src_group,
-                                            uint64_t surface_id,
-                                            rect dst_rect)
-{
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    auto sit = surfaces_.find(surface_id);
-    if (sit == surfaces_.end()) return;
-    auto& sd = sit->second;
-    if (sd.depth_format == DepthFormat::None) return;
-
-    auto git = render_target_groups_.find(src_group);
-    if (git == render_target_groups_.end()) return;
-    auto& gd = git->second;
-    if (gd.depth_vk_format == VK_FORMAT_UNDEFINED) return;
-
-    // Acquire swapchain image if not already this frame. This mirrors
-    // blit_to_surface — typically the caller runs blit_to_surface first
-    // and we just reuse sd.image_index.
-    if (present_surface_id_ != surface_id) {
-        present_surface_id_ = surface_id;
-        present_acquire_sem_idx_ = acquire_semaphore_index_;
-        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
-        VkResult result = vkAcquireNextImageKHR(
-            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            present_surface_id_ = 0;
-            return;
-        }
-    }
-
-    VkImage dst_image = sd.depth_images[sd.image_index];
-
-    // Source depth is currently in DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    // (finalLayout of the group's render pass). Destination depth is
-    // in UNDEFINED (first use this frame) — we don't care about
-    // previous content because we're overwriting it.
-    VkImageMemoryBarrier to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = gd.depth_image;
-    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    to_src.subresourceRange.levelCount = 1;
-    to_src.subresourceRange.layerCount = 1;
-    to_src.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-    VkImageMemoryBarrier to_dst{};
-    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_dst.image = dst_image;
-    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    to_dst.subresourceRange.levelCount = 1;
-    to_dst.subresourceRange.layerCount = 1;
-    to_dst.srcAccessMask = 0;
-    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    VkImageMemoryBarrier pre[2] = {to_src, to_dst};
-    vkCmdPipelineBarrier(sync.command_buffer,
-                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, pre);
-
-    int32_t dx0 = static_cast<int32_t>(dst_rect.x);
-    int32_t dy0 = static_cast<int32_t>(dst_rect.y);
-    int32_t dx1 = static_cast<int32_t>(dst_rect.x + dst_rect.width);
-    int32_t dy1 = static_cast<int32_t>(dst_rect.y + dst_rect.height);
-    if (dst_rect.width <= 0 || dst_rect.height <= 0) {
-        dx0 = 0;
-        dy0 = 0;
-        dx1 = sd.width;
-        dy1 = sd.height;
-    }
-
-    VkImageBlit blit{};
-    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1] = {gd.width, gd.height, 1};
-    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[0] = {dx0, dy0, 0};
-    blit.dstOffsets[1] = {dx1, dy1, 1};
-
-    // Depth must blit with NEAREST — LINEAR is not supported for
-    // depth/stencil aspect on most implementations.
-    vkCmdBlitImage(sync.command_buffer,
-                   gd.depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   dst_image,      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blit, VK_FILTER_NEAREST);
-
-    // Source back to DEPTH_STENCIL_ATTACHMENT_OPTIMAL for reuse next frame.
-    VkImageMemoryBarrier src_back{};
-    src_back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    src_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    src_back.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    src_back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    src_back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    src_back.image = gd.depth_image;
-    src_back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    src_back.subresourceRange.levelCount = 1;
-    src_back.subresourceRange.layerCount = 1;
-    src_back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    src_back.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-    // Destination to DEPTH_STENCIL_ATTACHMENT_OPTIMAL so the surface's
-    // load render pass (initialLayout=DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    // loadOp=LOAD) can preserve the blitted depth for forward draws.
-    VkImageMemoryBarrier dst_back{};
-    dst_back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    dst_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    dst_back.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    dst_back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    dst_back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    dst_back.image = dst_image;
-    dst_back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    dst_back.subresourceRange.levelCount = 1;
-    dst_back.subresourceRange.layerCount = 1;
-    dst_back.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    dst_back.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
-                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-    VkImageMemoryBarrier post[2] = {src_back, dst_back};
-    vkCmdPipelineBarrier(sync.command_buffer,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, post);
-
-    // If a later begin_pass runs on this surface, it should preserve the
-    // color we blitted and the depth we just blitted — use load_render_pass.
-    surface_has_clear_ = true;
-}
 
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
 {
@@ -2597,12 +2706,68 @@ void VkBackend::barrier(PipelineStage src, PipelineStage dst)
         0, nullptr);
 }
 
-void VkBackend::push_view_globals(uint64_t addr)
+VkRenderPass VkBackend::find_render_pass_for_target(uint64_t target_id)
 {
-    if (addr == 0) return;
+    if (target_id == 0) return VK_NULL_HANDLE;
+    auto sit = surfaces_.find(target_id);
+    if (sit != surfaces_.end()) {
+        return sit->second.render_pass;
+    }
+    return VK_NULL_HANDLE;
+}
+
+::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(uint64_t target_id)
+{
+    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
+        ::velk::ClassId::VkCommandBuffer);
+    VkRenderPass rp = find_render_pass_for_target(target_id);
+    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
+        impl->init(this, rp);
+    }
+    RENDER_LOG("vk.create_command_buffer target=%llu rp=%p ptr=%p",
+               (unsigned long long)target_id, (void*)rp, (void*)cmd.get());
+    return cmd;
+}
+
+::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(IGpuTexture& target)
+{
+    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
+        ::velk::ClassId::VkCommandBuffer);
+    auto* vk_t = interface_cast<IVkGpuTexture>(&target);
+    VkRenderPass rp = vk_t ? vk_t->vk_render_pass() : VK_NULL_HANDLE;
+    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
+        impl->init(this, rp);
+    }
+    RENDER_LOG("vk.create_command_buffer TEX rp=%p ptr=%p",
+               (void*)rp, (void*)cmd.get());
+    return cmd;
+}
+
+::velk::IGpuCommandBuffer::Ptr VkBackend::create_command_buffer(IRenderTextureGroup& target)
+{
+    auto cmd = ::velk::instance().create<::velk::IGpuCommandBuffer>(
+        ::velk::ClassId::VkCommandBuffer);
+    auto* vk_g = interface_cast<IVkRenderTargetGroup>(&target);
+    VkRenderPass rp = vk_g ? vk_g->vk_render_pass() : VK_NULL_HANDLE;
+    if (auto* impl = static_cast<VkCommandBuffer*>(cmd.get())) {
+        impl->init(this, rp);
+    }
+    RENDER_LOG("vk.create_command_buffer GROUP rp=%p ptr=%p",
+               (void*)rp, (void*)cmd.get());
+    return cmd;
+}
+
+void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
+{
+    if (!cmd) return;
+    auto* impl = static_cast<VkCommandBuffer*>(cmd.get());
+    ::VkCommandBuffer secondary = impl->handle();
+    if (!secondary) return;
     auto& sync = frame_sync_[frame_sync_index_];
-    vkCmdPushConstants(sync.command_buffer, pipeline_layout_,
-                       VK_SHADER_STAGE_ALL, 0, sizeof(uint64_t), &addr);
+    RENDER_LOG("vk.execute primary=%p secondary=%p current_rp=%p",
+               (void*)sync.command_buffer, (void*)secondary,
+               (void*)current_render_pass_);
+    vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
 void VkBackend::end_frame()
@@ -2721,7 +2886,7 @@ bool VkBackend::is_frame_complete(uint64_t marker) const
 // Utility
 // ============================================================================
 
-VkCommandBuffer VkBackend::begin_one_shot_commands()
+::VkCommandBuffer VkBackend::begin_one_shot_commands()
 {
     VkCommandBufferAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -2729,7 +2894,7 @@ VkCommandBuffer VkBackend::begin_one_shot_commands()
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = 1;
 
-    VkCommandBuffer cb;
+    ::VkCommandBuffer cb;
     vkAllocateCommandBuffers(device_, &alloc_info, &cb);
 
     VkCommandBufferBeginInfo begin_info{};
@@ -2740,7 +2905,7 @@ VkCommandBuffer VkBackend::begin_one_shot_commands()
     return cb;
 }
 
-void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
+void VkBackend::end_one_shot_commands(::VkCommandBuffer cb)
 {
     vkEndCommandBuffer(cb);
 
@@ -2755,7 +2920,7 @@ void VkBackend::end_one_shot_commands(VkCommandBuffer cb)
     vkFreeCommandBuffers(device_, command_pool_, 1, &cb);
 }
 
-void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
+void VkBackend::transition_image_layout(::VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
                                         VkImageLayout new_layout, uint32_t mip_levels)
 {
     VkImageMemoryBarrier barrier{};
@@ -2794,7 +2959,7 @@ void VkBackend::transition_image_layout(VkCommandBuffer cb, VkImage image, VkIma
     vkCmdPipelineBarrier(cb, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-RenderTargetGroup VkBackend::create_render_target_group(const TextureGroupDesc& desc)
+IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGroupDesc& desc)
 {
     const auto& formats = desc.formats;
     int width = desc.width;
@@ -2802,84 +2967,78 @@ RenderTargetGroup VkBackend::create_render_target_group(const TextureGroupDesc& 
     DepthFormat depth = desc.depth;
 
     if (formats.size() == 0 || width <= 0 || height <= 0) {
-        return 0;
+        return {};
     }
 
-    RenderTargetGroupData gd{};
-    gd.width = width;
-    gd.height = height;
-    gd.depth_vk_format = (depth == DepthFormat::Default)
-                             ? VK_FORMAT_D32_SFLOAT
-                             : VK_FORMAT_UNDEFINED;
-    gd.attachments.reserve(formats.size());
-    gd.vk_formats.reserve(formats.size());
+    const VkFormat depth_vk_format = (depth == DepthFormat::Default)
+                                         ? VK_FORMAT_D32_SFLOAT
+                                         : VK_FORMAT_UNDEFINED;
+    vector<IGpuTexture::Ptr> attachments;
+    vector<VkFormat> vk_formats;
+    attachments.reserve(formats.size());
+    vk_formats.reserve(formats.size());
 
     // Create each attachment as a renderable+sampleable texture using
-    // ColorAttachment, which preserves the declared format (unlike
-    // TextureUsage::RenderTarget which forces the surface's format so
-    // single-attachment RTT composites are swapchain-compatible).
+    // ColorAttachment, which preserves the declared format.
     for (auto f : formats) {
         TextureDesc td{};
         td.width = width;
         td.height = height;
         td.format = f;
         td.usage = TextureUsage::ColorAttachment;
-        TextureId t = create_texture(td);
-        if (t == 0) {
-            // Roll back attachments on partial failure.
-            for (auto a : gd.attachments) destroy_texture(a);
+        auto t = create_texture(td);
+        if (!t) {
             VELK_LOG(E, "VkBackend: create_render_target_group: attachment create failed");
-            return 0;
+            return {};
         }
-        gd.attachments.push_back(t);
+        attachments.push_back(std::move(t));
 
         VkFormat vk_f = vk_format_for(f);
         if (vk_f == VK_FORMAT_UNDEFINED) vk_f = VK_FORMAT_R8G8B8A8_UNORM;
-        gd.vk_formats.push_back(vk_f);
+        vk_formats.push_back(vk_f);
     }
 
-    // Allocate depth image for the group when requested. One image shared
-    // by both the CLEAR and LOAD render passes (depth is ephemeral — each
-    // pass clears it at begin).
-    const bool has_depth = gd.depth_vk_format != VK_FORMAT_UNDEFINED;
+    const bool has_depth = depth_vk_format != VK_FORMAT_UNDEFINED;
+    VkImage depth_image = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VmaAllocation depth_allocation = VK_NULL_HANDLE;
     if (has_depth) {
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = VK_IMAGE_TYPE_2D;
-        ici.format = gd.depth_vk_format;
+        ici.format = depth_vk_format;
         ici.extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
         ici.mipLevels = 1;
         ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
         ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
-                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // blit to surface depth for forward-over-deferred
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         VmaAllocationCreateInfo aci{};
         aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-        vmaCreateImage(allocator_, &ici, &aci, &gd.depth_image, &gd.depth_allocation, nullptr);
+        vmaCreateImage(allocator_, &ici, &aci, &depth_image, &depth_allocation, nullptr);
 
         VkImageViewCreateInfo dv_ci{};
         dv_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        dv_ci.image = gd.depth_image;
+        dv_ci.image = depth_image;
         dv_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        dv_ci.format = gd.depth_vk_format;
+        dv_ci.format = depth_vk_format;
         dv_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         dv_ci.subresourceRange.levelCount = 1;
         dv_ci.subresourceRange.layerCount = 1;
-        vkCreateImageView(device_, &dv_ci, nullptr, &gd.depth_view);
+        vkCreateImageView(device_, &dv_ci, nullptr, &depth_view);
     }
 
-    // Build the multi-attachment render pass. All color attachments plus
-    // an optional depth attachment (when has_depth).
+    // Build the multi-attachment render pass.
     const size_t n_color = formats.size();
     const size_t n_atts = n_color + (has_depth ? 1 : 0);
     vector<VkAttachmentDescription> atts(n_atts);
     vector<VkAttachmentReference> refs(n_color);
     for (size_t i = 0; i < n_color; ++i) {
         atts[i] = {};
-        atts[i].format = gd.vk_formats[i];
+        atts[i].format = vk_formats[i];
         atts[i].samples = VK_SAMPLE_COUNT_1_BIT;
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2895,7 +3054,7 @@ RenderTargetGroup VkBackend::create_render_target_group(const TextureGroupDesc& 
     if (has_depth) {
         auto& d = atts[n_color];
         d = {};
-        d.format = gd.depth_vk_format;
+        d.format = depth_vk_format;
         d.samples = VK_SAMPLE_COUNT_1_BIT;
         d.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         d.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -2932,79 +3091,111 @@ RenderTargetGroup VkBackend::create_render_target_group(const TextureGroupDesc& 
     rp_ci.dependencyCount = 1;
     rp_ci.pDependencies = &dep;
 
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkRenderPass load_render_pass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+
     auto cleanup_on_fail = [&]() {
-        if (gd.depth_view)  vkDestroyImageView(device_, gd.depth_view, nullptr);
-        if (gd.depth_image) vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
-        for (auto a : gd.attachments) destroy_texture(a);
+        if (framebuffer)      vkDestroyFramebuffer(device_, framebuffer, nullptr);
+        if (load_render_pass) vkDestroyRenderPass(device_, load_render_pass, nullptr);
+        if (render_pass)      vkDestroyRenderPass(device_, render_pass, nullptr);
+        if (depth_view)       vkDestroyImageView(device_, depth_view, nullptr);
+        if (depth_image)      vmaDestroyImage(allocator_, depth_image, depth_allocation);
     };
 
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &gd.render_pass) != VK_SUCCESS) {
+    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &render_pass) != VK_SUCCESS) {
         cleanup_on_fail();
-        return 0;
+        return {};
     }
-    // LOAD variant for re-entry in the same frame. Color attachments
-    // preserve; depth still clears (deferred passes treat depth as
-    // ephemeral per pass).
     for (size_t i = 0; i < n_color; ++i) {
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         atts[i].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &gd.load_render_pass) != VK_SUCCESS) {
-        vkDestroyRenderPass(device_, gd.render_pass, nullptr);
+    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &load_render_pass) != VK_SUCCESS) {
         cleanup_on_fail();
-        return 0;
+        return {};
     }
 
-    // Framebuffer binds all N color attachment views + optional depth view.
     vector<VkImageView> views(n_atts);
     for (size_t i = 0; i < n_color; ++i) {
-        views[i] = textures_[gd.attachments[i]].view;
+        auto* vk_t = interface_cast<IVkGpuTexture>(attachments[i].get());
+        views[i] = vk_t ? vk_t->vk_view() : VK_NULL_HANDLE;
     }
-    if (has_depth) {
-        views[n_color] = gd.depth_view;
-    }
+    if (has_depth) views[n_color] = depth_view;
+
     VkFramebufferCreateInfo fb_ci{};
     fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fb_ci.renderPass = gd.render_pass;
+    fb_ci.renderPass = render_pass;
     fb_ci.attachmentCount = static_cast<uint32_t>(views.size());
     fb_ci.pAttachments = views.data();
     fb_ci.width = static_cast<uint32_t>(width);
     fb_ci.height = static_cast<uint32_t>(height);
     fb_ci.layers = 1;
-
-    if (vkCreateFramebuffer(device_, &fb_ci, nullptr, &gd.framebuffer) != VK_SUCCESS) {
-        vkDestroyRenderPass(device_, gd.render_pass, nullptr);
-        vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
+    if (vkCreateFramebuffer(device_, &fb_ci, nullptr, &framebuffer) != VK_SUCCESS) {
         cleanup_on_fail();
-        return 0;
+        return {};
     }
 
-    RenderTargetGroup id = kRenderTargetGroupTag | next_render_target_group_id_++;
-    render_target_groups_[id] = std::move(gd);
-    return id;
+    auto group = ::velk::instance().create<IRenderTextureGroup>(ClassId::VkRenderTargetGroup);
+    if (!group) {
+        cleanup_on_fail();
+        return {};
+    }
+    auto* vk_group = interface_cast<IVkRenderTargetGroup>(group.get());
+    if (!vk_group) {
+        cleanup_on_fail();
+        return {};
+    }
+    const uvec2 dims{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    vk_group->init(this, std::move(attachments), render_pass, load_render_pass,
+                   framebuffer, depth_image, depth_view, depth_allocation,
+                   depth_vk_format, dims, formats[0], depth);
+    live_render_target_groups_.push_back(vk_group);
+    return group;
 }
 
-void VkBackend::destroy_render_target_group(RenderTargetGroup group)
+void VkBackend::defer_destroy_gpu_render_target_group(IRenderTextureGroup* group,
+                                                      uint64_t completion_marker)
 {
-    auto it = render_target_groups_.find(group);
-    if (it == render_target_groups_.end()) return;
-    auto& gd = it->second;
-    if (gd.framebuffer)       vkDestroyFramebuffer(device_, gd.framebuffer, nullptr);
-    if (gd.render_pass)       vkDestroyRenderPass(device_, gd.render_pass, nullptr);
-    if (gd.load_render_pass)  vkDestroyRenderPass(device_, gd.load_render_pass, nullptr);
-    if (gd.depth_view)        vkDestroyImageView(device_, gd.depth_view, nullptr);
-    if (gd.depth_image)       vmaDestroyImage(allocator_, gd.depth_image, gd.depth_allocation);
-    for (auto a : gd.attachments) destroy_texture(a);
-    render_target_groups_.erase(it);
+    if (!group) return;
+    auto* vk_group = interface_cast<IVkRenderTargetGroup>(group);
+    if (!vk_group) return;
+    if (completion_marker == kDefaultCompletionMarker) {
+        completion_marker = pending_frame_completion_marker();
+    }
+    for (auto it = live_render_target_groups_.begin();
+         it != live_render_target_groups_.end(); ++it) {
+        if (*it == vk_group) { live_render_target_groups_.erase(it); break; }
+    }
+    DeferredGpuRenderTargetGroupDestroy entry{
+        vk_group->vk_render_pass(),
+        vk_group->vk_load_render_pass(),
+        vk_group->vk_framebuffer(),
+        vk_group->vk_depth_image(),
+        vk_group->vk_depth_view(),
+        vk_group->vk_depth_allocation(),
+        completion_marker,
+    };
+    std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
+    deferred_gpu_render_target_groups_.push_back(entry);
 }
 
-TextureId VkBackend::get_render_target_group_attachment(
-    RenderTargetGroup group, uint32_t index) const
+void VkBackend::drain_deferred_render_target_groups()
 {
-    auto it = render_target_groups_.find(group);
-    if (it == render_target_groups_.end()) return 0;
-    if (index >= it->second.attachments.size()) return 0;
-    return it->second.attachments[index];
+    std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
+    for (auto it = deferred_gpu_render_target_groups_.begin();
+         it != deferred_gpu_render_target_groups_.end();) {
+        if (is_frame_complete(it->completion_marker)) {
+            if (it->framebuffer)      vkDestroyFramebuffer(device_, it->framebuffer, nullptr);
+            if (it->render_pass)      vkDestroyRenderPass(device_, it->render_pass, nullptr);
+            if (it->load_render_pass) vkDestroyRenderPass(device_, it->load_render_pass, nullptr);
+            if (it->depth_view)       vkDestroyImageView(device_, it->depth_view, nullptr);
+            if (it->depth_image)      vmaDestroyImage(allocator_, it->depth_image, it->depth_allocation);
+            it = deferred_gpu_render_target_groups_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace velk::vk

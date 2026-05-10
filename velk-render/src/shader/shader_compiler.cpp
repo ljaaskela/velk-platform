@@ -179,6 +179,12 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // per-vertex stream at gl_VertexIndex.
 #define velk_uv1(root) ((root).uv1.data[(root).uv1_enabled * gl_VertexIndex])
 
+// Per-view FrameGlobals from the draw root pointer. `root.globals_addr`
+// is already typed as `GlobalData` (a buffer-reference); the macro
+// hides the field name so callers stay decoupled from the header layout.
+//   GlobalData globals = velk_global_data(root);
+#define velk_global_data(root) ((root).globals_addr)
+
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
 //       VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
@@ -187,8 +193,11 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // `VboType` is a `buffer_reference`-typed handle to the vertex buffer
 // (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
 // The 48-byte header keeps everything 16-byte aligned for std430.
+// `globals_addr` is the per-view FrameGlobals address; cast it via
+// `GlobalData(root.globals_addr)` to access the view-projection,
+// camera position, BVH addrs, etc.
 #define VELK_DRAW_DATA(InstancesType, VboType) \
-    OpaquePtr _reserved0;                      \
+    GlobalData globals_addr;                   \
     InstancesType instance_data;               \
     uint texture_id;                           \
     uint instance_count;                       \

@@ -2,6 +2,7 @@
 
 #include <velk/api/velk.h>
 
+#include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/plugin.h>
 
@@ -60,7 +61,7 @@ void DefaultBatch::update_instance_at(uint32_t instance_index,
 
 uint64_t DefaultBatch::storage_gpu_address() const
 {
-    return storage_ ? storage_->get_gpu_handle(GpuResourceKey::Default) : 0;
+    return get_gpu_address(storage_);
 }
 
 } // namespace velk::impl

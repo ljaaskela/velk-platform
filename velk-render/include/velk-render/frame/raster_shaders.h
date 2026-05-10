@@ -99,7 +99,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
-layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
+layout(push_constant) uniform PC { DrawData root; };
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -113,6 +113,7 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
+    GlobalData globals = velk_global_data(root);
     EvalContext ctx;
     ctx.data_addr   = uint64_t(root.material);
     ctx.texture_id  = root.texture_id;
@@ -135,7 +136,7 @@ layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
     OpaquePtr material;
 };
-layout(push_constant) uniform PC { GlobalData globals; DrawData root; };
+layout(push_constant) uniform PC { DrawData root; };
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -155,6 +156,7 @@ void velk_visual_discard();
 
 void main()
 {
+    GlobalData globals = velk_global_data(root);
     velk_visual_discard();
 
     EvalContext ctx;

@@ -85,7 +85,9 @@ public:
         uvec2 gbuffer_size{};
 
         IRenderTarget::Ptr deferred_output;
+        IGpuTexture* deferred_output_tex = nullptr;
         IRenderTarget::Ptr shadow_debug;
+        IGpuTexture* shadow_debug_tex = nullptr;
         // Cached size for deferred_output + shadow_debug (both follow
         // the lighting target dims). Recreate only on size change.
         uvec2 output_size{};
@@ -111,6 +113,13 @@ public:
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
+
+        /// Cached surface-blit pass, set only when color_target is a
+        /// swapchain surface. The cached_lighting_pass cmd buffer
+        /// dispatches into deferred_output; this pass routes
+        /// IRenderBackend::blit_to_surface for the per-frame swapchain
+        /// copy. Rebuilt under the same lighting_dirty signal.
+        IRenderPass::Ptr cached_surface_blit_pass;
     };
 
 private:
@@ -122,8 +131,8 @@ private:
 
     uint64_t ensure_pipeline(FrameContext& ctx);
 
-    RenderTargetGroup ensure_gbuffer(ViewState& vs, int width, int height,
-                                     FrameContext& ctx, IRenderGraph& graph);
+    IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
+                                        FrameContext& ctx, IRenderGraph& graph);
 
     void emit_gbuffer_pass(IViewEntry& view, ViewState& vs,
                            const RenderView& render_view, FrameContext& ctx,

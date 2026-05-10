@@ -1,5 +1,6 @@
 #include "scene_bvh.h"
 
+#include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/interface/intf_object_storage.h>
@@ -71,6 +72,7 @@ uint64_t SceneBvh::hash_visual_aabbs(IScene* scene)
 void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
                        ShapeCb shape_cb, void* shape_user)
 {
+    VELK_PERF_SCOPE("renderer.bvh_rebuild");
     // Second-stage dirty check: the caller's heuristic (visuals in
     // redraw_list) over-triggers because the scene re-adds every
     // element to redraw_list on any Layout dirty flag, including
@@ -79,12 +81,14 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
     // full build, keep the cache.
     uint64_t current_hash = 0;
     if (dirty && !cached_nodes_.empty()) {
+        VELK_PERF_SCOPE("renderer.bvh_hash");
         current_hash = hash_visual_aabbs(scene);
         if (current_hash == cached_aabb_hash_) {
             dirty = false;
         }
     }
     if (dirty || cached_nodes_.empty()) {
+        VELK_PERF_SCOPE("renderer.bvh_build");
         auto build = build_scene_bvh(scene, ctx.render_ctx, shape_cb, shape_user);
         cached_nodes_ = std::move(build.nodes);
         cached_shapes_ = std::move(build.shapes);
@@ -96,6 +100,7 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
         dirty_ = false;
     }
 
+    VELK_PERF_SCOPE("renderer.bvh_upload");
     // Stage the packed mesh-instance array first so we can stamp
     // each mesh shape's `mesh_data_addr` with a stable per-instance
     // address (base + i * sizeof(MeshInstanceData)).

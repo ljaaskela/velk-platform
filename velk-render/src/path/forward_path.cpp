@@ -6,6 +6,7 @@
 
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/frame/raster_shaders.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_render_target.h>
@@ -16,15 +17,21 @@
 
 namespace velk {
 
+#ifdef VELK_RENDER_DEBUG
+#define RENDER_LOG(...) VELK_LOG(I, __VA_ARGS__)
+#else
+#define RENDER_LOG(...) ((void)0)
+#endif
+
 namespace {
 
 /// Resolves (or lazy-compiles) the forward-rendering pipeline for a
 /// batch. Material wins over the visual's IShaderSource when both
 /// are present; the visual's source is the no-material fallback.
 /// Returns 0 to skip (no source / compile failure).
-PipelineId resolve_or_compile_forward(IRenderContext& ctx,
-                                      const IBatch& batch,
-                                      PixelFormat target_format)
+IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
+                                         const IBatch& batch,
+                                         PixelFormat target_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -38,7 +45,7 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
     if (auto it = pipeline_map.find(
             PipelineCacheKey{user_key, target_format, 0});
         it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
 
     uint64_t compiled_key = 0;
@@ -71,14 +78,14 @@ PipelineId resolve_or_compile_forward(IRenderContext& ctx,
             pipeline_options);
     }
 
-    if (compiled_key == 0) return 0;
+    if (compiled_key == 0) return nullptr;
 
     if (auto it = pipeline_map.find(
             PipelineCacheKey{compiled_key, target_format, 0});
         it != pipeline_map.end()) {
-        return it->second;
+        return it->second.get();
     }
-    return 0;
+    return nullptr;
 }
 
 } // namespace
@@ -144,6 +151,10 @@ void ForwardPath::build_passes(IViewEntry& entry,
         // globals address (FrameGlobals lives in per-frame staging
         // and rotates each frame).
         cache.pass->set_view_globals_address(render_view.view_globals_address);
+        RENDER_LOG("forward.cached view=%p pass=%p target=%llu vg=0x%llx",
+                   (void*)&entry, (void*)cache.pass.get(),
+                   (unsigned long long)cache.pass->target_id(),
+                   (unsigned long long)render_view.view_globals_address);
         graph.add_pass(cache.pass);
         return;
     }
@@ -167,7 +178,8 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             env_batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, resolve, /*frustum=*/nullptr);
+            default_uv1, render_view.view_globals_address,
+            resolve, /*frustum=*/nullptr);
     }
 
     // Main scene batches.
@@ -175,16 +187,55 @@ void ForwardPath::build_passes(IViewEntry& entry,
         emit_draw_calls(
             draw_calls,
             *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, resolve, frustum_ptr);
+            default_uv1, render_view.view_globals_address,
+            resolve, frustum_ptr);
     }
 
     cache.pass->reset();
-    uint64_t target_id = color_target
-        ? color_target->get_gpu_handle(GpuResourceKey::Default)
-        : 0;
-    cache.pass->add_op(ops::BeginPass{target_id});
-    cache.pass->add_op(ops::Submit{render_view.viewport, std::move(draw_calls)});
-    cache.pass->add_op(ops::EndPass{});
+    // Surface targets carry their swapchain id in get_gpu_handle(Default);
+    // RTT targets carry the bindless TextureId (which begin_pass(uint64)
+    // no longer dispatches on). For RTT we look up the IGpuTexture and
+    // route through the IGpuTexture& overloads via target_texture.
+    // Per-graph transient pool owns deferred/post-process intermediates;
+    // the renderer's persistent manager owns user-supplied RenderTextures
+    // from RenderTargetCache. Check both.
+    uint64_t target_id = 0;
+    IGpuTexture* target_texture = nullptr;
+    if (color_target) {
+        target_texture = graph.resources().find_texture(color_target.get());
+        if (!target_texture && ctx.resources) {
+            target_texture = ctx.resources->find_texture(color_target.get());
+        }
+        if (!target_texture) {
+            // Surface (or untracked target): fall back to the uint64 path.
+            target_id = color_target->get_gpu_handle(GpuResourceKey::Default);
+        }
+    }
+
+    // Record one secondary cmd buffer per in-flight frame slot. Each
+    // secondary bakes its slot's stable view-globals BDA at offset
+    // [0..8) — required because secondaries don't inherit push state
+    // from the primary, and view_globals_address itself rotates per
+    // slot (per-view persistent ring buffer in ViewPreparer). The
+    // executor selects `command_buffer(backend.current_frame_slot())`
+    // each frame so the right slot's secondary executes.
+    RENDER_LOG("forward.rebuild view=%p target=%llu draws=%zu",
+               (void*)&entry, (unsigned long long)target_id,
+               draw_calls.size());
+    // Texture targets route through the IGpuTexture& overload so the
+    // backend derives the inheritance render pass from the wrapper.
+    IGpuCommandBuffer::Ptr cmd = target_texture
+        ? ctx.backend->create_command_buffer(*target_texture)
+        : ctx.backend->create_command_buffer(target_id);
+    if (cmd) {
+        cmd->begin_recording();
+        cmd->set_viewport(render_view.viewport);
+        cmd->record_draws({draw_calls.data(), draw_calls.size()});
+        cmd->end_recording();
+        cache.pass->set_command_buffer(std::move(cmd));
+    }
+    cache.pass->set_target_id(target_id);
+    cache.pass->set_target_texture(target_texture);
     if (color_target) {
         cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }

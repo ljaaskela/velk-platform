@@ -5,7 +5,7 @@
 #include <velk/interface/intf_metadata.h>
 
 #include <velk-render/interface/intf_gpu_resource.h>
-#include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/render_types.h>
 
 namespace velk {
 
