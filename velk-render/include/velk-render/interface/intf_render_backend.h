@@ -256,12 +256,23 @@ public:
     /** @brief Recreates the swapchain for the given surface at the new dimensions. */
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
-    /// True if @p id refers to a swapchain surface; false for textures
-    /// or unknown ids. Producers consult this to decide whether a
-    /// blit destination can be baked into a cached secondary command
-    /// buffer (textures: yes; surfaces: no, because per-frame
-    /// swapchain image acquisition can't be recorded once).
-    virtual bool is_surface(uint64_t id) const = 0;
+    /**
+     * @brief Returns the per-surface composite intermediate as a
+     *        renderable texture (S6.4 — see
+     *        design-notes/render_dynamic_rendering.md).
+     *
+     * Producers render to the returned target as if it were any
+     * regular `IGpuTexture`. The backend tracks which surfaces were
+     * rendered to and emits a final composite-to-swap blit at
+     * `end_frame`. Multi-view-to-same-surface is handled internally
+     * (first view loadOp respected; subsequent records overridden to
+     * LOAD so draws stack).
+     *
+     * Stable Ptr: same wrapper across frames, recreated only on
+     * surface resize. Cached cmd buffers that capture the wrapper's
+     * IGpuTexture* / VkImage* / VkImageView remain valid.
+     */
+    virtual IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) = 0;
 
     /// @}
     /// @name GPU Memory
@@ -317,6 +328,19 @@ public:
      */
     virtual void defer_destroy_gpu_texture(IGpuTexture* texture,
                                            uint64_t completion_marker = kDefaultCompletionMarker) = 0;
+
+    /**
+     * @brief Allocates a standalone depth attachment as an `IGpuTexture`.
+     *
+     * Returned texture has `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT`
+     * (no `SAMPLED_BIT` — depth is bound for record_begin_rendering, not
+     * sampled through the bindless heap). Lifetime via Ptr; backend
+     * defers destroy when the last Ptr drops. Used by paths that own
+     * their color attachment separately and need a paired depth (S6.5
+     * — see design-notes/render_dynamic_rendering.md).
+     */
+    virtual IGpuTexture::Ptr create_depth_attachment_texture(
+        int width, int height, DepthFormat format) = 0;
 
     /** @brief Uploads pixel data to a texture via a staging buffer. */
     virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
@@ -482,21 +506,6 @@ public:
 
     /** @brief Ends the current render pass. */
     virtual void end_pass() = 0;
-
-    /**
-     * @brief Blits a source texture onto the swapchain image of @p surface_id.
-     *
-     * Acquires the swapchain image if not already acquired this frame,
-     * records a scaling blit of @p source into the destination rect, and
-     * transitions the swapchain image to a present-ready layout. The
-     * source texture must have been created with TextureUsage::Storage.
-     * Mutually exclusive with begin_pass on the same surface within a
-     * frame.
-     *
-     * @param dst_rect Destination rect in surface pixels. Zero width/height
-     *                 means "full surface".
-     */
-    virtual void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect = {}) = 0;
 
     /**
      * @brief Blits @p source into @p dest. Both textures must have been

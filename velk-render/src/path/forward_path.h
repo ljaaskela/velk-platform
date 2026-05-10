@@ -69,6 +69,18 @@ private:
     {
         IRenderPass::Ptr pass;
         bool dirty = true;
+        /// Lazily-allocated depth attachment paired with the path's
+        /// color_target (S6.5). Allocated when color_target's
+        /// `get_depth_format()` is non-None — typically when called
+        /// from CameraPipeline. RTT callers (`RenderTargetCache`)
+        /// leave depth_format=None so this stays null.
+        IGpuTexture::Ptr depth_texture;
+        uvec2 depth_size{};
+        /// Most recently observed target IGpuTexture*. When it changes
+        /// (e.g., surface composite recreated on resize), the cached
+        /// cmd buffer's baked VkImage handles are stale and the pass
+        /// must re-record.
+        IGpuTexture* last_target_texture = nullptr;
     };
     std::unordered_map<IViewEntry*, CachedPass> cached_passes_;
 };

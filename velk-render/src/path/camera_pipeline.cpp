@@ -64,10 +64,10 @@ CameraPipeline::ensure_storage_target(::velk::IRenderTarget::Ptr& slot,
     td.height = height;
     td.format = format;
     td.usage = usage;
-    // Persistent allocation: keep the same Ptr / handle across frames
-    // so downstream cached passes (deferred lighting BlitToSurface,
-    // post-process effects) embed a stable target. Recreate only on
-    // size change.
+    // Persistent allocation: keep the same Ptr across frames so
+    // downstream cached passes embed a stable target. Recreate only on
+    // size change. (Caller is responsible for refreshing any cached raw
+    // IGpuTexture* whenever this slot is recreated.)
     slot = graph.resources().create_render_texture(td);
     if (slot) size_slot = want;
     return slot;
@@ -88,80 +88,85 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
 {
     auto* path = resolve_path(ctx);
     if (!path) return;
+    if (!color_target || !ctx.backend) return;
 
-    auto post = resolve_post_process();
-    if (!post) {
-        // No post-process: path renders directly to color_target.
-        path->build_passes(view, render_view, color_target, ctx, graph);
-        return;
-    }
-
-    /// Pipeline owns two storage intermediates per view:
-    ///   path → path_target  (compute / raster outputs)
-    ///   post → post_output  (post-process compute outputs)
-    /// Then a final Blit copies post_output to the surface, since
-    /// surfaces can't be bound as storage images for `imageStore`.
-    /// This keeps the post-process contract uniform: callers always
-    /// pass a storage target as `output`, never a window surface.
+    /// S6.4: the surface is just an `IGpuTexture` from the producer's
+    /// perspective. Backend exposes a per-surface composite via
+    /// `acquire_swapchain_texture`; backend handles the
+    /// composite-to-swap final blit at end_frame and applies LOAD
+    /// loadOp on subsequent record_begin_renderings so multi-view
+    /// rendering stacks naturally. Multi-camera-to-same-surface, HDR,
+    /// and post-process all converge on the same surface texture.
     int w = render_view.width;
     int h = render_view.height;
 
     auto& vs = view_states_[&view];
 
-    /// path_target: RenderTarget so ForwardPath can `begin_pass` it,
-    ///   DeferredPath can blit to it, and post-process effects can
-    ///   sample it via bindless. NOT writable from compute shaders
-    ///   (so a path that writes via Compute must blit, not imageStore).
-    /// post_target: Storage so post-process compute shaders can
-    ///   `imageStore` here. Sampleable too, so a final blit reads it.
-    /// HDR intermediates: cameras with a post-process attached
-    /// (typically a tonemap chain) render through RGBA16F so the
-    /// effects compose in linear high-range space. The final blit
-    /// converts RGBA16F to the swapchain's display format in one GPU
-    /// op. ctx.target_format flows to forward pipelines so they
-    /// compile against an RGBA16F render pass.
-    /// Save and restore so subsequent views (e.g. an overlay camera
-    /// added to the same surface) don't inherit RGBA16F and compile
-    /// pipelines that mismatch the swapchain's render pass.
+    auto post = resolve_post_process();
+    const bool has_post = (post != nullptr);
+
+    const uint64_t surface_id =
+        color_target->get_gpu_handle(::velk::GpuResourceKey::Default);
+    auto swap_target = ctx.backend->acquire_swapchain_texture(surface_id);
+    if (!swap_target) return;
+    // The composite is paired with depth (see S6.5 — ForwardPath
+    // allocates its own depth attachment when color_target carries a
+    // depth format).
+    swap_target->set_depth_format(::velk::DepthFormat::Default);
+
     ::velk::PixelFormat saved_format = ctx.target_format;
     ctx.target_format = ::velk::PixelFormat::RGBA16F;
 
-    auto path_target = ensure_storage_target(vs.path_output, vs.path_size, w, h,
-                                             ::velk::TextureUsage::RenderTarget,
-                                             ::velk::PixelFormat::RGBA16F, ctx, graph);
-    auto post_target = ensure_storage_target(vs.post_output, vs.post_size, w, h,
-                                             ::velk::TextureUsage::Storage,
-                                             ::velk::PixelFormat::RGBA16F, ctx, graph);
-    if (!path_target || !post_target) {
-        // Allocation failure: fall back to direct rendering. Restore
-        // the format first so the path compiles pipelines matching the
-        // swapchain rather than the HDR target we couldn't allocate.
-        ctx.target_format = saved_format;
-        path->build_passes(view, render_view, color_target, ctx, graph);
-        return;
-    }
-
-    path->build_passes(view, render_view, path_target, ctx, graph);
-    seen_post_[post.get()] = post;
-    post->emit(view, path_target, post_target, ctx, graph);
-
-    // Final blit from post-process output to the actual surface.
-    // Surface blit goes through the IRenderPass surface_blit seam,
-    // which the executor routes to IRenderBackend::blit_to_surface
-    // every frame (the swapchain image acquisition can't be baked
-    // into a cached secondary).
-    auto blit = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
-    if (blit) {
-        ::velk::IGpuTexture* post_tex = graph.resources().find_texture(post_target.get());
-        const uint64_t surface_id = color_target
-            ? color_target->get_gpu_handle(::velk::GpuResourceKey::Default)
-            : 0;
-        blit->set_surface_blit(post_tex, surface_id, render_view.viewport);
-        blit->add_read(post_target);
-        if (color_target) {
-            blit->add_write(color_target);
+    if (has_post) {
+        // HDR path: path → path_target (RenderTarget RGBA16F) → post →
+        // post_target (Storage RGBA16F) → blit → swap_target. The
+        // intermediate post_target keeps tonemap's imageStore happy
+        // (composite is bound for raster + final blit, not as
+        // storage-by-bindless).
+        auto path_target = ensure_storage_target(vs.path_output, vs.path_size, w, h,
+                                                 ::velk::TextureUsage::RenderTarget,
+                                                 ::velk::PixelFormat::RGBA16F, ctx, graph);
+        auto post_target = ensure_storage_target(vs.post_output, vs.post_size, w, h,
+                                                 ::velk::TextureUsage::Storage,
+                                                 ::velk::PixelFormat::RGBA16F, ctx, graph);
+        if (!path_target || !post_target) {
+            ctx.target_format = saved_format;
+            return;
         }
-        graph.add_pass(std::move(blit));
+        path_target->set_depth_format(::velk::DepthFormat::Default);
+        path->build_passes(view, render_view, path_target, ctx, graph);
+        seen_post_[post.get()] = post;
+        post->emit(view, path_target, post_target, ctx, graph);
+
+        // Blit post-process output into the surface composite. Cached
+        // pass per view; per-slot cross-slot find_texture caveat
+        // applies but is a non-issue because post_output's Ptr stays
+        // stable and we're invoked from the same view's slot rotation.
+        ::velk::IGpuTexture* post_tex = graph.resources().find_texture(post_target.get());
+        ::velk::IGpuTexture* swap_tex = interface_cast<::velk::IGpuTexture>(swap_target.get());
+        if (post_tex && swap_tex) {
+            auto blit_pass = ::velk::instance().create<::velk::IRenderPass>(
+                ::velk::ClassId::DefaultRenderPass);
+            if (blit_pass) {
+                if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+                    cmd->begin_recording();
+                    cmd->record_blit_to_texture(*post_tex, *swap_tex, render_view.viewport);
+                    cmd->end_recording();
+                    blit_pass->set_command_buffer(std::move(cmd));
+                }
+                blit_pass->add_read(post_target);
+                blit_pass->add_write(swap_target);
+                graph.add_pass(std::move(blit_pass));
+            }
+        }
+    } else {
+        // No post-process: path renders directly to the surface
+        // composite. Multi-view (e.g., main camera + perf overlay
+        // camera on the same surface) is handled inside the backend
+        // — first record on the composite each frame is fine; the
+        // second record's loadOp is silently overridden to LOAD so
+        // draws stack on top of begin_frame's clear + earlier views.
+        path->build_passes(view, render_view, swap_target, ctx, graph);
     }
 
     ctx.target_format = saved_format;

@@ -33,9 +33,6 @@ public:
     uint64_t target_id() const override { return target_id_; }
     IGpuTexture* target_texture() const override { return target_texture_; }
     IRenderTextureGroup* target_group() const override { return target_group_; }
-    IGpuTexture* surface_blit_source() const override { return surface_blit_source_; }
-    uint64_t surface_blit_surface_id() const override { return surface_blit_surface_id_; }
-    rect surface_blit_rect() const override { return surface_blit_rect_; }
 
     void add_read(IGpuResource::Ptr resource) override;
     void add_write(IGpuResource::Ptr resource) override;
@@ -47,14 +44,6 @@ public:
     void set_target_id(uint64_t target_id) override { target_id_ = target_id; }
     void set_target_texture(IGpuTexture* texture) override { target_texture_ = texture; }
     void set_target_group(IRenderTextureGroup* group) override { target_group_ = group; }
-    void set_surface_blit(IGpuTexture* source,
-                          uint64_t surface_id,
-                          rect dst_rect) override
-    {
-        surface_blit_source_ = source;
-        surface_blit_surface_id_ = surface_id;
-        surface_blit_rect_ = dst_rect;
-    }
     void reset() override;
 
 private:
@@ -65,9 +54,6 @@ private:
     uint64_t target_id_ = 0;
     IGpuTexture* target_texture_ = nullptr;
     IRenderTextureGroup* target_group_ = nullptr;
-    IGpuTexture* surface_blit_source_ = nullptr;
-    uint64_t surface_blit_surface_id_ = 0;
-    rect surface_blit_rect_{};
 };
 
 } // namespace velk::impl

@@ -68,6 +68,17 @@ public:
     /// frame; flipped from CLEAR to LOAD on subsequent passes.
     virtual bool was_cleared_this_frame() const = 0;
     virtual void mark_cleared_this_frame(bool cleared) = 0;
+
+    /// True when this texture is a per-surface composite intermediate
+    /// (S6.4 — see design-notes/render_dynamic_rendering.md). Used by
+    /// the cmd-buffer recorder to apply multi-view loadOp override and
+    /// dirty tracking, and by `end_frame` to emit the composite-to-swap
+    /// blit. False on regular sampled / RTT textures.
+    virtual bool is_swap_composite() const = 0;
+
+    /// Surface id this composite belongs to (only meaningful when
+    /// `is_swap_composite()` returns true).
+    virtual uint64_t swap_surface_id() const = 0;
 };
 
 /// Vulkan-backed sample-only `IGpuTexture` (TextureUsage::Sampled /
@@ -122,6 +133,8 @@ public:
     void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
     bool was_cleared_this_frame() const override { return false; }
     void mark_cleared_this_frame(bool) override {}
+    bool is_swap_composite() const override { return false; }
+    uint64_t swap_surface_id() const override { return 0; }
 
 private:
     ::velk::IRenderBackend* backend_ = nullptr;
@@ -200,6 +213,8 @@ public:
     void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
     bool was_cleared_this_frame() const override { return cleared_this_frame_; }
     void mark_cleared_this_frame(bool c) override { cleared_this_frame_ = c; }
+    bool is_swap_composite() const override { return false; }
+    uint64_t swap_surface_id() const override { return 0; }
 
 private:
     ::velk::IRenderBackend* backend_ = nullptr;
@@ -216,6 +231,116 @@ private:
     ::velk::PixelFormat format_ = ::velk::PixelFormat::RGBA8;
     ::velk::SamplerDesc sampler_{};
     ::velk::DepthFormat depth_format_ = ::velk::DepthFormat::None;
+    bool cleared_this_frame_ = false;
+};
+
+/// Sibling interface for backend code to call into VkSurfaceTexture
+/// without a concrete-type cast (which would be ambiguous through the
+/// IRenderTarget + IGpuTexture diamond on IInterface).
+class IVkSurfaceTexture
+    : public ::velk::Interface<IVkSurfaceTexture, ::velk::IInterface,
+                               VELK_UID("0c91ad60-e0a4-4c87-8d61-30b6a3e85c4f")>
+{
+public:
+    virtual void init(::velk::IRenderBackend* backend,
+                      uint64_t surface_id,
+                      ::VkImage image, ::VkImageView view,
+                      VmaAllocation allocation,
+                      ::velk::uvec2 dimensions,
+                      ::velk::PixelFormat format) = 0;
+    virtual void release(::VkDevice device, VmaAllocator allocator) = 0;
+};
+
+/// Per-surface composite intermediate (S6.4 — design-notes/render_dynamic_rendering.md).
+///
+/// Backed by a stable `VkImage` (recreated only on resize) so cached
+/// secondary cmd buffers that reference its `vk_view()` work across
+/// frames. The actual swapchain image rotation is hidden behind this
+/// wrapper: producers render to the composite as if it were any
+/// regular renderable+sampleable texture; the backend emits a final
+/// composite-to-swap blit at `end_frame` for any surface whose
+/// composite was rendered this frame.
+///
+/// Multi-view-to-same-surface is handled inside the recorder: first
+/// `record_begin_rendering` of the frame on this composite respects
+/// the producer's loadOp; subsequent records override loadOp=LOAD so
+/// later views stack draws on top instead of overwriting. `record_blit_to_texture`
+/// with this composite as dst marks it dirty so the final blit fires.
+class VkSurfaceTexture
+    : public ::velk::ext::GpuResource<VkSurfaceTexture,
+                                      ::velk::IRenderTarget,
+                                      ::velk::IGpuTexture,
+                                      IVkGpuTexture,
+                                      IVkSurfaceTexture>
+{
+public:
+    VELK_CLASS_UID(::velk::ClassId::VkSurfaceTexture, "VkSurfaceTexture");
+
+    VkSurfaceTexture() = default;
+    ~VkSurfaceTexture() override;
+
+    // IGpuResource
+    ::velk::GpuResourceType get_type() const override
+    {
+        return ::velk::GpuResourceType::Texture;
+    }
+
+    // ISurface
+    ::velk::uvec2       get_dimensions()   const override { return dimensions_; }
+    ::velk::PixelFormat format()           const override { return format_; }
+    ::velk::SamplerDesc get_sampler_desc() const override { return {}; }
+
+    // IRenderTarget
+    ::velk::DepthFormat get_depth_format() const override { return ::velk::DepthFormat::None; }
+    void set_depth_format(::velk::DepthFormat) override {}
+    void set_size(uint32_t w, uint32_t h) override { dimensions_ = {w, h}; }
+    void set_format(::velk::PixelFormat f) override { format_ = f; }
+
+    // IVkSurfaceTexture
+    void init(::velk::IRenderBackend* backend,
+              uint64_t surface_id,
+              ::VkImage image, ::VkImageView view, VmaAllocation allocation,
+              ::velk::uvec2 dimensions, ::velk::PixelFormat format) override;
+    void release(::VkDevice device, VmaAllocator allocator) override;
+
+    // IVkGpuTexture
+    void init_sampled(::velk::IRenderBackend*, ::VkImage, ::VkImageView,
+                      VmaAllocation, uint32_t, uint32_t, ::VkImageLayout,
+                      ::velk::uvec2, ::velk::PixelFormat,
+                      const ::velk::SamplerDesc&) override
+    { /* not used; init() covers the surface-composite shape */ }
+
+    void init_render_target(::velk::IRenderBackend*, ::VkImage, ::VkImageView,
+                            VmaAllocation, uint32_t, uint32_t, ::VkImageLayout,
+                            ::velk::uvec2, ::velk::PixelFormat,
+                            const ::velk::SamplerDesc&, ::VkFramebuffer,
+                            ::VkRenderPass, ::VkRenderPass) override
+    { /* not used */ }
+
+    ::VkImage      vk_image()           const override { return image_; }
+    ::VkImageView  vk_view()            const override { return view_; }
+    VmaAllocation  vk_allocation()      const override { return allocation_; }
+    uint32_t       vk_bindless_index()  const override { return UINT32_MAX; }
+    uint32_t       vk_mip_levels()      const override { return 1; }
+    ::VkFramebuffer vk_framebuffer()      const override { return VK_NULL_HANDLE; }
+    ::VkRenderPass  vk_render_pass()      const override { return VK_NULL_HANDLE; }
+    ::VkRenderPass  vk_load_render_pass() const override { return VK_NULL_HANDLE; }
+    ::VkImageLayout vk_current_layout()   const override { return current_layout_; }
+    void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
+    bool was_cleared_this_frame() const override { return cleared_this_frame_; }
+    void mark_cleared_this_frame(bool c) override { cleared_this_frame_ = c; }
+    bool is_swap_composite() const override { return true; }
+    uint64_t swap_surface_id() const override { return surface_id_; }
+
+private:
+    ::velk::IRenderBackend* backend_ = nullptr;
+    uint64_t        surface_id_ = 0;
+    ::VkImage       image_      = VK_NULL_HANDLE;
+    ::VkImageView   view_       = VK_NULL_HANDLE;
+    VmaAllocation   allocation_ = VK_NULL_HANDLE;
+    ::VkImageLayout current_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    ::velk::uvec2       dimensions_{};
+    ::velk::PixelFormat format_ = ::velk::PixelFormat::RGBA16F;
     bool cleared_this_frame_ = false;
 };
 

@@ -36,10 +36,7 @@ public:
     uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
-    bool is_surface(uint64_t id) const override
-    {
-        return surfaces_.find(id) != surfaces_.end();
-    }
+    IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) override;
 
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     void defer_destroy_gpu_buffer(IGpuBuffer* gb,
@@ -67,13 +64,14 @@ public:
     void defer_destroy_gpu_pipeline(IGpuPipeline* pipeline) override;
     void defer_destroy_gpu_texture(IGpuTexture* texture,
                                    uint64_t completion_marker) override;
+    IGpuTexture::Ptr create_depth_attachment_texture(int width, int height,
+                                                     DepthFormat format) override;
 
     void begin_frame() override;
     void begin_pass(uint64_t target_id) override;
     void begin_pass(IGpuTexture& target) override;
     void begin_pass(IRenderTextureGroup& target) override;
     void end_pass() override;
-    void blit_to_surface(IGpuTexture& source, uint64_t surface_id, rect dst_rect) override;
     void blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect) override;
 
     IGpuCommandBuffer::Ptr create_command_buffer(uint64_t target_id) override;
@@ -267,6 +265,18 @@ private:
         vector<VkImage> depth_images;
         vector<VkImageView> depth_views;
         vector<VmaAllocation> depth_allocations;
+
+        /// Per-surface composite intermediate (S6.4 — see
+        /// design-notes/render_dynamic_rendering.md). Producers render
+        /// here as if it were any IGpuTexture; backend emits a final
+        /// composite-to-swap blit at end_frame whenever it was rendered
+        /// this frame. Stable VkImage so cached cmd buffers work.
+        ::velk::IGpuTexture::Ptr composite;
+        /// Set by `acquire_swapchain_texture`; reset at `begin_frame`.
+        /// Tells `end_frame` whether to emit a present blit for this
+        /// surface. Lets multi-window apps with paused windows skip
+        /// presenting un-rendered frames.
+        bool composite_acquired_this_frame = false;
     };
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
@@ -367,6 +377,16 @@ private:
 
     bool create_swapchain(SurfaceData& sd);
     void destroy_swapchain(SurfaceData& sd);
+
+    /// Allocate the per-surface composite intermediate (S6.4) sized to
+    /// the swapchain. Called after create_swapchain settles dimensions.
+    bool create_surface_composite(uint64_t surface_id, SurfaceData& sd);
+    void destroy_surface_composite(SurfaceData& sd);
+
+    /// Records the final composite-to-swap blit on the primary cmd
+    /// buffer for a surface that was rendered to this frame. Called
+    /// from end_frame for each surface whose composite is dirty.
+    void emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd);
 
     ::VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(::VkCommandBuffer cb);

@@ -109,22 +109,6 @@ public:
     /// `set_target_id` / `set_target_texture`.
     virtual IRenderTextureGroup* target_group() const = 0;
     virtual void set_target_group(IRenderTextureGroup* group) = 0;
-
-    /// Surface-blit seam. When `surface_blit_source()` is non-null the
-    /// executor calls `IRenderBackend::blit_to_surface` directly,
-    /// bypassing the cmd-buffer / target dispatch entirely. Mutually
-    /// exclusive with command_buffer + the three target seams. Used
-    /// for the per-frame swapchain blit (CameraPipeline final stage,
-    /// DeferredPath / RtPath surface dest) — the swapchain image
-    /// changes per frame so this can't be baked into a secondary cmd
-    /// buffer; it's recorded onto the primary every frame inside the
-    /// backend.
-    virtual IGpuTexture* surface_blit_source() const = 0;
-    virtual uint64_t surface_blit_surface_id() const = 0;
-    virtual rect surface_blit_rect() const = 0;
-    virtual void set_surface_blit(IGpuTexture* source,
-                                  uint64_t surface_id,
-                                  rect dst_rect) = 0;
     /// @}
 };
 

@@ -830,6 +830,7 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
             if (!create_swapchain(sd)) {
                 return 0;
             }
+            create_surface_composite(id, sd);
             return id;
         }
     }
@@ -866,6 +867,82 @@ void VkBackend::resize_surface(uint64_t surface_id, int width, int height)
     it->second.height = height;
     destroy_swapchain(it->second);
     create_swapchain(it->second);
+    create_surface_composite(surface_id, it->second);
+}
+
+IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)
+{
+    auto it = surfaces_.find(surface_id);
+    if (it == surfaces_.end()) return {};
+    auto& sd = it->second;
+    if (!sd.composite) return {};
+
+    // First acquire this frame: emit the per-frame clear here (after
+    // any pending resize_surface has run during the renderer's build
+    // phase, but before producers record their secondaries that target
+    // the composite). Multi-camera-per-surface: subsequent acquires
+    // skip the clear; record_begin_rendering on the composite is
+    // overridden to LOAD so subsequent views stack on top.
+    if (!sd.composite_acquired_this_frame) {
+        sd.composite_acquired_this_frame = true;
+        auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
+        if (surf_tex && surf_tex->vk_image() != VK_NULL_HANDLE) {
+            auto& sync = frame_sync_[frame_sync_index_];
+            const VkImage img = surf_tex->vk_image();
+            const VkImageLayout old_layout = surf_tex->vk_current_layout();
+
+            VkImageSubresourceRange range{};
+            range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            range.levelCount = 1;
+            range.layerCount = 1;
+
+            VkImageMemoryBarrier to_dst{};
+            to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            to_dst.oldLayout = old_layout;
+            to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_dst.image = img;
+            to_dst.subresourceRange = range;
+            to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(sync.command_buffer,
+                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                     | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+
+            VkClearColorValue clear{};
+            clear.float32[0] = 0.f; clear.float32[1] = 0.f;
+            clear.float32[2] = 0.f; clear.float32[3] = 0.f;
+            vkCmdClearColorImage(sync.command_buffer, img,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &clear, 1, &range);
+
+            // Leave composite in SHADER_READ_ONLY post-clear so cached
+            // record_begin_rendering barriers (baked as SHADER_READ_ONLY
+            // → COLOR_ATTACHMENT_OPTIMAL) replay correctly.
+            VkImageMemoryBarrier to_read{};
+            to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_read.image = img;
+            to_read.subresourceRange = range;
+            to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(sync.command_buffer,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                     | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &to_read);
+            surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    // Up-cast IGpuTexture::Ptr → IRenderTarget::Ptr via the wrapper
+    // chain (VkSurfaceTexture IS-A IRenderTarget IS-A IGpuTexture).
+    return interface_pointer_cast<IRenderTarget>(sd.composite);
 }
 
 bool VkBackend::create_swapchain(SurfaceData& sd)
@@ -1086,8 +1163,89 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     return true;
 }
 
+bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
+{
+    if (sd.width <= 0 || sd.height <= 0) return false;
+
+    // Composite is RGBA16F linear (HDR-ready), with full usage spread:
+    //  - COLOR_ATTACHMENT for raster passes via record_begin_rendering.
+    //  - STORAGE so post-process effects (tonemap) can imageStore into it.
+    //  - SAMPLED so subsequent passes can sample (rare, but possible).
+    //  - TRANSFER_SRC for the end_frame composite-to-swap blit.
+    //  - TRANSFER_DST for record_blit_to_texture from compute / RT outputs
+    //    into the composite (debug overlays, deferred lighting blit).
+    constexpr VkFormat kCompositeFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = kCompositeFormat;
+    ici.extent = { static_cast<uint32_t>(sd.width),
+                   static_cast<uint32_t>(sd.height), 1 };
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+              | VK_IMAGE_USAGE_STORAGE_BIT
+              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+              | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+              | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    if (vmaCreateImage(allocator_, &ici, &aci, &image, &allocation, nullptr) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: failed to allocate surface composite image");
+        return false;
+    }
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = kCompositeFormat;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device_, &vci, nullptr, &view) != VK_SUCCESS) {
+        vmaDestroyImage(allocator_, image, allocation);
+        return false;
+    }
+
+    auto composite = ::velk::instance().create<IGpuTexture>(ClassId::VkSurfaceTexture);
+    auto* surf_tex = interface_cast<IVkSurfaceTexture>(composite.get());
+    if (!surf_tex) {
+        vkDestroyImageView(device_, view, nullptr);
+        vmaDestroyImage(allocator_, image, allocation);
+        return false;
+    }
+    const uvec2 dims{ static_cast<uint32_t>(sd.width),
+                      static_cast<uint32_t>(sd.height) };
+    surf_tex->init(this, surface_id, image, view, allocation, dims,
+                   PixelFormat::RGBA16F);
+    sd.composite = std::move(composite);
+    return true;
+}
+
+void VkBackend::destroy_surface_composite(SurfaceData& sd)
+{
+    if (!sd.composite) return;
+    auto* surf_tex = interface_cast<IVkSurfaceTexture>(sd.composite.get());
+    if (surf_tex) {
+        surf_tex->release(device_, allocator_);
+    }
+    sd.composite.reset();
+}
+
 void VkBackend::destroy_swapchain(SurfaceData& sd)
 {
+    destroy_surface_composite(sd);
     for (auto fb : sd.framebuffers) {
         vkDestroyFramebuffer(device_, fb, nullptr);
     }
@@ -2208,6 +2366,72 @@ void VkBackend::defer_destroy_gpu_texture(IGpuTexture* texture,
     deferred_gpu_textures_.push_back(entry);
 }
 
+IGpuTexture::Ptr VkBackend::create_depth_attachment_texture(
+    int width, int height, DepthFormat format)
+{
+    if (width <= 0 || height <= 0) return {};
+    const VkFormat vk_depth_format = (format == DepthFormat::Default)
+                                         ? VK_FORMAT_D32_SFLOAT
+                                         : VK_FORMAT_UNDEFINED;
+    if (vk_depth_format == VK_FORMAT_UNDEFINED) return {};
+
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = vk_depth_format;
+    ici.extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    if (vmaCreateImage(allocator_, &ici, &aci, &image, &allocation, nullptr) != VK_SUCCESS) {
+        return {};
+    }
+
+    VkImageView view = VK_NULL_HANDLE;
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = vk_depth_format;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device_, &vci, nullptr, &view) != VK_SUCCESS) {
+        vmaDestroyImage(allocator_, image, allocation);
+        return {};
+    }
+
+    auto tex = ::velk::instance().create<IGpuTexture>(ClassId::VkGpuTexture);
+    auto* vk_t = interface_cast<IVkGpuTexture>(tex.get());
+    if (!vk_t) {
+        vkDestroyImageView(device_, view, nullptr);
+        vmaDestroyImage(allocator_, image, allocation);
+        return {};
+    }
+    // Sentinel bindless index: depth attachments aren't sampled through
+    // the bindless heap. Initial layout UNDEFINED; transitioned by
+    // record_begin_rendering on first use.
+    constexpr uint32_t kNoBindless = UINT32_MAX;
+    const uvec2 dims{ static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+    vk_t->init_sampled(this, image, view, allocation,
+                       kNoBindless, /*mip_levels=*/1,
+                       VK_IMAGE_LAYOUT_UNDEFINED, dims,
+                       /*format=*/PixelFormat::RGBA8 /*placeholder*/,
+                       SamplerDesc{});
+    return tex;
+}
+
 void VkBackend::drain_deferred_textures()
 {
     std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
@@ -2279,6 +2503,87 @@ void VkBackend::begin_frame()
     for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
     for (auto* g  : live_render_target_groups_) g->mark_cleared_this_frame(false);
     current_render_pass_ = VK_NULL_HANDLE;
+
+    // S6.4: surface composites need a fresh "canvas" per frame, but
+    // the actual clear is deferred to the first acquire_swapchain_texture
+    // call this frame — by that point any pending resize_surface (which
+    // recreates the composite) has already fired during the renderer's
+    // build phase. Clearing in begin_frame would record vkCmd* on the
+    // primary referencing a composite VkImage that resize might destroy
+    // mid-frame, invalidating the primary cmd buffer.
+    for (auto& [surface_id, sd] : surfaces_) {
+        sd.composite_acquired_this_frame = false;
+    }
+#if 0  // moved to acquire_swapchain_texture (first-acquire-this-frame)
+    for (auto& [surface_id, sd] : surfaces_) {
+        if (!sd.composite) continue;
+        auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
+        if (!surf_tex) continue;
+        const VkImage img = surf_tex->vk_image();
+        if (img == VK_NULL_HANDLE) continue;
+
+        // Transition UNDEFINED/SHADER_READ_ONLY → TRANSFER_DST_OPTIMAL,
+        // clear, then back to COLOR_ATTACHMENT_OPTIMAL ready for the
+        // first record_begin_rendering's LOAD. The barrier oldLayout
+        // must match what was actually left at end of last frame:
+        // record_end_rendering's transition_image leaves color
+        // attachments in SHADER_READ_ONLY (or UNDEFINED on first frame).
+        const VkImageLayout old_layout = surf_tex->vk_current_layout();
+
+        VkImageMemoryBarrier to_dst{};
+        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_dst.oldLayout = old_layout;
+        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.image = img;
+        to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_dst.subresourceRange.levelCount = 1;
+        to_dst.subresourceRange.layerCount = 1;
+        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                 | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &to_dst);
+
+        VkClearColorValue clear{};
+        clear.float32[0] = 0.f;
+        clear.float32[1] = 0.f;
+        clear.float32[2] = 0.f;
+        clear.float32[3] = 0.f;
+        VkImageSubresourceRange range{};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.levelCount = 1;
+        range.layerCount = 1;
+        vkCmdClearColorImage(sync.command_buffer, img,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clear, 1, &range);
+
+        // Leave composite in SHADER_READ_ONLY post-clear: cached
+        // record_begin_rendering barriers were baked as
+        // SHADER_READ_ONLY → COLOR_ATTACHMENT_OPTIMAL (the layout
+        // record_end_rendering leaves color attachments in). Keeping
+        // begin_frame's exit layout consistent means cached cmd
+        // buffers replay correctly from frame 1 on.
+        VkImageMemoryBarrier to_read{};
+        to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_read.image = img;
+        to_read.subresourceRange = range;
+        to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(sync.command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                 | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &to_read);
+        surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+#endif
 }
 
 void VkBackend::begin_pass(uint64_t target_id)
@@ -2704,6 +3009,7 @@ void VkBackend::blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst
     record_blit_to_texture(sync.command_buffer, source, dest, dst_rect);
 }
 
+#if 0  // S6.4: replaced by emit_surface_present_blit (end_frame composite-to-swap).
 void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect dst_rect)
 {
     VELK_PERF_SCOPE("vk.blit_to_surface");
@@ -2719,10 +3025,6 @@ void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect ds
         src_h = static_cast<int>(sd.y);
     }
 
-    /// `target_id` may refer to a window surface (the original use
-    /// case — blit composited result to swapchain) or a renderable
-    /// texture (post-process pipeline routes deferred / forward path
-    /// output through an intermediate target before tonemap reads it).
     auto sit = surfaces_.find(target_id);
     if (sit == surfaces_.end()) return;
     const bool dst_is_surface = true;
@@ -2736,7 +3038,6 @@ void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect ds
 
     {
         auto& sd = sit->second;
-        // Acquire swapchain image once per frame per surface (mirrors begin_pass).
         if (present_surface_id_ != target_id) {
             present_surface_id_ = target_id;
             present_acquire_sem_idx_ = acquire_semaphore_index_;
@@ -2859,15 +3160,11 @@ void VkBackend::blit_to_surface(IGpuTexture& source, uint64_t target_id, rect ds
                                               | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 2, post);
 
-    // For surface destinations, mark "already cleared" so any subsequent
-    // begin_pass on the same surface preserves the blit (load instead
-    // of clear). Texture destinations are written in full by the blit
-    // as well, but they don't share the surface_has_clear_ machinery.
     if (dst_is_surface) {
         surface_has_clear_ = true;
     }
 }
-
+#endif
 
 static VkPipelineStageFlags to_vk_stage(PipelineStage stage)
 {
@@ -2973,9 +3270,126 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
+void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
+{
+    if (!sd.composite || !sd.swapchain) return;
+    auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
+    if (!surf_tex || surf_tex->vk_image() == VK_NULL_HANDLE) return;
+
+    auto& sync = frame_sync_[frame_sync_index_];
+
+    // Acquire swap image once for this surface this frame.
+    if (present_surface_id_ != surface_id) {
+        present_surface_id_ = surface_id;
+        present_acquire_sem_idx_ = acquire_semaphore_index_;
+        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+        VkResult r = vkAcquireNextImageKHR(
+            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+            present_surface_id_ = 0;
+            return;
+        }
+    }
+
+    const VkImage src_image = surf_tex->vk_image();
+    const VkImageLayout src_canonical_layout = surf_tex->vk_current_layout();
+    const VkImage dst_image = sd.images[sd.image_index];
+
+    VkImageMemoryBarrier to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst_image;
+    to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_dst.subresourceRange.levelCount = 1;
+    to_dst.subresourceRange.layerCount = 1;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageMemoryBarrier to_src{};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.oldLayout = src_canonical_layout;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = src_image;
+    to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_src.subresourceRange.levelCount = 1;
+    to_src.subresourceRange.layerCount = 1;
+    to_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                         | VK_ACCESS_SHADER_WRITE_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    VkImageMemoryBarrier pre[2] = {to_dst, to_src};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                             | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                             | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, pre);
+
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[1] = {sd.width, sd.height, 1};
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[1] = {sd.width, sd.height, 1};
+    vkCmdBlitImage(sync.command_buffer,
+                   src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_LINEAR);
+
+    // Swap → PRESENT_SRC; composite → SHADER_READ_ONLY for next-frame
+    // sampling (not strictly needed today; avoid surprising consumers).
+    VkImageMemoryBarrier to_present{};
+    to_present.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_present.image = dst_image;
+    to_present.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_present.subresourceRange.levelCount = 1;
+    to_present.subresourceRange.layerCount = 1;
+    to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageMemoryBarrier to_sampled{};
+    to_sampled.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_sampled.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_sampled.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_sampled.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_sampled.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_sampled.image = src_image;
+    to_sampled.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_sampled.subresourceRange.levelCount = 1;
+    to_sampled.subresourceRange.layerCount = 1;
+    to_sampled.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_sampled.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkImageMemoryBarrier post[2] = {to_present, to_sampled};
+    vkCmdPipelineBarrier(sync.command_buffer,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+                             | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, post);
+    surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
 void VkBackend::end_frame()
 {
     auto& sync = frame_sync_[frame_sync_index_];
+
+    // S6.4: emit composite-to-swap blit for each surface that was
+    // acquired this frame. Sets present_surface_id_ as a side effect.
+    for (auto& [surface_id, sd] : surfaces_) {
+        if (sd.composite_acquired_this_frame) {
+            emit_surface_present_blit(surface_id, sd);
+        }
+    }
+
     vkEndCommandBuffer(sync.command_buffer);
 
     // Allocate this submit's timeline value. The signal value rides

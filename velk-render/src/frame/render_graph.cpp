@@ -75,13 +75,11 @@ void RenderGraph::add_pass(::velk::IRenderPass::Ptr pass)
 
 RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 {
-    // Surface-blit seam → Blit (post-pass dest in color-attachment layout).
     // Cmd buffer with a target_id / target_texture / target_group → Raster.
     // Cmd buffer alone (no target) → Compute (compute dispatch, possibly
     //   followed by an in-cmd-buffer record_blit_to_texture; the post-
     //   pass writes list reflects what was written).
     // Empty / barrier-only pass → Raster as a default barrier dst.
-    if (pass.surface_blit_source() != nullptr) return PassClass::Blit;
     if (pass.command_buffer()) {
         if (pass.target_group() || pass.target_texture() || pass.target_id() != 0) {
             return PassClass::Raster;
@@ -205,21 +203,10 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.barrier(barrier.src, barrier.dst);
         }
 
-        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d surface_blit=%d",
+        RENDER_LOG("graph.pass[%zu] target=%llu has_cmd=%d",
                    i,
                    (unsigned long long)gp.target_id(),
-                   gp.command_buffer() ? 1 : 0,
-                   gp.surface_blit_source() ? 1 : 0);
-
-        // Surface-blit seam: per-frame swapchain blit; can't be baked
-        // into a cached secondary, recorded onto the primary every
-        // frame inside the backend.
-        if (auto* src = gp.surface_blit_source()) {
-            backend.blit_to_surface(*src,
-                                    gp.surface_blit_surface_id(),
-                                    gp.surface_blit_rect());
-            continue;
-        }
+                   gp.command_buffer() ? 1 : 0);
 
         if (auto cmd = gp.command_buffer()) {
             // Group/texture targets route through their typed overloads;

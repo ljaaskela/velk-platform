@@ -28,14 +28,13 @@ namespace {
 /// Resolves (or lazy-compiles) the forward-rendering pipeline for a
 /// batch. Material wins over the visual's IShaderSource when both
 /// are present; the visual's source is the no-material fallback.
-/// `dynamic_rendering` selects the S6 dynamic-rendering compile path
-/// (cmd buffer self-contained via `record_begin_rendering`); the
-/// legacy render-pass path stays for surface-target raster until S6.4.
-/// Returns 0 to skip (no source / compile failure).
+/// All pipelines compile against dynamic-rendering attachment formats
+/// (S6 — see design-notes/render_dynamic_rendering.md). Returns 0 to
+/// skip (no source / compile failure).
 IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
                                          const IBatch& batch,
                                          PixelFormat target_format,
-                                         bool dynamic_rendering)
+                                         DepthFormat depth_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -54,35 +53,20 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
 
     uint64_t compiled_key = 0;
     if (use_material) {
-        // Try the eval-snippet path first (material composed with the
-        // forward driver template). Falls back to a raw fragment
-        // source if the material declines the snippet path.
-        if (dynamic_rendering) {
-            compiled_key = compile_material_forward_pipeline_dynamic(
-                ctx, batch, target_format, DepthFormat::None, user_key);
-        } else {
-            compiled_key = compile_material_forward_pipeline(
-                ctx, batch, target_format, user_key);
-        }
+        compiled_key = compile_material_forward_pipeline_dynamic(
+            ctx, batch, target_format, depth_format, user_key);
         if (compiled_key == 0) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
             if (!frag_src.empty() && !vertex_src.empty()) {
-                if (dynamic_rendering) {
-                    PixelFormat formats[1] = {target_format};
-                    compiled_key = ctx.compile_pipeline_dynamic(
-                        frag_src, vertex_src,
-                        user_key,
-                        array_view<const PixelFormat>(formats, 1),
-                        DepthFormat::None,
-                        pipeline_options);
-                } else {
-                    compiled_key = ctx.compile_pipeline(
-                        frag_src, vertex_src,
-                        user_key, target_format, 0,
-                        pipeline_options);
-                }
+                PixelFormat formats[1] = {target_format};
+                compiled_key = ctx.compile_pipeline_dynamic(
+                    frag_src, vertex_src,
+                    user_key,
+                    array_view<const PixelFormat>(formats, 1),
+                    depth_format,
+                    pipeline_options);
             }
         }
         if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
@@ -91,20 +75,13 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
     } else if (shader_source_ptr && user_key != 0) {
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
         auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
-        if (dynamic_rendering) {
-            PixelFormat formats[1] = {target_format};
-            compiled_key = ctx.compile_pipeline_dynamic(
-                fsrc, vsrc,
-                user_key,
-                array_view<const PixelFormat>(formats, 1),
-                DepthFormat::None,
-                pipeline_options);
-        } else {
-            compiled_key = ctx.compile_pipeline(
-                fsrc, vsrc,
-                user_key, target_format, 0,
-                pipeline_options);
-        }
+        PixelFormat formats[1] = {target_format};
+        compiled_key = ctx.compile_pipeline_dynamic(
+            fsrc, vsrc,
+            user_key,
+            array_view<const PixelFormat>(formats, 1),
+            depth_format,
+            pipeline_options);
     }
 
     if (compiled_key == 0) return nullptr;
@@ -175,6 +152,29 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.dirty = true;
     }
 
+    // S6.4: color_target may be the per-surface composite (a real
+    // IGpuTexture-castable wrapper) or a RenderTexture proxy from
+    // RenderTargetCache (not IGpuTexture; needs find_texture lookup).
+    IGpuTexture* target_texture = nullptr;
+    if (color_target) {
+        target_texture = interface_cast<IGpuTexture>(color_target.get());
+        if (!target_texture) {
+            target_texture = graph.resources().find_texture(color_target.get());
+            if (!target_texture && ctx.resources) {
+                target_texture = ctx.resources->find_texture(color_target.get());
+            }
+        }
+    }
+    if (!target_texture) return;
+
+    // Resize detection: if the target's IGpuTexture* changed (e.g.,
+    // surface composite recreated on resize, RTT resized), the cached
+    // cmd buffer's baked VkImage handles are stale and must re-record.
+    if (target_texture != cache.last_target_texture) {
+        cache.dirty = true;
+        cache.last_target_texture = target_texture;
+    }
+
     if (!cache.dirty) {
         // Steady state: same Ptr, refresh only the per-frame view
         // globals address (FrameGlobals lives in per-frame staging
@@ -194,22 +194,32 @@ void ForwardPath::build_passes(IViewEntry& entry,
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto target_format = ctx.target_format;
 
-    // S6.2 canary: dynamic rendering for texture targets. Surface
-    // targets stay on the legacy render-pass path until S6.4 introduces
-    // acquire_swapchain_texture; ensures CameraPipeline + the no-post-
-    // process direct-to-swapchain path keep working during the slice.
-    IGpuTexture* target_texture = nullptr;
-    if (color_target) {
-        target_texture = graph.resources().find_texture(color_target.get());
-        if (!target_texture && ctx.resources) {
-            target_texture = ctx.resources->find_texture(color_target.get());
+    // Pair-depth allocation: only when the color_target is tagged with
+    // a depth format (CameraPipeline does this for its path_color).
+    // RTT cache leaves depth_format=None and gets no depth attachment.
+    const DepthFormat target_depth_format = color_target
+        ? color_target->get_depth_format()
+        : DepthFormat::None;
+    const uvec2 target_size = target_texture->get_dimensions();
+    if (target_depth_format != DepthFormat::None) {
+        if (!cache.depth_texture || cache.depth_size != target_size) {
+            cache.depth_texture = ctx.backend->create_depth_attachment_texture(
+                static_cast<int>(target_size.x),
+                static_cast<int>(target_size.y),
+                target_depth_format);
+            cache.depth_size = target_size;
+            cache.dirty = true;
         }
+    } else if (cache.depth_texture) {
+        cache.depth_texture.reset();
+        cache.depth_size = uvec2{};
+        cache.dirty = true;
     }
-    const bool use_dynamic_rendering = (target_texture != nullptr);
+    IGpuTexture* depth_texture = cache.depth_texture.get();
 
     auto resolve = [&](const IBatch& b) {
         return resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
-                                          use_dynamic_rendering);
+                                          target_depth_format);
     };
 
     vector<DrawCall> draw_calls;
@@ -236,56 +246,38 @@ void ForwardPath::build_passes(IViewEntry& entry,
 
     cache.pass->reset();
 
-    uint64_t target_id = 0;
-    if (!use_dynamic_rendering && color_target) {
-        // Legacy surface-target path: cmd buffer inherits the surface's
-        // render pass; executor wraps execute() in begin_pass(target_id) /
-        // end_pass(). Switches off in S6.4 once acquire_swapchain_texture
-        // lets the surface flow through the dynamic-rendering branch too.
-        target_id = color_target->get_gpu_handle(GpuResourceKey::Default);
-    }
+    RENDER_LOG("forward.rebuild view=%p draws=%zu depth=%d",
+               (void*)&entry, draw_calls.size(), depth_texture ? 1 : 0);
 
-    RENDER_LOG("forward.rebuild view=%p dynamic=%d target_id=%llu draws=%zu",
-               (void*)&entry, use_dynamic_rendering ? 1 : 0,
-               (unsigned long long)target_id, draw_calls.size());
+    // Self-contained dynamic-rendering secondary: attachments bound
+    // inline at record time, executor doesn't wrap in begin_pass.
+    IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
+    if (cmd) {
+        ColorAttachment color{};
+        color.texture = target_texture;
+        color.clear = true;
+        color.clear_color[0] = 0.f;
+        color.clear_color[1] = 0.f;
+        color.clear_color[2] = 0.f;
+        color.clear_color[3] = 0.f;
 
-    if (use_dynamic_rendering) {
-        // Self-contained secondary: record_begin_rendering binds the
-        // attachment inline at record time; the executor doesn't wrap
-        // execute() in begin_pass / end_pass.
-        IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer(/*target_id=*/0);
-        if (cmd) {
-            ColorAttachment color{};
-            color.texture = target_texture;
-            color.clear = true;
-            // Forward fullscreen draws cover the target; clear-to-zero
-            // is fine and matches the legacy render pass's loadOp=CLEAR.
-            color.clear_color[0] = 0.f;
-            color.clear_color[1] = 0.f;
-            color.clear_color[2] = 0.f;
-            color.clear_color[3] = 0.f;
-
-            cmd->begin_recording();
-            cmd->record_begin_rendering(
-                array_view<const ColorAttachment>(&color, 1),
-                /*depth=*/nullptr);
-            cmd->set_viewport(render_view.viewport);
-            cmd->record_draws({draw_calls.data(), draw_calls.size()});
-            cmd->record_end_rendering();
-            cmd->end_recording();
-            cache.pass->set_command_buffer(std::move(cmd));
+        DepthAttachment depth_att{};
+        if (depth_texture) {
+            depth_att.texture = depth_texture;
+            depth_att.clear = true;
+            depth_att.clear_depth = 1.0f;
+            depth_att.clear_stencil = 0;
         }
-        // No target_* seam: cmd buffer self-contained.
-    } else {
-        IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer(target_id);
-        if (cmd) {
-            cmd->begin_recording();
-            cmd->set_viewport(render_view.viewport);
-            cmd->record_draws({draw_calls.data(), draw_calls.size()});
-            cmd->end_recording();
-            cache.pass->set_command_buffer(std::move(cmd));
-        }
-        cache.pass->set_target_id(target_id);
+
+        cmd->begin_recording();
+        cmd->record_begin_rendering(
+            array_view<const ColorAttachment>(&color, 1),
+            depth_texture ? &depth_att : nullptr);
+        cmd->set_viewport(render_view.viewport);
+        cmd->record_draws({draw_calls.data(), draw_calls.size()});
+        cmd->record_end_rendering();
+        cmd->end_recording();
+        cache.pass->set_command_buffer(std::move(cmd));
     }
 
     if (color_target) {

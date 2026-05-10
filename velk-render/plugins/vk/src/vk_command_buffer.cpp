@@ -255,11 +255,22 @@ void VkCommandBuffer::record_begin_rendering(
         auto& info = color_infos[i];
         info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ::velk::vk::IVkGpuTexture* vk_t = nullptr;
         if (c.texture) {
-            auto* vk_t = interface_cast<IVkGpuTexture>(c.texture);
+            vk_t = interface_cast<IVkGpuTexture>(c.texture);
             info.imageView = vk_t ? vk_t->vk_view() : VK_NULL_HANDLE;
         }
-        info.loadOp = c.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        // Multi-view-to-same-surface (S6.4): the per-surface composite
+        // is shared across views. Backend.begin_frame clears the
+        // composite each frame, so producer record_begin_rendering on
+        // the composite is silently overridden to LOAD — views stack
+        // on top of each other (and on top of the begin_frame clear)
+        // instead of erasing prior content.
+        bool effective_clear = c.clear;
+        if (vk_t && vk_t->is_swap_composite()) {
+            effective_clear = false;
+        }
+        info.loadOp = effective_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         info.clearValue.color.float32[0] = c.clear_color[0];
         info.clearValue.color.float32[1] = c.clear_color[1];
