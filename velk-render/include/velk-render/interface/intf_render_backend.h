@@ -27,9 +27,6 @@ using TextureId = uint32_t; ///< Also the bindless shader index.
 inline constexpr uint64_t kDefaultCompletionMarker = uint64_t(-1);
 /// @}
 
-// PixelFormat moved to render_types.h alongside sibling format enums
-// (DepthFormat etc.); included transitively via the headers above.
-
 /// Describes a GPU buffer to create.
 struct GpuBufferDesc
 {

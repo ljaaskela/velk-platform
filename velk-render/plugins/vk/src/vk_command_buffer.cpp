@@ -77,9 +77,9 @@ void VkCommandBuffer::begin_recording()
 
     // Secondary command buffers inherit no state from the primary.
     // Bind the bindless descriptor set for the buffer's bind point.
-    // Producers push view-globals via the explicit push_view_globals
-    // op at recording time, against the slot's stable per-view ring
-    // buffer BDA.
+    // Per-view FrameGlobals are reached via DrawData.globals_addr
+    // (see render_architecture_cleanup.md S5.3) — stable BDA, no
+    // explicit push-constant.
     const VkPipelineBindPoint bind_point = (inherit_render_pass_ != VK_NULL_HANDLE)
         ? VK_PIPELINE_BIND_POINT_GRAPHICS
         : VK_PIPELINE_BIND_POINT_COMPUTE;

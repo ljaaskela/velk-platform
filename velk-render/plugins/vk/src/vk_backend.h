@@ -87,12 +87,10 @@ public:
     /// (caller falls back to a non-renderpass cmd buffer).
     VkRenderPass find_render_pass_for_target(uint64_t target_id);
 
-    /// Per-draw `vkCmd*` recording loop, shared by
-    /// `VkCommandBuffer::record_draws` (producer-recorded path) and
-    /// the legacy `submit` (which records into a transient secondary
-    /// every frame). Looks up pipeline / buffer handles in the
-    /// backend's maps and emits BindPipeline + PushConstants +
-    /// optional BindIndexBuffer + Draw*IndirectCount per call.
+    /// Per-draw `vkCmd*` recording loop. Called by
+    /// `VkCommandBuffer::record_draws` to emit BindPipeline +
+    /// PushConstants + optional BindIndexBuffer + Draw*IndirectCount
+    /// per call against the backend's pipeline / buffer maps.
     void record_draw_loop(::VkCommandBuffer cb,
                           array_view<const DrawCall> calls);
 
@@ -113,12 +111,6 @@ public:
     /// path (per-frame swapchain acquisition can't be baked in).
     void record_blit_to_texture(::VkCommandBuffer cb, IGpuTexture& source,
                                 IGpuTexture& dest, rect dst_rect);
-
-    /// Allocates a SECONDARY VkCommandBuffer from the current frame
-    /// slot's transient pool. Used by the legacy `submit` path.
-    /// Buffers allocated here are reset wholesale at the next
-    /// `begin_frame` for this slot.
-    ::VkCommandBuffer acquire_transient_secondary();
 
     /// Defers `vkFreeCommandBuffers` for a persistent-pool secondary
     /// to the next time the current frame slot rolls around — i.e.
@@ -173,13 +165,6 @@ private:
         // Qualified `::VkCommandBuffer` everywhere — `VkCommandBuffer`
         // resolves to our impl class inside `velk::vk`.
         ::VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-        /// Per-slot pool for transient SECONDARY command buffers used
-        /// by the legacy `submit()` path (which records into a fresh
-        /// secondary each frame and immediately executes it). Reset
-        /// at the top of each `begin_frame` for this slot.
-        VkCommandPool transient_secondary_pool = VK_NULL_HANDLE;
-        ::velk::vector<::VkCommandBuffer> transient_secondaries;
-        size_t transient_secondary_cursor = 0;
         /// Persistent-pool secondaries queued for free at this slot
         /// when their owning `IGpuCommandBuffer` Ptr drops. Drained at
         /// the top of `begin_frame` for this slot, after the slot's

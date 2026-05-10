@@ -15,7 +15,7 @@ class VkBackend;
 /**
  * @brief Vulkan secondary-command-buffer backed `IGpuCommandBuffer`.
  *
- * Backend creates these via `VkBackend::create_command_buffer(target_id)`,
+ * Backend creates these via `VkBackend::create_command_buffer(target)`,
  * which initialises the impl with a backend reference + the
  * inheritance render pass derived from the target. Producer code
  * calls `begin_recording` / record / `end_recording` in the standard
@@ -23,10 +23,6 @@ class VkBackend;
  * `vkBeginCommandBuffer` / vkCmd* / `vkEndCommandBuffer` against a
  * VkCommandBuffer allocated from the backend's long-lived
  * secondary pool.
- *
- * S4.2.1 stub: no-op recording + execute. Real implementation
- * lands in S4.2.3 alongside the ForwardPath migration that drives
- * the secondary-cmd-buf flow end-to-end.
  */
 class VkCommandBuffer : public ::velk::ext::ObjectCore<VkCommandBuffer, ::velk::IGpuCommandBuffer>
 {

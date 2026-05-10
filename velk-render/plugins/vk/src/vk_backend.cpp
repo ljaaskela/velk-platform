@@ -322,10 +322,6 @@ void VkBackend::shutdown()
         // Pool destruction frees all buffers in the pool — the deferred
         // queue would dangle. Clear it explicitly first.
         frame_sync_[i].deferred_persistent_frees.clear();
-        if (frame_sync_[i].transient_secondary_pool) {
-            vkDestroyCommandPool(device_, frame_sync_[i].transient_secondary_pool, nullptr);
-            frame_sync_[i].transient_secondary_pool = VK_NULL_HANDLE;
-        }
     }
     if (persistent_secondary_pool_) {
         vkDestroyCommandPool(device_, persistent_secondary_pool_, nullptr);
@@ -575,18 +571,6 @@ bool VkBackend::create_command_pool()
     spci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     if (vkCreateCommandPool(device_, &spci, nullptr, &persistent_secondary_pool_) != VK_SUCCESS) {
         return false;
-    }
-
-    // Per-slot transient pools: legacy `submit()` allocates one
-    // SECONDARY here per call, records, executes. The whole pool
-    // resets at the top of the slot's next `begin_frame`.
-    VkCommandPoolCreateInfo tpci = ci;
-    tpci.flags = 0;  // pool-level reset only.
-    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
-        if (vkCreateCommandPool(device_, &tpci, nullptr,
-                                &frame_sync_[i].transient_secondary_pool) != VK_SUCCESS) {
-            return false;
-        }
     }
 
     return true;
@@ -2053,15 +2037,6 @@ void VkBackend::begin_frame()
                frame_sync_index_, (void*)sync.command_buffer,
                sync.deferred_persistent_frees.size());
 
-    // Reset the slot's transient secondary pool — frees every
-    // `submit()`-allocated SECONDARY recorded last time this slot
-    // ran. Cursor restarts from 0 so this frame's `submit()`s
-    // re-use the slab.
-    if (sync.transient_secondary_pool) {
-        vkResetCommandPool(device_, sync.transient_secondary_pool, 0);
-        sync.transient_secondary_cursor = 0;
-    }
-
     // Drain persistent-pool secondaries deferred when this slot last
     // ran. The slot's fence above guarantees their last submission has
     // completed.
@@ -2367,27 +2342,6 @@ void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
     frame_sync_[target_slot].deferred_persistent_frees.push_back(cb);
     RENDER_LOG("vk.defer_free cb=%p current_slot=%u queue_slot=%u",
                (void*)cb, frame_sync_index_, target_slot);
-}
-
-::VkCommandBuffer VkBackend::acquire_transient_secondary()
-{
-    auto& sync = frame_sync_[frame_sync_index_];
-    if (sync.transient_secondary_cursor < sync.transient_secondaries.size()) {
-        // Reuse the slab slot: vkBeginCommandBuffer resets it
-        // implicitly at recording time (pool was created with
-        // RESET_COMMAND_BUFFER_BIT).
-        return sync.transient_secondaries[sync.transient_secondary_cursor++];
-    }
-    VkCommandBufferAllocateInfo ai{};
-    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    ai.commandPool = sync.transient_secondary_pool;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
-    ai.commandBufferCount = 1;
-    ::VkCommandBuffer cb = VK_NULL_HANDLE;
-    if (vkAllocateCommandBuffers(device_, &ai, &cb) != VK_SUCCESS) return VK_NULL_HANDLE;
-    sync.transient_secondaries.push_back(cb);
-    ++sync.transient_secondary_cursor;
-    return cb;
 }
 
 void VkBackend::end_pass()
