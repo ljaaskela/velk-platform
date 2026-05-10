@@ -32,6 +32,12 @@ public:
                               PixelFormat target_format = PixelFormat::Surface,
                               IRenderTextureGroup* target_group = nullptr,
                               const PipelineOptions& options = {}) override;
+    uint64_t compile_pipeline_dynamic(string_view fragment_source,
+                                      string_view vertex_source,
+                                      uint64_t key,
+                                      array_view<const PixelFormat> color_formats,
+                                      DepthFormat depth_format,
+                                      const PipelineOptions& options = {}) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 

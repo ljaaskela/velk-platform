@@ -137,6 +137,22 @@ public:
                                       const PipelineOptions& options = {}) = 0;
 
     /**
+     * @brief S6 dynamic-rendering compile path.
+     *
+     * Mirrors `compile_pipeline` but produces a pipeline compiled
+     * against attachment formats (no VkRenderPass), runnable inside
+     * a `record_begin_rendering` scope. Cache slot is
+     * `(user_key, color_formats[0], 0)` for the canary slice (single
+     * color attachment); MRT keying lands in S6.3 alongside DeferredPath.
+     */
+    virtual uint64_t compile_pipeline_dynamic(string_view fragment_source,
+                                              string_view vertex_source,
+                                              uint64_t key,
+                                              array_view<const PixelFormat> color_formats,
+                                              DepthFormat depth_format,
+                                              const PipelineOptions& options = {}) = 0;
+
+    /**
      * @brief Creates a compute pipeline from a compiled compute shader.
      *
      * If @p key is 0, a new key is auto-assigned. Otherwise the given key is

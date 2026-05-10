@@ -47,6 +47,41 @@ inline uint64_t compile_material_forward_pipeline(
 }
 
 /**
+ * @brief S6 dynamic-rendering variant of `compile_material_forward_pipeline`.
+ *
+ * Same shader composition; calls `compile_pipeline_dynamic` so the
+ * resulting pipeline runs inside `record_begin_rendering` / `record_end_rendering`.
+ * Cache slot is `(user_key, color_format, nullptr)` — single-color case
+ * (ForwardPath canary). Returns 0 if the material lacks the source.
+ */
+inline uint64_t compile_material_forward_pipeline_dynamic(
+    IRenderContext& ctx, const IBatch& batch,
+    PixelFormat color_format, DepthFormat depth_format,
+    uint64_t user_key)
+{
+    auto material_ptr = batch.material();
+    if (!material_ptr) return 0;
+    auto* mat = interface_cast<IMaterial>(material_ptr.get());
+    auto* src = interface_cast<IShaderSource>(material_ptr.get());
+    if (!mat || !src) return 0;
+    auto eval_src = src->get_source(shader_role::kEval);
+    auto vertex_src = src->get_source(shader_role::kVertex);
+    auto eval_fn = src->get_fn_name(shader_role::kEval);
+    if (eval_src.empty() || vertex_src.empty() || eval_fn.empty()) return 0;
+    src->register_includes(ctx);
+    string frag = compose_eval_fragment(
+        forward_fragment_driver_template, eval_src, eval_fn,
+        mat->get_forward_discard_threshold());
+    PixelFormat formats[1] = {color_format};
+    return ctx.compile_pipeline_dynamic(
+        string_view(frag), vertex_src,
+        user_key,
+        array_view<const PixelFormat>(formats, 1),
+        depth_format,
+        batch.pipeline_options());
+}
+
+/**
  * @brief Returns the material's stable forward-pipeline cache key,
  *        compiling the forward variant if needed to bootstrap it.
  *

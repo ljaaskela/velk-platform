@@ -249,6 +249,46 @@ uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string
     return create_pipeline(vert, frag, key, target_format, target_group, options);
 }
 
+uint64_t RenderContextImpl::compile_pipeline_dynamic(
+    string_view fragment_source, string_view vertex_source,
+    uint64_t key, array_view<const PixelFormat> color_formats,
+    DepthFormat depth_format, const PipelineOptions& options)
+{
+    if (!initialized_ || !backend_) {
+        return 0;
+    }
+    auto vert_src = vertex_source.empty() ? nullptr
+                  : compile_shader(vertex_source, ShaderStage::Vertex);
+    auto frag_src = fragment_source.empty() ? nullptr
+                  : compile_shader(fragment_source, ShaderStage::Fragment);
+    const auto& vert_shader = vert_src ? vert_src : default_vertex_shader_;
+    const auto& frag_shader = frag_src ? frag_src : default_fragment_shader_;
+    if (!vert_shader || !frag_shader) {
+        VELK_LOG(E, "compile_pipeline_dynamic: missing vertex or fragment shader");
+        return 0;
+    }
+
+    PipelineDesc desc;
+    desc.vertex = vert_shader;
+    desc.fragment = frag_shader;
+    desc.options = options;
+
+    auto pid = backend_->create_pipeline_dynamic(desc, color_formats, depth_format);
+    if (!pid) return 0;
+
+    if (key == 0) {
+        key = next_pipeline_key_++;
+    }
+    // Cache slot mirrors the legacy single-attachment shape so callers
+    // share the same lookup tuple `(user_key, color_format[0], nullptr)`.
+    // MRT keying (S6.3) will extend this when DeferredPath migrates.
+    PixelFormat cache_format = color_formats.empty()
+        ? PixelFormat::Surface
+        : color_formats[0];
+    pipeline_map_[PipelineCacheKey{key, cache_format, nullptr}] = std::move(pid);
+    return key;
+}
+
 uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute, uint64_t key)
 {
     if (!initialized_ || !backend_ || !compute) {
