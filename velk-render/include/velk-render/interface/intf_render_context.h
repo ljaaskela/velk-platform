@@ -150,7 +150,8 @@ public:
                                               uint64_t key,
                                               array_view<const PixelFormat> color_formats,
                                               DepthFormat depth_format,
-                                              const PipelineOptions& options = {}) = 0;
+                                              const PipelineOptions& options = {},
+                                              IRenderTextureGroup* cache_group = nullptr) = 0;
 
     /**
      * @brief Creates a compute pipeline from a compiled compute shader.

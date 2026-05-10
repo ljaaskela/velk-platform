@@ -313,10 +313,10 @@ void VkCommandBuffer::record_end_rendering()
 
     vkCmdEndRendering(cmd_);
 
-    // Transition attachments to SHADER_READ_ONLY so subsequent samples
-    // (post-process effects, deferred-lighting bindless reads) can pick
-    // them up without an extra graph-emitted barrier. Matches the
-    // finalLayout convention from the legacy render-pass machinery.
+    // Transition color attachments to SHADER_READ_ONLY so subsequent
+    // samples (post-process effects, deferred-lighting bindless reads)
+    // can pick them up without an extra graph-emitted barrier. Matches
+    // the finalLayout convention from the legacy render-pass machinery.
     for (uint32_t i = 0; i < rendering_color_count_; ++i) {
         auto* tex = rendering_color_textures_[i];
         if (!tex) continue;
@@ -326,14 +326,11 @@ void VkCommandBuffer::record_end_rendering()
                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          VK_IMAGE_ASPECT_COLOR_BIT);
     }
-    if (rendering_depth_texture_) {
-        auto* vk_t = interface_cast<IVkGpuTexture>(rendering_depth_texture_);
-        if (vk_t) {
-            transition_image(cmd_, vk_t,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                             VK_IMAGE_ASPECT_DEPTH_BIT);
-        }
-    }
+    // Depth attachments are created without VK_IMAGE_USAGE_SAMPLED_BIT
+    // (the gbuffer's depth isn't sampled directly — worldpos lives in a
+    // dedicated color attachment), so SHADER_READ_ONLY would be invalid.
+    // Leave depth in DEPTH_ATTACHMENT_OPTIMAL; the next frame's
+    // record_begin_rendering picks it up as a no-op transition.
 
     rendering_color_count_ = 0;
     rendering_depth_texture_ = nullptr;

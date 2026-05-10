@@ -252,7 +252,8 @@ uint64_t RenderContextImpl::compile_pipeline(string_view fragment_source, string
 uint64_t RenderContextImpl::compile_pipeline_dynamic(
     string_view fragment_source, string_view vertex_source,
     uint64_t key, array_view<const PixelFormat> color_formats,
-    DepthFormat depth_format, const PipelineOptions& options)
+    DepthFormat depth_format, const PipelineOptions& options,
+    IRenderTextureGroup* cache_group)
 {
     if (!initialized_ || !backend_) {
         return 0;
@@ -279,13 +280,15 @@ uint64_t RenderContextImpl::compile_pipeline_dynamic(
     if (key == 0) {
         key = next_pipeline_key_++;
     }
-    // Cache slot mirrors the legacy single-attachment shape so callers
-    // share the same lookup tuple `(user_key, color_format[0], nullptr)`.
-    // MRT keying (S6.3) will extend this when DeferredPath migrates.
+    // Cache slot mirrors the legacy `(user_key, target_format, target_group)`
+    // shape so MRT (gbuffer) and single-color (forward) callers share
+    // the same lookup tuple they used pre-S6. cache_group != nullptr
+    // differentiates MRT pipelines from single-color forward ones using
+    // the same user_key.
     PixelFormat cache_format = color_formats.empty()
         ? PixelFormat::Surface
         : color_formats[0];
-    pipeline_map_[PipelineCacheKey{key, cache_format, nullptr}] = std::move(pid);
+    pipeline_map_[PipelineCacheKey{key, cache_format, cache_group}] = std::move(pid);
     return key;
 }
 

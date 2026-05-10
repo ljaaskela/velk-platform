@@ -77,7 +77,10 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     }
     uint64_t gbuffer_key = forward_key ^ perturb;
     auto& pipeline_map = ctx.pipeline_map();
-    PipelineCacheKey gkey{gbuffer_key, PixelFormat::Surface, target_group};
+    // Cache lookup must match the format axis compile_pipeline_dynamic
+    // uses when it stores: color_formats[0] (Albedo = RGBA8). Earlier
+    // legacy path used PixelFormat::Surface here; that's stale post-S6.3.
+    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], target_group};
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
         return it->second.get();
     }
@@ -124,9 +127,16 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    uint64_t compiled = ctx.compile_pipeline(
+    // S6.3: gbuffer compiles via dynamic rendering against the kGBufferFormats
+    // attachment formats + DepthFormat::Default. cache_group differentiates
+    // gbuffer pipelines from forward ones using the same user_key.
+    uint64_t compiled = ctx.compile_pipeline_dynamic(
         string_view(composed), vsrc,
-        gbuffer_key, PixelFormat::Surface, target_group, po);
+        gbuffer_key,
+        array_view<const PixelFormat>(
+            kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count)),
+        DepthFormat::Default,
+        po, target_group);
     if (!compiled) return nullptr;
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
         return it->second.get();
@@ -333,14 +343,37 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
 
-    if (auto cmd = ctx.backend->create_command_buffer(*group)) {
+    // S6.3: gbuffer raster runs as a self-contained dynamic-rendering
+    // secondary. Attachments bound inline via `record_begin_rendering`;
+    // executor doesn't wrap in begin_pass / end_pass.
+    if (auto cmd = ctx.backend->create_command_buffer(/*target_id=*/0)) {
+        constexpr uint32_t kColorCount = static_cast<uint32_t>(GBufferAttachment::Count);
+        ColorAttachment colors[kColorCount]{};
+        for (uint32_t i = 0; i < kColorCount; ++i) {
+            colors[i].texture = group->attachment_texture(i);
+            colors[i].clear = true;
+            colors[i].clear_color[0] = 0.f;
+            colors[i].clear_color[1] = 0.f;
+            colors[i].clear_color[2] = 0.f;
+            colors[i].clear_color[3] = 0.f;
+        }
+        DepthAttachment depth_att{};
+        depth_att.texture = group->depth_attachment();
+        depth_att.clear = true;
+        depth_att.clear_depth = 1.0f;
+        depth_att.clear_stencil = 0;
+
         cmd->begin_recording();
+        cmd->record_begin_rendering(
+            array_view<const ColorAttachment>(colors, kColorCount),
+            depth_att.texture ? &depth_att : nullptr);
         cmd->set_viewport(viewport);
         cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
+        cmd->record_end_rendering();
         cmd->end_recording();
         vs.cached_gbuffer_pass->set_command_buffer(std::move(cmd));
     }
-    vs.cached_gbuffer_pass->set_target_group(group);
+    // Self-contained cmd buffer; no target_* seam.
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
     vs.gbuffer_dirty = false;

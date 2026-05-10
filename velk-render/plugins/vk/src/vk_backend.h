@@ -337,17 +337,15 @@ private:
 
     /// Pending render-target-group frees keyed by completion marker.
     /// Captured in `defer_destroy_gpu_render_target_group` from a dying
-    /// VkRenderTargetGroup. Attachment Ptrs already dropped through the
-    /// wrapper's destructor before this entry was queued, so we only
-    /// own the render pass / framebuffer / depth resources.
+    /// VkRenderTargetGroup. Color and depth attachments are real
+    /// IGpuTexture::Ptrs whose destructors handle their own deferred
+    /// destroy through the observer cascade — this entry only owns the
+    /// render pass + framebuffer (legacy artifacts kept until S6.6).
     struct DeferredGpuRenderTargetGroupDestroy
     {
         ::VkRenderPass  render_pass;
         ::VkRenderPass  load_render_pass;
         ::VkFramebuffer framebuffer;
-        ::VkImage       depth_image;
-        ::VkImageView   depth_view;
-        VmaAllocation   depth_allocation;
         uint64_t        completion_marker;
     };
     ::velk::vector<DeferredGpuRenderTargetGroupDestroy> deferred_gpu_render_target_groups_;

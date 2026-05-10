@@ -274,8 +274,6 @@ void VkBackend::shutdown()
             if (d.framebuffer)      vkDestroyFramebuffer(device_, d.framebuffer, nullptr);
             if (d.render_pass)      vkDestroyRenderPass(device_, d.render_pass, nullptr);
             if (d.load_render_pass) vkDestroyRenderPass(device_, d.load_render_pass, nullptr);
-            if (d.depth_view)       vkDestroyImageView(device_, d.depth_view, nullptr);
-            if (d.depth_image)      vmaDestroyImage(allocator_, d.depth_image, d.depth_allocation);
         }
         deferred_gpu_render_target_groups_.clear();
     }
@@ -3352,8 +3350,39 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
         return {};
     }
     const uvec2 dims{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-    vk_group->init(this, std::move(attachments), render_pass, load_render_pass,
-                   framebuffer, depth_image, depth_view, depth_allocation,
+
+    // Wrap the depth resources as a real IGpuTexture::Ptr so the group
+    // can expose `depth_attachment()` (S6 dynamic rendering) and the
+    // depth lifecycle flows through the standard texture observer chain
+    // when the group's last Ptr drops.
+    IGpuTexture::Ptr depth_tex{};
+    if (has_depth) {
+        depth_tex = ::velk::instance().create<IGpuTexture>(ClassId::VkGpuTexture);
+        if (auto* vk_depth = interface_cast<IVkGpuTexture>(depth_tex.get())) {
+            // Sentinel bindless index: depth attachments aren't sampled
+            // through the bindless heap (no descriptor write); reserved
+            // index value flags "not in heap". Initial layout UNDEFINED;
+            // record_begin_rendering / legacy begin_pass transition on
+            // first use.
+            constexpr uint32_t kNoBindless = UINT32_MAX;
+            vk_depth->init_sampled(this, depth_image, depth_view, depth_allocation,
+                                   kNoBindless, /*mip_levels=*/1,
+                                   VK_IMAGE_LAYOUT_UNDEFINED, dims,
+                                   /*format=*/PixelFormat::RGBA8 /*placeholder*/,
+                                   SamplerDesc{});
+            // Hand-off succeeded — backend doesn't track these handles
+            // separately anymore; the texture wrapper owns them.
+            depth_image = VK_NULL_HANDLE;
+            depth_view = VK_NULL_HANDLE;
+            depth_allocation = VK_NULL_HANDLE;
+        } else {
+            cleanup_on_fail();
+            return {};
+        }
+    }
+
+    vk_group->init(this, std::move(attachments), std::move(depth_tex),
+                   render_pass, load_render_pass, framebuffer,
                    depth_vk_format, dims, formats[0], depth);
     live_render_target_groups_.push_back(vk_group);
     return group;
@@ -3376,9 +3405,6 @@ void VkBackend::defer_destroy_gpu_render_target_group(IRenderTextureGroup* group
         vk_group->vk_render_pass(),
         vk_group->vk_load_render_pass(),
         vk_group->vk_framebuffer(),
-        vk_group->vk_depth_image(),
-        vk_group->vk_depth_view(),
-        vk_group->vk_depth_allocation(),
         completion_marker,
     };
     std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
@@ -3394,8 +3420,6 @@ void VkBackend::drain_deferred_render_target_groups()
             if (it->framebuffer)      vkDestroyFramebuffer(device_, it->framebuffer, nullptr);
             if (it->render_pass)      vkDestroyRenderPass(device_, it->render_pass, nullptr);
             if (it->load_render_pass) vkDestroyRenderPass(device_, it->load_render_pass, nullptr);
-            if (it->depth_view)       vkDestroyImageView(device_, it->depth_view, nullptr);
-            if (it->depth_image)      vmaDestroyImage(allocator_, it->depth_image, it->depth_allocation);
             it = deferred_gpu_render_target_groups_.erase(it);
         } else {
             ++it;

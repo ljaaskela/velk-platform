@@ -37,7 +37,8 @@ public:
                                       uint64_t key,
                                       array_view<const PixelFormat> color_formats,
                                       DepthFormat depth_format,
-                                      const PipelineOptions& options = {}) override;
+                                      const PipelineOptions& options = {},
+                                      IRenderTextureGroup* cache_group = nullptr) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 
