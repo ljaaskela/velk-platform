@@ -200,18 +200,15 @@ void RtPath::build_passes(IViewEntry& entry,
         vs.rt_dirty = true;
     }
 
-    VELK_GPU_STRUCT PushC {
-        uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
+    // Per-dispatch root struct mirroring the GLSL `RtRoot` buffer
+    // reference (compute_shaders.h). Lives in `vs.root_buffer` and is
+    // reached through an 8-byte BDA pushed as the only root constant.
+    VELK_GPU_STRUCT RtRoot {
+        uint64_t globals;          // FrameGlobals BDA
         float inv_vp[16];
         float cam_pos[4];
-        uint32_t image_index;
-        uint32_t width;
-        uint32_t height;
-        uint32_t shape_count;
-        uint32_t env_material_id;
-        uint32_t env_texture_id;
-        uint32_t _env_pad0;
-        uint32_t _env_pad1;
+        uint32_t extras[4];        // image_index, width, height, shape_count
+        uint32_t env[4];           // env_material_id, env_texture_id, _, _
         uint64_t shapes_addr;
         uint64_t bvh_shapes_addr;
         uint64_t bvh_nodes_addr;
@@ -223,27 +220,41 @@ void RtPath::build_passes(IViewEntry& entry,
         uint32_t _lights_pad;
     };
 
-    PushC pc{};
-    pc.globals = render_view.view_globals_address;
-    std::memcpy(pc.inv_vp, render_view.inverse_view_projection.m, sizeof(pc.inv_vp));
-    pc.cam_pos[0] = render_view.cam_pos.x;
-    pc.cam_pos[1] = render_view.cam_pos.y;
-    pc.cam_pos[2] = render_view.cam_pos.z;
-    pc.cam_pos[3] = 0.f;
-    pc.image_index = static_cast<uint32_t>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default));
-    pc.width = static_cast<uint32_t>(vp_w);
-    pc.height = static_cast<uint32_t>(vp_h);
-    pc.shape_count = static_cast<uint32_t>(shapes.size());
-    pc.env_material_id = render_view.env.material_id;
-    pc.env_texture_id = render_view.env.texture_id;
-    pc.shapes_addr = shapes_addr;
-    pc.bvh_shapes_addr = render_view.bvh_shapes_addr;
-    pc.bvh_nodes_addr = render_view.bvh_nodes_addr;
-    pc.bvh_root = render_view.bvh_root;
-    pc.bvh_node_count = render_view.bvh_node_count;
-    pc.env_data_addr = render_view.env.data_addr;
-    pc.lights_addr = lights_addr;
-    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    RtRoot root{};
+    root.globals = render_view.view_globals_address;
+    std::memcpy(root.inv_vp, render_view.inverse_view_projection.m, sizeof(root.inv_vp));
+    root.cam_pos[0] = render_view.cam_pos.x;
+    root.cam_pos[1] = render_view.cam_pos.y;
+    root.cam_pos[2] = render_view.cam_pos.z;
+    root.cam_pos[3] = 0.f;
+    root.extras[0] = static_cast<uint32_t>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default));
+    root.extras[1] = static_cast<uint32_t>(vp_w);
+    root.extras[2] = static_cast<uint32_t>(vp_h);
+    root.extras[3] = static_cast<uint32_t>(shapes.size());
+    root.env[0] = render_view.env.material_id;
+    root.env[1] = render_view.env.texture_id;
+    root.env[2] = 0;
+    root.env[3] = 0;
+    root.shapes_addr = shapes_addr;
+    root.bvh_shapes_addr = render_view.bvh_shapes_addr;
+    root.bvh_nodes_addr = render_view.bvh_nodes_addr;
+    root.bvh_root = render_view.bvh_root;
+    root.bvh_node_count = render_view.bvh_node_count;
+    root.env_data_addr = render_view.env.data_addr;
+    root.lights_addr = lights_addr;
+    root.light_count = static_cast<uint32_t>(render_view.lights.size());
+    root._lights_pad = 0;
+
+    if (!vs.root_buffer) {
+        GpuBufferDesc bd{};
+        bd.size = sizeof(RtRoot);
+        bd.cpu_writable = true;
+        vs.root_buffer = ctx.backend->create_gpu_buffer(bd);
+        if (!vs.root_buffer) return;
+        vs.rt_dirty = true;  // first-time alloc: cached secondary needs the new BDA
+    }
+    vs.root_buffer->update(0, sizeof(RtRoot), &root);
+    const uint64_t root_addr = vs.root_buffer->gpu_address();
 
     if (!vs.cached_rt_pass) {
         vs.cached_rt_pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
@@ -282,8 +293,8 @@ void RtPath::build_passes(IViewEntry& entry,
     dc.groups_x = (vp_w + 7) / 8;
     dc.groups_y = (vp_h + 7) / 8;
     dc.groups_z = 1;
-    dc.root_constants_size = sizeof(PushC);
-    std::memcpy(dc.root_constants, &pc, sizeof(PushC));
+    dc.root_constants_size = sizeof(uint64_t);
+    std::memcpy(dc.root_constants, &root_addr, sizeof(uint64_t));
 
     vs.cached_rt_pass->reset();
     if (auto cmd = ctx.backend->create_command_buffer()) {

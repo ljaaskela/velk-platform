@@ -719,12 +719,15 @@ layout(buffer_reference, std430) readonly buffer LightList {
     Light data[];
 };
 
-// scalar layout — see deferred-lighting PC above. Without it, the
-// mat4 after GlobalData would shift to offset 16 (std430 alignment)
-// and break the CPU/GPU push-constant offset agreement.
-layout(push_constant, scalar) uniform PC {
-    GlobalData globals;         // [0..8)  FrameGlobals BDA
-    mat4 inv_view_projection;   // [8..72) CPU push starts here
+// RT root: per-dispatch state in a buffer reached via an 8-byte
+// push-constant pointer. Keeps the push-constant block at the same
+// shape as forward / deferred (one BDA), and lets the cached secondary
+// stay valid across frames since the buffer's GPU address is stable
+// while its contents (cam_pos, BVH addresses, etc.) refresh in place.
+// scalar layout matches the C++ `RtRoot` struct's natural packing.
+layout(buffer_reference, scalar) readonly buffer RtRoot {
+    GlobalData globals;
+    mat4 inv_view_projection;
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
@@ -737,7 +740,12 @@ layout(push_constant, scalar) uniform PC {
     LightList lights;
     uint light_count;
     uint _lights_pad;
-} pc;
+};
+
+layout(push_constant) uniform PC { RtRoot _root; };
+// Existing call sites (pc.bvh_root, pc.cam_pos, ...) keep working via
+// this macro instead of being rewritten en masse.
+#define pc (_root)
 
 // ===== Core ray / hit / fill-context types =====
 struct Ray {

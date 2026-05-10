@@ -27,7 +27,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
   - [std430 alignment and the DrawDataHeader](#std430-alignment-and-the-drawdataheader)
   - [Color space](#color-space)
   - [Frame synchronization](#frame-synchronization)
-  - [Render pass setup](#render-pass-setup)
+  - [Dynamic rendering](#dynamic-rendering)
 - [What This Enables](#what-this-enables)
 - [Vulkan Implementation Details](#vulkan-implementation-details)
 - [Future: Metal Backend](#future-metal-backend)
@@ -87,60 +87,57 @@ The following methods from `IRenderBackend` give the renderer everything it need
 
 | Category | Methods |
 |--|--|
-| Lifecycle | `init`, `shutdown` |
-| Surfaces | `create_surface`, `destroy_surface`, `resize_surface` |
-| GPU memory | `create_buffer`, `destroy_buffer`, `map`, `gpu_address` |
-| Textures | `create_texture`, `destroy_texture`, `upload_texture` |
-| MRT groups | `create_render_target_group`, `destroy_render_target_group`, `get_render_target_group_attachment` |
-| Pipelines | `create_pipeline`, `create_compute_pipeline`, `destroy_pipeline` |
-| Frame lifecycle | `begin_frame`, `begin_pass`, `end_pass`, `create_command_buffer`, `execute`, `blit_to_surface`, `blit_to_texture`, `barrier`, `end_frame` |
+| Lifecycle | `init`, `shutdown`, `wait_idle` |
+| Surfaces | `create_surface`, `destroy_surface`, `resize_surface`, `acquire_swapchain_texture` |
+| GPU memory | `create_gpu_buffer`, `record_buffer_update`, `defer_destroy_gpu_buffer` |
+| Textures | `create_texture`, `upload_texture`, `read_texture`, `create_depth_attachment_texture`, `defer_destroy_gpu_texture` |
+| Render target groups | `create_render_target_group`, `defer_destroy_gpu_render_target_group` |
+| Pipelines | `create_pipeline_dynamic`, `create_compute_pipeline`, `defer_destroy_gpu_pipeline` |
+| Frame lifecycle | `begin_frame`, `create_command_buffer`, `execute`, `blit_to_texture`, `barrier`, `end_frame` |
 
 **Memory** is the foundation:
-* `create_buffer`: Allocate a GPU buffer (`GpuBufferDesc` sets size, CPU-writable flag, index-buffer usage).
-* `destroy_buffer`: Deallocate a GPU buffer.
-* `map`: Get a CPU pointer to a persistently mapped buffer.
-* `gpu_address`: Get the GPU virtual address to pass to shaders via `buffer_reference`.
+* `create_gpu_buffer`: Allocate a GPU buffer (`GpuBufferDesc` sets size, CPU-writable flag, index-buffer usage). Returns an `IGpuBuffer::Ptr` whose `gpu_address()` is the BDA pointer shaders dereference via `buffer_reference`.
+* `record_buffer_update`: Inline `vkCmdUpdateBuffer`-style write for small (<64 KB) device-local updates such as per-frame view globals.
+* `defer_destroy_gpu_buffer`: Queue a buffer for destruction after the in-flight frame's GPU completion marker resolves.
 
 This is the single mechanism for getting all data to the GPU: frame globals, instance data, vertex data, index data, material parameters.
 
 **Textures** are bindless by design:
-* `create_texture`: Create a texture from a `TextureDesc` (dimensions, format, usage — Sampled / RenderTarget / Storage / ColorAttachment) and return a `TextureId`, a `uint32_t` that shaders use directly as an index into a global texture array.
-* `destroy_texture`: Destroy a texture and free its bindless slot.
-* `upload_texture`: Upload pixel data to the texture via a staging buffer; fills mip 0 and generates the rest via blit-downsampling.
+* `create_texture`: Create a texture from a `TextureDesc` (dimensions, format, usage — Sampled / RenderTarget / Storage / ColorAttachment). Returns an `IGpuTexture::Ptr`; the texture's bindless `TextureId` (a `uint32_t` index into the global sampled-texture array) is reachable via the `IGpuTexture` interface.
+* `upload_texture`: Upload pixel data via a staging buffer; fills mip 0 and generates the rest via blit-downsampling.
+* `read_texture`: GPU → CPU readback (for screenshots, golden-image tests).
+* `create_depth_attachment_texture`: Convenience for the depth side of dynamic-rendering passes.
+* `defer_destroy_gpu_texture`: Queue a texture for destruction after the in-flight frame completes.
 
 The texture id can be used in any shader and any draw call. The backend manages the descriptor array internally.
 
-**MRT groups** bind multiple color attachments for a single render pass (used by the deferred G-buffer path):
-* `create_render_target_group`: Allocate N sampleable color attachments + optional depth, sharing one render pass and framebuffer. Returns a `RenderTargetGroup` handle (distinct from surface / texture IDs).
-* `destroy_render_target_group`: Destroy the group, its attachments, its render pass, and its framebuffer.
-* `get_render_target_group_attachment`: Return the bindless `TextureId` of attachment `i` so it can be sampled once `end_pass` has transitioned it to `SHADER_READ_ONLY_OPTIMAL`.
+**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. Post-S6 the group is a producer-side wrapper, not a backend concept — there is no group-aware `begin_pass` overload.
 
-**Pipelines** link shaders plus rasterizer state:
-* `create_pipeline`: Creates a graphics pipeline from a `PipelineDesc` (vertex + fragment `IShader::Ptr`s plus a `PipelineOptions` struct carrying topology, cull mode, front-face, blend mode, depth test / write). Optional `target_group` compiles against an MRT render pass so the fragment shader can write multiple color outputs; defaults to the single-attachment swapchain pass.
+**Pipelines** link shaders plus rasterizer state. With S6 dynamic rendering, pipelines are compiled against attachment formats, never against an explicit render pass:
+
+* `create_pipeline_dynamic`: Creates a graphics pipeline from a `PipelineDesc` (vertex + fragment `IShader::Ptr`s plus a `PipelineOptions` struct carrying topology, cull mode, front-face, blend mode, depth test / write), an array of color attachment formats (1 entry for forward, N for MRT), and a depth attachment format. The pipeline is built with `VkPipelineRenderingCreateInfo`; producers record `vkCmdBeginRendering` against attachments matching those formats.
 * `create_compute_pipeline`: Creates a compute pipeline from a `ComputePipelineDesc` (compute shader only).
-* `destroy_pipeline`: Destroy a graphics or compute pipeline.
+* `defer_destroy_gpu_pipeline`: Queue a pipeline for destruction.
 
 The shader itself defines what data it reads and how (everything is available through memory buffers), so the pipeline never describes vertex input layouts, uniform bindings, or resource layouts.
 
 Above the backend, `IRenderContext` provides a higher-level API that separates shader compilation from pipeline creation:
 
 * `compile_shader(source, stage, key = 0)`: Compiles GLSL source to an `IShader::Ptr` handle that owns the compiled bytecode. Consults an on-disk SPIR-V cache before falling back to shaderc — see [Materials → Shader cache](materials.md#shader-cache). Built-in shaders pass a `constexpr make_hash64(source)` as the cache key; leaving `key` as 0 hashes the source at runtime.
-* `create_pipeline(vertex, fragment, options)`: Links two compiled shaders into a pipeline with the given `PipelineOptions`. Passing nullptr for either shader substitutes the registered default.
-* `compile_pipeline(frag_source, vert_source, options)`: Convenience that compiles and links in one call.
+* `compile_pipeline_dynamic(frag_src, vert_src, key, color_formats, depth_format, options, cache_group = nullptr)`: Compiles GLSL sources, links them, and registers the resulting pipeline in the context's cache under a `PipelineCacheKey{user_key, target_format, target_group}`. Producers call this lazily on first cache miss against the active path's attachment formats.
+* `create_compute_pipeline(compute_shader, key)` / `compile_compute_pipeline(source, key)`: Compute equivalents.
 
 The UI renderer registers default vertex and fragment shaders during setup. This means materials typically only need to provide a fragment shader.
 
-**Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair around zero or more passes and dispatches:
+**Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair. There are no `begin_pass` / `end_pass` calls on the backend post-S6: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
 
-* `begin_frame`: Waits on the GPU fence for the slot being reused, then starts command buffer recording. Does not acquire the swapchain image (that happens lazily inside `begin_pass` or `blit_to_surface`).
-* `begin_pass`: Begins a render pass targeting a surface (uint64 overload), a render-target texture (`IGpuTexture&` overload), or an MRT group (`IRenderTextureGroup&` overload). For surface targets, acquires the swapchain image if not already acquired this frame, binds the bindless descriptor set.
-* `end_pass`: Ends the current render pass. MRT attachments are transitioned to `SHADER_READ_ONLY_OPTIMAL` so the compositor can sample them.
-* `create_command_buffer`: Allocates an `IGpuCommandBuffer` that producers record once (draws / dispatches / texture blits) and the executor replays each frame. Three overloads mirroring `begin_pass`.
-* `execute`: Replays a recorded command buffer in the active frame. Raster cmd buffers must be called between matching `begin_pass` / `end_pass`.
-* `blit_to_surface`: Blits a storage texture onto a surface's swapchain image. Used by the surface-blit seam on `IRenderPass` for the per-frame swapchain copy (CameraPipeline final stage, surface-target render paths). Cannot be baked into a cached secondary because swapchain image acquisition is per-frame.
-* `blit_to_texture`: Blits between two textures. Used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies.
-* `barrier`: Inserts a pipeline barrier between passes — call between `end_pass` and the next `begin_pass` when a pass reads output from the previous one.
-* `end_frame`: Ends command recording, submits to the GPU queue, and presents any surfaces that were rendered into this frame.
+* `begin_frame`: Waits on the GPU fence for the slot being reused, then starts primary command buffer recording.
+* `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr` (S6.4 surface-as-texture). Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at `end_frame`. Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
+* `create_command_buffer`: Allocates an `IGpuCommandBuffer` (Vulkan secondary) that producers record once (draws / dispatches / texture blits / `record_begin_rendering`+`record_end_rendering`) and the executor replays each frame. One overload — no target argument needed for dynamic-rendering secondaries.
+* `execute`: Replays a recorded command buffer (`vkCmdExecuteCommands` on the primary).
+* `blit_to_texture`: Blits between two textures (used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies).
+* `barrier`: Inserts a pipeline barrier between passes — call when a pass reads output the previous one wrote.
+* `end_frame`: Emits any pending composite-to-swap blits, ends primary recording, submits to the GPU queue, and presents.
 
 The backend handles command buffer recording, synchronization, and image layout transitions internally; the renderer only speaks passes, dispatches, and barriers.
 
@@ -177,7 +174,7 @@ struct DrawCall
 
 When `index_buffer` is non-zero the backend dispatches a `vkCmdDrawIndexed(index_count, ...)` after binding the IBO at `index_buffer_offset`. Otherwise it falls through to `vkCmdDraw(vertex_count, ...)`. 3D mesh primitives take the indexed path; the TriangleStrip unit quad and fullscreen effects take the non-indexed path.
 
-The `root_constants` field carries up to `kMaxRootConstantsSize` (256) bytes that get pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 256 is supported by every modern desktop and mobile GPU; Vulkan's guaranteed minimum is 128.
+The `root_constants` field carries up to `kMaxRootConstantsSize` (128) bytes that get pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 128 is Vulkan's spec-guaranteed minimum, so any conformant driver works. Larger payloads (the RT path's per-dispatch state, for example) live in `IGpuBuffer`-backed structs reached through an 8-byte BDA in push constants.
 
 In practice most draws use only 8 of those bytes: a single GPU pointer to a `DrawDataHeader` in the per-frame staging buffer. The shader dereferences this pointer to reach all its data. The rest of the space is there so more elaborate dispatches (ray trace, deferred lighting) can pack multiple addresses directly into push constants and skip the staging-buffer indirection.
 
@@ -436,7 +433,7 @@ float alpha = texture(velk_textures[nonuniformEXT(texture_id)], uv).r;
 
 The backend maintains a single global descriptor set with a variable-length sampler array. When a texture is created, it gets the next available slot. The slot index IS the `TextureId`. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
 
-On the Vulkan side, this uses `VK_EXT_descriptor_indexing` (core in 1.2) with `UPDATE_AFTER_BIND` and `PARTIALLY_BOUND` flags. The descriptor set is bound once per frame and never changes.
+On the Vulkan side, this uses descriptor indexing (core since 1.2) with `UPDATE_AFTER_BIND` and `PARTIALLY_BOUND` flags. The descriptor set is bound once per frame and never changes.
 
 ## Technical Details
 
@@ -503,9 +500,9 @@ The 8-byte material pointer follows at offset 48, 16-byte aligned. The material'
 
 ### Color space
 
-The swapchain uses `VK_FORMAT_B8G8R8A8_UNORM`. Colors in shaders pass through to the framebuffer without gamma correction. This means colors are treated as sRGB values throughout: the JSON scene files, the C++ color structs, and the shader output are all in the same space.
+Producers render into per-surface RGBA16F composite intermediates and the backend blits to the swapchain at present time, so the swap format is largely invisible to producers. Forward / deferred pipelines compile against `RGBA16F` (HDR-capable); a tonemap post-process step (opt-in) maps to LDR before the present blit. UI-only scenes without post-process treat colors as sRGB throughout: JSON scene files, C++ color structs, and shader output are all in the same space.
 
-If you need linear-space rendering (e.g. for physically based lighting in 3D), switch to `VK_FORMAT_B8G8R8A8_SRGB` and ensure all color inputs are in linear space. The current setup is optimized for UI where colors are specified as sRGB values.
+If you need strict linear-space rendering for physically based lighting, attach the post-process chain (tonemap is part of it) so the RGBA16F → LDR conversion happens on present.
 
 ### Frame synchronization
 
@@ -518,13 +515,13 @@ graph LR
 
 At the start of each frame, the backend waits on the current set's fence, which guarantees that the command buffer and semaphores from 3 frames ago are no longer in use. This matches the typical swapchain image count (3 with FIFO present mode) and avoids semaphore reuse conflicts with the present engine.
 
-### Render pass setup
+### Dynamic rendering
 
-Vulkan pipelines reference a render pass at creation time. The backend creates a "default" render pass during `init()` (before any swapchain exists) so that pipelines can be compiled early. This render pass must be compatible with the swapchain render pass created later, which means matching attachment formats and subpass dependency counts.
+Vulkan 1.3's `VK_KHR_dynamic_rendering` is core; pipelines are compiled with `VkPipelineRenderingCreateInfo` against attachment formats only — there are no `VkRenderPass` or `VkFramebuffer` objects in the backend. Producers call `record_begin_rendering(colors, depth)` on a cached secondary, which translates to `vkCmdBeginRendering` with the attachments resolved from the producer-supplied `IGpuTexture*`s. Layout transitions and load/store ops are baked into the secondary; multi-view stacking onto the same surface composite (e.g. main camera + perf overlay) is handled by overriding the first view's `LoadOp::Clear` to `Load` for subsequent views inside the backend.
 
 ## What This Enables
 
-The interface is 15 methods. A new backend (Metal, D3D12) implements those 15 methods and everything works. There is no backend-specific abstraction leaking into the renderer or the app.
+The interface is around 25 methods (most of them defer-destroy or one-shot accessors). A new backend (Metal, D3D12) implements them and everything works. There is no backend-specific abstraction leaking into the renderer or the app.
 
 Adding a new visual type means writing a shader and a struct. No interface changes, backend changes, or pipeline layout changes are needed.
 
@@ -536,14 +533,18 @@ Compute shaders, mesh shaders, ray tracing: they all operate on the same GPU buf
 
 The Vulkan backend (`velk::vk`) uses:
 
-- **Vulkan 1.2** with `bufferDeviceAddress`, `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`
+- **Vulkan 1.3** with `bufferDeviceAddress`, `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`, `dynamicRendering`, `synchronization2`, `timelineSemaphore`
+- **`VK_EXT_debug_utils`** always enabled (free when no debugger attached) so RenderDoc / Nsight captures group events under producer-supplied labels
 - **VMA** (Vulkan Memory Allocator) for all allocations, with `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT`
 - **volk** for function loading (no link-time Vulkan dependency)
 - **Persistent mapping** via `VMA_ALLOCATION_CREATE_MAPPED_BIT` + `VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT`
-- **Push constants** (128 bytes, `VK_SHADER_STAGE_ALL`) for root data pointer
+- **Push constants** (128 bytes, `VK_SHADER_STAGE_ALL`) for root data pointer (most draws use 8 bytes; full 128 reserved for outliers)
 - **Global descriptor set** with variable-length `sampler2D` array (1024 max)
 - **Empty vertex input** with per-pipeline topology (triangle strip for UI quads, triangle list for meshes)
 - **Single shared pipeline layout** (push constants + bindless descriptor set)
+- **Cached secondary command buffers** per producer pass; replayed via `vkCmdExecuteCommands` each frame, re-recorded only when the producer's content changes
+- **Timeline semaphore** for frame completion (replaces a CPU counter heuristic for slot reuse)
+- **Surface-as-texture composite**: per-surface RGBA16F intermediate is the stable render target; backend blits composite → swap at end_frame
 
 All synchronization is internal. The backend manages fences, semaphores, command buffer recording, and image layout transitions. None of this is exposed to the renderer.
 
@@ -556,4 +557,4 @@ Metal 3 on Apple Silicon supports:
 - `MTLResourceStorageModeShared` for persistently mapped CPU/GPU memory
 - MSL device pointers for the same shader data access pattern
 
-The 15-method interface maps naturally to Metal. The shader data model (push constants = `setBytes`, buffer pointers, bindless textures) translates directly.
+The interface maps naturally to Metal. The shader data model (push constants = `setBytes`, buffer pointers, bindless textures) translates directly. Dynamic rendering corresponds to `MTLRenderPassDescriptor` configured per encoder; secondary command buffers correspond to `MTLIndirectCommandBuffer` or parallel render encoders.

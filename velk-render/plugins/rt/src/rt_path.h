@@ -11,6 +11,7 @@
 #include <velk-render/plugin.h>
 #include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_path.h>
+#include <velk-render/interface/intf_buffer.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_render_path.h>
 #include <velk-render/interface/intf_render_pass.h>
@@ -64,7 +65,7 @@ private:
     {
         ::velk::IRenderTarget::Ptr rt_output;
         // Cached size for rt_output. Recreate only on size change so
-        // downstream PushC bindless ids and `add_write` resource refs
+        // downstream RtRoot bindless ids and `add_write` resource refs
         // stay stable.
         ::velk::uvec2 output_size{};
 
@@ -73,6 +74,12 @@ private:
         /// camera moves (depth recomputed), at which point
         /// PersistentBuffer signals `changed` and the upload happens.
         ::velk::PersistentBuffer shapes_buffer;
+
+        /// Per-dispatch root struct (cam, BVH addresses, lights, ...)
+        /// reached through an 8-byte BDA push constant. CPU rewrites
+        /// it every frame; GPU address is stable so the cached
+        /// secondary's recorded push constant value never goes stale.
+        ::velk::IGpuBuffer::Ptr root_buffer;
 
         /// Cached RT compute+blit pass. Stable Ptr across frames so
         /// the graph compile short-circuits. Rebuilt only when
