@@ -26,6 +26,7 @@ struct WindowConfig
     UpdateRate update_rate{UpdateRate::VSync};  ///< Surface pacing mode (VSync, Unlimited, or Targeted).
     uint32_t target_fps{60};                    ///< Target framerate for UpdateRate::Targeted
     DepthFormat depth{DepthFormat::None};       ///< Depth attachment. None for flat UI, Default for 3D scenes.
+    SurfaceColorFormat color_format{SurfaceColorFormat::RGBA8_SRGB}; ///< Composite format. RGBA16F for HDR / non-tonemapped bloom.
 };
 
 /**

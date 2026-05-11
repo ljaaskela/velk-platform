@@ -29,12 +29,14 @@ public:
     void set_pending_update_rate(UpdateRate r) { pending_update_rate_ = r; }
     void set_pending_target_fps(int fps) { pending_target_fps_ = fps; }
     void set_pending_depth(DepthFormat d) { pending_depth_ = d; }
+    void set_pending_color_format(SurfaceColorFormat f) { pending_color_format_ = f; }
 
     GLFWwindow* glfw_handle() const { return window_; }
     void* external_handle() const { return external_handle_; }
     UpdateRate pending_update_rate() const { return pending_update_rate_; }
     int pending_target_fps() const { return pending_target_fps_; }
     DepthFormat pending_depth() const { return pending_depth_; }
+    SurfaceColorFormat pending_color_format() const { return pending_color_format_; }
 
     IWindowSurface::Ptr surface() const override;
     ui::IInputDispatcher& input() const override;
@@ -56,6 +58,7 @@ private:
     UpdateRate pending_update_rate_ = UpdateRate::VSync;
     int pending_target_fps_ = 60;
     DepthFormat pending_depth_ = DepthFormat::None;
+    SurfaceColorFormat pending_color_format_ = SurfaceColorFormat::RGBA8_SRGB;
 };
 
 } // namespace velk::impl

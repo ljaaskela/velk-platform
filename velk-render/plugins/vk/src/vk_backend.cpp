@@ -787,6 +787,7 @@ uint64_t VkBackend::create_surface(const SurfaceDesc& desc)
             sd.width = desc.width;
             sd.height = desc.height;
             sd.update_rate = desc.update_rate;
+            sd.color_format = desc.color_format;
             if (!create_swapchain(sd)) {
                 return 0;
             }
@@ -985,7 +986,7 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
 {
     if (sd.width <= 0 || sd.height <= 0) return false;
 
-    // Composite is RGBA16F linear (HDR-ready). Usage spread:
+    // Composite format follows sd.color_format. Usage spread:
     //  - COLOR_ATTACHMENT for raster passes via record_begin_rendering.
     //  - SAMPLED so subsequent passes can sample (rare, but possible).
     //  - TRANSFER_SRC for the end_frame composite-to-swap blit.
@@ -996,12 +997,23 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
     // framebuffer compression on tile-based GPUs (Mali/Adreno). Tonemap and
     // other compute writers target a separate post_output image and blit into
     // the composite; nothing imageStores the composite directly.
-    constexpr VkFormat kCompositeFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkFormat vk_format = VK_FORMAT_UNDEFINED;
+    PixelFormat composite_format = PixelFormat::RGBA8_SRGB;
+    switch (sd.color_format) {
+    case SurfaceColorFormat::RGBA8_SRGB:
+        vk_format = VK_FORMAT_R8G8B8A8_SRGB;
+        composite_format = PixelFormat::RGBA8_SRGB;
+        break;
+    case SurfaceColorFormat::RGBA16F:
+        vk_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        composite_format = PixelFormat::RGBA16F;
+        break;
+    }
 
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = kCompositeFormat;
+    ici.format = vk_format;
     ici.extent = { static_cast<uint32_t>(sd.width),
                    static_cast<uint32_t>(sd.height), 1 };
     ici.mipLevels = 1;
@@ -1029,7 +1041,7 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
     vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vci.image = image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = kCompositeFormat;
+    vci.format = vk_format;
     vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.levelCount = 1;
     vci.subresourceRange.layerCount = 1;
@@ -1049,7 +1061,7 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
     const uvec2 dims{ static_cast<uint32_t>(sd.width),
                       static_cast<uint32_t>(sd.height) };
     surf_tex->init(this, surface_id, image, view, allocation, dims,
-                   PixelFormat::RGBA16F);
+                   composite_format);
     sd.composite = std::move(composite);
     return true;
 }

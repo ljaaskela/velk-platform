@@ -114,7 +114,13 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
     swap_target->set_depth_format(::velk::DepthFormat::Default);
 
     ::velk::PixelFormat saved_format = ctx.target_format;
-    ctx.target_format = ::velk::PixelFormat::RGBA16F;
+    // Pipelines that write directly into the composite (no-post case)
+    // must compile against the composite's actual format. Pipelines
+    // that write into the per-camera path_target (post case) compile
+    // against RGBA16F so HDR values survive into tonemap.
+    ctx.target_format = has_post
+        ? ::velk::PixelFormat::RGBA16F
+        : swap_target->format();
 
     if (has_post) {
         // HDR path: path → path_target (RenderTarget RGBA16F) → post →

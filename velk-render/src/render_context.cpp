@@ -105,6 +105,7 @@ IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& confi
         s.size = {static_cast<uint32_t>(config.width), static_cast<uint32_t>(config.height)};
         s.update_rate = config.update_rate;
         s.target_fps = config.target_fps;
+        s.color_format = config.color_format;
     });
 
     surface->set_depth_format(config.depth);
@@ -119,6 +120,7 @@ IWindowSurface::Ptr RenderContextImpl::create_surface(const SurfaceConfig& confi
         SurfaceDesc desc{};
         desc.width = config.width;
         desc.height = config.height;
+        desc.color_format = config.color_format;
         desc.update_rate = config.update_rate;
         desc.target_fps = config.target_fps;
         desc.depth = config.depth;

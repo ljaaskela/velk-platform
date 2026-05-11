@@ -170,6 +170,7 @@ struct SurfaceDesc
     UpdateRate update_rate{UpdateRate::VSync};          ///< Swapchain pacing mode.
     int target_fps{60};                                 ///< Target framerate for UpdateRate::Targeted.
     DepthFormat depth{DepthFormat::None};               ///< Depth attachment for the swapchain.
+    SurfaceColorFormat color_format{SurfaceColorFormat::RGBA8_SRGB}; ///< Per-surface composite format.
 };
 
 /// Pipeline stage for barrier synchronization.

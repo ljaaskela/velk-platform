@@ -57,6 +57,22 @@ enum class PixelFormat : uint8_t
     RGBA32F,    ///< 16 bytes per pixel, 32-bit float per channel (precision-critical, e.g. world position).
 };
 
+/// Format of a surface's per-frame composite intermediate. Whitelisted
+/// subset of `PixelFormat`; numeric values match `PixelFormat` so a
+/// `static_cast<PixelFormat>(scf)` is safe and round-trips.
+enum class SurfaceColorFormat : uint8_t
+{
+    /// 4 bytes per pixel, sRGB-tagged. Linear writes from raster /
+    /// blits get sRGB-encoded automatically. AFBC/UBWC-friendly on
+    /// tile-based mobile GPUs. Bright (>1.0) values clamp on store —
+    /// fine for tonemapped or SDR-native content. Default.
+    RGBA8_SRGB = static_cast<uint8_t>(PixelFormat::RGBA8_SRGB),
+    /// 8 bytes per pixel, linear half-float. Preserves values >1.0 so
+    /// HDR producers (bloom-style, non-tonemapped HDR display) keep
+    /// their full range. Disables AFBC/UBWC; opt in only when needed.
+    RGBA16F    = static_cast<uint8_t>(PixelFormat::RGBA16F),
+};
+
 /// Front-face winding convention. Pairs with CullMode.
 enum class FrontFace : uint8_t
 {
@@ -225,6 +241,7 @@ struct SurfaceConfig
     UpdateRate update_rate{UpdateRate::VSync};  ///< Pacing mode (VSync, Unlimited, Targeted).
     int target_fps{60};                         ///< Target framerate for UpdateRate::Targeted (ignored otherwise).
     DepthFormat depth{DepthFormat::None};       ///< Depth attachment. None for flat UI, Default for 3D scenes.
+    SurfaceColorFormat color_format{SurfaceColorFormat::RGBA8_SRGB}; ///< Composite format. RGBA16F for HDR / non-tonemapped bloom.
 };
 
 } // namespace velk

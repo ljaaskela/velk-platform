@@ -82,6 +82,7 @@ IWindow::Ptr GlfwPlugin::create_window(const WindowConfig& config,
     win->set_pending_update_rate(config.update_rate);
     win->set_pending_target_fps(config.target_fps);
     win->set_pending_depth(config.depth);
+    win->set_pending_color_format(config.color_format);
 
     if (ctx) {
         SurfaceConfig sc;
@@ -90,6 +91,7 @@ IWindow::Ptr GlfwPlugin::create_window(const WindowConfig& config,
         sc.update_rate = config.update_rate;
         sc.target_fps = config.target_fps;
         sc.depth = config.depth;
+        sc.color_format = config.color_format;
         auto surface = ctx->create_surface(sc);
         win->set_surface(std::move(surface));
         win->set_render_context(ctx);
@@ -196,6 +198,7 @@ void GlfwPlugin::finalize_window(const IWindow::Ptr& window,
     sc.update_rate = win->pending_update_rate();
     sc.target_fps = win->pending_target_fps();
     sc.depth = win->pending_depth();
+    sc.color_format = win->pending_color_format();
 
     auto surface = ctx->create_surface(sc);
     win->set_surface(std::move(surface));

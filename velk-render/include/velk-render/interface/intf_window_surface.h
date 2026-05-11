@@ -23,7 +23,8 @@ public:
     VELK_INTERFACE(
         (PROP, uvec2, size, {}),                              ///< Surface size in pixels (updated on resize).
         (RPROP, UpdateRate, update_rate, UpdateRate::VSync),  ///< Swapchain pacing mode (fixed at create time).
-        (RPROP, int, target_fps, 60)                          ///< Target framerate for UpdateRate::Targeted.
+        (RPROP, int, target_fps, 60),                         ///< Target framerate for UpdateRate::Targeted.
+        (RPROP, SurfaceColorFormat, color_format, SurfaceColorFormat::RGBA8_SRGB) ///< Composite format (fixed at create time).
     )
 };
 

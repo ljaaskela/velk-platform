@@ -122,6 +122,7 @@ int main(int /*argc*/, char* /*argv*/[])
     wc.height = kHeight;
     wc.title = "velk-ui fluent";
     wc.depth = velk::DepthFormat::Default;
+    wc.color_format = velk::SurfaceColorFormat::RGBA16F;
     // wc.update_rate = velk::UpdateRate::Unlimited;
 
     auto app = velk::create_app(config);

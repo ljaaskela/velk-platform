@@ -234,6 +234,7 @@ private:
         int height = 0;
         uint32_t image_index = 0;
         UpdateRate update_rate = UpdateRate::VSync;
+        SurfaceColorFormat color_format = SurfaceColorFormat::RGBA8_SRGB;
 
         /// Per-surface composite intermediate. Producers render here
         /// as if it were any IGpuTexture; backend emits a final

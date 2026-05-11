@@ -228,6 +228,7 @@ void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurfac
             desc.height = state->size.y;
             desc.update_rate = state->update_rate;
             desc.target_fps = state->target_fps;
+            desc.color_format = state->color_format;
             if (auto* rt = interface_cast<IRenderTarget>(surface)) {
                 desc.depth = rt->get_depth_format();
             }
