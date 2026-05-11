@@ -458,9 +458,8 @@ bool VkBackend::create_device()
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     features12.timelineSemaphore = VK_TRUE;
 
-    // Vulkan 1.3 features: dynamic rendering (S6 design — see
-    // design-notes/render_dynamic_rendering.md). Lets vkCmdBeginRendering
-    // bind attachments inline at record time without VkRenderPass /
+    // Vulkan 1.3: dynamic rendering. Lets vkCmdBeginRendering bind
+    // attachments inline at record time without VkRenderPass /
     // VkFramebuffer objects.
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -974,10 +973,10 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
         vkCreateImageView(device_, &view_ci, nullptr, &sd.image_views[i]);
     }
 
-    // S6.6: post-S6.4, surfaces no longer need their own render pass /
-    // framebuffer / depth attachment. Producers render to the per-surface
-    // composite (allocated separately in create_surface_composite); the
-    // backend blits composite → swap image at end_frame. The swap images
+    // Surfaces don't need their own render pass / framebuffer / depth
+    // attachment. Producers render to the per-surface composite
+    // (allocated separately in create_surface_composite); the backend
+    // blits composite → swap image at end_frame. The swap images
     // themselves are only used as transfer destinations.
     return true;
 }
@@ -986,13 +985,17 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
 {
     if (sd.width <= 0 || sd.height <= 0) return false;
 
-    // Composite is RGBA16F linear (HDR-ready), with full usage spread:
+    // Composite is RGBA16F linear (HDR-ready). Usage spread:
     //  - COLOR_ATTACHMENT for raster passes via record_begin_rendering.
-    //  - STORAGE so post-process effects (tonemap) can imageStore into it.
     //  - SAMPLED so subsequent passes can sample (rare, but possible).
     //  - TRANSFER_SRC for the end_frame composite-to-swap blit.
     //  - TRANSFER_DST for record_blit_to_texture from compute / RT outputs
     //    into the composite (debug overlays, deferred lighting blit).
+    //
+    // Note: STORAGE is intentionally absent. Including it disables AFBC/UBWC
+    // framebuffer compression on tile-based GPUs (Mali/Adreno). Tonemap and
+    // other compute writers target a separate post_output image and blit into
+    // the composite; nothing imageStores the composite directly.
     constexpr VkFormat kCompositeFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
     VkImageCreateInfo ici{};
@@ -1006,7 +1009,6 @@ bool VkBackend::create_surface_composite(uint64_t surface_id, SurfaceData& sd)
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-              | VK_IMAGE_USAGE_STORAGE_BIT
               | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
               | VK_IMAGE_USAGE_TRANSFER_DST_BIT
               | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -2020,13 +2022,13 @@ void VkBackend::begin_frame()
     for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
     for (auto* g  : live_render_target_groups_) g->mark_cleared_this_frame(false);
 
-    // S6.4: surface composites need a fresh "canvas" per frame, but
-    // the actual clear is deferred to the first acquire_swapchain_texture
-    // call this frame, by which point any pending resize_surface (which
-    // recreates the composite) has fired during the renderer's build
-    // phase. Clearing in begin_frame would record vkCmd* on the primary
-    // referencing a composite VkImage that resize might destroy
-    // mid-frame, invalidating the primary cmd buffer.
+    // Surface composites need a fresh "canvas" per frame, but the
+    // actual clear is deferred to the first acquire_swapchain_texture
+    // call this frame, by which point any pending resize_surface
+    // (which recreates the composite) has fired during the renderer's
+    // build phase. Clearing in begin_frame would record vkCmd* on the
+    // primary referencing a composite VkImage that resize might
+    // destroy mid-frame, invalidating the primary cmd buffer.
     for (auto& [surface_id, sd] : surfaces_) {
         sd.composite_acquired_this_frame = false;
     }
@@ -2320,10 +2322,8 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     if (!secondary) return;
     auto& sync = frame_sync_[frame_sync_index_];
 
-    // Flush any pending vkCmdUpdateBuffer writes before secondary reads
-    // them (view globals etc). Begin_pass used to host this barrier;
-    // post-S6.6 it lives at the only remaining point where producer
-    // work hits the primary.
+    // Flush any pending vkCmdUpdateBuffer writes before the secondary
+    // reads them (view globals etc).
     if (pending_buffer_update_barrier_) {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2454,8 +2454,8 @@ void VkBackend::end_frame()
 {
     auto& sync = frame_sync_[frame_sync_index_];
 
-    // S6.4: emit composite-to-swap blit for each surface that was
-    // acquired this frame. Sets present_surface_id_ as a side effect.
+    // Emit composite-to-swap blit for each surface that was acquired
+    // this frame. Sets present_surface_id_ as a side effect.
     for (auto& [surface_id, sd] : surfaces_) {
         if (sd.composite_acquired_this_frame) {
             cmd_push_label(sync.command_buffer, "Composite -> Swap");
@@ -2841,9 +2841,9 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
     const uvec2 dims{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
 
     // Wrap the depth resources as a real IGpuTexture::Ptr so the group
-    // can expose `depth_attachment()` (S6 dynamic rendering) and the
-    // depth lifecycle flows through the standard texture observer chain
-    // when the group's last Ptr drops.
+    // can expose `depth_attachment()` and the depth lifecycle flows
+    // through the standard texture observer chain when the group's
+    // last Ptr drops.
     IGpuTexture::Ptr depth_tex{};
     if (has_depth) {
         depth_tex = ::velk::instance().create<IGpuTexture>(ClassId::VkGpuTexture);

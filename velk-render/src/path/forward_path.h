@@ -70,7 +70,7 @@ private:
         IRenderPass::Ptr pass;
         bool dirty = true;
         /// Lazily-allocated depth attachment paired with the path's
-        /// color_target (S6.5). Allocated when color_target's
+        /// color_target. Allocated when color_target's
         /// `get_depth_format()` is non-None — typically when called
         /// from CameraPipeline. RTT callers (`RenderTargetCache`)
         /// leave depth_format=None so this stays null.

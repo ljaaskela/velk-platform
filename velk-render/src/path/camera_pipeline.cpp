@@ -90,7 +90,7 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
     if (!path) return;
     if (!color_target || !ctx.backend) return;
 
-    /// S6.4: the surface is just an `IGpuTexture` from the producer's
+    /// The surface is just an `IGpuTexture` from the producer's
     /// perspective. Backend exposes a per-surface composite via
     /// `acquire_swapchain_texture`; backend handles the
     /// composite-to-swap final blit at end_frame and applies LOAD
@@ -109,9 +109,8 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
         color_target->get_gpu_handle(::velk::GpuResourceKey::Default);
     auto swap_target = ctx.backend->acquire_swapchain_texture(surface_id);
     if (!swap_target) return;
-    // The composite is paired with depth (see S6.5 — ForwardPath
-    // allocates its own depth attachment when color_target carries a
-    // depth format).
+    // The composite is paired with depth — ForwardPath allocates its own
+    // depth attachment when color_target carries a depth format.
     swap_target->set_depth_format(::velk::DepthFormat::Default);
 
     ::velk::PixelFormat saved_format = ctx.target_format;

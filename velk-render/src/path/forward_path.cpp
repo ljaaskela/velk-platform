@@ -28,9 +28,8 @@ namespace {
 /// Resolves (or lazy-compiles) the forward-rendering pipeline for a
 /// batch. Material wins over the visual's IShaderSource when both
 /// are present; the visual's source is the no-material fallback.
-/// All pipelines compile against dynamic-rendering attachment formats
-/// (S6 — see design-notes/render_dynamic_rendering.md). Returns 0 to
-/// skip (no source / compile failure).
+/// All pipelines compile against dynamic-rendering attachment formats.
+/// Returns 0 to skip (no source / compile failure).
 IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
                                          const IBatch& batch,
                                          PixelFormat target_format,
@@ -152,7 +151,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.dirty = true;
     }
 
-    // S6.4: color_target may be the per-surface composite (a real
+    // color_target may be the per-surface composite (a real
     // IGpuTexture-castable wrapper) or a RenderTexture proxy from
     // RenderTargetCache (not IGpuTexture; needs find_texture lookup).
     IGpuTexture* target_texture = nullptr;

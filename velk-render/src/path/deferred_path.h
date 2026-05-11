@@ -113,7 +113,7 @@ public:
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
-        /// Resize detection (S6.4): the lighting cmd buffer bakes the
+        /// Resize detection: the lighting cmd buffer bakes the
         /// dst (surface composite) VkImage handle. If the composite is
         /// recreated, the cached cmd buffer is stale.
         IGpuTexture* last_dst_texture = nullptr;

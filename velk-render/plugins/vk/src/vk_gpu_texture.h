@@ -69,11 +69,10 @@ public:
     virtual bool was_cleared_this_frame() const = 0;
     virtual void mark_cleared_this_frame(bool cleared) = 0;
 
-    /// True when this texture is a per-surface composite intermediate
-    /// (S6.4 — see design-notes/render_dynamic_rendering.md). Used by
-    /// the cmd-buffer recorder to apply multi-view loadOp override and
-    /// dirty tracking, and by `end_frame` to emit the composite-to-swap
-    /// blit. False on regular sampled / RTT textures.
+    /// True when this texture is a per-surface composite intermediate.
+    /// Used by the cmd-buffer recorder to apply multi-view loadOp
+    /// override and dirty tracking, and by `end_frame` to emit the
+    /// composite-to-swap blit. False on regular sampled / RTT textures.
     virtual bool is_swap_composite() const = 0;
 
     /// Surface id this composite belongs to (only meaningful when
@@ -251,7 +250,7 @@ public:
     virtual void release(::VkDevice device, VmaAllocator allocator) = 0;
 };
 
-/// Per-surface composite intermediate (S6.4 — design-notes/render_dynamic_rendering.md).
+/// Per-surface composite intermediate.
 ///
 /// Backed by a stable `VkImage` (recreated only on resize) so cached
 /// secondary cmd buffers that reference its `vk_view()` work across

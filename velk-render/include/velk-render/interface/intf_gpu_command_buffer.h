@@ -20,8 +20,7 @@ class IGpuTexture;
 class IRenderTextureGroup;
 using TextureId = uint32_t;
 
-/// One color attachment for `record_begin_rendering` (S6 dynamic
-/// rendering — see design-notes/render_dynamic_rendering.md).
+/// One color attachment for `record_begin_rendering`.
 struct ColorAttachment
 {
     IGpuTexture* texture = nullptr;       ///< Renderable / storage texture to draw into.
@@ -111,7 +110,7 @@ public:
 
     /// @}
 
-    /// @name Dynamic rendering (S6 — design-notes/render_dynamic_rendering.md)
+    /// @name Dynamic rendering
     ///
     /// Producer-driven attachment binding via `vkCmdBeginRendering` /
     /// `vkCmdEndRendering`. Replaces the legacy

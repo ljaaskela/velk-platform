@@ -108,13 +108,11 @@ public:
                                         uint64_t key = 0) = 0;
 
     /**
-     * @brief S6 dynamic-rendering compile path.
+     * @brief Compiles a graphics pipeline against dynamic-rendering attachment
+     *        formats (no VkRenderPass), runnable inside a
+     *        `record_begin_rendering` scope.
      *
-     * Mirrors `compile_pipeline` but produces a pipeline compiled
-     * against attachment formats (no VkRenderPass), runnable inside
-     * a `record_begin_rendering` scope. Cache slot is
-     * `(user_key, color_formats[0], 0)` for the canary slice (single
-     * color attachment); MRT keying lands in S6.3 alongside DeferredPath.
+     * Cache slot is `(user_key, color_formats[0], 0)`.
      */
     virtual uint64_t compile_pipeline_dynamic(string_view fragment_source,
                                               string_view vertex_source,

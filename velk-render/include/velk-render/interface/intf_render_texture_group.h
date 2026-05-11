@@ -43,8 +43,7 @@ public:
     /// Backing IGpuTexture for the optional depth attachment. Returns
     /// nullptr when the group was created with `DepthFormat::None`.
     /// Used by `IGpuCommandBuffer::record_begin_rendering` to bind the
-    /// depth attachment alongside the color attachments under dynamic
-    /// rendering (S6 — see design-notes/render_dynamic_rendering.md).
+    /// depth attachment alongside the color attachments.
     virtual class IGpuTexture* depth_attachment() const = 0;
 
     /// Returns the bindless `TextureId` of attachment @p index. Derived

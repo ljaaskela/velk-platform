@@ -112,10 +112,10 @@ public:
 private:
     ::velk::IRenderBackend* backend_ = nullptr;
     ::velk::vector<::velk::IGpuTexture::Ptr> attachments_;
-    /// Depth attachment as a real IGpuTexture::Ptr so dynamic rendering
-    /// (S6 — record_begin_rendering) can bind it via the same shape as
-    /// color attachments. Dropping the group's last Ptr cascades to the
-    /// depth wrapper's destructor, which defers via the standard
+    /// Depth attachment as a real IGpuTexture::Ptr so
+    /// `record_begin_rendering` can bind it via the same shape as
+    /// color attachments. Dropping the group's last Ptr cascades to
+    /// the depth wrapper's destructor, which defers via the standard
     /// IGpuTexture observer chain. nullptr when DepthFormat::None.
     ::velk::IGpuTexture::Ptr depth_attachment_;
     ::VkRenderPass  render_pass_      = VK_NULL_HANDLE;

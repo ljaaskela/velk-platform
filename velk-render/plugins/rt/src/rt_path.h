@@ -89,7 +89,7 @@ private:
         /// `rt_change` detecting BVH / shape-count drift.
         ::velk::IRenderPass::Ptr cached_rt_pass;
         bool rt_dirty = true;
-        /// Resize detection (S6.4): see DeferredPath::ViewState.
+        /// Resize detection: see DeferredPath::ViewState.
         ::velk::IGpuTexture* last_dst_texture = nullptr;
 
         /// PushC fingerprint covering inputs not propagated through

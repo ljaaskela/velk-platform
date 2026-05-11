@@ -84,7 +84,7 @@ public:
     /// every replay. `reset()` drops the cmd buffer Ptr.
     ///
     /// All raster passes are self-contained dynamic-rendering
-    /// secondaries (S6) — they call `record_begin_rendering` /
+    /// secondaries — they call `record_begin_rendering` /
     /// `record_end_rendering` internally; the executor doesn't wrap
     /// the replay in any begin_pass / end_pass.
     virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;

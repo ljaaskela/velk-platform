@@ -220,9 +220,9 @@ private:
     // Shared pipeline layout (push constants + bindless set)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
 
-    // Surfaces — post-S6.4, the swapchain images are only used as
-    // transfer destinations for the per-surface composite blit at
-    // end_frame. No render pass / framebuffer / surface depth.
+    // Surfaces — the swapchain images are only used as transfer
+    // destinations for the per-surface composite blit at end_frame.
+    // No render pass / framebuffer / surface depth.
     struct SurfaceData
     {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -235,11 +235,11 @@ private:
         uint32_t image_index = 0;
         UpdateRate update_rate = UpdateRate::VSync;
 
-        /// Per-surface composite intermediate (S6.4 — see
-        /// design-notes/render_dynamic_rendering.md). Producers render
-        /// here as if it were any IGpuTexture; backend emits a final
-        /// composite-to-swap blit at end_frame whenever it was rendered
-        /// this frame. Stable VkImage so cached cmd buffers work.
+        /// Per-surface composite intermediate. Producers render here
+        /// as if it were any IGpuTexture; backend emits a final
+        /// composite-to-swap blit at end_frame whenever it was
+        /// rendered this frame. Stable VkImage so cached cmd buffers
+        /// work.
         ::velk::IGpuTexture::Ptr composite;
         /// Set by `acquire_swapchain_texture`; reset at `begin_frame`.
         /// Tells `end_frame` whether to emit a present blit for this
@@ -315,7 +315,7 @@ private:
     /// VkRenderTargetGroup. Color and depth attachments are real
     /// IGpuTexture::Ptrs whose destructors handle their own deferred
     /// destroy through the observer cascade — this entry only owns the
-    /// render pass + framebuffer (legacy artifacts kept until S6.6).
+    /// render pass + framebuffer.
     struct DeferredGpuRenderTargetGroupDestroy
     {
         ::VkRenderPass  render_pass;
@@ -343,8 +343,8 @@ private:
     bool create_swapchain(SurfaceData& sd);
     void destroy_swapchain(SurfaceData& sd);
 
-    /// Allocate the per-surface composite intermediate (S6.4) sized to
-    /// the swapchain. Called after create_swapchain settles dimensions.
+    /// Allocate the per-surface composite intermediate sized to the
+    /// swapchain. Called after create_swapchain settles dimensions.
     bool create_surface_composite(uint64_t surface_id, SurfaceData& sd);
     void destroy_surface_composite(SurfaceData& sd);
 

@@ -33,8 +33,8 @@ public:
     ~VkCommandBuffer() override;
 
     /// Configures the cmd buffer with backend reference.
-    /// All cmd buffers are self-contained dynamic-rendering secondaries
-    /// (S6); no inheritance render pass needed.
+    /// All cmd buffers are self-contained dynamic-rendering secondaries;
+    /// no inheritance render pass needed.
     void init(VkBackend* backend);
 
     // IGpuCommandBuffer

@@ -75,8 +75,8 @@ void RenderGraph::add_pass(::velk::IRenderPass::Ptr pass)
 
 RenderGraph::PassClass RenderGraph::classify(const ::velk::IRenderPass& pass)
 {
-    // S6.6: every cmd-buffer-bearing pass is self-contained — the
-    // secondary internally calls record_begin_rendering for raster or
+    // Every cmd-buffer-bearing pass is self-contained — the secondary
+    // internally calls record_begin_rendering for raster or
     // record_dispatch / record_blit_to_texture for compute-style. The
     // graph can't distinguish raster from compute by looking at the
     // pass's outer state. Treat all cmd-buffer passes as Compute for
@@ -130,13 +130,13 @@ void RenderGraph::compile()
         return ResourceState::ColorWrite;
     };
 
-    /// S6.6: with target_* seams gone, raster passes are no longer
-    /// distinguishable from compute at the graph level. The
-    /// skip_pre_barrier optimization (used to suppress the pre-pass
-    /// barrier when a raster pass declared writes against a fresh
-    /// RTT) doesn't have a clean signal anymore. Always emit
-    /// pre-pass barriers; the over-sync is one extra memory barrier
-    /// per pass per frame. Revisit if profiling shows it matters.
+    /// Raster passes are not distinguishable from compute at the graph
+    /// level (no target_* seams). The skip_pre_barrier optimization
+    /// (used to suppress the pre-pass barrier when a raster pass
+    /// declared writes against a fresh RTT) doesn't have a clean signal
+    /// anymore. Always emit pre-pass barriers; the over-sync is one
+    /// extra memory barrier per pass per frame. Revisit if profiling
+    /// shows it matters.
     auto skip_pre_barrier = [](const ::velk::IRenderPass&, PassClass) {
         return false;
     };
@@ -202,8 +202,8 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         RENDER_LOG("graph.pass[%zu] has_cmd=%d", i, gp.command_buffer() ? 1 : 0);
 
         if (auto cmd = gp.command_buffer()) {
-            // S6.6: every cmd-buffer pass is self-contained — raster
-            // passes call record_begin_rendering / record_end_rendering
+            // Every cmd-buffer pass is self-contained — raster passes
+            // call record_begin_rendering / record_end_rendering
             // internally; compute / blit passes leave the rendering
             // scope alone. Executor never wraps in begin_pass/end_pass.
             backend.execute(cmd);

@@ -78,8 +78,7 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     uint64_t gbuffer_key = forward_key ^ perturb;
     auto& pipeline_map = ctx.pipeline_map();
     // Cache lookup must match the format axis compile_pipeline_dynamic
-    // uses when it stores: color_formats[0] (Albedo = RGBA8). Earlier
-    // legacy path used PixelFormat::Surface here; that's stale post-S6.3.
+    // uses when it stores: color_formats[0] (Albedo = RGBA8).
     PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], target_group};
     if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
         return it->second.get();
@@ -127,9 +126,9 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    // S6.3: gbuffer compiles via dynamic rendering against the kGBufferFormats
-    // attachment formats + DepthFormat::Default. cache_group differentiates
-    // gbuffer pipelines from forward ones using the same user_key.
+    // Gbuffer compiles against kGBufferFormats + DepthFormat::Default.
+    // cache_group differentiates gbuffer pipelines from forward ones
+    // using the same user_key.
     uint64_t compiled = ctx.compile_pipeline_dynamic(
         string_view(composed), vsrc,
         gbuffer_key,
@@ -343,7 +342,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                   static_cast<float>(vs.gbuffer_size.y)};
     vs.cached_gbuffer_pass->reset();
 
-    // S6.3: gbuffer raster runs as a self-contained dynamic-rendering
+    // Gbuffer raster runs as a self-contained dynamic-rendering
     // secondary. Attachments bound inline via `record_begin_rendering`;
     // executor doesn't wrap in begin_pass / end_pass.
     if (auto cmd = ctx.backend->create_command_buffer()) {
@@ -484,10 +483,10 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    // S6.4: color_target is always an IGpuTexture-castable wrapper.
+    // color_target is always an IGpuTexture-castable wrapper.
     // VkSurfaceTexture (the per-surface composite) is itself an
-    // IGpuTexture; the legacy RenderTexture proxy is not, so fall
-    // back to find_texture for that case.
+    // IGpuTexture; the RenderTexture proxy is not, so fall back to
+    // find_texture for that case.
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
     if (!src_tex) src_tex = vs.deferred_output_tex;
     IGpuTexture* dst_tex = nullptr;

@@ -262,7 +262,7 @@ void RtPath::build_passes(IViewEntry& entry,
         vs.rt_dirty = true;
     }
 
-    // S6.4: color_target is always an IGpuTexture-castable wrapper.
+    // color_target is always an IGpuTexture-castable wrapper.
     IGpuTexture* rt_tex = graph.resources().find_texture(vs.rt_output.get());
     IGpuTexture* dst_tex = nullptr;
     if (color_target) {

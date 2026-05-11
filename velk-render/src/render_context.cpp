@@ -230,11 +230,9 @@ uint64_t RenderContextImpl::compile_pipeline_dynamic(
     if (key == 0) {
         key = next_pipeline_key_++;
     }
-    // Cache slot mirrors the legacy `(user_key, target_format, target_group)`
-    // shape so MRT (gbuffer) and single-color (forward) callers share
-    // the same lookup tuple they used pre-S6. cache_group != nullptr
-    // differentiates MRT pipelines from single-color forward ones using
-    // the same user_key.
+    // Cache slot is `(user_key, color_formats[0], cache_group)`. cache_group
+    // != nullptr differentiates MRT pipelines (e.g. gbuffer) from single-color
+    // forward ones sharing the same user_key.
     PixelFormat cache_format = color_formats.empty()
         ? PixelFormat::RGBA8
         : color_formats[0];

@@ -111,9 +111,9 @@ This is the single mechanism for getting all data to the GPU: frame globals, ins
 
 The texture id can be used in any shader and any draw call. The backend manages the descriptor array internally.
 
-**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. Post-S6 the group is a producer-side wrapper, not a backend concept — there is no group-aware `begin_pass` overload.
+**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. The group is a producer-side wrapper, not a backend concept — there is no group-aware `begin_pass` overload.
 
-**Pipelines** link shaders plus rasterizer state. With S6 dynamic rendering, pipelines are compiled against attachment formats, never against an explicit render pass:
+**Pipelines** link shaders plus rasterizer state. Pipelines are compiled against dynamic-rendering attachment formats, never against an explicit render pass:
 
 * `create_pipeline_dynamic`: Creates a graphics pipeline from a `PipelineDesc` (vertex + fragment `IShader::Ptr`s plus a `PipelineOptions` struct carrying topology, cull mode, front-face, blend mode, depth test / write), an array of color attachment formats (1 entry for forward, N for MRT), and a depth attachment format. The pipeline is built with `VkPipelineRenderingCreateInfo`; producers record `vkCmdBeginRendering` against attachments matching those formats.
 * `create_compute_pipeline`: Creates a compute pipeline from a `ComputePipelineDesc` (compute shader only).
@@ -129,10 +129,10 @@ Above the backend, `IRenderContext` provides a higher-level API that separates s
 
 The UI renderer registers default vertex and fragment shaders during setup. This means materials typically only need to provide a fragment shader.
 
-**Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair. There are no `begin_pass` / `end_pass` calls on the backend post-S6: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
+**Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair. The backend has no `begin_pass` / `end_pass` calls: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
 
 * `begin_frame`: Waits on the GPU fence for the slot being reused, then starts primary command buffer recording.
-* `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr` (S6.4 surface-as-texture). Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at `end_frame`. Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
+* `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr`. Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at `end_frame`. Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
 * `create_command_buffer`: Allocates an `IGpuCommandBuffer` (Vulkan secondary) that producers record once (draws / dispatches / texture blits / `record_begin_rendering`+`record_end_rendering`) and the executor replays each frame. One overload — no target argument needed for dynamic-rendering secondaries.
 * `execute`: Replays a recorded command buffer (`vkCmdExecuteCommands` on the primary).
 * `blit_to_texture`: Blits between two textures (used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies).

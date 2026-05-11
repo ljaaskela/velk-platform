@@ -256,8 +256,7 @@ public:
 
     /**
      * @brief Returns the per-surface composite intermediate as a
-     *        renderable texture (S6.4 — see
-     *        design-notes/render_dynamic_rendering.md).
+     *        renderable texture.
      *
      * Producers render to the returned target as if it were any
      * regular `IGpuTexture`. The backend tracks which surfaces were
@@ -334,8 +333,7 @@ public:
      * (no `SAMPLED_BIT` — depth is bound for record_begin_rendering, not
      * sampled through the bindless heap). Lifetime via Ptr; backend
      * defers destroy when the last Ptr drops. Used by paths that own
-     * their color attachment separately and need a paired depth (S6.5
-     * — see design-notes/render_dynamic_rendering.md).
+     * their color attachment separately and need a paired depth.
      */
     virtual IGpuTexture::Ptr create_depth_attachment_texture(
         int width, int height, DepthFormat format) = 0;
@@ -395,7 +393,7 @@ public:
 
     /**
      * @brief Creates a graphics pipeline against dynamic-rendering attachment
-     *        formats (S6 — see design-notes/render_dynamic_rendering.md).
+     *        formats.
      *
      * Pipelines compiled this way are render-pass-agnostic and run inside
      * a `vkCmdBeginRendering` scope opened by `IGpuCommandBuffer::record_begin_rendering`
@@ -429,8 +427,8 @@ public:
     virtual void begin_frame() = 0;
 
     /**
-     * @brief Allocates a self-contained `IGpuCommandBuffer` (S6 dynamic
-     *        rendering — see design-notes/render_dynamic_rendering.md).
+     * @brief Allocates a self-contained `IGpuCommandBuffer` for
+     *        dynamic-rendering recording.
      *
      * Producers record once when their pass content changes; the graph
      * executor replays via `execute(cmd)` each frame. Raster passes

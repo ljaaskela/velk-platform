@@ -55,8 +55,8 @@ void VkCommandBuffer::begin_recording()
     // Pool created with RESET_COMMAND_BUFFER_BIT, so vkBeginCommandBuffer
     // implicitly resets the buffer on a re-begin.
     //
-    // S6.6: secondaries are self-contained dynamic-rendering — they
-    // call vkCmdBeginRendering / vkCmdEndRendering inside
+    // Secondaries are self-contained dynamic-rendering — they call
+    // vkCmdBeginRendering / vkCmdEndRendering inside
     // record_begin_rendering / record_end_rendering. No inheritance
     // render pass; no RENDER_PASS_CONTINUE_BIT.
     VkCommandBufferInheritanceInfo inh{};
@@ -260,11 +260,11 @@ void VkCommandBuffer::record_begin_rendering(
             vk_t = interface_cast<IVkGpuTexture>(c.texture);
             info.imageView = vk_t ? vk_t->vk_view() : VK_NULL_HANDLE;
         }
-        // Multi-view-to-same-surface (S6.4): the per-surface composite
-        // is shared across views. Backend.begin_frame clears the
-        // composite each frame, so producer record_begin_rendering on
-        // the composite is silently overridden to LOAD — views stack
-        // on top of each other (and on top of the begin_frame clear)
+        // Multi-view-to-same-surface: the per-surface composite is
+        // shared across views. Backend.begin_frame clears the composite
+        // each frame, so producer record_begin_rendering on the
+        // composite is silently overridden to LOAD — views stack on
+        // top of each other (and on top of the begin_frame clear)
         // instead of erasing prior content.
         bool effective_clear = c.clear;
         if (vk_t && vk_t->is_swap_composite()) {
