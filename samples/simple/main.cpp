@@ -50,7 +50,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    velk::instance().plugin_registry().load_plugin_from_path("velk_tracy.dll");
+    velk::instance().plugin_registry().load_plugin("plugin:velk_tracy");
 
     VELK_LOG(E, "ipsum: %zu", ipsum.size());
 

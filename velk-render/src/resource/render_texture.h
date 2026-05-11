@@ -10,9 +10,9 @@ namespace velk {
 /**
  * @brief A texture that can be both rendered into and sampled.
  *
- * Implements IRenderTarget (for use as a begin_pass target) and ISurface
- * (for querying dimensions and format). Sampled in shaders via its
- * bindless TextureId (get_render_target_id).
+ * Implements IRenderTarget (renderable) and ISurface (queryable
+ * dimensions and format). Sampled in shaders via its bindless
+ * TextureId (get_render_target_id).
  *
  * Created via instance().create<IObject>(ClassId::RenderTexture).
  * Set size and format before first use.

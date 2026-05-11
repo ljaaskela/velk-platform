@@ -166,7 +166,7 @@ public:
 inline Application create_app(const ApplicationConfig& config = {})
 {
     auto& v = instance();
-    v.plugin_registry().load_plugin_from_path("velk_runtime.dll");
+    v.plugin_registry().load_plugin("plugin:velk_runtime");
     auto app = v.create<IApplication>(ClassId::Application);
     return Application(app && app->init(config) ? std::move(app) : nullptr);
 }

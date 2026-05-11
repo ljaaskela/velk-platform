@@ -38,23 +38,24 @@ bool Application::init(const ApplicationConfig& config)
     auto& v = instance();
     auto& reg = v.plugin_registry();
 
-    // Load all standard plugins.
-    reg.load_plugin_from_path("velk_ui.dll");
-    reg.load_plugin_from_path("velk_render.dll");
-    reg.load_plugin_from_path("velk_scene.dll");
-    reg.load_plugin_from_path("velk_vk.dll");
-    reg.load_plugin_from_path("velk_rt.dll");
-    reg.load_plugin_from_path("velk_text.dll");
-    reg.load_plugin_from_path("velk_image.dll");
-    reg.load_plugin_from_path("velk_gltf.dll");
-    reg.load_plugin_from_path("velk_importer.dll");
+    // Load all standard plugins. The "plugin:" URI scheme resolves to
+    // <exe_dir>/plugins/<name>.<dll|so> on the host platform.
+    reg.load_plugin("plugin:velk_ui");
+    reg.load_plugin("plugin:velk_render");
+    reg.load_plugin("plugin:velk_scene");
+    reg.load_plugin("plugin:velk_vk");
+    reg.load_plugin("plugin:velk_rt");
+    reg.load_plugin("plugin:velk_text");
+    reg.load_plugin("plugin:velk_image");
+    reg.load_plugin("plugin:velk_gltf");
+    reg.load_plugin("plugin:velk_importer");
 
     // Load the platform plugin (compile-time selection).
 #if defined(__ANDROID__)
-    reg.load_plugin_from_path("libvelk_runtime_android.so");
+    reg.load_plugin("plugin:velk_runtime_android");
     platform_plugin_ = reg.find_plugin(PluginId::RuntimeAndroidPlugin);
 #else
-    reg.load_plugin_from_path("velk_runtime_glfw.dll");
+    reg.load_plugin("plugin:velk_runtime_glfw");
     platform_plugin_ = reg.find_plugin(PluginId::RuntimeGlfwPlugin);
 #endif
     if (!platform_plugin_) {

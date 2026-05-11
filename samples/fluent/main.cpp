@@ -134,7 +134,7 @@ int main(int /*argc*/, char* /*argv*/[])
 
     auto ctx = app.render_context();
 
-    velk::instance().plugin_registry().load_plugin_from_path("velk_tracy.dll");
+    velk::instance().plugin_registry().load_plugin("plugin:velk_tracy");
 
     auto scene = velk::create_scene("app://scenes/fluent.json");
     scene.set_geometry(velk::aabb::from_size({static_cast<float>(kWidth), static_cast<float>(kHeight)}));
