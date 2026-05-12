@@ -28,6 +28,15 @@ target_include_directories(velk_vk
     PRIVATE ${Vulkan_INCLUDE_DIRS}
 )
 
+if(ANDROID)
+    # NDK ships only core Vulkan headers; vma/ and Volk/ live in the desktop
+    # Vulkan SDK install. Borrow them from there until we vendor them.
+    if(NOT DEFINED ENV{VULKAN_SDK})
+        message(FATAL_ERROR "VULKAN_SDK env var required for vma/volk headers on Android cross-compile.")
+    endif()
+    target_include_directories(velk_vk PRIVATE "$ENV{VULKAN_SDK}/Include")
+endif()
+
 target_compile_definitions(velk_vk PRIVATE VELK_EXPORTS VK_NO_PROTOTYPES)
 
 if(VELK_RENDER_DEBUG)

@@ -178,6 +178,27 @@ public:
 };
 
 /**
+ * @brief Internal init seam for IMeshPrimitive impls.
+ *
+ * Primitives stay immutable on the public IMeshPrimitive interface; the
+ * builder constructs them via this internal interface (interface_cast,
+ * no dynamic_cast). External callers should not handle this interface.
+ */
+class IMeshPrimitiveInternal : public Interface<IMeshPrimitiveInternal, IMeshPrimitive>
+{
+public:
+    virtual void init(const IMeshBuffer::Ptr& buffer,
+                      uint32_t vertex_offset, uint32_t vertex_count,
+                      uint32_t index_offset, uint32_t index_count,
+                      array_view<VertexAttribute> attributes,
+                      uint32_t vertex_stride,
+                      MeshTopology topology,
+                      const aabb& bounds,
+                      const IMeshBuffer::Ptr& uv1_buffer,
+                      uint32_t uv1_offset) = 0;
+};
+
+/**
  * @brief A mesh: an authored group of geometry primitives.
  *
  * Matches glTF's mesh vocabulary: a container of IMeshPrimitives plus
@@ -198,6 +219,15 @@ public:
     /// may pre-populate at construction when the caller already knows
     /// the answer (e.g. procedural cube = [0,1]^3).
     virtual aabb get_bounds() const = 0;
+};
+
+/** Internal init seam for IMesh impls; see IMeshPrimitiveInternal. */
+class IMeshInternal : public Interface<IMeshInternal, IMesh>
+{
+public:
+    virtual void init(array_view<IMeshPrimitive::Ptr> primitives,
+                      const aabb& bounds,
+                      bool has_explicit_bounds) = 0;
 };
 
 /**

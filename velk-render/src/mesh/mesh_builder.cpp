@@ -30,7 +30,7 @@ IMeshPrimitive::Ptr MeshBuilder::build_primitive_in_buffer(
     if (!buffer) return nullptr;
 
     auto prim_intf = ::velk::instance().create<IMeshPrimitive>(::velk::ClassId::MeshPrimitive);
-    auto* prim = dynamic_cast<MeshPrimitive*>(prim_intf.get());
+    auto* prim = interface_cast<IMeshPrimitiveInternal>(prim_intf.get());
     if (!prim) return nullptr;
 
     prim->init(buffer,
@@ -66,7 +66,7 @@ IMeshPrimitive::Ptr MeshBuilder::build_primitive(
 IMesh::Ptr MeshBuilder::build(array_view<IMeshPrimitive::Ptr> primitives)
 {
     auto mesh_intf = ::velk::instance().create<IMesh>(::velk::ClassId::Mesh);
-    auto* mesh = dynamic_cast<Mesh*>(mesh_intf.get());
+    auto* mesh = interface_cast<IMeshInternal>(mesh_intf.get());
     if (!mesh) return nullptr;
 
     mesh->init(primitives, aabb{}, /*has_explicit_bounds*/ false);
@@ -87,7 +87,7 @@ IMesh::Ptr MeshBuilder::build(array_view<VertexAttribute> attributes,
     if (!prim) return nullptr;
 
     auto mesh_intf = ::velk::instance().create<IMesh>(::velk::ClassId::Mesh);
-    auto* mesh = dynamic_cast<Mesh*>(mesh_intf.get());
+    auto* mesh = interface_cast<IMeshInternal>(mesh_intf.get());
     if (!mesh) return nullptr;
 
     IMeshPrimitive::Ptr list[] = { prim };
@@ -100,7 +100,7 @@ IMesh::Ptr MeshBuilder::mesh_from_geometry(const CachedGeometry& g)
     // Fresh primitive referencing the shared buffer. Material defaults
     // to empty ObjectRef; callers set their own.
     auto prim_intf = ::velk::instance().create<IMeshPrimitive>(::velk::ClassId::MeshPrimitive);
-    auto* prim = dynamic_cast<MeshPrimitive*>(prim_intf.get());
+    auto* prim = interface_cast<IMeshPrimitiveInternal>(prim_intf.get());
     if (!prim) return nullptr;
 
     prim->init(g.buffer,
@@ -109,10 +109,11 @@ IMesh::Ptr MeshBuilder::mesh_from_geometry(const CachedGeometry& g)
                {g.attributes.data(), g.attributes.size()},
                g.vertex_stride,
                g.topology,
-               g.bounds);
+               g.bounds,
+               /*uv1_buffer*/ nullptr, /*uv1_offset*/ 0);
 
     auto mesh_intf = ::velk::instance().create<IMesh>(::velk::ClassId::Mesh);
-    auto* mesh = dynamic_cast<Mesh*>(mesh_intf.get());
+    auto* mesh = interface_cast<IMeshInternal>(mesh_intf.get());
     if (!mesh) return nullptr;
 
     IMeshPrimitive::Ptr list[] = { prim_intf };
