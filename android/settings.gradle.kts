@@ -17,3 +17,5 @@ dependencyResolutionManagement {
 rootProject.name = "velk-android"
 
 include(":velk-platform")
+include(":samples:simple")
+project(":samples:simple").projectDir = file("samples/simple")

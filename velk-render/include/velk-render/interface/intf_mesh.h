@@ -180,11 +180,12 @@ public:
 /**
  * @brief Internal init seam for IMeshPrimitive impls.
  *
- * Primitives stay immutable on the public IMeshPrimitive interface; the
- * builder constructs them via this internal interface (interface_cast,
- * no dynamic_cast). External callers should not handle this interface.
+ * Sibling interface (not inheriting IMeshPrimitive) so the concrete impl
+ * can list both as independent bases without diamond ambiguity, and so
+ * the metadata-layout position of IMeshPrimitive in the impl's interface
+ * chain stays stable.
  */
-class IMeshPrimitiveInternal : public Interface<IMeshPrimitiveInternal, IMeshPrimitive>
+class IMeshPrimitiveInternal : public Interface<IMeshPrimitiveInternal>
 {
 public:
     virtual void init(const IMeshBuffer::Ptr& buffer,
@@ -222,7 +223,7 @@ public:
 };
 
 /** Internal init seam for IMesh impls; see IMeshPrimitiveInternal. */
-class IMeshInternal : public Interface<IMeshInternal, IMesh>
+class IMeshInternal : public Interface<IMeshInternal>
 {
 public:
     virtual void init(array_view<IMeshPrimitive::Ptr> primitives,

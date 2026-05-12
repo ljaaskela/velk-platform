@@ -1,8 +1,14 @@
+#include "run.h"
+
 #include "velk-ui/plugins/text/api/text_visual.h"
 
 #include <velk/api/any.h>
 #include <velk/api/callback.h>
 #include <velk/api/velk.h>
+
+#if defined(__ANDROID__)
+#include <velk-runtime/plugins/android/native_activity_main.h>
+#endif
 
 #include <velk-render/api/material/shader_material.h>
 #include <velk-render/api/render_context.h>
@@ -30,8 +36,10 @@ Vehicula etiam elementum finibus enim duis feugiat commodo adipiscing tortor tem
 Nam hendrerit dignissim condimentum ullamcorper diam morbi eget consectetur odio in sagittis.
 )";
 
-int main(int argc, char* argv[])
+int velk_simple::run_app(int argc, char* argv[])
 {
+    (void)argc;
+    (void)argv;
     velk::ApplicationConfig config;
 
     constexpr int kWidth = 1280;
@@ -41,7 +49,7 @@ int main(int argc, char* argv[])
     wc.width = kWidth;
     wc.height = kHeight;
     wc.title = "velk-ui";
-    wc.update_rate = velk::UpdateRate::Unlimited;
+    wc.update_rate = velk::UpdateRate::VSync;
 
     auto app = velk::create_app(config);
     auto window = app.create_window(wc);
@@ -64,11 +72,11 @@ int main(int argc, char* argv[])
     auto camera_3d = scene.find_first<velk::IOrbit>(); // only the perspective one has orbit
 
     // Forward is the default path (no IRenderPath attachment needed).
-    if (camera) {
+    /*if (camera) {
         app.add_view(window, camera, {0.5f, 0, 0.5f, 1.0f});
-    }
+    }*/
     if (camera_3d) {
-        app.add_view(window, camera_3d, {0, 0, .5f, 1.0f});
+        app.add_view(window, camera_3d, {0, 0, 1.0f, 1.0f});
     }
 
     // Orbit camera control via input dispatcher events.
@@ -296,11 +304,25 @@ void main()
         }
     }
 
-    // Main loop
+#if defined(__ANDROID__)
+    // Framework-driven mode: Choreographer fires update()+prepare() per vsync
+    // on this thread; a dedicated render thread drains prepared frames and
+    // calls submit(). Loop returns when the activity is destroyed.
+    velk::android_run_frame_loop(app);
+#else
+    // App-driven mode: single-threaded poll/update/present loop.
     while (app.poll()) {
         app.update();
         app.present();
     }
+#endif
 
     return 0;
 }
+
+#if !defined(__ANDROID__)
+int main(int argc, char* argv[])
+{
+    return velk_simple::run_app(argc, argv);
+}
+#endif

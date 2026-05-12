@@ -68,10 +68,12 @@ add_subdirectory(plugins/text)
 add_subdirectory(plugins/image)
 add_subdirectory(plugins/gltf)
 add_subdirectory(velk-runtime)
-if(NOT ANDROID)
+if(ANDROID)
+    add_subdirectory(velk-runtime/plugins/android)
+else()
     add_subdirectory(velk-runtime/plugins/glfw)
-    add_subdirectory(samples)
 endif()
+add_subdirectory(samples)
 
 # =============================================================================
 # Route plugin DLL outputs into a `plugins/` subdir alongside the exe, so
@@ -89,7 +91,7 @@ set(VELK_PLUGIN_TARGETS
     velk_importer velk_animator velk_tracy
     velk_render velk_vk velk_rt velk_scene velk_ui
     velk_text velk_image velk_gltf
-    velk_runtime velk_runtime_glfw
+    velk_runtime velk_runtime_glfw velk_runtime_android
 )
 get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 foreach(plugin_target ${VELK_PLUGIN_TARGETS})

@@ -24,7 +24,7 @@ namespace velk::impl {
 /// so RtShape records can cache it once and only the per-frame
 /// instance data has to be re-uploaded.
 class MeshPrimitive
-    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitiveInternal, IDrawData>
+    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitive, IMeshPrimitiveInternal, IDrawData>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::MeshPrimitive, "MeshPrimitive");
@@ -103,7 +103,7 @@ private:
 /// Concrete IMesh container. Stores a list of primitives and a lazily
 /// computed aggregate bounds.
 class Mesh
-    : public ::velk::ext::Object<Mesh, IMeshInternal>
+    : public ::velk::ext::Object<Mesh, IMesh, IMeshInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::Mesh, "Mesh");
