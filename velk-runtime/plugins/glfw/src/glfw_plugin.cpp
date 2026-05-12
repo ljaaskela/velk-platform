@@ -3,6 +3,9 @@
 #include "glfw_window.h"
 
 #include <velk/api/velk.h>
+#include <velk/interface/resource/intf_resource_protocol.h>
+#include <velk/interface/resource/intf_resource_store.h>
+#include <velk/interface/types.h>
 
 #include <velk-ui/api/input_dispatcher.h>
 
@@ -15,6 +18,11 @@
 #include <windows.h>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan_win32.h>
+#include <direct.h>
+#define velk_getcwd _getcwd
+#else
+#include <unistd.h>
+#define velk_getcwd getcwd
 #endif
 
 namespace velk::impl {
@@ -24,6 +32,37 @@ static void glfw_error_callback(int error, const char* description)
     VELK_LOG(E, "GLFW error %d: %s", error, description);
 }
 
+static string current_working_directory()
+{
+    string base;
+    char cwd[4096];
+    if (velk_getcwd(cwd, sizeof(cwd))) {
+        base.append(cwd);
+        if (!base.empty()) {
+            char last = base.back();
+            if (last != '/' && last != '\\') {
+                base.append("/");
+            }
+        }
+    }
+    return base;
+}
+
+static void register_app_protocol(IVelk& velk)
+{
+    auto working = current_working_directory();
+    if (working.empty()) {
+        return;
+    }
+    auto app_proto = velk.create<IResourceProtocolInternal>(ClassId::FileProtocol);
+    if (!app_proto) {
+        return;
+    }
+    app_proto->set_scheme("app");
+    app_proto->set_base_path(working);
+    velk.resource_store().register_protocol(interface_pointer_cast<IResourceProtocol>(app_proto));
+}
+
 ReturnValue GlfwPlugin::initialize(IVelk& velk, PluginConfig&)
 {
     glfwSetErrorCallback(glfw_error_callback);
@@ -31,6 +70,8 @@ ReturnValue GlfwPlugin::initialize(IVelk& velk, PluginConfig&)
         VELK_LOG(E, "Failed to initialize GLFW");
         return ReturnValue::Fail;
     }
+
+    register_app_protocol(velk);
 
     return ::velk::register_type<GlfwWindow>(velk);
 }
