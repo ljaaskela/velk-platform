@@ -70,7 +70,7 @@ The system has three layers:
 graph TD
     App["App<br/><i>attach, render, shutdown</i>"]
     Renderer["Renderer (velk::ui)<br/><i>Batch DrawEntries, write GPU buffers, build DrawCalls</i>"]
-    Backend["IRenderBackend (velk::vk)<br/><i>create_buffer, map, gpu_address, create_texture,<br/>create_pipeline, begin_frame, submit, end_frame</i>"]
+    Backend["IRenderBackend (velk::vk)<br/><i>create_buffer, map, gpu_address, create_texture,<br/>create_pipeline, begin_frame, close_frame, submit_frame</i>"]
 
     App --> Renderer --> Backend
 ```
@@ -88,12 +88,12 @@ The following methods from `IRenderBackend` give the renderer everything it need
 | Category | Methods |
 |--|--|
 | Lifecycle | `init`, `shutdown`, `wait_idle` |
-| Surfaces | `create_surface`, `destroy_surface`, `resize_surface`, `acquire_swapchain_texture` |
+| Surfaces | `create_surface`, `destroy_surface`, `resize_surface`, `recreate_surface`, `acquire_swapchain_texture` |
 | GPU memory | `create_gpu_buffer`, `record_buffer_update`, `defer_destroy_gpu_buffer` |
 | Textures | `create_texture`, `upload_texture`, `read_texture`, `create_depth_attachment_texture`, `defer_destroy_gpu_texture` |
 | Render target groups | `create_render_target_group`, `defer_destroy_gpu_render_target_group` |
 | Pipelines | `create_pipeline_dynamic`, `create_compute_pipeline`, `defer_destroy_gpu_pipeline` |
-| Frame lifecycle | `begin_frame`, `create_command_buffer`, `execute`, `blit_to_texture`, `barrier`, `end_frame` |
+| Frame lifecycle | `begin_frame`, `create_command_buffer`, `execute`, `blit_to_texture`, `barrier`, `close_frame`, `submit_frame` |
 
 **Memory** is the foundation:
 * `create_gpu_buffer`: Allocate a GPU buffer (`GpuBufferDesc` sets size, CPU-writable flag, index-buffer usage). Returns an `IGpuBuffer::Ptr` whose `gpu_address()` is the BDA pointer shaders dereference via `buffer_reference`.
@@ -129,15 +129,16 @@ Above the backend, `IRenderContext` provides a higher-level API that separates s
 
 The UI renderer registers default vertex and fragment shaders during setup. This means materials typically only need to provide a fragment shader.
 
-**Frame lifecycle** — a frame is one `begin_frame` / `end_frame` pair. The backend has no `begin_pass` / `end_pass` calls: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
+**Frame lifecycle** — a frame is a `begin_frame` → `close_frame` → `submit_frame` sequence. The split lets all command recording happen on one thread (where the renderer runs `prepare`) while the GPU submit + present run on another (where it runs `present`); see [rendering](rendering.md). The backend has no `begin_pass` / `end_pass` calls: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
 
-* `begin_frame`: Waits on the GPU fence for the slot being reused, then starts primary command buffer recording.
-* `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr`. Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at `end_frame`. Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
+* `begin_frame`: Waits on the GPU fence for the slot being reused, then starts primary command buffer recording. Runs on the recording thread.
+* `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr`. Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at present time (in `submit_frame`). Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
 * `create_command_buffer`: Allocates an `IGpuCommandBuffer` (Vulkan secondary) that producers record once (draws / dispatches / texture blits / `record_begin_rendering`+`record_end_rendering`) and the executor replays each frame. One overload — no target argument needed for dynamic-rendering secondaries.
 * `execute`: Replays a recorded command buffer (`vkCmdExecuteCommands` on the primary).
 * `blit_to_texture`: Blits between two textures (used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies).
 * `barrier`: Inserts a pipeline barrier between passes — call when a pass reads output the previous one wrote.
-* `end_frame`: Emits any pending composite-to-swap blits, ends primary recording, submits to the GPU queue, and presents.
+* `close_frame`: Finalizes the frame on the recording thread. Snapshots the present target (composite image + swapchain) so the swap-image acquire and present can run on the submit thread without touching shared surface state. The primary is left open for `submit_frame` to finish.
+* `submit_frame`: Acquires the swap image, records and runs the composite-to-swap blit, ends the primary, submits to the GPU queue, and presents. Swapchain acquire and present both happen here so the swapchain is only ever used from one thread.
 
 The backend handles command buffer recording, synchronization, and image layout transitions internally; the renderer only speaks passes, dispatches, and barriers.
 
@@ -544,7 +545,7 @@ The Vulkan backend (`velk::vk`) uses:
 - **Single shared pipeline layout** (push constants + bindless descriptor set)
 - **Cached secondary command buffers** per producer pass; replayed via `vkCmdExecuteCommands` each frame, re-recorded only when the producer's content changes
 - **Timeline semaphore** for frame completion (replaces a CPU counter heuristic for slot reuse)
-- **Surface-as-texture composite**: per-surface RGBA16F intermediate is the stable render target; backend blits composite → swap at end_frame
+- **Surface-as-texture composite**: per-surface RGBA16F intermediate is the stable render target; backend blits composite → swap at present time (`submit_frame`)
 
 All synchronization is internal. The backend manages fences, semaphores, command buffer recording, and image layout transitions. None of this is exposed to the renderer.
 

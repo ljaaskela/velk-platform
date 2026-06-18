@@ -150,6 +150,12 @@ A managed (GLFW) window lives until closed by the user; `app.poll()` returns `fa
 
 A wrapped (framework-driven) window has no GLFW backing. `should_close()` always returns `false`; the host framework controls the lifecycle and is expected to fire `on_surface_destroyed` when tearing down.
 
+#### Suspend / resume
+
+On platforms where the OS destroys and recreates the native window across app suspend/resume (Android screen-off/on, lock/unlock, backgrounding), the runtime handles the surface lifecycle automatically — **no app code is required**. The Android platform plugin pauses rendering while the window is gone and, when a new native window arrives, rebuilds the underlying GPU surface (a new `VkSurfaceKHR` + swapchain) and resumes. The `Window` and its scene stay valid throughout; the `on_surface_destroyed` / `on_surface_created` events still fire if you want to react, but you do not need to tear down or recreate anything yourself.
+
+A custom embedded host that wraps surfaces directly (rather than using the Android plugin) drives the same path by publishing the new platform window handle into the surface state on recreation; the renderer then rebuilds the GPU surface on the next `prepare()`.
+
 ### Window events
 
 `IWindow` exposes typed events that user code can subscribe to via `ScopedHandler`:

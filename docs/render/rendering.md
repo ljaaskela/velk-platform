@@ -94,8 +94,8 @@ Rendering is split into two phases:
 
 | Phase | Method | Thread | Work |
 |-------|--------|--------|------|
-| **Prepare** | `renderer->prepare(desc)` | Main thread | Consume scene state, rebuild draw commands, write GPU buffers. Returns an opaque `Frame` handle. |
-| **Present** | `renderer->present(frame)` | Any thread | Submit draw calls to the backend (`begin_frame`, `submit`, `end_frame`). Blocks on vsync. |
+| **Prepare** | `renderer->prepare(desc)` | Main thread | Consume scene state, rebuild draw commands, write GPU buffers, and record the frame's command buffers (the whole frame is recorded here). Returns an opaque `Frame` handle. |
+| **Present** | `renderer->present(frame)` | Any thread | Submit the already-recorded frame to the GPU and present it (`submit_frame`). Records nothing itself; blocks on vsync. |
 
 The convenience method `renderer->render()` calls `present(prepare({}))` for the simple single-threaded case.
 
@@ -188,25 +188,23 @@ A single `prepare()` call can target any combination of surfaces. The resulting 
 ## What prepare() does internally
 
 1. Claim a frame slot from the pool (block if none free)
-2. For each view matching the `FrameDesc`:
-   a. Check for surface resize; update backend if needed
+2. `backend->begin_frame()`: wait on the slot's GPU fence, start the primary command buffer
+3. For each view matching the `FrameDesc`:
+   a. Check for surface resize / native-window swap; update the backend if needed (`resize_surface` / `recreate_surface`)
    b. `scene->consume_state()` to get the redraw/removed lists
    c. Evict removed elements from the draw command cache
    d. `rebuild_commands()` for dirty elements (query `IVisual` attachments)
    e. Upload dirty textures (e.g. glyph atlas updates)
    f. `rebuild_batches()` if batches are dirty (group by pipeline + texture)
    g. Write instance data, draw headers, and material params to the GPU staging buffer
-   h. Build the `DrawCall` array
-3. Store draw calls per surface in the frame slot
-4. Return the `Frame` handle
+   h. Build the `DrawCall` array and emit the view's passes into the frame graph
+4. Compile + execute the frame graph (records the primary command buffer), then `backend->close_frame()`
+5. Return the `Frame` handle — the frame is now fully recorded
 
 ## What present() does internally
 
 1. Discard older unpresented frames targeting the same surfaces
-2. For each surface in the frame:
-   a. `backend->begin_frame(surface_id)`: acquire swapchain image
-   b. `backend->submit(draw_calls)`: record into command buffer
-   c. `backend->end_frame()`: submit GPU work and present
+2. `backend->submit_frame()`: acquire the swap image, run the composite-to-swap blit, submit GPU work, and present
 3. Recycle the frame slot
 
 ## Performance profiling
