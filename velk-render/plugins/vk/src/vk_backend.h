@@ -109,7 +109,8 @@ public:
     /// commands from the last submission that referenced it.
     void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
-    void end_frame() override;
+    void close_frame() override;
+    void submit_frame() override;
 
     /// @name Debug-utils label helpers.
     /// Wrap the VK_EXT_debug_utils calls so call sites don't have to
@@ -178,13 +179,19 @@ private:
         /// fence has fired — guarantees kFrameOverlap frames of
         /// in-flight grace before vkFreeCommandBuffers runs.
         ::velk::vector<::VkCommandBuffer> deferred_persistent_frees;
-        /// Surface picked at acquire time; consumed by end_frame's submit
-        /// path. Per-slot so a second prepare() can pick a different
-        /// surface without trampling the one a concurrent submit needs.
+        /// Surface picked at acquire time; consumed by submit_frame. Per-slot
+        /// so a second prepare() can pick a different surface without
+        /// trampling the one a concurrent submit needs.
         uint64_t present_surface_id = 0;
         /// Index into image_available_ for the acquire semaphore tied to
         /// this frame's swapchain acquire. Per-slot for the same reason.
         uint32_t present_acquire_sem_idx = 0;
+        /// Swapchain + acquired image index snapshotted at `close_frame`
+        /// (recording thread) so `submit_frame` (render thread) submits and
+        /// presents without reading shared `SurfaceData`, which the next
+        /// frame's prepare may already be mutating.
+        VkSwapchainKHR present_swapchain = VK_NULL_HANDLE;
+        uint32_t present_image_index = 0;
         /// Coalesced TRANSFER → SHADER_READ barrier flag for this frame's
         /// vkCmdUpdateBuffer calls; set during recording, consumed at the
         /// next begin_pass.

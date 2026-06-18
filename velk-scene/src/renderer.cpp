@@ -854,6 +854,18 @@ Frame Renderer::prepare(const FrameDesc& desc)
     snippets_->begin_frame();
     build_frame_passes(desc, consumed_scenes, *slot);
 
+    // Record the whole frame on this (prepare / main) thread: compile the
+    // graph, execute it into the backend's primary command buffer, and close
+    // recording. The returned Frame is then fully recorded and immutable, so
+    // `present` can submit it from the render thread without recording
+    // anything — no command buffer or pool is touched by two threads.
+    if (slot->graph) {
+        VELK_PERF_SCOPE("renderer.record");
+        slot->graph->compile();
+        slot->graph->execute(*backend_);
+    }
+    backend_->close_frame();
+
     active_slot_ = nullptr;
     slot->ready = true;
     return Frame{slot->id};
@@ -888,6 +900,14 @@ void Renderer::present(Frame frame)
         // pending slot's pass matches a write in the frame being
         // presented, the slot's pass is dropped. Tier 2 graph deps will
         // subsume this.
+        //
+        // Inert in both current runtimes: desktop presents synchronously and
+        // Android drains frames in FIFO order, so by the time a frame is
+        // presented every older frame has already been presented (not ready).
+        // Since each frame is now fully recorded in `prepare`, dropping a
+        // superseded frame's passes here no longer cancels its GPU work — a
+        // skip-to-newest presentation model would need to gate `submit_frame`
+        // instead. Deferred until such a model exists.
         auto pass_writes_target = [](const IRenderPass& pass) -> uint64_t {
             for (auto& w : pass.writes()) {
                 if (!w) continue;
@@ -929,15 +949,12 @@ void Renderer::present(Frame frame)
             }
         }
 
-        // Backend frame was opened by `prepare`; just compile + execute + end here.
-        target->graph->compile();
+        // The frame was fully recorded by `prepare` (compile + execute +
+        // close_frame). Here we only submit the already-recorded command
+        // buffers to the GPU and present — no recording on this thread.
         {
             VELK_PERF_SCOPE("renderer.submit");
-            target->graph->execute(*backend_);
-        }
-        {
-            VELK_PERF_SCOPE("renderer.end_frame");
-            backend_->end_frame();
+            backend_->submit_frame();
         }
         present_counter_++;
         target->ready = false;

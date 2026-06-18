@@ -2431,6 +2431,13 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
         }
     }
 
+    // Snapshot the presenting surface's swapchain + acquired image into the
+    // slot so submit_frame (render thread) needs no shared SurfaceData.
+    if (sync.present_surface_id == surface_id) {
+        sync.present_swapchain = sd.swapchain;
+        sync.present_image_index = sd.image_index;
+    }
+
     const VkImage src_image = surf_tex->vk_image();
     const VkImageLayout src_canonical_layout = surf_tex->vk_current_layout();
     const VkImage dst_image = sd.images[sd.image_index];
@@ -2517,24 +2524,15 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
     surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-void VkBackend::end_frame()
+void VkBackend::close_frame()
 {
-    // Pop the FIFO slot pushed by begin_frame for this frame. End up with
-    // the slot prepare() recorded into, even if a later prepare() has
-    // already advanced recording_slot_ on the main thread.
-    uint32_t slot;
-    {
-        std::lock_guard<std::mutex> lk(in_flight_mutex_);
-        if (in_flight_slots_.empty()) {
-            return;  // unmatched end_frame — shouldn't happen in normal flow
-        }
-        slot = in_flight_slots_.front();
-        in_flight_slots_.pop_front();
-    }
-    auto& sync = frame_sync_[slot];
+    // Recording tail, on the same thread as prepare / begin_frame. Records
+    // the composite-to-swap blit for each surface rendered this frame and
+    // ends the primary. After this the frame's command buffers are complete
+    // and immutable — nothing records into them again — so submit_frame can
+    // run on a separate thread.
+    auto& sync = frame_sync_[recording_slot_];
 
-    // Emit composite-to-swap blit for each surface that was acquired
-    // this frame.
     for (auto& [surface_id, sd] : surfaces_) {
         if (sd.composite_acquired_this_frame) {
             cmd_push_label(sync.command_buffer, "Composite -> Swap");
@@ -2545,56 +2543,70 @@ void VkBackend::end_frame()
 
     cmd_pop_label(sync.command_buffer);  // "Frame"
     vkEndCommandBuffer(sync.command_buffer);
+    frame_open_ = false;
+}
+
+void VkBackend::submit_frame()
+{
+    // Pop the FIFO slot pushed by begin_frame. submit_frame only submits
+    // already-recorded command buffers (close_frame ended them), so it runs
+    // on the render thread without touching any pool or shared SurfaceData.
+    uint32_t slot;
+    {
+        std::lock_guard<std::mutex> lk(in_flight_mutex_);
+        if (in_flight_slots_.empty()) {
+            return;  // unmatched submit_frame — shouldn't happen in normal flow
+        }
+        slot = in_flight_slots_.front();
+        in_flight_slots_.pop_front();
+    }
+    auto& sync = frame_sync_[slot];
 
     // Allocate this submit's timeline value. The signal value rides
     // along on every queue submit below; renderer pulls it via
     // frame_completion_marker() right after this returns.
     const uint64_t timeline_value = next_frame_value_.fetch_add(1);
 
-    if (sync.present_surface_id != 0) {
-        // Surface was used: submit with swapchain synchronization
-        auto it = surfaces_.find(sync.present_surface_id);
-        if (it != surfaces_.end()) {
-            auto& sd = it->second;
+    if (sync.present_surface_id != 0 && sync.present_swapchain != VK_NULL_HANDLE) {
+        // Surface was used: submit with swapchain synchronization, reading
+        // only the per-slot snapshot taken at close_frame.
+        VkSemaphore wait_sem = image_available_[sync.present_acquire_sem_idx];
+        VkSemaphore signal_sems[2] = { render_finished_[sync.present_image_index], frame_timeline_ };
+        // Binary semaphore values are ignored; index 1 is the timeline value.
+        uint64_t signal_values[2] = { 0, timeline_value };
 
-            VkSemaphore wait_sem = image_available_[sync.present_acquire_sem_idx];
-            VkSemaphore signal_sems[2] = { render_finished_[sd.image_index], frame_timeline_ };
-            // Binary semaphore values are ignored; index 1 is the timeline value.
-            uint64_t signal_values[2] = { 0, timeline_value };
+        VkTimelineSemaphoreSubmitInfo timeline_info{};
+        timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline_info.signalSemaphoreValueCount = 2;
+        timeline_info.pSignalSemaphoreValues = signal_values;
 
-            VkTimelineSemaphoreSubmitInfo timeline_info{};
-            timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timeline_info.signalSemaphoreValueCount = 2;
-            timeline_info.pSignalSemaphoreValues = signal_values;
+        // Cover both the raster path (COLOR_ATTACHMENT_OUTPUT) and the
+        // RT blit path (TRANSFER) on acquire-semaphore wait.
+        VkPipelineStageFlags wait_stage =
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
 
-            // Cover both the raster path (COLOR_ATTACHMENT_OUTPUT) and the
-            // RT blit path (TRANSFER) on acquire-semaphore wait.
-            VkPipelineStageFlags wait_stage =
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo submit_info{};
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.pNext = &timeline_info;
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &wait_sem;
+        submit_info.pWaitDstStageMask = &wait_stage;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &sync.command_buffer;
+        submit_info.signalSemaphoreCount = 2;
+        submit_info.pSignalSemaphores = signal_sems;
 
-            VkSubmitInfo submit_info{};
-            submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit_info.pNext = &timeline_info;
-            submit_info.waitSemaphoreCount = 1;
-            submit_info.pWaitSemaphores = &wait_sem;
-            submit_info.pWaitDstStageMask = &wait_stage;
-            submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &sync.command_buffer;
-            submit_info.signalSemaphoreCount = 2;
-            submit_info.pSignalSemaphores = signal_sems;
+        vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
 
-            vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        VkPresentInfoKHR present_info{};
+        present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores = &signal_sems[0];
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &sync.present_swapchain;
+        present_info.pImageIndices = &sync.present_image_index;
 
-            VkPresentInfoKHR present_info{};
-            present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-            present_info.waitSemaphoreCount = 1;
-            present_info.pWaitSemaphores = &signal_sems[0];
-            present_info.swapchainCount = 1;
-            present_info.pSwapchains = &sd.swapchain;
-            present_info.pImageIndices = &sd.image_index;
-
-            vkQueuePresentKHR(graphics_queue_, &present_info);
-        }
+        vkQueuePresentKHR(graphics_queue_, &present_info);
     } else {
         // Headless: submit without swapchain synchronization
         uint64_t signal_value = timeline_value;
@@ -2615,7 +2627,6 @@ void VkBackend::end_frame()
     }
 
     last_frame_value_.store(timeline_value);
-    frame_open_ = false;
     // No recording_slot_ advance here; begin_frame advances on the main thread.
 }
 

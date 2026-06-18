@@ -212,7 +212,7 @@ public:
     virtual void wait_idle() = 0;
 
     /** @brief Returns a monotonically increasing marker tagging the GPU
-     *         work submitted by the most recent `end_frame()` call.
+     *         work submitted by the most recent `submit_frame()` call.
      *
      * Stamp the returned value on whatever per-frame state needs to
      * outlive the frame's GPU work (frame slot, deferred-destroy queue
@@ -228,7 +228,7 @@ public:
      */
     virtual void wait_for_frame_completion(uint64_t marker) = 0;
 
-    /** @brief Marker the next `end_frame()` submit will signal.
+    /** @brief Marker the next `submit_frame()` submit will signal.
      *
      * Use this to tag deferred-destroy entries for resources still
      * referenced by the in-flight frame: once the returned marker
@@ -262,7 +262,7 @@ public:
      * Producers render to the returned target as if it were any
      * regular `IGpuTexture`. The backend tracks which surfaces were
      * rendered to and emits a final composite-to-swap blit at
-     * `end_frame`. Multi-view-to-same-surface is handled internally
+     * `close_frame`. Multi-view-to-same-surface is handled internally
      * (first view loadOp respected; subsequent records overridden to
      * LOAD so draws stack).
      *
@@ -462,8 +462,25 @@ public:
      */
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
-    /** @brief Ends command recording, submits to GPU queue, and presents any surfaces used. */
-    virtual void end_frame() = 0;
+    /** @brief Finalizes command recording for the current frame: records
+     *         the composite-to-swap present blit for any surfaces used and
+     *         ends the primary command buffer.
+     *
+     * Runs on the same thread as `prepare` / `begin_frame` (the recording
+     * thread). After this returns the frame's command buffers are complete
+     * and immutable — nothing records into them again — so the frame can be
+     * handed to another thread for submission. Pair with `submit_frame`.
+     */
+    virtual void close_frame() = 0;
+
+    /** @brief Submits the closed frame to the GPU queue and presents any
+     *         surfaces used.
+     *
+     * Records nothing — it only submits already-recorded command buffers,
+     * so it is safe to call on a render thread separate from the one that
+     * ran `prepare` / `close_frame`. Pair with `close_frame`.
+     */
+    virtual void submit_frame() = 0;
 
     /// @}
 };
