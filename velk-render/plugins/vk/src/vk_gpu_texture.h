@@ -290,8 +290,13 @@ public:
     ::velk::SamplerDesc get_sampler_desc() const override { return {}; }
 
     // IRenderTarget
-    ::velk::DepthFormat get_depth_format() const override { return ::velk::DepthFormat::None; }
-    void set_depth_format(::velk::DepthFormat) override {}
+    // Stores the requested depth format so a path rendering directly into the
+    // surface composite (forward, no post-process) gets a paired depth
+    // attachment. The composite itself is color-only; the format is a request
+    // the path reads to allocate its own depth texture. Stubbing this (always
+    // None) silently disabled depth for direct-to-surface forward rendering.
+    ::velk::DepthFormat get_depth_format() const override { return depth_format_; }
+    void set_depth_format(::velk::DepthFormat df) override { depth_format_ = df; }
     void set_size(uint32_t w, uint32_t h) override { dimensions_ = {w, h}; }
     void set_format(::velk::PixelFormat f) override { format_ = f; }
 
@@ -340,6 +345,7 @@ private:
     ::VkImageLayout current_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     ::velk::uvec2       dimensions_{};
     ::velk::PixelFormat format_ = ::velk::PixelFormat::RGBA16F;
+    ::velk::DepthFormat depth_format_ = ::velk::DepthFormat::None;
     bool cleared_this_frame_ = false;
 };
 
