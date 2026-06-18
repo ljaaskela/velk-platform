@@ -24,7 +24,7 @@ namespace velk::impl {
 /// so RtShape records can cache it once and only the per-frame
 /// instance data has to be re-uploaded.
 class MeshPrimitive
-    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitive, IDrawData>
+    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitive, IMeshPrimitiveInternal, IDrawData>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::MeshPrimitive, "MeshPrimitive");
@@ -32,9 +32,9 @@ public:
     MeshPrimitive() = default;
 
     /// Internal: populates the primitive from a pre-uploaded or
-    /// pre-filled IMeshBuffer. Called by MeshBuilder; not part of the
-    /// IMeshPrimitive interface so primitives stay immutable from the
-    /// consumer's perspective.
+    /// pre-filled IMeshBuffer. Reached via interface_cast on
+    /// IMeshPrimitiveInternal so primitives stay immutable from the
+    /// IMeshPrimitive consumer perspective.
     void init(const IMeshBuffer::Ptr& buffer,
               uint32_t vertex_offset, uint32_t vertex_count,
               uint32_t index_offset, uint32_t index_count,
@@ -42,8 +42,8 @@ public:
               uint32_t vertex_stride,
               MeshTopology topology,
               const aabb& bounds,
-              const IMeshBuffer::Ptr& uv1_buffer = nullptr,
-              uint32_t uv1_offset = 0);
+              const IMeshBuffer::Ptr& uv1_buffer,
+              uint32_t uv1_offset) override;
 
     IMeshBuffer::Ptr get_buffer() const override { return buffer_; }
     uint32_t get_vertex_offset() const override { return vertex_offset_; }
@@ -103,7 +103,7 @@ private:
 /// Concrete IMesh container. Stores a list of primitives and a lazily
 /// computed aggregate bounds.
 class Mesh
-    : public ::velk::ext::Object<Mesh, IMesh>
+    : public ::velk::ext::Object<Mesh, IMesh, IMeshInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::Mesh, "Mesh");
@@ -115,7 +115,7 @@ public:
     /// exact extent analytically); otherwise the aggregate is computed
     /// lazily on first `get_bounds` call from the primitive bounds.
     void init(array_view<IMeshPrimitive::Ptr> primitives,
-              const aabb& bounds, bool has_explicit_bounds);
+              const aabb& bounds, bool has_explicit_bounds) override;
 
     array_view<IMeshPrimitive::Ptr> get_primitives() const override
     {

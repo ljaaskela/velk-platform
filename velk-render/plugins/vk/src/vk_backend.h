@@ -4,6 +4,8 @@
 #include <velk/ext/object.h>
 #include <velk/vector.h>
 
+#include <atomic>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 #include <velk-render/interface/intf_render_backend.h>
@@ -36,6 +38,8 @@ public:
     uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
+    void recreate_surface(uint64_t surface_id, void* native_handle,
+                          int width, int height) override;
     IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) override;
 
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
@@ -107,7 +111,8 @@ public:
     /// commands from the last submission that referenced it.
     void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
-    void end_frame() override;
+    void close_frame() override;
+    void submit_frame() override;
 
     /// @name Debug-utils label helpers.
     /// Wrap the VK_EXT_debug_utils calls so call sites don't have to
@@ -137,8 +142,10 @@ private:
     // before reusing the slot — replacing the prior CPU-counter heuristic
     // with a real GPU fence.
     VkSemaphore frame_timeline_ = VK_NULL_HANDLE;
-    uint64_t next_frame_value_ = 1;
-    uint64_t last_frame_value_ = 0;
+    // Atomic because end_frame (render thread) updates these while prepare
+    // (main thread) may read frame_completion_marker concurrently.
+    std::atomic<uint64_t> next_frame_value_{1};
+    std::atomic<uint64_t> last_frame_value_{0};
 
     // Command submission with double-buffered sync objects.
     // Even with single frame-in-flight, we need 2 sets because the present
@@ -153,23 +160,68 @@ private:
     VkCommandPool persistent_secondary_pool_ = VK_NULL_HANDLE;
 
     static constexpr uint32_t kFrameOverlap = 3;
+    static constexpr uint32_t kMaxSwapchainImages = 8;
 
-    // Per-frame-in-flight sync: fence + command buffer.
+    // Per-frame-in-flight sync: fence + command buffer + per-frame state.
+    // Each in-flight frame owns its own slot so prepare() (main thread)
+    // and submit() (render thread) never touch the same one concurrently.
     struct FrameSync
     {
         VkFence fence = VK_NULL_HANDLE;
         // Qualified `::VkCommandBuffer` everywhere — `VkCommandBuffer`
         // resolves to our impl class inside `velk::vk`.
         ::VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        /// Per-slot pool so begin_frame (main thread) and end_frame
+        /// (render thread, on a different slot) never touch the same
+        /// pool concurrently — Vulkan requires pool ops to be externally
+        /// synchronized.
+        VkCommandPool command_pool = VK_NULL_HANDLE;
         /// Persistent-pool secondaries queued for free at this slot
         /// when their owning `IGpuCommandBuffer` Ptr drops. Drained at
         /// the top of `begin_frame` for this slot, after the slot's
         /// fence has fired — guarantees kFrameOverlap frames of
         /// in-flight grace before vkFreeCommandBuffers runs.
         ::velk::vector<::VkCommandBuffer> deferred_persistent_frees;
+        /// Surface picked at acquire time; consumed by submit_frame. Per-slot
+        /// so a second prepare() can pick a different surface without
+        /// trampling the one a concurrent submit needs.
+        uint64_t present_surface_id = 0;
+        /// Index into image_available_ for the acquire semaphore tied to
+        /// this frame's swapchain acquire. Per-slot for the same reason.
+        uint32_t present_acquire_sem_idx = 0;
+        /// Acquired swap image index for this frame (set by record_present_blit
+        /// on the render thread); also indexes render_finished_.
+        uint32_t present_image_index = 0;
+        /// Present target snapshotted at `close_frame` (main thread) so
+        /// submit_frame (render thread) does acquire + present-blit + present
+        /// without reading shared SurfaceData (which prepare may be mutating).
+        /// The composite blit is layout-neutral (returns it to SHADER_READ), so
+        /// close_frame updates the composite's tracked layout and the render
+        /// thread never writes shared composite state. present_swapchain ==
+        /// VK_NULL_HANDLE means nothing to present this frame.
+        VkSwapchainKHR present_swapchain = VK_NULL_HANDLE;
+        VkImage present_composite_image = VK_NULL_HANDLE;
+        VkImageLayout present_composite_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage present_images[kMaxSwapchainImages]{};
+        uint32_t present_image_count = 0;
+        int present_width = 0;
+        int present_height = 0;
+        /// Coalesced TRANSFER → SHADER_READ barrier flag for this frame's
+        /// vkCmdUpdateBuffer calls; set during recording, consumed at the
+        /// next begin_pass.
+        bool pending_buffer_update_barrier = false;
     };
     FrameSync frame_sync_[kFrameOverlap]{};
-    uint32_t frame_sync_index_ = 0;
+
+    /// Slot currently being prepared/recorded on the main thread. Advances
+    /// at begin_frame. Main thread only — no lock needed.
+    uint32_t recording_slot_ = kFrameOverlap - 1;
+
+    /// FIFO queue of slots between begin_frame and end_frame. begin_frame
+    /// pushes; end_frame pops. Bridges the prepare (main) → submit (render)
+    /// thread split so end_frame knows which slot to consume.
+    std::deque<uint32_t> in_flight_slots_;
+    std::mutex in_flight_mutex_;
 
     /// Tracked at `begin_pass` so `submit()` and
     /// `create_command_buffer()` can populate `VkCommandBufferInheritanceInfo`
@@ -179,14 +231,12 @@ private:
     VkRenderPass current_render_pass_ = VK_NULL_HANDLE;
     VkFramebuffer current_framebuffer_ = VK_NULL_HANDLE;
 
-/// Set by `mark_pending_buffer_update_barrier`; consumed by the
-    /// next `begin_pass` to emit a single TRANSFER → SHADER_READ
-    /// barrier covering all `vkCmdUpdateBuffer`s recorded this frame.
-    bool pending_buffer_update_barrier_ = false;
+    // pending_buffer_update_barrier moved into FrameSync (per-slot).
 
     // Per-swapchain-image semaphores to avoid present engine conflicts.
     // Indexed by the acquired image index, not the frame sync index.
-    static constexpr uint32_t kMaxSwapchainImages = 4;
+    // Bumped from 4 to 8 because Android compositors commonly return 5–6
+    // swapchain images, which would OOB the smaller bound.
     VkSemaphore image_available_[kMaxSwapchainImages]{};
     VkSemaphore render_finished_[kMaxSwapchainImages]{};
     uint32_t acquire_semaphore_index_ = 0;
@@ -251,9 +301,14 @@ private:
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
     uint64_t next_surface_id_ = 1;
-    uint64_t present_surface_id_ = 0;     ///< Surface to present in end_frame (0 = headless).
-    uint32_t present_acquire_sem_idx_ = 0; ///< Acquire semaphore index used for the surface pass.
-    bool frame_open_ = false;             ///< True between begin_frame/end_frame.
+
+    /// Surface-create callback retained from init (VulkanInitParams). Stored
+    /// so `recreate_surface` can build a fresh VkSurfaceKHR from a new native
+    /// window (Android suspend/resume). Signature matches CreateSurfaceFn:
+    /// bool(vk_instance, out_VkSurfaceKHR, user_data=native_handle).
+    bool (*surface_create_fn_)(void*, void*, void*) = nullptr;
+    // present_surface_id, present_acquire_sem_idx moved into FrameSync.
+    bool frame_open_ = false;             ///< True between begin_frame/end_frame (debug flag only).
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 
     /// Pending `vmaDestroyBuffer` calls keyed by the
@@ -349,10 +404,12 @@ private:
     bool create_surface_composite(uint64_t surface_id, SurfaceData& sd);
     void destroy_surface_composite(SurfaceData& sd);
 
-    /// Records the final composite-to-swap blit on the primary cmd
-    /// buffer for a surface that was rendered to this frame. Called
-    /// from end_frame for each surface whose composite is dirty.
-    void emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd);
+    /// Acquires the next swap image and records the composite-to-swap blit
+    /// onto the slot's primary, entirely from the @p sync snapshot taken at
+    /// close_frame. Runs on the render thread (from submit_frame) so acquire +
+    /// present stay on one thread and no shared SurfaceData is touched.
+    /// Returns false if the swapchain is out of date (skip present).
+    bool record_present_blit(FrameSync& sync);
 
     ::VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(::VkCommandBuffer cb);

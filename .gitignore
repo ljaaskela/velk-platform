@@ -1,6 +1,19 @@
-build/**
+build/
 .claude/**
 .qtcreator/**
+.vs/
+design-notes/
+shader_cache/
+
+# Gradle / Android Studio
+.gradle/
+.cxx/
+.kotlin/
+.idea/
+*.iml
+local.properties
+captures/
+*.hprof
 
 # Prerequisites
 *.d

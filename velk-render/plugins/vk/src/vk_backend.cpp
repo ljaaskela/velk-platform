@@ -156,6 +156,9 @@ bool VkBackend::init(void* params)
     auto* vk_params = static_cast<VulkanInitParams*>(params);
     VkSurfaceKHR initial_surface = VK_NULL_HANDLE;
     if (vk_params && vk_params->create_surface) {
+        // Retain the callback so recreate_surface can rebuild the platform
+        // surface handle from a new native window after suspend/resume.
+        surface_create_fn_ = vk_params->create_surface;
         if (!vk_params->create_surface(instance_, &initial_surface, vk_params->user_data)) {
             VELK_LOG(E, "VkBackend: failed to create initial surface");
             return false;
@@ -287,6 +290,12 @@ void VkBackend::shutdown()
         vkDestroyCommandPool(device_, persistent_secondary_pool_, nullptr);
         persistent_secondary_pool_ = VK_NULL_HANDLE;
     }
+    for (uint32_t i = 0; i < kFrameOverlap; ++i) {
+        if (frame_sync_[i].command_pool) {
+            vkDestroyCommandPool(device_, frame_sync_[i].command_pool, nullptr);
+            frame_sync_[i].command_pool = VK_NULL_HANDLE;
+        }
+    }
     vkDestroyCommandPool(device_, command_pool_, nullptr);
 
     vmaDestroyAllocator(allocator_);
@@ -316,8 +325,10 @@ bool VkBackend::create_vk_instance()
 
     vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
-#ifdef _WIN32
+#if defined(_WIN32)
         "VK_KHR_win32_surface",
+#elif defined(__ANDROID__)
+        "VK_KHR_android_surface",
 #endif
         // Always enabled: debug-utils labels are free when no debugger
         // is attached and let RenderDoc / Nsight group events by our
@@ -325,17 +336,17 @@ bool VkBackend::create_vk_instance()
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
     };
 
-    // Validation always on in debug; in release, opt in via
-    // VELK_VK_VALIDATION=1 so we can run release builds with validation
-    // when chasing a TDR that's too slow under debug.
+    // Validation on by default in debug builds (both desktop and Android).
+    // Android sample APKs bundle libVkLayer_khronos_validation.so under
+    // lib/<abi>/ via the gradle downloadValidationLayers task — without that,
+    // vkCreateInstance fails with VK_ERROR_LAYER_NOT_PRESENT.
     bool enable_validation = false;
 #ifndef NDEBUG
     enable_validation = true;
-#else
+#endif
     if (const char* v = std::getenv("VELK_VK_VALIDATION")) {
         enable_validation = (v[0] == '1');
     }
-#endif
 
     vector<const char*> layers;
     if (enable_validation) {
@@ -350,8 +361,8 @@ bool VkBackend::create_vk_instance()
     ci.enabledLayerCount = static_cast<uint32_t>(layers.size());
     ci.ppEnabledLayerNames = layers.data();
 
-    if (vkCreateInstance(&ci, nullptr, &instance_) != VK_SUCCESS) {
-        VELK_LOG(E, "VkBackend: failed to create VkInstance");
+    if (VkResult r = vkCreateInstance(&ci, nullptr, &instance_); r != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: vkCreateInstance failed (VkResult=%d)", static_cast<int>(r));
         return false;
     }
     return true;
@@ -516,22 +527,26 @@ bool VkBackend::create_command_pool()
     ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     ci.queueFamilyIndex = graphics_family_;
 
+    // command_pool_ stays around for one-shot ops (begin_one_shot_commands).
+    // Frame-loop primary cmd buffers come from per-slot pools instead — see
+    // FrameSync::command_pool — so begin_frame (main thread) and end_frame
+    // (render thread) never touch the same pool concurrently.
     if (vkCreateCommandPool(device_, &ci, nullptr, &command_pool_) != VK_SUCCESS) {
         return false;
     }
 
-    VkCommandBufferAllocateInfo alloc_info{};
-    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    alloc_info.commandPool = command_pool_;
-    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc_info.commandBufferCount = kFrameOverlap;
-
-    ::VkCommandBuffer cbs[kFrameOverlap];
-    if (vkAllocateCommandBuffers(device_, &alloc_info, cbs) != VK_SUCCESS) {
-        return false;
-    }
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
-        frame_sync_[i].command_buffer = cbs[i];
+        if (vkCreateCommandPool(device_, &ci, nullptr, &frame_sync_[i].command_pool) != VK_SUCCESS) {
+            return false;
+        }
+        VkCommandBufferAllocateInfo alloc_info{};
+        alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.commandPool = frame_sync_[i].command_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device_, &alloc_info, &frame_sync_[i].command_buffer) != VK_SUCCESS) {
+            return false;
+        }
     }
 
     // Long-lived secondary pool: producers' cached cmd buffers
@@ -831,6 +846,39 @@ void VkBackend::resize_surface(uint64_t surface_id, int width, int height)
     create_surface_composite(surface_id, it->second);
 }
 
+void VkBackend::recreate_surface(uint64_t surface_id, void* native_handle,
+                                 int width, int height)
+{
+    auto it = surfaces_.find(surface_id);
+    if (it == surfaces_.end() || !surface_create_fn_) {
+        return;
+    }
+    auto& sd = it->second;
+
+    // Caller (Android resume) guarantees no frame is in flight; wait idle
+    // before tearing the old swapchain + (now-invalid) surface handle down.
+    vkDeviceWaitIdle(device_);
+    destroy_swapchain(sd);
+    if (sd.surface) {
+        vkDestroySurfaceKHR(instance_, sd.surface, nullptr);
+        sd.surface = VK_NULL_HANDLE;
+    }
+
+    VkSurfaceKHR new_surface = VK_NULL_HANDLE;
+    if (!surface_create_fn_(instance_, &new_surface, native_handle)) {
+        VELK_LOG(E, "VkBackend::recreate_surface: surface-create callback failed");
+        return;
+    }
+    sd.surface = new_surface;
+    sd.width = width;
+    sd.height = height;
+    if (!create_swapchain(sd)) {
+        VELK_LOG(E, "VkBackend::recreate_surface: create_swapchain failed");
+        return;
+    }
+    create_surface_composite(surface_id, sd);
+}
+
 IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)
 {
     auto it = surfaces_.find(surface_id);
@@ -848,7 +896,7 @@ IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)
         sd.composite_acquired_this_frame = true;
         auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
         if (surf_tex && surf_tex->vk_image() != VK_NULL_HANDLE) {
-            auto& sync = frame_sync_[frame_sync_index_];
+            auto& sync = frame_sync_[recording_slot_];
             cmd_push_label(sync.command_buffer, "Composite Clear");
             const VkImage img = surf_tex->vk_image();
             const VkImageLayout old_layout = surf_tex->vk_current_layout();
@@ -943,8 +991,33 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     // image via vkCmdBlitImage (the blit_to_surface path).
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ci.preTransform = caps.currentTransform;
+    // Use IDENTITY when supported so the compositor handles device rotation.
+    // The alternative (preTransform = currentTransform) requires the app to
+    // pre-rotate its content in the projection matrix; velk's camera path
+    // doesn't do that yet, so rotated displays would show portrait-oriented
+    // content. Fall back to currentTransform if IDENTITY isn't supported.
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    } else {
+        ci.preTransform = caps.currentTransform;
+    }
+    // Pick a supported compositeAlpha. Android surfaces commonly only support
+    // INHERIT (not OPAQUE), so the previous hardcoded OPAQUE caused
+    // vkCreateSwapchainKHR to fail there. Prefer OPAQUE when available, fall
+    // through to the other defined bits.
+    constexpr VkCompositeAlphaFlagBitsKHR kCompositePrefs[] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+    };
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    for (auto bit : kCompositePrefs) {
+        if (caps.supportedCompositeAlpha & bit) {
+            ci.compositeAlpha = bit;
+            break;
+        }
+    }
     ci.presentMode = present_mode;
     ci.clipped = VK_TRUE;
 
@@ -956,6 +1029,11 @@ bool VkBackend::create_swapchain(SurfaceData& sd)
     // Get images
     uint32_t img_count = 0;
     vkGetSwapchainImagesKHR(device_, sd.swapchain, &img_count, nullptr);
+    if (img_count > kMaxSwapchainImages) {
+        VELK_LOG(E, "VkBackend: swapchain returned %u images, exceeds kMaxSwapchainImages=%u",
+                 img_count, kMaxSwapchainImages);
+        return false;
+    }
     sd.images.resize(img_count);
     vkGetSwapchainImagesKHR(device_, sd.swapchain, &img_count, sd.images.data());
 
@@ -1147,9 +1225,9 @@ void VkBackend::record_buffer_update(IGpuBuffer& target, size_t offset,
     if (!vk_gb) return;
     ::VkBuffer buffer = vk_gb->vk_buffer();
     if (buffer == VK_NULL_HANDLE) return;
-    auto& sync = frame_sync_[frame_sync_index_];
+    auto& sync = frame_sync_[recording_slot_];
     vkCmdUpdateBuffer(sync.command_buffer, buffer, offset, size, data);
-    pending_buffer_update_barrier_ = true;
+    sync.pending_buffer_update_barrier = true;
 }
 
 void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
@@ -1985,13 +2063,23 @@ void VkBackend::drain_deferred_textures()
 
 void VkBackend::begin_frame()
 {
-    auto& sync = frame_sync_[frame_sync_index_];
+    // Advance the recording slot first so prepare(N+1) records into a
+    // different slot than submit(N) is consuming on the render thread.
+    // The fence wait below gates reuse when the slot is still GPU-busy.
+    recording_slot_ = (recording_slot_ + 1) % kFrameOverlap;
+    auto& sync = frame_sync_[recording_slot_];
     vkWaitForFences(device_, 1, &sync.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(device_, 1, &sync.fence);
     vkResetCommandBuffer(sync.command_buffer, 0);
 
+    // Reset per-slot state captured during recording (formerly VkBackend
+    // fields; moved into FrameSync so concurrent submits stay isolated).
+    sync.present_surface_id = 0;
+    sync.present_acquire_sem_idx = 0;
+    sync.pending_buffer_update_barrier = false;
+
     RENDER_LOG("vk.begin_frame slot=%u primary=%p deferred_frees=%zu",
-               frame_sync_index_, (void*)sync.command_buffer,
+               recording_slot_, (void*)sync.command_buffer,
                sync.deferred_persistent_frees.size());
 
     // Drain persistent-pool secondaries deferred when this slot last
@@ -2008,8 +2096,6 @@ void VkBackend::begin_frame()
     drain_deferred_pipelines();
     drain_deferred_textures();
     drain_deferred_render_target_groups();
-
-    pending_buffer_update_barrier_ = false;
 
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2030,9 +2116,14 @@ void VkBackend::begin_frame()
                             0, nullptr);
 
     frame_open_ = true;
-    present_surface_id_ = 0;
     for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
     for (auto* g  : live_render_target_groups_) g->mark_cleared_this_frame(false);
+
+    // Bridge to end_frame on the render thread.
+    {
+        std::lock_guard<std::mutex> lk(in_flight_mutex_);
+        in_flight_slots_.push_back(recording_slot_);
+    }
 
     // Surface composites need a fresh "canvas" per frame, but the
     // actual clear is deferred to the first acquire_swapchain_texture
@@ -2121,10 +2212,10 @@ void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
     // recently-submitted frame's GPU work referencing the secondary
     // could still be in flight when vkFreeCommandBuffers ran.
     uint32_t target_slot =
-        (frame_sync_index_ + kFrameOverlap - 1) % kFrameOverlap;
+        (recording_slot_ + kFrameOverlap - 1) % kFrameOverlap;
     frame_sync_[target_slot].deferred_persistent_frees.push_back(cb);
     RENDER_LOG("vk.defer_free cb=%p current_slot=%u queue_slot=%u",
-               (void*)cb, frame_sync_index_, target_slot);
+               (void*)cb, recording_slot_, target_slot);
 }
 
 void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
@@ -2270,7 +2361,7 @@ void VkBackend::record_blit_to_texture(::VkCommandBuffer cb, IGpuTexture& source
 void VkBackend::blit_to_texture(IGpuTexture& source, IGpuTexture& dest, rect dst_rect)
 {
     VELK_PERF_SCOPE("vk.blit_to_texture");
-    auto& sync = frame_sync_[frame_sync_index_];
+    auto& sync = frame_sync_[recording_slot_];
     record_blit_to_texture(sync.command_buffer, source, dest, dst_rect);
 }
 
@@ -2299,7 +2390,7 @@ static VkAccessFlags to_vk_access(PipelineStage stage)
 
 void VkBackend::barrier(PipelineStage src, PipelineStage dst)
 {
-    auto& sync = frame_sync_[frame_sync_index_];
+    auto& sync = frame_sync_[recording_slot_];
 
     VkMemoryBarrier mem_barrier{};
     mem_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2332,11 +2423,11 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     auto* impl = static_cast<VkCommandBuffer*>(cmd.get());
     ::VkCommandBuffer secondary = impl->handle();
     if (!secondary) return;
-    auto& sync = frame_sync_[frame_sync_index_];
+    auto& sync = frame_sync_[recording_slot_];
 
     // Flush any pending vkCmdUpdateBuffer writes before the secondary
     // reads them (view globals etc).
-    if (pending_buffer_update_barrier_) {
+    if (sync.pending_buffer_update_barrier) {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -2346,7 +2437,7 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
                              VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
                                  | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0, 1, &mb, 0, nullptr, 0, nullptr);
-        pending_buffer_update_barrier_ = false;
+        sync.pending_buffer_update_barrier = false;
     }
 
     RENDER_LOG("vk.execute primary=%p secondary=%p",
@@ -2354,31 +2445,28 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
-void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
+bool VkBackend::record_present_blit(FrameSync& sync)
 {
-    if (!sd.composite || !sd.swapchain) return;
-    auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
-    if (!surf_tex || surf_tex->vk_image() == VK_NULL_HANDLE) return;
-
-    auto& sync = frame_sync_[frame_sync_index_];
-
-    // Acquire swap image once for this surface this frame.
-    if (present_surface_id_ != surface_id) {
-        present_surface_id_ = surface_id;
-        present_acquire_sem_idx_ = acquire_semaphore_index_;
-        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
-        VkResult r = vkAcquireNextImageKHR(
-            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-            present_surface_id_ = 0;
-            return;
-        }
+    if (sync.present_swapchain == VK_NULL_HANDLE
+        || sync.present_composite_image == VK_NULL_HANDLE) {
+        return false;
     }
 
-    const VkImage src_image = surf_tex->vk_image();
-    const VkImageLayout src_canonical_layout = surf_tex->vk_current_layout();
-    const VkImage dst_image = sd.images[sd.image_index];
+    // Acquire on the render thread so acquire + present share one thread; the
+    // swapchain is therefore never used from two threads concurrently.
+    sync.present_acquire_sem_idx = acquire_semaphore_index_;
+    VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+    acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+    VkResult r = vkAcquireNextImageKHR(
+        device_, sync.present_swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE,
+        &sync.present_image_index);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || sync.present_image_index >= sync.present_image_count) {
+        return false;
+    }
+
+    const VkImage src_image = sync.present_composite_image;
+    const VkImageLayout src_canonical_layout = sync.present_composite_layout;
+    const VkImage dst_image = sync.present_images[sync.present_image_index];
 
     VkImageMemoryBarrier to_dst{};
     to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2417,10 +2505,10 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1] = {sd.width, sd.height, 1};
+    blit.srcOffsets[1] = {sync.present_width, sync.present_height, 1};
     blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[1] = {sd.width, sd.height, 1};
+    blit.dstOffsets[1] = {sync.present_width, sync.present_height, 1};
     vkCmdBlitImage(sync.command_buffer,
                    src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2459,21 +2547,81 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
                              | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 2, post);
-    surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // Composite's tracked layout was already advanced to SHADER_READ_ONLY by
+    // close_frame (main thread); the blit is layout-neutral so nothing to
+    // write back here.
+    return true;
 }
 
-void VkBackend::end_frame()
+void VkBackend::close_frame()
 {
-    auto& sync = frame_sync_[frame_sync_index_];
+    // End of recording on the prepare / main thread. The scene is recorded into
+    // the primary; the composite-to-swap present blit is NOT recorded here.
+    // Instead we snapshot the present target (composite source + swapchain +
+    // dims) into the slot, and submit_frame (render thread) does the acquire +
+    // blit + present. That keeps swapchain acquire and present on one thread
+    // (the swapchain must not be used from two threads) and keeps the blit's
+    // composite-layout read off the live value that the next prepare mutates.
+    auto& sync = frame_sync_[recording_slot_];
 
-    // Emit composite-to-swap blit for each surface that was acquired
-    // this frame. Sets present_surface_id_ as a side effect.
+    sync.present_surface_id = 0;
+    sync.present_swapchain = VK_NULL_HANDLE;
+    sync.present_composite_image = VK_NULL_HANDLE;
+    sync.present_image_count = 0;
+
+    // Single-surface present (matches prior behavior): pick the first surface
+    // rendered this frame.
     for (auto& [surface_id, sd] : surfaces_) {
-        if (sd.composite_acquired_this_frame) {
-            cmd_push_label(sync.command_buffer, "Composite -> Swap");
-            emit_surface_present_blit(surface_id, sd);
-            cmd_pop_label(sync.command_buffer);
+        if (!sd.composite_acquired_this_frame || !sd.swapchain) continue;
+        auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
+        if (!surf_tex || surf_tex->vk_image() == VK_NULL_HANDLE) continue;
+
+        sync.present_surface_id = surface_id;
+        sync.present_swapchain = sd.swapchain;
+        sync.present_composite_image = surf_tex->vk_image();
+        sync.present_composite_layout = surf_tex->vk_current_layout();
+        sync.present_width = sd.width;
+        sync.present_height = sd.height;
+        const uint32_t n = (sd.images.size() < kMaxSwapchainImages)
+                               ? static_cast<uint32_t>(sd.images.size())
+                               : kMaxSwapchainImages;
+        for (uint32_t i = 0; i < n; ++i) sync.present_images[i] = sd.images[i];
+        sync.present_image_count = n;
+
+        // The present blit is layout-neutral (composite returns to
+        // SHADER_READ_ONLY); advance the tracked layout here on the main thread
+        // so the render thread never writes the shared composite state.
+        surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        break;
+    }
+
+    // Primary is left open; submit_frame appends the present blit then ends it.
+    frame_open_ = false;
+}
+
+void VkBackend::submit_frame()
+{
+    // Pop the FIFO slot pushed by begin_frame. Runs on the render thread; it
+    // appends the present blit (acquire + composite->swap), finalizes the
+    // primary, then submits + presents. Acquire and present both happen here so
+    // the swapchain is never touched from two threads. All present inputs come
+    // from the per-slot snapshot taken at close_frame, not shared SurfaceData.
+    uint32_t slot;
+    {
+        std::lock_guard<std::mutex> lk(in_flight_mutex_);
+        if (in_flight_slots_.empty()) {
+            return;  // unmatched submit_frame — shouldn't happen in normal flow
         }
+        slot = in_flight_slots_.front();
+        in_flight_slots_.pop_front();
+    }
+    auto& sync = frame_sync_[slot];
+
+    bool present_ok = false;
+    if (sync.present_swapchain != VK_NULL_HANDLE) {
+        cmd_push_label(sync.command_buffer, "Composite -> Swap");
+        present_ok = record_present_blit(sync);
+        cmd_pop_label(sync.command_buffer);
     }
 
     cmd_pop_label(sync.command_buffer);  // "Frame"
@@ -2482,52 +2630,48 @@ void VkBackend::end_frame()
     // Allocate this submit's timeline value. The signal value rides
     // along on every queue submit below; renderer pulls it via
     // frame_completion_marker() right after this returns.
-    const uint64_t timeline_value = next_frame_value_++;
+    const uint64_t timeline_value = next_frame_value_.fetch_add(1);
 
-    if (present_surface_id_ != 0) {
-        // Surface was used: submit with swapchain synchronization
-        auto it = surfaces_.find(present_surface_id_);
-        if (it != surfaces_.end()) {
-            auto& sd = it->second;
+    if (present_ok) {
+        // Surface was used: submit with swapchain synchronization, reading
+        // only the per-slot snapshot taken at close_frame.
+        VkSemaphore wait_sem = image_available_[sync.present_acquire_sem_idx];
+        VkSemaphore signal_sems[2] = { render_finished_[sync.present_image_index], frame_timeline_ };
+        // Binary semaphore values are ignored; index 1 is the timeline value.
+        uint64_t signal_values[2] = { 0, timeline_value };
 
-            VkSemaphore wait_sem = image_available_[present_acquire_sem_idx_];
-            VkSemaphore signal_sems[2] = { render_finished_[sd.image_index], frame_timeline_ };
-            // Binary semaphore values are ignored; index 1 is the timeline value.
-            uint64_t signal_values[2] = { 0, timeline_value };
+        VkTimelineSemaphoreSubmitInfo timeline_info{};
+        timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline_info.signalSemaphoreValueCount = 2;
+        timeline_info.pSignalSemaphoreValues = signal_values;
 
-            VkTimelineSemaphoreSubmitInfo timeline_info{};
-            timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timeline_info.signalSemaphoreValueCount = 2;
-            timeline_info.pSignalSemaphoreValues = signal_values;
+        // Cover both the raster path (COLOR_ATTACHMENT_OUTPUT) and the
+        // RT blit path (TRANSFER) on acquire-semaphore wait.
+        VkPipelineStageFlags wait_stage =
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
 
-            // Cover both the raster path (COLOR_ATTACHMENT_OUTPUT) and the
-            // RT blit path (TRANSFER) on acquire-semaphore wait.
-            VkPipelineStageFlags wait_stage =
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo submit_info{};
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.pNext = &timeline_info;
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &wait_sem;
+        submit_info.pWaitDstStageMask = &wait_stage;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &sync.command_buffer;
+        submit_info.signalSemaphoreCount = 2;
+        submit_info.pSignalSemaphores = signal_sems;
 
-            VkSubmitInfo submit_info{};
-            submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit_info.pNext = &timeline_info;
-            submit_info.waitSemaphoreCount = 1;
-            submit_info.pWaitSemaphores = &wait_sem;
-            submit_info.pWaitDstStageMask = &wait_stage;
-            submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &sync.command_buffer;
-            submit_info.signalSemaphoreCount = 2;
-            submit_info.pSignalSemaphores = signal_sems;
+        vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
 
-            vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        VkPresentInfoKHR present_info{};
+        present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores = &signal_sems[0];
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &sync.present_swapchain;
+        present_info.pImageIndices = &sync.present_image_index;
 
-            VkPresentInfoKHR present_info{};
-            present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-            present_info.waitSemaphoreCount = 1;
-            present_info.pWaitSemaphores = &signal_sems[0];
-            present_info.swapchainCount = 1;
-            present_info.pSwapchains = &sd.swapchain;
-            present_info.pImageIndices = &sd.image_index;
-
-            vkQueuePresentKHR(graphics_queue_, &present_info);
-        }
+        vkQueuePresentKHR(graphics_queue_, &present_info);
     } else {
         // Headless: submit without swapchain synchronization
         uint64_t signal_value = timeline_value;
@@ -2547,15 +2691,13 @@ void VkBackend::end_frame()
         vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
     }
 
-    last_frame_value_ = timeline_value;
-    frame_sync_index_ = (frame_sync_index_ + 1) % kFrameOverlap;
-    frame_open_ = false;
-    present_surface_id_ = 0;
+    last_frame_value_.store(timeline_value);
+    // No recording_slot_ advance here; begin_frame advances on the main thread.
 }
 
 uint64_t VkBackend::frame_completion_marker() const
 {
-    return last_frame_value_;
+    return last_frame_value_.load();
 }
 
 void VkBackend::wait_for_frame_completion(uint64_t marker)
@@ -2573,7 +2715,7 @@ void VkBackend::wait_for_frame_completion(uint64_t marker)
 
 uint64_t VkBackend::pending_frame_completion_marker() const
 {
-    return next_frame_value_;
+    return next_frame_value_.load();
 }
 
 bool VkBackend::is_frame_complete(uint64_t marker) const

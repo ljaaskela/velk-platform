@@ -20,8 +20,8 @@ inline constexpr Uid RuntimePlugin{"25a0cd31-1b2a-4eda-b04d-9bcdc40bf9fe"};
 /** @brief Desktop platform plugin (GLFW-backed window provider). */
 inline constexpr Uid RuntimeGlfwPlugin{"b2cd54b3-2d75-4c9d-a262-02a2a245c7a8"};
 
-/** @brief Android platform plugin (planned). Placeholder UID until implementation lands. */
-inline constexpr Uid RuntimeAndroidPlugin{"00000000-0000-0000-0000-000000000000"};
+/** @brief Android platform plugin. NativeActivity host today; Java + JNI host in a later phase. */
+inline constexpr Uid RuntimeAndroidPlugin{"41cd6da9-9394-4da5-b591-82b6dafbbfa0"};
 
 } // namespace PluginId
 

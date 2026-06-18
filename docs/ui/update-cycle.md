@@ -73,6 +73,7 @@ sequenceDiagram
     Scene->>Scene: clear dirty flags
 
     App->>Renderer: prepare()
+    Renderer->>Backend: begin_frame()
     Renderer->>Scene: consume_state()
     Scene-->>Renderer: SceneState (visual_list, redraw_list, removed_list)
     alt has changes or resize
@@ -80,12 +81,11 @@ sequenceDiagram
         Renderer->>Renderer: pack instance data into RenderBatch[]
     end
     Renderer->>Renderer: build DrawCall array, write GPU buffers
+    Renderer->>Backend: execute graph + close_frame (record primary)
     Renderer-->>App: Frame handle
 
     App->>Renderer: present(frame)
-    Renderer->>Backend: begin_frame(surface_id)
-    Renderer->>Backend: submit(draw_calls)
-    Renderer->>Backend: end_frame()
+    Renderer->>Backend: submit_frame() (acquire, blit, submit, present)
 ```
 
 The velk-ui plugin hooks into velk's update cycle via `post_update()`. For each live scene, it calls `Scene::update()`, which processes dirty flags accumulated since the last frame.
@@ -115,20 +115,20 @@ Flags accumulate between frames. A single `update()` processes all pending chang
 
 ### prepare()
 
-1. **Check surface resize**: if the surface dimensions changed, update the backend and mark batches dirty.
-2. **Consume scene state**: pull `SceneState` from each attached scene.
-3. **Process removals**: evict cached draw commands for removed elements.
-4. **Rebuild draw commands**: for each element in the redraw list, query `IVisual` attachments for draw commands, resolve materials to pipeline keys.
-5. **Rebuild batches** (if dirty): pack instance data into `RenderBatch` structs grouped by pipeline/format/texture.
-6. **Write GPU buffers**: write instance data, draw headers, and material params into the staging buffer. Build the `DrawCall` array.
+1. **begin_frame**: wait on the slot's GPU fence and start the primary command buffer.
+2. **Check surface resize / native-window swap**: if the surface dimensions changed (or the platform window was recreated on suspend/resume), update the backend (`resize_surface` / `recreate_surface`) and mark batches dirty.
+3. **Consume scene state**: pull `SceneState` from each attached scene.
+4. **Process removals**: evict cached draw commands for removed elements.
+5. **Rebuild draw commands**: for each element in the redraw list, query `IVisual` attachments for draw commands, resolve materials to pipeline keys.
+6. **Rebuild batches** (if dirty): pack instance data into `RenderBatch` structs grouped by pipeline/format/texture.
+7. **Write GPU buffers**: write instance data, draw headers, and material params into the staging buffer. Build the `DrawCall` array.
+8. **Record the frame**: compile + execute the frame graph into the primary command buffer, then `close_frame`. The returned `Frame` is fully recorded.
 
-On clean frames (nothing changed), steps 3-5 are skipped and the renderer re-submits cached batches.
+On clean frames (nothing changed), steps 4-6 are skipped and the renderer re-submits cached batches.
 
 ### present(frame)
 
-1. **begin_frame**: acquire the swapchain image for each surface.
-2. **submit**: record draw calls into the command buffer.
-3. **end_frame**: submit GPU work and present.
+`present()` records nothing — the frame was fully recorded in `prepare()`. It calls `submit_frame`, which acquires the swap image, blits each surface's composite into its swapchain, submits the GPU work, and presents. Keeping all recording in `prepare()` and only the GPU submit + present here lets the two phases run on separate threads.
 
 Older unpresented frames targeting the same surfaces are silently discarded.
 

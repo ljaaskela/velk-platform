@@ -24,7 +24,8 @@ public:
         (PROP, uvec2, size, {}),                              ///< Surface size in pixels (updated on resize).
         (RPROP, UpdateRate, update_rate, UpdateRate::VSync),  ///< Swapchain pacing mode (fixed at create time).
         (RPROP, int, target_fps, 60),                         ///< Target framerate for UpdateRate::Targeted.
-        (RPROP, SurfaceColorFormat, color_format, SurfaceColorFormat::RGBA8_SRGB) ///< Composite format (fixed at create time).
+        (RPROP, SurfaceColorFormat, color_format, SurfaceColorFormat::RGBA8_SRGB), ///< Composite format (fixed at create time).
+        (PROP, uint64_t, native_handle, 0)                    ///< Opaque platform window handle; changes when the OS swaps the native window (Android suspend/resume), driving a full surface recreate.
     )
 };
 

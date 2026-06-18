@@ -264,7 +264,7 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         return idx < images.size() ? images[idx] : nullptr;
     };
 
-    auto apply_tex_transform = [&](auto& prop, const cgltf_texture_view& tv) {
+    auto apply_tex_transform = [&](auto&& prop, const cgltf_texture_view& tv) {
         prop.set_tex_coord(tv.texcoord);
         if (tv.has_transform) {
             const auto& xt = tv.transform;
