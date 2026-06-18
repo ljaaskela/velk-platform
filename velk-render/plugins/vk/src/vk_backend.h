@@ -160,6 +160,7 @@ private:
     VkCommandPool persistent_secondary_pool_ = VK_NULL_HANDLE;
 
     static constexpr uint32_t kFrameOverlap = 3;
+    static constexpr uint32_t kMaxSwapchainImages = 8;
 
     // Per-frame-in-flight sync: fence + command buffer + per-frame state.
     // Each in-flight frame owns its own slot so prepare() (main thread)
@@ -188,12 +189,23 @@ private:
         /// Index into image_available_ for the acquire semaphore tied to
         /// this frame's swapchain acquire. Per-slot for the same reason.
         uint32_t present_acquire_sem_idx = 0;
-        /// Swapchain + acquired image index snapshotted at `close_frame`
-        /// (recording thread) so `submit_frame` (render thread) submits and
-        /// presents without reading shared `SurfaceData`, which the next
-        /// frame's prepare may already be mutating.
-        VkSwapchainKHR present_swapchain = VK_NULL_HANDLE;
+        /// Acquired swap image index for this frame (set by record_present_blit
+        /// on the render thread); also indexes render_finished_.
         uint32_t present_image_index = 0;
+        /// Present target snapshotted at `close_frame` (main thread) so
+        /// submit_frame (render thread) does acquire + present-blit + present
+        /// without reading shared SurfaceData (which prepare may be mutating).
+        /// The composite blit is layout-neutral (returns it to SHADER_READ), so
+        /// close_frame updates the composite's tracked layout and the render
+        /// thread never writes shared composite state. present_swapchain ==
+        /// VK_NULL_HANDLE means nothing to present this frame.
+        VkSwapchainKHR present_swapchain = VK_NULL_HANDLE;
+        VkImage present_composite_image = VK_NULL_HANDLE;
+        VkImageLayout present_composite_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage present_images[kMaxSwapchainImages]{};
+        uint32_t present_image_count = 0;
+        int present_width = 0;
+        int present_height = 0;
         /// Coalesced TRANSFER → SHADER_READ barrier flag for this frame's
         /// vkCmdUpdateBuffer calls; set during recording, consumed at the
         /// next begin_pass.
@@ -225,7 +237,6 @@ private:
     // Indexed by the acquired image index, not the frame sync index.
     // Bumped from 4 to 8 because Android compositors commonly return 5–6
     // swapchain images, which would OOB the smaller bound.
-    static constexpr uint32_t kMaxSwapchainImages = 8;
     VkSemaphore image_available_[kMaxSwapchainImages]{};
     VkSemaphore render_finished_[kMaxSwapchainImages]{};
     uint32_t acquire_semaphore_index_ = 0;
@@ -393,10 +404,12 @@ private:
     bool create_surface_composite(uint64_t surface_id, SurfaceData& sd);
     void destroy_surface_composite(SurfaceData& sd);
 
-    /// Records the final composite-to-swap blit on the primary cmd
-    /// buffer for a surface that was rendered to this frame. Called
-    /// from end_frame for each surface whose composite is dirty.
-    void emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd);
+    /// Acquires the next swap image and records the composite-to-swap blit
+    /// onto the slot's primary, entirely from the @p sync snapshot taken at
+    /// close_frame. Runs on the render thread (from submit_frame) so acquire +
+    /// present stay on one thread and no shared SurfaceData is touched.
+    /// Returns false if the swapchain is out of date (skip present).
+    bool record_present_blit(FrameSync& sync);
 
     ::VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(::VkCommandBuffer cb);

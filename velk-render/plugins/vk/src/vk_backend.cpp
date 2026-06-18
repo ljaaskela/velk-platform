@@ -2445,38 +2445,28 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
 }
 
-void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
+bool VkBackend::record_present_blit(FrameSync& sync)
 {
-    if (!sd.composite || !sd.swapchain) return;
-    auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
-    if (!surf_tex || surf_tex->vk_image() == VK_NULL_HANDLE) return;
-
-    auto& sync = frame_sync_[recording_slot_];
-
-    // Acquire swap image once for this surface this frame.
-    if (sync.present_surface_id != surface_id) {
-        sync.present_surface_id = surface_id;
-        sync.present_acquire_sem_idx = acquire_semaphore_index_;
-        VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
-        acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
-        VkResult r = vkAcquireNextImageKHR(
-            device_, sd.swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &sd.image_index);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-            sync.present_surface_id = 0;
-            return;
-        }
+    if (sync.present_swapchain == VK_NULL_HANDLE
+        || sync.present_composite_image == VK_NULL_HANDLE) {
+        return false;
     }
 
-    // Snapshot the presenting surface's swapchain + acquired image into the
-    // slot so submit_frame (render thread) needs no shared SurfaceData.
-    if (sync.present_surface_id == surface_id) {
-        sync.present_swapchain = sd.swapchain;
-        sync.present_image_index = sd.image_index;
+    // Acquire on the render thread so acquire + present share one thread; the
+    // swapchain is therefore never used from two threads concurrently.
+    sync.present_acquire_sem_idx = acquire_semaphore_index_;
+    VkSemaphore acquire_sem = image_available_[acquire_semaphore_index_];
+    acquire_semaphore_index_ = (acquire_semaphore_index_ + 1) % kMaxSwapchainImages;
+    VkResult r = vkAcquireNextImageKHR(
+        device_, sync.present_swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE,
+        &sync.present_image_index);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || sync.present_image_index >= sync.present_image_count) {
+        return false;
     }
 
-    const VkImage src_image = surf_tex->vk_image();
-    const VkImageLayout src_canonical_layout = surf_tex->vk_current_layout();
-    const VkImage dst_image = sd.images[sd.image_index];
+    const VkImage src_image = sync.present_composite_image;
+    const VkImageLayout src_canonical_layout = sync.present_composite_layout;
+    const VkImage dst_image = sync.present_images[sync.present_image_index];
 
     VkImageMemoryBarrier to_dst{};
     to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2515,10 +2505,10 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1] = {sd.width, sd.height, 1};
+    blit.srcOffsets[1] = {sync.present_width, sync.present_height, 1};
     blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[1] = {sd.width, sd.height, 1};
+    blit.dstOffsets[1] = {sync.present_width, sync.present_height, 1};
     vkCmdBlitImage(sync.command_buffer,
                    src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2557,36 +2547,65 @@ void VkBackend::emit_surface_present_blit(uint64_t surface_id, SurfaceData& sd)
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
                              | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 2, post);
-    surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // Composite's tracked layout was already advanced to SHADER_READ_ONLY by
+    // close_frame (main thread); the blit is layout-neutral so nothing to
+    // write back here.
+    return true;
 }
 
 void VkBackend::close_frame()
 {
-    // Recording tail, on the same thread as prepare / begin_frame. Records
-    // the composite-to-swap blit for each surface rendered this frame and
-    // ends the primary. After this the frame's command buffers are complete
-    // and immutable — nothing records into them again — so submit_frame can
-    // run on a separate thread.
+    // End of recording on the prepare / main thread. The scene is recorded into
+    // the primary; the composite-to-swap present blit is NOT recorded here.
+    // Instead we snapshot the present target (composite source + swapchain +
+    // dims) into the slot, and submit_frame (render thread) does the acquire +
+    // blit + present. That keeps swapchain acquire and present on one thread
+    // (the swapchain must not be used from two threads) and keeps the blit's
+    // composite-layout read off the live value that the next prepare mutates.
     auto& sync = frame_sync_[recording_slot_];
 
+    sync.present_surface_id = 0;
+    sync.present_swapchain = VK_NULL_HANDLE;
+    sync.present_composite_image = VK_NULL_HANDLE;
+    sync.present_image_count = 0;
+
+    // Single-surface present (matches prior behavior): pick the first surface
+    // rendered this frame.
     for (auto& [surface_id, sd] : surfaces_) {
-        if (sd.composite_acquired_this_frame) {
-            cmd_push_label(sync.command_buffer, "Composite -> Swap");
-            emit_surface_present_blit(surface_id, sd);
-            cmd_pop_label(sync.command_buffer);
-        }
+        if (!sd.composite_acquired_this_frame || !sd.swapchain) continue;
+        auto* surf_tex = interface_cast<IVkGpuTexture>(sd.composite.get());
+        if (!surf_tex || surf_tex->vk_image() == VK_NULL_HANDLE) continue;
+
+        sync.present_surface_id = surface_id;
+        sync.present_swapchain = sd.swapchain;
+        sync.present_composite_image = surf_tex->vk_image();
+        sync.present_composite_layout = surf_tex->vk_current_layout();
+        sync.present_width = sd.width;
+        sync.present_height = sd.height;
+        const uint32_t n = (sd.images.size() < kMaxSwapchainImages)
+                               ? static_cast<uint32_t>(sd.images.size())
+                               : kMaxSwapchainImages;
+        for (uint32_t i = 0; i < n; ++i) sync.present_images[i] = sd.images[i];
+        sync.present_image_count = n;
+
+        // The present blit is layout-neutral (composite returns to
+        // SHADER_READ_ONLY); advance the tracked layout here on the main thread
+        // so the render thread never writes the shared composite state.
+        surf_tex->set_vk_current_layout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        break;
     }
 
-    cmd_pop_label(sync.command_buffer);  // "Frame"
-    vkEndCommandBuffer(sync.command_buffer);
+    // Primary is left open; submit_frame appends the present blit then ends it.
     frame_open_ = false;
 }
 
 void VkBackend::submit_frame()
 {
-    // Pop the FIFO slot pushed by begin_frame. submit_frame only submits
-    // already-recorded command buffers (close_frame ended them), so it runs
-    // on the render thread without touching any pool or shared SurfaceData.
+    // Pop the FIFO slot pushed by begin_frame. Runs on the render thread; it
+    // appends the present blit (acquire + composite->swap), finalizes the
+    // primary, then submits + presents. Acquire and present both happen here so
+    // the swapchain is never touched from two threads. All present inputs come
+    // from the per-slot snapshot taken at close_frame, not shared SurfaceData.
     uint32_t slot;
     {
         std::lock_guard<std::mutex> lk(in_flight_mutex_);
@@ -2598,12 +2617,22 @@ void VkBackend::submit_frame()
     }
     auto& sync = frame_sync_[slot];
 
+    bool present_ok = false;
+    if (sync.present_swapchain != VK_NULL_HANDLE) {
+        cmd_push_label(sync.command_buffer, "Composite -> Swap");
+        present_ok = record_present_blit(sync);
+        cmd_pop_label(sync.command_buffer);
+    }
+
+    cmd_pop_label(sync.command_buffer);  // "Frame"
+    vkEndCommandBuffer(sync.command_buffer);
+
     // Allocate this submit's timeline value. The signal value rides
     // along on every queue submit below; renderer pulls it via
     // frame_completion_marker() right after this returns.
     const uint64_t timeline_value = next_frame_value_.fetch_add(1);
 
-    if (sync.present_surface_id != 0 && sync.present_swapchain != VK_NULL_HANDLE) {
+    if (present_ok) {
         // Surface was used: submit with swapchain synchronization, reading
         // only the per-slot snapshot taken at close_frame.
         VkSemaphore wait_sem = image_available_[sync.present_acquire_sem_idx];
