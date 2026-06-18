@@ -25,6 +25,19 @@ void AndroidWindow::set_native_window(ANativeWindow* w)
 void AndroidWindow::notify_surface_created(ANativeWindow* w)
 {
     set_native_window(w);
+    // Publish the new native window + its dimensions into the surface state.
+    // The renderer compares native_handle against its cached value and, on a
+    // change (suspend/resume), drives backend->recreate_surface to rebuild the
+    // platform surface + swapchain. Note: relies on the OS handing back a
+    // distinct ANativeWindow* across destroy/recreate (it does in practice).
+    if (w && surface_) {
+        int width = ANativeWindow_getWidth(w);
+        int height = ANativeWindow_getHeight(w);
+        write_state<IWindowSurface>(surface_, [&](IWindowSurface::State& s) {
+            s.native_handle = reinterpret_cast<uint64_t>(w);
+            s.size = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+        });
+    }
     ::velk::invoke_event(get_interface(IInterface::UID), "on_surface_created");
 }
 

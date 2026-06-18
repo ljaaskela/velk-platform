@@ -370,9 +370,27 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             continue;
         }
 
-        // Handle surface resize
+        // Handle surface native-window swap + resize. The platform swaps the
+        // native handle on suspend/resume (Android), which needs a full
+        // surface recreate; a plain dimension change only needs a swapchain
+        // resize. Callers gate the frame loop so this runs with no frame in
+        // flight on the platforms where it fires.
         auto sstate = read_state<IWindowSurface>(entry.surface());
         if (sstate) {
+            if (entry.cached_native_handle() == UINT64_MAX) {
+                // First prepare for this view: adopt the current handle
+                // without recreating (initial surface already exists).
+                entry.set_cached_native_handle(sstate->native_handle);
+            } else if (sstate->native_handle != entry.cached_native_handle()) {
+                entry.set_cached_native_handle(sstate->native_handle);
+                entry.set_cached_size(sstate->size.x, sstate->size.y);
+                backend_->recreate_surface(
+                    get_render_target_id(entry.surface()),
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(sstate->native_handle)),
+                    sstate->size.x, sstate->size.y);
+                entry.set_batches_dirty(true);
+                RENDER_LOG("render: surface recreated %dx%d", sstate->size.x, sstate->size.y);
+            }
             if (sstate->size.x != entry.cached_width() || sstate->size.y != entry.cached_height()) {
                 entry.set_cached_size(sstate->size.x, sstate->size.y);
                 backend_->resize_surface(get_render_target_id(entry.surface()), sstate->size.x, sstate->size.y);

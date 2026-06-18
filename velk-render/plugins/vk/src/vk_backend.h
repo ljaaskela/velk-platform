@@ -38,6 +38,8 @@ public:
     uint64_t create_surface(const SurfaceDesc& desc) override;
     void destroy_surface(uint64_t surface_id) override;
     void resize_surface(uint64_t surface_id, int width, int height) override;
+    void recreate_surface(uint64_t surface_id, void* native_handle,
+                          int width, int height) override;
     IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) override;
 
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
@@ -288,6 +290,12 @@ private:
 
     std::unordered_map<uint64_t, SurfaceData> surfaces_;
     uint64_t next_surface_id_ = 1;
+
+    /// Surface-create callback retained from init (VulkanInitParams). Stored
+    /// so `recreate_surface` can build a fresh VkSurfaceKHR from a new native
+    /// window (Android suspend/resume). Signature matches CreateSurfaceFn:
+    /// bool(vk_instance, out_VkSurfaceKHR, user_data=native_handle).
+    bool (*surface_create_fn_)(void*, void*, void*) = nullptr;
     // present_surface_id, present_acquire_sem_idx moved into FrameSync.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame (debug flag only).
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.

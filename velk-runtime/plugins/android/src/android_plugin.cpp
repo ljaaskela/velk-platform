@@ -48,6 +48,12 @@ AndroidWindow* g_active_window = nullptr;
 ANativeWindow* g_latest_native_window = nullptr;
 bool g_running = true;
 
+/// Render-loop gate controls. Defined in the frame-loop block lower in this
+/// file (alongside FrameLoopState); declared here so the window lifecycle hooks
+/// can quiesce / resume rendering around a surface destroy/recreate.
+void pause_render_loop();
+void resume_render_loop();
+
 /// Distance between the first two pointers on the previous frame's MOVE,
 /// so we can emit ScrollEvent deltas proportional to pinch distance change.
 /// Reset whenever the pinch is interrupted (one finger lifts, gesture cancels).
@@ -212,13 +218,21 @@ struct android_app* AndroidPlugin::android_app_handle()
 
 void AndroidPlugin::on_init_window(ANativeWindow* w)
 {
+    // Publish the new window first (writes native_handle into the surface
+    // state), then re-open the gate so the next prepared frame picks up the
+    // recreate. The render thread is parked at this point (drained on pause),
+    // so the recreate runs with no frame in flight.
     if (g_active_window) {
         g_active_window->notify_surface_created(w);
     }
+    resume_render_loop();
 }
 
 void AndroidPlugin::on_term_window()
 {
+    // Close the gate and drain the render thread before the OS destroys the
+    // native window — nothing must be rendering against the dead surface.
+    pause_render_loop();
     if (g_active_window) {
         g_active_window->notify_surface_destroyed();
     }
@@ -446,7 +460,17 @@ void android_native_activity_run(struct android_app* app, int (*run_fn)())
     }
 }
 
+}  // namespace velk
+
+namespace velk::impl {
+
 namespace {
+
+/// False while the OS-owned native window is gone (between surface destroy and
+/// recreate). The Choreographer frame callback skips prepare/submit while
+/// false so we never render against a dead surface. Toggled on the main thread
+/// by the window lifecycle hooks.
+std::atomic<bool> g_surface_ready{true};
 
 struct FrameLoopState
 {
@@ -454,9 +478,20 @@ struct FrameLoopState
     AChoreographer* choreographer = nullptr;
     std::mutex frame_mutex;
     std::condition_variable frame_cv;
+    /// Signalled by the render thread whenever it finishes a submit and the
+    /// queue is empty — lets `pause_render_loop` wait until idle.
+    std::condition_variable idle_cv;
     std::queue<::velk::Frame> frame_queue;
     std::atomic<bool> stop{false};
+    /// True while the render thread is inside `app.submit`. Combined with an
+    /// empty queue it means the render thread is parked.
+    std::atomic<bool> submitting{false};
 };
+
+/// Set to the active frame loop's state while `android_run_frame_loop` runs, so
+/// the lifecycle hooks (main thread) can quiesce the render thread before the
+/// surface is torn down / recreated. Null outside the loop.
+FrameLoopState* g_frame_loop = nullptr;
 
 void on_choreographer_frame(long /*frame_time_nanos*/, void* data)
 {
@@ -464,18 +499,44 @@ void on_choreographer_frame(long /*frame_time_nanos*/, void* data)
     if (s->stop.load()) {
         return;
     }
-    s->app.update();
-    auto frame = s->app.prepare();
-    {
-        std::lock_guard<std::mutex> lk(s->frame_mutex);
-        s->frame_queue.push(frame);
+    // Skip the frame while the surface is gone (suspend); keep re-arming so we
+    // resume cleanly once the window is recreated.
+    if (g_surface_ready.load()) {
+        s->app.update();
+        auto frame = s->app.prepare();
+        {
+            std::lock_guard<std::mutex> lk(s->frame_mutex);
+            s->frame_queue.push(frame);
+        }
+        s->frame_cv.notify_one();
     }
-    s->frame_cv.notify_one();
 
     AChoreographer_postFrameCallback(s->choreographer, &on_choreographer_frame, s);
 }
 
+void pause_render_loop()
+{
+    g_surface_ready.store(false);
+    // Wait for the render thread to finish any in-flight submit and empty its
+    // queue, so the surface can be torn down with no GPU work referencing it.
+    if (g_frame_loop) {
+        std::unique_lock<std::mutex> lk(g_frame_loop->frame_mutex);
+        g_frame_loop->idle_cv.wait(lk, [] {
+            return g_frame_loop->frame_queue.empty() && !g_frame_loop->submitting.load();
+        });
+    }
+}
+
+void resume_render_loop()
+{
+    g_surface_ready.store(true);
+}
+
 } // namespace
+
+} // namespace velk::impl
+
+namespace velk {
 
 void android_run_frame_loop(Application app)
 {
@@ -484,12 +545,16 @@ void android_run_frame_loop(Application app)
         return;
     }
 
-    FrameLoopState state;
+    impl::FrameLoopState state;
     state.app = std::move(app);
     state.choreographer = AChoreographer_getInstance();
     if (!state.choreographer) {
         return;
     }
+
+    // Expose the loop to the lifecycle hooks (main thread) so they can quiesce
+    // the render thread around a surface destroy/recreate.
+    impl::g_frame_loop = &state;
 
     // Render thread: drains prepared frames and calls submit.
     std::thread render_thread([&state] {
@@ -505,14 +570,23 @@ void android_run_frame_loop(Application app)
                 }
                 frame = state.frame_queue.front();
                 state.frame_queue.pop();
+                state.submitting.store(true);
             }
             state.app.submit(frame);
+            {
+                // Reset under the lock so a pauser blocked in idle_cv.wait
+                // can't miss this transition (lost-wakeup).
+                std::lock_guard<std::mutex> lk(state.frame_mutex);
+                state.submitting.store(false);
+            }
+            // Wake a pauser waiting for the render thread to go idle.
+            state.idle_cv.notify_all();
         }
     });
 
     // First frame callback. Subsequent ones re-arm themselves from inside
     // on_choreographer_frame.
-    AChoreographer_postFrameCallback(state.choreographer, &on_choreographer_frame, &state);
+    AChoreographer_postFrameCallback(state.choreographer, &impl::on_choreographer_frame, &state);
 
     // Main thread loop: pump Looper indefinitely. Both NativeActivity events
     // (window lifecycle, input) and Choreographer callbacks land here.
@@ -532,6 +606,7 @@ void android_run_frame_loop(Application app)
     if (render_thread.joinable()) {
         render_thread.join();
     }
+    impl::g_frame_loop = nullptr;
 }
 
 } // namespace velk

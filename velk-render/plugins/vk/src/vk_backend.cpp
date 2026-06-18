@@ -156,6 +156,9 @@ bool VkBackend::init(void* params)
     auto* vk_params = static_cast<VulkanInitParams*>(params);
     VkSurfaceKHR initial_surface = VK_NULL_HANDLE;
     if (vk_params && vk_params->create_surface) {
+        // Retain the callback so recreate_surface can rebuild the platform
+        // surface handle from a new native window after suspend/resume.
+        surface_create_fn_ = vk_params->create_surface;
         if (!vk_params->create_surface(instance_, &initial_surface, vk_params->user_data)) {
             VELK_LOG(E, "VkBackend: failed to create initial surface");
             return false;
@@ -841,6 +844,39 @@ void VkBackend::resize_surface(uint64_t surface_id, int width, int height)
     destroy_swapchain(it->second);
     create_swapchain(it->second);
     create_surface_composite(surface_id, it->second);
+}
+
+void VkBackend::recreate_surface(uint64_t surface_id, void* native_handle,
+                                 int width, int height)
+{
+    auto it = surfaces_.find(surface_id);
+    if (it == surfaces_.end() || !surface_create_fn_) {
+        return;
+    }
+    auto& sd = it->second;
+
+    // Caller (Android resume) guarantees no frame is in flight; wait idle
+    // before tearing the old swapchain + (now-invalid) surface handle down.
+    vkDeviceWaitIdle(device_);
+    destroy_swapchain(sd);
+    if (sd.surface) {
+        vkDestroySurfaceKHR(instance_, sd.surface, nullptr);
+        sd.surface = VK_NULL_HANDLE;
+    }
+
+    VkSurfaceKHR new_surface = VK_NULL_HANDLE;
+    if (!surface_create_fn_(instance_, &new_surface, native_handle)) {
+        VELK_LOG(E, "VkBackend::recreate_surface: surface-create callback failed");
+        return;
+    }
+    sd.surface = new_surface;
+    sd.width = width;
+    sd.height = height;
+    if (!create_swapchain(sd)) {
+        VELK_LOG(E, "VkBackend::recreate_surface: create_swapchain failed");
+        return;
+    }
+    create_surface_composite(surface_id, sd);
 }
 
 IRenderTarget::Ptr VkBackend::acquire_swapchain_texture(uint64_t surface_id)

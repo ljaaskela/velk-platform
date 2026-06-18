@@ -256,6 +256,23 @@ public:
     virtual void resize_surface(uint64_t surface_id, int width, int height) = 0;
 
     /**
+     * @brief Rebuilds a surface's platform handle and swapchain against a
+     *        new native window, keeping @p surface_id stable.
+     *
+     * For platforms (Android) where the OS destroys and recreates the
+     * native window across suspend/resume: the old platform surface handle
+     * is invalid, so resize_surface (which keeps the handle) is not enough.
+     * @p native_handle is the new opaque platform window (ANativeWindow* on
+     * Android) passed through to the backend's surface-create callback.
+     *
+     * Must be called with no frame in flight (GPU work submitted against the
+     * old swapchain must be drained first) — it waits idle and tears the old
+     * swapchain + surface handle down before rebuilding.
+     */
+    virtual void recreate_surface(uint64_t surface_id, void* native_handle,
+                                  int width, int height) = 0;
+
+    /**
      * @brief Returns the per-surface composite intermediate as a
      *        renderable texture.
      *

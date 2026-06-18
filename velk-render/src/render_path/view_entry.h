@@ -5,6 +5,8 @@
 #include <velk-render/interface/intf_view_entry.h>
 #include <velk-render/plugin.h>
 
+#include <cstdint>
+
 namespace velk::impl {
 
 /**
@@ -35,6 +37,12 @@ public:
         cached_height_ = height;
     }
 
+    uint64_t cached_native_handle() const override { return cached_native_handle_; }
+    void set_cached_native_handle(uint64_t handle) override
+    {
+        cached_native_handle_ = handle;
+    }
+
     void notify_view_changed() override
     {
         notify_render_state_changed(::velk::RenderStateChange::All);
@@ -46,6 +54,7 @@ private:
     bool batches_dirty_ = true;
     int cached_width_ = 0;
     int cached_height_ = 0;
+    uint64_t cached_native_handle_ = UINT64_MAX;  ///< UINT64_MAX = unsynced.
 };
 
 } // namespace velk::impl

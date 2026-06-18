@@ -53,6 +53,14 @@ public:
     virtual int cached_height() const = 0;
     virtual void set_cached_size(int width, int height) = 0;
 
+    /// Renderer-side cache of the last-seen surface native handle, for
+    /// detecting a platform window swap (Android suspend/resume) that needs
+    /// a full surface recreate rather than just a swapchain resize. Initial
+    /// value is the "unsynced" sentinel (UINT64_MAX) so the first prepare
+    /// adopts the current handle without triggering a recreate.
+    virtual uint64_t cached_native_handle() const = 0;
+    virtual void set_cached_native_handle(uint64_t handle) = 0;
+
     /// Producer-side: fires `IRenderState::on_render_state_changed` on
     /// all subscribers. Called by `ViewPreparer` when anything that
     /// affects the cached pass changes — structural batch rebuild or
