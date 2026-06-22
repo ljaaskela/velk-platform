@@ -1,8 +1,6 @@
 #ifndef VELK_SCENE_RENDER_PATH_FRAME_CONTEXT_H
 #define VELK_SCENE_RENDER_PATH_FRAME_CONTEXT_H
 
-#include <unordered_map>
-
 #include <velk/interface/intf_interface.h>
 
 #include <velk-render/frame/draw_call_emit.h>
@@ -32,11 +30,11 @@ struct FrameContext
     IFrameDataManager* frame_buffer = nullptr;
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
-    const PipelineCacheMap* pipeline_map = nullptr;
 
     /// Color attachment format the active path is writing into.
-    /// Pipeline lookups in `pipeline_map` reconstruct their cache key
-    /// using this format; raster pipelines must be compiled against a
+    /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
+    /// cache key using this format; raster pipelines must be compiled
+    /// against a
     /// dynamic-rendering setup matching this format. Always overwritten
     /// per-view by IViewPipeline::emit / RenderTargetCache before any
     /// pipeline lookup; the RGBA8 default is purely a placeholder.

@@ -67,8 +67,7 @@ void RtPath::build_passes(IViewEntry& entry,
                              FrameContext& ctx,
                              IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.render_ctx || !ctx.frame_buffer || !ctx.resources ||
-        !ctx.pipeline_map) {
+    if (!ctx.backend || !ctx.render_ctx || !ctx.frame_buffer || !ctx.resources) {
         return;
     }
     if (render_view.width <= 0 || render_view.height <= 0) {
@@ -115,9 +114,9 @@ void RtPath::build_passes(IViewEntry& entry,
     if (rt_pipeline_key == 0) {
         return;
     }
-    auto pit = ctx.pipeline_map->find(
+    auto rt_pipeline = ctx.render_ctx->find_pipeline(
         PipelineCacheKey{rt_pipeline_key, PixelFormat::RGBA8, 0});
-    if (pit == ctx.pipeline_map->end()) {
+    if (!rt_pipeline) {
         return;
     }
 
@@ -289,7 +288,7 @@ void RtPath::build_passes(IViewEntry& entry,
     }
 
     DispatchCall dc{};
-    dc.pipeline = pit->second.get();
+    dc.pipeline = rt_pipeline.get();
     dc.groups_x = (vp_w + 7) / 8;
     dc.groups_y = (vp_h + 7) / 8;
     dc.groups_z = 1;

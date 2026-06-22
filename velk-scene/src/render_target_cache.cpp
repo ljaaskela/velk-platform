@@ -99,7 +99,7 @@ void RenderTargetCache::ensure(FrameContext& ctx, BatchBuilder& batch_builder)
 void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_builder,
                                     IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.frame_buffer || !ctx.pipeline_map) {
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx) {
         return;
     }
 

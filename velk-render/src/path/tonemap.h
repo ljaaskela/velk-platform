@@ -16,7 +16,7 @@ namespace velk::impl {
  *
  * Stateless across views (no per-view caches), but compiles its
  * compute pipeline lazily on first emit. The pipeline is identical
- * across views and shared via the renderer's pipeline_map.
+ * across views and shared via the render context's unified pipeline cache.
  */
 class Tonemap final
     : public ::velk::ext::Effect<Tonemap>

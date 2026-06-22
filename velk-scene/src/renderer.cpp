@@ -154,8 +154,6 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         return;
     }
 
-    pipeline_map_ = &ctx->pipeline_map();
-
     diag_enabled_ = false;
 
     // Instantiate the per-renderer plumbing through the type registry so
@@ -273,7 +271,6 @@ FrameContext Renderer::make_frame_context()
     ctx.frame_buffer = frame_buffer_.get();
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
-    ctx.pipeline_map = pipeline_map_;
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -1149,7 +1146,6 @@ void Renderer::shutdown()
 
     views_.clear();
     batch_builder_.clear();
-    pipeline_map_ = nullptr;
 }
 
 

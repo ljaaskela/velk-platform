@@ -76,12 +76,11 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
         perturb = uid.lo ^ uid.hi;
     }
     uint64_t gbuffer_key = forward_key ^ perturb;
-    auto& pipeline_map = ctx.pipeline_map();
     // Cache lookup must match the format axis compile_pipeline_dynamic
     // uses when it stores: color_formats[0] (Albedo = RGBA8).
     PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], target_group};
-    if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
-        return it->second.get();
+    if (auto pipeline = ctx.find_pipeline(gkey)) {
+        return pipeline.get();
     }
 
     string_view vsrc;
@@ -137,8 +136,8 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
         DepthFormat::Default,
         po, target_group);
     if (!compiled) return nullptr;
-    if (auto it = pipeline_map.find(gkey); it != pipeline_map.end()) {
-        return it->second.get();
+    if (auto pipeline = ctx.find_pipeline(gkey)) {
+        return pipeline.get();
     }
     return nullptr;
 }
@@ -278,7 +277,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
                                 FrameContext& ctx,
                                 IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.frame_buffer || !ctx.pipeline_map) {
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx) {
         return;
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
@@ -422,9 +421,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
-    auto pit = ctx.pipeline_map->find(
+    auto lighting_pipeline = ctx.render_ctx->find_pipeline(
         PipelineCacheKey{pipeline_key, PixelFormat::RGBA8, 0});
-    if (pit == ctx.pipeline_map->end()) return;
+    if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
     auto normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
@@ -516,7 +515,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
 
     DispatchCall dc{};
-    dc.pipeline = pit->second.get();
+    dc.pipeline = lighting_pipeline.get();
     dc.groups_x = (w + 7) / 8;
     dc.groups_y = (h + 7) / 8;
     dc.groups_z = 1;

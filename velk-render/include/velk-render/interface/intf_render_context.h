@@ -4,7 +4,6 @@
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
-#include <unordered_map>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
@@ -50,22 +49,6 @@ struct PipelineCacheKey
             && target_group == o.target_group;
     }
 };
-
-struct PipelineCacheKeyHash
-{
-    size_t operator()(const PipelineCacheKey& k) const noexcept
-    {
-        size_t h = std::hash<uint64_t>{}(k.user_key);
-        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
-             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<void*>{}(static_cast<void*>(k.target_group))
-             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
-    }
-};
-
-using PipelineCacheMap =
-    std::unordered_map<PipelineCacheKey, IGpuPipeline::Ptr, PipelineCacheKeyHash>;
 
 /**
  * @brief Owns the render backend and provides rendering infrastructure.
@@ -127,8 +110,8 @@ public:
      *
      * If @p key is 0, a new key is auto-assigned. Otherwise the given key is
      * used. Returns the pipeline key, or 0 on failure. Compute pipelines
-     * share the pipeline_map() with graphics pipelines and the same backend
-     * destroy_pipeline() path.
+     * share the unified pipeline cache with graphics pipelines and the same
+     * backend destroy_pipeline() path.
      */
     virtual uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) = 0;
 
@@ -143,8 +126,12 @@ public:
     /** @brief Registers a default fragment shader used when create_pipeline receives nullptr. */
     virtual void set_default_fragment_shader(const IShader::Ptr& shader) = 0;
 
-    /** @brief Returns the unified pipeline cache keyed by `PipelineCacheKey`. */
-    virtual const PipelineCacheMap& pipeline_map() const = 0;
+    /**
+     * @brief Looks up a compiled pipeline in the unified cache by key.
+     *
+     * Returns nullptr if no pipeline has been compiled for @p key yet.
+     */
+    virtual IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const = 0;
 
     /**
      * @brief Registers a virtual shader include.

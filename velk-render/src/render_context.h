@@ -9,7 +9,25 @@
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>
 
+#include <unordered_map>
+
 namespace velk {
+
+struct PipelineCacheKeyHash
+{
+    size_t operator()(const PipelineCacheKey& k) const noexcept
+    {
+        size_t h = std::hash<uint64_t>{}(k.user_key);
+        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
+             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= std::hash<void*>{}(static_cast<void*>(k.target_group))
+             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+using PipelineCacheMap =
+    std::unordered_map<PipelineCacheKey, IGpuPipeline::Ptr, PipelineCacheKeyHash>;
 
 class RenderContextImpl : public ext::ObjectCore<RenderContextImpl, IRenderContext>
 {
@@ -37,7 +55,11 @@ public:
 
     void register_shader_include(string_view name, string_view content) override;
 
-    const PipelineCacheMap& pipeline_map() const override { return pipeline_map_; }
+    IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const override
+    {
+        auto it = pipeline_map_.find(key);
+        return it != pipeline_map_.end() ? it->second : nullptr;
+    }
 
     IRenderBackend::Ptr backend() const override { return backend_; }
 

@@ -43,11 +43,9 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
         ? material_ptr->get_pipeline_handle(ctx)
         : batch.pipeline_key();
 
-    auto& pipeline_map = ctx.pipeline_map();
-    if (auto it = pipeline_map.find(
-            PipelineCacheKey{user_key, target_format, 0});
-        it != pipeline_map.end()) {
-        return it->second.get();
+    if (auto pipeline = ctx.find_pipeline(
+            PipelineCacheKey{user_key, target_format, 0})) {
+        return pipeline.get();
     }
 
     uint64_t compiled_key = 0;
@@ -85,10 +83,9 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
 
     if (compiled_key == 0) return nullptr;
 
-    if (auto it = pipeline_map.find(
-            PipelineCacheKey{compiled_key, target_format, 0});
-        it != pipeline_map.end()) {
-        return it->second.get();
+    if (auto pipeline = ctx.find_pipeline(
+            PipelineCacheKey{compiled_key, target_format, 0})) {
+        return pipeline.get();
     }
     return nullptr;
 }
@@ -130,8 +127,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                                FrameContext& ctx,
                                IRenderGraph& graph)
 {
-    if (!ctx.backend || !ctx.frame_buffer
-        || !ctx.pipeline_map || !ctx.render_ctx) {
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx) {
         return;
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;

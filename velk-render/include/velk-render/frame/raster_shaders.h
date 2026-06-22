@@ -196,7 +196,6 @@ inline string compose_eval_fragment(string_view driver_template,
 {
     string out;
     out.append(string_view("#version 450\n"
-                           "#define VELK_RASTER 1\n"
                            "#include \"velk.glsl\"\n"
                            "#include \"velk-ui.glsl\"\n"));
     out.append(eval_src);

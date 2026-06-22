@@ -85,7 +85,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
                    ::velk::FrameContext& ctx,
                    ::velk::IRenderGraph& graph)
 {
-    if (!input || !output || !ctx.backend || !ctx.pipeline_map) return;
+    if (!input || !output || !ctx.backend || !ctx.render_ctx) return;
 
     auto* in_surf = interface_cast<::velk::ISurface>(input.get());
     if (!in_surf) return;
@@ -94,9 +94,9 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
 
     uint64_t pipeline_key = ensure_pipeline(ctx);
     if (pipeline_key == 0) return;
-    auto pit = ctx.pipeline_map->find(
+    auto tonemap_pipeline = ctx.render_ctx->find_pipeline(
         ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::RGBA8, 0});
-    if (pit == ctx.pipeline_map->end()) return;
+    if (!tonemap_pipeline) return;
 
     /// Push constant layout matches the shader's `PC` block above.
     /// Texture id reads come via bindless sampling; output is a
@@ -118,7 +118,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     pc.height = dims.y;
 
     ::velk::DispatchCall dc{};
-    dc.pipeline = pit->second.get();
+    dc.pipeline = tonemap_pipeline.get();
     dc.groups_x = (dims.x + 7) / 8;
     dc.groups_y = (dims.y + 7) / 8;
     dc.groups_z = 1;

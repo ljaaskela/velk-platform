@@ -121,7 +121,6 @@ private:
     IGpuResourceManager::Ptr resources_;
 
     vector<ViewSlot> views_;
-    const PipelineCacheMap* pipeline_map_ = nullptr;
 
     struct DebugOverlay {
         IWindowSurface::Ptr surface;
