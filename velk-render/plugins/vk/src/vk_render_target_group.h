@@ -15,8 +15,8 @@ namespace velk::vk {
 
 /// Backend-internal sibling of `IRenderTextureGroup` exposing Vulkan
 /// handles. Backend code uses
-/// `interface_cast<IVkRenderTargetGroup>(p)` to reach the render pass /
-/// framebuffer / depth resources without depending on the concrete
+/// `interface_cast<IVkRenderTargetGroup>(p)` to reach the depth format /
+/// attachment info without depending on the concrete
 /// `VkRenderTargetGroup`.
 class IVkRenderTargetGroup
     : public ::velk::Interface<IVkRenderTargetGroup, ::velk::IInterface,
@@ -26,17 +26,11 @@ public:
     virtual void init(::velk::IRenderBackend* backend,
                       ::velk::vector<::velk::IGpuTexture::Ptr> attachments,
                       ::velk::IGpuTexture::Ptr depth_attachment,
-                      ::VkRenderPass render_pass,
-                      ::VkRenderPass load_render_pass,
-                      ::VkFramebuffer framebuffer,
                       ::VkFormat depth_vk_format,
                       ::velk::uvec2 dimensions,
                       ::velk::PixelFormat color_format,
                       ::velk::DepthFormat depth_format) = 0;
 
-    virtual ::VkRenderPass  vk_render_pass()      const = 0;
-    virtual ::VkRenderPass  vk_load_render_pass() const = 0;
-    virtual ::VkFramebuffer vk_framebuffer()      const = 0;
     virtual ::VkFormat      vk_depth_format()     const = 0;
     virtual size_t          vk_attachment_count() const = 0;
 
@@ -47,9 +41,10 @@ public:
 
 /// Vulkan-backed `IRenderTextureGroup`: owns N color attachments
 /// (IGpuTexture::Ptr each, allocated via `create_texture` with
-/// ColorAttachment usage), the shared render pass + framebuffer, and an
-/// optional depth image. Dropping the last Ptr defers the vk handles
-/// for destruction; cascading destroys also drop attachment Ptrs.
+/// ColorAttachment usage) and an optional depth attachment (also an
+/// IGpuTexture::Ptr). Rendered into via dynamic rendering, so the group
+/// holds no render pass / framebuffer. Dropping the last Ptr cascades to
+/// the attachment Ptrs, each deferring its own destruction.
 class VkRenderTargetGroup
     : public ::velk::ext::GpuResource<VkRenderTargetGroup,
                                       ::velk::IRenderTextureGroup,
@@ -93,17 +88,11 @@ public:
     void init(::velk::IRenderBackend* backend,
               ::velk::vector<::velk::IGpuTexture::Ptr> attachments,
               ::velk::IGpuTexture::Ptr depth_attachment,
-              ::VkRenderPass render_pass,
-              ::VkRenderPass load_render_pass,
-              ::VkFramebuffer framebuffer,
               ::VkFormat depth_vk_format,
               ::velk::uvec2 dimensions,
               ::velk::PixelFormat color_format,
               ::velk::DepthFormat depth_format) override;
 
-    ::VkRenderPass  vk_render_pass()      const override { return render_pass_; }
-    ::VkRenderPass  vk_load_render_pass() const override { return load_render_pass_; }
-    ::VkFramebuffer vk_framebuffer()      const override { return framebuffer_; }
     ::VkFormat      vk_depth_format()     const override { return depth_vk_format_; }
     size_t          vk_attachment_count() const override { return attachments_.size(); }
     bool was_cleared_this_frame() const override { return cleared_this_frame_; }
@@ -118,9 +107,6 @@ private:
     /// the depth wrapper's destructor, which defers via the standard
     /// IGpuTexture observer chain. nullptr when DepthFormat::None.
     ::velk::IGpuTexture::Ptr depth_attachment_;
-    ::VkRenderPass  render_pass_      = VK_NULL_HANDLE;
-    ::VkRenderPass  load_render_pass_ = VK_NULL_HANDLE;
-    ::VkFramebuffer framebuffer_      = VK_NULL_HANDLE;
     ::VkFormat      depth_vk_format_  = VK_FORMAT_UNDEFINED;
     ::velk::uvec2       dimensions_{};
     ::velk::PixelFormat format_       = ::velk::PixelFormat::RGBA8;

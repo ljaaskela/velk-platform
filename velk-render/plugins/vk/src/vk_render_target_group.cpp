@@ -4,9 +4,9 @@ namespace velk::vk {
 
 VkRenderTargetGroup::~VkRenderTargetGroup()
 {
-    if (render_pass_ == VK_NULL_HANDLE && framebuffer_ == VK_NULL_HANDLE) {
-        return;
-    }
+    // The group owns no GPU resources of its own (color/depth attachments
+    // are IGpuTexture::Ptrs that defer their own destruction). This call
+    // only unregisters the group from the backend's live-group tracking.
     if (backend_) {
         backend_->defer_destroy_gpu_render_target_group(this);
     }
@@ -15,9 +15,6 @@ VkRenderTargetGroup::~VkRenderTargetGroup()
 void VkRenderTargetGroup::init(::velk::IRenderBackend* backend,
                                ::velk::vector<::velk::IGpuTexture::Ptr> attachments,
                                ::velk::IGpuTexture::Ptr depth_attachment,
-                               ::VkRenderPass render_pass,
-                               ::VkRenderPass load_render_pass,
-                               ::VkFramebuffer framebuffer,
                                ::VkFormat depth_vk_format,
                                ::velk::uvec2 dimensions,
                                ::velk::PixelFormat color_format,
@@ -26,9 +23,6 @@ void VkRenderTargetGroup::init(::velk::IRenderBackend* backend,
     backend_           = backend;
     attachments_       = std::move(attachments);
     depth_attachment_  = std::move(depth_attachment);
-    render_pass_       = render_pass;
-    load_render_pass_  = load_render_pass;
-    framebuffer_       = framebuffer;
     depth_vk_format_   = depth_vk_format;
     dimensions_        = dimensions;
     format_            = color_format;

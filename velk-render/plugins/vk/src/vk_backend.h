@@ -223,14 +223,6 @@ private:
     std::deque<uint32_t> in_flight_slots_;
     std::mutex in_flight_mutex_;
 
-    /// Tracked at `begin_pass` so `submit()` and
-    /// `create_command_buffer()` can populate `VkCommandBufferInheritanceInfo`
-    /// for the SECONDARY recordings. Framebuffer is technically optional
-    /// in inheritance info but some drivers (AMD especially on MRT
-    /// renderpasses) misbehave when it's VK_NULL_HANDLE.
-    VkRenderPass current_render_pass_ = VK_NULL_HANDLE;
-    VkFramebuffer current_framebuffer_ = VK_NULL_HANDLE;
-
     // pending_buffer_update_barrier moved into FrameSync (per-slot).
 
     // Per-swapchain-image semaphores to avoid present engine conflicts.
@@ -248,6 +240,14 @@ private:
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
     VkSampler linear_sampler_ = VK_NULL_HANDLE;  ///< Default Repeat+Linear sampler. Kept as the fallback when no per-texture desc is supplied.
     uint32_t next_bindless_index_ = 1; // 0 reserved for "no texture"
+
+    /// Recycled bindless slots from destroyed textures. `create_texture`
+    /// pops from here before bumping `next_bindless_index_`; a slot is
+    /// returned only once its texture's frame-completion marker resolves
+    /// (in `drain_deferred_textures`), so no in-flight frame can still
+    /// reference it when it is handed out again. Touched only on the main
+    /// thread (create_texture + begin_frame's drain), so it needs no lock.
+    ::velk::vector<uint32_t> free_bindless_indices_;
 
     /// Per-(SamplerDesc) sampler cache. Lookup key is the byte pattern of
     /// the desc (struct is POD with no padding for our enum sizes), so
@@ -349,40 +349,21 @@ private:
 
     /// Pending texture-resource frees keyed by completion marker.
     /// Captured in `defer_destroy_gpu_texture` from a dying
-    /// VkGpuTexture / VkRenderTexture. Slot is leaked for now (matches
-    /// current backend behaviour — `next_bindless_index_` is monotonic).
+    /// VkGpuTexture / VkRenderTexture. `bindless_index` is returned to
+    /// `free_bindless_indices_` for reuse once the marker resolves
+    /// (UINT32_MAX / 0 = no slot, e.g. depth attachments).
     struct DeferredGpuTextureDestroy
     {
         ::VkImage         image;
         ::VkImageView     view;
         VmaAllocation     allocation;
-        ::VkFramebuffer   framebuffer;
-        ::VkRenderPass    render_pass;
-        ::VkRenderPass    load_render_pass;
+        uint32_t          bindless_index;
         uint64_t          completion_marker;
     };
     ::velk::vector<DeferredGpuTextureDestroy> deferred_gpu_textures_;
     std::mutex deferred_gpu_textures_mutex_;
 
     void drain_deferred_textures();
-
-    /// Pending render-target-group frees keyed by completion marker.
-    /// Captured in `defer_destroy_gpu_render_target_group` from a dying
-    /// VkRenderTargetGroup. Color and depth attachments are real
-    /// IGpuTexture::Ptrs whose destructors handle their own deferred
-    /// destroy through the observer cascade — this entry only owns the
-    /// render pass + framebuffer.
-    struct DeferredGpuRenderTargetGroupDestroy
-    {
-        ::VkRenderPass  render_pass;
-        ::VkRenderPass  load_render_pass;
-        ::VkFramebuffer framebuffer;
-        uint64_t        completion_marker;
-    };
-    ::velk::vector<DeferredGpuRenderTargetGroupDestroy> deferred_gpu_render_target_groups_;
-    std::mutex deferred_gpu_render_target_groups_mutex_;
-
-    void drain_deferred_render_target_groups();
 
     bool initialized_ = false;
 

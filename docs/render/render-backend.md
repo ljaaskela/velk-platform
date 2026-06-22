@@ -45,7 +45,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 
 The result is that the per-draw-call CPU cost is dominated by the `vkCmdPushConstants` + `vkCmdDraw` calls themselves, which is the theoretical minimum. On the GPU side, the pointer dereference for draw data is a single memory load from L2-cached memory, comparable to a traditional uniform buffer read.
 
-However, this is *not* GPU-driven rendering (yet). The CPU still decides what to draw and builds the draw call list. The GPU does not perform culling, sorting, or indirect dispatch. The "bindless" label describes the resource access model: once data is in GPU memory, shaders reach it by address, not by API-managed binding.
+However, this is *not* GPU-driven rendering (yet). The CPU still decides what to draw and builds the draw call list. Draws are issued through indirect-count commands (`vkCmdDraw*IndirectCount`), but the CPU writes the draw count and argument records — the GPU does not yet perform culling or sorting. The indirect substrate is in place so a future GPU-driven path can write those buffers instead. The "bindless" label describes the resource access model: once data is in GPU memory, shaders reach it by address, not by API-managed binding.
 
 ## The Core Idea
 
@@ -157,15 +157,24 @@ A typical Vulkan abstraction might expose 40+ methods for these. Here they're ei
 ## The DrawCall
 
 ```cpp
+/// Always dispatched indirectly: the actual draw count is read from
+/// `count_buffer` at GPU execution time, so a future GPU-side culling
+/// pass can write the count (and records) without CPU involvement.
 struct DrawCall
 {
-    PipelineId pipeline{};      ///< Which pipeline to bind.
-    uint32_t vertex_count{};    ///< Vertices per instance (non-indexed draws).
-    uint32_t instance_count{1}; ///< Number of instances to draw.
+    IGpuPipeline* pipeline{};   ///< Which pipeline to bind.
+    bool indexed{false};        ///< true => indexed draw (uses `index_buffer`).
 
-    GpuBufferHandle index_buffer{};         ///< Index buffer to bind (0 = non-indexed draw).
-    uint64_t index_buffer_offset{};   ///< Byte offset into index_buffer where indices start.
-    uint32_t index_count{};           ///< Indices per instance for indexed draws.
+    IGpuBuffer* index_buffer{};       ///< Index buffer. Required when `indexed`.
+    uint64_t index_buffer_offset{};   ///< Byte offset into `index_buffer`.
+
+    IGpuBuffer* args_buffer{};        ///< Buffer holding indirect-draw records.
+    uint64_t args_buffer_offset{};    ///< Byte offset of the first record.
+    uint32_t args_stride{};           ///< Bytes per record (5xu32 indexed, 4xu32 non-indexed).
+
+    IGpuBuffer* count_buffer{};       ///< Buffer holding the uint32 actual draw count.
+    uint64_t count_buffer_offset{};   ///< Byte offset of the count value.
+    uint32_t max_draw_count{1};       ///< Upper bound: min(count_buffer[0], max_draw_count) draws.
 
     /// Push constant data, typically an 8-byte GPU pointer to a DrawDataHeader.
     uint8_t  root_constants[kMaxRootConstantsSize]{};
@@ -173,7 +182,7 @@ struct DrawCall
 };
 ```
 
-When `index_buffer` is non-zero the backend dispatches a `vkCmdDrawIndexed(index_count, ...)` after binding the IBO at `index_buffer_offset`. Otherwise it falls through to `vkCmdDraw(vertex_count, ...)`. 3D mesh primitives take the indexed path; the TriangleStrip unit quad and fullscreen effects take the non-indexed path.
+The backend always dispatches indirectly: `vkCmdDrawIndexedIndirectCount` when `indexed` (binding the IBO at `index_buffer_offset`), otherwise `vkCmdDrawIndirectCount`. The draw count comes from `count_buffer` and the per-draw arguments from `args_buffer`. Today the CPU writes a count of 1 and a single record per batch; the indirection is the substrate a future GPU-driven path (compute culling writing the count + records) plugs into without changing the call shape or the CPU/GPU data contract. 3D mesh primitives use the indexed path; the TriangleStrip unit quad and fullscreen effects use the non-indexed path.
 
 The `root_constants` field carries up to `kMaxRootConstantsSize` (128) bytes that get pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 128 is Vulkan's spec-guaranteed minimum, so any conformant driver works. Larger payloads (the RT path's per-dispatch state, for example) live in `IGpuBuffer`-backed structs reached through an 8-byte BDA in push constants.
 
@@ -432,7 +441,7 @@ layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 float alpha = texture(velk_textures[nonuniformEXT(texture_id)], uv).r;
 ```
 
-The backend maintains a single global descriptor set with a variable-length sampler array. When a texture is created, it gets the next available slot. The slot index IS the `TextureId`. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
+The backend maintains a single global descriptor set with a variable-length sampler array (1024 slots). When a texture is created, it takes the next free slot — recycled from a free list of destroyed-texture slots, or the next never-used index. The slot index IS the `TextureId`. A destroyed texture's slot is returned to the free list once the GPU is past the frames that referenced it, so long-running sessions that churn textures don't exhaust the array. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
 
 On the Vulkan side, this uses descriptor indexing (core since 1.2) with `UPDATE_AFTER_BIND` and `PARTIALLY_BOUND` flags. The descriptor set is bound once per frame and never changes.
 

@@ -13,15 +13,14 @@ namespace velk::vk {
 
 /// Backend-internal sibling of `IGpuTexture` exposing Vulkan handles.
 /// Backend code uses `interface_cast<IVkGpuTexture>(p)` to reach the
-/// VkImage / VkImageView / VmaAllocation / framebuffer / render passes
-/// without depending on the concrete `VkGpuTexture` / `VkRenderTexture`
-/// types.
+/// VkImage / VkImageView / VmaAllocation without depending on the
+/// concrete `VkGpuTexture` / `VkRenderTexture` types.
 class IVkGpuTexture
     : public ::velk::Interface<IVkGpuTexture, ::velk::IInterface,
                                VELK_UID("288bea31-feea-4d78-acd8-2d695bb5b67c")>
 {
 public:
-    /// Initializes a sample-only texture (no framebuffer / render pass).
+    /// Initializes a sample-only texture.
     virtual void init_sampled(::velk::IRenderBackend* backend,
                               ::VkImage image, ::VkImageView view,
                               VmaAllocation allocation,
@@ -31,9 +30,9 @@ public:
                               ::velk::PixelFormat format,
                               const ::velk::SamplerDesc& sampler) = 0;
 
-    /// Initializes a renderable texture (carries framebuffer + render passes
-    /// for single-attachment RTT, or null for MRT-group attachments which
-    /// share the group's framebuffer / render pass).
+    /// Initializes a renderable texture. Rendering goes through dynamic
+    /// rendering (`vkCmdBeginRendering`), so no framebuffer / render pass
+    /// is stored.
     virtual void init_render_target(::velk::IRenderBackend* backend,
                                     ::VkImage image, ::VkImageView view,
                                     VmaAllocation allocation,
@@ -41,23 +40,13 @@ public:
                                     ::VkImageLayout initial_layout,
                                     ::velk::uvec2 dimensions,
                                     ::velk::PixelFormat format,
-                                    const ::velk::SamplerDesc& sampler,
-                                    ::VkFramebuffer framebuffer,
-                                    ::VkRenderPass render_pass,
-                                    ::VkRenderPass load_render_pass) = 0;
+                                    const ::velk::SamplerDesc& sampler) = 0;
 
     virtual ::VkImage      vk_image()           const = 0;
     virtual ::VkImageView  vk_view()            const = 0;
     virtual VmaAllocation  vk_allocation()      const = 0;
     virtual uint32_t       vk_bindless_index()  const = 0;
     virtual uint32_t       vk_mip_levels()      const = 0;
-
-    /// Render-pass / framebuffer accessors. Return `VK_NULL_HANDLE` for
-    /// sample-only textures and for MRT-group attachments (group owns the
-    /// framebuffer / render pass instead).
-    virtual ::VkFramebuffer vk_framebuffer()      const = 0;
-    virtual ::VkRenderPass  vk_render_pass()      const = 0;
-    virtual ::VkRenderPass  vk_load_render_pass() const = 0;
 
     /// Live tracking of the image's current layout. begin_pass / blit_*
     /// consult and update this so cross-pass ops emit correct barriers.
@@ -116,8 +105,7 @@ public:
     void init_render_target(::velk::IRenderBackend*, ::VkImage, ::VkImageView,
                             VmaAllocation, uint32_t, uint32_t,
                             ::VkImageLayout, ::velk::uvec2, ::velk::PixelFormat,
-                            const ::velk::SamplerDesc&, ::VkFramebuffer,
-                            ::VkRenderPass, ::VkRenderPass) override
+                            const ::velk::SamplerDesc&) override
     { /* not supported on sample-only impl */ }
 
     ::VkImage      vk_image()           const override { return image_; }
@@ -125,9 +113,6 @@ public:
     VmaAllocation  vk_allocation()      const override { return allocation_; }
     uint32_t       vk_bindless_index()  const override { return bindless_index_; }
     uint32_t       vk_mip_levels()      const override { return mip_levels_; }
-    ::VkFramebuffer vk_framebuffer()      const override { return VK_NULL_HANDLE; }
-    ::VkRenderPass  vk_render_pass()      const override { return VK_NULL_HANDLE; }
-    ::VkRenderPass  vk_load_render_pass() const override { return VK_NULL_HANDLE; }
     ::VkImageLayout vk_current_layout()   const override { return current_layout_; }
     void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
     bool was_cleared_this_frame() const override { return false; }
@@ -149,10 +134,8 @@ private:
 };
 
 /// Vulkan-backed renderable `IRenderTarget` + `IGpuTexture`
-/// (TextureUsage::RenderTarget / ColorAttachment). Carries the
-/// framebuffer + render passes for single-attachment RTT. MRT-group
-/// attachments share the group's framebuffer / render pass and leave
-/// these null.
+/// (TextureUsage::RenderTarget / ColorAttachment). Rendered into via
+/// dynamic rendering; no framebuffer / render pass is stored.
 class VkRenderTexture
     : public ::velk::ext::GpuResource<VkRenderTexture,
                                       ::velk::IRenderTarget,
@@ -195,19 +178,13 @@ public:
                             ::VkImageLayout initial_layout,
                             ::velk::uvec2 dimensions,
                             ::velk::PixelFormat format,
-                            const ::velk::SamplerDesc& sampler,
-                            ::VkFramebuffer framebuffer,
-                            ::VkRenderPass render_pass,
-                            ::VkRenderPass load_render_pass) override;
+                            const ::velk::SamplerDesc& sampler) override;
 
     ::VkImage       vk_image()           const override { return image_; }
     ::VkImageView   vk_view()            const override { return view_; }
     VmaAllocation   vk_allocation()      const override { return allocation_; }
     uint32_t        vk_bindless_index()  const override { return bindless_index_; }
     uint32_t        vk_mip_levels()      const override { return mip_levels_; }
-    ::VkFramebuffer vk_framebuffer()      const override { return framebuffer_; }
-    ::VkRenderPass  vk_render_pass()      const override { return render_pass_; }
-    ::VkRenderPass  vk_load_render_pass() const override { return load_render_pass_; }
     ::VkImageLayout vk_current_layout()   const override { return current_layout_; }
     void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
     bool was_cleared_this_frame() const override { return cleared_this_frame_; }
@@ -223,9 +200,6 @@ private:
     uint32_t        bindless_index_ = 0;
     uint32_t        mip_levels_  = 1;
     ::VkImageLayout current_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-    ::VkFramebuffer framebuffer_ = VK_NULL_HANDLE;
-    ::VkRenderPass  render_pass_ = VK_NULL_HANDLE;
-    ::VkRenderPass  load_render_pass_ = VK_NULL_HANDLE;
     ::velk::uvec2       dimensions_{};
     ::velk::PixelFormat format_ = ::velk::PixelFormat::RGBA8;
     ::velk::SamplerDesc sampler_{};
@@ -317,8 +291,7 @@ public:
     void init_render_target(::velk::IRenderBackend*, ::VkImage, ::VkImageView,
                             VmaAllocation, uint32_t, uint32_t, ::VkImageLayout,
                             ::velk::uvec2, ::velk::PixelFormat,
-                            const ::velk::SamplerDesc&, ::VkFramebuffer,
-                            ::VkRenderPass, ::VkRenderPass) override
+                            const ::velk::SamplerDesc&) override
     { /* not used */ }
 
     ::VkImage      vk_image()           const override { return image_; }
@@ -326,9 +299,6 @@ public:
     VmaAllocation  vk_allocation()      const override { return allocation_; }
     uint32_t       vk_bindless_index()  const override { return UINT32_MAX; }
     uint32_t       vk_mip_levels()      const override { return 1; }
-    ::VkFramebuffer vk_framebuffer()      const override { return VK_NULL_HANDLE; }
-    ::VkRenderPass  vk_render_pass()      const override { return VK_NULL_HANDLE; }
-    ::VkRenderPass  vk_load_render_pass() const override { return VK_NULL_HANDLE; }
     ::VkImageLayout vk_current_layout()   const override { return current_layout_; }
     void set_vk_current_layout(::VkImageLayout l) override { current_layout_ = l; }
     bool was_cleared_this_frame() const override { return cleared_this_frame_; }

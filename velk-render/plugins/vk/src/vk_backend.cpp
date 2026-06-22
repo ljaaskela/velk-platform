@@ -232,22 +232,10 @@ void VkBackend::shutdown()
     {
         std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
         for (auto& d : deferred_gpu_textures_) {
-            if (d.framebuffer)      vkDestroyFramebuffer(device_, d.framebuffer, nullptr);
-            if (d.render_pass)      vkDestroyRenderPass(device_, d.render_pass, nullptr);
-            if (d.load_render_pass) vkDestroyRenderPass(device_, d.load_render_pass, nullptr);
             if (d.view)             vkDestroyImageView(device_, d.view, nullptr);
             if (d.image)            vmaDestroyImage(allocator_, d.image, d.allocation);
         }
         deferred_gpu_textures_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
-        for (auto& d : deferred_gpu_render_target_groups_) {
-            if (d.framebuffer)      vkDestroyFramebuffer(device_, d.framebuffer, nullptr);
-            if (d.render_pass)      vkDestroyRenderPass(device_, d.render_pass, nullptr);
-            if (d.load_render_pass) vkDestroyRenderPass(device_, d.load_render_pass, nullptr);
-        }
-        deferred_gpu_render_target_groups_.clear();
     }
 
     // Destroy surfaces
@@ -1319,7 +1307,13 @@ IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
     transition_image_layout(cb, image, VK_IMAGE_LAYOUT_UNDEFINED, initial_layout, mip_levels);
     end_one_shot_commands(cb);
 
-    const uint32_t bindless_index = next_bindless_index_++;
+    uint32_t bindless_index;
+    if (!free_bindless_indices_.empty()) {
+        bindless_index = free_bindless_indices_.back();
+        free_bindless_indices_.pop_back();
+    } else {
+        bindless_index = next_bindless_index_++;
+    }
 
     VkDescriptorImageInfo sampler_info{};
     sampler_info.sampler = get_or_create_sampler(desc.sampler);
@@ -1356,64 +1350,6 @@ IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
         vkUpdateDescriptorSets(device_, 1, &storage_write, 0, nullptr);
     }
 
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    VkRenderPass render_pass = VK_NULL_HANDLE;
-    VkRenderPass load_render_pass = VK_NULL_HANDLE;
-    if (is_render_target) {
-        // Single-attachment RTT: standalone render pass + framebuffer.
-        // MRT group attachments share the group's render pass and skip this.
-        VkAttachmentDescription color_att{};
-        color_att.format = vk_format;
-        color_att.samples = VK_SAMPLE_COUNT_1_BIT;
-        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        color_att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkAttachmentReference color_ref{};
-        color_ref.attachment = 0;
-        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_ref;
-
-        VkSubpassDependency dep{};
-        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo rp_ci{};
-        rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rp_ci.attachmentCount = 1;
-        rp_ci.pAttachments = &color_att;
-        rp_ci.subpassCount = 1;
-        rp_ci.pSubpasses = &subpass;
-        rp_ci.dependencyCount = 1;
-        rp_ci.pDependencies = &dep;
-
-        vkCreateRenderPass(device_, &rp_ci, nullptr, &render_pass);
-
-        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        color_att.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCreateRenderPass(device_, &rp_ci, nullptr, &load_render_pass);
-
-        VkFramebufferCreateInfo fb_ci{};
-        fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_ci.renderPass = render_pass;
-        fb_ci.attachmentCount = 1;
-        fb_ci.pAttachments = &view;
-        fb_ci.width = static_cast<uint32_t>(desc.width);
-        fb_ci.height = static_cast<uint32_t>(desc.height);
-        fb_ci.layers = 1;
-        vkCreateFramebuffer(device_, &fb_ci, nullptr, &framebuffer);
-    }
-
     const uvec2 dims{static_cast<uint32_t>(desc.width), static_cast<uint32_t>(desc.height)};
 
     if (is_renderable) {
@@ -1423,8 +1359,7 @@ IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
         if (!vk_rt) return {};
         vk_rt->init_render_target(this, image, view, allocation, bindless_index,
                                   mip_levels, initial_layout, dims, desc.format,
-                                  desc.sampler, framebuffer, render_pass,
-                                  load_render_pass);
+                                  desc.sampler);
         if (auto* rt_target = interface_cast<IRenderTarget>(rt.get())) {
             rt_target->set_size(static_cast<uint32_t>(desc.width),
                                 static_cast<uint32_t>(desc.height));
@@ -1965,9 +1900,7 @@ void VkBackend::defer_destroy_gpu_texture(IGpuTexture* texture,
         vk_t->vk_image(),
         vk_t->vk_view(),
         vk_t->vk_allocation(),
-        vk_t->vk_framebuffer(),
-        vk_t->vk_render_pass(),
-        vk_t->vk_load_render_pass(),
+        vk_t->vk_bindless_index(),
         completion_marker,
     };
     std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
@@ -2045,11 +1978,14 @@ void VkBackend::drain_deferred_textures()
     std::lock_guard<std::mutex> lock(deferred_gpu_textures_mutex_);
     for (auto it = deferred_gpu_textures_.begin(); it != deferred_gpu_textures_.end();) {
         if (is_frame_complete(it->completion_marker)) {
-            if (it->framebuffer)      vkDestroyFramebuffer(device_, it->framebuffer, nullptr);
-            if (it->render_pass)      vkDestroyRenderPass(device_, it->render_pass, nullptr);
-            if (it->load_render_pass) vkDestroyRenderPass(device_, it->load_render_pass, nullptr);
             if (it->view)             vkDestroyImageView(device_, it->view, nullptr);
             if (it->image)            vmaDestroyImage(allocator_, it->image, it->allocation);
+            // Recycle the bindless slot now that the GPU is done with it.
+            // UINT32_MAX / 0 sentinels (depth attachments, "no texture")
+            // never occupied a slot.
+            if (it->bindless_index != UINT32_MAX && it->bindless_index != 0) {
+                free_bindless_indices_.push_back(it->bindless_index);
+            }
             it = deferred_gpu_textures_.erase(it);
         } else {
             ++it;
@@ -2095,7 +2031,6 @@ void VkBackend::begin_frame()
     drain_deferred_buffers();
     drain_deferred_pipelines();
     drain_deferred_textures();
-    drain_deferred_render_target_groups();
 
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2820,9 +2755,7 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
                                          ? VK_FORMAT_D32_SFLOAT
                                          : VK_FORMAT_UNDEFINED;
     vector<IGpuTexture::Ptr> attachments;
-    vector<VkFormat> vk_formats;
     attachments.reserve(formats.size());
-    vk_formats.reserve(formats.size());
 
     // Create each attachment as a renderable+sampleable texture using
     // ColorAttachment, which preserves the declared format.
@@ -2838,10 +2771,6 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
             return {};
         }
         attachments.push_back(std::move(t));
-
-        VkFormat vk_f = vk_format_for(f);
-        if (vk_f == VK_FORMAT_UNDEFINED) vk_f = VK_FORMAT_R8G8B8A8_UNORM;
-        vk_formats.push_back(vk_f);
     }
 
     const bool has_depth = depth_vk_format != VK_FORMAT_UNDEFINED;
@@ -2877,110 +2806,13 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
         vkCreateImageView(device_, &dv_ci, nullptr, &depth_view);
     }
 
-    // Build the multi-attachment render pass.
-    const size_t n_color = formats.size();
-    const size_t n_atts = n_color + (has_depth ? 1 : 0);
-    vector<VkAttachmentDescription> atts(n_atts);
-    vector<VkAttachmentReference> refs(n_color);
-    for (size_t i = 0; i < n_color; ++i) {
-        atts[i] = {};
-        atts[i].format = vk_formats[i];
-        atts[i].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        atts[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        atts[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        refs[i] = {};
-        refs[i].attachment = static_cast<uint32_t>(i);
-        refs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    VkAttachmentReference depth_ref{};
-    if (has_depth) {
-        auto& d = atts[n_color];
-        d = {};
-        d.format = depth_vk_format;
-        d.samples = VK_SAMPLE_COUNT_1_BIT;
-        d.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        d.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        d.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        depth_ref.attachment = static_cast<uint32_t>(n_color);
-        depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = static_cast<uint32_t>(refs.size());
-    subpass.pColorAttachments = refs.data();
-    subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
-
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                       | (has_depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0);
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        | (has_depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0);
-
-    VkRenderPassCreateInfo rp_ci{};
-    rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_ci.attachmentCount = static_cast<uint32_t>(atts.size());
-    rp_ci.pAttachments = atts.data();
-    rp_ci.subpassCount = 1;
-    rp_ci.pSubpasses = &subpass;
-    rp_ci.dependencyCount = 1;
-    rp_ci.pDependencies = &dep;
-
-    VkRenderPass render_pass = VK_NULL_HANDLE;
-    VkRenderPass load_render_pass = VK_NULL_HANDLE;
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-
+    // Rendering goes through dynamic rendering (record_begin_rendering),
+    // so the group needs no VkRenderPass / VkFramebuffer. Attachment
+    // formats already live on the individual attachment textures.
     auto cleanup_on_fail = [&]() {
-        if (framebuffer)      vkDestroyFramebuffer(device_, framebuffer, nullptr);
-        if (load_render_pass) vkDestroyRenderPass(device_, load_render_pass, nullptr);
-        if (render_pass)      vkDestroyRenderPass(device_, render_pass, nullptr);
-        if (depth_view)       vkDestroyImageView(device_, depth_view, nullptr);
-        if (depth_image)      vmaDestroyImage(allocator_, depth_image, depth_allocation);
+        if (depth_view)  vkDestroyImageView(device_, depth_view, nullptr);
+        if (depth_image) vmaDestroyImage(allocator_, depth_image, depth_allocation);
     };
-
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &render_pass) != VK_SUCCESS) {
-        cleanup_on_fail();
-        return {};
-    }
-    for (size_t i = 0; i < n_color; ++i) {
-        atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        atts[i].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-    if (vkCreateRenderPass(device_, &rp_ci, nullptr, &load_render_pass) != VK_SUCCESS) {
-        cleanup_on_fail();
-        return {};
-    }
-
-    vector<VkImageView> views(n_atts);
-    for (size_t i = 0; i < n_color; ++i) {
-        auto* vk_t = interface_cast<IVkGpuTexture>(attachments[i].get());
-        views[i] = vk_t ? vk_t->vk_view() : VK_NULL_HANDLE;
-    }
-    if (has_depth) views[n_color] = depth_view;
-
-    VkFramebufferCreateInfo fb_ci{};
-    fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fb_ci.renderPass = render_pass;
-    fb_ci.attachmentCount = static_cast<uint32_t>(views.size());
-    fb_ci.pAttachments = views.data();
-    fb_ci.width = static_cast<uint32_t>(width);
-    fb_ci.height = static_cast<uint32_t>(height);
-    fb_ci.layers = 1;
-    if (vkCreateFramebuffer(device_, &fb_ci, nullptr, &framebuffer) != VK_SUCCESS) {
-        cleanup_on_fail();
-        return {};
-    }
 
     auto group = ::velk::instance().create<IRenderTextureGroup>(ClassId::VkRenderTargetGroup);
     if (!group) {
@@ -3025,48 +2857,25 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
     }
 
     vk_group->init(this, std::move(attachments), std::move(depth_tex),
-                   render_pass, load_render_pass, framebuffer,
                    depth_vk_format, dims, formats[0], depth);
     live_render_target_groups_.push_back(vk_group);
     return group;
 }
 
 void VkBackend::defer_destroy_gpu_render_target_group(IRenderTextureGroup* group,
-                                                      uint64_t completion_marker)
+                                                      uint64_t /*completion_marker*/)
 {
+    // The group owns no GPU resources of its own — color/depth attachments
+    // are IGpuTexture::Ptrs that defer their own destruction, and rendering
+    // uses dynamic rendering (no render pass / framebuffer). So there is
+    // nothing to fence; this only unregisters the group from the
+    // begin_frame cleared-flag walk.
     if (!group) return;
     auto* vk_group = interface_cast<IVkRenderTargetGroup>(group);
     if (!vk_group) return;
-    if (completion_marker == kDefaultCompletionMarker) {
-        completion_marker = pending_frame_completion_marker();
-    }
     for (auto it = live_render_target_groups_.begin();
          it != live_render_target_groups_.end(); ++it) {
         if (*it == vk_group) { live_render_target_groups_.erase(it); break; }
-    }
-    DeferredGpuRenderTargetGroupDestroy entry{
-        vk_group->vk_render_pass(),
-        vk_group->vk_load_render_pass(),
-        vk_group->vk_framebuffer(),
-        completion_marker,
-    };
-    std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
-    deferred_gpu_render_target_groups_.push_back(entry);
-}
-
-void VkBackend::drain_deferred_render_target_groups()
-{
-    std::lock_guard<std::mutex> lock(deferred_gpu_render_target_groups_mutex_);
-    for (auto it = deferred_gpu_render_target_groups_.begin();
-         it != deferred_gpu_render_target_groups_.end();) {
-        if (is_frame_complete(it->completion_marker)) {
-            if (it->framebuffer)      vkDestroyFramebuffer(device_, it->framebuffer, nullptr);
-            if (it->render_pass)      vkDestroyRenderPass(device_, it->render_pass, nullptr);
-            if (it->load_render_pass) vkDestroyRenderPass(device_, it->load_render_pass, nullptr);
-            it = deferred_gpu_render_target_groups_.erase(it);
-        } else {
-            ++it;
-        }
     }
 }
 

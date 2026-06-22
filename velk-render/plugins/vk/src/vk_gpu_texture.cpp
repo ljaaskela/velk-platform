@@ -48,10 +48,7 @@ void VkRenderTexture::init_render_target(::velk::IRenderBackend* backend,
                                          ::VkImageLayout initial_layout,
                                          ::velk::uvec2 dimensions,
                                          ::velk::PixelFormat format,
-                                         const ::velk::SamplerDesc& sampler,
-                                         ::VkFramebuffer framebuffer,
-                                         ::VkRenderPass render_pass,
-                                         ::VkRenderPass load_render_pass)
+                                         const ::velk::SamplerDesc& sampler)
 {
     backend_           = backend;
     image_             = image;
@@ -63,9 +60,6 @@ void VkRenderTexture::init_render_target(::velk::IRenderBackend* backend,
     dimensions_        = dimensions;
     format_            = format;
     sampler_           = sampler;
-    framebuffer_       = framebuffer;
-    render_pass_       = render_pass;
-    load_render_pass_  = load_render_pass;
     set_gpu_handle(::velk::GpuResourceKey::Default,
                    static_cast<uint64_t>(bindless_index));
 }

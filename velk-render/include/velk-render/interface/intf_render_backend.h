@@ -396,10 +396,13 @@ public:
     virtual IRenderTextureGroup::Ptr create_render_target_group(const TextureGroupDesc& desc) = 0;
 
     /**
-     * @brief Queues an `IRenderTextureGroup`'s native handles for
-     *        destruction once the GPU is past the current pending
-     *        frame. Called by `~VkRenderTargetGroup` when its owning
-     *        Ptr drops.
+     * @brief Lifecycle callback from `~VkRenderTargetGroup` when its
+     *        owning Ptr drops. The group owns no GPU resources of its own
+     *        (color/depth attachments are `IGpuTexture::Ptr`s that defer
+     *        their own destruction), so this only lets the backend drop
+     *        its internal tracking of the group. The `completion_marker`
+     *        is accepted for symmetry with the other defer-destroy
+     *        callbacks but is unused.
      */
     virtual void defer_destroy_gpu_render_target_group(
         IRenderTextureGroup* group,
