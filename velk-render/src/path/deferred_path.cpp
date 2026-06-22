@@ -33,8 +33,7 @@ namespace {
 /// way two visuals sharing a material still get distinct pipelines
 /// with the right `velk_visual_discard` body. Returns 0 to skip.
 IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                         const IBatch& batch,
-                                         IRenderTextureGroup* target_group)
+                                         const IBatch& batch)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -76,9 +75,13 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
         perturb = uid.lo ^ uid.hi;
     }
     uint64_t gbuffer_key = forward_key ^ perturb;
-    // Cache lookup must match the format axis compile_pipeline_dynamic
-    // uses when it stores: color_formats[0] (Albedo = RGBA8).
-    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], target_group};
+    // Cache lookup must match what compile_pipeline_dynamic stores:
+    // color_formats[0] (Albedo = RGBA8) plus the MRT layout signature
+    // derived from the full gbuffer format set (stable across resize).
+    const auto gbuffer_formats = array_view<const PixelFormat>(
+        kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
+    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0],
+                          pipeline_target_layout(gbuffer_formats)};
     if (auto pipeline = ctx.find_pipeline(gkey)) {
         return pipeline.get();
     }
@@ -125,16 +128,15 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     // G-buffer passes always write opaquely regardless of alpha mode.
     po.blend_mode = BlendMode::Opaque;
 
-    // Gbuffer compiles against kGBufferFormats + DepthFormat::Default.
-    // cache_group differentiates gbuffer pipelines from forward ones
-    // using the same user_key.
+    // Gbuffer compiles against kGBufferFormats + DepthFormat::Default. The
+    // layout signature (computed inside compile_pipeline_dynamic from these
+    // formats) differentiates gbuffer pipelines from forward ones using the
+    // same user_key.
     uint64_t compiled = ctx.compile_pipeline_dynamic(
         string_view(composed), vsrc,
-        gbuffer_key,
-        array_view<const PixelFormat>(
-            kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count)),
+        gbuffer_key, gbuffer_formats,
         DepthFormat::Default,
-        po, target_group);
+        po);
     if (!compiled) return nullptr;
     if (auto pipeline = ctx.find_pipeline(gkey)) {
         return pipeline.get();
@@ -323,7 +325,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
     auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_gbuffer(*ctx.render_ctx, b, group);
+        return resolve_or_compile_gbuffer(*ctx.render_ctx, b);
     };
     vector<DrawCall> gbuffer_draw_calls;
     emit_draw_calls(

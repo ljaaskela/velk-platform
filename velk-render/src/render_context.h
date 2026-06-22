@@ -20,7 +20,7 @@ struct PipelineCacheKeyHash
         size_t h = std::hash<uint64_t>{}(k.user_key);
         h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<void*>{}(static_cast<void*>(k.target_group))
+        h ^= std::hash<uint64_t>{}(k.target_layout)
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         return h;
     }
@@ -45,8 +45,7 @@ public:
                                       uint64_t key,
                                       array_view<const PixelFormat> color_formats,
                                       DepthFormat depth_format,
-                                      const PipelineOptions& options = {},
-                                      IRenderTextureGroup* cache_group = nullptr) override;
+                                      const PipelineOptions& options = {}) override;
     uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
 

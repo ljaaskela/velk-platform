@@ -204,8 +204,7 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
 uint64_t RenderContextImpl::compile_pipeline_dynamic(
     string_view fragment_source, string_view vertex_source,
     uint64_t key, array_view<const PixelFormat> color_formats,
-    DepthFormat depth_format, const PipelineOptions& options,
-    IRenderTextureGroup* cache_group)
+    DepthFormat depth_format, const PipelineOptions& options)
 {
     if (!initialized_ || !backend_) {
         return 0;
@@ -232,13 +231,15 @@ uint64_t RenderContextImpl::compile_pipeline_dynamic(
     if (key == 0) {
         key = next_pipeline_key_++;
     }
-    // Cache slot is `(user_key, color_formats[0], cache_group)`. cache_group
-    // != nullptr differentiates MRT pipelines (e.g. gbuffer) from single-color
-    // forward ones sharing the same user_key.
+    // Cache slot is `(user_key, color_formats[0], layout)`. The layout
+    // signature (derived from the full color-format set) differentiates MRT
+    // pipelines (e.g. gbuffer) from single-color forward ones sharing the
+    // same user_key, without keying on a render-target instance.
     PixelFormat cache_format = color_formats.empty()
         ? PixelFormat::RGBA8
         : color_formats[0];
-    pipeline_map_[PipelineCacheKey{key, cache_format, cache_group}] = std::move(pid);
+    pipeline_map_[PipelineCacheKey{key, cache_format,
+                                   pipeline_target_layout(color_formats)}] = std::move(pid);
     return key;
 }
 
@@ -260,7 +261,7 @@ uint64_t RenderContextImpl::create_compute_pipeline(const IShader::Ptr& compute,
         key = next_pipeline_key_++;
     }
     // Compute pipelines are render-pass independent; key under a
-    // canonical (RGBA8, group 0) placeholder tuple so call sites look
+    // canonical (RGBA8, layout 0) placeholder tuple so call sites look
     // them up with just the user_key.
     pipeline_map_[PipelineCacheKey{key, PixelFormat::RGBA8, 0}] = std::move(pid);
     return key;
