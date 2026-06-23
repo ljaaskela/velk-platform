@@ -18,25 +18,27 @@ namespace velk {
  * Composes the forward fragment shader from the material's IShaderSource
  * (eval source + eval entry point + `forward_fragment_driver_template`)
  * and calls `IRenderContext::compile_pipeline_dynamic`. Returns the
- * cache key the call produced (also usable as the value the renderer
- * caches the compiled pipeline under at `(key, color_format, nullptr)`).
+ * compiled pipeline as a strong `Ptr` (the caller must keep it alive —
+ * the cache holds only a weak ref); @p out_key receives the cache key.
  *
- * Returns 0 if the material lacks an eval/vertex source pair.
+ * Returns nullptr if the material lacks an eval/vertex source pair.
  */
-inline uint64_t compile_material_forward_pipeline_dynamic(
+inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
     IRenderContext& ctx, const IBatch& batch,
     PixelFormat color_format, DepthFormat depth_format,
-    uint64_t user_key)
+    uint64_t user_key, uint64_t* out_key = nullptr)
 {
     auto material_ptr = batch.material();
-    if (!material_ptr) return 0;
-    auto* mat = interface_cast<IMaterial>(material_ptr.get());
-    auto* src = interface_cast<IShaderSource>(material_ptr.get());
-    if (!mat || !src) return 0;
+    if (!material_ptr) return {};
+    auto* mat = interface_cast<IMaterial>(material_ptr);
+    auto* src = interface_cast<IShaderSource>(material_ptr);
+    if (!(mat && src)) {
+        return {};
+    }
     auto eval_src = src->get_source(shader_role::kEval);
     auto vertex_src = src->get_source(shader_role::kVertex);
     auto eval_fn = src->get_fn_name(shader_role::kEval);
-    if (eval_src.empty() || vertex_src.empty() || eval_fn.empty()) return 0;
+    if (eval_src.empty() || vertex_src.empty() || eval_fn.empty()) return {};
     src->register_includes(ctx);
     string frag = compose_eval_fragment(
         forward_fragment_driver_template, eval_src, eval_fn,
@@ -47,7 +49,8 @@ inline uint64_t compile_material_forward_pipeline_dynamic(
         user_key,
         array_view<const PixelFormat>(formats, 1),
         depth_format,
-        batch.pipeline_options());
+        batch.pipeline_options(),
+        out_key);
 }
 
 /**
@@ -74,13 +77,26 @@ inline uint64_t ensure_material_forward_key(IRenderContext& ctx, const IBatch& b
     if (!material_ptr) return 0;
     uint64_t key = material_ptr->get_pipeline_handle(ctx);
     if (key != 0) return key;
-    uint64_t compiled = compile_material_forward_pipeline_dynamic(
-        ctx, batch, PixelFormat::RGBA16F, DepthFormat::Default,
-        /*user_key=*/0);
-    if (compiled != 0) {
-        material_ptr->set_pipeline_handle(compiled);
+    // We want the stable cache key, not the forward pipeline itself: this
+    // material may only ever render deferred, and ForwardPath compiles and
+    // holds its own forward variant on demand. Compiling here just to mint a
+    // key would leave a homeless pipeline in the weak cache (no strong owner),
+    // so reserve a key without compiling. The material's shader includes,
+    // which the deferred gbuffer compile relies on, are still registered.
+    auto* mat = interface_cast<IMaterial>(material_ptr);
+    auto* src = interface_cast<IShaderSource>(material_ptr);
+    if (!(mat && src)) {
+        return 0;
     }
-    return compiled;
+    if (src->get_source(shader_role::kEval).empty()
+        || src->get_source(shader_role::kVertex).empty()
+        || src->get_fn_name(shader_role::kEval).empty()) {
+        return 0;
+    }
+    src->register_includes(ctx);
+    uint64_t reserved = ctx.reserve_pipeline_key();
+    material_ptr->set_pipeline_handle(reserved);
+    return reserved;
 }
 
 } // namespace velk

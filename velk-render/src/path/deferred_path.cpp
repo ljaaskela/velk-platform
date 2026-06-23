@@ -32,8 +32,8 @@ namespace {
 /// class perturbation derived from the shader-source class uid; that
 /// way two visuals sharing a material still get distinct pipelines
 /// with the right `velk_visual_discard` body. Returns 0 to skip.
-IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                         const IBatch& batch)
+IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
+                                             const IBatch& batch)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -48,7 +48,7 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     if (forward_key == 0) {
         forward_key = ensure_material_forward_key(ctx, batch);
     }
-    if (forward_key == 0) return nullptr;
+    if (forward_key == 0) return {};
 
     // Pull the material's eval snippet for the gbuffer compile below.
     // Fast-path note: when ensure_material_forward_key just compiled,
@@ -83,7 +83,7 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0],
                           pipeline_target_layout(gbuffer_formats)};
     if (auto pipeline = ctx.find_pipeline(gkey)) {
-        return pipeline.get();
+        return pipeline;
     }
 
     string_view vsrc;
@@ -132,23 +132,20 @@ IGpuPipeline* resolve_or_compile_gbuffer(IRenderContext& ctx,
     // layout signature (computed inside compile_pipeline_dynamic from these
     // formats) differentiates gbuffer pipelines from forward ones using the
     // same user_key.
-    uint64_t compiled = ctx.compile_pipeline_dynamic(
+    // Compile and return the strong Ptr directly (cache is weak, so a
+    // find-after-compile would already be dead).
+    return ctx.compile_pipeline_dynamic(
         string_view(composed), vsrc,
         gbuffer_key, gbuffer_formats,
         DepthFormat::Default,
         po);
-    if (!compiled) return nullptr;
-    if (auto pipeline = ctx.find_pipeline(gkey)) {
-        return pipeline.get();
-    }
-    return nullptr;
 }
 
 } // namespace
 
-uint64_t DeferredPath::ensure_pipeline(FrameContext& ctx)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
 {
-    if (!ctx.render_ctx || !ctx.snippets) return 0;
+    if (!ctx.render_ctx || !ctx.snippets) return {};
 
     const auto& intersect_ids = ctx.snippets->frame_intersects();
     const auto& intersect_info_by_id = ctx.snippets->intersect_info_by_id();
@@ -169,8 +166,12 @@ uint64_t DeferredPath::ensure_pipeline(FrameContext& ctx)
     }
     key |= 0x4000000000000000ULL;
 
-    if (compiled_pipelines_.find(key) != compiled_pipelines_.end()) {
-        return key;
+    // The weak pipeline cache is the source of truth: if the pipeline for
+    // this snippet combo is still alive (held by a live lighting pass),
+    // reuse it; otherwise compose + compile a fresh one.
+    if (auto p = ctx.render_ctx->find_pipeline(
+            PipelineCacheKey{key, PixelFormat::RGBA8, 0})) {
+        return p;
     }
 
     string src;
@@ -229,10 +230,7 @@ uint64_t DeferredPath::ensure_pipeline(FrameContext& ctx)
     append_literal("    }\n");
     append_literal("}\n");
 
-    uint64_t compiled = ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
-    if (compiled == 0) return 0;
-    compiled_pipelines_[key] = true;
-    return key;
+    return ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
 }
 
 IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,
@@ -324,8 +322,16 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
     IRenderTextureGroup* group = vs.gbuffer.get();
 
     auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
-    auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_gbuffer(*ctx.render_ctx, b);
+    // Hold strong refs to every pipeline this pass binds (cache is weak).
+    // `held` is populated during emit_draw_calls — before `reset()` below —
+    // so pipelines reused from the prior recording never drop to zero refs.
+    vector<IGpuPipeline::Ptr> held;
+    auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+        auto p = resolve_or_compile_gbuffer(*ctx.render_ctx, b);
+        if (!p) return nullptr;
+        IGpuPipeline* raw = p.get();
+        held.push_back(std::move(p));
+        return raw;
     };
     vector<DrawCall> gbuffer_draw_calls;
     emit_draw_calls(
@@ -378,6 +384,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
     // Self-contained cmd buffer; no target_* seam.
     vs.cached_gbuffer_pass->add_write(interface_pointer_cast<IGpuResource>(vs.gbuffer));
     vs.cached_gbuffer_pass->set_view_globals_address(render_view.view_globals_address);
+    vs.cached_gbuffer_pass->set_held_pipelines(std::move(held));
     vs.gbuffer_dirty = false;
     graph.add_pass(vs.cached_gbuffer_pass);
 }
@@ -421,10 +428,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     vs.output_size = want;
 
-    uint64_t pipeline_key = ensure_pipeline(ctx);
-    if (pipeline_key == 0) return;
-    auto lighting_pipeline = ctx.render_ctx->find_pipeline(
-        PipelineCacheKey{pipeline_key, PixelFormat::RGBA8, 0});
+    auto lighting_pipeline = ensure_pipeline(ctx);
     if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
@@ -542,6 +546,10 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.cached_lighting_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
     vs.cached_lighting_pass->set_view_globals_address(render_view.view_globals_address);
+    // Hold the lighting compute pipeline strong (cache is weak).
+    vector<IGpuPipeline::Ptr> held_lighting;
+    held_lighting.push_back(std::move(lighting_pipeline));
+    vs.cached_lighting_pass->set_held_pipelines(std::move(held_lighting));
     vs.lighting_dirty = false;
     graph.add_pass(vs.cached_lighting_pass);
 }
@@ -584,7 +592,6 @@ void DeferredPath::shutdown(FrameContext& /*ctx*/)
         view->remove_render_state_observer(this);
     }
     view_states_.clear();
-    compiled_pipelines_.clear();
 }
 
 IGpuResource::Ptr DeferredPath::find_named_output(string_view name, IViewEntry* view) const

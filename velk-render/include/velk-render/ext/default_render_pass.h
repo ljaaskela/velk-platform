@@ -38,6 +38,10 @@ public:
     {
         command_buffer_ = std::move(cmd);
     }
+    void set_held_pipelines(vector<IGpuPipeline::Ptr> pipelines) override
+    {
+        held_pipelines_ = std::move(pipelines);
+    }
     void reset() override;
 
 private:
@@ -45,6 +49,10 @@ private:
     vector<IGpuResource::Ptr> writes_;
     uint64_t view_globals_address_ = 0;
     IGpuCommandBuffer::Ptr command_buffer_;
+    /// Strong refs to the pipelines this pass's command buffer binds;
+    /// the pipeline cache holds only weak refs, so this keeps them alive
+    /// for as long as the recorded pass is live. See `set_held_pipelines`.
+    vector<IGpuPipeline::Ptr> held_pipelines_;
 };
 
 } // namespace velk::impl

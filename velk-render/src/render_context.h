@@ -26,8 +26,13 @@ struct PipelineCacheKeyHash
     }
 };
 
+/// Weak-ref intern pool: compiled pipelines are looked up here but owned
+/// (strong) by the recorders that bind them (each cached IRenderPass holds
+/// `IGpuPipeline::Ptr`s for the pipelines its command buffer uses). A
+/// pipeline dies when the last pass referencing it is gone; `find_pipeline`
+/// returns nullptr for an entry whose pipeline has expired.
 using PipelineCacheMap =
-    std::unordered_map<PipelineCacheKey, IGpuPipeline::Ptr, PipelineCacheKeyHash>;
+    std::unordered_map<PipelineCacheKey, IGpuPipeline::WeakPtr, PipelineCacheKeyHash>;
 
 class RenderContextImpl : public ext::ObjectCore<RenderContextImpl, IRenderContext>
 {
@@ -40,14 +45,17 @@ public:
 
     IShader::Ptr compile_shader(string_view source, ShaderStage stage,
                                 uint64_t key = 0) override;
-    uint64_t compile_pipeline_dynamic(string_view fragment_source,
+    IGpuPipeline::Ptr compile_pipeline_dynamic(string_view fragment_source,
                                       string_view vertex_source,
                                       uint64_t key,
                                       array_view<const PixelFormat> color_formats,
                                       DepthFormat depth_format,
-                                      const PipelineOptions& options = {}) override;
-    uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
-    uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
+                                      const PipelineOptions& options = {},
+                                      uint64_t* out_key = nullptr) override;
+    IGpuPipeline::Ptr create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
+    IGpuPipeline::Ptr compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
+
+    uint64_t reserve_pipeline_key() override { return next_pipeline_key_++; }
 
     void set_default_vertex_shader(const IShader::Ptr& shader) override;
     void set_default_fragment_shader(const IShader::Ptr& shader) override;
@@ -57,7 +65,7 @@ public:
     IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const override
     {
         auto it = pipeline_map_.find(key);
-        return it != pipeline_map_.end() ? it->second : nullptr;
+        return it != pipeline_map_.end() ? it->second.lock() : nullptr;
     }
 
     IRenderBackend::Ptr backend() const override { return backend_; }

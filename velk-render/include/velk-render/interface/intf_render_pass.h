@@ -89,6 +89,16 @@ public:
     /// the replay in any begin_pass / end_pass.
     virtual IGpuCommandBuffer::Ptr command_buffer() const = 0;
     virtual void set_command_buffer(IGpuCommandBuffer::Ptr cmd) = 0;
+
+    /// Retain strong refs to the GPU pipelines this pass's command buffer
+    /// binds. The pipeline cache holds only weak refs, so the recorder is
+    /// the strong owner — a pipeline lives as long as some pass that binds
+    /// it. Replaces the previously-held set; producers call this once per
+    /// re-record with the pipelines their command buffer references. The
+    /// set is GPU-object lifetime state, independent of `reset()` (so a
+    /// rebuild that bails after `reset()` keeps the old pipelines alive
+    /// rather than dropping them mid-flight).
+    virtual void set_held_pipelines(vector<IGpuPipeline::Ptr> pipelines) = 0;
     /// @}
 };
 

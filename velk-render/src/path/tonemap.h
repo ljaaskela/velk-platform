@@ -31,11 +31,10 @@ public:
               ::velk::IRenderGraph& graph) override;
 
 private:
-    /// Compiles the tonemap compute pipeline if not yet compiled.
-    /// Returns the pipeline cache key (zero on failure).
-    uint64_t ensure_pipeline(::velk::FrameContext& ctx);
-
-    bool compiled_ = false;
+    /// Resolves the tonemap compute pipeline, compiling on a (weak) cache
+    /// miss. Returns a strong Ptr the caller keeps alive (the tonemap pass
+    /// holds it); nullptr on failure.
+    ::velk::IGpuPipeline::Ptr ensure_pipeline(::velk::FrameContext& ctx);
 };
 
 } // namespace velk::impl

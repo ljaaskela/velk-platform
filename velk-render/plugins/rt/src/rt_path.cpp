@@ -16,10 +16,10 @@
 
 namespace velk {
 
-uint64_t RtPath::ensure_pipeline(FrameContext& ctx)
+IGpuPipeline::Ptr RtPath::ensure_pipeline(FrameContext& ctx)
 {
     if (!ctx.render_ctx || !ctx.snippets) {
-        return 0;
+        return {};
     }
 
     const auto& material_ids = ctx.snippets->frame_materials();
@@ -46,19 +46,17 @@ uint64_t RtPath::ensure_pipeline(FrameContext& ctx)
     }
     key |= 0x8000000000000000ULL;
 
-    auto cached = compiled_pipelines_.find(key);
-    if (cached != compiled_pipelines_.end()) {
-        return key;
+    // The weak pipeline cache is the source of truth: reuse the live
+    // pipeline for this snippet combo if it's still held by a live RT pass,
+    // otherwise compose + compile a fresh one.
+    if (auto p = ctx.render_ctx->find_pipeline(
+            PipelineCacheKey{key, PixelFormat::RGBA8, 0})) {
+        return p;
     }
 
     string src = compose_rt_compute(*ctx.snippets);
 
-    uint64_t compiled = ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
-    if (compiled == 0) {
-        return 0;
-    }
-    compiled_pipelines_[key] = true;
-    return key;
+    return ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
 }
 
 void RtPath::build_passes(IViewEntry& entry,
@@ -110,12 +108,7 @@ void RtPath::build_passes(IViewEntry& entry,
     // else uses it, but RenderView is immutable from a path's POV).
     vector<RtShape> shapes(render_view.shapes);
 
-    uint64_t rt_pipeline_key = ensure_pipeline(ctx);
-    if (rt_pipeline_key == 0) {
-        return;
-    }
-    auto rt_pipeline = ctx.render_ctx->find_pipeline(
-        PipelineCacheKey{rt_pipeline_key, PixelFormat::RGBA8, 0});
+    auto rt_pipeline = ensure_pipeline(ctx);
     if (!rt_pipeline) {
         return;
     }
@@ -312,6 +305,10 @@ void RtPath::build_passes(IViewEntry& entry,
         vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
     vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);
+    // Hold the RT compute pipeline strong (cache is weak).
+    vector<IGpuPipeline::Ptr> held_rt;
+    held_rt.push_back(std::move(rt_pipeline));
+    vs.cached_rt_pass->set_held_pipelines(std::move(held_rt));
     vs.rt_dirty = false;
     graph.add_pass(vs.cached_rt_pass);
 }

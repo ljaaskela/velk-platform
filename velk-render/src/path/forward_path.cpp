@@ -30,10 +30,10 @@ namespace {
 /// are present; the visual's source is the no-material fallback.
 /// All pipelines compile against dynamic-rendering attachment formats.
 /// Returns 0 to skip (no source / compile failure).
-IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
-                                         const IBatch& batch,
-                                         PixelFormat target_format,
-                                         DepthFormat depth_format)
+IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
+                                             const IBatch& batch,
+                                             PixelFormat target_format,
+                                             DepthFormat depth_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -45,25 +45,28 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
 
     if (auto pipeline = ctx.find_pipeline(
             PipelineCacheKey{user_key, target_format, 0})) {
-        return pipeline.get();
+        return pipeline;
     }
 
+    // Cache miss: compile and return the strong Ptr directly (the cache
+    // holds only a weak ref, so a find-after-compile would already be dead).
+    IGpuPipeline::Ptr compiled;
     uint64_t compiled_key = 0;
     if (use_material) {
-        compiled_key = compile_material_forward_pipeline_dynamic(
-            ctx, batch, target_format, depth_format, user_key);
-        if (compiled_key == 0) {
+        compiled = compile_material_forward_pipeline_dynamic(
+            ctx, batch, target_format, depth_format, user_key, &compiled_key);
+        if (!compiled) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
             if (!frag_src.empty() && !vertex_src.empty()) {
                 PixelFormat formats[1] = {target_format};
-                compiled_key = ctx.compile_pipeline_dynamic(
+                compiled = ctx.compile_pipeline_dynamic(
                     frag_src, vertex_src,
                     user_key,
                     array_view<const PixelFormat>(formats, 1),
                     depth_format,
-                    pipeline_options);
+                    pipeline_options, &compiled_key);
             }
         }
         if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
@@ -73,7 +76,7 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
         auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
         PixelFormat formats[1] = {target_format};
-        compiled_key = ctx.compile_pipeline_dynamic(
+        compiled = ctx.compile_pipeline_dynamic(
             fsrc, vsrc,
             user_key,
             array_view<const PixelFormat>(formats, 1),
@@ -81,13 +84,7 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
             pipeline_options);
     }
 
-    if (compiled_key == 0) return nullptr;
-
-    if (auto pipeline = ctx.find_pipeline(
-            PipelineCacheKey{compiled_key, target_format, 0})) {
-        return pipeline.get();
-    }
-    return nullptr;
+    return compiled;
 }
 
 } // namespace
@@ -211,9 +208,18 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
     IGpuTexture* depth_texture = cache.depth_texture.get();
 
-    auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
-                                          target_depth_format);
+    // Hold strong refs to every pipeline this pass binds (cache is weak).
+    // Accumulated across the env + main emit_draw_calls below, then handed
+    // to the pass after recording. Populated before `reset()`, so reused
+    // pipelines never drop to zero refs across a rebuild.
+    vector<IGpuPipeline::Ptr> held;
+    auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+        auto p = resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
+                                            target_depth_format);
+        if (!p) return nullptr;
+        IGpuPipeline* raw = p.get();
+        held.push_back(std::move(p));
+        return raw;
     };
 
     vector<DrawCall> draw_calls;
@@ -280,6 +286,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
     }
     cache.pass->set_view_globals_address(render_view.view_globals_address);
+    cache.pass->set_held_pipelines(std::move(held));
     cache.dirty = false;
     graph.add_pass(cache.pass);
 }

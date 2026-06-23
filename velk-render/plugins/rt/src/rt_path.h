@@ -119,12 +119,11 @@ private:
 
     std::unordered_map<IViewEntry*, ViewState> view_states_;
 
-    /// Compiled compute pipelines keyed by FNV hash of (materials,
-    /// shadow techs, intersects). Composition runs through the shared
-    /// FrameSnippetRegistry on ctx.
-    std::unordered_map<uint64_t, bool> compiled_pipelines_;
-
-    uint64_t ensure_pipeline(FrameContext& ctx);
+    /// Resolves the RT compute pipeline for the active snippet set
+    /// (materials, shadow techs, intersects), compiling on a (weak) cache
+    /// miss. Returns a strong Ptr the caller keeps alive (the RT pass
+    /// holds it). Composition runs through the shared FrameSnippetRegistry.
+    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx);
 };
 
 } // namespace velk
