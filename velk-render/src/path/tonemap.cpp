@@ -1,5 +1,6 @@
 #include "path/tonemap.h"
 
+#include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/string.h>
 
@@ -35,6 +36,10 @@ layout(push_constant) uniform PC {
     uint output_image_id;
     uint width;
     uint height;
+    float exposure;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 } pc;
 
 vec3 tonemap_aces(vec3 x) {
@@ -53,16 +58,17 @@ void main()
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
     vec4 src = velk_texture(pc.input_tex_id, uv);
-    vec3 mapped = tonemap_aces(src.rgb);
+    vec3 mapped = tonemap_aces(src.rgb * pc.exposure);
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord,
                vec4(mapped, src.a));
 }
 )";
 
-/// Stable compile-cache key for the tonemap pipeline. ACES is the
-/// only variant today; if user-tunable parameters add variants the
-/// key gains a hash of those.
-constexpr uint64_t kTonemapPipelineKey = 0x546f6e656d617001ULL; // "Tonema\1"
+/// Stable compile-cache key for the tonemap pipeline. Bumped when the
+/// shader source changes (here: added the exposure push constant).
+/// Exposure itself is a runtime push constant, not a compile variant,
+/// so a single pipeline still serves every exposure value.
+constexpr uint64_t kTonemapPipelineKey = 0x546f6e656d617002ULL; // "Tonema\2"
 
 } // namespace
 
@@ -104,8 +110,19 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
         uint32_t output_image_id;
         uint32_t width;
         uint32_t height;
+        float exposure;
+        uint32_t _pad0;
+        uint32_t _pad1;
+        uint32_t _pad2;
     };
-    static_assert(sizeof(PushC) == 16, "Tonemap PushC layout mismatch");
+    static_assert(sizeof(PushC) == 32, "Tonemap PushC layout mismatch");
+
+    // Exposure lives on this effect's ITonemap state; read it through the
+    // state system so main-thread writes are safely visible here.
+    float exposure = 1.f;
+    if (auto st = ::velk::read_state<::velk::ITonemap>(interface_cast<::velk::IObject>(this))) {
+        exposure = st->exposure;
+    }
 
     PushC pc{};
     pc.input_tex_id =
@@ -114,6 +131,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
         static_cast<uint32_t>(output->get_gpu_handle(::velk::GpuResourceKey::Default));
     pc.width = dims.x;
     pc.height = dims.y;
+    pc.exposure = exposure;
 
     ::velk::DispatchCall dc{};
     dc.pipeline = tonemap_pipeline.get();

@@ -3,6 +3,7 @@
 
 #include <velk-render/ext/effect.h>
 #include <velk-render/interface/intf_render_target.h>
+#include <velk-render/interface/intf_tonemap.h>
 #include <velk-render/plugin.h>
 
 namespace velk::impl {
@@ -19,7 +20,7 @@ namespace velk::impl {
  * across views and shared via the render context's unified pipeline cache.
  */
 class Tonemap final
-    : public ::velk::ext::Effect<Tonemap>
+    : public ::velk::ext::Effect<Tonemap, ::velk::ITonemap>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::Effect::Tonemap, "Tonemap");

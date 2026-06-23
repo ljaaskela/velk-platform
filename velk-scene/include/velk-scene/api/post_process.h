@@ -2,9 +2,11 @@
 #define VELK_SCENE_API_POST_PROCESS_H
 
 #include <velk/api/object.h>
+#include <velk/api/state.h>
 
 #include <velk-render/interface/intf_effect.h>
 #include <velk-render/interface/intf_post_process.h>
+#include <velk-render/interface/intf_tonemap.h>
 #include <velk-render/plugin.h>
 
 namespace velk {
@@ -28,6 +30,33 @@ public:
         : Object(as_object(p)) {}
 
     operator IEffect::Ptr() const { return as_ptr<IEffect>(); }
+};
+
+/**
+ * @brief Typed wrapper around the tonemap effect, adding exposure control.
+ *
+ * The tonemap object also implements `ITonemap`, whose `exposure` property
+ * scales HDR radiance before the ACES curve. Drive it at runtime to lift or
+ * darken a scene (e.g. a brighter exposure for a dim night look).
+ */
+class Tonemap : public Effect
+{
+public:
+    Tonemap() = default;
+    explicit Tonemap(IObject::Ptr obj) : Effect(obj) {}
+    explicit Tonemap(IEffect::Ptr p) : Effect(p) {}
+
+    /// Sets the exposure multiplier (1 = neutral, > 1 brighter).
+    void set_exposure(float v)
+    {
+        write_state_value<ITonemap>(&ITonemap::State::exposure, v);
+    }
+
+    /// Returns the exposure multiplier.
+    auto get_exposure() const
+    {
+        return read_state_value<ITonemap>(&ITonemap::State::exposure);
+    }
 };
 
 /**
@@ -84,10 +113,13 @@ inline PostProcess create_post_process()
     return PostProcess(instance().create<IObject>(ClassId::Post::PostProcess));
 }
 
-/// ACES filmic tonemap effect.
-inline Effect create_tonemap()
+/// ACES filmic tonemap effect. @p exposure scales HDR radiance before the
+/// curve (1 = neutral); adjust later via `Tonemap::set_exposure`.
+inline Tonemap create_tonemap(float exposure = 1.f)
 {
-    return Effect(instance().create<IObject>(ClassId::Effect::Tonemap));
+    Tonemap t(instance().create<IObject>(ClassId::Effect::Tonemap));
+    if (t) t.set_exposure(exposure);
+    return t;
 }
 
 } // namespace pp

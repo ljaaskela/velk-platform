@@ -177,6 +177,7 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_post_process.h
     include/velk-render/interface/intf_effect.h
     include/velk-render/interface/intf_render_texture_group.h
+    include/velk-render/interface/intf_tonemap.h
     src/frame/render_graph.h
     src/frame/render_graph.cpp
     include/velk-render/ext/default_render_pass.h
