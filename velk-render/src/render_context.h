@@ -9,32 +9,28 @@
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>
 
-#include <unordered_map>
+#include <velk/vector.h>
 
 namespace velk {
 
-struct PipelineCacheKeyHash
+/// One entry in the weak-ref pipeline intern pool.
+struct PipelineCacheEntry
 {
-    size_t operator()(const PipelineCacheKey& k) const noexcept
-    {
-        size_t h = std::hash<uint64_t>{}(k.user_key);
-        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
-             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.depth_format))
-             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<uint64_t>{}(k.target_layout)
-             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
-    }
+    PipelineCacheKey key;
+    IGpuPipeline::WeakPtr pipeline;
 };
 
 /// Weak-ref intern pool: compiled pipelines are looked up here but owned
 /// (strong) by the recorders that bind them (each cached IRenderPass holds
 /// `IGpuPipeline::Ptr`s for the pipelines its command buffer uses). A
 /// pipeline dies when the last pass referencing it is gone; `find_pipeline`
-/// returns nullptr for an entry whose pipeline has expired.
-using PipelineCacheMap =
-    std::unordered_map<PipelineCacheKey, IGpuPipeline::WeakPtr, PipelineCacheKeyHash>;
+/// returns nullptr for an entry whose pipeline has expired and prunes it.
+///
+/// Backed by a flat vector, not a hash map: the set is small (bounded by
+/// distinct pipeline content) and lookups are cold (gated by pass rebuilds),
+/// so a linear scan wins on simplicity + cache locality, and lets
+/// `find_pipeline` swap-remove expired entries as it scans — keeping the pool
+/// bounded with no separate sweep.
 
 class RenderContextImpl : public ext::ObjectCore<RenderContextImpl, IRenderContext>
 {
@@ -64,8 +60,20 @@ public:
 
     IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const override
     {
-        auto it = pipeline_map_.find(key);
-        return it != pipeline_map_.end() ? it->second.lock() : nullptr;
+        for (size_t i = 0; i < pipeline_cache_.size();) {
+            if (pipeline_cache_[i].pipeline.expired()) {
+                // Dead entry: swap-remove it and re-examine this slot.
+                if (i + 1 < pipeline_cache_.size()) {
+                    pipeline_cache_[i] = std::move(pipeline_cache_.back());
+                }
+                pipeline_cache_.pop_back();
+            } else if (pipeline_cache_[i].key == key) {
+                return pipeline_cache_[i].pipeline.lock();
+            } else {
+                ++i;
+            }
+        }
+        return nullptr;
     }
 
     IRenderBackend::Ptr backend() const override { return backend_; }
@@ -75,10 +83,24 @@ public:
     IBuffer::Ptr get_default_buffer(DefaultBufferType type) const override;
 
 private:
+    /// Interns a compiled pipeline weakly under @p key, replacing any existing
+    /// entry for that key. Called by the compile paths after a find miss.
+    void store_pipeline(const PipelineCacheKey& key, const IGpuPipeline::Ptr& pipeline)
+    {
+        for (auto& e : pipeline_cache_) {
+            if (e.key == key) {
+                e.pipeline = pipeline;
+                return;
+            }
+        }
+        pipeline_cache_.push_back(PipelineCacheEntry{key, pipeline});
+    }
+
     IRenderBackend::Ptr backend_;
     IMeshBuilder::Ptr mesh_builder_;
     IMeshBuffer::Ptr default_uv1_;
-    PipelineCacheMap pipeline_map_;
+    /// Mutable: find_pipeline prunes expired entries during its scan.
+    mutable vector<PipelineCacheEntry> pipeline_cache_;
     ShaderIncludeMap shader_includes_;
     mutable ShaderCache shader_cache_;
     IShader::Ptr default_vertex_shader_;
