@@ -51,7 +51,7 @@ IGpuPipeline::Ptr RtPath::ensure_pipeline(FrameContext& ctx)
     // pipeline for this snippet combo if it's still held by a live RT pass,
     // otherwise compose + compile a fresh one.
     if (auto p = ctx.render_ctx->find_pipeline(
-            PipelineCacheKey{key, PixelFormat::RGBA8, 0})) {
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
 

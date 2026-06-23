@@ -20,6 +20,8 @@ struct PipelineCacheKeyHash
         size_t h = std::hash<uint64_t>{}(k.user_key);
         h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.target_format))
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.depth_format))
+             + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         h ^= std::hash<uint64_t>{}(k.target_layout)
              + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         return h;
@@ -54,8 +56,6 @@ public:
                                       uint64_t* out_key = nullptr) override;
     IGpuPipeline::Ptr create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     IGpuPipeline::Ptr compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
-
-    uint64_t reserve_pipeline_key() override { return next_pipeline_key_++; }
 
     void set_default_vertex_shader(const IShader::Ptr& shader) override;
     void set_default_fragment_shader(const IShader::Ptr& shader) override;

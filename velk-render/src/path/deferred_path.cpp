@@ -71,18 +71,41 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
         }
     }
 
-    uint64_t perturb = 0;
-    if (auto* obj = interface_cast<IObject>(shader_source_ptr.get())) {
-        Uid uid = obj->get_class_uid();
-        perturb = uid.lo ^ uid.hi;
+    uint64_t gbuffer_key;
+    if (has_eval) {
+        // Content key: identical materials share one gbuffer pipeline and a
+        // recreated material hits the cache. Captures the deferred eval inputs
+        // (the deferred driver template is constant, covered by the tag).
+        string_view discard_def =
+            shader_source_ptr ? shader_source_ptr->get_source(shader_role::kDiscard)
+                              : string_view{};
+        PipelineOptions po = batch.pipeline_options();
+        po.blend_mode = BlendMode::Opaque; // gbuffer always writes opaquely
+        PipelineContentHasher hasher(kGbufferEvalContentTag);
+        hasher.str(eval_src);
+        hasher.str(eval_fn);
+        hasher.f32(mat->get_deferred_discard_threshold());
+        hasher.str(discard_def);
+        hasher.str(vertex_src);
+        hasher.options(po);
+        gbuffer_key = hasher.key();
+    } else {
+        // Non-eval batch (default gbuffer shader): keep the per-instance key
+        // XOR'd with a per-visual-class perturb so two visuals sharing a
+        // material still get distinct velk_visual_discard bodies.
+        uint64_t perturb = 0;
+        if (auto* obj = interface_cast<IObject>(shader_source_ptr.get())) {
+            Uid uid = obj->get_class_uid();
+            perturb = uid.lo ^ uid.hi;
+        }
+        gbuffer_key = forward_key ^ perturb;
     }
-    uint64_t gbuffer_key = forward_key ^ perturb;
     // Cache lookup must match what compile_pipeline_dynamic stores:
     // color_formats[0] (Albedo = RGBA8) plus the MRT layout signature
     // derived from the full gbuffer format set (stable across resize).
     const auto gbuffer_formats = array_view<const PixelFormat>(
         kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
-    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0],
+    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], DepthFormat::Default,
                           pipeline_target_layout(gbuffer_formats)};
     if (auto pipeline = ctx.find_pipeline(gkey)) {
         return pipeline;
@@ -172,7 +195,7 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
     // this snippet combo is still alive (held by a live lighting pass),
     // reuse it; otherwise compose + compile a fresh one.
     if (auto p = ctx.render_ctx->find_pipeline(
-            PipelineCacheKey{key, PixelFormat::RGBA8, 0})) {
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
 

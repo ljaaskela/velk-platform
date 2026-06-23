@@ -41,12 +41,22 @@ IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
     auto shader_source_ptr = batch.shader_source();
     const bool use_material = (material_ptr != nullptr);
     PipelineOptions pipeline_options = batch.pipeline_options();
-    uint64_t user_key = use_material
-        ? material_ptr->get_pipeline_handle(ctx)
-        : batch.pipeline_key();
+    // Eval materials key on their content so identical materials share a
+    // pipeline and a recreated material hits the cache. Raw-fragment materials
+    // (content key 0) keep their per-instance stored handle; non-material
+    // programs keep their explicit pipeline_key.
+    uint64_t user_key = 0;
+    if (use_material) {
+        user_key = forward_material_content_key(ctx, batch);
+        if (user_key == 0) {
+            user_key = material_ptr->get_pipeline_handle(ctx);
+        }
+    } else {
+        user_key = batch.pipeline_key();
+    }
 
     if (auto pipeline = ctx.find_pipeline(
-            PipelineCacheKey{user_key, target_format, 0})) {
+            PipelineCacheKey{user_key, target_format, depth_format, 0})) {
         return pipeline;
     }
 

@@ -240,7 +240,7 @@ IGpuPipeline::Ptr RenderContextImpl::compile_pipeline_dynamic(
     PixelFormat cache_format = color_formats.empty()
         ? PixelFormat::RGBA8
         : color_formats[0];
-    pipeline_map_[PipelineCacheKey{key, cache_format,
+    pipeline_map_[PipelineCacheKey{key, cache_format, depth_format,
                                    pipeline_target_layout(color_formats)}] = pid;
     if (out_key) *out_key = key;
     return pid;
@@ -267,7 +267,7 @@ IGpuPipeline::Ptr RenderContextImpl::create_compute_pipeline(const IShader::Ptr&
     // canonical (RGBA8, layout 0) placeholder tuple so call sites look
     // them up with just the user_key. Cache holds a weak ref; the returned
     // strong Ptr is the caller's to keep.
-    pipeline_map_[PipelineCacheKey{key, PixelFormat::RGBA8, 0}] = pid;
+    pipeline_map_[PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0}] = pid;
     return pid;
 }
 
