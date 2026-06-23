@@ -42,6 +42,23 @@ IResource::Ptr EnvDecoder::decode(const IResource::Ptr& inner) const
             // Convert float32 RGBA to half-float RGBA16F.
             size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
             size_t total_floats = pixel_count * 4;
+
+            // Sanitize radiance to the finite half-float range before
+            // conversion. A bright HDR sun can exceed the RGBA16F max
+            // (65504) and convert to +Inf; linear mip downsampling then
+            // spreads Inf and produces NaN, blacking out the averaged mips
+            // that env diffuse / rough specular sample. Clamp over-range to
+            // the max finite half and map NaN to zero so the whole chain
+            // stays finite.
+            constexpr float kHalfMax = 65504.f;
+            for (size_t i = 0; i < total_floats; ++i) {
+                float v = decoded[i];
+                if (!(v == v)) v = 0.f;           // NaN
+                else if (v > kHalfMax) v = kHalfMax;
+                else if (v < 0.f) v = 0.f;
+                decoded[i] = v;
+            }
+
             vector<uint8_t> pixels;
             pixels.resize(total_floats * sizeof(uint16_t));
             floats_to_halves(decoded, reinterpret_cast<uint16_t*>(pixels.data()), total_floats);

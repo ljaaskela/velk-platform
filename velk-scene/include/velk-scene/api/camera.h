@@ -1,6 +1,7 @@
 #ifndef VELK_UI_API_CAMERA_H
 #define VELK_UI_API_CAMERA_H
 
+#include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 
 #include <velk-render/interface/intf_camera.h>
@@ -8,6 +9,7 @@
 #include <velk-scene/api/post_process.h>
 #include <velk-scene/api/render_path.h>
 #include <velk-scene/api/render_trait.h>
+#include <velk-scene/interface/intf_environment.h>
 #include <velk-scene/plugin.h>
 
 namespace velk {
@@ -76,6 +78,14 @@ public:
 
     auto get_fov() const { return read_state_value<ICamera>(&ICamera::State::fov); }
     void set_fov(float v) { write_state_value<ICamera>(&ICamera::State::fov, v); }
+
+    /// Attaches an environment (equirect HDR) to this camera. The deferred
+    /// and RT paths sample it as the ambient / IBL term and draw it as the
+    /// background sky. Pass a null Ptr to clear the environment.
+    void set_environment(const IEnvironment::Ptr& env)
+    {
+        write_state<ICamera>([&](ICamera::State& s) { set_object_ref(s.environment, env); });
+    }
 };
 
 namespace trait::render {
