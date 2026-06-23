@@ -122,11 +122,10 @@ public:
 private:
     std::unordered_map<IViewEntry*, ViewState> view_states_;
 
-    /// Compiled compute pipelines keyed by FNV hash of active intersect
-    /// id set; each variant compiles once, kept across frames.
-    std::unordered_map<uint64_t, bool> compiled_pipelines_;
-
-    uint64_t ensure_pipeline(FrameContext& ctx);
+    /// Resolves the deferred-lighting compute pipeline for the active
+    /// snippet set, compiling on a (weak) cache miss. Returns a strong Ptr
+    /// the caller must keep alive (the lighting pass holds it).
+    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx);
 
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);

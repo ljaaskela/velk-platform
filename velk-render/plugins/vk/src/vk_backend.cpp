@@ -1786,6 +1786,7 @@ IGpuPipeline::Ptr VkBackend::create_pipeline_dynamic(
     vkDestroyShaderModule(device_, vert_module, nullptr);
     vkDestroyShaderModule(device_, frag_module, nullptr);
 
+
     auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
         ::velk::ClassId::VkGpuPipeline);
     auto* vk_gp = interface_cast<IVkGpuPipeline>(gp.get());
@@ -1847,6 +1848,7 @@ IGpuPipeline::Ptr VkBackend::create_compute_pipeline(const ComputePipelineDesc& 
         VELK_LOG(E, "VkBackend: failed to create compute pipeline");
         return {};
     }
+
 
     auto gp = ::velk::instance().create<::velk::IGpuPipeline>(
         ::velk::ClassId::VkGpuPipeline);

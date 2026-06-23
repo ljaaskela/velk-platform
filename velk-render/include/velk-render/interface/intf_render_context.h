@@ -23,9 +23,9 @@ namespace velk {
  * @brief Cache key for compiled pipelines.
  *
  * Pipelines are uniquely identified by the tuple
- * `(user_key, target_format, target_layout)`. The user-facing API still
- * exposes the user-key as a `uint64_t`; lookups reconstruct the full
- * key from the active path's render target description.
+ * `(user_key, target_format, depth_format, target_layout)`. The user-facing
+ * API still exposes the user-key as a `uint64_t`; lookups reconstruct the
+ * full key from the active path's render target description.
  *
  * - `user_key`: stable id chosen by the caller (visual / material /
  *   built-in `PipelineKey::*`) or auto-assigned when 0.
@@ -33,6 +33,11 @@ namespace velk {
  *   compiled against (RGBA8, RGBA8_SRGB, RGBA16F, ...). For pipelines
  *   that don't render into a color attachment (compute, blit), use
  *   the canonical `RGBA8` placeholder so the cache key is deterministic.
+ * - `depth_format`: the depth attachment format the pipeline was compiled
+ *   against (`None` for no-depth targets and for compute/blit pipelines).
+ *   Keyed because dynamic-rendering bakes the depth format into the
+ *   pipeline, so a depth and a no-depth variant of the same shader must
+ *   not share a cache slot.
  * - `target_layout`: signature of the full color-attachment layout,
  *   non-zero for MRT (G-buffer) variants and 0 for single-attachment
  *   (forward / compute). Derived from the attachment formats via
@@ -44,12 +49,14 @@ struct PipelineCacheKey
 {
     uint64_t user_key = 0;
     PixelFormat target_format = PixelFormat::RGBA8;
+    DepthFormat depth_format = DepthFormat::None;
     uint64_t target_layout = 0;
 
     bool operator==(const PipelineCacheKey& o) const noexcept
     {
         return user_key == o.user_key
             && target_format == o.target_format
+            && depth_format == o.depth_format
             && target_layout == o.target_layout;
     }
 };
@@ -70,7 +77,9 @@ inline uint64_t pipeline_target_layout(array_view<const PixelFormat> color_forma
         h ^= static_cast<uint64_t>(f);
         h *= 1099511628211ull; // FNV-1a prime
     }
-    return h;
+    // Force the top bit so an MRT layout can never equal the
+    // single-attachment sentinel (0) and collide with a forward key.
+    return h | 0x8000000000000000ull;
 }
 
 /**
@@ -118,32 +127,45 @@ public:
      *        formats (no VkRenderPass), runnable inside a
      *        `record_begin_rendering` scope.
      *
-     * Cache slot is `(user_key, color_formats[0], pipeline_target_layout(color_formats))`
+     * Cache slot is
+     * `(user_key, color_formats[0], depth_format, pipeline_target_layout(color_formats))`
      * — the layout signature is derived from @p color_formats, so MRT
      * pipelines are distinguished from single-attachment ones without a
-     * render-target instance leaking into the key.
+     * render-target instance leaking into the key, and @p depth_format keeps
+     * depth and no-depth variants of the same shader in distinct slots.
+     *
+     * Returns the compiled pipeline as a strong `Ptr` (also stored in the
+     * cache as a weak ref). The caller MUST keep the returned Ptr alive
+     * for as long as it's used — the cache won't, since it holds only a
+     * weak ref. Returns nullptr on failure. If @p out_key is non-null it
+     * receives the final cache key (the passed key, or an auto-assigned
+     * one when 0 was passed).
      */
-    virtual uint64_t compile_pipeline_dynamic(string_view fragment_source,
+    virtual IGpuPipeline::Ptr compile_pipeline_dynamic(string_view fragment_source,
                                               string_view vertex_source,
                                               uint64_t key,
                                               array_view<const PixelFormat> color_formats,
                                               DepthFormat depth_format,
-                                              const PipelineOptions& options = {}) = 0;
+                                              const PipelineOptions& options = {},
+                                              uint64_t* out_key = nullptr) = 0;
 
     /**
      * @brief Creates a compute pipeline from a compiled compute shader.
      *
-     * If @p key is 0, a new key is auto-assigned. Otherwise the given key is
-     * used. Returns the pipeline key, or 0 on failure. Compute pipelines
+     * If @p key is 0, a new key is auto-assigned. Returns the compiled
+     * pipeline as a strong `Ptr` (stored weak in the cache); the caller
+     * must keep it alive. Returns nullptr on failure. Compute pipelines
      * share the unified pipeline cache with graphics pipelines and the same
      * backend destroy_pipeline() path.
      */
-    virtual uint64_t create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) = 0;
+    virtual IGpuPipeline::Ptr create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) = 0;
 
     /**
-     * @brief Convenience: compiles a compute GLSL shader and creates the pipeline.
+     * @brief Convenience: compiles a compute GLSL shader and creates the
+     *        pipeline. Returns the strong `Ptr` (stored weak in the cache);
+     *        the caller must keep it alive. nullptr on failure.
      */
-    virtual uint64_t compile_compute_pipeline(string_view compute_source, uint64_t key = 0) = 0;
+    virtual IGpuPipeline::Ptr compile_compute_pipeline(string_view compute_source, uint64_t key = 0) = 0;
 
     /** @brief Registers a default vertex shader used when create_pipeline receives nullptr. */
     virtual void set_default_vertex_shader(const IShader::Ptr& shader) = 0;

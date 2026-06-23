@@ -66,17 +66,18 @@ constexpr uint64_t kTonemapPipelineKey = 0x546f6e656d617001ULL; // "Tonema\1"
 
 } // namespace
 
-uint64_t Tonemap::ensure_pipeline(::velk::FrameContext& ctx)
+::velk::IGpuPipeline::Ptr Tonemap::ensure_pipeline(::velk::FrameContext& ctx)
 {
-    if (compiled_) return kTonemapPipelineKey;
-    if (!ctx.render_ctx) return 0;
-
-    uint64_t handle = ctx.render_ctx->compile_compute_pipeline(
+    if (!ctx.render_ctx) return {};
+    // Weak cache is the source of truth: reuse if a live tonemap pass still
+    // holds it, otherwise compile.
+    if (auto p = ctx.render_ctx->find_pipeline(
+            ::velk::PipelineCacheKey{kTonemapPipelineKey, ::velk::PixelFormat::RGBA8,
+                                     ::velk::DepthFormat::None, 0})) {
+        return p;
+    }
+    return ctx.render_ctx->compile_compute_pipeline(
         tonemap_compute_src, kTonemapPipelineKey);
-    if (handle == 0) return 0;
-
-    compiled_ = true;
-    return kTonemapPipelineKey;
 }
 
 void Tonemap::emit(::velk::IViewEntry& /*view*/,
@@ -92,10 +93,7 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     auto dims = in_surf->get_dimensions();
     if (dims.x == 0 || dims.y == 0) return;
 
-    uint64_t pipeline_key = ensure_pipeline(ctx);
-    if (pipeline_key == 0) return;
-    auto tonemap_pipeline = ctx.render_ctx->find_pipeline(
-        ::velk::PipelineCacheKey{pipeline_key, ::velk::PixelFormat::RGBA8, 0});
+    auto tonemap_pipeline = ensure_pipeline(ctx);
     if (!tonemap_pipeline) return;
 
     /// Push constant layout matches the shader's `PC` block above.
@@ -137,6 +135,12 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     }
     gp->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
     gp->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
+    // Hold the tonemap compute pipeline strong (cache is weak). The pass
+    // is recreated each frame and kept alive by the graph's passes_ /
+    // prev_passes_ window, so the pipeline survives across frames.
+    ::velk::vector<::velk::IGpuPipeline::Ptr> held_tm;
+    held_tm.push_back(std::move(tonemap_pipeline));
+    gp->set_held_pipelines(std::move(held_tm));
     graph.add_pass(std::move(gp));
 }
 

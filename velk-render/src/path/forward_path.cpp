@@ -1,6 +1,8 @@
 #include "path/forward_path.h"
 #include "path/material_pipeline.h"
 
+#include <velk-render/api/cached_view_pass.h>
+
 #include <velk/api/velk.h>
 #include <velk/string.h>
 
@@ -30,40 +32,53 @@ namespace {
 /// are present; the visual's source is the no-material fallback.
 /// All pipelines compile against dynamic-rendering attachment formats.
 /// Returns 0 to skip (no source / compile failure).
-IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
-                                         const IBatch& batch,
-                                         PixelFormat target_format,
-                                         DepthFormat depth_format)
+IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
+                                             const IBatch& batch,
+                                             PixelFormat target_format,
+                                             DepthFormat depth_format)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
     const bool use_material = (material_ptr != nullptr);
     PipelineOptions pipeline_options = batch.pipeline_options();
-    uint64_t user_key = use_material
-        ? material_ptr->get_pipeline_handle(ctx)
-        : batch.pipeline_key();
-
-    if (auto pipeline = ctx.find_pipeline(
-            PipelineCacheKey{user_key, target_format, 0})) {
-        return pipeline.get();
+    // Eval materials key on their content so identical materials share a
+    // pipeline and a recreated material hits the cache. Raw-fragment materials
+    // (content key 0) keep their per-instance stored handle; non-material
+    // programs keep their explicit pipeline_key.
+    uint64_t user_key = 0;
+    if (use_material) {
+        user_key = forward_material_content_key(ctx, batch);
+        if (user_key == 0) {
+            user_key = material_ptr->get_pipeline_handle(ctx);
+        }
+    } else {
+        user_key = batch.pipeline_key();
     }
 
+    if (auto pipeline = ctx.find_pipeline(
+            PipelineCacheKey{user_key, target_format, depth_format, 0})) {
+        return pipeline;
+    }
+
+    // Cache miss: compile and return the strong Ptr directly (the cache
+    // holds only a weak ref, so a find-after-compile would already be dead).
+    IGpuPipeline::Ptr compiled;
     uint64_t compiled_key = 0;
     if (use_material) {
-        compiled_key = compile_material_forward_pipeline_dynamic(
-            ctx, batch, target_format, depth_format, user_key);
-        if (compiled_key == 0) {
+        compiled = compile_material_forward_pipeline_dynamic(
+            ctx, batch, target_format, depth_format, user_key, &compiled_key);
+        if (!compiled) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
             if (!frag_src.empty() && !vertex_src.empty()) {
                 PixelFormat formats[1] = {target_format};
-                compiled_key = ctx.compile_pipeline_dynamic(
+                compiled = ctx.compile_pipeline_dynamic(
                     frag_src, vertex_src,
                     user_key,
                     array_view<const PixelFormat>(formats, 1),
                     depth_format,
-                    pipeline_options);
+                    pipeline_options, &compiled_key);
             }
         }
         if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
@@ -73,7 +88,7 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
         auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
         PixelFormat formats[1] = {target_format};
-        compiled_key = ctx.compile_pipeline_dynamic(
+        compiled = ctx.compile_pipeline_dynamic(
             fsrc, vsrc,
             user_key,
             array_view<const PixelFormat>(formats, 1),
@@ -81,13 +96,7 @@ IGpuPipeline* resolve_or_compile_forward(IRenderContext& ctx,
             pipeline_options);
     }
 
-    if (compiled_key == 0) return nullptr;
-
-    if (auto pipeline = ctx.find_pipeline(
-            PipelineCacheKey{compiled_key, target_format, 0})) {
-        return pipeline.get();
-    }
-    return nullptr;
+    return compiled;
 }
 
 } // namespace
@@ -132,19 +141,14 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
 
-    // Get-or-create + first-sight subscription. The pass is rebuilt
-    // only when `dirty` is set by `on_render_state_changed` (view's
-    // batch set changed); steady-state frames refresh only the
-    // per-frame `view_globals_address` on the cached pass.
+    // Get-or-create the per-view cache slot + first-sight subscription.
+    // The pass rebuilds only when `dirty` is set (by on_render_state_changed
+    // or the resize check below); steady-state frames refresh just the
+    // per-frame view_globals_address (handled by emit_cached_view_pass).
     auto [it, inserted] = cached_passes_.try_emplace(&entry);
     auto& cache = it->second;
     if (inserted) {
         entry.add_render_state_observer(this);
-    }
-    if (!cache.pass) {
-        cache.pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-        if (!cache.pass) return;
-        cache.dirty = true;
     }
 
     // color_target may be the per-surface composite (a real
@@ -170,118 +174,110 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.last_target_texture = target_texture;
     }
 
-    if (!cache.dirty) {
-        // Steady state: same Ptr, refresh only the per-frame view
-        // globals address (FrameGlobals lives in per-frame staging
-        // and rotates each frame).
-        cache.pass->set_view_globals_address(render_view.view_globals_address);
-        RENDER_LOG("forward.cached view=%p pass=%p vg=0x%llx",
-                   (void*)&entry, (void*)cache.pass.get(),
-                   (unsigned long long)render_view.view_globals_address);
-        graph.add_pass(cache.pass);
-        return;
-    }
+    emit_cached_view_pass(
+        cache.pass, cache.dirty, render_view.view_globals_address, graph,
+        [&](CachedPassRecording& rec) {
+            const ::velk::render::Frustum* frustum_ptr =
+                render_view.has_frustum ? &render_view.frustum : nullptr;
+            auto* default_uv1 =
+                ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            auto target_format = ctx.target_format;
 
-    const ::velk::render::Frustum* frustum_ptr =
-        render_view.has_frustum ? &render_view.frustum : nullptr;
+            // Pair-depth allocation: only when the color_target is tagged
+            // with a depth format (CameraPipeline does this for its
+            // path_color). RTT cache leaves depth_format=None.
+            const DepthFormat target_depth_format = color_target
+                ? color_target->get_depth_format()
+                : DepthFormat::None;
+            const uvec2 target_size = target_texture->get_dimensions();
+            if (target_depth_format != DepthFormat::None) {
+                if (!cache.depth_texture || cache.depth_size != target_size) {
+                    cache.depth_texture = ctx.backend->create_depth_attachment_texture(
+                        static_cast<int>(target_size.x),
+                        static_cast<int>(target_size.y),
+                        target_depth_format);
+                    cache.depth_size = target_size;
+                }
+            } else if (cache.depth_texture) {
+                cache.depth_texture.reset();
+                cache.depth_size = uvec2{};
+            }
+            IGpuTexture* depth_texture = cache.depth_texture.get();
 
-    auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
-    auto target_format = ctx.target_format;
+            // Hold strong refs to every pipeline this pass binds (cache is
+            // weak). resolve runs before set_held_pipelines replaces the
+            // pass's old set, so reused pipelines never drop to zero refs.
+            auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+                auto p = resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
+                                                    target_depth_format);
+                if (!p) return nullptr;
+                IGpuPipeline* raw = p.get();
+                rec.held.push_back(std::move(p));
+                return raw;
+            };
 
-    // Pair-depth allocation: only when the color_target is tagged with
-    // a depth format (CameraPipeline does this for its path_color).
-    // RTT cache leaves depth_format=None and gets no depth attachment.
-    const DepthFormat target_depth_format = color_target
-        ? color_target->get_depth_format()
-        : DepthFormat::None;
-    const uvec2 target_size = target_texture->get_dimensions();
-    if (target_depth_format != DepthFormat::None) {
-        if (!cache.depth_texture || cache.depth_size != target_size) {
-            cache.depth_texture = ctx.backend->create_depth_attachment_texture(
-                static_cast<int>(target_size.x),
-                static_cast<int>(target_size.y),
-                target_depth_format);
-            cache.depth_size = target_size;
-            cache.dirty = true;
-        }
-    } else if (cache.depth_texture) {
-        cache.depth_texture.reset();
-        cache.depth_size = uvec2{};
-        cache.dirty = true;
-    }
-    IGpuTexture* depth_texture = cache.depth_texture.get();
+            vector<DrawCall> draw_calls;
 
-    auto resolve = [&](const IBatch& b) {
-        return resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
-                                          target_depth_format);
-    };
+            // Env first (no frustum cull — fullscreen). Null env_batch
+            // means no env on this view's camera.
+            if (render_view.env_batch && render_view.env_batch->material()) {
+                vector<IBatch::Ptr> env_batches{render_view.env_batch};
+                emit_draw_calls(
+                    draw_calls,
+                    env_batches, *ctx.frame_buffer, *ctx.resources,
+                    default_uv1, render_view.view_globals_address,
+                    resolve, /*frustum=*/nullptr);
+            }
 
-    vector<DrawCall> draw_calls;
+            // Main scene batches.
+            if (render_view.batches && !render_view.batches->empty()) {
+                emit_draw_calls(
+                    draw_calls,
+                    *render_view.batches, *ctx.frame_buffer, *ctx.resources,
+                    default_uv1, render_view.view_globals_address,
+                    resolve, frustum_ptr);
+            }
 
-    // Env first (no frustum cull — fullscreen). Null env_batch means
-    // no env on this view's camera.
-    if (render_view.env_batch && render_view.env_batch->material()) {
-        vector<IBatch::Ptr> env_batches{render_view.env_batch};
-        emit_draw_calls(
-            draw_calls,
-            env_batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, render_view.view_globals_address,
-            resolve, /*frustum=*/nullptr);
-    }
+            RENDER_LOG("forward.rebuild view=%p draws=%zu depth=%d",
+                       (void*)&entry, draw_calls.size(), depth_texture ? 1 : 0);
 
-    // Main scene batches.
-    if (render_view.batches && !render_view.batches->empty()) {
-        emit_draw_calls(
-            draw_calls,
-            *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-            default_uv1, render_view.view_globals_address,
-            resolve, frustum_ptr);
-    }
+            // Self-contained dynamic-rendering secondary: attachments bound
+            // inline at record time, executor doesn't wrap in begin_pass.
+            IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer();
+            if (cmd) {
+                ColorAttachment color{};
+                color.texture = target_texture;
+                color.clear = true;
+                color.clear_color[0] = 0.f;
+                color.clear_color[1] = 0.f;
+                color.clear_color[2] = 0.f;
+                color.clear_color[3] = 0.f;
 
-    cache.pass->reset();
+                DepthAttachment depth_att{};
+                if (depth_texture) {
+                    depth_att.texture = depth_texture;
+                    depth_att.clear = true;
+                    depth_att.clear_depth = 1.0f;
+                    depth_att.clear_stencil = 0;
+                }
 
-    RENDER_LOG("forward.rebuild view=%p draws=%zu depth=%d",
-               (void*)&entry, draw_calls.size(), depth_texture ? 1 : 0);
+                cmd->begin_recording();
+                cmd->push_label("ForwardPath");
+                cmd->record_begin_rendering(
+                    array_view<const ColorAttachment>(&color, 1),
+                    depth_texture ? &depth_att : nullptr);
+                cmd->set_viewport(render_view.viewport);
+                cmd->record_draws({draw_calls.data(), draw_calls.size()});
+                cmd->record_end_rendering();
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
 
-    // Self-contained dynamic-rendering secondary: attachments bound
-    // inline at record time, executor doesn't wrap in begin_pass.
-    IGpuCommandBuffer::Ptr cmd = ctx.backend->create_command_buffer();
-    if (cmd) {
-        ColorAttachment color{};
-        color.texture = target_texture;
-        color.clear = true;
-        color.clear_color[0] = 0.f;
-        color.clear_color[1] = 0.f;
-        color.clear_color[2] = 0.f;
-        color.clear_color[3] = 0.f;
-
-        DepthAttachment depth_att{};
-        if (depth_texture) {
-            depth_att.texture = depth_texture;
-            depth_att.clear = true;
-            depth_att.clear_depth = 1.0f;
-            depth_att.clear_stencil = 0;
-        }
-
-        cmd->begin_recording();
-        cmd->push_label("ForwardPath");
-        cmd->record_begin_rendering(
-            array_view<const ColorAttachment>(&color, 1),
-            depth_texture ? &depth_att : nullptr);
-        cmd->set_viewport(render_view.viewport);
-        cmd->record_draws({draw_calls.data(), draw_calls.size()});
-        cmd->record_end_rendering();
-        cmd->pop_label();
-        cmd->end_recording();
-        cache.pass->set_command_buffer(std::move(cmd));
-    }
-
-    if (color_target) {
-        cache.pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
-    }
-    cache.pass->set_view_globals_address(render_view.view_globals_address);
-    cache.dirty = false;
-    graph.add_pass(cache.pass);
+            if (color_target) {
+                rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+            }
+        });
 }
 
 } // namespace velk
