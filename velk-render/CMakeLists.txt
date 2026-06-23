@@ -154,6 +154,7 @@ add_library(velk_render SHARED
     include/velk-render/detail/intf_renderer_internal.h
     include/velk-render/detail/intf_gpu_resource_manager_internal.h
     include/velk-render/api/render_context.h
+    include/velk-render/api/cached_view_pass.h
     include/velk-render/api/material/shader_material.h
     include/velk-render/interface/intf_analytic_shape.h
     include/velk-render/interface/intf_bvh.h

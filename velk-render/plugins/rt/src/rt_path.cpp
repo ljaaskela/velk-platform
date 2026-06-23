@@ -4,6 +4,7 @@
 #include <velk/api/velk.h>
 #include <velk/string.h>
 
+#include <velk-render/api/cached_view_pass.h>
 #include <velk-render/frame/compute_shaders.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_pass.h>
@@ -248,12 +249,6 @@ void RtPath::build_passes(IViewEntry& entry,
     vs.root_buffer->update(0, sizeof(RtRoot), &root);
     const uint64_t root_addr = vs.root_buffer->gpu_address();
 
-    if (!vs.cached_rt_pass) {
-        vs.cached_rt_pass = ::velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass);
-        if (!vs.cached_rt_pass) return;
-        vs.rt_dirty = true;
-    }
-
     // color_target is always an IGpuTexture-castable wrapper.
     IGpuTexture* rt_tex = graph.resources().find_texture(vs.rt_output.get());
     IGpuTexture* dst_tex = nullptr;
@@ -272,45 +267,35 @@ void RtPath::build_passes(IViewEntry& entry,
         vs.last_dst_texture = dst_tex;
     }
 
-    if (!vs.rt_dirty) {
-        // Steady state: same Ptr, refresh only the per-frame view
-        // globals address.
-        vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);
-        graph.add_pass(vs.cached_rt_pass);
-        return;
-    }
+    emit_cached_view_pass(
+        vs.cached_rt_pass, vs.rt_dirty, render_view.view_globals_address, graph,
+        [&](CachedPassRecording& rec) {
+            DispatchCall dc{};
+            dc.pipeline = rt_pipeline.get();
+            dc.groups_x = (vp_w + 7) / 8;
+            dc.groups_y = (vp_h + 7) / 8;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(uint64_t);
+            std::memcpy(dc.root_constants, &root_addr, sizeof(uint64_t));
 
-    DispatchCall dc{};
-    dc.pipeline = rt_pipeline.get();
-    dc.groups_x = (vp_w + 7) / 8;
-    dc.groups_y = (vp_h + 7) / 8;
-    dc.groups_z = 1;
-    dc.root_constants_size = sizeof(uint64_t);
-    std::memcpy(dc.root_constants, &root_addr, sizeof(uint64_t));
-
-    vs.cached_rt_pass->reset();
-    if (auto cmd = ctx.backend->create_command_buffer()) {
-        cmd->begin_recording();
-        cmd->push_label("RtPath");
-        cmd->record_dispatch(dc);
-        if (rt_tex && dst_tex) {
-            cmd->record_blit_to_texture(*rt_tex, *dst_tex, render_view.viewport);
-        }
-        cmd->pop_label();
-        cmd->end_recording();
-        vs.cached_rt_pass->set_command_buffer(std::move(cmd));
-    }
-    vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(vs.rt_output));
-    if (color_target) {
-        vs.cached_rt_pass->add_write(interface_pointer_cast<IGpuResource>(color_target));
-    }
-    vs.cached_rt_pass->set_view_globals_address(render_view.view_globals_address);
-    // Hold the RT compute pipeline strong (cache is weak).
-    vector<IGpuPipeline::Ptr> held_rt;
-    held_rt.push_back(std::move(rt_pipeline));
-    vs.cached_rt_pass->set_held_pipelines(std::move(held_rt));
-    vs.rt_dirty = false;
-    graph.add_pass(vs.cached_rt_pass);
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("RtPath");
+                cmd->record_dispatch(dc);
+                if (rt_tex && dst_tex) {
+                    cmd->record_blit_to_texture(*rt_tex, *dst_tex, render_view.viewport);
+                }
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.rt_output));
+            if (color_target) {
+                rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+            }
+            // Hold the RT compute pipeline strong (cache is weak).
+            rec.held.push_back(std::move(rt_pipeline));
+        });
 }
 
 RtPath::~RtPath()
