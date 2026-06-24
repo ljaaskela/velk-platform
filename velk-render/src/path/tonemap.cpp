@@ -4,7 +4,9 @@
 #include <velk/api/velk.h>
 #include <velk/string.h>
 
+#include <velk-render/api/cached_view_pass.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_render_pass.h>
@@ -86,7 +88,7 @@ constexpr uint64_t kTonemapPipelineKey = 0x546f6e656d617002ULL; // "Tonema\2"
         tonemap_compute_src, kTonemapPipelineKey);
 }
 
-void Tonemap::emit(::velk::IViewEntry& /*view*/,
+void Tonemap::emit(::velk::IViewEntry& view,
                    ::velk::IRenderTarget::Ptr input,
                    ::velk::IRenderTarget::Ptr output,
                    ::velk::FrameContext& ctx,
@@ -99,24 +101,6 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
     auto dims = in_surf->get_dimensions();
     if (dims.x == 0 || dims.y == 0) return;
 
-    auto tonemap_pipeline = ensure_pipeline(ctx);
-    if (!tonemap_pipeline) return;
-
-    /// Push constant layout matches the shader's `PC` block above.
-    /// Texture id reads come via bindless sampling; output is a
-    /// storage image bound through the same descriptor table.
-    VELK_GPU_STRUCT PushC {
-        uint32_t input_tex_id;
-        uint32_t output_image_id;
-        uint32_t width;
-        uint32_t height;
-        float exposure;
-        uint32_t _pad0;
-        uint32_t _pad1;
-        uint32_t _pad2;
-    };
-    static_assert(sizeof(PushC) == 32, "Tonemap PushC layout mismatch");
-
     // Exposure lives on this effect's ITonemap state; read it through the
     // state system so main-thread writes are safely visible here.
     float exposure = 1.f;
@@ -124,42 +108,84 @@ void Tonemap::emit(::velk::IViewEntry& /*view*/,
         exposure = st->exposure;
     }
 
-    PushC pc{};
-    pc.input_tex_id =
+    const uint32_t input_id =
         static_cast<uint32_t>(input->get_gpu_handle(::velk::GpuResourceKey::Default));
-    pc.output_image_id =
+    const uint32_t output_id =
         static_cast<uint32_t>(output->get_gpu_handle(::velk::GpuResourceKey::Default));
-    pc.width = dims.x;
-    pc.height = dims.y;
-    pc.exposure = exposure;
 
-    ::velk::DispatchCall dc{};
-    dc.pipeline = tonemap_pipeline.get();
-    dc.groups_x = (dims.x + 7) / 8;
-    dc.groups_y = (dims.y + 7) / 8;
-    dc.groups_z = 1;
-    dc.root_constants_size = sizeof(PushC);
-    std::memcpy(dc.root_constants, &pc, sizeof(PushC));
+    // Re-record only when something baked into the cached command buffer
+    // changed (exposure toggle, input/output retarget, resize); otherwise the
+    // cached pass is re-added as-is.
+    auto& vs = view_states_[&view];
+    bool dirty = !vs.snapshot_valid || vs.exposure != exposure
+        || vs.input_id != input_id || vs.output_id != output_id || vs.dims != dims;
 
-    auto gp = ::velk::instance().create<::velk::IRenderPass>(::velk::ClassId::DefaultRenderPass);
-    if (!gp) return;
-    if (auto cmd = ctx.backend->create_command_buffer()) {
-        cmd->begin_recording();
-        cmd->push_label("Tonemap");
-        cmd->record_dispatch(dc);
-        cmd->pop_label();
-        cmd->end_recording();
-        gp->set_command_buffer(std::move(cmd));
-    }
-    gp->add_read(interface_pointer_cast<::velk::IGpuResource>(input));
-    gp->add_write(interface_pointer_cast<::velk::IGpuResource>(output));
-    // Hold the tonemap compute pipeline strong (cache is weak). The pass
-    // is recreated each frame and kept alive by the graph's passes_ /
-    // prev_passes_ window, so the pipeline survives across frames.
-    ::velk::vector<::velk::IGpuPipeline::Ptr> held_tm;
-    held_tm.push_back(std::move(tonemap_pipeline));
-    gp->set_held_pipelines(std::move(held_tm));
-    graph.add_pass(std::move(gp));
+    // The tonemap compute shader uses no FrameGlobals, so the view-globals
+    // address is irrelevant here (passed as 0).
+    ::velk::emit_cached_view_pass(
+        vs.pass, dirty, 0, graph, [&](::velk::CachedPassRecording& rec) {
+            auto pipeline = ensure_pipeline(ctx);
+            if (!pipeline) return;
+
+            /// Push constant layout matches the shader's `PC` block above.
+            /// Texture id reads come via bindless sampling; output is a
+            /// storage image bound through the same descriptor table.
+            VELK_GPU_STRUCT PushC {
+                uint32_t input_tex_id;
+                uint32_t output_image_id;
+                uint32_t width;
+                uint32_t height;
+                float exposure;
+                uint32_t _pad0;
+                uint32_t _pad1;
+                uint32_t _pad2;
+            };
+            static_assert(sizeof(PushC) == 32, "Tonemap PushC layout mismatch");
+
+            PushC pc{};
+            pc.input_tex_id    = input_id;
+            pc.output_image_id = output_id;
+            pc.width  = dims.x;
+            pc.height = dims.y;
+            pc.exposure = exposure;
+
+            ::velk::DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = (dims.x + 7) / 8;
+            dc.groups_y = (dims.y + 7) / 8;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(PushC);
+            std::memcpy(dc.root_constants, &pc, sizeof(PushC));
+
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("Tonemap");
+                cmd->record_dispatch(dc);
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+            // Hold the compute pipeline strong (the weak cache is not an owner).
+            rec.held.push_back(std::move(pipeline));
+            rec.reads.push_back(interface_pointer_cast<::velk::IGpuResource>(input));
+            rec.writes.push_back(interface_pointer_cast<::velk::IGpuResource>(output));
+        });
+
+    vs.snapshot_valid = true;
+    vs.exposure = exposure;
+    vs.input_id = input_id;
+    vs.output_id = output_id;
+    vs.dims = dims;
+}
+
+void Tonemap::on_view_removed(::velk::IViewEntry& view, ::velk::FrameContext& /*ctx*/)
+{
+    view_states_.erase(&view);
+}
+
+void Tonemap::shutdown(::velk::FrameContext& /*ctx*/)
+{
+    view_states_.clear();
 }
 
 } // namespace velk::impl

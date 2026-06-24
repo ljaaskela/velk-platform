@@ -8,6 +8,7 @@
 
 #include <velk-render/ext/default_render_pass.h>
 #include "path/tonemap.h"
+#include "path/bloom.h"
 #include "material/material_property.h"
 #include "mesh/mesh.h"
 #include "mesh/mesh_buffer.h"
@@ -78,9 +79,10 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::RenderGraph>(velk);
     rv &= register_type<impl::DefaultRenderPass>(velk);
 
-    // Post-processing: container + first built-in effect.
+    // Post-processing: container + built-in effects.
     rv &= register_type<impl::PostProcess>(velk);
     rv &= register_type<impl::Tonemap>(velk);
+    rv &= register_type<impl::Bloom>(velk);
     return rv;
 }
 

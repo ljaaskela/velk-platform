@@ -63,7 +63,7 @@ void PostProcess::emit(::velk::IViewEntry& view,
     }
 
     /// Each non-last effect writes to a container-allocated storage
-    /// intermediate (RGBA8). The last effect writes directly to the
+    /// intermediate (RGBA16F, HDR). The last effect writes directly to the
     /// caller-supplied `output`. The container's caller guarantees
     /// `output` is a storage-writable texture so effects don't
     /// special-case "am I the last stage?". An empty container does a
@@ -127,7 +127,10 @@ PostProcess::ensure_intermediate(::velk::IViewEntry& view,
     ::velk::TextureDesc td{};
     td.width = width;
     td.height = height;
-    td.format = ::velk::PixelFormat::RGBA8;
+    // HDR (RGBA16F): the path output feeding the chain is HDR linear radiance,
+    // and effects upstream of the tonemap (e.g. bloom) hand HDR to the next
+    // stage. An LDR intermediate here would clamp that before tonemap runs.
+    td.format = ::velk::PixelFormat::RGBA16F;
     td.usage = ::velk::TextureUsage::Storage;
     // Persistent: the same Ptr is reused across frames so downstream
     // cached effect passes can embed the texture id stably.

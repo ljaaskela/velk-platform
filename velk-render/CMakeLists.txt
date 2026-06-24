@@ -178,6 +178,7 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_effect.h
     include/velk-render/interface/intf_render_texture_group.h
     include/velk-render/interface/intf_tonemap.h
+    include/velk-render/interface/intf_bloom.h
     src/frame/render_graph.h
     src/frame/render_graph.cpp
     include/velk-render/ext/default_render_pass.h
@@ -212,6 +213,8 @@ add_library(velk_render SHARED
     src/path/post_process.cpp
     src/path/tonemap.h
     src/path/tonemap.cpp
+    src/path/bloom.h
+    src/path/bloom.cpp
     src/path/camera_pipeline.h
     src/path/camera_pipeline.cpp
 )

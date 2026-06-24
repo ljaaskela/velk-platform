@@ -98,6 +98,9 @@ namespace Effect {
 /** @brief ACES filmic tonemap effect. */
 inline constexpr Uid Tonemap{"e58c8d7d-8339-4df4-85b9-0274a2256ab8"};
 
+/** @brief Progressive mip-chain bloom effect. */
+inline constexpr Uid Bloom{"908c29ce-5c8a-4708-87ab-e14a09b6f0a8"};
+
 } // namespace Effect
 
 } // namespace ClassId

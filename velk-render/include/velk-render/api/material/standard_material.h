@@ -58,15 +58,34 @@ public:
             ClassId::MetallicRoughnessProperty, &IMetallicRoughnessProperty::State::roughness_factor, v);
     }
 
-    /// Canonical (first-attached) property wrappers. Empty wrapper if none attached.
+    /// Property wrappers for configuring a material input. The non-const
+    /// accessors create-and-attach the property on first use (so e.g.
+    /// `mat.emissive().set_factor(...)` works on a fresh material), matching
+    /// how `set_base_color` etc. already behave. The const overloads are
+    /// read-only: they return the canonical (first-attached) property, or an
+    /// empty wrapper if none is attached, and never create one.
+    BaseColorProperty base_color() { return ensure<BaseColorProperty, IBaseColorProperty>(ClassId::BaseColorProperty); }
     BaseColorProperty base_color() const { return canonical<BaseColorProperty, IBaseColorProperty>(); }
+
+    MetallicRoughnessProperty metallic_roughness()
+    {
+        return ensure<MetallicRoughnessProperty, IMetallicRoughnessProperty>(ClassId::MetallicRoughnessProperty);
+    }
     MetallicRoughnessProperty metallic_roughness() const
     {
         return canonical<MetallicRoughnessProperty, IMetallicRoughnessProperty>();
     }
+
+    NormalProperty normal() { return ensure<NormalProperty, INormalProperty>(ClassId::NormalProperty); }
     NormalProperty normal() const { return canonical<NormalProperty, INormalProperty>(); }
+
+    OcclusionProperty occlusion() { return ensure<OcclusionProperty, IOcclusionProperty>(ClassId::OcclusionProperty); }
     OcclusionProperty occlusion() const { return canonical<OcclusionProperty, IOcclusionProperty>(); }
+
+    EmissiveProperty emissive() { return ensure<EmissiveProperty, IEmissiveProperty>(ClassId::EmissiveProperty); }
     EmissiveProperty emissive() const { return canonical<EmissiveProperty, IEmissiveProperty>(); }
+
+    SpecularProperty specular() { return ensure<SpecularProperty, ISpecularProperty>(ClassId::SpecularProperty); }
     SpecularProperty specular() const { return canonical<SpecularProperty, ISpecularProperty>(); }
 
 private:
@@ -74,6 +93,14 @@ private:
     Wrapper canonical() const
     {
         return Wrapper(as_object(find_attachment<Interface>()));
+    }
+
+    /// Returns the canonical @p Interface property, creating + attaching one
+    /// of @p class_id if absent, so callers can configure it immediately.
+    template <class Wrapper, class Interface>
+    Wrapper ensure(Uid class_id)
+    {
+        return Wrapper(as_object(find_or_create_attachment<Interface>(class_id)));
     }
 
     /// Reads a field from the canonical (first-attached) @p P property, or its default if absent.

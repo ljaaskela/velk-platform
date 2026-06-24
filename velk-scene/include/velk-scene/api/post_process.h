@@ -4,6 +4,7 @@
 #include <velk/api/object.h>
 #include <velk/api/state.h>
 
+#include <velk-render/interface/intf_bloom.h>
 #include <velk-render/interface/intf_effect.h>
 #include <velk-render/interface/intf_post_process.h>
 #include <velk-render/interface/intf_tonemap.h>
@@ -57,6 +58,33 @@ public:
     {
         return read_state_value<ITonemap>(&ITonemap::State::exposure);
     }
+};
+
+/**
+ * @brief Typed wrapper around the bloom effect.
+ *
+ * Bloom blurs the bright (HDR) part of the image across a mip chain and adds
+ * it back as a soft glow. Place it before the tonemap in the post chain (it
+ * operates on HDR radiance). Drive the look at runtime via the setters, e.g.
+ * raise `intensity` for a night scene and drop it to 0 for daytime.
+ */
+class Bloom : public Effect
+{
+public:
+    Bloom() = default;
+    explicit Bloom(IObject::Ptr obj) : Effect(obj) {}
+    explicit Bloom(IEffect::Ptr p) : Effect(p) {}
+
+    /// Luminance below which a pixel does not bloom.
+    void set_threshold(float v) { write_state_value<IBloom>(&IBloom::State::threshold, v); }
+    /// Soft-knee width around the threshold.
+    void set_knee(float v) { write_state_value<IBloom>(&IBloom::State::knee, v); }
+    /// Strength the glow is added back at (0 = bloom off).
+    void set_intensity(float v) { write_state_value<IBloom>(&IBloom::State::intensity, v); }
+    /// Upsample tent-filter scale; larger spreads the glow wider.
+    void set_radius(float v) { write_state_value<IBloom>(&IBloom::State::radius, v); }
+
+    auto get_intensity() const { return read_state_value<IBloom>(&IBloom::State::intensity); }
 };
 
 /**
@@ -120,6 +148,18 @@ inline Tonemap create_tonemap(float exposure = 1.f)
     Tonemap t(instance().create<IObject>(ClassId::Effect::Tonemap));
     if (t) t.set_exposure(exposure);
     return t;
+}
+
+/// Progressive mip-chain bloom effect. Add it before the tonemap. @p intensity
+/// is the glow strength (0 = off); tune all knobs later via the setters.
+inline Bloom create_bloom(float intensity = 0.05f, float threshold = 1.f)
+{
+    Bloom b(instance().create<IObject>(ClassId::Effect::Bloom));
+    if (b) {
+        b.set_intensity(intensity);
+        b.set_threshold(threshold);
+    }
+    return b;
 }
 
 } // namespace pp
