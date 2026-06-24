@@ -281,6 +281,7 @@ IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int 
     vs.gbuffer_size = want;
     vs.gbuffer_dirty = true;
     vs.lighting_dirty = true;
+    vs.transparent_dirty = true;
 
     if (!vs.worldpos_alias) {
         vs.worldpos_alias = instance().create<IRenderTarget>(ClassId::RenderTexture);
@@ -322,6 +323,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
+    // Blended geometry draws forward, over the lit composite, against the
+    // retained gbuffer depth.
+    emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
 }
 
 void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -339,6 +343,11 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
             // weak). resolve runs before set_held_pipelines replaces the
             // pass's old set, so reused pipelines never drop to zero refs.
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+                // Blended materials draw in the transparent pass, not the
+                // opaque G-buffer; skip them here.
+                if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
+                    return nullptr;
+                }
                 auto p = resolve_or_compile_gbuffer(*ctx.render_ctx, b);
                 if (!p) return nullptr;
                 IGpuPipeline* raw = p.get();
@@ -551,6 +560,99 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         });
 }
 
+void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
+                                         const RenderView& render_view,
+                                         IRenderTarget::Ptr color_target,
+                                         FrameContext& ctx,
+                                         IRenderGraph& graph)
+{
+    if (!render_view.batches || render_view.batches->empty()) return;
+    if (!color_target || !vs.gbuffer || !ctx.backend || !ctx.frame_buffer) return;
+
+    // Resolve the composite target as an IGpuTexture (surface composite casts
+    // directly; a RenderTexture proxy needs find_texture).
+    IGpuTexture* target_texture = interface_cast<IGpuTexture>(color_target.get());
+    if (!target_texture) {
+        target_texture = graph.resources().find_texture(color_target.get());
+        if (!target_texture && ctx.resources) {
+            target_texture = ctx.resources->find_texture(color_target.get());
+        }
+    }
+    if (!target_texture) return;
+
+    IGpuTexture* depth_texture = vs.gbuffer->depth_attachment();
+
+    // Retarget / resize detection: the cached cmd buffer bakes the composite
+    // VkImage handle.
+    if (target_texture != vs.last_transparent_target) {
+        vs.transparent_dirty = true;
+        vs.last_transparent_target = target_texture;
+    }
+
+    emit_cached_view_pass(
+        vs.cached_transparent_pass, vs.transparent_dirty,
+        render_view.view_globals_address, graph,
+        [&](CachedPassRecording& rec) {
+            auto* default_uv1 =
+                ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            const PixelFormat target_format = ctx.target_format;
+            const DepthFormat depth_format = color_target->get_depth_format();
+
+            // Only BLEND batches; everything else drew opaque in the gbuffer.
+            // resolve returns null to skip non-blended batches, and holds the
+            // pipeline strong (the cache is weak).
+            auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+                if (b.pipeline_options().blend_mode != BlendMode::Alpha) {
+                    return nullptr;
+                }
+                auto p = resolve_or_compile_forward(*ctx.render_ctx, b,
+                                                    target_format, depth_format);
+                if (!p) return nullptr;
+                IGpuPipeline* raw = p.get();
+                rec.held.push_back(std::move(p));
+                return raw;
+            };
+
+            vector<DrawCall> draw_calls;
+            emit_draw_calls(
+                draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
+                default_uv1, render_view.view_globals_address, resolve,
+                render_view.has_frustum ? &render_view.frustum : nullptr);
+
+            // No transparent geometry this view: leave an empty (no-op) pass.
+            if (draw_calls.empty()) return;
+
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                // Load the lit composite + the opaque gbuffer depth; blend the
+                // transparent draws over them (pipelines carry BlendMode::Alpha
+                // and depth_write=false from the materials' options).
+                ColorAttachment color{};
+                color.texture = target_texture;
+                color.clear = false;
+
+                DepthAttachment depth_att{};
+                depth_att.texture = depth_texture;
+                depth_att.clear = false;
+
+                cmd->begin_recording();
+                cmd->push_label("DeferredPath: transparent");
+                cmd->record_begin_rendering(
+                    array_view<const ColorAttachment>(&color, 1),
+                    depth_texture ? &depth_att : nullptr);
+                cmd->set_viewport(render_view.viewport);
+                cmd->record_draws({draw_calls.data(), draw_calls.size()});
+                cmd->record_end_rendering();
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+
+            // Reads the gbuffer (its depth); reads + writes the composite.
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        });
+}
+
 DeferredPath::~DeferredPath()
 {
     // Detach from every view we observed. The renderer's destruction
@@ -570,6 +672,7 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
     if (it != view_states_.end()) {
         it->second.gbuffer_dirty = true;
         it->second.lighting_dirty = true;
+        it->second.transparent_dirty = true;
     }
 }
 

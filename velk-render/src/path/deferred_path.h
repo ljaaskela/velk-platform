@@ -117,6 +117,15 @@ public:
         /// dst (surface composite) VkImage handle. If the composite is
         /// recreated, the cached cmd buffer is stale.
         IGpuTexture* last_dst_texture = nullptr;
+
+        /// Cached transparent (blended) forward pass: draws BLEND-mode batches
+        /// over the lit composite, depth-testing the retained gbuffer depth
+        /// without writing it. Rebuilt on the same triggers as the gbuffer pass
+        /// (batch / material / camera change, resize), plus when the composite
+        /// target it draws into is recreated.
+        IRenderPass::Ptr cached_transparent_pass;
+        bool transparent_dirty = true;
+        IGpuTexture* last_transparent_target = nullptr;
     };
 
 private:
@@ -140,6 +149,15 @@ private:
                             FrameContext& ctx,
                             int w, int h,
                             IRenderGraph& graph);
+
+    /// Forward pass for BLEND-mode batches, drawn over the lit composite in
+    /// @p color_target with the gbuffer depth bound read-only. No-op when the
+    /// view has no transparent batches.
+    void emit_transparent_pass(IViewEntry& view, ViewState& vs,
+                               const RenderView& render_view,
+                               IRenderTarget::Ptr color_target,
+                               FrameContext& ctx,
+                               IRenderGraph& graph);
 };
 
 } // namespace velk

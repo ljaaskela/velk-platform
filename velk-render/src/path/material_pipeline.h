@@ -172,6 +172,82 @@ inline uint64_t ensure_material_forward_key(IRenderContext& ctx, const IBatch& b
     return key;
 }
 
+/**
+ * @brief Resolves (or lazy-compiles) the forward-rendering pipeline for a
+ *        batch against the given color/depth attachment formats.
+ *
+ * Material wins over the visual's IShaderSource when both are present; the
+ * visual's source is the no-material fallback. Eval materials key on their
+ * content so identical materials share a pipeline; raw-fragment materials keep
+ * their stored handle; non-material programs keep their explicit pipeline_key.
+ * The batch's own `pipeline_options()` (blend / depth / cull) drive the
+ * pipeline state. Returns nullptr to skip (no source / compile failure).
+ *
+ * Shared by ForwardPath and the deferred path's transparent (blended) pass.
+ */
+inline IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
+                                                    const IBatch& batch,
+                                                    PixelFormat target_format,
+                                                    DepthFormat depth_format)
+{
+    auto material_ptr = batch.material();
+    auto shader_source_ptr = batch.shader_source();
+    const bool use_material = (material_ptr != nullptr);
+    PipelineOptions pipeline_options = batch.pipeline_options();
+    uint64_t user_key = 0;
+    if (use_material) {
+        user_key = forward_material_content_key(ctx, batch);
+        if (user_key == 0) {
+            user_key = material_ptr->get_pipeline_handle(ctx);
+        }
+    } else {
+        user_key = batch.pipeline_key();
+    }
+
+    if (auto pipeline = ctx.find_pipeline(
+            PipelineCacheKey{user_key, target_format, depth_format, 0})) {
+        return pipeline;
+    }
+
+    // Cache miss: compile and return the strong Ptr directly (the cache holds
+    // only a weak ref, so a find-after-compile would already be dead).
+    IGpuPipeline::Ptr compiled;
+    uint64_t compiled_key = 0;
+    if (use_material) {
+        compiled = compile_material_forward_pipeline_dynamic(
+            ctx, batch, target_format, depth_format, user_key, &compiled_key);
+        if (!compiled) {
+            auto* src = interface_cast<IShaderSource>(material_ptr);
+            auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};
+            auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
+            if (!frag_src.empty() && !vertex_src.empty()) {
+                PixelFormat formats[1] = {target_format};
+                compiled = ctx.compile_pipeline_dynamic(
+                    frag_src, vertex_src,
+                    user_key,
+                    array_view<const PixelFormat>(formats, 1),
+                    depth_format,
+                    pipeline_options, &compiled_key);
+            }
+        }
+        if (compiled_key && material_ptr->get_pipeline_handle(ctx) == 0) {
+            material_ptr->set_pipeline_handle(compiled_key);
+        }
+    } else if (shader_source_ptr && user_key != 0) {
+        auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
+        auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
+        PixelFormat formats[1] = {target_format};
+        compiled = ctx.compile_pipeline_dynamic(
+            fsrc, vsrc,
+            user_key,
+            array_view<const PixelFormat>(formats, 1),
+            depth_format,
+            pipeline_options);
+    }
+
+    return compiled;
+}
+
 } // namespace velk
 
 #endif // VELK_RENDER_PATH_MATERIAL_PIPELINE_H
