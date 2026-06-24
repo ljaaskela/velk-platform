@@ -5,6 +5,7 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-render/api/cached_view_pass.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_pass.h>
@@ -143,28 +144,35 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
         seen_post_[post.get()] = post;
         post->emit(view, path_target, post_target, ctx, graph);
 
-        // Blit post-process output into the surface composite. Cached
-        // pass per view; per-slot cross-slot find_texture caveat
-        // applies but is a non-issue because post_output's Ptr stays
-        // stable and we're invoked from the same view's slot rotation.
+        // Blit post-process output into the surface composite. Cached per
+        // view; the post-process output and the per-surface composite are both
+        // stable Ptrs (recreated only on resize), so the recorded blit is
+        // reused every frame and re-recorded only when either texture changes.
+        // (per-slot cross-slot find_texture caveat is a non-issue here because
+        // post_output's Ptr stays stable across this view's slot rotation.)
         ::velk::IGpuTexture* post_tex = graph.resources().find_texture(post_target.get());
         ::velk::IGpuTexture* swap_tex = interface_cast<::velk::IGpuTexture>(swap_target.get());
         if (post_tex && swap_tex) {
-            auto blit_pass = ::velk::instance().create<::velk::IRenderPass>(
-                ::velk::ClassId::DefaultRenderPass);
-            if (blit_pass) {
-                if (auto cmd = ctx.backend->create_command_buffer()) {
-                    cmd->begin_recording();
-                    cmd->push_label("CameraPipeline: post -> composite");
-                    cmd->record_blit_to_texture(*post_tex, *swap_tex, render_view.viewport);
-                    cmd->pop_label();
-                    cmd->end_recording();
-                    blit_pass->set_command_buffer(std::move(cmd));
-                }
-                blit_pass->add_read(post_target);
-                blit_pass->add_write(swap_target);
-                graph.add_pass(std::move(blit_pass));
+            if (post_tex != vs.last_post_tex || swap_tex != vs.last_swap_tex) {
+                vs.composite_blit_dirty = true;
+                vs.last_post_tex = post_tex;
+                vs.last_swap_tex = swap_tex;
             }
+            ::velk::emit_cached_view_pass(
+                vs.cached_composite_blit, vs.composite_blit_dirty,
+                render_view.view_globals_address, graph,
+                [&](::velk::CachedPassRecording& rec) {
+                    if (auto cmd = ctx.backend->create_command_buffer()) {
+                        cmd->begin_recording();
+                        cmd->push_label("CameraPipeline: post -> composite");
+                        cmd->record_blit_to_texture(*post_tex, *swap_tex, render_view.viewport);
+                        cmd->pop_label();
+                        cmd->end_recording();
+                        rec.cmd = std::move(cmd);
+                    }
+                    rec.reads.push_back(interface_pointer_cast<::velk::IGpuResource>(post_target));
+                    rec.writes.push_back(interface_pointer_cast<::velk::IGpuResource>(swap_target));
+                });
         }
     } else {
         // No post-process: path renders directly to the surface

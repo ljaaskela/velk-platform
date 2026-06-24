@@ -7,7 +7,10 @@
 #include <velk-render/ext/view_pipeline.h>
 #include <velk-render/interface/intf_post_process.h>
 #include <velk-render/interface/intf_render_path.h>
+#include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_view_pipeline.h>
+
+namespace velk { class IGpuTexture; }
 
 namespace velk::impl {
 
@@ -78,6 +81,15 @@ private:
         ::velk::IRenderTarget::Ptr post_output;
         ::velk::uvec2 path_size{};
         ::velk::uvec2 post_size{};
+
+        /// Cached post -> composite blit pass. Re-recorded only when the
+        /// post-process output or the surface composite texture changes
+        /// (resize / retarget); otherwise the same pass Ptr is re-added each
+        /// frame so the render graph's compile short-circuit holds.
+        ::velk::IRenderPass::Ptr cached_composite_blit;
+        bool composite_blit_dirty = true;
+        ::velk::IGpuTexture* last_post_tex = nullptr;
+        ::velk::IGpuTexture* last_swap_tex = nullptr;
     };
     std::unordered_map<::velk::IViewEntry*, ViewState> view_states_;
 
