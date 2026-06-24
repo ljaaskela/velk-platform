@@ -235,10 +235,23 @@ void main()
     if (e.color.a < <%DISCARD%>) discard;
 
     vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
+
+    // Geometric specular antialiasing (Tokuyoshi 2019). With the dominant
+    // mipmap aliasing fixed, this targets the residual sub-pixel specular
+    // shimmer: estimate the shading normal's screen-space variance and fold it
+    // into roughness so a tight GGX lobe widens exactly where it would alias.
+    // N is kept finite by velk_eval_standard's TBN guard, so the derivatives
+    // are clean (an earlier attempt amplified NaN normals before that guard).
+    vec3 dndx = dFdx(N);
+    vec3 dndy = dFdy(N);
+    float specaa_var = 0.25 * (dot(dndx, dndx) + dot(dndy, dndy)); // SIGMA2 = 0.5^2
+    float aa_roughness = sqrt(clamp(e.roughness * e.roughness
+                                    + min(2.0 * specaa_var, 0.18 /*KAPPA*/), 0.0, 1.0));
+
     g_albedo    = e.color;
     g_normal    = vec4(N, 0.0);
     g_world_pos = vec4(v_world_pos, 0.0);
-    g_material  = vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0);
+    g_material  = vec4(e.metallic, aa_roughness, float(e.lighting_mode) / 255.0, 0.0);
     g_emissive  = vec4(e.emissive, 0.0);
 }
 )";
