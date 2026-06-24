@@ -169,12 +169,22 @@ MaterialEval velk_eval_standard(EvalContext ctx)
     vec3 shading_normal = ctx.normal;
     if (d.normal.texture_id != 0u && dot(ctx.tangent.xyz, ctx.tangent.xyz) > 0.0) {
         vec3 Ngeo = normalize(ctx.normal);
-        vec3 T = normalize(ctx.tangent.xyz - Ngeo * dot(Ngeo, ctx.tangent.xyz));
-        vec3 Bt = cross(Ngeo, T) * ctx.tangent.w;
-        vec3 tn = velk_texture(d.normal.texture_id,
-                               VELK_STD_UV(ctx, d.normal.tex_coord)).xyz * 2.0 - 1.0;
-        tn.xy *= d.normal.scale;
-        shading_normal = normalize(mat3(T, Bt, Ngeo) * tn);
+        // Gram-Schmidt the tangent against the normal. Guard the result: when
+        // the (interpolated) tangent is near-parallel to the normal it collapses
+        // to ~zero, and normalizing it would yield NaN -> a NaN shading normal ->
+        // a bright specular firefly downstream. Fall back to the geometric normal.
+        vec3 T = ctx.tangent.xyz - Ngeo * dot(Ngeo, ctx.tangent.xyz);
+        float t_len = length(T);
+        if (t_len > 1e-4) {
+            T /= t_len;
+            vec3 Bt = cross(Ngeo, T) * ctx.tangent.w;
+            vec3 tn = velk_texture(d.normal.texture_id,
+                                   VELK_STD_UV(ctx, d.normal.tex_coord)).xyz * 2.0 - 1.0;
+            tn.xy *= d.normal.scale;
+            vec3 mapped = mat3(T, Bt, Ngeo) * tn;
+            float m_len = length(mapped);
+            if (m_len > 1e-6) shading_normal = mapped / m_len;
+        }
     }
     e.normal = shading_normal;
     e.metallic = metallic;
