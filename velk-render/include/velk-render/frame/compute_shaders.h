@@ -71,13 +71,16 @@ layout(push_constant, scalar) uniform PC {
     uint normal_tex_id;        // 32
     uint worldpos_tex_id;      // 36
     uint material_tex_id;      // 40
-    uint width;                // 44
-    uint height;               // 48
-    uint light_count;          // 52
-    uint env_texture_id;       // 56
-    uint shadow_debug_image_id;// 60  RGBA32F storage image; 0 = disabled
-    LightList lights;          // 64
-    _EnvParamsBuf env_params;  // 72
+    uint emissive_tex_id;      // 44
+    uint width;                // 48
+    uint height;               // 52
+    uint light_count;          // 56
+    uint env_texture_id;       // 60
+    uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
+    uint _pad0;                // 68  aligns the BDA pointers below to 8
+    LightList lights;          // 72
+    _EnvParamsBuf env_params;  // 80
+    uvec2 _pad1;               // 88  pads block to 96 (CPU struct is alignas(16))
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -528,6 +531,11 @@ void main()
         return;
     }
 
+    // Emissive radiance, added to the lit output below (sky pixels return
+    // above without reading it). HDR; folded in before tonemap so bloom
+    // can pick up bright emitters.
+    vec3 emissive = velk_texture(pc.emissive_tex_id, uv).rgb;
+
     // LightingMode encoded in mat.b (0 = Unlit, 1 = Standard, ...).
     uint lighting_mode = uint(mat.b * 255.0 + 0.5);
     float metallic  = clamp(mat.r, 0.0, 1.0);
@@ -644,6 +652,10 @@ void main()
             + kD_env * albedo.rgb * env_diffuse * ao
             + F_env * env_specular;
     }
+
+    // Emissive is unlit additive radiance; fold it in for every shading
+    // mode (the default-fill / unlit path writes zero emissive).
+    rgb += emissive;
 
     // Output raw HDR linear radiance. Tonemapping is the post-process
     // chain's responsibility; cameras that need an LDR display must

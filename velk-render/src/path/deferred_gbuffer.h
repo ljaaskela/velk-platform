@@ -26,7 +26,10 @@ enum class GBufferAttachment : uint32_t
                         ///  any per-pixel computation that needs world-space coords
                         ///  (notably RT shadows: triangle-granularity hit/miss).
     MaterialParams = 3, ///< RGBA8      r = metallic, g = roughness, b = lighting mode, a = unused.
-    Count          = 4
+    Emissive       = 4, ///< RGBA16F    rgb = HDR emissive radiance, a = unused. Half float so
+                        ///  KHR_materials_emissive_strength values above 1 survive for bloom;
+                        ///  the lighting pass adds this to the lit output before tonemap.
+    Count          = 5
 };
 
 /** @brief G-buffer attachment formats in declaration order. */
@@ -35,6 +38,7 @@ inline constexpr PixelFormat kGBufferFormats[static_cast<uint32_t>(GBufferAttach
     PixelFormat::RGBA16F,  // Normal
     PixelFormat::RGBA32F,  // WorldPos (precision-critical; see comment above)
     PixelFormat::RGBA8,    // MaterialParams
+    PixelFormat::RGBA16F,  // Emissive (HDR; see comment above)
 };
 
 /**

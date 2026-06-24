@@ -443,6 +443,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     auto normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
     auto worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
     auto material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+    auto emissive_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Emissive));
 
     // Lights and env come pre-resolved from RenderView. ViewPreparer
     // registered shadow techniques against the snippet registry and
@@ -461,15 +462,18 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         uint32_t normal_tex_id;
         uint32_t worldpos_tex_id;
         uint32_t material_tex_id;
+        uint32_t emissive_tex_id;
         uint32_t width;
         uint32_t height;
         uint32_t light_count;
         uint32_t env_texture_id;
         uint32_t shadow_debug_image_id;
+        uint32_t _pad0;            // aligns the BDA pointers below to 8
         uint64_t lights_addr;
         uint64_t env_data_addr;
+        uint32_t _pad1[2];         // pads to 96 (VELK_GPU_STRUCT is alignas(16))
     };
-    static_assert(sizeof(PushC) == 80, "Deferred PushC layout mismatch");
+    static_assert(sizeof(PushC) == 96, "Deferred PushC layout mismatch");
 
     PushC pc{};
     pc.globals = render_view.view_globals_address;
@@ -482,6 +486,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.normal_tex_id   = normal_id;
     pc.worldpos_tex_id = worldpos_id;
     pc.material_tex_id = material_id;
+    pc.emissive_tex_id = emissive_id;
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());

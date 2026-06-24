@@ -65,6 +65,7 @@ layout(location = 0) out vec4 g_albedo;
 layout(location = 1) out vec4 g_normal;
 layout(location = 2) out vec4 g_world_pos;
 layout(location = 3) out vec4 g_material;
+layout(location = 4) out vec4 g_emissive;
 
 // Forward decl; the gbuffer-pipeline composer appends either the
 // visual's discard snippet or an empty stub after this fragment's body.
@@ -77,6 +78,7 @@ void main()
     g_normal      = vec4(normalize(v_world_normal), 0.0);
     g_world_pos   = vec4(v_world_pos, 0.0);
     g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
+    g_emissive    = vec4(0.0);
 }
 )";
 
@@ -150,6 +152,7 @@ layout(location = 0) out vec4 g_albedo;
 layout(location = 1) out vec4 g_normal;
 layout(location = 2) out vec4 g_world_pos;
 layout(location = 3) out vec4 g_material;
+layout(location = 4) out vec4 g_emissive;
 
 // Composer appends either the visual's discard snippet or an empty stub.
 void velk_visual_discard();
@@ -178,6 +181,7 @@ void main()
     g_normal    = vec4(N, 0.0);
     g_world_pos = vec4(v_world_pos, 0.0);
     g_material  = vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0);
+    g_emissive  = vec4(e.emissive, 0.0);
 }
 )";
 
