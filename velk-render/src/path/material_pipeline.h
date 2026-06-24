@@ -20,6 +20,7 @@ namespace velk {
 /// collide even with identical inputs.
 constexpr uint64_t kForwardEvalContentTag = 0x46776452'4576616cULL; // "FwdREval"
 constexpr uint64_t kGbufferEvalContentTag = 0x47427546'4576616cULL; // "GBufEval"
+constexpr uint64_t kTransparentEvalContentTag = 0x54726e73'4576616cULL; // "TrnsEval"
 
 /**
  * @brief Accumulates an FNV-1a content hash over the inputs that uniquely
@@ -83,7 +84,8 @@ struct PipelineContentHasher
 inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
     IRenderContext& ctx, const IBatch& batch,
     PixelFormat color_format, DepthFormat depth_format,
-    uint64_t user_key, uint64_t* out_key = nullptr)
+    uint64_t user_key, uint64_t* out_key = nullptr,
+    string_view driver_template = forward_fragment_driver_template)
 {
     auto material_ptr = batch.material();
     if (!material_ptr) return {};
@@ -98,7 +100,7 @@ inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
     if (eval_src.empty() || vertex_src.empty() || eval_fn.empty()) return {};
     src->register_includes(ctx);
     string frag = compose_eval_fragment(
-        forward_fragment_driver_template, eval_src, eval_fn,
+        driver_template, eval_src, eval_fn,
         mat->get_forward_discard_threshold());
     PixelFormat formats[1] = {color_format};
     return ctx.compile_pipeline_dynamic(
@@ -125,7 +127,8 @@ inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
  * fragment material or non-material program), so callers keep their existing
  * key for those.
  */
-inline uint64_t forward_material_content_key(IRenderContext& ctx, const IBatch& batch)
+inline uint64_t forward_material_content_key(IRenderContext& ctx, const IBatch& batch,
+                                             uint64_t content_tag = kForwardEvalContentTag)
 {
     auto material_ptr = batch.material();
     if (!material_ptr) return 0;
@@ -137,7 +140,7 @@ inline uint64_t forward_material_content_key(IRenderContext& ctx, const IBatch& 
     auto eval_fn = src->get_fn_name(shader_role::kEval);
     if (eval_src.empty() || vertex_src.empty() || eval_fn.empty()) return 0;
     src->register_includes(ctx);
-    PipelineContentHasher hasher(kForwardEvalContentTag);
+    PipelineContentHasher hasher(content_tag);
     hasher.str(eval_src);
     hasher.str(vertex_src);
     hasher.str(eval_fn);
@@ -185,10 +188,11 @@ inline uint64_t ensure_material_forward_key(IRenderContext& ctx, const IBatch& b
  *
  * Shared by ForwardPath and the deferred path's transparent (blended) pass.
  */
-inline IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
-                                                    const IBatch& batch,
-                                                    PixelFormat target_format,
-                                                    DepthFormat depth_format)
+inline IGpuPipeline::Ptr resolve_or_compile_forward(
+    IRenderContext& ctx, const IBatch& batch,
+    PixelFormat target_format, DepthFormat depth_format,
+    string_view driver_template = forward_fragment_driver_template,
+    uint64_t content_tag = kForwardEvalContentTag)
 {
     auto material_ptr = batch.material();
     auto shader_source_ptr = batch.shader_source();
@@ -196,7 +200,7 @@ inline IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
     PipelineOptions pipeline_options = batch.pipeline_options();
     uint64_t user_key = 0;
     if (use_material) {
-        user_key = forward_material_content_key(ctx, batch);
+        user_key = forward_material_content_key(ctx, batch, content_tag);
         if (user_key == 0) {
             user_key = material_ptr->get_pipeline_handle(ctx);
         }
@@ -215,7 +219,8 @@ inline IGpuPipeline::Ptr resolve_or_compile_forward(IRenderContext& ctx,
     uint64_t compiled_key = 0;
     if (use_material) {
         compiled = compile_material_forward_pipeline_dynamic(
-            ctx, batch, target_format, depth_format, user_key, &compiled_key);
+            ctx, batch, target_format, depth_format, user_key, &compiled_key,
+            driver_template);
         if (!compiled) {
             auto* src = interface_cast<IShaderSource>(material_ptr);
             auto vertex_src = src ? src->get_source(shader_role::kVertex) : string_view{};

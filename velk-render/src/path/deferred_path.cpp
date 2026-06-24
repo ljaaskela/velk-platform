@@ -605,8 +605,10 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
                 if (b.pipeline_options().blend_mode != BlendMode::Alpha) {
                     return nullptr;
                 }
-                auto p = resolve_or_compile_forward(*ctx.render_ctx, b,
-                                                    target_format, depth_format);
+                // Glass driver: Fresnel-boosted opacity at grazing angles.
+                auto p = resolve_or_compile_forward(
+                    *ctx.render_ctx, b, target_format, depth_format,
+                    transparent_fragment_driver_template, kTransparentEvalContentTag);
                 if (!p) return nullptr;
                 IGpuPipeline* raw = p.get();
                 rec.held.push_back(std::move(p));

@@ -133,6 +133,56 @@ void main()
 }
 )";
 
+// Transparent (glass) driver. Same eval-driven shading as the forward
+// template, but the output opacity is boosted toward 1 at grazing angles via
+// a Schlick-Fresnel term (dielectric F0 = 0.04). This gives a transmissive
+// pane edge presence as the view angle steepens — the honest part of glass
+// reflectance — without faking any reflected *color* (a sky/env reflection
+// would be wrong when geometry sits between the glass and the sky). Used by
+// the deferred path's transparent pass for BLEND / transmissive materials.
+[[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
+layout(buffer_reference, std430) readonly buffer DrawData {
+    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
+    OpaquePtr material;
+};
+layout(push_constant) uniform PC { DrawData root; };
+
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_local_uv;
+layout(location = 2) flat in vec2 v_size;
+layout(location = 3) in vec3 v_world_pos;
+layout(location = 4) in vec3 v_world_normal;
+layout(location = 5) flat in uint v_shape_param;
+layout(location = 6) in vec2 v_uv1;
+
+layout(location = 0) out vec4 frag_color;
+
+void main()
+{
+    GlobalData globals = velk_global_data(root);
+    EvalContext ctx;
+    ctx.data_addr   = uint64_t(root.material);
+    ctx.texture_id  = root.texture_id;
+    ctx.shape_param = v_shape_param;
+    ctx.uv          = v_local_uv;
+    ctx.uv1         = v_uv1;
+    ctx.base        = v_color;
+    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
+    ctx.normal      = v_world_normal;
+    ctx.hit_pos     = v_world_pos;
+
+    MaterialEval e = <%EVAL_FN%>(ctx);
+    if (e.color.a < <%DISCARD%>) discard;
+
+    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
+    vec3 V = normalize(globals.cam_pos.xyz - v_world_pos);
+    float ndv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+    float opacity = e.color.a + fresnel * (1.0 - e.color.a);
+    frag_color = vec4(e.color.rgb, opacity);
+}
+)";
+
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
