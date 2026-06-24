@@ -148,13 +148,14 @@ vec4 velk_texture(uint id, vec2 uv)
     return texture(velk_textures[nonuniformEXT(id)], uv);
 }
 
-// Standard vertex layout used by every visual (2D and 3D). 32-byte
-// tight C-style packing (vec3 pos + vec3 normal + vec2 uv) via scalar
-// layout — the default std430 rule would pad vec3 to 16 bytes and
-// inflate this to 48. Enabled by the Vulkan `scalarBlockLayout`
-// feature (see vk_backend). 2D visuals use the unit quad mesh
-// (z = 0, normal = +Z); 3D meshes use full xyz positions + normals.
-struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; };
+// Standard vertex layout used by every visual (2D and 3D). 48-byte
+// tight C-style packing (vec3 pos + vec3 normal + vec2 uv + vec4 tangent)
+// via scalar layout — the default std430 rule would pad the vec3s to 16
+// bytes. Enabled by the Vulkan `scalarBlockLayout` feature (see vk_backend).
+// 2D visuals use the unit quad mesh (z = 0, normal = +Z); 3D meshes use
+// full xyz. tangent = glTF TANGENT (xyz world-space dir + w handedness);
+// synthesized for procedural meshes that carry none.
+struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; vec4 tangent; };
 layout(buffer_reference, scalar) readonly buffer VelkVbo3D { VelkVertex3D data[]; };
 
 // Optional TEXCOORD_1 stream: one vec2 per vertex, in a buffer

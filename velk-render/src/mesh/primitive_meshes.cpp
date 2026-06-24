@@ -19,13 +19,15 @@ namespace {
 //   offset  0..12  position
 //   offset 12..24  normal
 //   offset 24..32  uv
-// Stride = 32 bytes.
-constexpr uint32_t kVertex3DStride = 32;
+//   offset 32..48  tangent (xyz dir + w handedness)
+// Stride = 48 bytes.
+constexpr uint32_t kVertex3DStride = 48;
 
 const VertexAttribute kVertex3DAttributes[] = {
     { VertexAttributeSemantic::Position,  VertexAttributeFormat::Float3, 0 },
     { VertexAttributeSemantic::Normal,    VertexAttributeFormat::Float3, 12 },
     { VertexAttributeSemantic::TexCoord0, VertexAttributeFormat::Float2, 24 },
+    { VertexAttributeSemantic::Tangent,   VertexAttributeFormat::Float4, 32 },
 };
 
 struct Vertex3D
@@ -33,6 +35,7 @@ struct Vertex3D
     float position[3];
     float normal[3];
     float uv[2];
+    float tangent[4];
 };
 static_assert(sizeof(Vertex3D) == kVertex3DStride,
               "Vertex3D must be tightly packed to match GLSL scalar layout");
@@ -62,6 +65,12 @@ void append_face(::velk::vector<Vertex3D>& verts,
             }
             vert.uv[0] = u;
             vert.uv[1] = v;
+            // Tangent runs along the face U axis (matches uv.x); the faces use
+            // unit-length axes, so no normalization needed. Handedness +1.
+            vert.tangent[0] = u_axis[0];
+            vert.tangent[1] = u_axis[1];
+            vert.tangent[2] = u_axis[2];
+            vert.tangent[3] = 1.f;
             verts.push_back(vert);
         }
     }
@@ -172,6 +181,12 @@ MeshBuilder::CachedGeometry MeshBuilder::make_sphere_geometry(uint32_t subdivisi
             vert.position[2] = kCenter + kRadius * vert.normal[2];
             vert.uv[0] = vx;
             vert.uv[1] = vy;
+            // Tangent = d(position)/d(theta), normalized (sin_phi factors out;
+            // degenerate at the poles where it falls back to +X). Handedness +1.
+            vert.tangent[0] = -sin_theta;
+            vert.tangent[1] = 0.f;
+            vert.tangent[2] = cos_theta;
+            vert.tangent[3] = 1.f;
             verts.push_back(vert);
         }
     }

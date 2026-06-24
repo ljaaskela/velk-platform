@@ -132,28 +132,30 @@ IMesh::Ptr MeshBuilder::get_unit_quad()
     // — the unit quad in the XY plane at z = 0, facing +Z. Every 2D
     // visual (rect, text, image, texture, env) and any mesh-style
     // visual share this same vertex layout (VelkVertex3D: vec3 pos +
-    // vec3 normal + vec2 uv, 32 B scalar). No IBO; drawn with
-    // vkCmdDraw(vertex_count=4).
-    struct Vertex { float pos[3]; float normal[3]; float uv[2]; };
+    // vec3 normal + vec2 uv + vec4 tangent, 48 B scalar). No IBO; drawn
+    // with vkCmdDraw(vertex_count=4). Tangent = +X (uv.x runs along +X
+    // for this +Z-facing quad), handedness +1.
+    struct Vertex { float pos[3]; float normal[3]; float uv[2]; float tangent[4]; };
     static const Vertex verts[] = {
-        { {0.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f} },
-        { {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 0.f} },
-        { {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 1.f} },
-        { {1.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 1.f} },
+        { {0.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 0.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 1.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {1.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f, 0.f, 1.f} },
     };
-    static_assert(sizeof(Vertex) == 32, "Vertex must match scalar-layout VelkVertex3D");
+    static_assert(sizeof(Vertex) == 48, "Vertex must match scalar-layout VelkVertex3D");
 
     static const VertexAttribute attrs[] = {
         { VertexAttributeSemantic::Position,  VertexAttributeFormat::Float3, 0 },
         { VertexAttributeSemantic::Normal,    VertexAttributeFormat::Float3, 12 },
         { VertexAttributeSemantic::TexCoord0, VertexAttributeFormat::Float2, 24 },
+        { VertexAttributeSemantic::Tangent,   VertexAttributeFormat::Float4, 32 },
     };
 
     aabb bounds{};
     bounds.position = { 0.f, 0.f, 0.f };
     bounds.extent = { 1.f, 1.f, 0.f };
 
-    unit_quad_ = build({ attrs, 3 },
+    unit_quad_ = build({ attrs, 4 },
                        /*vertex_stride*/ sizeof(Vertex),
                        verts, /*vertex_count*/ 4,
                        /*indices*/ nullptr, /*index_count*/ 0,

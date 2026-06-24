@@ -48,6 +48,10 @@ public:
     /// renderer (subsequent changes won't replace the descriptor).
     void set_sampler_desc(const SamplerDesc& desc) override { sampler_desc_ = desc; }
 
+    /// Overrides the GPU pixel format / color space before upload. Used by
+    /// loaders to mark non-color data (normal / MR / occlusion) maps linear.
+    void set_format(PixelFormat format) override { format_ = format; }
+
     /// IImage interface entry: copy pixels and call init().
     void init_from_pixels(string_view uri, int width, int height, PixelFormat format,
                           const uint8_t* pixels, size_t pixel_size) override;

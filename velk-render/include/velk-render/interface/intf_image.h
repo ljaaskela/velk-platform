@@ -55,6 +55,19 @@ public:
     virtual void set_sampler_desc(const SamplerDesc& desc) = 0;
 
     /**
+     * @brief Overrides the pixel format (color space) used when this image is
+     *        uploaded.
+     *
+     * Loaders that know an image's role call this between decode and first
+     * observation by the renderer — e.g. the glTF importer retagging normal /
+     * metallic-roughness / occlusion maps as linear (`RGBA8`) instead of the
+     * sRGB default, which glTF requires for non-color data. The pixel bytes are
+     * unchanged; only the GPU's sample-time color-space handling differs. No
+     * effect once the texture has been uploaded.
+     */
+    virtual void set_format(PixelFormat format) = 0;
+
+    /**
      * @brief Initializes the image directly from decoded RGBA pixel data,
      *        bypassing any bytes decoder.
      *

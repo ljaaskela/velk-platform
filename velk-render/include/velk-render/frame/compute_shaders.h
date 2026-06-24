@@ -1322,6 +1322,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
         ctx.ray_dir = ray.dir;
         ctx.normal = hit.normal;
         ctx.hit_pos = ray.origin + hit.t * ray.dir;
+        ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
         BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
 
         float a = clamp(bs.emission.a, 0.0, 1.0);
@@ -1415,6 +1416,7 @@ void main()
             ctx.ray_dir = primary.dir;
             ctx.normal = hit.normal;
             ctx.hit_pos = primary.origin + hit.t * primary.dir;
+            ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
             BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
 
             vec3 shape_rgb = bs.emission.rgb;

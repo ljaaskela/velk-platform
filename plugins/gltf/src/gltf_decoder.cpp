@@ -34,15 +34,16 @@ namespace velk::ui::impl {
 
 namespace {
 
-constexpr uint32_t kVertexStride = 32;  // vec3 pos + vec3 normal + vec2 uv = 32 bytes (matches VelkVertex3D).
+constexpr uint32_t kVertexStride = 48;  // vec3 pos + vec3 normal + vec2 uv + vec4 tangent = 48 bytes (matches VelkVertex3D).
 
 struct InterleavedVertex
 {
     float pos[3];
     float nrm[3];
     float uv[2];
+    float tangent[4];  // xyz dir + w handedness
 };
-static_assert(sizeof(InterleavedVertex) == kVertexStride, "InterleavedVertex must be 32 bytes");
+static_assert(sizeof(InterleavedVertex) == kVertexStride, "InterleavedVertex must be 48 bytes");
 
 bool extension_is_safelisted(const char* name)
 {
@@ -426,6 +427,36 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         }
     }
 
+    // glTF alphaMode / alphaCutoff -> pipeline alpha handling. Mask drives a
+    // fragment discard at the cutoff (foliage cut-outs); Blend routes the
+    // material to the transparent pass. doubleSided drops back-face culling
+    // (common for foliage and glass). front_face is left at the engine default
+    // (see design notes on winding) and is irrelevant when double-sided.
+    const bool is_blend = (m.alpha_mode == cgltf_alpha_mode_blend);
+    // KHR_materials_transmission: approximate as plain alpha blending (no
+    // refraction) — the surface lets `transmission_factor` of the background
+    // through, so glass (factor ~0.9) reads as mostly see-through. This is what
+    // makes the bistro windows transparent; they author OPAQUE alphaMode and
+    // carry transmission, so without this they'd shade as solid.
+    const bool is_transmissive =
+        (m.has_transmission && m.transmission.transmission_factor > 0.f);
+    mat.options().set_alpha_mode(
+        (is_blend || is_transmissive) ? AlphaMode::Blend
+        : m.alpha_mode == cgltf_alpha_mode_mask ? AlphaMode::Mask
+                                                : AlphaMode::Opaque);
+    mat.options().set_alpha_cutoff(m.alpha_cutoff);
+    mat.options().set_double_sided(m.double_sided);
+    // Blended/transmissive surfaces draw in the transparent pass and must not
+    // write depth (so overlapping glass doesn't self-occlude).
+    if (is_blend || is_transmissive) mat.options().set_depth_write(false);
+    if (is_transmissive) {
+        // Fold transmission into the base-color alpha that drives the blend:
+        // opacity = (1 - transmission) * authored alpha.
+        color bc = mat.get_base_color();
+        bc.a *= (1.f - m.transmission.transmission_factor);
+        mat.set_base_color(bc);
+    }
+
     return static_cast<IMaterial::Ptr>(mat);
 }
 
@@ -509,12 +540,14 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
         const cgltf_accessor* nrm = nullptr;
         const cgltf_accessor* uv0 = nullptr;
         const cgltf_accessor* uv1 = nullptr;
+        const cgltf_accessor* tan = nullptr;
         for (cgltf_size ai = 0; ai < p.attributes_count; ++ai) {
             const auto& a = p.attributes[ai];
             if (a.type == cgltf_attribute_type_position) pos = a.data;
             else if (a.type == cgltf_attribute_type_normal) nrm = a.data;
             else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) uv0 = a.data;
             else if (a.type == cgltf_attribute_type_texcoord && a.index == 1) uv1 = a.data;
+            else if (a.type == cgltf_attribute_type_tangent) tan = a.data;
         }
         if (!pos || !p.indices) continue;
 
@@ -533,6 +566,10 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
         // UV1 (default to 0)
         vector<float> uvs1;
         if (uv1 && !read_attribute_to_floats(uv1, uvs1, 2)) continue;
+        // TANGENT (vec4: xyz + handedness). Default to a +X tangent when the
+        // primitive carries none (no normal-map detail, just a valid basis).
+        vector<float> tangents;
+        if (tan && !read_attribute_to_floats(tan, tangents, 4)) continue;
 
         // glTF is right-handed Y-up; velk world is Y-down. Negate Y on
         // positions and normals so the asset stands the right way up
@@ -555,6 +592,17 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
                 v.uv[1] = uvs[k * 2 + 1];
             } else {
                 v.uv[0] = 0; v.uv[1] = 0;
+            }
+            if (tan) {
+                // Same Y-up -> Y-down reflection as pos/normal on the tangent
+                // direction; the reflection flips chirality, so the handedness
+                // (w) is negated too (so cross(N,T)*w stays the right bitangent).
+                v.tangent[0] =  tangents[k * 4 + 0];
+                v.tangent[1] = -tangents[k * 4 + 1];
+                v.tangent[2] =  tangents[k * 4 + 2];
+                v.tangent[3] = -tangents[k * 4 + 3];
+            } else {
+                v.tangent[0] = 1; v.tangent[1] = 0; v.tangent[2] = 0; v.tangent[3] = 1;
             }
             if (any_uv1) {
                 if (uv1) {
@@ -643,6 +691,7 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
         {VertexAttributeSemantic::Position,  VertexAttributeFormat::Float3, 0},
         {VertexAttributeSemantic::Normal,    VertexAttributeFormat::Float3, 12},
         {VertexAttributeSemantic::TexCoord0, VertexAttributeFormat::Float2, 24},
+        {VertexAttributeSemantic::Tangent,   VertexAttributeFormat::Float4, 32},
     };
 
     vector<IMeshPrimitive::Ptr> prims;
@@ -652,7 +701,7 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
             buffer,
             r.v_offset * kVertexStride, r.v_count,
             r.i_offset * static_cast<uint32_t>(sizeof(uint32_t)), r.i_count,
-            {kAttrs, 3},
+            {kAttrs, 4},
             kVertexStride,
             MeshTopology::TriangleList,
             r.bounds,
@@ -797,6 +846,31 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
         if (auto* img = interface_cast<IImage>(images[img_idx].get())) {
             img->set_sampler_desc(sampler_desc_from(tex.sampler));
         }
+    }
+
+    // Color space by role. Images decode sRGB by default (correct for
+    // base-color / emissive / specular-color). glTF requires non-color data —
+    // normal, metallic-roughness, occlusion, specular weight — in LINEAR space,
+    // so retag those by the material slot that references them. (Shared-image
+    // caveat: an image used in two roles with different color spaces gets the
+    // last writer's format; rare in practice, same as the sampler model above.)
+    auto mark_linear = [&](const cgltf_texture_view& tv) {
+        if (!tv.texture || !tv.texture->image) return;
+        size_t idx = static_cast<size_t>(tv.texture->image - data->images);
+        if (idx < images.size() && images[idx]) {
+            if (auto* img = interface_cast<IImage>(images[idx].get())) {
+                img->set_format(PixelFormat::RGBA8);
+            }
+        }
+    };
+    for (cgltf_size i = 0; i < data->materials_count; ++i) {
+        const cgltf_material& m = data->materials[i];
+        if (m.normal_texture.texture)    mark_linear(m.normal_texture);
+        if (m.occlusion_texture.texture) mark_linear(m.occlusion_texture);
+        if (m.has_pbr_metallic_roughness)
+            mark_linear(m.pbr_metallic_roughness.metallic_roughness_texture);
+        if (m.has_specular)
+            mark_linear(m.specular.specular_texture); // A = specular weight (linear)
     }
 
     // Build materials.

@@ -82,6 +82,7 @@ struct EvalContext {
     vec3 ray_dir;          // incoming ray / view direction (0 if unavailable)
     vec3 normal;           // surface normal at hit (world space)
     vec3 hit_pos;          // world-space hit point (or frag world position)
+    vec4 tangent;          // world-space surface tangent (xyz) + handedness (w) for normal mapping; xyz=0 means no tangent basis (e.g. the RT path)
 };
 
 // Canonical material output. Produced by velk_eval_<name> once per

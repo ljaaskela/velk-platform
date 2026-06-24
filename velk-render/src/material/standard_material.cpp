@@ -161,7 +161,22 @@ MaterialEval velk_eval_standard(EvalContext ctx)
 
     MaterialEval e = velk_default_material_eval();
     e.color = base;
-    e.normal = ctx.normal;
+
+    // Tangent-space normal mapping. Requires a normal map and a valid tangent
+    // basis: raster fragment paths supply ctx.tangent (xyz dir + w handedness)
+    // from the interpolated vertex tangent; the RT path leaves it zero, so it
+    // falls through to the geometric normal.
+    vec3 shading_normal = ctx.normal;
+    if (d.normal.texture_id != 0u && dot(ctx.tangent.xyz, ctx.tangent.xyz) > 0.0) {
+        vec3 Ngeo = normalize(ctx.normal);
+        vec3 T = normalize(ctx.tangent.xyz - Ngeo * dot(Ngeo, ctx.tangent.xyz));
+        vec3 Bt = cross(Ngeo, T) * ctx.tangent.w;
+        vec3 tn = velk_texture(d.normal.texture_id,
+                               VELK_STD_UV(ctx, d.normal.tex_coord)).xyz * 2.0 - 1.0;
+        tn.xy *= d.normal.scale;
+        shading_normal = normalize(mat3(T, Bt, Ngeo) * tn);
+    }
+    e.normal = shading_normal;
     e.metallic = metallic;
     e.roughness = roughness;
     e.emissive = emissive;

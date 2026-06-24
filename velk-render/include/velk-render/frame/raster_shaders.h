@@ -32,6 +32,7 @@ layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 layout(location = 5) flat in uint v_shape_param;
 layout(location = 6) in vec2 v_uv1;
+layout(location = 7) in vec4 v_world_tangent;
 
 layout(location = 0) out vec4 frag_color;
 
@@ -58,6 +59,7 @@ layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 layout(location = 5) flat in uint v_shape_param;
 layout(location = 6) in vec2 v_uv1;
+layout(location = 7) in vec4 v_world_tangent;
 
 // G-buffer attachment locations. Must match deferred_gbuffer.h's
 // GBufferAttachment enum; coupled to the deferred lighting compute.
@@ -110,6 +112,7 @@ layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 layout(location = 5) flat in uint v_shape_param;
 layout(location = 6) in vec2 v_uv1;
+layout(location = 7) in vec4 v_world_tangent;
 
 layout(location = 0) out vec4 frag_color;
 
@@ -126,6 +129,7 @@ void main()
     ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
+    ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;
@@ -154,6 +158,7 @@ layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 layout(location = 5) flat in uint v_shape_param;
 layout(location = 6) in vec2 v_uv1;
+layout(location = 7) in vec4 v_world_tangent;
 
 layout(location = 0) out vec4 frag_color;
 
@@ -170,6 +175,7 @@ void main()
     ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
+    ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;
@@ -197,6 +203,7 @@ layout(location = 3) in vec3 v_world_pos;
 layout(location = 4) in vec3 v_world_normal;
 layout(location = 5) flat in uint v_shape_param;
 layout(location = 6) in vec2 v_uv1;
+layout(location = 7) in vec4 v_world_tangent;
 
 layout(location = 0) out vec4 g_albedo;
 layout(location = 1) out vec4 g_normal;
@@ -222,6 +229,7 @@ void main()
     ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
     ctx.normal      = v_world_normal;
     ctx.hit_pos     = v_world_pos;
+    ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;

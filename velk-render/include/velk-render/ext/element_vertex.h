@@ -42,6 +42,7 @@ layout(location = 3) out vec3 v_world_pos;
 layout(location = 4) out vec3 v_world_normal;
 layout(location = 5) flat out uint v_shape_param;
 layout(location = 6) out vec2 v_uv1;
+layout(location = 7) out vec4 v_world_tangent;
 
 void main()
 {
@@ -60,6 +61,8 @@ void main()
     v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
     v_shape_param  = inst.params.x;
     v_uv1          = velk_uv1(root);
+    // Tangent dir to world space (upper 3x3); handedness (w) passes through.
+    v_world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
 }
 )";
 
