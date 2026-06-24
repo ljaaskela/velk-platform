@@ -488,6 +488,16 @@ vec3 fresnel_schlick(float cos_theta, vec3 F0)
     return F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// Roughness-aware Schlick for environment / IBL specular: caps the grazing
+// reflectance (F90) at (1 - roughness), so rough surfaces don't reflect the
+// full environment at glancing angles. Without this, rough geometry edges
+// (e.g. painted facades) get an over-bright Fresnel rim of the env.
+vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float roughness)
+{
+    vec3 F90 = max(vec3(1.0 - roughness), F0);
+    return F0 + (F90 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 // ACES Filmic tone map (Krzysztof Narkowicz fit). Maps 0..inf HDR
 // radiance to 0..1 SDR while preserving mid-tone contrast. Stand-in
 // until the renderer grows a dedicated HDR target + composite pass with
@@ -604,7 +614,7 @@ void main()
         float diffuse_lod = env_max_lod;
         vec3 env_diffuse  = env_miss_color_lod(N, diffuse_lod);
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), spec_lod);
-        vec3 F_env = fresnel_schlick(NdotV, F0);
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
         vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
 
         // RT ambient occlusion: one short any-hit ray along N. Without

@@ -41,6 +41,9 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<GpuResourceManager>(velk, alloc);
     rv &= register_type<FrameDataManager>(velk, alloc);
     rv &= register_type<FrameSnippetRegistry>(velk, alloc);
+    rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk, alloc);
+
+    // Hive types
     rv &= register_type<Shader>(velk);
     rv &= register_type<WindowSurface>(velk);
     rv &= register_type<RenderTexture>(velk);
@@ -61,7 +64,6 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::MeshPrimitive>(velk);
     rv &= register_type<impl::MeshBuffer>(velk);
     rv &= register_type<impl::MeshBuilder>(velk);
-    rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk);
 
     // Built-in render paths (hive-allocated). RtPath ships in the
     // velk_rt sub-plugin so trivial UI apps don't pay for the RT
