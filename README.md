@@ -25,6 +25,9 @@ Element / Scene primitives, scene graph, transforms, 3D visuals, and the rendere
 * Render paths (Forward / Deferred / RayTrace) consuming the scene model and submitting draw calls via velk-render.
 * Render-feeding traits (Camera, Light) and 3D visuals (Cube, Sphere, Mesh) live here alongside the transform traits (Trs, Matrix, LookAt, Orbit).
 
+![rendering sample](docs/render/bistro.jpg)
+glTF-converted Amazon Lumberyard Bistro scene rendering with velk-scene: 20 warm local lights with soft contact shadows. The panels on the right are G-buffer debug views.
+
 ### UI framework ([velk-ui](velk-ui/))
 
 Declarative UI policy on top of velk-scene:
