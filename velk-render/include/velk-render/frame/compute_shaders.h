@@ -777,19 +777,6 @@ void main()
     vec3 cur_irr   = velk_texture(pc.irr_id, uv).rgb;
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
 
-    // 3x3 mean of the current irradiance: a cheap, far-less-noisy reference for
-    // the change test below than the raw single sample. Used ONLY to decide how
-    // much to trust history (not for the accumulated value, which stays the
-    // unbiased single sample).
-    vec3 cur_mean = vec3(0.0);
-    {
-        vec2 texel = 1.0 / vec2(float(pc.width), float(pc.height));
-        for (int j = -1; j <= 1; ++j)
-            for (int i = -1; i <= 1; ++i)
-                cur_mean += velk_texture(pc.irr_id, uv + vec2(float(i), float(j)) * texel).rgb;
-        cur_mean *= (1.0 / 9.0);
-    }
-
     // Temporal reprojection: where was this world point last frame?
     vec3 irr_acc = cur_irr;
     float count = 1.0;
@@ -803,22 +790,10 @@ void main()
                 vec4 hi = velk_texture(pc.hist_irr_prev_id, prev_uv);
                 // Same surface? World-space distance, tolerance scaled by depth.
                 if (hp.w > 0.5 && length(hp.xyz - world_pos) < 0.03 * max(prev_clip.w, 1.0)) {
-                    // Adaptive history window: a large relative change in
-                    // irradiance (a moving occluder shadowing / unshadowing this
-                    // point) shrinks the window so the estimate adapts in a few
-                    // frames instead of ~64 -> kills shadow trails from moving
-                    // objects. Stable points keep the long, smooth window.
-                    const float L = 0.2126, M = 0.7152, S = 0.0722;
-                    float hl = dot(hi.rgb, vec3(L, M, S));
-                    float cl = dot(cur_mean, vec3(L, M, S));
-                    float change = abs(cl - hl) / (hl + cl + 1e-3);
-                    // Ramp from the full smooth window to a very short one as
-                    // soon as a modest change appears: a moving occluder often
-                    // blocks only part of the light, so a partial irradiance
-                    // drop must still collapse the window. Reaches the floor by
-                    // a ~one-third relative change (e.g. irradiance halving).
-                    float cap = mix(64.0, 2.0, clamp((change - 0.1) / 0.2, 0.0, 1.0));
-                    count = min(hi.a + 1.0, cap);
+                    // Fixed accumulation window. Shorter = shorter dynamic-
+                    // occluder trail, slightly noisier static (uniform - no
+                    // change-detection, so no dark-area instability). Tunable.
+                    count = min(hi.a + 1.0, 24.0);
                     irr_acc = mix(hi.rgb, cur_irr, 1.0 / count);
                 }
             }
