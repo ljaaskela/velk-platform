@@ -203,8 +203,10 @@ VELK_GPU_STRUCT DenoisePushC {
     uint32_t irr_id;
     uint32_t hist_irr_prev_id;
     uint32_t hist_pos_prev_id;
+    uint32_t hist_mom_prev_id;
     uint32_t hist_irr_cur_id;
     uint32_t hist_pos_cur_id;
+    uint32_t hist_mom_cur_id;
     uint32_t width;
     uint32_t height;
     uint32_t reset;
@@ -219,6 +221,7 @@ VELK_GPU_STRUCT SpatialPushC {
     uint32_t normal_id;
     uint32_t worldpos_id;
     uint32_t hist_irr_id;
+    uint32_t hist_mom_id;
     uint32_t output_id;
     uint32_t width;
     uint32_t height;
@@ -653,8 +656,10 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
         for (int i = 0; i < 2; ++i) {
             vs.hist_irr[i] = make();
             vs.hist_pos[i] = make();
+            vs.hist_mom[i] = make();
             vs.hist_irr_tex[i] = graph.resources().find_texture(vs.hist_irr[i].get());
             vs.hist_pos_tex[i] = graph.resources().find_texture(vs.hist_pos[i].get());
+            vs.hist_mom_tex[i] = graph.resources().find_texture(vs.hist_mom[i].get());
         }
         vs.hist_size = want;
         vs.denoise_reset_pending = true; // fresh (garbage) history
@@ -673,8 +678,10 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.irr_id      = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
     pc.hist_irr_prev_id = static_cast<uint32_t>(vs.hist_irr[parity]->get_gpu_handle(GpuResourceKey::Default));
     pc.hist_pos_prev_id = static_cast<uint32_t>(vs.hist_pos[parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_mom_prev_id = static_cast<uint32_t>(vs.hist_mom[parity]->get_gpu_handle(GpuResourceKey::Default));
     pc.hist_irr_cur_id  = static_cast<uint32_t>(vs.hist_irr[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
     pc.hist_pos_cur_id  = static_cast<uint32_t>(vs.hist_pos[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_mom_cur_id  = static_cast<uint32_t>(vs.hist_mom[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
     pc.reset  = vs.denoise_reset_pending ? 1u : 0u;
@@ -686,8 +693,10 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     IRenderTarget::Ptr hist_prev_irr = vs.hist_irr[parity];
     IRenderTarget::Ptr hist_prev_pos = vs.hist_pos[parity];
+    IRenderTarget::Ptr hist_prev_mom = vs.hist_mom[parity];
     IRenderTarget::Ptr hist_cur_irr  = vs.hist_irr[1u - parity];
     IRenderTarget::Ptr hist_cur_pos  = vs.hist_pos[1u - parity];
+    IRenderTarget::Ptr hist_cur_mom  = vs.hist_mom[1u - parity];
 
     emit_cached_view_pass(
         vs.cached_denoise_pass, vs.denoise_dirty, render_view.view_globals_address, graph,
@@ -712,8 +721,10 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_irr));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_pos));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_mom));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_irr));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_pos));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_mom));
             rec.held.push_back(std::move(temporal_pipeline));
         });
 }
@@ -728,9 +739,10 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     if (!vs.deferred_output || !vs.gbuffer) return;
 
     const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
-    // The temporal pass wrote hist_irr[1 - parity] this frame.
+    // The temporal pass wrote hist_irr[1 - parity] / hist_mom[1 - parity] this frame.
     IRenderTarget::Ptr cur_hist = vs.hist_irr[1u - parity];
-    if (!cur_hist) return;
+    IRenderTarget::Ptr cur_mom  = vs.hist_mom[1u - parity];
+    if (!cur_hist || !cur_mom) return;
 
     auto spatial_pipeline = ensure_spatial_pipeline(ctx);
     if (!spatial_pipeline) return;
@@ -760,6 +772,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
     pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
     pc.hist_irr_id = static_cast<uint32_t>(cur_hist->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_mom_id = static_cast<uint32_t>(cur_mom->get_gpu_handle(GpuResourceKey::Default));
     pc.output_id   = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
@@ -792,6 +805,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_hist));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_mom));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

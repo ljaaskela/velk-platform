@@ -106,6 +106,11 @@ public:
         IGpuTexture* hist_irr_tex[2] = {nullptr, nullptr};
         IRenderTarget::Ptr hist_pos[2];
         IGpuTexture* hist_pos_tex[2] = {nullptr, nullptr};
+        /// Accumulated luminance 2nd moment (.r), ping-pong alongside hist_irr.
+        /// variance = moment - mean^2 drives the spatial filter's luminance edge
+        /// stop (SVGF-style).
+        IRenderTarget::Ptr hist_mom[2];
+        IGpuTexture* hist_mom_tex[2] = {nullptr, nullptr};
         uvec2 hist_size{};
         /// Cached temporal-accumulate pass (writes the history). Re-records
         /// every frame (ping-pong ids change); cheap (one dispatch).

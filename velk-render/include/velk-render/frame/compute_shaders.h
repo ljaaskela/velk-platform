@@ -752,8 +752,10 @@ layout(push_constant, scalar) uniform PC {
     uint irr_id;               // current-frame noisy diffuse irradiance (sampled)
     uint hist_irr_prev_id;     // sampled
     uint hist_pos_prev_id;     // sampled
+    uint hist_mom_prev_id;     // sampled (.r = accumulated luminance 2nd moment)
     uint hist_irr_cur_id;      // storage
     uint hist_pos_cur_id;      // storage
+    uint hist_mom_cur_id;      // storage
     uint width;
     uint height;
     uint reset;
@@ -771,15 +773,19 @@ void main()
     if (dot(world_n, world_n) < 1e-6) {
         imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(0.0));
         imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_mom_cur_id)], coord, vec4(0.0));
         return;
     }
 
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     vec3 cur_irr   = velk_texture(pc.irr_id, uv).rgb;
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
+    float cur_lum  = dot(cur_irr, LUMA);
 
     // Temporal reprojection: where was this world point last frame?
     vec3 irr_acc = cur_irr;
     float count = 1.0;
+    float m2_acc = cur_lum * cur_lum; // accumulated 2nd moment of luminance
     if (pc.reset == 0u) {
         vec4 prev_clip = pc.globals.prev_view_projection * vec4(world_pos, 1.0);
         if (prev_clip.w > 1e-6) {
@@ -791,10 +797,13 @@ void main()
                 // Same surface? World-space distance, tolerance scaled by depth.
                 if (hp.w > 0.5 && length(hp.xyz - world_pos) < 0.03 * max(prev_clip.w, 1.0)) {
                     // Fixed accumulation window. Shorter = shorter dynamic-
-                    // occluder trail, slightly noisier static (uniform - no
-                    // change-detection, so no dark-area instability). Tunable.
-                    count = min(hi.a + 1.0, 24.0);
-                    irr_acc = mix(hi.rgb, cur_irr, 1.0 / count);
+                    // occluder trail, slightly noisier static; the spatial pass'
+                    // variance-guided filter cleans the residual. Tunable.
+                    count = min(hi.a + 1.0, 20.0);
+                    float w = 1.0 / count;
+                    irr_acc = mix(hi.rgb, cur_irr, w);
+                    float m2_prev = velk_texture(pc.hist_mom_prev_id, prev_uv).r;
+                    m2_acc = mix(m2_prev, cur_lum * cur_lum, w);
                 }
             }
         }
@@ -802,14 +811,19 @@ void main()
 
     imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(irr_acc, count));
     imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(world_pos, 1.0));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_mom_cur_id)], coord, vec4(m2_acc, 0.0, 0.0, 0.0));
 }
 )";
 
-// Spatial (a-trous-style) filter + composite. Reads the accumulated irradiance
-// history (NOT modifying it - the unfiltered mean stays the temporal history)
-// over a normal + plane-distance weighted neighborhood, with strength driven by
-// the per-pixel sample count: wide blur where unconverged (just disoccluded /
-// few samples), down to the sharp converged value where the count is high. Then
+// Variance-guided spatial (a-trous-style) filter + composite. Reads the
+// accumulated irradiance history (NOT modifying it - the unfiltered mean stays
+// the temporal history) over a normal + plane-distance + LUMINANCE weighted
+// neighborhood. The luminance edge-stop tolerance scales with the per-pixel
+// temporal VARIANCE (variance = 2nd moment - mean^2, both luminance): noisy /
+// just-changed pixels (high variance) blur freely, converged pixels (low
+// variance) keep their detail, and a real shadow edge (large luminance jump)
+// is preserved at any variance. Low sample counts widen the support + loosen
+// the luminance gate (the variance estimate is unreliable there). Then
 // composites the final image (albedo*(1-metallic)*filtered + sharp rest, read
 // back in place from the output) for the surface blit.
 [[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
@@ -827,6 +841,7 @@ layout(push_constant, scalar) uniform PC {
     uint normal_id;
     uint worldpos_id;
     uint hist_irr_id;          // accumulated irradiance + count (sampled, neighborhood)
+    uint hist_mom_id;          // accumulated luminance 2nd moment (.r)
     uint output_id;            // deferred_output: "rest" on read, final on write
     uint width;
     uint height;
@@ -848,6 +863,7 @@ void main()
         return;
     }
 
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     vec3 N         = normalize(world_n);
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
     vec4 albedo    = velk_texture(pc.albedo_id, uv);
@@ -856,10 +872,19 @@ void main()
     vec4 c = velk_texture(pc.hist_irr_id, uv);
     vec3 center_irr = c.rgb;
     float count = c.a;
-    float conf = clamp(count / 16.0, 0.0, 1.0); // 0 = noisy, 1 = converged
+    float center_lum = dot(center_irr, LUMA);
 
-    // Wider taps when unconverged; collapses to the center when converged.
-    int step = int(mix(3.0, 1.0, conf) + 0.5);
+    // Per-pixel temporal variance of luminance -> noise level.
+    float m2 = velk_texture(pc.hist_mom_id, uv).r;
+    float variance = max(m2 - center_lum * center_lum, 0.0);
+    // Luminance edge-stop tolerance: scene-scaled by sigma, with a small
+    // relative floor so converged-flat areas don't divide by ~0. Loosened a lot
+    // while the count is low (variance estimate unreliable -> trust neighbours).
+    float low_count = mix(8.0, 1.0, clamp(count / 8.0, 0.0, 1.0));
+    float phi_l = (4.0 * sqrt(variance) + 0.02 * center_lum + 1e-4) * low_count;
+
+    // Wider taps when unconverged; tightens to a 5x5 once converged.
+    int step = int(mix(3.0, 1.0, clamp(count / 16.0, 0.0, 1.0)) + 0.5);
     float depth = max(length(pc.globals.cam_pos.xyz - world_pos), 1e-3);
 
     vec3 sum = vec3(0.0);
@@ -871,17 +896,18 @@ void main()
             vec2 uv2 = (vec2(c2) + 0.5) / dims;
             vec3 n2 = velk_texture(pc.normal_id, uv2).xyz;
             if (dot(n2, n2) < 1e-6) continue; // sky neighbour
-            vec3 p2 = velk_texture(pc.worldpos_id, uv2).xyz;
+            vec3 p2  = velk_texture(pc.worldpos_id, uv2).xyz;
+            vec3 ir2 = velk_texture(pc.hist_irr_id, uv2).rgb;
             float wn = pow(max(dot(N, normalize(n2)), 0.0), 32.0);
             float wp = exp(-abs(dot(p2 - world_pos, N)) / (0.05 * depth));
+            float wl = exp(-abs(center_lum - dot(ir2, LUMA)) / phi_l); // variance-guided
             float wk = exp(-float(i * i + j * j) * 0.25);
-            float w = wn * wp * wk;
-            sum += velk_texture(pc.hist_irr_id, uv2).rgb * w;
+            float w = wn * wp * wl * wk;
+            sum += ir2 * w;
             wsum += w;
         }
     }
-    vec3 filtered = (wsum > 1e-5) ? (sum / wsum) : center_irr;
-    vec3 irr_out = mix(filtered, center_irr, conf);
+    vec3 irr_out = (wsum > 1e-5) ? (sum / wsum) : center_irr;
 
     vec3 final = albedo.rgb * (1.0 - metallic) * irr_out + rest.rgb;
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
