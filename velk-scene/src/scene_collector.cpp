@@ -607,6 +607,13 @@ void enumerate_scene_lights(const SceneState& scene_state, LightCb cb, void* use
                 g.params[0] = ls->range;
                 g.params[1] = std::cos(ls->cone_inner_deg * kDegToRad);
                 g.params[2] = std::cos(ls->cone_outer_deg * kDegToRad);
+                // params.w = light size for soft-shadow penumbra. Directional
+                // size is authored as an angular diameter (deg) and stored as
+                // the angular radius (rad); point/spot size is a world radius.
+                // 0 stays 0 -> point source -> hard shadow (today's behavior).
+                g.params[3] = (ls->type == LightType::Directional)
+                                  ? ls->size * 0.5f * kDegToRad
+                                  : ls->size;
                 cb(user, site);
             }
         });

@@ -240,6 +240,15 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];
+    // Previous frame's VP for temporal reprojection. On the first frame use
+    // the current VP (reprojection is a no-op identity that frame; the sun
+    // pass also resets its history then).
+    const mat4& prev_vp = cache.has_prev_view_projection ? cache.prev_view_projection
+                                                         : rv.view_projection;
+    std::memcpy(globals.prev_view_projection, prev_vp.m, sizeof(prev_vp.m));
+    cache.prev_view_projection = rv.view_projection;
+    cache.has_prev_view_projection = true;
+
     if (!cache.view_globals_buffer) {
         GpuBufferDesc desc{};
         desc.size = sizeof(FrameGlobals);

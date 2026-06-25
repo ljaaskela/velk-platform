@@ -37,9 +37,10 @@ struct FrameGlobals
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint64_t bvh_nodes_addr;               ///< GPU pointer to the BvhNode array.
     uint64_t bvh_shapes_addr;              ///< GPU pointer to the scene's RtShape array.
+    float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
 };
 
-static_assert(sizeof(FrameGlobals) == 192, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
 
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
@@ -136,7 +137,7 @@ VELK_GPU_STRUCT GpuLight
     float    position[4];         ///< xyz = world position (point / spot)
     float    direction[4];        ///< xyz = world forward (dir / spot)
     float    color_intensity[4];  ///< rgb = colour, a = intensity multiplier
-    float    params[4];           ///< x = range, y = cos(inner), z = cos(outer)
+    float    params[4];           ///< x = range, y = cos(inner), z = cos(outer), w = light size (dir: angular radius rad; point/spot: world radius)
 };
 static_assert(sizeof(GpuLight) == 80, "GpuLight layout mismatch");
 

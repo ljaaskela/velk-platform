@@ -41,7 +41,11 @@ public:
         /// Inner cone half-angle in degrees (full intensity inside). Spot only.
         (PROP, float, cone_inner_deg, 20.f),
         /// Outer cone half-angle in degrees (falloff to zero). Spot only.
-        (PROP, float, cone_outer_deg, 30.f)
+        (PROP, float, cone_outer_deg, 30.f),
+        /// Apparent source size driving soft-shadow penumbra width.
+        /// Directional: angular diameter in degrees (the sun is ~0.53).
+        /// Point / spot: world-space radius. 0 = a point source (hard shadow).
+        (PROP, float, size, 0.f)
     )
 };
 

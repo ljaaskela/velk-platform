@@ -27,7 +27,7 @@ namespace velk {
 //     light (directional / point / spot) with distance + cone falloff.
 //   - Shadow modulation lands in a later slice (B.3.d) alongside the
 //     shared `velk_eval_shadow` composer.
-[[maybe_unused]] constexpr string_view default_deferred_compute_src = R"(
+[[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
@@ -44,7 +44,7 @@ struct Light {
     vec4  position;        // xyz world position (point / spot)
     vec4  direction;       // xyz world forward (dir / spot)
     vec4  color_intensity; // rgb colour, a intensity
-    vec4  params;          // x range, y cos(inner), z cos(outer), w _
+    vec4  params;          // x range, y cos(inner), z cos(outer), w light size (dir: angular radius rad; point/spot: world radius)
 };
 
 layout(buffer_reference, std430) readonly buffer LightList { Light data[]; };
@@ -80,7 +80,8 @@ layout(push_constant, scalar) uniform PC {
     uint _pad0;                // 68  aligns the BDA pointers below to 8
     LightList lights;          // 72
     _EnvParamsBuf env_params;  // 80
-    uvec2 _pad1;               // 88  pads block to 96 (CPU struct is alignas(16))
+    uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
+    uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -511,7 +512,21 @@ vec3 velk_tonemap_aces(vec3 x)
     const float e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
+)";
 
+// Deferred lighting main: full PBR + env IBL + stochastic single-light shadow.
+// Composed on top of `deferred_compute_prelude_src` (plus the intersect_shape /
+// velk_eval_shadow switches the composer appends).
+//
+// Outputs TWO images for the temporal denoiser downstream:
+//   irr_image_id   = demodulated diffuse IRRADIANCE (no albedo) - view-
+//                    independent, noisy (one stochastic light + jittered
+//                    shadow), reprojected + accumulated by the denoise pass.
+//   output_image_id= the SHARP "rest": analytic specular + env specular +
+//                    emissive (+ unlit albedo / sky). The denoise pass reads
+//                    this back, adds albedo*(1-metallic)*denoised_irradiance
+//                    in place, and produces the final HDR image.
+[[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -535,9 +550,11 @@ void main()
         vec3 far_w  = far_h.xyz  / far_h.w;
         vec3 rd = normalize(far_w - near_w);
         vec3 sky = env_miss_color(rd);
-        // Sky is HDR; output linearly. Post-process tonemap (if attached)
-        // brings it to LDR display range.
+        // Sky is sharp (no diffuse irradiance): write it to the "rest" image
+        // and zero irradiance. The denoise/composite pass passes it through
+        // (albedo == 0 for sky pixels, so it adds nothing).
         imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
         return;
     }
 
@@ -551,10 +568,13 @@ void main()
     float metallic  = clamp(mat.r, 0.0, 1.0);
     float roughness = clamp(mat.g, 0.04, 1.0);
 
-    vec3 rgb;
+    // irr = demodulated diffuse irradiance (no albedo; denoised downstream);
+    // rest = the sharp, view-dependent remainder (specular / env spec / emissive).
+    vec3 irr  = vec3(0.0);
+    vec3 rest = vec3(0.0);
     if (lighting_mode == 0u) {
-        // Unlit: emit albedo as-is.
-        rgb = albedo.rgb;
+        // Unlit: emit albedo as-is (no diffuse irradiance).
+        rest = albedo.rgb;
     } else {
         vec3 N = normalize(world_n);
         vec3 V = normalize(pc.cam_pos.xyz - world_pos);
@@ -563,10 +583,24 @@ void main()
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
         float a = roughness * roughness;
 
-        // Direct lighting: sum Lambertian diffuse + analytic GGX specular
-        // per light. Fresnel evaluated at the half-vector.
-        vec3 direct_diffuse  = vec3(0.0);
+        // Direct lighting. The shadowed diffuse term is estimated by
+        // resampled importance sampling (RIS): in one pass over the lights we
+        // reservoir-pick a SINGLE light (weighted by its unshadowed diffuse
+        // luminance) and trace one jittered shadow ray for it, dividing by the
+        // pick pdf for an unbiased estimate of the sum over all lights. This
+        // keeps the shadow cost at one ray/pixel regardless of light count
+        // (scales to many / dynamic lights); the noise it introduces is what
+        // the temporal + spatial denoiser resolves. Specular is summed
+        // analytically over ALL lights but UNSHADOWED (no rays, stays sharp;
+        // a v1 approximation — specular shadowing is a later refinement).
         vec3 direct_specular = vec3(0.0);
+        uint  res_light = 0xffffffffu;
+        float res_w = 0.0;        // chosen light's reservoir weight
+        float res_NdotL = 0.0;
+        vec3  res_radiance = vec3(0.0);
+        float total_w = 0.0;
+        uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
+                     + pc.globals.present_counter * 26699u) | 1u;
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = pc.lights.data[i];
             vec3 L;
@@ -587,20 +621,39 @@ void main()
             }
             float NdotL = max(dot(N, L), 0.0);
             if (NdotL <= 0.0 || atten <= 0.0) continue;
-            float shadow = velk_eval_shadow(light.flags.y, i, world_pos, N);
-            if (shadow <= 0.0) continue;
-            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
+            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
 
-            direct_diffuse += albedo.rgb * NdotL * radiance;
-
+            // Analytic specular (unshadowed), summed over all lights.
             vec3 H = normalize(L + V);
             float NdotH = max(dot(N, H), 0.0);
             float VdotH = max(dot(V, H), 0.0);
             float D = ggx_d(NdotH, a);
             float G = smith_g(NdotV, NdotL, roughness);
             vec3  F = fresnel_schlick(VdotH, F0);
-            vec3 spec = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6);
-            direct_specular += spec * NdotL * radiance;
+            direct_specular += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance;
+
+            // Reservoir step: weight = luminance of this light's unshadowed
+            // diffuse contribution.
+            vec3 dcontrib = albedo.rgb * NdotL * radiance;
+            float w = dot(dcontrib, vec3(0.2126, 0.7152, 0.0722));
+            total_w += w;
+            seed = seed * 1664525u + 1013904223u;
+            if (w > 0.0 && float(seed) * (1.0 / 4294967296.0) < w / total_w) {
+                res_light = i;
+                res_w = w;
+                res_NdotL = NdotL;
+                res_radiance = radiance;
+            }
+        }
+
+        // Shadowed diffuse IRRADIANCE estimate from the single chosen light
+        // (one ray), demodulated (no albedo - reapplied at composite).
+        vec3 direct_diffuse = vec3(0.0);
+        if (res_light != 0xffffffffu && res_w > 0.0) {
+            Light chosen = pc.lights.data[res_light];
+            float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
+            float pdf = res_w / total_w;
+            direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
         }
 
         // Env lighting: single-sample approximation. Diffuse reads
@@ -657,20 +710,206 @@ void main()
         // makes a metallic sphere on a floor go black on its lower
         // hemisphere because its outward-pointing normals all point
         // toward the nearby floor.
-        rgb = direct_diffuse * (1.0 - metallic)
-            + direct_specular
-            + kD_env * albedo.rgb * env_diffuse * ao
-            + F_env * env_specular;
+        // Diffuse IRRADIANCE (demodulated, view-independent) for the denoiser:
+        // the stochastic direct term + env diffuse * AO. albedo and the
+        // (1-metallic) factor are reapplied at composite. (Env diffuse's
+        // (1-F_env) energy factor is dropped so it shares the direct term's
+        // albedo*(1-metallic) demodulation; ~minor.)
+        irr = direct_diffuse + env_diffuse * ao;
+        // Sharp, view-dependent terms (NOT denoised).
+        rest = direct_specular + F_env * env_specular;
     }
 
-    // Emissive is unlit additive radiance; fold it in for every shading
-    // mode (the default-fill / unlit path writes zero emissive).
-    rgb += emissive;
+    // Emissive is additive radiance; part of the sharp output.
+    rest += emissive;
 
-    // Output raw HDR linear radiance. Tonemapping is the post-process
-    // chain's responsibility; cameras that need an LDR display must
-    // attach a tonemap effect (or any other HDR -> LDR mapper).
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rgb, albedo.a));
+    // Two outputs (raw HDR linear): "rest" (sharp) on output_image_id, diffuse
+    // irradiance on irr_image_id. The denoise/composite pass reprojects +
+    // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, 1.0));
+}
+)";
+
+// Diffuse-irradiance TEMPORAL accumulation. Reprojects the noisy stochastic
+// diffuse irradiance by world position (irradiance is view-independent, so the
+// reprojection is exact under camera motion) and folds it into a running mean.
+// Writes only the ping-pong history (irradiance+count, world-position+validity);
+// the spatial+composite pass below filters this history and produces the final
+// image. `reset` discards history on the first frame / resize.
+[[maybe_unused]] constexpr string_view deferred_denoise_compute_src = R"(
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+layout(push_constant, scalar) uniform PC {
+    GlobalData globals;        // prev_view_projection (+ view_projection)
+    uint normal_id;
+    uint worldpos_id;
+    uint irr_id;               // current-frame noisy diffuse irradiance (sampled)
+    uint hist_irr_prev_id;     // sampled
+    uint hist_pos_prev_id;     // sampled
+    uint hist_irr_cur_id;      // storage
+    uint hist_pos_cur_id;      // storage
+    uint width;
+    uint height;
+    uint reset;
+} pc;
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
+
+    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
+
+    // Sky / no coverage: store empty history (validity 0).
+    if (dot(world_n, world_n) < 1e-6) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(0.0));
+        return;
+    }
+
+    vec3 cur_irr   = velk_texture(pc.irr_id, uv).rgb;
+    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
+
+    // 3x3 mean of the current irradiance: a cheap, far-less-noisy reference for
+    // the change test below than the raw single sample. Used ONLY to decide how
+    // much to trust history (not for the accumulated value, which stays the
+    // unbiased single sample).
+    vec3 cur_mean = vec3(0.0);
+    {
+        vec2 texel = 1.0 / vec2(float(pc.width), float(pc.height));
+        for (int j = -1; j <= 1; ++j)
+            for (int i = -1; i <= 1; ++i)
+                cur_mean += velk_texture(pc.irr_id, uv + vec2(float(i), float(j)) * texel).rgb;
+        cur_mean *= (1.0 / 9.0);
+    }
+
+    // Temporal reprojection: where was this world point last frame?
+    vec3 irr_acc = cur_irr;
+    float count = 1.0;
+    if (pc.reset == 0u) {
+        vec4 prev_clip = pc.globals.prev_view_projection * vec4(world_pos, 1.0);
+        if (prev_clip.w > 1e-6) {
+            vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+            if (all(greaterThanEqual(prev_uv, vec2(0.0))) &&
+                all(lessThanEqual(prev_uv, vec2(1.0)))) {
+                vec4 hp = velk_texture(pc.hist_pos_prev_id, prev_uv);
+                vec4 hi = velk_texture(pc.hist_irr_prev_id, prev_uv);
+                // Same surface? World-space distance, tolerance scaled by depth.
+                if (hp.w > 0.5 && length(hp.xyz - world_pos) < 0.03 * max(prev_clip.w, 1.0)) {
+                    // Adaptive history window: a large relative change in
+                    // irradiance (a moving occluder shadowing / unshadowing this
+                    // point) shrinks the window so the estimate adapts in a few
+                    // frames instead of ~64 -> kills shadow trails from moving
+                    // objects. Stable points keep the long, smooth window.
+                    const float L = 0.2126, M = 0.7152, S = 0.0722;
+                    float hl = dot(hi.rgb, vec3(L, M, S));
+                    float cl = dot(cur_mean, vec3(L, M, S));
+                    float change = abs(cl - hl) / (hl + cl + 1e-3);
+                    // Ramp from the full smooth window to a very short one as
+                    // soon as a modest change appears: a moving occluder often
+                    // blocks only part of the light, so a partial irradiance
+                    // drop must still collapse the window. Reaches the floor by
+                    // a ~one-third relative change (e.g. irradiance halving).
+                    float cap = mix(64.0, 2.0, clamp((change - 0.1) / 0.2, 0.0, 1.0));
+                    count = min(hi.a + 1.0, cap);
+                    irr_acc = mix(hi.rgb, cur_irr, 1.0 / count);
+                }
+            }
+        }
+    }
+
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(irr_acc, count));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(world_pos, 1.0));
+}
+)";
+
+// Spatial (a-trous-style) filter + composite. Reads the accumulated irradiance
+// history (NOT modifying it - the unfiltered mean stays the temporal history)
+// over a normal + plane-distance weighted neighborhood, with strength driven by
+// the per-pixel sample count: wide blur where unconverged (just disoccluded /
+// few samples), down to the sharp converged value where the count is high. Then
+// composites the final image (albedo*(1-metallic)*filtered + sharp rest, read
+// back in place from the output) for the surface blit.
+[[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+layout(push_constant, scalar) uniform PC {
+    GlobalData globals;        // cam_pos (for depth-relative edge stops)
+    uint albedo_id;
+    uint material_id;
+    uint normal_id;
+    uint worldpos_id;
+    uint hist_irr_id;          // accumulated irradiance + count (sampled, neighborhood)
+    uint output_id;            // deferred_output: "rest" on read, final on write
+    uint width;
+    uint height;
+} pc;
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    vec2 dims = vec2(float(pc.width), float(pc.height));
+    vec2 uv = (vec2(coord) + 0.5) / dims;
+
+    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
+    vec4 rest    = velk_texture(pc.output_id, uv);
+
+    // Sky / no coverage: pass the sharp value through unchanged.
+    if (dot(world_n, world_n) < 1e-6) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, rest);
+        return;
+    }
+
+    vec3 N         = normalize(world_n);
+    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
+    vec4 albedo    = velk_texture(pc.albedo_id, uv);
+    float metallic = clamp(velk_texture(pc.material_id, uv).r, 0.0, 1.0);
+
+    vec4 c = velk_texture(pc.hist_irr_id, uv);
+    vec3 center_irr = c.rgb;
+    float count = c.a;
+    float conf = clamp(count / 16.0, 0.0, 1.0); // 0 = noisy, 1 = converged
+
+    // Wider taps when unconverged; collapses to the center when converged.
+    int step = int(mix(3.0, 1.0, conf) + 0.5);
+    float depth = max(length(pc.globals.cam_pos.xyz - world_pos), 1e-3);
+
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (int j = -2; j <= 2; ++j) {
+        for (int i = -2; i <= 2; ++i) {
+            ivec2 c2 = coord + ivec2(i, j) * step;
+            if (c2.x < 0 || c2.y < 0 || c2.x >= int(pc.width) || c2.y >= int(pc.height)) continue;
+            vec2 uv2 = (vec2(c2) + 0.5) / dims;
+            vec3 n2 = velk_texture(pc.normal_id, uv2).xyz;
+            if (dot(n2, n2) < 1e-6) continue; // sky neighbour
+            vec3 p2 = velk_texture(pc.worldpos_id, uv2).xyz;
+            float wn = pow(max(dot(N, normalize(n2)), 0.0), 32.0);
+            float wp = exp(-abs(dot(p2 - world_pos, N)) / (0.05 * depth));
+            float wk = exp(-float(i * i + j * j) * 0.25);
+            float w = wn * wp * wk;
+            sum += velk_texture(pc.hist_irr_id, uv2).rgb * w;
+            wsum += w;
+        }
+    }
+    vec3 filtered = (wsum > 1e-5) ? (sum / wsum) : center_irr;
+    vec3 irr_out = mix(filtered, center_irr, conf);
+
+    vec3 final = albedo.rgb * (1.0 - metallic) * irr_out + rest.rgb;
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
 }
 )";
 
@@ -734,7 +973,7 @@ struct Light {
     vec4  position;        // xyz = world position (point / spot)
     vec4  direction;       // xyz = world forward axis (directional / spot)
     vec4  color_intensity; // rgb = colour, a = intensity multiplier
-    vec4  params;          // x = range, y = cos(inner), z = cos(outer), w = _
+    vec4  params;          // x = range, y = cos(inner), z = cos(outer), w = light size (dir: angular radius rad; point/spot: world radius)
 };
 
 layout(buffer_reference, std430) readonly buffer LightList {

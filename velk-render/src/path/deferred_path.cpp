@@ -168,7 +168,71 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
+namespace {
+
+// CPU mirror of the deferred lighting push-constant block
+// (`layout(push_constant) PC` in deferred_compute_prelude_src).
+VELK_GPU_STRUCT DeferredComputePushC {
+    uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
+    float    cam_pos[4];
+    uint32_t output_image_id;
+    uint32_t albedo_tex_id;
+    uint32_t normal_tex_id;
+    uint32_t worldpos_tex_id;
+    uint32_t material_tex_id;
+    uint32_t emissive_tex_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t light_count;
+    uint32_t env_texture_id;
+    uint32_t shadow_debug_image_id;
+    uint32_t _pad0;            // aligns the BDA pointers below to 8
+    uint64_t lights_addr;
+    uint64_t env_data_addr;
+    uint32_t irr_image_id;     // demodulated diffuse irradiance output
+    uint32_t _pad1;            // pads to 96 (VELK_GPU_STRUCT is alignas(16))
+};
+static_assert(sizeof(DeferredComputePushC) == 96, "Deferred compute PushC layout mismatch");
+
+// Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
+// mirrors the PC block in deferred_denoise_compute_src).
+VELK_GPU_STRUCT DenoisePushC {
+    uint64_t globals;
+    uint32_t normal_id;
+    uint32_t worldpos_id;
+    uint32_t irr_id;
+    uint32_t hist_irr_prev_id;
+    uint32_t hist_pos_prev_id;
+    uint32_t hist_irr_cur_id;
+    uint32_t hist_pos_cur_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t reset;
+};
+
+// Push constants for the spatial filter + composite pass (mirrors the PC block
+// in deferred_spatial_composite_compute_src).
+VELK_GPU_STRUCT SpatialPushC {
+    uint64_t globals;
+    uint32_t albedo_id;
+    uint32_t material_id;
+    uint32_t normal_id;
+    uint32_t worldpos_id;
+    uint32_t hist_irr_id;
+    uint32_t output_id;
+    uint32_t width;
+    uint32_t height;
+};
+
+// Composes a deferred-family compute pipeline: the shared prelude
+// (deferred_compute_prelude_src) + the given main() + the intersect_shape
+// and velk_eval_shadow switches built from the frame's snippet set. The
+// lighting and sun-visibility shaders are identical except for main(), so
+// they compose the same way and differ only by `main_src` + `variant_tag`
+// (the tag keeps their weak-cache entries distinct).
+IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
+                                                    string_view main_src,
+                                                    uint64_t variant_tag)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -182,6 +246,7 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
     constexpr uint64_t kDeferredTag = 0x44665232'44666572ULL;
     constexpr uint64_t kShadowTag = 0x53686477'54656368ULL;
     uint64_t key = kFnvBasis ^ kDeferredTag;
+    key = (key ^ variant_tag) * kFnvPrime;
     for (auto id : intersect_ids) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
@@ -192,15 +257,16 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
     key |= 0x4000000000000000ULL;
 
     // The weak pipeline cache is the source of truth: if the pipeline for
-    // this snippet combo is still alive (held by a live lighting pass),
-    // reuse it; otherwise compose + compile a fresh one.
+    // this snippet combo is still alive (held by a live pass), reuse it;
+    // otherwise compose + compile a fresh one.
     if (auto p = ctx.render_ctx->find_pipeline(
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
 
     string src;
-    src += default_deferred_compute_src;
+    src += deferred_compute_prelude_src;
+    src += main_src;
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
         const auto& ii = intersect_info_by_id[id - 3];
@@ -256,6 +322,37 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
     append_literal("}\n");
 
     return ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
+}
+
+} // namespace
+
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
+{
+    return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull);
+}
+
+IGpuPipeline::Ptr DeferredPath::ensure_denoise_pipeline(FrameContext& ctx)
+{
+    if (!ctx.render_ctx) return {};
+    // Standalone compute; fixed key (no snippet variance). Bit 62 set to match
+    // the compute-pipeline key convention.
+    constexpr uint64_t key = 0x4465'6e6f'6973'6531ULL;
+    if (auto p = ctx.render_ctx->find_pipeline(
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
+        return p;
+    }
+    return ctx.render_ctx->compile_compute_pipeline(deferred_denoise_compute_src, key);
+}
+
+IGpuPipeline::Ptr DeferredPath::ensure_spatial_pipeline(FrameContext& ctx)
+{
+    if (!ctx.render_ctx) return {};
+    constexpr uint64_t key = 0x5370'6174'6961'6c31ULL;
+    if (auto p = ctx.render_ctx->find_pipeline(
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
+        return p;
+    }
+    return ctx.render_ctx->compile_compute_pipeline(deferred_spatial_composite_compute_src, key);
 }
 
 IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,
@@ -323,6 +420,14 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
+    // Temporally accumulate the noisy diffuse irradiance (writes history), then
+    // spatially filter it (count-driven) + composite the final image + blit.
+    emit_temporal_pass(entry, vs, render_view, ctx,
+                       static_cast<int>(vs.gbuffer_size.x),
+                       static_cast<int>(vs.gbuffer_size.y), graph);
+    emit_spatial_composite_pass(entry, vs, render_view, color_target, ctx,
+                                static_cast<int>(vs.gbuffer_size.x),
+                                static_cast<int>(vs.gbuffer_size.y), graph);
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
     emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
@@ -443,6 +548,19 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.shadow_debug_tex = graph.resources().find_texture(vs.shadow_debug.get());
         vs.lighting_dirty = true;
     }
+
+    // Demodulated diffuse irradiance: the lighting pass writes the noisy
+    // single-light estimate here; the denoise pass accumulates + composites it.
+    if (!vs.diffuse_irr || vs.output_size != want) {
+        TextureDesc td{};
+        td.width = w;
+        td.height = h;
+        td.format = PixelFormat::RGBA16F;
+        td.usage = TextureUsage::Storage;
+        vs.diffuse_irr = graph.resources().create_render_texture(td);
+        vs.diffuse_irr_tex = graph.resources().find_texture(vs.diffuse_irr.get());
+        vs.lighting_dirty = true;
+    }
     vs.output_size = want;
 
     auto lighting_pipeline = ensure_pipeline(ctx);
@@ -463,28 +581,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // is stable across frames so cached lighting passes can embed it.
     uint64_t lights_addr = render_view.lights_addr;
 
-    VELK_GPU_STRUCT PushC {
-        uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
-        float    cam_pos[4];
-        uint32_t output_image_id;
-        uint32_t albedo_tex_id;
-        uint32_t normal_tex_id;
-        uint32_t worldpos_tex_id;
-        uint32_t material_tex_id;
-        uint32_t emissive_tex_id;
-        uint32_t width;
-        uint32_t height;
-        uint32_t light_count;
-        uint32_t env_texture_id;
-        uint32_t shadow_debug_image_id;
-        uint32_t _pad0;            // aligns the BDA pointers below to 8
-        uint64_t lights_addr;
-        uint64_t env_data_addr;
-        uint32_t _pad1[2];         // pads to 96 (VELK_GPU_STRUCT is alignas(16))
-    };
-    static_assert(sizeof(PushC) == 96, "Deferred PushC layout mismatch");
-
-    PushC pc{};
+    DeferredComputePushC pc{};
     pc.globals = render_view.view_globals_address;
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;
@@ -503,11 +600,142 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
     pc.lights_addr = lights_addr;
     pc.env_data_addr = render_view.env.data_addr;
+    pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
 
-    // color_target is always an IGpuTexture-castable wrapper.
-    // VkSurfaceTexture (the per-surface composite) is itself an
-    // IGpuTexture; the RenderTexture proxy is not, so fall back to
-    // find_texture for that case.
+    // No surface blit here anymore: the lighting pass writes the "rest" image
+    // (deferred_output) + diffuse irradiance; the denoise/composite pass
+    // produces the final image and blits it.
+    emit_cached_view_pass(
+        vs.cached_lighting_pass, vs.lighting_dirty, render_view.view_globals_address, graph,
+        [&](CachedPassRecording& rec) {
+            DispatchCall dc{};
+            dc.pipeline = lighting_pipeline.get();
+            dc.groups_x = (w + 7) / 8;
+            dc.groups_y = (h + 7) / 8;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("DeferredPath: lighting");
+                cmd->record_dispatch(dc);
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
+            // Hold the lighting compute pipeline strong (cache is weak).
+            rec.held.push_back(std::move(lighting_pipeline));
+        });
+}
+
+void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
+                                      const RenderView& render_view,
+                                      FrameContext& ctx,
+                                      int w, int h,
+                                      IRenderGraph& graph)
+{
+    if (!vs.diffuse_irr || !vs.gbuffer) return;
+
+    uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+    if (!vs.hist_irr[0] || vs.hist_size != want) {
+        auto make = [&]() {
+            TextureDesc td{};
+            td.width = w;
+            td.height = h;
+            td.format = PixelFormat::RGBA16F;
+            td.usage = TextureUsage::Storage;
+            return graph.resources().create_render_texture(td);
+        };
+        for (int i = 0; i < 2; ++i) {
+            vs.hist_irr[i] = make();
+            vs.hist_pos[i] = make();
+            vs.hist_irr_tex[i] = graph.resources().find_texture(vs.hist_irr[i].get());
+            vs.hist_pos_tex[i] = graph.resources().find_texture(vs.hist_pos[i].get());
+        }
+        vs.hist_size = want;
+        vs.denoise_reset_pending = true; // fresh (garbage) history
+    }
+    if (!vs.hist_irr[0] || !vs.hist_irr[1]) return;
+
+    auto temporal_pipeline = ensure_denoise_pipeline(ctx);
+    if (!temporal_pipeline) return;
+
+    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
+
+    DenoisePushC pc{};
+    pc.globals = render_view.view_globals_address;
+    pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.irr_id      = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_irr_prev_id = static_cast<uint32_t>(vs.hist_irr[parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_pos_prev_id = static_cast<uint32_t>(vs.hist_pos[parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_irr_cur_id  = static_cast<uint32_t>(vs.hist_irr[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.hist_pos_cur_id  = static_cast<uint32_t>(vs.hist_pos[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
+    pc.width  = static_cast<uint32_t>(w);
+    pc.height = static_cast<uint32_t>(h);
+    pc.reset  = vs.denoise_reset_pending ? 1u : 0u;
+    vs.denoise_reset_pending = false;
+
+    // Ping-pong history ids change every frame -> re-record each frame (one
+    // dispatch, negligible CPU).
+    vs.denoise_dirty = true;
+
+    IRenderTarget::Ptr hist_prev_irr = vs.hist_irr[parity];
+    IRenderTarget::Ptr hist_prev_pos = vs.hist_pos[parity];
+    IRenderTarget::Ptr hist_cur_irr  = vs.hist_irr[1u - parity];
+    IRenderTarget::Ptr hist_cur_pos  = vs.hist_pos[1u - parity];
+
+    emit_cached_view_pass(
+        vs.cached_denoise_pass, vs.denoise_dirty, render_view.view_globals_address, graph,
+        [&](CachedPassRecording& rec) {
+            DispatchCall dc{};
+            dc.pipeline = temporal_pipeline.get();
+            dc.groups_x = (w + 7) / 8;
+            dc.groups_y = (h + 7) / 8;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("DeferredPath: diffuse temporal accumulate");
+                cmd->record_dispatch(dc);
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_irr));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_pos));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_irr));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_pos));
+            rec.held.push_back(std::move(temporal_pipeline));
+        });
+}
+
+void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState& vs,
+                                               const RenderView& render_view,
+                                               IRenderTarget::Ptr color_target,
+                                               FrameContext& ctx,
+                                               int w, int h,
+                                               IRenderGraph& graph)
+{
+    if (!vs.deferred_output || !vs.gbuffer) return;
+
+    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
+    // The temporal pass wrote hist_irr[1 - parity] this frame.
+    IRenderTarget::Ptr cur_hist = vs.hist_irr[1u - parity];
+    if (!cur_hist) return;
+
+    auto spatial_pipeline = ensure_spatial_pipeline(ctx);
+    if (!spatial_pipeline) return;
+
+    // Resolve the surface composite as an IGpuTexture for the final blit.
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
     if (!src_tex) src_tex = vs.deferred_output_tex;
     IGpuTexture* dst_tex = nullptr;
@@ -520,28 +748,40 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             }
         }
     }
-    // Resize detection: the cached lighting cmd buffer bakes the dst
-    // VkImage handle. If the composite was recreated (resize), the
-    // baked handle is stale and the cmd buffer must re-record.
-    if (dst_tex != vs.last_dst_texture) {
-        vs.lighting_dirty = true;
-        vs.last_dst_texture = dst_tex;
+    if (dst_tex != vs.last_spatial_dst) {
+        vs.spatial_dirty = true;
+        vs.last_spatial_dst = dst_tex;
     }
 
+    SpatialPushC pc{};
+    pc.globals     = render_view.view_globals_address;
+    pc.albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
+    pc.material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+    pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.hist_irr_id = static_cast<uint32_t>(cur_hist->get_gpu_handle(GpuResourceKey::Default));
+    pc.output_id   = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
+    pc.width  = static_cast<uint32_t>(w);
+    pc.height = static_cast<uint32_t>(h);
+
+    // The accumulated-history id alternates each frame (ping-pong) -> re-record
+    // each frame (one dispatch + blit, negligible CPU).
+    vs.spatial_dirty = true;
+
     emit_cached_view_pass(
-        vs.cached_lighting_pass, vs.lighting_dirty, render_view.view_globals_address, graph,
+        vs.cached_spatial_pass, vs.spatial_dirty, render_view.view_globals_address, graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
-            dc.pipeline = lighting_pipeline.get();
+            dc.pipeline = spatial_pipeline.get();
             dc.groups_x = (w + 7) / 8;
             dc.groups_y = (h + 7) / 8;
             dc.groups_z = 1;
-            dc.root_constants_size = sizeof(PushC);
-            std::memcpy(dc.root_constants, &pc, sizeof(PushC));
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
 
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
-                cmd->push_label("DeferredPath: lighting");
+                cmd->push_label("DeferredPath: diffuse spatial + composite");
                 cmd->record_dispatch(dc);
                 if (src_tex && dst_tex) {
                     cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
@@ -551,12 +791,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                 rec.cmd = std::move(cmd);
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_hist));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
             }
-            // Hold the lighting compute pipeline strong (cache is weak).
-            rec.held.push_back(std::move(lighting_pipeline));
+            rec.held.push_back(std::move(spatial_pipeline));
         });
 }
 

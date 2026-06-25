@@ -62,6 +62,9 @@ public:
     {
         write_state_value<ILight>(&ILight::State::cone_outer_deg, v);
     }
+
+    auto get_size() const { return read_state_value<ILight>(&ILight::State::size); }
+    void set_size(float v) { write_state_value<ILight>(&ILight::State::size, v); }
 };
 
 namespace trait::render {

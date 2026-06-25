@@ -8,6 +8,17 @@ namespace {
 // this snippet into the RT compute shader only when at least one
 // light's shadow_tech_id resolves to this technique.
 constexpr string_view rt_shadow_snippet = R"(
+// Integer hash -> float in [0,1). Seeds a per-world-point per-frame disk
+// sample for soft-shadow jitter; the lighting path's temporal denoiser
+// integrates the resulting single sample across frames.
+float velk_shadow_hash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x) * (1.0 / 4294967296.0);
+}
+
 float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
 {
     Light light = pc.lights.data[light_idx];
@@ -26,6 +37,26 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
         t_max = length(to_light);
         if (t_max < 1e-6) return 1.0;
         L = to_light / t_max;
+    }
+
+    // Soft shadows: jitter the ray within the light's apparent size
+    // (Light.params.w). One sample per light per frame; the lighting
+    // path accumulates + denoises across frames. params.w is an angular
+    // radius (rad) for a directional sun, or a world-space radius for a
+    // point / spot source -> its apparent angular spread is radius/dist.
+    // size == 0 keeps a single hard ray (today's behaviour).
+    float size = max(light.params.w, 0.0);
+    if (size > 0.0) {
+        float spread = (light.flags.x == 0u) ? tan(size) : (size / max(t_max, 1e-4));
+        uvec3 q = floatBitsToUint(world_pos);
+        uint seed = (q.x * 1973u + q.y * 9277u + q.z * 26699u
+                     + pc.globals.present_counter * 53891u) | 1u;
+        vec3 up = abs(L.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 T  = normalize(cross(up, L));
+        vec3 B  = cross(L, T);
+        float rr = sqrt(velk_shadow_hash(seed)) * spread;
+        float th = 6.28318530718 * velk_shadow_hash(seed ^ 0x9e3779b9u);
+        L = normalize(L + T * (rr * cos(th)) + B * (rr * sin(th)));
     }
 
     // Bias along L (toward the light) rather than the surface normal:

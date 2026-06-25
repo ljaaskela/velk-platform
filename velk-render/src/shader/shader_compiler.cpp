@@ -131,6 +131,7 @@ layout(buffer_reference, scalar) readonly buffer GlobalData {
     uint present_counter;
     BvhNodeList bvh_nodes;
     RtShapeList bvh_shapes;
+    mat4 prev_view_projection;
 };
 
 // Storage-image arrays for compute imageStore are declared locally

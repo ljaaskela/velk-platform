@@ -128,6 +128,12 @@ private:
         };
         ChangeCache<CameraKey> camera_change;
 
+        /// Previous frame's view-projection, fed to FrameGlobals for temporal
+        /// reprojection (sun-shadow accumulation). Identity until the first
+        /// frame has been seen.
+        mat4 prev_view_projection = mat4::identity();
+        bool has_prev_view_projection = false;
+
         /// Env fingerprint (texture id + material id + data address).
         /// `prepare_env` resolves these from the snippet registry; on
         /// the first frame the env material's persistent data buffer

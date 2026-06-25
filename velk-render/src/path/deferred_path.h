@@ -92,6 +92,38 @@ public:
         // the lighting target dims). Recreate only on size change.
         uvec2 output_size{};
 
+        /// Demodulated diffuse irradiance (no albedo) written by the lighting
+        /// pass: the noisy single-light stochastic estimate the denoise pass
+        /// reprojects + accumulates. Recreated on size change.
+        IRenderTarget::Ptr diffuse_irr;
+        IGpuTexture* diffuse_irr_tex = nullptr;
+
+        /// Ping-pong temporal history for the diffuse-irradiance denoiser.
+        /// hist_irr: rgb = accumulated irradiance, a = sample count.
+        /// hist_pos: rgb = world position (reprojection validation), a = valid.
+        /// The denoise pass reads [frame & 1], writes [1 - (frame & 1)].
+        IRenderTarget::Ptr hist_irr[2];
+        IGpuTexture* hist_irr_tex[2] = {nullptr, nullptr};
+        IRenderTarget::Ptr hist_pos[2];
+        IGpuTexture* hist_pos_tex[2] = {nullptr, nullptr};
+        uvec2 hist_size{};
+        /// Cached temporal-accumulate pass (writes the history). Re-records
+        /// every frame (ping-pong ids change); cheap (one dispatch).
+        IRenderPass::Ptr cached_denoise_pass;
+        bool denoise_dirty = true;
+        /// Discards temporal history for one frame (first frame / resize). NOT
+        /// set on camera motion (reprojection handles that).
+        bool denoise_reset_pending = true;
+
+        /// Cached spatial-filter + composite pass (count-driven a-trous over the
+        /// accumulated history, then composite + surface blit). Re-records every
+        /// frame (the history ping-pong id alternates).
+        IRenderPass::Ptr cached_spatial_pass;
+        bool spatial_dirty = true;
+        /// Surface-composite blit target the spatial pass bakes; resize detect.
+        IGpuTexture* last_spatial_dst = nullptr;
+
+
         /// RenderTexture alias for the gbuffer worldpos attachment.
         /// Does not own the GPU texture (the group does); exposed via
         /// find_named_output("gbuffer.worldpos") for debug readback.
@@ -113,10 +145,6 @@ public:
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
-        /// Resize detection: the lighting cmd buffer bakes the
-        /// dst (surface composite) VkImage handle. If the composite is
-        /// recreated, the cached cmd buffer is stale.
-        IGpuTexture* last_dst_texture = nullptr;
 
         /// Cached transparent (blended) forward pass: draws BLEND-mode batches
         /// over the lit composite, depth-testing the retained gbuffer depth
@@ -136,6 +164,14 @@ private:
     /// the caller must keep alive (the lighting pass holds it).
     IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx);
 
+    /// Resolves the diffuse-irradiance temporal-accumulate pipeline
+    /// (standalone compute). Strong Ptr; the temporal pass holds it.
+    IGpuPipeline::Ptr ensure_denoise_pipeline(FrameContext& ctx);
+
+    /// Resolves the spatial filter + composite pipeline (standalone compute).
+    /// Strong Ptr; the spatial pass holds it.
+    IGpuPipeline::Ptr ensure_spatial_pipeline(FrameContext& ctx);
+
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);
 
@@ -149,6 +185,24 @@ private:
                             FrameContext& ctx,
                             int w, int h,
                             IRenderGraph& graph);
+
+    /// Reprojects + temporally accumulates the noisy diffuse irradiance into
+    /// the ping-pong history (no composite).
+    void emit_temporal_pass(IViewEntry& view, ViewState& vs,
+                            const RenderView& render_view,
+                            FrameContext& ctx,
+                            int w, int h,
+                            IRenderGraph& graph);
+
+    /// Count-driven spatial filter over the accumulated irradiance history,
+    /// then composites the final HDR image (albedo*irr + sharp rest) into
+    /// deferred_output and blits it to @p color_target.
+    void emit_spatial_composite_pass(IViewEntry& view, ViewState& vs,
+                                     const RenderView& render_view,
+                                     IRenderTarget::Ptr color_target,
+                                     FrameContext& ctx,
+                                     int w, int h,
+                                     IRenderGraph& graph);
 
     /// Forward pass for BLEND-mode batches, drawn over the lit composite in
     /// @p color_target with the gbuffer depth bound read-only. No-op when the
