@@ -34,6 +34,7 @@ The lower-level rendering layer. Most apps don't touch this directly — the run
 | [Render backend](render/render-backend.md) | GPU data model, bindless shader interface, Vulkan implementation details |
 | [Mesh](render/mesh.md) | `IMesh` / `IMeshPrimitive` / `IMeshBuffer` container-primitive-buffer model, procedural and authored meshes |
 | [Materials](render/materials.md) | Built-in materials and shader materials with dynamic inputs; where materials attach on 2D vs 3D visuals |
+| [Lighting](render/lighting.md) | Light sources (`ILight`), ray-traced soft shadows, environment / image-based lighting, and the deferred lighting path |
 
 ## Plugins
 
