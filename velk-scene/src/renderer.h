@@ -3,6 +3,7 @@
 
 #include <velk/ext/object.h>
 #include <velk/vector.h>
+#include <velk/string.h>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -69,7 +70,9 @@ public:
     void render() override;
     void set_max_frames_in_flight(uint32_t count) override;
     void add_debug_overlay(const IWindowSurface::Ptr& surface,
-                           IGpuTexture* texture,
+                           const IElement::Ptr& camera_element,
+                           string_view name,
+                           uint32_t attachment_index,
                            const rect& dst_rect) override;
     void clear_debug_overlays() override;
     IGpuResource::Ptr get_named_output(const IElement::Ptr& camera_element,
@@ -122,9 +125,14 @@ private:
 
     vector<ViewSlot> views_;
 
+    // A debug overlay references a path output BY NAME (resolved fresh each
+    // frame via get_named_output), never a raw texture pointer, so it survives
+    // texture recreation on resize.
     struct DebugOverlay {
         IWindowSurface::Ptr surface;
-        IGpuTexture* texture = nullptr;
+        IElement::Ptr camera_element;
+        string name;
+        uint32_t attachment_index = 0;
         rect dst_rect{};
     };
     vector<DebugOverlay> debug_overlays_;

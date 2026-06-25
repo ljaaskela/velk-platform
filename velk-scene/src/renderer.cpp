@@ -5,6 +5,7 @@
 
 #include <velk-render/frame/raster_shaders.h>
 #include <velk-render/interface/intf_render_pass.h>
+#include <velk-render/interface/intf_render_texture_group.h>
 #include <velk-render/plugin.h>
 
 #include <velk/api/any.h>
@@ -797,18 +798,36 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // Backend's end_frame composite-to-swap blit picks up whatever
         // we left in the composite.
         for (auto& ov : debug_overlays_) {
-            if (!ov.surface || !ov.texture || !backend_) continue;
+            if (!ov.surface || !backend_) continue;
+            // Re-resolve the live texture by name every frame so the overlay
+            // survives texture recreation on resize (no stored raw pointer).
+            auto out = get_named_output(ov.camera_element, ov.surface, ov.name);
+            if (!out) continue;
+            IGpuTexture* tex = nullptr;
+            if (auto* group = out->get_interface<IRenderTextureGroup>()) {
+                tex = group->attachment_texture(ov.attachment_index);
+            } else {
+                tex = interface_cast<IGpuTexture>(out.get());
+            }
+            if (!tex) continue;
             auto swap_target = backend_->acquire_swapchain_texture(
                 ov.surface->get_gpu_handle(GpuResourceKey::Default));
             if (!swap_target) continue;
             auto* swap_tex = interface_cast<IGpuTexture>(swap_target.get());
             if (!swap_tex) continue;
+            // Normalized [0,1] rect -> pixels against the CURRENT surface size,
+            // so the overlay relocates / rescales on resize.
+            auto dim = swap_tex->get_dimensions();
+            rect px{ov.dst_rect.x * static_cast<float>(dim.x),
+                    ov.dst_rect.y * static_cast<float>(dim.y),
+                    ov.dst_rect.width * static_cast<float>(dim.x),
+                    ov.dst_rect.height * static_cast<float>(dim.y)};
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
             if (auto cmd = backend_->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->push_label("DebugOverlay");
-                cmd->record_blit_to_texture(*ov.texture, *swap_tex, ov.dst_rect);
+                cmd->record_blit_to_texture(*tex, *swap_tex, px);
                 cmd->pop_label();
                 cmd->end_recording();
                 gp->set_command_buffer(std::move(cmd));
@@ -1068,10 +1087,12 @@ void Renderer::set_max_frames_in_flight(uint32_t count)
 }
 
 void Renderer::add_debug_overlay(const IWindowSurface::Ptr& surface,
-                                  IGpuTexture* texture,
+                                  const IElement::Ptr& camera_element,
+                                  string_view name,
+                                  uint32_t attachment_index,
                                   const rect& dst_rect)
 {
-    debug_overlays_.push_back({surface, texture, dst_rect});
+    debug_overlays_.push_back({surface, camera_element, string(name), attachment_index, dst_rect});
 }
 
 void Renderer::clear_debug_overlays()

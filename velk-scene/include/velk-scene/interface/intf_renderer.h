@@ -118,17 +118,29 @@ public:
     virtual void set_max_frames_in_flight(uint32_t count) = 0;
 
     /**
-     * @brief Registers a persistent debug overlay: blits `texture_id`
-     *        onto `surface` at `dst_rect` after all view passes have
-     *        run. Stacks in registration order. No-ops if `texture_id`
-     *        is 0 at frame time.
+     * @brief Registers a persistent debug overlay that blits a named path
+     *        output onto @p surface at @p dst_rect after all view passes
+     *        have run. Stacks in registration order.
      *
-     * Useful for displaying intermediate textures (G-buffer
-     * attachments, shadow maps, AO buffers) without wiring a dedicated
-     * sub-renderer toggle for each.
+     * The overlay references the output by NAME (the same lookup as
+     * `get_named_output`, for the path attached to @p camera_element) and is
+     * re-resolved every frame, so it survives texture recreation on resize
+     * and always shows the live texture. When the named output is an
+     * `IRenderTextureGroup` (e.g. "gbuffer"), @p attachment_index selects the
+     * attachment; it is ignored for single-texture outputs. No-ops on any
+     * frame where the output does not resolve.
+     *
+     * @p dst_rect is in NORMALIZED [0,1] coordinates of the target surface
+     * (x, y, width, height), resolved to pixels against the current surface
+     * size each frame, so overlays relocate and rescale on window resize.
+     *
+     * Useful for displaying intermediate textures (G-buffer attachments,
+     * shadow / AO buffers) without wiring a dedicated sub-renderer toggle.
      */
     virtual void add_debug_overlay(const IWindowSurface::Ptr& surface,
-                                   IGpuTexture* texture,
+                                   const IElement::Ptr& camera_element,
+                                   string_view name,
+                                   uint32_t attachment_index,
                                    const rect& dst_rect) = 0;
 
     /** @brief Removes all debug overlays previously added. */
