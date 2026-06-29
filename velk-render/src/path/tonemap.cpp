@@ -123,7 +123,7 @@ void Tonemap::emit(::velk::IViewEntry& view,
     // The tonemap compute shader uses no FrameGlobals, so the view-globals
     // address is irrelevant here (passed as 0).
     ::velk::emit_cached_view_pass(
-        vs.pass, dirty, 0, graph, [&](::velk::CachedPassRecording& rec) {
+        vs.pass, dirty, "tonemap", 0, graph, [&](::velk::CachedPassRecording& rec) {
             auto pipeline = ensure_pipeline(ctx);
             if (!pipeline) return;
 

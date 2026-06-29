@@ -824,6 +824,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     ov.dst_rect.height * static_cast<float>(dim.y)};
             auto gp = instance().create<IRenderPass>(ClassId::DefaultRenderPass);
             if (!gp) continue;
+            gp->set_name("debug.overlay");
             if (auto cmd = backend_->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->push_label("DebugOverlay");

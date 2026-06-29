@@ -173,6 +173,18 @@ struct SurfaceDesc
     SurfaceColorFormat color_format{SurfaceColorFormat::RGBA8_SRGB}; ///< Per-surface composite format.
 };
 
+/// One timed GPU region resolved from timestamp queries.
+///
+/// `label` points at a static string (the producing pass's `name()`),
+/// so it stays valid without copying. `ms` is the GPU-side duration of
+/// all regions sharing that label this frame, summed (so the many
+/// bloom sub-dispatches collapse to a single "bloom" line).
+struct GpuPassTiming
+{
+    const char* label = ""; ///< Pass name (static literal, never freed).
+    float ms = 0.f;         ///< GPU duration in milliseconds.
+};
+
 /// Pipeline stage for barrier synchronization.
 enum class PipelineStage : uint32_t
 {
@@ -501,6 +513,39 @@ public:
      * ran `prepare` / `close_frame`. Pair with `close_frame`.
      */
     virtual void submit_frame() = 0;
+
+    /// @}
+    /// @name GPU timing
+    ///
+    /// Per-pass GPU timestamps for ground-truth profiling. Disabled by
+    /// default: when off, `begin_gpu_timer` / `end_gpu_timer` are no-ops
+    /// and no query work is recorded, so there is zero overhead. The perf
+    /// overlay flips it on while it is shown. Results lag by the
+    /// frames-in-flight depth (the backend reads a slot's timestamps only
+    /// after that slot's fence has fired), so `last_gpu_timings()` returns
+    /// the most recently resolved frame, not the one being recorded.
+    /// @{
+
+    /** @brief Enables or disables per-pass GPU timestamp capture. */
+    virtual void set_gpu_timing_enabled(bool enabled) = 0;
+
+    /** @brief Whether GPU timestamp capture is currently enabled. */
+    virtual bool gpu_timing_enabled() const = 0;
+
+    /** @brief Opens a timed GPU region labeled @p label on the current
+     *         frame's command stream. No-op when timing is disabled or the
+     *         per-frame region budget is exhausted. @p label must point at
+     *         storage that outlives the frame (a static literal). */
+    virtual void begin_gpu_timer(const char* label) = 0;
+
+    /** @brief Closes the most recently opened timed GPU region. */
+    virtual void end_gpu_timer() = 0;
+
+    /** @brief Returns the last fully-resolved frame's per-pass GPU
+     *         durations, aggregated by label. Empty until a timed frame
+     *         has completed. The backing storage is stable until the next
+     *         resolve (at `begin_frame`). */
+    virtual array_view<const GpuPassTiming> last_gpu_timings() const = 0;
 
     /// @}
 };

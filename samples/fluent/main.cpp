@@ -174,8 +174,8 @@ int main(int /*argc*/, char* /*argv*/[])
     // light element's forward axis (-Z), so the Trs rotation below
     // tilts the sun to a nice angle.
     {
-        auto sun_light = velk::trait::render::create_directional_light(
-            velk::color{1.f, 0.96f, 0.88f, 1.f}, /*intensity=*/2.5f);
+        auto sun_light = velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f},
+                                                                       /*intensity=*/2.5f);
         sun_light.add_technique(velk::technique::create_rt_shadow());
 
         auto sun = velk::create_element();
@@ -388,9 +388,6 @@ int main(int /*argc*/, char* /*argv*/[])
     if (auto renderer = app.renderer()) {
         if (camera_3d) {
             auto window_surface = window.surface();
-            constexpr float kThumbW = 220.f;
-            const float col_x = static_cast<float>(kWidth) - kThumbW;
-            const float thumb_h = static_cast<float>(kHeight) / 4.f;
             auto gbuffer_out = renderer->get_named_output(
                 camera_3d, window_surface, "gbuffer");
             auto* gbuffer_group = gbuffer_out
@@ -399,12 +396,19 @@ int main(int /*argc*/, char* /*argv*/[])
             const uint32_t att_count = gbuffer_group
                 ? static_cast<uint32_t>(gbuffer_group->attachment_count())
                 : 0;
+            // Right-edge column of G-buffer thumbnails, one per attachment.
+            // Normalized [0,1] rects so the column relocates / rescales on resize;
+            // each thumbnail fills 1/att_count of the surface height.
+            constexpr float kThumbWNorm = 0.18f;
             for (uint32_t i = 0; i < att_count; ++i) {
-                if (auto* tex = gbuffer_group->attachment_texture(i)) {
-                    renderer->add_debug_overlay(
-                        window_surface, tex,
-                        {col_x, i * thumb_h, kThumbW, thumb_h});
-                }
+                // Reference the G-buffer by name + attachment index; the renderer
+                // re-resolves the live texture each frame (survives resize).
+                renderer->add_debug_overlay(
+                    window_surface, camera_3d, "gbuffer", i,
+                    {1.0f - kThumbWNorm,
+                     static_cast<float>(i) / static_cast<float>(att_count),
+                     kThumbWNorm,
+                     1.0f / static_cast<float>(att_count)});
             }
         }
     }

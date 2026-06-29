@@ -72,6 +72,7 @@ void PostProcess::emit(::velk::IViewEntry& view,
         auto passthrough = ::velk::instance().create<::velk::IRenderPass>(
             ::velk::ClassId::DefaultRenderPass);
         if (!passthrough) return;
+        passthrough->set_name("postprocess.passthrough");
         ::velk::IGpuTexture* input_tex = graph.resources().find_texture(input.get());
         ::velk::IGpuTexture* output_tex = graph.resources().find_texture(output.get());
         if (input_tex && output_tex && ctx.backend) {

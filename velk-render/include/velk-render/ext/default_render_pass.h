@@ -26,6 +26,9 @@ class DefaultRenderPass : public ::velk::ext::RenderState<DefaultRenderPass, IRe
 public:
     VELK_CLASS_UID(ClassId::DefaultRenderPass, "DefaultRenderPass");
 
+    const char* name() const override { return name_; }
+    void set_name(const char* name) override { name_ = name ? name : ""; }
+
     array_view<const IGpuResource::Ptr> reads() const override;
     array_view<const IGpuResource::Ptr> writes() const override;
     uint64_t view_globals_address() const override;
@@ -47,6 +50,7 @@ public:
 private:
     vector<IGpuResource::Ptr> reads_;
     vector<IGpuResource::Ptr> writes_;
+    const char* name_ = "";
     uint64_t view_globals_address_ = 0;
     IGpuCommandBuffer::Ptr command_buffer_;
     /// Strong refs to the pipelines this pass's command buffer binds;

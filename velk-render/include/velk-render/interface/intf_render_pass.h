@@ -38,6 +38,17 @@ class IRenderPass
                        VELK_UID("ffc6e6c3-639a-461e-ad5c-7bc4ed902edf")>
 {
 public:
+    /// Stable, human-readable label for this pass (static literal set by
+    /// the producer, e.g. "deferred.gbuffer"). Used by the backend's
+    /// per-pass GPU timer to tag timestamp regions. Defaults to "" and is
+    /// preserved across `reset()` (it identifies the pass, not its
+    /// per-frame contents).
+    virtual const char* name() const = 0;
+
+    /// Sets the pass label. Producers call this once when they create the
+    /// cached pass.
+    virtual void set_name(const char* name) = 0;
+
     /// Resources read by this pass.
     virtual array_view<const IGpuResource::Ptr> reads() const = 0;
 

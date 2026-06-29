@@ -49,10 +49,12 @@ struct CachedPassRecording
  *
  * @param pass   In/out cached pass slot; created on first sight.
  * @param dirty  In/out dirty flag; cleared after a successful rebuild.
+ * @param name   Static label for the pass (used by GPU-timing readout).
  * @param view_globals_address Per-frame FrameGlobals GPU address.
  */
 template <class RecordFn>
 inline void emit_cached_view_pass(IRenderPass::Ptr& pass, bool& dirty,
+                                  const char* name,
                                   uint64_t view_globals_address,
                                   IRenderGraph& graph, RecordFn&& record)
 {
@@ -61,6 +63,7 @@ inline void emit_cached_view_pass(IRenderPass::Ptr& pass, bool& dirty,
         if (!pass) {
             return;
         }
+        pass->set_name(name);
         dirty = true;
     }
 

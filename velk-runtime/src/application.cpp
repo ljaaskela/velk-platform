@@ -284,6 +284,15 @@ void Application::present()
 void Application::tick_overlays(double cpu_time, double frame_time,
                                 std::chrono::steady_clock::time_point now)
 {
+    // Latest resolved per-pass GPU timings (snapshot of the last completed
+    // frame, shared by every overlay). Empty until a timed frame resolves.
+    array_view<const GpuPassTiming> gpu_timings;
+    if (render_ctx_) {
+        if (auto backend = render_ctx_->backend()) {
+            gpu_timings = backend->last_gpu_timings();
+        }
+    }
+
     for (auto& ov : overlays_) {
         ov.frame_count++;
         ov.cpu_time_accum += cpu_time;
@@ -294,9 +303,20 @@ void Application::tick_overlays(double cpu_time, double frame_time,
             double fps = static_cast<double>(ov.frame_count) / elapsed;
             double avg_cpu_ms = ov.cpu_time_accum / static_cast<double>(ov.frame_count) * 1000.0;
             double avg_frame_ms = ov.frame_time_accum / static_cast<double>(ov.frame_count) * 1000.0;
-            char buf[96];
-            std::snprintf(
-                buf, sizeof(buf), "%.0f fps\ncpu %.3f ms\ngpu %.3f ms", fps, avg_cpu_ms, avg_frame_ms);
+
+            // Real GPU total = sum of the measured per-pass durations.
+            float gpu_total = 0.f;
+            for (const auto& t : gpu_timings) gpu_total += t.ms;
+
+            char buf[512];
+            int n = std::snprintf(buf, sizeof(buf),
+                "%.0f fps\nframe %.3f ms\ncpu %.3f ms\ngpu %.3f ms",
+                fps, avg_frame_ms, avg_cpu_ms, static_cast<double>(gpu_total));
+            for (const auto& t : gpu_timings) {
+                if (n < 0 || n >= static_cast<int>(sizeof(buf))) break;
+                n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n),
+                                   "\n  %s %.2f", t.label, static_cast<double>(t.ms));
+            }
             ov.text_visual.set_text(string(buf));
             ov.frame_count = 0;
             ov.cpu_time_accum = 0.0;
@@ -329,12 +349,26 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
 
     if (!config.enabled && it != overlays_.end()) {
         overlays_.erase(it);
+        // Stop paying for GPU timestamps once no overlay needs them.
+        if (overlays_.empty() && render_ctx_) {
+            if (auto backend = render_ctx_->backend()) {
+                backend->set_gpu_timing_enabled(false);
+            }
+        }
         return;
     }
 
     auto* iwin = interface_cast<IWindow>(window);
     if (!iwin || !renderer_) {
         return;
+    }
+
+    // The overlay is the only consumer of per-pass GPU timestamps; turn
+    // capture on while it's shown (off by default for zero overhead).
+    if (render_ctx_) {
+        if (auto backend = render_ctx_->backend()) {
+            backend->set_gpu_timing_enabled(true);
+        }
     }
 
     // Create the overlay scene with a root element, an ortho camera child,
@@ -353,7 +387,9 @@ void Application::set_performance_overlay(const IObject::Ptr& window,
     auto text_elem = ::velk::create_element();
     scene.add(root, text_elem);
 
-    auto text_sz = ui::trait::layout::create_fixed_size(::velk::dim::px(112), ::velk::dim::px(64));
+    // Sized to fit the fps/frame/cpu/gpu header plus the per-pass GPU
+    // timing breakdown lines (deferred bistro emits ~9 passes).
+    auto text_sz = ui::trait::layout::create_fixed_size(::velk::dim::px(224), ::velk::dim::px(248));
     text_elem.add_trait(text_sz);
 
     auto text_bg = ui::trait::visual::create_rect();

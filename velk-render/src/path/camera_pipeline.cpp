@@ -159,7 +159,7 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
                 vs.last_swap_tex = swap_tex;
             }
             ::velk::emit_cached_view_pass(
-                vs.cached_composite_blit, vs.composite_blit_dirty,
+                vs.cached_composite_blit, vs.composite_blit_dirty, "composite.blit",
                 render_view.view_globals_address, graph,
                 [&](::velk::CachedPassRecording& rec) {
                     if (auto cmd = ctx.backend->create_command_buffer()) {

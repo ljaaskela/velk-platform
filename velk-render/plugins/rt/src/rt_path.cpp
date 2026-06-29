@@ -268,7 +268,7 @@ void RtPath::build_passes(IViewEntry& entry,
     }
 
     emit_cached_view_pass(
-        vs.cached_rt_pass, vs.rt_dirty, render_view.view_globals_address, graph,
+        vs.cached_rt_pass, vs.rt_dirty, "rt.lighting", render_view.view_globals_address, graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = rt_pipeline.get();

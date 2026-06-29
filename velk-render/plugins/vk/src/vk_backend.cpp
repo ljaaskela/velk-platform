@@ -269,6 +269,10 @@ void VkBackend::shutdown()
         vkDestroySemaphore(device_, frame_timeline_, nullptr);
         frame_timeline_ = VK_NULL_HANDLE;
     }
+    if (timestamp_pool_) {
+        vkDestroyQueryPool(device_, timestamp_pool_, nullptr);
+        timestamp_pool_ = VK_NULL_HANDLE;
+    }
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         // Pool destruction frees all buffers in the pool — the deferred
         // queue would dangle. Clear it explicitly first.
@@ -419,6 +423,13 @@ bool VkBackend::select_physical_device()
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(physical_device_, &props);
     VELK_LOG(I, "VkBackend: using %s", props.deviceName);
+
+    // GPU timing support: timestampComputeAndGraphics guarantees the
+    // graphics/compute queues report valid timestamp bits. A zero period
+    // means timestamps are unsupported; leave the feature disabled.
+    if (props.limits.timestampComputeAndGraphics && props.limits.timestampPeriod > 0.f) {
+        timestamp_period_ns_ = props.limits.timestampPeriod;
+    }
     return true;
 }
 
@@ -585,6 +596,20 @@ bool VkBackend::create_sync_objects()
     timeline_ci.pNext = &timeline_type;
     if (vkCreateSemaphore(device_, &timeline_ci, nullptr, &frame_timeline_) != VK_SUCCESS) {
         return false;
+    }
+
+    // Timestamp query pool for per-pass GPU timing. One contiguous range
+    // per frame slot (2 timestamps per timed region). A failed create or
+    // unsupported timestamps just leaves the feature inert.
+    if (timestamp_period_ns_ > 0.f) {
+        VkQueryPoolCreateInfo qpci{};
+        qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpci.queryCount = kFrameOverlap * 2 * kMaxTimedPasses;
+        if (vkCreateQueryPool(device_, &qpci, nullptr, &timestamp_pool_) != VK_SUCCESS) {
+            timestamp_pool_ = VK_NULL_HANDLE;
+            timestamp_period_ns_ = 0.f;
+        }
     }
     return true;
 }
@@ -2010,6 +2035,11 @@ void VkBackend::begin_frame()
     vkResetFences(device_, 1, &sync.fence);
     vkResetCommandBuffer(sync.command_buffer, 0);
 
+    // The slot's fence has fired, so the timestamps it wrote last time it
+    // recorded are now readable. Resolve them before the pool range is
+    // reset + reused below.
+    resolve_gpu_timings(recording_slot_);
+
     // Reset per-slot state captured during recording (formerly VkBackend
     // fields; moved into FrameSync so concurrent submits stay isolated).
     sync.present_surface_id = 0;
@@ -2038,6 +2068,16 @@ void VkBackend::begin_frame()
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(sync.command_buffer, &begin_info);
+
+    // Reset this slot's timestamp range on the primary before any pass
+    // records into it, and start a fresh region count for the frame.
+    if (gpu_timing_enabled_ && timestamp_pool_) {
+        vkCmdResetQueryPool(sync.command_buffer, timestamp_pool_,
+                            recording_slot_ * 2 * kMaxTimedPasses,
+                            2 * kMaxTimedPasses);
+    }
+    timer_slots_[recording_slot_].count = 0;
+    timer_region_open_ = false;
 
     cmd_push_label(sync.command_buffer, "Frame");
 
@@ -2380,6 +2420,66 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
     RENDER_LOG("vk.execute primary=%p secondary=%p",
                (void*)sync.command_buffer, (void*)secondary);
     vkCmdExecuteCommands(sync.command_buffer, 1, &secondary);
+}
+
+void VkBackend::begin_gpu_timer(const char* label)
+{
+    if (!gpu_timing_enabled_ || !timestamp_pool_) return;
+    auto& slot = timer_slots_[recording_slot_];
+    if (slot.count >= kMaxTimedPasses) {
+        // Region budget exhausted this frame; drop the pair so the
+        // matching end_gpu_timer is a no-op too.
+        timer_region_open_ = false;
+        return;
+    }
+    slot.labels[slot.count] = label ? label : "";
+    uint32_t base = recording_slot_ * 2 * kMaxTimedPasses + 2 * slot.count;
+    vkCmdWriteTimestamp(frame_sync_[recording_slot_].command_buffer,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        timestamp_pool_, base);
+    timer_region_open_ = true;
+}
+
+void VkBackend::end_gpu_timer()
+{
+    if (!gpu_timing_enabled_ || !timestamp_pool_ || !timer_region_open_) return;
+    auto& slot = timer_slots_[recording_slot_];
+    uint32_t base = recording_slot_ * 2 * kMaxTimedPasses + 2 * slot.count + 1;
+    vkCmdWriteTimestamp(frame_sync_[recording_slot_].command_buffer,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        timestamp_pool_, base);
+    ++slot.count;
+    timer_region_open_ = false;
+}
+
+void VkBackend::resolve_gpu_timings(uint32_t slot)
+{
+    if (!gpu_timing_enabled_ || !timestamp_pool_ || timestamp_period_ns_ <= 0.f) return;
+    const TimerSlot& ts = timer_slots_[slot];
+    if (ts.count == 0) return;
+
+    uint64_t stamps[2 * kMaxTimedPasses];
+    uint32_t n = ts.count;
+    VkResult r = vkGetQueryPoolResults(
+        device_, timestamp_pool_, slot * 2 * kMaxTimedPasses, 2 * n,
+        sizeof(uint64_t) * 2 * n, stamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return; // VK_NOT_READY should not happen post-fence.
+
+    last_timings_.clear();
+    for (uint32_t i = 0; i < n; ++i) {
+        uint64_t begin = stamps[2 * i];
+        uint64_t end = stamps[2 * i + 1];
+        // Guard against wraparound on the (unlikely) decreasing pair.
+        float ms = end > begin
+            ? static_cast<float>(static_cast<double>(end - begin) * timestamp_period_ns_ * 1e-6)
+            : 0.f;
+        const char* lbl = ts.labels[i] ? ts.labels[i] : "";
+        bool merged = false;
+        for (auto& t : last_timings_) {
+            if (std::strcmp(t.label, lbl) == 0) { t.ms += ms; merged = true; break; }
+        }
+        if (!merged) last_timings_.push_back({lbl, ms});
+    }
 }
 
 bool VkBackend::record_present_blit(FrameSync& sync)

@@ -99,7 +99,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
 
     emit_cached_view_pass(
-        cache.pass, cache.dirty, render_view.view_globals_address, graph,
+        cache.pass, cache.dirty, "forward", render_view.view_globals_address, graph,
         [&](CachedPassRecording& rec) {
             const ::velk::render::Frustum* frustum_ptr =
                 render_view.has_frustum ? &render_view.frustum : nullptr;

@@ -114,6 +114,15 @@ public:
     void close_frame() override;
     void submit_frame() override;
 
+    void set_gpu_timing_enabled(bool enabled) override { gpu_timing_enabled_ = enabled; }
+    bool gpu_timing_enabled() const override { return gpu_timing_enabled_; }
+    void begin_gpu_timer(const char* label) override;
+    void end_gpu_timer() override;
+    array_view<const GpuPassTiming> last_gpu_timings() const override
+    {
+        return {last_timings_.data(), last_timings_.size()};
+    }
+
     /// @name Debug-utils label helpers.
     /// Wrap the VK_EXT_debug_utils calls so call sites don't have to
     /// build VkDebugUtilsLabelEXT structs or null-check the function
@@ -366,6 +375,39 @@ private:
     void drain_deferred_textures();
 
     bool initialized_ = false;
+
+    /// @name GPU timing (per-pass timestamp queries)
+    /// One timestamp query pool shared across frame slots; each slot owns
+    /// the contiguous range `[slot * 2*kMaxTimedPasses, ...)` so a slot's
+    /// queries are only read after that slot's fence has fired. Disabled
+    /// by default: when off nothing is recorded or read.
+    /// @{
+    static constexpr uint32_t kMaxTimedPasses = 48; ///< Max timed regions per frame.
+    VkQueryPool timestamp_pool_ = VK_NULL_HANDLE;
+    float timestamp_period_ns_ = 0.f;  ///< ns per timestamp tick; 0 = unsupported.
+    bool gpu_timing_enabled_ = false;
+    bool timer_region_open_ = false;   ///< True between begin/end_gpu_timer (main thread only).
+
+    /// Per-slot recorded-region bookkeeping. `count` is the number of
+    /// closed regions this slot recorded; `labels` tags each region for
+    /// aggregation. `begin_frame` reads the prior frame's results using
+    /// the surviving count, then resets count to 0 for the new frame.
+    struct TimerSlot
+    {
+        uint32_t count = 0;
+        const char* labels[kMaxTimedPasses] = {};
+    };
+    TimerSlot timer_slots_[kFrameOverlap];
+
+    /// Last fully-resolved frame's per-pass durations, aggregated by
+    /// label. Written at `begin_frame`, read by the overlay. Main thread.
+    ::velk::vector<GpuPassTiming> last_timings_;
+
+    /// Reads a completed slot's timestamps and aggregates them by label
+    /// into `last_timings_`. Called at `begin_frame` after the slot's
+    /// fence wait, before the pool range is reset.
+    void resolve_gpu_timings(uint32_t slot);
+    /// @}
 
     // Internal helpers
     bool create_vk_instance();

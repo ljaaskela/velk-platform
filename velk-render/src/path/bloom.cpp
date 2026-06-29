@@ -332,6 +332,7 @@ void Bloom::emit(::velk::IViewEntry& view,
         auto gp = ::velk::instance().create<::velk::IRenderPass>(
             ::velk::ClassId::DefaultRenderPass);
         if (!gp) return;
+        gp->set_name("bloom");
         if (auto cmd = ctx.backend->create_command_buffer()) {
             cmd->begin_recording();
             cmd->push_label(label);
@@ -359,6 +360,7 @@ void Bloom::emit(::velk::IViewEntry& view,
         auto gp = ::velk::instance().create<::velk::IRenderPass>(
             ::velk::ClassId::DefaultRenderPass);
         if (!gp) return;
+        gp->set_name("bloom");
         ::velk::IGpuTexture* in_tex  = graph.resources().find_texture(input.get());
         ::velk::IGpuTexture* out_tex = graph.resources().find_texture(output.get());
         if (in_tex && out_tex) {
