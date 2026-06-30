@@ -17,6 +17,29 @@ namespace velk {
 /// The compiler pads the struct automatically, no manual _pad fields needed.
 #define VELK_GPU_STRUCT struct alignas(16)
 
+/// Renderer-side description of how a view reaches the scene BVH for
+/// index-based shader reads. Carried through RenderView / FrameContext and
+/// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c shape_base
+/// select this frame's IGpuArena ring region; @c root and the counts are
+/// relative to it. Not uploaded directly; the GPU structs mirror these
+/// fields individually.
+struct BvhBinding
+{
+    uint32_t root        = 0;
+    uint32_t node_count  = 0;
+    uint32_t shape_count = 0;
+    uint32_t node_base   = 0;
+    uint32_t shape_base  = 0;
+
+    bool operator==(const BvhBinding& o) const
+    {
+        return root == o.root && node_count == o.node_count
+            && shape_count == o.shape_count && node_base == o.node_base
+            && shape_base == o.shape_base;
+    }
+    bool operator!=(const BvhBinding& o) const { return !(*this == o); }
+};
+
 /// Per-frame global data written by the renderer, read by all shaders.
 ///
 /// Layout must match the `GlobalData` buffer_reference declaration in

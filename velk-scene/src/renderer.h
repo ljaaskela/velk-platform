@@ -154,13 +154,7 @@ private:
         RenderView render_view{};
         IInterface::Ptr camera_trait;
         vector<IViewPipeline::Ptr> pipelines;
-        uint64_t bvh_nodes_addr = 0;
-        uint64_t bvh_shapes_addr = 0;
-        uint32_t bvh_root = 0;
-        uint32_t bvh_node_count = 0;
-        uint32_t bvh_shape_count = 0;
-        uint32_t bvh_node_base = 0;
-        uint32_t bvh_shape_base = 0;
+        BvhBinding bvh{};
     };
     vector<PreparedView> prepared_views_;
 

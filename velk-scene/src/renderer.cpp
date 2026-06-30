@@ -741,24 +741,15 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             auto bit = scene_bvhs.find(scene);
             if (bit != scene_bvhs.end() && bit->second) {
                 auto* b = bit->second;
-                ctx.bvh_nodes_addr = b->nodes_addr();
-                ctx.bvh_shapes_addr = b->shapes_addr();
-                ctx.bvh_root = b->get_root_index();
-                ctx.bvh_node_count = b->get_node_count();
-                ctx.bvh_shape_count = b->get_shape_count();
-                ctx.bvh_node_base = b->get_node_base();
-                ctx.bvh_shape_base = b->get_shape_base();
-                // The BVH binds its own node/shape buffers into set = 1
-                // via its IGpuArenas during rebuild (self-registering), so
-                // nothing to bind here.
+                ctx.bvh.root = b->get_root_index();
+                ctx.bvh.node_count = b->get_node_count();
+                ctx.bvh.shape_count = b->get_shape_count();
+                ctx.bvh.node_base = b->get_node_base();
+                ctx.bvh.shape_base = b->get_shape_base();
+                // The BVH writes its node/shape data into the shared set = 1
+                // arenas during rebuild; nothing to bind here.
             } else {
-                ctx.bvh_nodes_addr = 0;
-                ctx.bvh_shapes_addr = 0;
-                ctx.bvh_root = 0;
-                ctx.bvh_node_count = 0;
-                ctx.bvh_shape_count = 0;
-                ctx.bvh_node_base = 0;
-                ctx.bvh_shape_base = 0;
+                ctx.bvh = {};
             }
             ctx.view_camera_trait = camera_trait.get();
 
@@ -775,13 +766,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             pv.slot = &view_slot;
             pv.camera_trait = camera_trait;
             pv.pipelines = std::move(pipelines_scratch_);
-            pv.bvh_nodes_addr = ctx.bvh_nodes_addr;
-            pv.bvh_shapes_addr = ctx.bvh_shapes_addr;
-            pv.bvh_root = ctx.bvh_root;
-            pv.bvh_node_count = ctx.bvh_node_count;
-            pv.bvh_shape_count = ctx.bvh_shape_count;
-            pv.bvh_node_base = ctx.bvh_node_base;
-            pv.bvh_shape_base = ctx.bvh_shape_base;
+            pv.bvh = ctx.bvh;
             pv.render_view = view_preparer_.prepare(*view_slot.entry,
                                                     view_slot.camera_element,
                                                     sit->second, ctx,
@@ -804,13 +789,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
 
         // Phase 2: emit each prepared view's pipelines into slot.graph.
         for (auto& pv : prepared_views_) {
-            ctx.bvh_nodes_addr = pv.bvh_nodes_addr;
-            ctx.bvh_shapes_addr = pv.bvh_shapes_addr;
-            ctx.bvh_root = pv.bvh_root;
-            ctx.bvh_node_count = pv.bvh_node_count;
-            ctx.bvh_shape_count = pv.bvh_shape_count;
-            ctx.bvh_node_base = pv.bvh_node_base;
-            ctx.bvh_shape_base = pv.bvh_shape_base;
+            ctx.bvh = pv.bvh;
             ctx.view_camera_trait = pv.camera_trait.get();
 
             IRenderTarget::Ptr color_target =

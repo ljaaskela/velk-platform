@@ -184,11 +184,9 @@ void RtPath::build_passes(IViewEntry& entry,
     // Catch BVH / shape-count drift that doesn't flow through view
     // notify (BVH lives at scene scope, not view).
     if (vs.rt_change.changed({
-            render_view.bvh_nodes_addr,
-            render_view.bvh_shapes_addr,
             shapes_addr,
-            render_view.bvh_root,
-            render_view.bvh_node_count,
+            render_view.bvh.root,
+            render_view.bvh.node_count,
             static_cast<uint32_t>(shapes.size())})) {
         vs.rt_dirty = true;
     }
@@ -229,10 +227,10 @@ void RtPath::build_passes(IViewEntry& entry,
     root.env[2] = 0;
     root.env[3] = 0;
     root.shapes_addr = shapes_addr;
-    root.bvh_node_base = render_view.bvh_node_base;
-    root.bvh_shape_base = render_view.bvh_shape_base;
-    root.bvh_root = render_view.bvh_root;
-    root.bvh_node_count = render_view.bvh_node_count;
+    root.bvh_node_base = render_view.bvh.node_base;
+    root.bvh_shape_base = render_view.bvh.shape_base;
+    root.bvh_root = render_view.bvh.root;
+    root.bvh_node_count = render_view.bvh.node_count;
     root.env_data_addr = render_view.env.data_addr;
     root.lights_addr = lights_addr;
     root.light_count = static_cast<uint32_t>(render_view.lights.size());

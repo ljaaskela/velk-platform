@@ -57,11 +57,6 @@ public:
     void rebuild(IScene* scene, FrameContext& ctx, bool dirty,
                  ShapeCb shape_cb, void* shape_user);
 
-    /// Frame-local GPU addresses. Only valid for the frame in which
-    /// `rebuild` was called.
-    uint64_t nodes_addr() const { return nodes_addr_; }
-    uint64_t shapes_addr() const { return shapes_addr_; }
-
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
     {
@@ -117,8 +112,6 @@ private:
     /// PersistentBuffer (BDA) until the mesh chain migrates.
     PersistentBuffer mesh_instances_buffer_;
 
-    uint64_t nodes_addr_ = 0;
-    uint64_t shapes_addr_ = 0;
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
     uint32_t shape_count_ = 0;

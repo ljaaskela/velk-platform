@@ -67,16 +67,8 @@ struct RenderView
     /// in the velk.glsl prelude. 0 when the viewport is degenerate.
     uint64_t view_globals_address = 0;
 
-    /// Scene-wide BVH addresses (zero when the view's scene has no BVH).
-    uint64_t bvh_nodes_addr = 0;
-    uint64_t bvh_shapes_addr = 0;
-    uint32_t bvh_root = 0;
-    uint32_t bvh_node_count = 0;
-    uint32_t bvh_shape_count = 0;
-    /// Element base added to BVH node / shape indices this frame (IGpuArena
-    /// ring region); stamped into FrameGlobals / RtRoot.
-    uint32_t bvh_node_base = 0;
-    uint32_t bvh_shape_base = 0;
+    /// How this view reaches the scene BVH (empty when no BVH).
+    BvhBinding bvh{};
 
     /// Camera environment, if any.
     ViewEnv env{};

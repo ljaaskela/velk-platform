@@ -130,13 +130,11 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
         auto r = ctx.bvh_shapes_arena->write(cached_shapes_.data(),
                                              cached_shapes_.size() * sizeof(RtShape), ctx);
         shape_base_ = static_cast<uint32_t>(r.offset / sizeof(RtShape));
-        shapes_addr_ = ctx.bvh_shapes_arena->gpu_address();
     }
     if (ctx.bvh_nodes_arena) {
         auto r = ctx.bvh_nodes_arena->write(cached_nodes_.data(),
                                             cached_nodes_.size() * sizeof(GpuBvhNode), ctx);
         node_base_ = static_cast<uint32_t>(r.offset / sizeof(GpuBvhNode));
-        nodes_addr_ = ctx.bvh_nodes_arena->gpu_address();
     }
 }
 

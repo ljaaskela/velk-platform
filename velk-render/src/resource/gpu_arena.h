@@ -83,7 +83,6 @@ public:
     }
 
     uint32_t slot() const override { return slot_; }
-    uint64_t gpu_address() const override { return buffer_ ? buffer_->gpu_address() : 0; }
 
 private:
     void recreate_buffer(uint32_t regions, FrameContext& ctx)

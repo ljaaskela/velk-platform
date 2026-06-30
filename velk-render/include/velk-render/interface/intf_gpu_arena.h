@@ -60,11 +60,6 @@ public:
 
     /// The set = 1 slot this arena's buffer is bound to.
     virtual uint32_t slot() const = 0;
-
-    /// The bound buffer's GPU address. Stable until the buffer grows; used
-    /// only as a CPU-side identity token for pipeline cache keys, never by
-    /// shaders (which reach the data by index).
-    virtual uint64_t gpu_address() const = 0;
 };
 
 } // namespace velk

@@ -92,23 +92,23 @@ private:
         /// Resize detection: see DeferredPath::ViewState.
         ::velk::IGpuTexture* last_dst_texture = nullptr;
 
-        /// PushC fingerprint covering inputs not propagated through
-        /// the view notify cascade (BVH addresses + shape_count +
-        /// shapes_addr). When BVH or shape topology changes mid-run
-        /// these flip even though the view itself hasn't notified.
+        /// PushC fingerprint covering inputs not propagated through the
+        /// view notify cascade (BVH topology + primary shapes_addr). When
+        /// the BVH or shape set changes mid-run these flip even though the
+        /// view itself hasn't notified. The BVH lives in a shared arena now,
+        /// so its buffer address is constant and not part of the key; the
+        /// counts / root carry topology change, and node/shape base are
+        /// deliberately excluded (they rotate per frame and are read fresh
+        /// from RtRoot, so they must not force a re-record).
         struct RtKey
         {
-            uint64_t bvh_nodes_addr;
-            uint64_t bvh_shapes_addr;
             uint64_t shapes_addr;
             uint32_t bvh_root;
             uint32_t bvh_node_count;
             uint32_t shape_count;
             bool operator==(const RtKey& rhs) const
             {
-                return bvh_nodes_addr == rhs.bvh_nodes_addr
-                    && bvh_shapes_addr == rhs.bvh_shapes_addr
-                    && shapes_addr == rhs.shapes_addr
+                return shapes_addr == rhs.shapes_addr
                     && bvh_root == rhs.bvh_root
                     && bvh_node_count == rhs.bvh_node_count
                     && shape_count == rhs.shape_count;

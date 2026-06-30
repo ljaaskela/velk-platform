@@ -4,6 +4,7 @@
 #include <velk/interface/intf_interface.h>
 
 #include <velk-render/frame/draw_call_emit.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
 #include <velk-render/interface/intf_frame_snippet_registry.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
@@ -71,19 +72,10 @@ struct FrameContext
     /// without a back-pointer to the trait. Null between dispatches.
     IInterface* view_camera_trait = nullptr;
 
-    // Scene-wide BVH built once per frame in build_frame_passes before
-    // any view renders; consumed by paths when they stamp out
-    // FrameGlobals. Zero when the view's scene has no BVH.
-    uint64_t bvh_nodes_addr = 0;
-    uint64_t bvh_shapes_addr = 0;
-    uint32_t bvh_root = 0;
-    uint32_t bvh_node_count = 0;
-    uint32_t bvh_shape_count = 0;
-    /// Element base added to BVH node / shape indices this frame (IGpuArena
-    /// ring region); stamped into FrameGlobals / RtRoot so shaders read
-    /// data[base + index].
-    uint32_t bvh_node_base = 0;
-    uint32_t bvh_shape_base = 0;
+    // Scene-wide BVH built once per frame in build_frame_passes before any
+    // view renders; consumed by paths when they stamp out FrameGlobals /
+    // RtRoot. Empty when the view's scene has no BVH.
+    BvhBinding bvh{};
 
     /// Convenience: assemble a FrameResolveContext for snippet-registry calls.
     FrameResolveContext make_resolve_context() const
