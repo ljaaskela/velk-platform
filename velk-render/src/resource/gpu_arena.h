@@ -87,13 +87,13 @@ public:
 private:
     void recreate_buffer(uint32_t regions, FrameContext& ctx)
     {
-        if (buffer_) {
-            // Keep the old buffer alive past in-flight frames before freeing.
-            ctx.backend->defer_destroy_gpu_buffer(buffer_.get());
-        }
         GpuBufferDesc desc{};
         desc.size = uint64_t(regions) * sub_stride_;
         desc.cpu_writable = true;
+        // Reassigning buffer_ drops the old Ptr; ~VkGpuBuffer defers its
+        // destruction past in-flight frames on its own, so we must NOT also
+        // defer it explicitly here (that double-queues the same VkBuffer and
+        // double-frees it in drain_deferred_buffers).
         buffer_ = ctx.backend->create_gpu_buffer(desc);
         mapped_ = buffer_ ? buffer_->map() : nullptr;
         if (buffer_) {
