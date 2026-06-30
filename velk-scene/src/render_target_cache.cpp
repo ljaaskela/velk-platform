@@ -133,8 +133,8 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_globals.bvh_root = ctx.bvh_root;
         rt_globals.bvh_node_count = ctx.bvh_node_count;
         rt_globals.bvh_shape_count = ctx.bvh_shape_count;
-        rt_globals.bvh_nodes_addr = ctx.bvh_nodes_addr;
-        rt_globals.bvh_shapes_addr = ctx.bvh_shapes_addr;
+        rt_globals.bvh_node_base = ctx.bvh_node_base;
+        rt_globals.bvh_shape_base = ctx.bvh_shape_base;
         rt_globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
         RenderView rt_view{};
         rt_view.batches = &rtp.batches;
@@ -161,6 +161,8 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_view.bvh_shape_count = ctx.bvh_shape_count;
         rt_view.bvh_nodes_addr = ctx.bvh_nodes_addr;
         rt_view.bvh_shapes_addr = ctx.bvh_shapes_addr;
+        rt_view.bvh_node_base = ctx.bvh_node_base;
+        rt_view.bvh_shape_base = ctx.bvh_shape_base;
 
         auto& entry_ptr = view_entries_[rtp.element];
         if (!entry_ptr) {

@@ -203,8 +203,8 @@ void RtPath::build_passes(IViewEntry& entry,
         uint32_t extras[4];        // image_index, width, height, shape_count
         uint32_t env[4];           // env_material_id, env_texture_id, _, _
         uint64_t shapes_addr;
-        uint64_t bvh_shapes_addr;
-        uint64_t bvh_nodes_addr;
+        uint32_t bvh_node_base;
+        uint32_t bvh_shape_base;
         uint32_t bvh_root;
         uint32_t bvh_node_count;
         uint64_t env_data_addr;
@@ -229,8 +229,8 @@ void RtPath::build_passes(IViewEntry& entry,
     root.env[2] = 0;
     root.env[3] = 0;
     root.shapes_addr = shapes_addr;
-    root.bvh_shapes_addr = render_view.bvh_shapes_addr;
-    root.bvh_nodes_addr = render_view.bvh_nodes_addr;
+    root.bvh_node_base = render_view.bvh_node_base;
+    root.bvh_shape_base = render_view.bvh_shape_base;
     root.bvh_root = render_view.bvh_root;
     root.bvh_node_count = render_view.bvh_node_count;
     root.env_data_addr = render_view.env.data_addr;

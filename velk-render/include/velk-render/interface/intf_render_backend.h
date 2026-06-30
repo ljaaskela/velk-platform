@@ -337,6 +337,35 @@ public:
                                       size_t size,
                                       const void* data) = 0;
 
+    /// Fixed binding slots in the per-frame "global buffer" descriptor
+    /// set (set = 1) that compute shaders read by index instead of by
+    /// chasing a buffer_device_address. First step of the
+    /// index-not-address resource model; GpuHive pages claim further
+    /// slots later. Keep in sync with the set = 1 declarations in the
+    /// compute shader preludes.
+    enum GlobalBufferSlot : uint32_t {
+        kGlobalBvhNodes  = 0,
+        kGlobalBvhShapes = 1,
+        kGlobalBufferSlotCount = 2,
+    };
+
+    /// Binds @p buffer at slot @p binding of the current frame's set = 1
+    /// descriptor set, so compute shaders read it as a bound storage
+    /// buffer. Call once per frame during prepare (after begin_frame),
+    /// each frame the buffer is needed; pass null to leave the slot
+    /// unbound. @p buffer must outlive the frame. The slot's set is only
+    /// updated after its fence has fired, so no in-flight frame is
+    /// disturbed.
+    virtual void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) = 0;
+
+    /// The in-flight frame slot currently being recorded
+    /// (0 .. frame_slot_count() - 1). begin_frame has already waited this
+    /// slot's fence, so a per-slot resource region indexed by it has no
+    /// in-flight reader and is safe to overwrite. IGpuArena uses this to
+    /// pick its ring-buffer region.
+    virtual uint32_t current_frame_slot() const = 0;
+    virtual uint32_t frame_slot_count() const = 0;
+
     /// @}
     /// @name Textures
     /// @{

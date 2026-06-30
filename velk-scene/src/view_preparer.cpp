@@ -235,8 +235,8 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.bvh_root = rv.bvh_root;
     globals.bvh_node_count = rv.bvh_node_count;
     globals.bvh_shape_count = rv.bvh_shape_count;
-    globals.bvh_nodes_addr = rv.bvh_nodes_addr;
-    globals.bvh_shapes_addr = rv.bvh_shapes_addr;
+    globals.bvh_node_base = rv.bvh_node_base;
+    globals.bvh_shape_base = rv.bvh_shape_base;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];
@@ -473,6 +473,8 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     rv.bvh_root = ctx.bvh_root;
     rv.bvh_node_count = ctx.bvh_node_count;
     rv.bvh_shape_count = ctx.bvh_shape_count;
+    rv.bvh_node_base = ctx.bvh_node_base;
+    rv.bvh_shape_base = ctx.bvh_shape_base;
     prepare_frame_globals(entry, ctx, rv);
     prepare_env(entry, camera_element, ctx, rv);
 

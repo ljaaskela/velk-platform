@@ -190,6 +190,9 @@ bool VkBackend::init(void* params)
     if (!create_bindless_descriptor()) {
         return false;
     }
+    if (!create_bound_buffer_descriptor()) {
+        return false;
+    }
     if (!create_pipeline_layout()) {
         return false;
     }
@@ -250,6 +253,8 @@ void VkBackend::shutdown()
     vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptor_layout_, nullptr);
     vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+    vkDestroyDescriptorSetLayout(device_, bound_buffer_layout_, nullptr);
+    vkDestroyDescriptorPool(device_, bound_buffer_pool_, nullptr);
     // linear_sampler_ lives inside sampler_cache_ (primed at init); loop
     // destroys everything in one pass.
     for (auto& [key, sampler] : sampler_cache_) {
@@ -459,6 +464,9 @@ bool VkBackend::create_device()
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    // The per-frame "global buffer" set (set = 1) fills its STORAGE_BUFFER
+    // descriptors during prepare, after the set was bound at begin_frame.
+    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     // Required for vkCmdDrawIndexedIndirectCount / vkCmdDrawIndirectCount —
     // the always-indirect emission path lets the GPU determine the actual
     // draw count later (post-culling) without a CPU readback.
@@ -782,6 +790,69 @@ bool VkBackend::create_bindless_descriptor()
     return vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_) == VK_SUCCESS;
 }
 
+bool VkBackend::create_bound_buffer_descriptor()
+{
+    // set = 1: a small fixed set of bound storage buffers that compute
+    // shaders read by index (BVH nodes/shapes; GpuArena/GpuHive pages
+    // later). A SINGLE frame-invariant set, bound by both the primary and
+    // every simultaneous-use secondary. Per-frame variance lives in the
+    // buffer contents (IGpuArena refreshes them in place); the descriptor
+    // is rewritten only when a buffer's address changes (first bind + the
+    // rare growth realloc), so steady state never disturbs in-flight
+    // reads. UPDATE_AFTER_BIND because the arena writes the descriptor
+    // during prepare, after the set was bound. PARTIALLY_BOUND lets no-BVH
+    // frames leave the slots unbound (shaders gate on bvh_node_count == 0).
+    VkDescriptorSetLayoutBinding bindings[IRenderBackend::kGlobalBufferSlotCount]{};
+    VkDescriptorBindingFlags binding_flags[IRenderBackend::kGlobalBufferSlotCount]{};
+    for (uint32_t i = 0; i < IRenderBackend::kGlobalBufferSlotCount; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    }
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
+    flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flags_ci.bindingCount = IRenderBackend::kGlobalBufferSlotCount;
+    flags_ci.pBindingFlags = binding_flags;
+
+    VkDescriptorSetLayoutCreateInfo layout_ci{};
+    layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_ci.pNext = &flags_ci;
+    layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layout_ci.bindingCount = IRenderBackend::kGlobalBufferSlotCount;
+    layout_ci.pBindings = bindings;
+
+    if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &bound_buffer_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pool_size.descriptorCount = IRenderBackend::kGlobalBufferSlotCount;
+
+    VkDescriptorPoolCreateInfo pool_ci{};
+    pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pool_ci.maxSets = 1;
+    pool_ci.poolSizeCount = 1;
+    pool_ci.pPoolSizes = &pool_size;
+
+    if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &bound_buffer_pool_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc_info.descriptorPool = bound_buffer_pool_;
+    alloc_info.descriptorSetCount = 1;
+    alloc_info.pSetLayouts = &bound_buffer_layout_;
+
+    return vkAllocateDescriptorSets(device_, &alloc_info, &bound_buffer_set_) == VK_SUCCESS;
+}
+
 bool VkBackend::create_pipeline_layout()
 {
     VkPushConstantRange push_range{};
@@ -789,10 +860,13 @@ bool VkBackend::create_pipeline_layout()
     push_range.offset = 0;
     push_range.size = kMaxRootConstantsSize;
 
+    // set 0 = bindless arrays (shared), set 1 = per-frame bound buffers.
+    VkDescriptorSetLayout set_layouts[2] = { descriptor_layout_, bound_buffer_layout_ };
+
     VkPipelineLayoutCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    ci.setLayoutCount = 1;
-    ci.pSetLayouts = &descriptor_layout_;
+    ci.setLayoutCount = 2;
+    ci.pSetLayouts = set_layouts;
     ci.pushConstantRangeCount = 1;
     ci.pPushConstantRanges = &push_range;
 
@@ -1241,6 +1315,43 @@ void VkBackend::record_buffer_update(IGpuBuffer& target, size_t offset,
     auto& sync = frame_sync_[recording_slot_];
     vkCmdUpdateBuffer(sync.command_buffer, buffer, offset, size, data);
     sync.pending_buffer_update_barrier = true;
+}
+
+void VkBackend::set_global_buffer(uint32_t binding, IGpuBuffer* buffer)
+{
+    if (binding >= IRenderBackend::kGlobalBufferSlotCount) return;
+
+    // The caller may pass a raw IGpuBuffer or a CPU-shadow IBuffer
+    // wrapper whose backend handle lives on its attached storage.
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(buffer);
+    IGpuBuffer::Ptr storage;  // keeps resolved storage alive across the cast
+    if (!vk_gb) {
+        if (auto* owner = interface_cast<IGpuBufferStorageOwner>(buffer)) {
+            storage = owner->attached_gpu_buffer();
+            vk_gb = interface_cast<IVkGpuBuffer>(storage.get());
+        }
+    }
+
+    ::VkBuffer vk_buffer = vk_gb ? vk_gb->vk_buffer() : VK_NULL_HANDLE;
+    // Null / unresolved: leave the slot as-is. PARTIALLY_BOUND keeps the
+    // descriptor valid as long as the shader does not access it (no-BVH
+    // frames gate on bvh_node_count == 0).
+    if (vk_buffer == VK_NULL_HANDLE) return;
+
+    VkDescriptorBufferInfo info{};
+    info.buffer = vk_buffer;
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = bound_buffer_set_;
+    write.dstBinding = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &info;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
 void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
@@ -2090,6 +2201,15 @@ void VkBackend::begin_frame()
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
+                            0, nullptr);
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes).
+    // Bound here for compute dispatches recorded inline on the primary;
+    // simultaneous-use secondaries bind it themselves. The arena fills its
+    // descriptors during prepare; raster never references set 1.
+    vkCmdBindDescriptorSets(sync.command_buffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline_layout_,
+                            1, 1, &bound_buffer_set_,
                             0, nullptr);
 
     frame_open_ = true;

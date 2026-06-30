@@ -129,8 +129,9 @@ layout(buffer_reference, scalar) readonly buffer GlobalData {
     uint bvh_node_count;
     uint bvh_shape_count;
     uint present_counter;
-    BvhNodeList bvh_nodes;
-    RtShapeList bvh_shapes;
+    uint bvh_node_base;   // element base into the BVH node ring region this frame
+    uint bvh_shape_base;  // element base into the BVH shape ring region this frame
+    uvec2 _bvh_reserved;  // keeps the FrameGlobals layout (was bvh_shapes_addr)
     mat4 prev_view_projection;
 };
 

@@ -14,6 +14,8 @@
 
 namespace velk {
 
+class IGpuArena;
+
 /**
  * @brief Shared non-owning context passed to per-view render paths.
  *
@@ -30,6 +32,13 @@ struct FrameContext
     IFrameDataManager* frame_buffer = nullptr;
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
+
+    /// Shared BVH arenas (set = 1 slots 0/1), owned by the Renderer and
+    /// reused by every scene's BVH so multiple BVHs suballocate distinct
+    /// regions of one buffer instead of fighting over the slot. Null before
+    /// the Renderer assigns them.
+    IGpuArena* bvh_nodes_arena = nullptr;
+    IGpuArena* bvh_shapes_arena = nullptr;
 
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
@@ -70,6 +79,11 @@ struct FrameContext
     uint32_t bvh_root = 0;
     uint32_t bvh_node_count = 0;
     uint32_t bvh_shape_count = 0;
+    /// Element base added to BVH node / shape indices this frame (IGpuArena
+    /// ring region); stamped into FrameGlobals / RtRoot so shaders read
+    /// data[base + index].
+    uint32_t bvh_node_base = 0;
+    uint32_t bvh_shape_base = 0;
 
     /// Convenience: assemble a FrameResolveContext for snippet-registry calls.
     FrameResolveContext make_resolve_context() const

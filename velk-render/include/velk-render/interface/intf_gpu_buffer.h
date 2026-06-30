@@ -52,6 +52,12 @@ class IGpuBufferStorageOwner
 {
 public:
     virtual void attach_gpu_buffer(IGpuBuffer::Ptr gb) = 0;
+
+    /// The attached GPU storage, or null before attach. Lets a backend
+    /// reach the concrete GPU buffer (e.g. to bind it into a descriptor)
+    /// from a CPU-shadow IBuffer wrapper, whose own IGpuBuffer methods
+    /// forward to this storage but cannot expose the backend handle.
+    virtual IGpuBuffer::Ptr attached_gpu_buffer() const = 0;
 };
 
 } // namespace velk

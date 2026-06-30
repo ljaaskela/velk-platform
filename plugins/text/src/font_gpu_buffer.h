@@ -76,6 +76,7 @@ public:
     bool write_diff(const void* /*bytes*/, size_t /*size*/) override { return false; }
     bool write(size_t /*sz*/, WriteFn /*fn*/, void* /*ctx*/) override { return false; }
     void attach_gpu_buffer(IGpuBuffer::Ptr gb) override { gpu_buffer_ = std::move(gb); }
+    IGpuBuffer::Ptr attached_gpu_buffer() const override { return gpu_buffer_; }
 
 private:
     IGpuBuffer::Ptr gpu_buffer_;

@@ -81,6 +81,16 @@ void VkCommandBuffer::begin_recording()
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
                             0, nullptr);
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes).
+    // Compute dispatches recorded into this secondary statically use it;
+    // it is a single set, so binding it here is valid even though the
+    // secondary is shared across in-flight frames. Compute-only, so it is
+    // not rebound for GRAPHICS in record_begin_rendering.
+    vkCmdBindDescriptorSets(cmd_,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            backend_->pipeline_layout_,
+                            1, 1, &backend_->bound_buffer_set_,
+                            0, nullptr);
 }
 
 void VkCommandBuffer::end_recording()

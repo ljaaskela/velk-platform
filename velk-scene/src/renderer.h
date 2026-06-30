@@ -118,6 +118,12 @@ private:
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
 
+    /// Shared BVH arenas (set = 1 slots 0/1), created once and handed to
+    /// every scene's BVH via FrameContext so multiple BVHs suballocate
+    /// distinct regions instead of colliding on the slot.
+    IGpuArena::Ptr bvh_nodes_arena_;
+    IGpuArena::Ptr bvh_shapes_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.
@@ -153,6 +159,8 @@ private:
         uint32_t bvh_root = 0;
         uint32_t bvh_node_count = 0;
         uint32_t bvh_shape_count = 0;
+        uint32_t bvh_node_base = 0;
+        uint32_t bvh_shape_base = 0;
     };
     vector<PreparedView> prepared_views_;
 

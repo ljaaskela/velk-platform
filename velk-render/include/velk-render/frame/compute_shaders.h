@@ -38,6 +38,16 @@ layout(set = 0, binding = 1, rgba8)   uniform writeonly image2D gStorageImages[]
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
+// Scene TLAS, bound by index (set = 1) instead of chased through a
+// buffer_device_address in globals. The renderer stamps the same
+// scene-wide BVH buffers into set_global_buffer each frame; indexed by
+// first_child / first_shape are relative to this frame's ring region;
+// VELK_NODE_BASE / VELK_SHAPE_BASE add the region base (see IGpuArena).
+layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
+layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
+#define VELK_NODE_BASE pc.globals.bvh_node_base
+#define VELK_SHAPE_BASE pc.globals.bvh_shape_base
+
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
     uvec4 flags;           // x = type (0 dir, 1 point, 2 spot), y = shadow_tech_id, zw = _
@@ -394,12 +404,12 @@ bool trace_any_hit(Ray ray, float t_max)
     stack[sp++] = pc.globals.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.globals.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = pc.globals.bvh_shapes.data[node.first_shape + i];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -410,8 +420,8 @@ bool trace_any_hit(Ray ray, float t_max)
         // Falls back to natural order for non-binary or single-child
         // nodes (none today, but kept defensive).
         if (node.child_count == 2u) {
-            BvhNode l = pc.globals.bvh_nodes.data[node.first_child];
-            BvhNode r = pc.globals.bvh_nodes.data[node.first_child + 1u];
+            BvhNode l = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child];
+            BvhNode r = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child + 1u];
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -968,6 +978,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
 
+// Scene TLAS bound by index (set = 1); same buffers as the deferred
+// pass. Replaces the RtRoot BDA fields bvh_nodes / bvh_shapes for the
+// array reads (bvh_root / bvh_node_count scalars still come from RtRoot).
+layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
+layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
+#define VELK_NODE_BASE pc.bvh_node_base
+#define VELK_SHAPE_BASE pc.bvh_shape_base
+
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {
     uvec4 flags;           // x = type (0=dir, 1=point, 2=spot), y = shadow_tech_id, zw = _
@@ -994,8 +1012,8 @@ layout(buffer_reference, scalar) readonly buffer RtRoot {
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
     RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
-    RtShapeList bvh_shapes;     // element-grouped buffer; BvhNode ranges index here
-    BvhNodeList bvh_nodes;
+    uint bvh_node_base;         // element base into the BVH node ring region this frame
+    uint bvh_shape_base;        // element base into the BVH shape ring region this frame
     uint bvh_root;
     uint bvh_node_count;
     uint64_t env_data_addr;
@@ -1380,12 +1398,12 @@ bool trace_closest_hit(Ray ray, out RayHit hit) {
     stack[sp++] = pc.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
         for (uint i = 0u; i < node.shape_count; ++i) {
             uint idx = node.first_shape + i;
-            RtShape s = pc.bvh_shapes.data[idx];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +idx];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < hit.t) {
                 hit = h;
@@ -1407,11 +1425,11 @@ bool trace_any_hit(Ray ray, float t_max) {
     stack[sp++] = pc.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_enter)) continue;
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = pc.bvh_shapes.data[node.first_shape + i];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -1559,7 +1577,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             return acc;
         }
         // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
-        RtShape s = pc.bvh_shapes.data[hit.shape_index];
+        RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +hit.shape_index];
         EvalContext ctx;
         ctx.data_addr = s.material_data_addr;
         ctx.texture_id = s.texture_id;

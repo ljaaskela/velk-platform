@@ -9,6 +9,7 @@
 #include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_bvh.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-scene/plugin.h>
 
@@ -75,12 +76,11 @@ public:
         return false;
     }
 
-    IBuffer::Ptr get_nodes_buffer() const override { return nodes_buffer_.buffer(); }
-    IBuffer::Ptr get_shapes_buffer() const override { return shapes_buffer_.buffer(); }
-
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
     uint32_t get_shape_count() const override { return shape_count_; }
+    uint32_t get_node_base() const override { return node_base_; }
+    uint32_t get_shape_base() const override { return shape_base_; }
 
     void invalidate() override { dirty_ = true; }
 
@@ -111,13 +111,10 @@ private:
     vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
 
-    /// Persistent per-bvh GPU buffers backing nodes / shapes / mesh-
-    /// instance arrays. PersistentBuffer wraps the standard
-    /// "lazy-create + write_diff + ensure_buffer_storage + map+memcpy"
-    /// pipeline; addresses stay stable until the underlying buffer
-    /// reallocates (size change).
-    PersistentBuffer nodes_buffer_;
-    PersistentBuffer shapes_buffer_;
+    /// Nodes / shapes are written into the Renderer-owned shared IGpuArenas
+    /// (set = 1) each rebuild; this BVH gets a suballocated region whose base
+    /// is stamped into FrameGlobals / RtRoot. The mesh-instance array stays a
+    /// PersistentBuffer (BDA) until the mesh chain migrates.
     PersistentBuffer mesh_instances_buffer_;
 
     uint64_t nodes_addr_ = 0;
@@ -125,6 +122,8 @@ private:
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
     uint32_t shape_count_ = 0;
+    uint32_t node_base_ = 0;   ///< Ring-region element base for nodes this frame.
+    uint32_t shape_base_ = 0;  ///< Ring-region element base for shapes this frame.
     bool dirty_ = true;
 };
 

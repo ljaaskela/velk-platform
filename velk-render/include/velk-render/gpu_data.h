@@ -31,12 +31,13 @@ struct FrameGlobals
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
-    uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
+    uint32_t bvh_root;                     ///< Index of the root BvhNode (relative to this frame's ring region); 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
-    uint64_t bvh_nodes_addr;               ///< GPU pointer to the BvhNode array.
-    uint64_t bvh_shapes_addr;              ///< GPU pointer to the scene's RtShape array.
+    uint32_t bvh_node_base;                ///< Element base added to BVH node indices (IGpuArena ring region for this frame).
+    uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
+    uint64_t _bvh_reserved;                ///< Was bvh_shapes_addr; reserved to keep the 256-byte layout.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
 };
 

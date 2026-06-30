@@ -73,6 +73,10 @@ struct RenderView
     uint32_t bvh_root = 0;
     uint32_t bvh_node_count = 0;
     uint32_t bvh_shape_count = 0;
+    /// Element base added to BVH node / shape indices this frame (IGpuArena
+    /// ring region); stamped into FrameGlobals / RtRoot.
+    uint32_t bvh_node_base = 0;
+    uint32_t bvh_shape_base = 0;
 
     /// Camera environment, if any.
     ViewEnv env{};

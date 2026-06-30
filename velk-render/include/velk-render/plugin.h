@@ -36,6 +36,9 @@ inline constexpr Uid ProgramDataBuffer{"5362a373-42bf-48b1-9537-1229f44d008d"};
 /** @brief Generic CPU-resident byte blob with a backend handle (composed by batches, etc). */
 inline constexpr Uid GpuBuffer{"fc36343d-5f1c-4cbf-8a9c-7ed736862525"};
 
+/** @brief Frame-invariant bound storage buffer (set = 1) read by index; see intf_gpu_arena.h. */
+inline constexpr Uid GpuArena{"f82e85d3-15a6-426b-845a-3ee1edfe60ee"};
+
 /** @brief Mesh container: an authored group of IMeshPrimitives plus aggregate bounds. */
 inline constexpr Uid Mesh{"d82485b9-7d93-4196-ae98-f22f6131f7c8"};
 

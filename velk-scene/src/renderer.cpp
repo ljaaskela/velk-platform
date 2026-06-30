@@ -267,12 +267,30 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
 
 FrameContext Renderer::make_frame_context()
 {
+    // Shared BVH arenas (set = 1 slots 0/1): created once, reused by every
+    // scene's BVH so multiple BVHs suballocate distinct regions of one
+    // buffer rather than overwriting each other's descriptor binding.
+    if (!bvh_nodes_arena_) {
+        bvh_nodes_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+        if (bvh_nodes_arena_) {
+            bvh_nodes_arena_->init(IRenderBackend::kGlobalBvhNodes, sizeof(GpuBvhNode));
+        }
+    }
+    if (!bvh_shapes_arena_) {
+        bvh_shapes_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+        if (bvh_shapes_arena_) {
+            bvh_shapes_arena_->init(IRenderBackend::kGlobalBvhShapes, sizeof(RtShape));
+        }
+    }
+
     FrameContext ctx{};
     ctx.backend = backend_.get();
     ctx.render_ctx = render_ctx_;
     ctx.frame_buffer = frame_buffer_.get();
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
+    ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
+    ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -728,12 +746,19 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 ctx.bvh_root = b->get_root_index();
                 ctx.bvh_node_count = b->get_node_count();
                 ctx.bvh_shape_count = b->get_shape_count();
+                ctx.bvh_node_base = b->get_node_base();
+                ctx.bvh_shape_base = b->get_shape_base();
+                // The BVH binds its own node/shape buffers into set = 1
+                // via its IGpuArenas during rebuild (self-registering), so
+                // nothing to bind here.
             } else {
                 ctx.bvh_nodes_addr = 0;
                 ctx.bvh_shapes_addr = 0;
                 ctx.bvh_root = 0;
                 ctx.bvh_node_count = 0;
                 ctx.bvh_shape_count = 0;
+                ctx.bvh_node_base = 0;
+                ctx.bvh_shape_base = 0;
             }
             ctx.view_camera_trait = camera_trait.get();
 
@@ -755,6 +780,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             pv.bvh_root = ctx.bvh_root;
             pv.bvh_node_count = ctx.bvh_node_count;
             pv.bvh_shape_count = ctx.bvh_shape_count;
+            pv.bvh_node_base = ctx.bvh_node_base;
+            pv.bvh_shape_base = ctx.bvh_shape_base;
             pv.render_view = view_preparer_.prepare(*view_slot.entry,
                                                     view_slot.camera_element,
                                                     sit->second, ctx,
@@ -782,6 +809,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             ctx.bvh_root = pv.bvh_root;
             ctx.bvh_node_count = pv.bvh_node_count;
             ctx.bvh_shape_count = pv.bvh_shape_count;
+            ctx.bvh_node_base = pv.bvh_node_base;
+            ctx.bvh_shape_base = pv.bvh_shape_base;
             ctx.view_camera_trait = pv.camera_trait.get();
 
             IRenderTarget::Ptr color_target =

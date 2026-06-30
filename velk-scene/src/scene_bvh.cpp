@@ -8,6 +8,9 @@
 #include <velk-scene/interface/intf_element.h>
 #include <velk-scene/interface/intf_visual.h>
 
+#include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/plugin.h>
+
 #include <cstring>
 
 namespace velk::impl {
@@ -115,13 +118,26 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
     }
 
     // Shapes after mesh-instance stamping so any address change cascades
-    // into the shapes blob (PersistentBuffer's write_diff catches it).
-    shapes_addr_ = shapes_buffer_.upload(
-        cached_shapes_.data(),
-        cached_shapes_.size() * sizeof(RtShape), ctx).address;
-    nodes_addr_ = nodes_buffer_.upload(
-        cached_nodes_.data(),
-        cached_nodes_.size() * sizeof(GpuBvhNode), ctx).address;
+    // into the shapes blob (the arena's write_diff catches it). The
+    // arenas self-register their buffers into compute set = 1; shaders
+    // read nodes / shapes by index. The returned address is kept only as
+    // a CPU-side change token for the RT pipeline cache key.
+    // Shared arenas owned by the Renderer: every scene's BVH suballocates a
+    // distinct region, so multiple BVHs in one frame never collide on the
+    // set = 1 slot. The returned region's element base selects this BVH's
+    // region; shaders read data[base + index].
+    if (ctx.bvh_shapes_arena) {
+        auto r = ctx.bvh_shapes_arena->write(cached_shapes_.data(),
+                                             cached_shapes_.size() * sizeof(RtShape), ctx);
+        shape_base_ = static_cast<uint32_t>(r.offset / sizeof(RtShape));
+        shapes_addr_ = ctx.bvh_shapes_arena->gpu_address();
+    }
+    if (ctx.bvh_nodes_arena) {
+        auto r = ctx.bvh_nodes_arena->write(cached_nodes_.data(),
+                                            cached_nodes_.size() * sizeof(GpuBvhNode), ctx);
+        node_base_ = static_cast<uint32_t>(r.offset / sizeof(GpuBvhNode));
+        nodes_addr_ = ctx.bvh_nodes_arena->gpu_address();
+    }
 }
 
 } // namespace velk::impl
