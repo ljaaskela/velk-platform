@@ -5,6 +5,7 @@
 #include <velk/uid.h>
 
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -53,6 +54,12 @@ public:
     /// returned IGpuBuffer for lifetime tracking; dropping the last
     /// Ptr defers the backend allocation for destruction.
     virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
+
+    /// Creates an IGpuArena bound to set = 1 @p slot with the given element
+    /// size, allocating its backing buffer(s) from this manager. The manager
+    /// weak-tracks it and drives its deferred region reclaim from
+    /// `drain_deferred`. The caller owns the returned Ptr.
+    virtual IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) = 0;
 
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last

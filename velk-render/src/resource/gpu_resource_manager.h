@@ -48,6 +48,7 @@ public:
     void init(IRenderBackend* backend) override;
     void enable_transient_pool() override;
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
+    IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) override;
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) override;
@@ -132,6 +133,10 @@ private:
     std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
+
+    /// Arenas created via create_arena; weak so the caller owns lifetime.
+    /// drain_deferred ticks each live arena's deferred region reclaim.
+    vector<IGpuArena::WeakPtr> arenas_;
 
     /// Transient-pool state. Empty / inactive when `transient_mode_`
     /// is false (the default for the renderer's persistent manager).

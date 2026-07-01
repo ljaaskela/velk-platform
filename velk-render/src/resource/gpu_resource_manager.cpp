@@ -31,6 +31,15 @@ IGpuBuffer::Ptr GpuResourceManager::create_gpu_buffer(const GpuBufferDesc& desc)
     return gb;
 }
 
+IGpuArena::Ptr GpuResourceManager::create_arena(uint32_t slot, uint32_t element_size)
+{
+    auto arena = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+    if (!arena) return {};
+    arena->init(slot, element_size);
+    arenas_.push_back(arena);  // weak-track for the reclaim tick
+    return arena;
+}
+
 bool GpuResourceManager::transient_desc_matches(const TextureDesc& a, const TextureDesc& b)
 {
     return a.width == b.width && a.height == b.height &&
@@ -250,6 +259,18 @@ void GpuResourceManager::add_env_observer(const IBuffer::WeakPtr& res)
 void GpuResourceManager::drain_deferred(IRenderBackend& /*backend*/)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
+
+    // Reclaim freed arena regions whose in-flight frame has retired, and
+    // prune arenas the caller has dropped.
+    for (size_t i = 0; i < arenas_.size();) {
+        if (auto a = arenas_[i].lock()) {
+            a->reclaim();
+            ++i;
+        } else {
+            arenas_[i] = arenas_.back();
+            arenas_.pop_back();
+        }
+    }
 
     // Transient-pool tick: age idle texture entries; drop the Ptr after
     // `kMaxIdleFrames` consecutive idle ticks, which routes through

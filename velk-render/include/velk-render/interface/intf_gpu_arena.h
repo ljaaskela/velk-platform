@@ -4,9 +4,10 @@
 #include <velk/api/velk.h>
 
 #include <cstdint>
-#include <velk-render/render_path/frame_context.h>
 
 namespace velk {
+
+struct FrameContext;
 
 class IGpuArena;
 
@@ -115,6 +116,11 @@ public:
     /// The arena defers the reclaim past the in-flight frame's fence, so the
     /// range is never reused while an earlier frame may still read it.
     virtual void release_region(uint64_t offset, uint64_t size) = 0;
+
+    /// Returns freed persistent regions whose in-flight frame has retired to
+    /// the free-list. Driven by GpuResourceManager::drain_deferred each frame
+    /// so reclaim happens even without a new alloc. No-op for ring arenas.
+    virtual void reclaim() = 0;
 
     /// The set = 1 slot this arena's buffer is bound to.
     virtual uint32_t slot() const = 0;

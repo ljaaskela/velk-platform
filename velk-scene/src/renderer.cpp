@@ -269,36 +269,25 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
 
 FrameContext Renderer::make_frame_context()
 {
-    // Shared BVH arenas (set = 1 slots 0/1): created once, reused by every
-    // scene's BVH so multiple BVHs suballocate distinct regions of one
-    // buffer rather than overwriting each other's descriptor binding.
-    if (!bvh_nodes_arena_) {
-        bvh_nodes_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
-        if (bvh_nodes_arena_) {
-            bvh_nodes_arena_->init(IRenderBackend::kGlobalBvhNodes, sizeof(GpuBvhNode));
-        }
+    // Shared arenas, created from the resource manager (which allocates their
+    // buffers and drives their deferred region reclaim). BVH arenas (slots
+    // 0/1) and the globals arena (slot 2) are ring/transient; the instance
+    // arena (slot 3) is a persistent suballocator.
+    if (resources_ && !bvh_nodes_arena_) {
+        bvh_nodes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhNodes,
+                                                    sizeof(GpuBvhNode));
     }
-    if (!bvh_shapes_arena_) {
-        bvh_shapes_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
-        if (bvh_shapes_arena_) {
-            bvh_shapes_arena_->init(IRenderBackend::kGlobalBvhShapes, sizeof(RtShape));
-        }
+    if (resources_ && !bvh_shapes_arena_) {
+        bvh_shapes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhShapes,
+                                                     sizeof(RtShape));
     }
-    // Shared per-view FrameGlobals arena (set = 1 slot 2): every view writes
-    // its FrameGlobals into a distinct suballocated region of one buffer.
-    if (!globals_arena_) {
-        globals_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
-        if (globals_arena_) {
-            globals_arena_->init(IRenderBackend::kGlobalGlobals, sizeof(FrameGlobals));
-        }
+    if (resources_ && !globals_arena_) {
+        globals_arena_ = resources_->create_arena(IRenderBackend::kGlobalGlobals,
+                                                  sizeof(FrameGlobals));
     }
-    // Shared instance arena (set = 1 slot 3): every batch writes its instance
-    // blob into the fenced ring each frame (element size = one instance).
-    if (!instance_arena_) {
-        instance_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
-        if (instance_arena_) {
-            instance_arena_->init(IRenderBackend::kGlobalInstances, kMaxInstanceDataSize);
-        }
+    if (resources_ && !instance_arena_) {
+        instance_arena_ = resources_->create_arena(IRenderBackend::kGlobalInstances,
+                                                   kMaxInstanceDataSize);
     }
 
     FrameContext ctx{};

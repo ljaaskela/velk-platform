@@ -109,6 +109,8 @@ add_library(velk_render SHARED
     src/resource/program_data_buffer.h
     src/resource/gpu_resource_manager.h
     src/resource/gpu_resource_manager.cpp
+    src/resource/gpu_arena.h
+    src/resource/gpu_arena.cpp
     src/resource/surface.h
 
     # Shadow / reflection / etc. techniques
@@ -169,6 +171,7 @@ add_library(velk_render SHARED
     # Per-frame runtime interfaces (interfaces under interface/, shared
     # types stay in frame/, render-graph impl in src/frame/)
     include/velk-render/interface/intf_gpu_resource_manager.h
+    include/velk-render/interface/intf_gpu_arena.h
     include/velk-render/interface/intf_frame_data_manager.h
     include/velk-render/interface/intf_frame_snippet_registry.h
     include/velk-render/interface/intf_render_graph.h
