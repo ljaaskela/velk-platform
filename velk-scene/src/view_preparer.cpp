@@ -15,6 +15,7 @@
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shadow_technique.h>
@@ -258,6 +259,16 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     }
     cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
     rv.view_globals_address = cache.view_globals_buffer->gpu_address();
+
+    // Also mirror into the shared globals arena (set = 1 slot 2) so the
+    // direct-push compute shaders read velk_globals.data[base] by index.
+    // Graphics and RT still use the address above until their root pointers
+    // migrate.
+    if (ctx.globals_arena) {
+        auto region = ctx.globals_arena->write(&globals, sizeof(globals), ctx);
+        rv.view_globals_base =
+            region.valid() ? static_cast<uint32_t>(region.offset / sizeof(FrameGlobals)) : 0u;
+    }
 }
 
 void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,

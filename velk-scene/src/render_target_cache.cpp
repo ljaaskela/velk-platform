@@ -8,6 +8,7 @@
 #include <velk-render/detail/intf_gpu_resource_manager_internal.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-scene/interface/intf_render_to_texture.h>
 
@@ -154,6 +155,15 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
             if (vg) {
                 vg->update(0, sizeof(FrameGlobals), &rt_globals);
                 rt_view.view_globals_address = vg->gpu_address();
+            }
+            // Mirror into the shared globals arena for index-based compute
+            // reads (same as the main view path in ViewPreparer).
+            if (ctx.globals_arena) {
+                auto region = ctx.globals_arena->write(&rt_globals, sizeof(rt_globals), ctx);
+                rt_view.view_globals_base =
+                    region.valid()
+                        ? static_cast<uint32_t>(region.offset / sizeof(FrameGlobals))
+                        : 0u;
             }
         }
         rt_view.bvh = ctx.bvh;

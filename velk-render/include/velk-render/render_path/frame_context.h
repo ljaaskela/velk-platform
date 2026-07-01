@@ -41,6 +41,15 @@ struct FrameContext
     IGpuArena* bvh_nodes_arena = nullptr;
     IGpuArena* bvh_shapes_arena = nullptr;
 
+    /// Shared per-view FrameGlobals arena (set = 1 slot 2), owned by the
+    /// Renderer. Each view writes its FrameGlobals here and pushes the
+    /// returned element base so the direct-push compute shaders (deferred
+    /// lighting / denoise / spatial) read velk_globals.data[base] instead
+    /// of chasing a buffer_device_address. Null before the Renderer assigns
+    /// it. Graphics and RT still reach globals via the per-view buffer's
+    /// address until their root pointers migrate.
+    IGpuArena* globals_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

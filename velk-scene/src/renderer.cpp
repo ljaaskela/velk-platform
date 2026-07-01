@@ -282,6 +282,14 @@ FrameContext Renderer::make_frame_context()
             bvh_shapes_arena_->init(IRenderBackend::kGlobalBvhShapes, sizeof(RtShape));
         }
     }
+    // Shared per-view FrameGlobals arena (set = 1 slot 2): every view writes
+    // its FrameGlobals into a distinct suballocated region of one buffer.
+    if (!globals_arena_) {
+        globals_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+        if (globals_arena_) {
+            globals_arena_->init(IRenderBackend::kGlobalGlobals, sizeof(FrameGlobals));
+        }
+    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -291,6 +299,7 @@ FrameContext Renderer::make_frame_context()
     ctx.snippets = snippets_.get();
     ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
     ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
+    ctx.globals_arena = globals_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before

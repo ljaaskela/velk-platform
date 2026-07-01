@@ -124,6 +124,11 @@ private:
     IGpuArena::Ptr bvh_nodes_arena_;
     IGpuArena::Ptr bvh_shapes_arena_;
 
+    /// Shared per-view FrameGlobals arena (set = 1 slot 2), created once
+    /// and handed to every view via FrameContext so multiple views
+    /// suballocate distinct regions of one buffer.
+    IGpuArena::Ptr globals_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.

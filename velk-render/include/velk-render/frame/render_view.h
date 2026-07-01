@@ -67,6 +67,13 @@ struct RenderView
     /// in the velk.glsl prelude. 0 when the viewport is degenerate.
     uint64_t view_globals_address = 0;
 
+    /// Element base of this view's FrameGlobals within the shared globals
+    /// arena (set = 1 slot 2). Pushed to the direct-push compute shaders
+    /// (deferred lighting / denoise / spatial) so they read
+    /// velk_globals.data[view_globals_base] instead of a device address.
+    /// Derived as region.offset / sizeof(FrameGlobals) at prepare time.
+    uint32_t view_globals_base = 0;
+
     /// How this view reaches the scene BVH (empty when no BVH).
     BvhBinding bvh{};
 

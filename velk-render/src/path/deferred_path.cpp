@@ -173,7 +173,8 @@ namespace {
 // CPU mirror of the deferred lighting push-constant block
 // (`layout(push_constant) PC` in deferred_compute_prelude_src).
 VELK_GPU_STRUCT DeferredComputePushC {
-    uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
+    uint32_t globals_base;     // FrameGlobals arena index, GLSL pc.globals_base
+    uint32_t _pad_globals;
     float    cam_pos[4];
     uint32_t output_image_id;
     uint32_t albedo_tex_id;
@@ -197,7 +198,8 @@ static_assert(sizeof(DeferredComputePushC) == 96, "Deferred compute PushC layout
 // Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
 // mirrors the PC block in deferred_denoise_compute_src).
 VELK_GPU_STRUCT DenoisePushC {
-    uint64_t globals;
+    uint32_t globals_base;
+    uint32_t _pad_globals;
     uint32_t normal_id;
     uint32_t worldpos_id;
     uint32_t irr_id;
@@ -215,7 +217,8 @@ VELK_GPU_STRUCT DenoisePushC {
 // Push constants for the spatial filter + composite pass (mirrors the PC block
 // in deferred_spatial_composite_compute_src).
 VELK_GPU_STRUCT SpatialPushC {
-    uint64_t globals;
+    uint32_t globals_base;
+    uint32_t _pad_globals;
     uint32_t albedo_id;
     uint32_t material_id;
     uint32_t normal_id;
@@ -586,7 +589,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uint64_t lights_addr = render_view.lights_addr;
 
     DeferredComputePushC pc{};
-    pc.globals = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;
     pc.cam_pos[2] = render_view.cam_pos.z;
@@ -674,7 +677,7 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
     const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
 
     DenoisePushC pc{};
-    pc.globals = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
     pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
     pc.irr_id      = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
@@ -769,7 +772,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     }
 
     SpatialPushC pc{};
-    pc.globals     = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
     pc.material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
     pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));

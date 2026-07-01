@@ -45,8 +45,12 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF1
 // VELK_NODE_BASE / VELK_SHAPE_BASE add the region base (see IGpuArena).
 layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
 layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
-#define VELK_NODE_BASE pc.globals.bvh_node_base
-#define VELK_SHAPE_BASE pc.globals.bvh_shape_base
+// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
+// view's FrameGlobals record, replacing the FrameGlobals device address.
+layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
+#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
@@ -74,7 +78,8 @@ layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
 // std430 would round vec4 up to a 16-byte alignment and shift every
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // offset 0  (8 bytes, FrameGlobals BDA)
+    uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
+    uint _pad_globals;         // 4         (keeps cam_pos at offset 8)
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -398,10 +403,10 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 // any realistic UI scene depth.
 bool trace_any_hit(Ray ray, float t_max)
 {
-    if (pc.globals.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[32];
     int sp = 0;
-    stack[sp++] = pc.globals.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
         BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
@@ -553,7 +558,7 @@ void main()
     // the environment. Falls back to black when the view has no env.
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
-        mat4 inv_vp = pc.globals.inverse_view_projection;
+        mat4 inv_vp = VELK_GLOBALS.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
         vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
@@ -610,7 +615,7 @@ void main()
         vec3  res_radiance = vec3(0.0);
         float total_w = 0.0;
         uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
-                     + pc.globals.present_counter * 26699u) | 1u;
+                     + VELK_GLOBALS.present_counter * 26699u) | 1u;
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = pc.lights.data[i];
             vec3 L;
@@ -703,7 +708,7 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         float ao = 1.0;
-        if (pc.globals.bvh_node_count != 0u) {
+        if (VELK_GLOBALS.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
             ao_r.origin = world_pos + N * 0.01;
@@ -755,8 +760,14 @@ void main()
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
+// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
+// view's FrameGlobals record.
+layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // prev_view_projection (+ view_projection)
+    uint globals_base;         // offset 0  (view's FrameGlobals index)
+    uint _pad_globals;
     uint normal_id;
     uint worldpos_id;
     uint irr_id;               // current-frame noisy diffuse irradiance (sampled)
@@ -797,7 +808,7 @@ void main()
     float count = 1.0;
     float m2_acc = cur_lum * cur_lum; // accumulated 2nd moment of luminance
     if (pc.reset == 0u) {
-        vec4 prev_clip = pc.globals.prev_view_projection * vec4(world_pos, 1.0);
+        vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(world_pos, 1.0);
         if (prev_clip.w > 1e-6) {
             vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
             if (all(greaterThanEqual(prev_uv, vec2(0.0))) &&
@@ -844,8 +855,14 @@ void main()
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
+// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
+// view's FrameGlobals record.
+layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // cam_pos (for depth-relative edge stops)
+    uint globals_base;         // offset 0  (view's FrameGlobals index; cam_pos via VELK_GLOBALS)
+    uint _pad_globals;
     uint albedo_id;
     uint material_id;
     uint normal_id;
@@ -895,7 +912,7 @@ void main()
 
     // Wider taps when unconverged; tightens to a 5x5 once converged.
     int step = int(mix(3.0, 1.0, clamp(count / 16.0, 0.0, 1.0)) + 0.5);
-    float depth = max(length(pc.globals.cam_pos.xyz - world_pos), 1e-3);
+    float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
 
     vec3 sum = vec3(0.0);
     float wsum = 0.0;

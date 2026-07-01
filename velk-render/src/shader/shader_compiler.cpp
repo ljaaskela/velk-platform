@@ -135,6 +135,28 @@ layout(buffer_reference, scalar) readonly buffer GlobalData {
     mat4 prev_view_projection;
 };
 
+// Plain-struct mirror of FrameGlobals (same fields as GlobalData above),
+// used as the element type of the set = 1 globals buffer that the
+// direct-push compute shaders (deferred lighting / denoise / spatial)
+// read by index: `velk_globals.data[globals_base].X`. Declared here as a
+// value type only — no `layout(...) buffer` binding — so graphics/raster
+// shaders that #include this prelude never reflect a set = 1 descriptor.
+// The buffer itself is declared per compute source (see compute_shaders.h).
+struct FrameGlobalsData {
+    mat4 view_projection;
+    mat4 inverse_view_projection;
+    vec4 viewport;
+    vec4 cam_pos;
+    uint bvh_root;
+    uint bvh_node_count;
+    uint bvh_shape_count;
+    uint present_counter;
+    uint bvh_node_base;
+    uint bvh_shape_base;
+    uvec2 _bvh_reserved;
+    mat4 prev_view_projection;
+};
+
 // Storage-image arrays for compute imageStore are declared locally
 // per-shader (rgba8 -> binding 1, rgba32f -> binding 2, rgba16f ->
 // binding 3) rather than here. Putting them in the prelude leaks the
