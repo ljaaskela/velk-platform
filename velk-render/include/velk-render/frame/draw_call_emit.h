@@ -94,16 +94,15 @@ inline void emit_draw_calls(
             }
         }
         const bool has_storage = (storage_gb != nullptr && batch.storage_gpu_address() != 0);
-        uint64_t instances_addr = 0;
-        if (has_storage) {
-            instances_addr = batch.storage_gpu_address() + BatchBufferLayout::kInstanceOffset;
-        } else {
-            auto instance_bytes = batch.instance_data();
-            instances_addr =
-                frame_data.write(instance_bytes.begin(), instance_bytes.size());
-            if (!instances_addr) continue;
+        // Instance data lives in the shared instance arena (set = 1 slot 3),
+        // suballocated per batch by the upload sweep. The header carries the
+        // element base (region offset / stride) the vertex shader adds to
+        // gl_InstanceIndex. Batches with no instance data (e.g. env) get 0.
+        uint32_t instances_base = 0;
+        if (batch.instance_stride() != 0 && batch.instance_region_size() != 0) {
+            instances_base = static_cast<uint32_t>(
+                batch.instance_region_offset() / batch.instance_stride());
         }
-
         uint32_t texture_id = 0;
         if (batch.texture_key() != 0) {
             auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
@@ -137,7 +136,7 @@ inline void emit_draw_calls(
 
         DrawDataHeader header{};
         header.globals_base = view_globals_base;
-        header.instances_address = instances_addr;
+        header.instances_base = instances_base;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
         header.vbo_address = get_gpu_address(buffer);

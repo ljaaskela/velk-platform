@@ -55,9 +55,11 @@ struct ElementInstance {
     uvec4 params;
 };
 
-layout(buffer_reference, std430) readonly buffer ElementInstanceData {
-    ElementInstance data[];
-};
+// The shared instance arena (set = 1 slot 3), typed as ElementInstance (the
+// universal per-instance record). Every velk-ui shader reads its draw's
+// instance via velk_instance(root); fragment shaders that don't touch
+// instances simply never reference it.
+VELK_INSTANCES(ElementInstance)
 
 // ===== Material evaluation types =====
 // Shared across raster (forward / deferred fragment drivers) and RT
@@ -290,6 +292,14 @@ FrameContext Renderer::make_frame_context()
             globals_arena_->init(IRenderBackend::kGlobalGlobals, sizeof(FrameGlobals));
         }
     }
+    // Shared instance arena (set = 1 slot 3): every batch writes its instance
+    // blob into the fenced ring each frame (element size = one instance).
+    if (!instance_arena_) {
+        instance_arena_ = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+        if (instance_arena_) {
+            instance_arena_->init(IRenderBackend::kGlobalInstances, kMaxInstanceDataSize);
+        }
+    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -300,6 +310,7 @@ FrameContext Renderer::make_frame_context()
     ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
     ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
     ctx.globals_arena = globals_arena_.get();
+    ctx.instance_arena = instance_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before

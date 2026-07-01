@@ -85,6 +85,14 @@ public:
     void update_instance_at(uint32_t instance_index,
                             array_view<const uint8_t> bytes) override;
 
+    void set_instance_binding(uint64_t offset, uint64_t size) override
+    {
+        instance_offset_ = offset;
+        instance_size_ = size;
+    }
+    uint64_t instance_region_offset() const override { return instance_offset_; }
+    uint64_t instance_region_size() const override { return instance_size_; }
+
     IBuffer* storage_buffer() const override { return storage_.get(); }
     uint64_t storage_gpu_address() const override;
     uint8_t* storage_mapped() const override { return storage_mapped_; }
@@ -106,13 +114,19 @@ private:
     IShaderSource::Ptr shader_source_;
     PipelineOptions pipeline_options_{};
 
-    /// Composed `[args(32)][count(16)][instance_data]` blob carrier.
-    /// Created lazily on first finalize. Lifetime tied to the batch.
+    /// Composed `[args(32)][count(16)][header(48)][material_ptr(16)]` blob
+    /// carrier (fixed 112 B). Created lazily on first finalize. Instance
+    /// bytes are NOT here; they live in the shared instance arena.
     IBuffer::Ptr storage_;
-    /// Cached after each upload — host-visible pointer for in-place
-    /// transform updates. Cleared by finalize_storage when the blob is
-    /// resized (since ensure_buffer_storage will reallocate).
+    /// Cached after each upload — host-visible pointer to the storage blob,
+    /// used by emit to write the header/material_ptr in place.
     uint8_t* storage_mapped_ = nullptr;
+
+    /// This frame's instance region in the shared arena ring (set = 1 slot
+    /// 3), stamped by the upload sweep. offset / instance_stride is the
+    /// shader instances_base.
+    uint64_t instance_offset_ = 0;
+    uint64_t instance_size_ = 0;
 };
 
 } // namespace velk::impl

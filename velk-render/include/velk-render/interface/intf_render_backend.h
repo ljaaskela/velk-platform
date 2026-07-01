@@ -346,8 +346,9 @@ public:
     enum GlobalBufferSlot : uint32_t {
         kGlobalBvhNodes  = 0,
         kGlobalBvhShapes = 1,
-        kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read by compute at velk_globals.data[globals_base].
-        kGlobalBufferSlotCount = 3,
+        kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read at velk_globals.data[globals_base].
+        kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
+        kGlobalBufferSlotCount = 4,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

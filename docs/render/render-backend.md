@@ -201,7 +201,7 @@ block-beta
     E["..."]:1 F["Instance data 2"]:2 G["DrawDataHeader 2<br/>+ material ptr"]:1 H["..."]:2
 ```
 
-- **Instance data**: the per-instance array the shader reads via `instances_address`. Every visual — 2D or 3D — packs this as an array of `ElementInstance` structs (see [Instance data](#instance-data) below).
+- **Instance data**: the per-instance array the shader reads by index from the shared instance arena (`instances_base + gl_InstanceIndex`). Every visual — 2D or 3D — packs this as an array of `ElementInstance` structs (see [Instance data](#instance-data) below).
 - **DrawDataHeader**: the root struct that the shader receives a pointer to. Contains GPU addresses pointing to the instance data, frame globals, and the draw's VBO, plus the bindless texture index. A per-draw 8-byte material pointer is written immediately after the header — material params live in a separate `IProgramDataBuffer` (dirty-tracked across frames) reached through that pointer.
 
 Each write returns the GPU address of what was written. The DrawDataHeader + material-pointer pair is written last (after the instance data), and its address goes into the `DrawCall`'s push constants.
@@ -222,7 +222,7 @@ The DrawDataHeader is the root of the shader's data graph. The push constant car
 graph LR
     PC["Push Constant<br/><i>8 bytes</i>"] -->|GPU ptr| DDH["DrawDataHeader<br/>+ material ptr"]
     DDH -->|globals_base index| G["velk_globals[]<br/>view_projection, viewport, BVH"]
-    DDH -->|instances_address| I["ElementInstance[]<br/>world_matrix, offset, size, color"]
+    DDH -->|instances_base index| I["velk_instances[]<br/>world_matrix, offset, size, color"]
     DDH -->|vbo_address| V["VelkVertex3D[]<br/>position, normal, uv"]
     DDH -->|texture_id| T["Bindless Array<br/>sampler2D[]"]
     DDH -->|material ptr| M["IProgramDataBuffer<br/><i>per-material, dirty-tracked</i>"]
@@ -237,7 +237,8 @@ VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;       ///< index into velk_globals[] (set = 1)
     uint32_t _pad_globals;
-    uint64_t instances_address;  ///< -> ElementInstance[]
+    uint32_t instances_base;     ///< index into velk_instances[] (set = 1)
+    uint32_t _pad_instances;
     uint32_t texture_id;         ///< bindless index, 0 = none
     uint32_t instance_count;
     uint64_t vbo_address;        ///< -> bound VBO (VelkVbo3D)
@@ -249,23 +250,23 @@ static_assert(sizeof(DrawDataHeader) == 48, ...);
 ```
 
 ```glsl
-// GLSL (velk.glsl provides the VELK_DRAW_DATA macro; velk-ui.glsl provides ElementInstanceData)
+// GLSL (velk.glsl provides VELK_DRAW_DATA / velk_instance; velk-ui.glsl declares velk_instances as ElementInstance)
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)  // globals, instances, texture_id, count, vbo, uv1, uv1_enabled, pad
-    OpaquePtr material;                              // -> per-material data buffer
+    VELK_DRAW_DATA(VelkVbo3D)  // globals_base, instances_base, texture_id, count, vbo, uv1, uv1_enabled, pad
+    OpaquePtr material;         // -> per-material data buffer
 };
 
 layout(push_constant) uniform PC { DrawData root; };
 ```
 
-The `VELK_DRAW_DATA(InstancesType, VboType)` macro expands to the standard 48-byte header: `uint globals_base` + `uint _pad_globals`, `InstancesType instance_data`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint _pad_uv1`. The 8-byte `OpaquePtr material` field lives at offset 48 and addresses the material's per-draw GPU data buffer (an `IProgramDataBuffer` owned by the material, reused and dirty-tracked across frames). `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
+The `VELK_DRAW_DATA(VboType)` macro expands to the standard 48-byte header: `uint globals_base` + `uint _pad_globals`, `uint instances_base` + `uint _pad_instances`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint _pad_uv1`. The 8-byte `OpaquePtr material` field lives at offset 48 and addresses the material's per-draw GPU data buffer (an `IProgramDataBuffer` owned by the material, reused and dirty-tracked across frames). `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
 
-The C++ side writes addresses and indices; the GLSL side declares the pointer fields as `buffer_reference` types (dereferenced to follow the GPU pointer), while view globals are reached by index: `velk_global_data(root)` reads `velk_globals.data[root.globals_base]` from the set = 1 globals buffer (no descriptor uploads, no vertex input). Vertex shaders that don't dereference the material pointer declare it as `OpaquePtr` (8-byte placeholder) to preserve the layout without pulling in material-specific types; eval-based fragment shaders reach it as `ctx.data_addr`.
+The C++ side writes indices and addresses; the GLSL side declares the pointer fields (`vbo`, `uv1`, `material`) as `buffer_reference` types, while view globals and instances are reached by **index** into set = 1 storage buffers: `velk_global_data(root)` reads `velk_globals.data[root.globals_base]`, and `velk_instance(root)` reads `velk_instances.data[root.instances_base + gl_InstanceIndex]` (no descriptor uploads, no vertex input). Vertex shaders that don't dereference the material pointer declare it as `OpaquePtr` (8-byte placeholder); eval-based fragment shaders reach it as `ctx.data_addr`.
 
 ### Instance data
 
-The `instances_address` in the header points to an array of `ElementInstance` structs. This is the universal per-instance record: every visual (rect, rounded rect, text glyph, texture, image, env, cube, sphere, future glTF meshes) packs this one layout, so there's only one GLSL instance type to learn and one vertex shader pattern that handles everything.
+`instances_base` in the header is an element index into the shared instance arena (set = 1 slot 3), a Renderer-owned persistent storage buffer where every batch suballocates a stable region for its instances. The shader reads its draw's instance via `velk_instance(root)`. Instances are `ElementInstance` structs — the universal per-instance record: every visual (rect, rounded rect, text glyph, texture, image, env, cube, sphere, future glTF meshes) packs this one layout, so there's only one GLSL instance type to learn and one vertex shader pattern that handles everything.
 
 ```cpp
 // C++ (velk-scene/instance_types.h)
@@ -292,9 +293,8 @@ struct ElementInstance {
     uvec4 params;
 };
 
-layout(buffer_reference, std430) readonly buffer ElementInstanceData {
-    ElementInstance data[];
-};
+// velk-ui.glsl binds the shared instance arena as ElementInstance:
+VELK_INSTANCES(ElementInstance)   // -> set = 1 slot 3, read via velk_instance(root)
 ```
 
 Visuals pack their instances via `DrawEntry::set_instance()`:
@@ -317,8 +317,8 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 
 | Include | Source | Provides |
 |--|--|--|
-| `velk.glsl` | velk-render (always available) | `GlobalData`, `VelkVertex3D`, `VelkVbo3D`, `velk_vertex3d(root)`, `OpaquePtr`, `VELK_DRAW_DATA(InstancesType, VboType)`, `velk_texture(id, uv)`, BVH / RT types |
-| `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance`, `ElementInstanceData`, `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
+| `velk.glsl` | velk-render (always available) | `GlobalData`, `VelkVertex3D`, `VelkVbo3D`, `velk_vertex3d(root)`, `OpaquePtr`, `VELK_DRAW_DATA(VboType)`, `VELK_INSTANCES(Type)`, `velk_instance(root)`, `velk_texture(id, uv)`, BVH / RT types |
+| `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
 Modules can register additional includes via `IRenderContext::register_shader_include()` — the text plugin registers `velk_text.glsl` for glyph coverage sampling.
 
@@ -330,7 +330,7 @@ With these includes, a complete UI vertex shader only needs its `DrawData` layou
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
+    VELK_DRAW_DATA(VelkVbo3D)
     OpaquePtr material;
 };
 
@@ -339,7 +339,7 @@ layout(push_constant) uniform PC { DrawData root; };
 void main()
 {
     VelkVertex3D    v    = velk_vertex3d(root);
-    ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
+    ElementInstance inst = velk_instance(root);
 
     vec4 local   = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
     vec4 world_h = inst.world_matrix * local;
@@ -391,7 +391,7 @@ The shader pulls vertices via buffer_reference, exactly as in 2D — no vertex i
 
 ```glsl
 VelkVertex3D    v    = velk_vertex3d(root);
-ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
+ElementInstance inst = velk_instance(root);
 
 vec4 local   = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
 vec4 world_h = inst.world_matrix * local;
@@ -497,7 +497,8 @@ VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;       // 4 bytes, offset  0
     uint32_t _pad_globals;       // 4 bytes, offset  4
-    uint64_t instances_address;  // 8 bytes, offset  8
+    uint32_t instances_base;     // 4 bytes, offset  8
+    uint32_t _pad_instances;     // 4 bytes, offset 12
     uint32_t texture_id;         // 4 bytes, offset 16
     uint32_t instance_count;     // 4 bytes, offset 20
     uint64_t vbo_address;        // 8 bytes, offset 24

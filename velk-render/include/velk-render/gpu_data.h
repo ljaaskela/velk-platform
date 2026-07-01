@@ -80,8 +80,9 @@ static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.
 VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;      ///< Index into the set = 1 globals buffer; shaders read velk_globals.data[globals_base].
-    uint32_t _pad_globals;      ///< Keeps instances_address at offset 8 (was the upper half of the globals address).
-    uint64_t instances_address; ///< GPU pointer to the instance data array.
+    uint32_t _pad_globals;      ///< Keeps the following field at offset 8.
+    uint32_t instances_base;    ///< Element base into the set = 1 instance arena; shader reads velk_instances.data[instances_base + gl_InstanceIndex].
+    uint32_t _pad_instances;    ///< Keeps texture_id at offset 16.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.
     uint64_t vbo_address;       ///< GPU pointer to the draw's vertex buffer (mesh VBO).

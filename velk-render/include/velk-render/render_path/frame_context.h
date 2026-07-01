@@ -50,6 +50,12 @@ struct FrameContext
     /// address until their root pointers migrate.
     IGpuArena* globals_arena = nullptr;
 
+    /// Shared instance arena (set = 1 slot 3), owned by the Renderer. Each
+    /// frame every batch writes its instance blob into the fenced ring;
+    /// vertex shaders read velk_instances by index. Null before the Renderer
+    /// assigns it.
+    IGpuArena* instance_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

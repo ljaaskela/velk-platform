@@ -129,6 +129,11 @@ private:
     /// suballocate distinct regions of one buffer.
     IGpuArena::Ptr globals_arena_;
 
+    /// Shared instance arena (set = 1 slot 3): every batch writes its
+    /// instance blob into the fenced ring each frame, so vertex shaders read
+    /// velk_instances.data[instances_base + i].
+    IGpuArena::Ptr instance_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.

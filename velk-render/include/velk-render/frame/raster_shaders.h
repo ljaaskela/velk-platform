@@ -100,7 +100,7 @@ void main()
 
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr)
     OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
@@ -146,7 +146,7 @@ void main()
 // the deferred path's transparent pass for BLEND / transmissive materials.
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr)
     OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
@@ -191,7 +191,7 @@ void main()
 
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr)
     OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };

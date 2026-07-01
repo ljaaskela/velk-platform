@@ -29,18 +29,20 @@ constexpr uint32_t SpvDecorationOffset = 35;
 
 // The standard DrawDataHeader has these fields (48 bytes total),
 // matching the VELK_DRAW_DATA macro expansion in shader_compiler.cpp:
-//   globals (buffer_reference, 8 bytes)
-//   instances (buffer_reference, 8 bytes)
+//   globals_base (uint) + _pad_globals (uint)      -- set = 1 globals index
+//   instances_base (uint) + _pad_instances (uint)  -- set = 1 instance index
 //   texture_id (uint, 4 bytes)
 //   instance_count (uint, 4 bytes)
 //   vbo (buffer_reference, 8 bytes)
 //   uv1 (buffer_reference, 8 bytes)
 //   uv1_enabled (uint, 4 bytes)
-//   _pad (uint, 4 bytes)
+//   _pad_uv1 (uint, 4 bytes)
 // After the header a single `material` buffer_reference slot points at
 // the per-material params struct; reflection descends into that struct
-// to enumerate the user-facing inputs.
-constexpr uint32_t kHeaderFieldCount = 8;
+// to enumerate the user-facing inputs. The scan below skips padding and
+// non-pointer fields, so it is robust to the exact count, but keep this in
+// sync with the macro.
+constexpr uint32_t kHeaderFieldCount = 10;
 constexpr uint32_t kHeaderSize = 48;
 
 struct TypeInfo

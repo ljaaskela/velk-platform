@@ -204,7 +204,7 @@ layout(buffer_reference, std430) readonly buffer CheckerParams {
 };
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
+    VELK_DRAW_DATA(VelkVbo3D)
     CheckerParams material;
 };
 
@@ -216,7 +216,7 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     vec2 q = velk_vertex3d(root).position.xy;
-    ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
+    ElementInstance inst = velk_instance(root);
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
     gl_Position = globals.view_projection * inst.world_matrix * local_pos;
     v_local_uv = q;
@@ -234,7 +234,7 @@ layout(buffer_reference, std430) readonly buffer CheckerParams {
 };
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
+    VELK_DRAW_DATA(OpaquePtr)
     CheckerParams material;
 };
 

@@ -29,7 +29,7 @@ inline constexpr string_view element_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
+    VELK_DRAW_DATA(VelkVbo3D)
     OpaquePtr material;
 };
 
@@ -48,7 +48,7 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     VelkVertex3D v = velk_vertex3d(root);
-    ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
+    ElementInstance inst = velk_instance(root);
 
     vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
     vec4 world_h = inst.world_matrix * local;

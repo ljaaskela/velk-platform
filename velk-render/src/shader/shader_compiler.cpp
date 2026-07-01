@@ -211,21 +211,37 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 //   GlobalData globals = velk_global_data(root);
 #define velk_global_data(root) (velk_globals.data[(root).globals_base])
 
+// Per-shader typed view of the shared instance arena (set = 1 slot 3).
+// Declare once at file scope with the shader's instance struct:
+//   VELK_INSTANCES(ElementInstance)
+// The buffer holds every batch's instance data; each draw reads its own run
+// at `instances_base + gl_InstanceIndex`. Different shaders bind the same
+// slot with their own element type (the buffer is raw bytes; each pipeline
+// interprets its own run).
+#define VELK_INSTANCES(InstancesType) \
+    layout(set = 1, binding = 3, scalar) readonly buffer VelkInstances { InstancesType data[]; } velk_instances;
+
+// Vertex-shader accessor: this draw's instance for the current
+// gl_InstanceIndex. Requires a matching VELK_INSTANCES(...) declaration.
+//   ElementInstance inst = velk_instance(root);
+#define velk_instance(root) (velk_instances.data[(root).instances_base + gl_InstanceIndex])
+
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
+//       VELK_DRAW_DATA(VelkVbo3D)
 //       vec4 my_material_param;  // optional material fields follow
 //   };
 // `VboType` is a `buffer_reference`-typed handle to the vertex buffer
 // (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
 // The 48-byte header keeps everything 16-byte aligned for std430.
-// `globals_base` indexes the set = 1 globals buffer; read it via
-// `velk_global_data(root)` to access the view-projection, camera position,
-// BVH bases, etc.
-#define VELK_DRAW_DATA(InstancesType, VboType) \
+// `globals_base` indexes the set = 1 globals buffer (read via
+// `velk_global_data(root)`); `instances_base` indexes the set = 1 instance
+// arena (read via `velk_instance(root)`).
+#define VELK_DRAW_DATA(VboType)                \
     uint globals_base;                         \
     uint _pad_globals;                         \
-    InstancesType instance_data;               \
+    uint instances_base;                       \
+    uint _pad_instances;                       \
     uint texture_id;                           \
     uint instance_count;                       \
     VboType vbo;                               \

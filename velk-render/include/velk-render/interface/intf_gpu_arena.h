@@ -20,21 +20,20 @@ struct GpuArenaRegion
 };
 
 /**
- * @brief A frame-invariant bound storage buffer (descriptor set = 1) that
- *        compute shaders read by index instead of by buffer_device_address.
+ * @brief A frame-invariant bound storage buffer (descriptor set = 1) read by
+ *        index instead of by buffer_device_address.
  *
- * The buffer handle is stable, so cached / simultaneous-use command
- * buffers can bind it once and never go stale. Per-frame-dynamic data is
- * handled by a **ring of `frame_slot_count()` regions**: each frame's
- * `write` targets the region indexed by the backend's fenced current
- * frame slot, so no in-flight frame is reading the region being written,
- * and the descriptor is written once (not per frame). The returned
- * region's element base goes into the per-frame push constant.
+ * The buffer handle is stable, so cached / simultaneous-use command buffers
+ * can bind it once and never go stale. Per-frame-dynamic data (rebuilt
+ * wholesale each frame: BVH, globals, instances) is written via a **ring of
+ * `frame_slot_count()` sub-buffers**: each frame writes the sub-buffer for the
+ * backend's fenced current slot, so no in-flight frame reads the region being
+ * written. The returned region's element base (@c offset / element_size) goes
+ * into the per-frame push constant / draw header; the shader reads
+ * `data[base + i]`.
  *
- * The backing buffer is bound to its slot the first time data is written,
- * and re-bound only when it must grow (a frame's data exceeds the current
- * per-region stride) — rare after warmup, so steady state never touches
- * the descriptor.
+ * The backing buffer is bound to its slot on the first write and re-bound only
+ * on growth, rare after warmup, so steady state never touches the descriptor.
  *
  * Chain: IInterface -> IGpuArena
  */
@@ -44,17 +43,16 @@ class IGpuArena
 {
 public:
     /// One-time setup: @p slot is the set = 1 binding
-    /// (IRenderBackend::GlobalBufferSlot); @p element_size keeps the
-    /// per-region stride a whole multiple of the element so the returned
+    /// (IRenderBackend::GlobalBufferSlot); @p element_size keeps ring
+    /// per-region strides a whole multiple of the element so `write`'s
     /// offset divides cleanly into an element base.
     virtual void init(uint32_t slot, uint32_t element_size) = 0;
 
-    /// Writes @p size bytes into this frame's ring region (picked from the
-    /// backend's current fenced frame slot), growing the buffer and
-    /// re-binding the slot only if @p size exceeds the current per-region
-    /// stride. Returns the written region; its @c offset / element_size is
-    /// the base the shader adds to every index. New bytes are visible to
-    /// this frame's shader reads.
+    /// Writes @p size bytes into this frame's ring region (the backend's
+    /// fenced current slot), growing + re-binding the slot only if @p size
+    /// exceeds the current per-region stride. Returns the written region;
+    /// @c offset / element_size is the base the shader adds to every index.
+    /// Visible to this frame's reads only.
     virtual GpuArenaRegion write(const void* data, uint64_t size,
                                  FrameContext& ctx) = 0;
 

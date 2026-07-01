@@ -26,7 +26,7 @@ constexpr string_view env_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, VelkVbo3D)
+    VELK_DRAW_DATA(VelkVbo3D)
     OpaquePtr material;
 };
 

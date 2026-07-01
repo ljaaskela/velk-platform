@@ -23,24 +23,23 @@ namespace velk {
  *        (`get_data` returns the contiguous blob), and consumers
  *        (`emit_draw_calls` reads several offsets into the same buffer).
  *
- * Layout: `[args (32 B)][count (16 B)][header (48 B)][material_ptr (8 B)][pad (8 B)][instance_data (rest)]`.
+ * Layout: `[args (32 B)][count (16 B)][header (48 B)][material_ptr (8 B)][pad (8 B)]` = 112 B fixed.
  *
  * - args  (offset 0, 32 B) — indirect-draw command record. 16-byte
  *   aligned and oversized so any future args struct fits.
  * - count (offset 32, 16 B) — uint32 actual draw count consumed by
  *   the backend's indirect-with-count draw; 16-byte aligned.
  * - header (offset 48, 48 B) — `DrawDataHeader` the shader receives
- *   via push-constant. Persistent across frames; addresses inside
- *   reference other persistent buffers (instance data, VBO, UV1) so
- *   the value is stable until the batch is rebuilt or a referenced
- *   buffer is reallocated.
+ *   via push-constant. Persistent across frames; carries `instances_base`
+ *   (index into the shared instance arena) and pointers to other
+ *   persistent buffers (VBO, UV1), stable until the batch is rebuilt.
  * - material_ptr (offset 96, 8 B) — GPU pointer to the material's
  *   persistent `IProgramDataBuffer`. Stable per material lifetime.
- * - pad (offset 104, 8 B) — alignment so the instance-data slice
- *   that follows starts on a natural 16-byte boundary.
- * - instance_data (offset 112, rest) — per-instance bytes the vertex
- *   shader reads via a buffer-reference dereference of
- *   `storage_gpu_address() + kInstanceOffset`.
+ * - pad (offset 104, 8 B) — alignment to a 16-byte boundary.
+ *
+ * Instance bytes no longer live here: they are suballocated in the shared
+ * persistent instance arena (set = 1 slot 3) and read by index; see
+ * `set_instance_binding` / `instance_region_offset`.
  *
  * The DrawCall's root_constants carry `storage_gpu_address() + kHeaderOffset`
  * so the shader's push-constant pointer lands directly on the header.
@@ -55,7 +54,7 @@ struct BatchBufferLayout
     static constexpr size_t kHeaderSize        = 48;
     static constexpr size_t kMaterialPtrOffset = kHeaderOffset + kHeaderSize;
     static constexpr size_t kMaterialPtrSize   = 8;
-    static constexpr size_t kInstanceOffset    = 112; // kMaterialPtrOffset + 16 (8 ptr + 8 pad)
+    static constexpr size_t kBufferSize        = 112; // kMaterialPtrOffset + 16 (8 ptr + 8 pad)
 };
 
 /**
@@ -124,11 +123,34 @@ public:
     ///        slot without touching the rest of the batch. The byte
     ///        range overwritten is `[instance_index * instance_stride,
     ///        instance_index * instance_stride + bytes.size())` within
-    ///        the batch's persistent storage's instance-data region.
-    ///        @p bytes.size() must be `<= instance_stride`. Out-of-range
-    ///        slots are silently ignored.
+    ///        the batch's suballocated region in the shared instance
+    ///        arena, written in place through the pointer captured by
+    ///        `set_instance_binding`. @p bytes.size() must be
+    ///        `<= instance_stride`. Out-of-range slots are silently ignored.
     virtual void update_instance_at(uint32_t instance_index,
                                     array_view<const uint8_t> bytes) = 0;
+
+    /// @name Shared instance arena binding — instance bytes live in the
+    ///       Renderer-owned persistent instance arena (set = 1 slot 3), not
+    ///       in the per-batch storage buffer. The upload sweep suballocates a
+    ///       region, writes the bytes, and stamps the binding here; the
+    ///       vertex shader reads `velk_instances.data[instances_base + i]`.
+    /// @{
+    /// @brief Stamped by the upload sweep after (re)allocating this batch's
+    ///        instance region. @p arena owns the region (retained to free it
+    ///        this frame; @p offset / @p size describe it (offset /
+    ///        instance_stride = the shader `instances_base`).
+    virtual void set_instance_binding(uint64_t offset, uint64_t size) = 0;
+
+    /// @brief Byte offset of this batch's instance region within the arena's
+    ///        current ring sub-buffer. `offset / instance_stride` is the
+    ///        shader `instances_base`.
+    virtual uint64_t instance_region_offset() const = 0;
+
+    /// @brief Byte size written for this batch's instances this frame (0 if
+    ///        the batch has no instance data).
+    virtual uint64_t instance_region_size() const = 0;
+    /// @}
 
     /// @name Persistent per-batch storage — each batch composes an
     ///       `IBuffer` (an `impl::GpuBuffer` instance) holding the
@@ -137,9 +159,9 @@ public:
     ///       (`IGpuResourceManager::ensure_buffer_storage`).
     ///       `emit_draw_calls` resolves the backend handle via
     ///       `IGpuResourceManager::find_buffer(storage_buffer())->handle`
-    ///       for indirect args + count, and dereferences
-    ///       `storage_gpu_address() + kInstanceOffset` for instance
-    ///       bytes (buffer-reference / device-address read).
+    ///       for indirect args + count, and reads the header at
+    ///       `storage_gpu_address() + kHeaderOffset`. Instance bytes live in
+    ///       the shared instance arena, not here.
     /// @{
     /// @brief Composed storage buffer. Lifetime is owned by the batch;
     ///        consumers borrow the raw pointer.

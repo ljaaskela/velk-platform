@@ -69,13 +69,14 @@ Shader includes are registered via `IRenderContext::register_shader_include()`. 
 - `VelkVbo3D` — buffer reference to a `VelkVertex3D` array.
 - `velk_vertex3d(root)` — macro that fetches the current `gl_VertexIndex` from the bound VBO.
 - `OpaquePtr` — 8-byte buffer_reference placeholder for typed pointer fields the shader doesn't dereference (e.g. the material-data pointer in a vertex shader that doesn't care about the material).
-- `VELK_DRAW_DATA(InstancesType, VboType)` — macro expanding to the 32-byte DrawDataHeader fields (see [DrawData struct layout](#drawdata-struct-layout)).
+- `VELK_DRAW_DATA(VboType)` — macro expanding to the 48-byte DrawDataHeader fields (see [DrawData struct layout](#drawdata-struct-layout)).
+- `VELK_INSTANCES(Type)` / `velk_instance(root)` — declare the set = 1 instance arena as `Type` and read this draw's instance by index.
 - `velk_texture(id, uv)` — bindless texture sample helper.
 - `BvhNode`, `RtShape`, `Ray`, `RayHit` — ray-trace types used by shadow / bounce shaders.
 
 **velk-ui.glsl** (provided by velk-scene, registered on renderer init):
 - `ElementInstance` — the universal per-instance record shared by every visual: `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
-- `ElementInstanceData` — buffer_reference array of `ElementInstance`.
+- `VELK_INSTANCES(ElementInstance)` — binds the shared instance arena as `ElementInstance`; read via `velk_instance(root)`.
 - `EvalContext` — everything a material eval body receives: `data_addr`, `texture_id`, `shape_param`, `uv`, `base`, `ray_dir`, `normal`, `hit_pos`.
 - `MaterialEval` — the canonical eval output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
 - `velk_default_material_eval()` — returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
@@ -419,14 +420,14 @@ layout(buffer_reference, std430) readonly buffer MyParams {
 };
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)  // globals, instances, texture_id, count, vbo
-    MyParams material;                              // per-draw material pointer
+    VELK_DRAW_DATA(VelkVbo3D)  // globals_base, instances_base, texture_id, count, vbo
+    MyParams material;          // per-draw material pointer
 };
 
 layout(push_constant) uniform PC { DrawData root; };
 
 // Reads that an eval body can't make, but a full-fragment can:
-//   root.instance_data.data[i].world_matrix   // other instances in the draw
+//   velk_instance(root).world_matrix          // this draw's instance
 //   root.vbo.data[gl_VertexIndex]              // raw VBO fetch
 //   root.material.tint                         // material without the ctx.data_addr cast
 //
@@ -457,7 +458,7 @@ layout(buffer_reference, std430) readonly buffer MyParams {
 };
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)  // fragment shader doesn't touch instances / VBO
+    VELK_DRAW_DATA(OpaquePtr)  // fragment shader doesn't touch instances / VBO
     MyParams material;                    // pointer to the per-draw material buffer
 };
 
@@ -515,7 +516,8 @@ VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;       // index into velk_globals[] (set = 1)
     uint32_t _pad_globals;
-    uint64_t instances_address;  // -> per-instance array
+    uint32_t instances_base;     // index into velk_instances[] (set = 1)
+    uint32_t _pad_instances;
     uint32_t texture_id;         // bindless index, 0 = none
     uint32_t instance_count;
     uint64_t vbo_address;        // -> bound VBO (VelkVbo3D)
@@ -530,7 +532,8 @@ static_assert(sizeof(DrawDataHeader) == 48, ...);
 |--------|-------|------|------|
 | 0  | `globals_base`      | uint32 (index into velk_globals[]) | 4 |
 | 4  | `_pad_globals`      | uint32 | 4 |
-| 8  | `instances_address` | uint64 (buffer_reference) | 8 |
+| 8  | `instances_base`    | uint32 (index into velk_instances[]) | 4 |
+| 12 | `_pad_instances`    | uint32 | 4 |
 | 16 | `texture_id`        | uint32 | 4 |
 | 20 | `instance_count`    | uint32 | 4 |
 | 24 | `vbo_address`       | uint64 (buffer_reference) | 8 |
@@ -539,11 +542,11 @@ static_assert(sizeof(DrawDataHeader) == 48, ...);
 | 44 | `_pad0`             | uint32 | 4 |
 | **48** | **material data pointer** | **uint64 (buffer_reference)** | **8** |
 
-On the GLSL side, declare these fields with the `VELK_DRAW_DATA(InstancesType, VboType)` macro (expanded from `velk.glsl`); the shared `element_vertex_src` shows the canonical pattern:
+On the GLSL side, declare these fields with the `VELK_DRAW_DATA(VboType)` macro (expanded from `velk.glsl`); the shared `element_vertex_src` shows the canonical pattern:
 
 ```glsl
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
+    VELK_DRAW_DATA(VelkVbo3D)
     OpaquePtr material;   // pointer to the material's per-draw data
 };
 ```

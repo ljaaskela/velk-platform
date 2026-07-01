@@ -156,21 +156,40 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
                 upload_buffer(buf.get());
             }
         };
+        // Instance bytes go into the shared instance arena (set = 1 slot 3)
+        // as a fenced ring: each frame writes every batch's blob into this
+        // frame's ring sub-buffer, so no in-flight frame reads a region being
+        // written. Batches are re-assembled every frame (regions are not
+        // stable across frames), so this is per-frame-dynamic data like the
+        // BVH / globals, not persistent write-in-place. The returned region's
+        // offset / stride is the shader `instances_base`, stamped into the
+        // header by emit_draw_calls this same frame.
+        auto upload_instances = [&](const IBatch::Ptr& bp) {
+            if (!bp || !ctx.instance_arena) return;
+            auto blob = bp->instance_data();
+            if (blob.size() == 0) {
+                bp->set_instance_binding(0, 0);
+                return;
+            }
+            auto region = ctx.instance_arena->write(blob.begin(), blob.size(), ctx);
+            bp->set_instance_binding(region.offset, region.valid() ? region.size : 0);
+        };
         auto upload_batch = [&](IBatch::Ptr& bp) {
             if (!bp) return;
             auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
             if (auto* mapped = upload_buffer(batch->storage_buffer())) {
                 batch->set_storage_mapping(mapped);
             }
+            upload_instances(bp);
             upload_material(bp);
         };
         for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {
             for (auto& bp : rtp.batches) upload_batch(bp);
         }
-        // env_batch has no persistent storage of its own (instance
-        // bytes still go through per-frame staging), but its material's
-        // persistent data buffer needs the same upload sweep.
+        // env_batch has no per-batch storage buffer, but its instances go
+        // through the same arena and its material needs the upload sweep.
+        upload_instances(rv.env_batch);
         upload_material(rv.env_batch);
     }
     rv.batches = &cache.batches;
