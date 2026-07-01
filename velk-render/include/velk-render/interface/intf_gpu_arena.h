@@ -8,6 +8,8 @@
 
 namespace velk {
 
+class IGpuArena;
+
 /// A written region within an IGpuArena. @c offset is the byte offset of
 /// the data within the arena's bound buffer; the producer derives an
 /// element base (@c offset / element_size) and pushes it so the shader
@@ -17,6 +19,46 @@ struct GpuArenaRegion
     uint64_t offset = 0;
     uint64_t size   = 0;
     bool valid() const { return size != 0; }
+};
+
+/// RAII handle to a persistent suballocated region (from IGpuArena::alloc).
+/// Move-only; on destruction it tells its source arena to free the region
+/// (which the arena defers past the in-flight frame's fence). Deliberately
+/// lightweight, not an IGpuResource: there may be very many small regions.
+class ArenaRegion
+{
+public:
+    ArenaRegion() = default;
+    ArenaRegion(IGpuArena* arena, uint64_t offset, uint64_t size)
+        : arena_(arena), offset_(offset), size_(size) {}
+    ~ArenaRegion() { release(); }
+
+    ArenaRegion(ArenaRegion&& o) noexcept
+        : arena_(o.arena_), offset_(o.offset_), size_(o.size_) { o.arena_ = nullptr; }
+    ArenaRegion& operator=(ArenaRegion&& o) noexcept
+    {
+        if (this != &o) {
+            release();
+            arena_ = o.arena_; offset_ = o.offset_; size_ = o.size_;
+            o.arena_ = nullptr;
+        }
+        return *this;
+    }
+    ArenaRegion(const ArenaRegion&) = delete;
+    ArenaRegion& operator=(const ArenaRegion&) = delete;
+
+    bool valid() const { return arena_ != nullptr; }
+    uint64_t offset() const { return offset_; }
+    uint64_t size() const { return size_; }
+
+    /// Frees the region back to its arena (deferred past the in-flight fence)
+    /// and clears this handle. Called automatically on destruction / move.
+    void release();
+
+private:
+    IGpuArena* arena_ = nullptr;
+    uint64_t offset_ = 0;
+    uint64_t size_ = 0;
 };
 
 /**
@@ -56,9 +98,35 @@ public:
     virtual GpuArenaRegion write(const void* data, uint64_t size,
                                  FrameContext& ctx) = 0;
 
+    /// Persistent style. Reserves a stable @p size-byte region from the
+    /// arena's free-list (growing the buffer if no span fits) and returns an
+    /// owning handle. The offset survives across frames until the handle
+    /// drops; the shader base is @c offset / element_size. Fill it with
+    /// `write_at`. Returns an invalid handle on failure. First reclaims any
+    /// freed regions whose in-flight frame has retired.
+    virtual ArenaRegion alloc(uint64_t size, FrameContext& ctx) = 0;
+
+    /// Writes @p size bytes into the persistent buffer at @p offset (a region
+    /// obtained from `alloc`). Call only when the region's contents change;
+    /// unchanged regions keep their bytes across frames (no re-upload).
+    virtual void write_at(uint64_t offset, const void* data, uint64_t size) = 0;
+
+    /// Internal: called by ArenaRegion on drop to free a persistent region.
+    /// The arena defers the reclaim past the in-flight frame's fence, so the
+    /// range is never reused while an earlier frame may still read it.
+    virtual void release_region(uint64_t offset, uint64_t size) = 0;
+
     /// The set = 1 slot this arena's buffer is bound to.
     virtual uint32_t slot() const = 0;
 };
+
+inline void ArenaRegion::release()
+{
+    if (arena_) arena_->release_region(offset_, size_);
+    arena_ = nullptr;
+    offset_ = 0;
+    size_ = 0;
+}
 
 } // namespace velk
 

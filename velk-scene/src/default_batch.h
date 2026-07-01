@@ -6,6 +6,7 @@
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-scene/plugin.h>
 
 #include <cstdint>
@@ -85,13 +86,18 @@ public:
     void update_instance_at(uint32_t instance_index,
                             array_view<const uint8_t> bytes) override;
 
-    void set_instance_binding(uint64_t offset, uint64_t size) override
+    void set_instance_region(ArenaRegion&& region) override
     {
-        instance_offset_ = offset;
-        instance_size_ = size;
+        instance_region_ = std::move(region);
     }
-    uint64_t instance_region_offset() const override { return instance_offset_; }
-    uint64_t instance_region_size() const override { return instance_size_; }
+    uint64_t instance_region_offset() const override { return instance_region_.offset(); }
+    uint64_t instance_region_size() const override { return instance_region_.size(); }
+    bool take_instances_dirty() override
+    {
+        bool d = instances_dirty_;
+        instances_dirty_ = false;
+        return d;
+    }
 
     IBuffer* storage_buffer() const override { return storage_.get(); }
     uint64_t storage_gpu_address() const override;
@@ -122,11 +128,14 @@ private:
     /// used by emit to write the header/material_ptr in place.
     uint8_t* storage_mapped_ = nullptr;
 
-    /// This frame's instance region in the shared arena ring (set = 1 slot
-    /// 3), stamped by the upload sweep. offset / instance_stride is the
-    /// shader instances_base.
-    uint64_t instance_offset_ = 0;
-    uint64_t instance_size_ = 0;
+    /// Persistent instance region in the shared arena (set = 1 slot 3), owned
+    /// by this batch. Allocated on structural change, kept across steady-state
+    /// frames, RAII-freed (deferred) when the batch is destroyed.
+    /// offset / instance_stride is the shader instances_base.
+    ArenaRegion instance_region_;
+    /// Set when instance bytes change (finalize_storage / update_instance_at);
+    /// the upload sweep re-uploads the region only when this is set.
+    bool instances_dirty_ = true;
 };
 
 } // namespace velk::impl

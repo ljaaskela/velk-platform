@@ -38,6 +38,9 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
     // Reset cached mapped pointer — a size change forces
     // ensure_buffer_storage to reallocate, invalidating the prior map.
     storage_mapped_ = nullptr;
+    // Instance bytes were just (re)written; the upload sweep re-uploads the
+    // arena region.
+    instances_dirty_ = true;
 
     notify_render_state_changed(::velk::RenderStateChange::All);
 }
@@ -49,9 +52,9 @@ void DefaultBatch::update_instance_at(uint32_t instance_index,
     if (instance_index >= instance_count_) return;
     size_t offset = static_cast<size_t>(instance_index) * instance_stride_;
     if (offset + bytes.size() > instance_data_.size()) return;
-    // CPU-side only; the arena ring re-uploads instance_data_ wholesale each
-    // frame in the upload sweep.
     std::memcpy(instance_data_.data() + offset, bytes.begin(), bytes.size());
+    // Mark dirty so the upload sweep re-uploads the region this frame.
+    instances_dirty_ = true;
 }
 
 uint64_t DefaultBatch::storage_gpu_address() const

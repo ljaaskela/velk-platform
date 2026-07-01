@@ -17,6 +17,8 @@
 
 namespace velk {
 
+class ArenaRegion;
+
 /**
  * @brief Persistent per-batch storage layout shared between producers
  *        (BatchBuilder fills the prefix), the IBatch implementation
@@ -131,25 +133,30 @@ public:
                                     array_view<const uint8_t> bytes) = 0;
 
     /// @name Shared instance arena binding — instance bytes live in the
-    ///       Renderer-owned persistent instance arena (set = 1 slot 3), not
-    ///       in the per-batch storage buffer. The upload sweep suballocates a
-    ///       region, writes the bytes, and stamps the binding here; the
-    ///       vertex shader reads `velk_instances.data[instances_base + i]`.
+    ///       Renderer-owned instance arena (set = 1 slot 3), not in the
+    ///       per-batch storage buffer. The batch owns a persistent
+    ///       `ArenaRegion` (allocated on structural change, kept across
+    ///       steady-state frames, RAII-freed when the batch is destroyed);
+    ///       the vertex shader reads `velk_instances.data[instances_base + i]`
+    ///       where `instances_base = offset / instance_stride`.
     /// @{
-    /// @brief Stamped by the upload sweep after (re)allocating this batch's
-    ///        instance region. @p arena owns the region (retained to free it
-    ///        this frame; @p offset / @p size describe it (offset /
-    ///        instance_stride = the shader `instances_base`).
-    virtual void set_instance_binding(uint64_t offset, uint64_t size) = 0;
+    /// @brief Takes ownership of this batch's instance region. Moving in a new
+    ///        region RAII-frees the previous one (deferred past the in-flight
+    ///        fence by the arena). Pass a default (empty) region to release.
+    virtual void set_instance_region(ArenaRegion&& region) = 0;
 
-    /// @brief Byte offset of this batch's instance region within the arena's
-    ///        current ring sub-buffer. `offset / instance_stride` is the
-    ///        shader `instances_base`.
+    /// @brief Byte offset of this batch's instance region within the arena.
+    ///        `offset / instance_stride` is the shader `instances_base`.
     virtual uint64_t instance_region_offset() const = 0;
 
-    /// @brief Byte size written for this batch's instances this frame (0 if
-    ///        the batch has no instance data).
+    /// @brief Byte size of this batch's instance region (0 if none).
     virtual uint64_t instance_region_size() const = 0;
+
+    /// @brief Returns whether the instance bytes changed since the last call
+    ///        and clears the flag. Set by `finalize_storage` (structural
+    ///        rebuild) and `update_instance_at`; the upload sweep re-uploads
+    ///        the region only when set, so unchanged batches never re-upload.
+    virtual bool take_instances_dirty() = 0;
     /// @}
 
     /// @name Persistent per-batch storage — each batch composes an

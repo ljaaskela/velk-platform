@@ -156,23 +156,32 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
                 upload_buffer(buf.get());
             }
         };
-        // Instance bytes go into the shared instance arena (set = 1 slot 3)
-        // as a fenced ring: each frame writes every batch's blob into this
-        // frame's ring sub-buffer, so no in-flight frame reads a region being
-        // written. Batches are re-assembled every frame (regions are not
-        // stable across frames), so this is per-frame-dynamic data like the
-        // BVH / globals, not persistent write-in-place. The returned region's
-        // offset / stride is the shader `instances_base`, stamped into the
-        // header by emit_draw_calls this same frame.
+        // Instance bytes live in the shared instance arena (set = 1 slot 3),
+        // one persistent region per batch. The batch keeps its region across
+        // steady-state frames (stable `instances_base`, no re-upload); we
+        // (re)allocate only when the instance count changes and re-upload only
+        // when the batch flags its bytes dirty. The region is RAII-freed
+        // (deferred past the in-flight fence) when the batch is destroyed.
         auto upload_instances = [&](const IBatch::Ptr& bp) {
             if (!bp || !ctx.instance_arena) return;
             auto blob = bp->instance_data();
-            if (blob.size() == 0) {
-                bp->set_instance_binding(0, 0);
+            const uint64_t need = blob.size();
+            const bool dirty = bp->take_instances_dirty();
+            if (need == 0) {
+                bp->set_instance_region({});  // release any existing region
                 return;
             }
-            auto region = ctx.instance_arena->write(blob.begin(), blob.size(), ctx);
-            bp->set_instance_binding(region.offset, region.valid() ? region.size : 0);
+            if (bp->instance_region_size() != need) {
+                auto region = ctx.instance_arena->alloc(need, ctx);
+                const uint64_t off = region.offset();
+                const bool ok = region.valid();
+                bp->set_instance_region(std::move(region));
+                if (ok) ctx.instance_arena->write_at(off, blob.begin(), need);
+            } else if (dirty) {
+                ctx.instance_arena->write_at(bp->instance_region_offset(),
+                                             blob.begin(), need);
+            }
+            // else: unchanged, keep the region and its bytes (no re-upload).
         };
         auto upload_batch = [&](IBatch::Ptr& bp) {
             if (!bp) return;
