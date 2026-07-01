@@ -473,7 +473,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                 *ctx.frame_buffer,
                 *ctx.resources,
                 default_uv1,
-                render_view.view_globals_address,
+                render_view.view_globals_base,
                 resolve,
                 render_view.has_frustum ? &render_view.frustum : nullptr);
 
@@ -879,7 +879,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
             vector<DrawCall> draw_calls;
             emit_draw_calls(
                 draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-                default_uv1, render_view.view_globals_address, resolve,
+                default_uv1, render_view.view_globals_base, resolve,
                 render_view.has_frustum ? &render_view.frustum : nullptr);
 
             // No transparent geometry this view: leave an empty (no-op) pass.

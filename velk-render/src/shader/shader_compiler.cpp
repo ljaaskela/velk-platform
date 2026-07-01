@@ -113,14 +113,12 @@ layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
 // texture by index rather than declaring their own samplers.
 layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 
-// Per-view FrameGlobals. The renderer writes one FrameGlobals record
-// into the per-frame staging buffer per view per frame and pushes its
-// GPU address into push-constant slot [0..8) at pass start. Each
-// shader's `layout(push_constant)` block must declare a `GlobalData
-// globals;` field at offset 0 to receive that address; shaders then
-// read view-level state via `globals.X`. Layout matches the FrameGlobals
-// struct in gpu_data.h byte-for-byte under scalar layout.
-layout(buffer_reference, scalar) readonly buffer GlobalData {
+// Per-view FrameGlobals as a value type. `GlobalData` is the element of the
+// set = 1 globals buffer (velk_globals below); shaders reach it by index
+// (`velk_globals.data[globals_base]`) via velk_global_data(root), replacing
+// the old FrameGlobals device address. Layout matches the FrameGlobals struct
+// in gpu_data.h byte-for-byte under scalar layout.
+struct GlobalData {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
@@ -135,14 +133,17 @@ layout(buffer_reference, scalar) readonly buffer GlobalData {
     mat4 prev_view_projection;
 };
 
-// Plain-struct mirror of FrameGlobals (same fields as GlobalData above),
-// used as the element type of the set = 1 globals buffer that the
-// direct-push compute shaders (deferred lighting / denoise / spatial)
-// read by index: `velk_globals.data[globals_base].X`. Declared here as a
-// value type only — no `layout(...) buffer` binding — so graphics/raster
-// shaders that #include this prelude never reflect a set = 1 descriptor.
-// The buffer itself is declared per compute source (see compute_shaders.h).
-struct FrameGlobalsData {
+// Frame-invariant per-view globals, bound at set = 1 slot 2 and read by
+// index in every stage (graphics via velk_global_data(root), compute via the
+// per-source VELK_GLOBALS macro). Declared once here: set = 1 is now visible
+// to graphics as well as compute, so this no longer leaks a compute-only
+// descriptor into raster pipelines.
+layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { GlobalData data[]; } velk_globals;
+
+// Device-address form of GlobalData, retained for the paths still on
+// buffer_device_address (the RT RtRoot root pointer; the composite-blit
+// compute's unused slot). Migrates away when those root pointers do.
+layout(buffer_reference, scalar) readonly buffer GlobalDataPtr {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
@@ -204,11 +205,11 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // per-vertex stream at gl_VertexIndex.
 #define velk_uv1(root) ((root).uv1.data[(root).uv1_enabled * gl_VertexIndex])
 
-// Per-view FrameGlobals from the draw root pointer. `root.globals_addr`
-// is already typed as `GlobalData` (a buffer-reference); the macro
-// hides the field name so callers stay decoupled from the header layout.
+// Per-view FrameGlobals from the draw root pointer. `root.globals_base` is
+// an index into the set = 1 globals buffer; the macro hides the field so
+// callers stay decoupled from the header layout.
 //   GlobalData globals = velk_global_data(root);
-#define velk_global_data(root) ((root).globals_addr)
+#define velk_global_data(root) (velk_globals.data[(root).globals_base])
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
@@ -218,11 +219,12 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // `VboType` is a `buffer_reference`-typed handle to the vertex buffer
 // (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
 // The 48-byte header keeps everything 16-byte aligned for std430.
-// `globals_addr` is the per-view FrameGlobals address; cast it via
-// `GlobalData(root.globals_addr)` to access the view-projection,
-// camera position, BVH addrs, etc.
+// `globals_base` indexes the set = 1 globals buffer; read it via
+// `velk_global_data(root)` to access the view-projection, camera position,
+// BVH bases, etc.
 #define VELK_DRAW_DATA(InstancesType, VboType) \
-    GlobalData globals_addr;                   \
+    uint globals_base;                         \
+    uint _pad_globals;                         \
     InstancesType instance_data;               \
     uint texture_id;                           \
     uint instance_count;                       \

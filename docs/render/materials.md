@@ -513,7 +513,8 @@ Both material types share the same per-draw layout. Every draw call passes a sin
 // velk-render/gpu_data.h
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_address;    // -> FrameGlobals
+    uint32_t globals_base;       // index into velk_globals[] (set = 1)
+    uint32_t _pad_globals;
     uint64_t instances_address;  // -> per-instance array
     uint32_t texture_id;         // bindless index, 0 = none
     uint32_t instance_count;
@@ -527,7 +528,8 @@ static_assert(sizeof(DrawDataHeader) == 48, ...);
 
 | Offset | Field | Type | Size |
 |--------|-------|------|------|
-| 0  | `globals_address`   | uint64 (buffer_reference) | 8 |
+| 0  | `globals_base`      | uint32 (index into velk_globals[]) | 4 |
+| 4  | `_pad_globals`      | uint32 | 4 |
 | 8  | `instances_address` | uint64 (buffer_reference) | 8 |
 | 16 | `texture_id`        | uint32 | 4 |
 | 20 | `instance_count`    | uint32 | 4 |

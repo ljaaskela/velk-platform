@@ -81,11 +81,11 @@ void VkCommandBuffer::begin_recording()
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
                             0, nullptr);
-    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes).
-    // Compute dispatches recorded into this secondary statically use it;
-    // it is a single set, so binding it here is valid even though the
-    // secondary is shared across in-flight frames. Compute-only, so it is
-    // not rebound for GRAPHICS in record_begin_rendering.
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes +
+    // globals). Compute dispatches recorded into this secondary statically
+    // use it; it is a single set, so binding it here is valid even though
+    // the secondary is shared across in-flight frames. record_begin_rendering
+    // rebinds it for GRAPHICS (raster reads the globals slot by index).
     vkCmdBindDescriptorSets(cmd_,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             backend_->pipeline_layout_,
@@ -318,6 +318,15 @@ void VkCommandBuffer::record_begin_rendering(
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
+                            0, nullptr);
+    // set 1 for GRAPHICS: raster reads the globals slot by index
+    // (velk_global_data). begin_recording bound it for COMPUTE only;
+    // rebind for the graphics bind point. Same frame-invariant single set,
+    // so binding it per render pass is valid on the shared secondary.
+    vkCmdBindDescriptorSets(cmd_,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            backend_->pipeline_layout_,
+                            1, 1, &backend_->bound_buffer_set_,
                             0, nullptr);
 
     rendering_color_count_ = static_cast<uint32_t>(n_colors);

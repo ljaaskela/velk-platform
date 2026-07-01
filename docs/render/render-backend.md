@@ -221,7 +221,7 @@ The DrawDataHeader is the root of the shader's data graph. The push constant car
 ```mermaid
 graph LR
     PC["Push Constant<br/><i>8 bytes</i>"] -->|GPU ptr| DDH["DrawDataHeader<br/>+ material ptr"]
-    DDH -->|globals_address| G["FrameGlobals<br/>view_projection, viewport, BVH"]
+    DDH -->|globals_base index| G["velk_globals[]<br/>view_projection, viewport, BVH"]
     DDH -->|instances_address| I["ElementInstance[]<br/>world_matrix, offset, size, color"]
     DDH -->|vbo_address| V["VelkVertex3D[]<br/>position, normal, uv"]
     DDH -->|texture_id| T["Bindless Array<br/>sampler2D[]"]
@@ -235,7 +235,8 @@ The C++ struct and the shader's `buffer_reference` layout mirror each other:
 
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_address;    ///< -> FrameGlobals
+    uint32_t globals_base;       ///< index into velk_globals[] (set = 1)
+    uint32_t _pad_globals;
     uint64_t instances_address;  ///< -> ElementInstance[]
     uint32_t texture_id;         ///< bindless index, 0 = none
     uint32_t instance_count;
@@ -258,9 +259,9 @@ layout(buffer_reference, std430) readonly buffer DrawData {
 layout(push_constant) uniform PC { DrawData root; };
 ```
 
-The `VELK_DRAW_DATA(InstancesType, VboType)` macro expands to the standard 48-byte header: `GlobalData global_data`, `InstancesType instance_data`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint _pad_uv1`. The 8-byte `OpaquePtr material` field lives at offset 48 and addresses the material's per-draw GPU data buffer (an `IProgramDataBuffer` owned by the material, reused and dirty-tracked across frames). `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
+The `VELK_DRAW_DATA(InstancesType, VboType)` macro expands to the standard 48-byte header: `uint globals_base` + `uint _pad_globals`, `InstancesType instance_data`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint _pad_uv1`. The 8-byte `OpaquePtr material` field lives at offset 48 and addresses the material's per-draw GPU data buffer (an `IProgramDataBuffer` owned by the material, reused and dirty-tracked across frames). `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
 
-The C++ side writes addresses and indices; the GLSL side declares the same fields as `buffer_reference` types, so dereferencing `root.global_data` follows the GPU pointer to `FrameGlobals`. No descriptor binding, no uniform uploads, no vertex input. Vertex shaders that don't dereference the material pointer declare it as `OpaquePtr` (8-byte placeholder) to preserve the layout without pulling in material-specific types; eval-based fragment shaders reach it as `ctx.data_addr`.
+The C++ side writes addresses and indices; the GLSL side declares the pointer fields as `buffer_reference` types (dereferenced to follow the GPU pointer), while view globals are reached by index: `velk_global_data(root)` reads `velk_globals.data[root.globals_base]` from the set = 1 globals buffer (no descriptor uploads, no vertex input). Vertex shaders that don't dereference the material pointer declare it as `OpaquePtr` (8-byte placeholder) to preserve the layout without pulling in material-specific types; eval-based fragment shaders reach it as `ctx.data_addr`.
 
 ### Instance data
 
@@ -475,7 +476,7 @@ struct ElementInstance {  // value type, 128 bytes
 };
 ```
 
-The rule: use `buffer_reference` only for types that represent actual GPU pointers (DrawData, GlobalData, instance buffer containers). Data that lives inside those buffers is plain structs.
+The rule: use `buffer_reference` only for types that represent actual GPU pointers (DrawData, the RT `GlobalDataPtr` / `RtRoot`, instance buffer containers). Data that lives inside those buffers is plain structs, and view globals are reached by index into the set = 1 `velk_globals` buffer rather than by address.
 
 ### std430 alignment and the DrawDataHeader
 
@@ -494,7 +495,8 @@ The `DrawDataHeader` packs exactly to 48 bytes, 16-byte aligned (`VELK_GPU_STRUC
 ```cpp
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_address;    // 8 bytes, offset  0
+    uint32_t globals_base;       // 4 bytes, offset  0
+    uint32_t _pad_globals;       // 4 bytes, offset  4
     uint64_t instances_address;  // 8 bytes, offset  8
     uint32_t texture_id;         // 4 bytes, offset 16
     uint32_t instance_count;     // 4 bytes, offset 20

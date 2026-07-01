@@ -808,7 +808,11 @@ bool VkBackend::create_bound_buffer_descriptor()
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        // ALL stages: graphics now reads the globals slot by index too
+        // (velk_global_data), so set = 1 must be visible to raster, not
+        // just compute. BVH slots stay compute-only in practice; a shared
+        // stage mask is simpler than per-slot flags and costs nothing.
+        bindings[i].stageFlags = VK_SHADER_STAGE_ALL;
         binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
     }
@@ -2202,10 +2206,11 @@ void VkBackend::begin_frame()
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
                             0, nullptr);
-    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes).
-    // Bound here for compute dispatches recorded inline on the primary;
-    // simultaneous-use secondaries bind it themselves. The arena fills its
-    // descriptors during prepare; raster never references set 1.
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes +
+    // globals). Bound here for compute dispatches recorded inline on the
+    // primary; simultaneous-use secondaries bind it themselves (compute in
+    // begin_recording, graphics in record_begin_rendering). The arena fills
+    // its descriptors during prepare.
     vkCmdBindDescriptorSets(sync.command_buffer,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_,
@@ -2260,10 +2265,9 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
 
         if (call.root_constants_size > 0) {
             // Per-draw push at offset 0: the 8-byte DrawData address
-            // (root pointer). The DrawData header carries
-            // `globals_addr` so shaders synthesise globals via a
-            // buffer-reference cast on `root.globals_addr` — no
-            // separate FrameGlobals push needed for graphics.
+            // (root pointer). The DrawData header carries `globals_base`,
+            // an index the shader uses to read velk_globals (set = 1) —
+            // no separate FrameGlobals push needed for graphics.
             vkCmdPushConstants(cb,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,

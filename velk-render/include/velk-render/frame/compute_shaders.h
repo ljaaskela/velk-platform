@@ -45,9 +45,8 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF1
 // VELK_NODE_BASE / VELK_SHAPE_BASE add the region base (see IGpuArena).
 layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
 layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
-// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
-// view's FrameGlobals record, replacing the FrameGlobals device address.
-layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+// velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
+// selects this view's record.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
 #define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
 #define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
@@ -760,9 +759,7 @@ void main()
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
-// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
-// view's FrameGlobals record.
-layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+// velk_globals (set = 1 slot 2) is declared in velk.glsl.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
 
 layout(push_constant, scalar) uniform PC {
@@ -855,9 +852,7 @@ void main()
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
-// View-level globals by index (set = 1 slot 2): pc.globals_base selects this
-// view's FrameGlobals record.
-layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { FrameGlobalsData data[]; } velk_globals;
+// velk_globals (set = 1 slot 2) is declared in velk.glsl.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
 
 layout(push_constant, scalar) uniform PC {
@@ -965,7 +960,7 @@ void main()
 #include "velk.glsl"
 
 layout(push_constant) uniform PC {
-    GlobalData globals;        // [0..8) FrameGlobals BDA (unused here)
+    GlobalDataPtr globals;     // [0..8) FrameGlobals BDA (unused here)
     uint src_tex_id;           // [8..)  CPU push starts here
 } pc;
 
@@ -1023,7 +1018,7 @@ layout(buffer_reference, std430) readonly buffer LightList {
 // while its contents (cam_pos, BVH addresses, etc.) refresh in place.
 // scalar layout matches the C++ `RtRoot` struct's natural packing.
 layout(buffer_reference, scalar) readonly buffer RtRoot {
-    GlobalData globals;
+    GlobalDataPtr globals;
     mat4 inv_view_projection;
     vec4 cam_pos;
     uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
