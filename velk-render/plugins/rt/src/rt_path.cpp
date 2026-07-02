@@ -194,30 +194,27 @@ void RtPath::build_passes(IViewEntry& entry,
     // Per-dispatch root struct mirroring the GLSL `RtRoot` buffer
     // reference (compute_shaders.h). Lives in `vs.root_buffer` and is
     // reached through an 8-byte BDA pushed as the only root constant.
+    // Camera matrices, BVH root/counts/bases and present_counter are read
+    // from the bound FrameGlobals record (globals_base) rather than
+    // duplicated here; shapes / env_data / lights stay device addresses
+    // until later slices bind them by index. Field order keeps the uint64
+    // addresses first so scalar layout needs no padding (matches GLSL).
     VELK_GPU_STRUCT RtRoot {
-        uint64_t globals;          // FrameGlobals BDA
-        float inv_vp[16];
-        float cam_pos[4];
+        uint64_t shapes_addr;      // primary-ray RtShape buffer BDA
+        uint64_t env_data_addr;    // env material data BDA
+        uint64_t lights_addr;      // Light array BDA
+        uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
+        uint32_t light_count;
         uint32_t extras[4];        // image_index, width, height, shape_count
         uint32_t env[4];           // env_material_id, env_texture_id, _, _
-        uint64_t shapes_addr;
-        uint32_t bvh_node_base;
-        uint32_t bvh_shape_base;
-        uint32_t bvh_root;
-        uint32_t bvh_node_count;
-        uint64_t env_data_addr;
-        uint64_t lights_addr;
-        uint32_t light_count;
-        uint32_t _lights_pad;
     };
 
     RtRoot root{};
-    root.globals = render_view.view_globals_address;
-    std::memcpy(root.inv_vp, render_view.inverse_view_projection.m, sizeof(root.inv_vp));
-    root.cam_pos[0] = render_view.cam_pos.x;
-    root.cam_pos[1] = render_view.cam_pos.y;
-    root.cam_pos[2] = render_view.cam_pos.z;
-    root.cam_pos[3] = 0.f;
+    root.shapes_addr = shapes_addr;
+    root.env_data_addr = render_view.env.data_addr;
+    root.lights_addr = lights_addr;
+    root.globals_base = render_view.view_globals_base;
+    root.light_count = static_cast<uint32_t>(render_view.lights.size());
     root.extras[0] = static_cast<uint32_t>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default));
     root.extras[1] = static_cast<uint32_t>(vp_w);
     root.extras[2] = static_cast<uint32_t>(vp_h);
@@ -226,15 +223,6 @@ void RtPath::build_passes(IViewEntry& entry,
     root.env[1] = render_view.env.texture_id;
     root.env[2] = 0;
     root.env[3] = 0;
-    root.shapes_addr = shapes_addr;
-    root.bvh_node_base = render_view.bvh.node_base;
-    root.bvh_shape_base = render_view.bvh.shape_base;
-    root.bvh_root = render_view.bvh.root;
-    root.bvh_node_count = render_view.bvh.node_count;
-    root.env_data_addr = render_view.env.data_addr;
-    root.lights_addr = lights_addr;
-    root.light_count = static_cast<uint32_t>(render_view.lights.size());
-    root._lights_pad = 0;
 
     if (!vs.root_buffer) {
         GpuBufferDesc bd{};

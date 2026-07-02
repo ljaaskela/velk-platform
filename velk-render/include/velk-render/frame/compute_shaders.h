@@ -995,8 +995,11 @@ layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
 // array reads (bvh_root / bvh_node_count scalars still come from RtRoot).
 layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
 layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
-#define VELK_NODE_BASE pc.bvh_node_base
-#define VELK_SHAPE_BASE pc.bvh_shape_base
+// BVH bases (and the rest of the per-view frame state: inv-VP, cam, bvh root
+// / counts, present_counter) come from the bound FrameGlobals record, indexed
+// by pc.globals_base — see VELK_GLOBALS below.
+#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
+#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
 
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {
@@ -1015,29 +1018,31 @@ layout(buffer_reference, std430) readonly buffer LightList {
 // push-constant pointer. Keeps the push-constant block at the same
 // shape as forward / deferred (one BDA), and lets the cached secondary
 // stay valid across frames since the buffer's GPU address is stable
-// while its contents (cam_pos, BVH addresses, etc.) refresh in place.
-// scalar layout matches the C++ `RtRoot` struct's natural packing.
+// while its contents refresh in place. scalar layout matches the C++
+// `RtRoot` struct's natural packing (uint64 addresses first, 8-aligned).
+//
+// The camera matrices, BVH root/counts/bases and present_counter live in
+// the bound FrameGlobals record (indexed by globals_base), not here, so
+// this struct no longer duplicates them. Only the RT-specific per-dispatch
+// state remains; shapes / env_data_addr / lights stay device addresses for
+// now (later slices bind them by index).
 layout(buffer_reference, scalar) readonly buffer RtRoot {
-    GlobalDataPtr globals;
-    mat4 inv_view_projection;
-    vec4 cam_pos;
-    uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
-    uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
     RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
-    uint bvh_node_base;         // element base into the BVH node ring region this frame
-    uint bvh_shape_base;        // element base into the BVH shape ring region this frame
-    uint bvh_root;
-    uint bvh_node_count;
     uint64_t env_data_addr;
     LightList lights;
+    uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
-    uint _lights_pad;
+    uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
+    uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
 };
 
 layout(push_constant) uniform PC { RtRoot _root; };
-// Existing call sites (pc.bvh_root, pc.cam_pos, ...) keep working via
-// this macro instead of being rewritten en masse.
+// Existing call sites (pc.shapes, pc.extras, ...) keep working via this
+// macro instead of being rewritten en masse.
 #define pc (_root)
+// This view's FrameGlobals, read by index from the bound globals buffer
+// (set = 1 slot 2, declared in velk.glsl) instead of a device address.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
 
 // ===== Core ray / hit / fill-context types =====
 struct Ray {
@@ -1404,10 +1409,10 @@ const int kBvhStackSize = 128;
 bool trace_closest_hit(Ray ray, out RayHit hit) {
     hit.t = 1e30;
     hit.shape_index = 0xffffffffu;
-    if (pc.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[kBvhStackSize];
     int sp = 0;
-    stack[sp++] = pc.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
         BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
@@ -1431,10 +1436,10 @@ bool trace_closest_hit(Ray ray, out RayHit hit) {
 
 // Any-hit BVH traversal for shadow rays: first confirmed blocker wins.
 bool trace_any_hit(Ray ray, float t_max) {
-    if (pc.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[kBvhStackSize];
     int sp = 0;
-    stack[sp++] = pc.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
         BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
@@ -1633,7 +1638,7 @@ void main()
     uint shape_count = pc.extras.w;
     if (coord.x >= int(w) || coord.y >= int(h)) return;
 
-    rng_init(uvec2(coord), pc.globals.present_counter);
+    rng_init(uvec2(coord), VELK_GLOBALS.present_counter);
 
     // Per-pixel primary sample count. Each sample fires one jittered
     // primary ray through the painter-sorted loop; the results are
@@ -1652,8 +1657,8 @@ void main()
         // different between frames.
         vec2 jitter = vec2(rng_next_float(), rng_next_float());
         vec2 ndc = (vec2(coord) + jitter) / vec2(float(w), float(h)) * 2.0 - 1.0;
-        vec4 near_h = pc.inv_view_projection * vec4(ndc, 0.0, 1.0);
-        vec4 far_h  = pc.inv_view_projection * vec4(ndc, 1.0, 1.0);
+        vec4 near_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 0.0, 1.0);
+        vec4 far_h  = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
         vec3 far_w  = far_h.xyz  / far_h.w;
 
