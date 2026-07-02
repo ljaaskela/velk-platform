@@ -55,12 +55,13 @@ GpuArenaRegion GpuArena::write(const void* data, uint64_t size, FrameContext& ct
     return GpuArenaRegion{offset, size};
 }
 
-ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx)
+ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx, uint64_t alignment)
 {
     if (!ctx.backend || size == 0) return {};
     backend_ = ctx.backend;
     drain_zombies();
 
+    const uint64_t align = alignment ? alignment : element_size_;
     const uint64_t need = (size + element_size_ - 1) / element_size_ * element_size_;
     if (!persistent_buffer_) {
         uint64_t cap = need * 4;
@@ -72,20 +73,24 @@ ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx)
 
     for (;;) {
         for (size_t i = 0; i < free_spans_.size(); ++i) {
-            if (free_spans_[i].size < need) continue;
-            const uint64_t offset = free_spans_[i].offset;
-            if (free_spans_[i].size == need) {
-                free_spans_.erase(free_spans_.begin() + static_cast<long>(i));
-            } else {
-                free_spans_[i].offset += need;
-                free_spans_[i].size -= need;
-            }
-            return ArenaRegion{this, offset, need};
+            const uint64_t span_off  = free_spans_[i].offset;
+            const uint64_t span_size = free_spans_[i].size;
+            // Align the region's start; the skipped bytes become a free span
+            // so a later smaller-alignment alloc can reuse them.
+            const uint64_t aligned = (span_off + align - 1) / align * align;
+            const uint64_t pad = aligned - span_off;
+            if (span_size < pad + need) continue;
+            free_spans_.erase(free_spans_.begin() + static_cast<long>(i));
+            if (pad > 0) free_spans_.push_back({span_off, pad});
+            const uint64_t tail_off = aligned + need;
+            const uint64_t tail_size = (span_off + span_size) - tail_off;
+            if (tail_size > 0) free_spans_.push_back({tail_off, tail_size});
+            return ArenaRegion{this, aligned, need};
         }
         // No span fits: grow (the fresh tail becomes a free span) and retry.
         const uint64_t old_cap = persistent_capacity_;
         uint64_t want = persistent_capacity_ * 2;
-        if (want < persistent_capacity_ + need) want = persistent_capacity_ + need;
+        if (want < persistent_capacity_ + need + align) want = persistent_capacity_ + need + align;
         if (!grow_persistent(want, ctx)) return {};
         free_spans_.push_back({old_cap, persistent_capacity_ - old_cap});
         coalesce_free();

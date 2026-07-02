@@ -32,15 +32,17 @@ constexpr string_view text_eval_src = R"(
 #endif
 #include "velk_text.glsl"
 
-layout(buffer_reference, std430) buffer TextMaterialData {
+struct TextMaterialData {
     VelkTextCurveBuffer curves;
     VelkTextBandBuffer bands;
     VelkTextGlyphBuffer glyphs;
+    uvec2 _pad;  // match C++ sizeof: alignas(16) rounds the three addresses (24 B) up to 32 B
 };
+VELK_MATERIAL_BUFFER(TextMaterialData, TextMaterialRef)
 
 MaterialEval velk_eval_text(EvalContext ctx)
 {
-    TextMaterialData d = TextMaterialData(ctx.data_addr);
+    TextMaterialData d = VELK_LOAD_MATERIAL(TextMaterialData, TextMaterialRef, ctx);
     // Glyph curves use FreeType's Y-up convention (y=0 at descender,
     // y=1 at ascender). ctx.uv arrives Y-down from raster varyings /
     // RT intersect_rect; flip here so both paths hit the same glyph

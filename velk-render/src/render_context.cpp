@@ -311,20 +311,24 @@ IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_so
     // between now and then is honored, same as every other material.
     mat->set_sources(vertex_source, fragment_source);
 
-    // Reflect material parameters from the vertex shader SPIR-V for
-    // dynamic-property setup. Compilation hits the shader cache on
+    // Reflect material parameters from the SPIR-V for dynamic-property setup.
+    // The material record (VELK_MATERIAL block) is read in the fragment
+    // shader, so reflect that; fall back to the vertex shader for materials
+    // that declare the block there. Compilation hits the shader cache on the
     // second run (inside the renderer's pipeline compile).
-    auto vert = vertex_source.empty()
-                    ? default_vertex_shader_
-                    : compile_shader(vertex_source, ShaderStage::Vertex);
-    if (vert) {
-        auto vert_data = vert->get_data();
-        if (!vert_data.empty()) {
-            auto params = reflect_material_params(vert_data.begin(), vert_data.size());
-            if (!params.empty()) {
-                mat->setup_inputs(params);
-            }
-        }
+    auto reflect_stage = [&](const string_view& src, ShaderStage stage,
+                             const IShader::Ptr& fallback) -> bool {
+        auto sh = src.empty() ? fallback : compile_shader(src, stage);
+        if (!sh) return false;
+        auto data = sh->get_data();
+        if (data.empty()) return false;
+        auto params = reflect_material_params(data.begin(), data.size());
+        if (params.empty()) return false;
+        mat->setup_inputs(params);
+        return true;
+    };
+    if (!reflect_stage(fragment_source, ShaderStage::Fragment, nullptr)) {
+        reflect_stage(vertex_source, ShaderStage::Vertex, default_vertex_shader_);
     }
 
     return mat;

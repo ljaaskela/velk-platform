@@ -197,15 +197,8 @@ int velk_simple::run_app(int argc, char* argv[])
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer CheckerParams {
-    vec4 color_a;
-    vec4 color_b;
-    float scale;
-};
-
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(VelkVbo3D)
-    CheckerParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -227,15 +220,15 @@ void main()
 #version 450
 #include "velk.glsl"
 
-layout(buffer_reference, std430) readonly buffer CheckerParams {
+struct CheckerParams {
     vec4 color_a;
     vec4 color_b;
     float scale;
 };
+VELK_MATERIAL(CheckerParams)
 
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr)
-    CheckerParams material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -245,10 +238,10 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float s = root.material.scale;
-    vec2 cell = floor(v_local_uv * s);
+    CheckerParams m = velk_material(root);
+    vec2 cell = floor(v_local_uv * m.scale);
     float checker = mod(cell.x + cell.y, 2.0);
-    frag_color = mix(root.material.color_a, root.material.color_b, checker);
+    frag_color = mix(m.color_a, m.color_b, checker);
 }
 )";
 

@@ -20,15 +20,16 @@ VELK_GPU_STRUCT GradientParams
 // `angle` in degrees. Shared across forward / deferred / RT; the
 // framework wraps this into the appropriate per-path driver.
 constexpr string_view gradient_eval_src = R"(
-layout(buffer_reference, std430) readonly buffer GradientMaterialData {
+struct GradientMaterialData {
     vec4 start_color;
     vec4 end_color;
     vec4 angle_pad; // x = angle in degrees; yzw unused
 };
+VELK_MATERIAL_BUFFER(GradientMaterialData, GradientMaterialRef)
 
 MaterialEval velk_eval_gradient(EvalContext ctx)
 {
-    GradientMaterialData d = GradientMaterialData(ctx.data_addr);
+    GradientMaterialData d = VELK_LOAD_MATERIAL(GradientMaterialData, GradientMaterialRef, ctx);
     float rad = radians(d.angle_pad.x);
     vec2 dir = vec2(cos(rad), sin(rad));
     float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);

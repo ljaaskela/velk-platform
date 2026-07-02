@@ -99,7 +99,7 @@ struct SpecularParams {
     uint tex_coord; uint color_tex_coord; uint _pad0; uint _pad1;
 };
 
-layout(buffer_reference, std430) readonly buffer StandardMaterialData {
+struct StandardMaterialData {
     BaseColorParams         base_color;
     MetallicRoughnessParams metallic_roughness;
     NormalParams            normal;
@@ -107,13 +107,14 @@ layout(buffer_reference, std430) readonly buffer StandardMaterialData {
     EmissiveParams          emissive;
     SpecularParams          specular;
 };
+VELK_MATERIAL_BUFFER(StandardMaterialData, StandardMaterialRef)
 
 // Per-property tex_coord selects TEXCOORD_0 (ctx.uv) or TEXCOORD_1 (ctx.uv1).
 #define VELK_STD_UV(ctx, tc) ((tc) == 0u ? (ctx).uv : (ctx).uv1)
 
 MaterialEval velk_eval_standard(EvalContext ctx)
 {
-    StandardMaterialData d = StandardMaterialData(ctx.data_addr);
+    StandardMaterialData d = VELK_LOAD_MATERIAL(StandardMaterialData, StandardMaterialRef, ctx);
 
     // Base color = factor * texture (texture defaults to white when absent).
     vec4 base = d.base_color.factor;

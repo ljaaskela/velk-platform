@@ -69,8 +69,10 @@ static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430) so material
- * data that follows can begin at offset 48 with its own alignment intact.
+ * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Material data
+ * no longer trails the header: it lives in the set = 1 material arena, indexed
+ * by @c material_base (region offset / material record size), which reuses the
+ * header's former trailing pad so the size stays 48.
  *
  * Multi-texture materials (e.g. StandardMaterial) embed their bindless
  * TextureIds directly in their own UBO via ITextureResolver, so the
@@ -88,7 +90,7 @@ VELK_GPU_STRUCT DrawDataHeader
     uint64_t vbo_address;       ///< GPU pointer to the draw's vertex buffer (mesh VBO).
     uint64_t uv1_address;       ///< GPU pointer to the draw's TEXCOORD_1 stream (vec2 per vertex), or a context-owned single-vertex fallback when @c uv1_enabled is 0.
     uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_address; 0 = fallback buffer, vertex shader reads index 0 only. Used as a branchless index multiplier in the vertex shader.
-    uint32_t _pad0;
+    uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
 };
 
 static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for std430 alignment");

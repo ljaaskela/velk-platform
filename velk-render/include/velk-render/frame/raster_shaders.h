@@ -101,7 +101,6 @@ void main()
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr)
-    OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
 
@@ -120,7 +119,7 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
+    ctx.material_base = root.material_base;
     ctx.texture_id  = root.texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
@@ -147,7 +146,6 @@ void main()
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr)
-    OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
 
@@ -166,7 +164,7 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
+    ctx.material_base = root.material_base;
     ctx.texture_id  = root.texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
@@ -192,7 +190,6 @@ void main()
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(OpaquePtr)
-    OpaquePtr material;
 };
 layout(push_constant) uniform PC { DrawData root; };
 
@@ -220,7 +217,7 @@ void main()
     velk_visual_discard();
 
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
+    ctx.material_base = root.material_base;
     ctx.texture_id  = root.texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
@@ -273,6 +270,14 @@ inline string compose_eval_fragment(string_view driver_template,
     out.append(string_view("#version 450\n"
                            "#include \"velk.glsl\"\n"
                            "#include \"velk-ui.glsl\"\n"));
+    // Raster override: the material record lives in the set = 1 material arena
+    // (one type per pipeline), read by index instead of by address. The default
+    // (address) forms are declared in velk-ui.glsl for the compute paths.
+    out.append(string_view(
+        "#undef VELK_MATERIAL_BUFFER\n"
+        "#undef VELK_LOAD_MATERIAL\n"
+        "#define VELK_MATERIAL_BUFFER(T, Ref) VELK_MATERIAL(T)\n"
+        "#define VELK_LOAD_MATERIAL(T, Ref, ctx) (velk_materials.data[(ctx).material_base])\n"));
     out.append(eval_src);
     out.append(string_view("\n"));
 

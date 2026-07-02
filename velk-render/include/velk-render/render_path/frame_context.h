@@ -56,6 +56,14 @@ struct FrameContext
     /// assigns it.
     IGpuArena* instance_arena = nullptr;
 
+    /// Shared material arena (set = 1 slot 4), owned by the Renderer. Each
+    /// material suballocates a persistent region for its draw data, aligned
+    /// to its own record size, and fragment shaders read velk_materials by
+    /// index (material_base = region offset / record size). Byte-granular
+    /// (element_size 1) since material records vary in size by material type.
+    /// Null before the Renderer assigns it.
+    IGpuArena* material_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

@@ -20,6 +20,7 @@ constexpr uint32_t SpvOpTypeInt = 21;
 constexpr uint32_t SpvOpTypeFloat = 22;
 constexpr uint32_t SpvOpTypeVector = 23;
 constexpr uint32_t SpvOpTypeMatrix = 24;
+constexpr uint32_t SpvOpTypeRuntimeArray = 29;
 constexpr uint32_t SpvOpTypeStruct = 30;
 constexpr uint32_t SpvOpTypePointer = 32;
 constexpr uint32_t SpvOpMemberDecorate = 72;
@@ -27,23 +28,13 @@ constexpr uint32_t SpvOpMemberDecorate = 72;
 // SPIR-V decoration
 constexpr uint32_t SpvDecorationOffset = 35;
 
-// The standard DrawDataHeader has these fields (48 bytes total),
-// matching the VELK_DRAW_DATA macro expansion in shader_compiler.cpp:
-//   globals_base (uint) + _pad_globals (uint)      -- set = 1 globals index
-//   instances_base (uint) + _pad_instances (uint)  -- set = 1 instance index
-//   texture_id (uint, 4 bytes)
-//   instance_count (uint, 4 bytes)
-//   vbo (buffer_reference, 8 bytes)
-//   uv1 (buffer_reference, 8 bytes)
-//   uv1_enabled (uint, 4 bytes)
-//   _pad_uv1 (uint, 4 bytes)
-// After the header a single `material` buffer_reference slot points at
-// the per-material params struct; reflection descends into that struct
-// to enumerate the user-facing inputs. The scan below skips padding and
-// non-pointer fields, so it is robust to the exact count, but keep this in
-// sync with the macro.
-constexpr uint32_t kHeaderFieldCount = 10;
-constexpr uint32_t kHeaderSize = 48;
+// Material params live in the set = 1 material arena, declared in the shader
+// by the VELK_MATERIAL(T) macro as `buffer VelkMaterials { T data[]; }`.
+// Reflection finds that block, follows its runtime-array member to the
+// element struct T, and enumerates T's members as the user-facing inputs.
+// Offsets are relative to T's start, so serialisation (ShaderMaterial) stays
+// independent of where the record sits in the arena.
+constexpr char kMaterialBlockName[] = "VelkMaterials";
 
 struct TypeInfo
 {
@@ -226,6 +217,14 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
             }
             break;
         }
+        case SpvOpTypeRuntimeArray: {
+            // id, element_type_id
+            if (length >= 3) {
+                uint32_t id = spirv[pos + 1];
+                pointer_targets[id] = spirv[pos + 2]; // reuse: id -> element type
+            }
+            break;
+        }
         case SpvOpTypeStruct: {
             if (length >= 2) {
                 uint32_t id = spirv[pos + 1];
@@ -253,46 +252,36 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
         pos += length;
     }
 
-    // Find the struct named "DrawData"
-    uint32_t draw_data_id = 0;
+    // Find the material block struct (VELK_MATERIAL(T) -> `buffer VelkMaterials
+    // { T data[]; }`). Its first member is a runtime array of the params
+    // struct T; follow the array's element type and enumerate T's members.
+    uint32_t block_id = 0;
     for (auto& [id, name] : id_names) {
-        if (name == "DrawData") {
-            draw_data_id = id;
+        if (name == kMaterialBlockName) {
+            block_id = id;
             break;
         }
     }
 
-    if (draw_data_id == 0) {
+    if (block_id == 0) {
         return {};
     }
 
-    auto sit = struct_members.find(draw_data_id);
-    if (sit == struct_members.end()) {
+    auto sit = struct_members.find(block_id);
+    if (sit == struct_members.end() || sit->second.empty()) {
         return {};
     }
 
-    auto& dd_members = sit->second;
-    auto& dd_names = member_names[draw_data_id];
-
-    // After the header there must be a single buffer_reference pointer
-    // field (conventionally named `material`) that points at the
-    // per-material params struct. Find it, follow the pointer, and
-    // enumerate that struct's members as the shader inputs.
-    uint32_t params_struct_id = 0;
-    for (uint32_t i = kHeaderFieldCount; i < static_cast<uint32_t>(dd_members.size()); ++i) {
-        auto nit = dd_names.find(i);
-        if (nit == dd_names.end()) continue;
-        const string& name = nit->second;
-        if (!name.empty() && name[0] == '_') continue; // padding
-        auto pit = pointer_targets.find(dd_members[i]);
-        if (pit == pointer_targets.end()) continue;
-        if (struct_members.find(pit->second) == struct_members.end()) continue;
-        params_struct_id = pit->second;
-        break;
+    // member 0 is the runtime array; pointer_targets maps its id to the
+    // element (params) struct type (see SpvOpTypeRuntimeArray above).
+    auto ait = pointer_targets.find(sit->second[0]);
+    if (ait == pointer_targets.end()) {
+        return {};
     }
+    uint32_t params_struct_id = ait->second;
 
     vector<ShaderParam> params;
-    if (params_struct_id == 0) {
+    if (struct_members.find(params_struct_id) == struct_members.end()) {
         return params;
     }
 

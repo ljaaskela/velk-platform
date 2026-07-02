@@ -105,7 +105,14 @@ public:
     /// drops; the shader base is @c offset / element_size. Fill it with
     /// `write_at`. Returns an invalid handle on failure. First reclaims any
     /// freed regions whose in-flight frame has retired.
-    virtual ArenaRegion alloc(uint64_t size, FrameContext& ctx) = 0;
+    ///
+    /// @p alignment, when non-zero, forces the returned offset to a multiple
+    /// of it (0 uses the arena's element_size). Heterogeneous records that
+    /// share one arena but derive their shader base as @c offset / record_size
+    /// pass their own record size so the base stays integral (e.g. per-material
+    /// data whose struct size varies by material type).
+    virtual ArenaRegion alloc(uint64_t size, FrameContext& ctx,
+                              uint64_t alignment = 0) = 0;
 
     /// Writes @p size bytes into the persistent buffer at @p offset (a region
     /// obtained from `alloc`). Call only when the region's contents change;

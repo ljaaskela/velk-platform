@@ -30,7 +30,6 @@ inline constexpr string_view element_vertex_src = R"(
 
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(VelkVbo3D)
-    OpaquePtr material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };

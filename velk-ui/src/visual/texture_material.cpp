@@ -16,13 +16,14 @@ VELK_GPU_STRUCT TextureParams
 };
 
 constexpr string_view texture_eval_src = R"(
-layout(buffer_reference, std430) readonly buffer TextureMaterialData {
+struct TextureMaterialData {
     vec4 tint;
 };
+VELK_MATERIAL_BUFFER(TextureMaterialData, TextureMaterialRef)
 
 MaterialEval velk_eval_texture(EvalContext ctx)
 {
-    TextureMaterialData d = TextureMaterialData(ctx.data_addr);
+    TextureMaterialData d = VELK_LOAD_MATERIAL(TextureMaterialData, TextureMaterialRef, ctx);
     vec4 sampled = velk_texture(ctx.texture_id, ctx.uv);
 
     MaterialEval e = velk_default_material_eval();

@@ -348,7 +348,8 @@ public:
         kGlobalBvhShapes = 1,
         kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read at velk_globals.data[globals_base].
         kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
-        kGlobalBufferSlotCount = 4,
+        kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
+        kGlobalBufferSlotCount = 5,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

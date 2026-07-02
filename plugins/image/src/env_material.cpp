@@ -27,7 +27,6 @@ constexpr string_view env_vertex_src = R"(
 
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(VelkVbo3D)
-    OpaquePtr material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -69,14 +68,15 @@ void main()
 // Env eval: rotate incoming ray direction around Y, convert to
 // equirectangular UV, sample the env texture.
 constexpr string_view env_eval_src = R"(
-layout(buffer_reference, std430) readonly buffer EnvMaterialData {
+struct EnvMaterialData {
     vec4 params; // x = intensity, y = rotation_rad, zw unused
 };
+VELK_MATERIAL_BUFFER(EnvMaterialData, EnvMaterialRef)
 
 MaterialEval velk_eval_env(EvalContext ctx)
 {
     const float PI = 3.14159265358979323846;
-    EnvMaterialData d = EnvMaterialData(ctx.data_addr);
+    EnvMaterialData d = VELK_LOAD_MATERIAL(EnvMaterialData, EnvMaterialRef, ctx);
 
     float c = cos(d.params.y);
     float s = sin(d.params.y);

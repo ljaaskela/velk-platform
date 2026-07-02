@@ -226,6 +226,22 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 //   ElementInstance inst = velk_instance(root);
 #define velk_instance(root) (velk_instances.data[(root).instances_base + gl_InstanceIndex])
 
+// Per-pipeline typed view of the shared material arena (set = 1 slot 4).
+// Declare once at file scope with this pipeline's material struct:
+//   VELK_MATERIAL(CheckerParams)
+// The buffer holds every material's draw data; this draw reads its own record
+// at `material_base`. Each graphics pipeline binds the same slot with its own
+// material struct (the arena is raw bytes; each material's region is aligned to
+// its record size so the element index lands on it). Raster only: the RT /
+// deferred compute path reaches heterogeneous materials by address instead.
+#define VELK_MATERIAL(MaterialType) \
+    layout(set = 1, binding = 4, std430) readonly buffer VelkMaterials { MaterialType data[]; } velk_materials;
+
+// Fragment-shader accessor: this draw's material record. Requires a matching
+// VELK_MATERIAL(...) declaration.
+//   CheckerParams m = velk_material(root);
+#define velk_material(root) (velk_materials.data[(root).material_base])
+
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
 //       VELK_DRAW_DATA(VelkVbo3D)
@@ -236,7 +252,8 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // The 48-byte header keeps everything 16-byte aligned for std430.
 // `globals_base` indexes the set = 1 globals buffer (read via
 // `velk_global_data(root)`); `instances_base` indexes the set = 1 instance
-// arena (read via `velk_instance(root)`).
+// arena (read via `velk_instance(root)`); `material_base` indexes the set = 1
+// material arena (read via `velk_material(root)`).
 #define VELK_DRAW_DATA(VboType)                \
     uint globals_base;                         \
     uint _pad_globals;                         \
@@ -247,7 +264,7 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
     VboType vbo;                               \
     VelkUv1Buffer uv1;                         \
     uint uv1_enabled;                          \
-    uint _pad_uv1;
+    uint material_base;
 )";
 
 namespace {

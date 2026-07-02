@@ -40,7 +40,7 @@ public:
 
     void init(uint32_t slot, uint32_t element_size) override;
     GpuArenaRegion write(const void* data, uint64_t size, FrameContext& ctx) override;
-    ArenaRegion alloc(uint64_t size, FrameContext& ctx) override;
+    ArenaRegion alloc(uint64_t size, FrameContext& ctx, uint64_t alignment = 0) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void release_region(uint64_t offset, uint64_t size) override;
     void reclaim() override;

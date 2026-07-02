@@ -14,6 +14,7 @@
 #include <velk-render/interface/intf_frame_data_manager.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_program.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_surface.h>
@@ -153,40 +154,37 @@ inline void emit_draw_calls(
             if (!header.uv1_address) continue;
         }
 
-        // Material draw-data lives in a persistent IProgramDataBuffer
-        // owned by the material; ViewPreparer's per-batch upload sweep
-        // ensure_buffer_storage's it and uploads when dirty (same path
-        // as VBOs / IBOs / batch storage). Here we just read its stable
-        // GPU address.
+        // Material draw-data lives in the shared material arena (set = 1 slot
+        // 4), suballocated + written by ViewPreparer's upload sweep. The header
+        // carries the element base (region offset / record size) the fragment
+        // shader adds to reach velk_materials.data[material_base]. Materials
+        // with no draw data (record size 0) get base 0.
         auto material_ptr = batch.material();
-        uint64_t material_addr = 0;
-        if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
-            if (auto buf = dd->get_data_buffer(static_cast<ITextureResolver*>(&resources))) {
-                material_addr = get_gpu_address(buf);
+        if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
+            if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
+                const size_t rec = dd->get_draw_data_size();
+                if (rec != 0 && mi->material_region_size() != 0) {
+                    header.material_base = static_cast<uint32_t>(
+                        mi->material_region_offset() / rec);
+                }
             }
         }
 
-        // Header + material_ptr destination: prefer the batch's own
-        // persistent storage (cross-frame stable address) when mapped.
-        // Falls back to per-frame staging for batches without backing
-        // storage (e.g. env_batch).
+        // Header destination: prefer the batch's own persistent storage
+        // (cross-frame stable address) when mapped. Falls back to per-frame
+        // staging for batches without backing storage (e.g. env_batch).
         uint64_t draw_data_addr = 0;
         uint8_t* persistent = batch.storage_mapped();
         if (has_storage && persistent) {
             std::memcpy(persistent + BatchBufferLayout::kHeaderOffset,
                         &header, sizeof(header));
-            std::memcpy(persistent + BatchBufferLayout::kMaterialPtrOffset,
-                        &material_addr, sizeof(material_addr));
             draw_data_addr = batch.storage_gpu_address() + BatchBufferLayout::kHeaderOffset;
         } else {
-            constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
-            size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
-            auto reservation = frame_data.reserve(total_size);
+            auto reservation = frame_data.reserve(sizeof(DrawDataHeader));
             if (!reservation.ptr) continue;
             auto* dst = static_cast<uint8_t*>(reservation.ptr);
             draw_data_addr = reservation.gpu_addr;
             std::memcpy(dst, &header, sizeof(header));
-            std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
         }
 
         // Always-indirect: pull args + count from the batch's own

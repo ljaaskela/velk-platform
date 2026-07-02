@@ -134,6 +134,11 @@ private:
     /// velk_instances.data[instances_base + i].
     IGpuArena::Ptr instance_arena_;
 
+    /// Shared material arena (set = 1 slot 4): each material suballocates a
+    /// persistent region for its draw data, so fragment shaders read
+    /// velk_materials.data[material_base].
+    IGpuArena::Ptr material_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.

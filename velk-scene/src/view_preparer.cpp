@@ -22,6 +22,7 @@
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/interface/material/intf_material.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-scene/interface/intf_environment.h>
 #include <velk-scene/interface/intf_visual.h>
 
@@ -141,20 +142,44 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             buf->clear_dirty();
             return mapped;
         };
+        // Material draw data lives in the shared material arena (set = 1 slot
+        // 4), one persistent region per material aligned to its record size so
+        // the fragment shader's material_base (= offset / record size) is
+        // integral. Kept across steady-state frames; (re)allocated only when
+        // the record size changes and rewritten only when the bytes change.
+        // Multiple batches sharing one material upload at most once per frame
+        // (get_data_buffer clears dirty after the first).
         auto upload_material = [&](const IBatch::Ptr& bp) {
-            if (!bp) return;
+            if (!bp || !ctx.material_arena) return;
             auto material_ptr = bp->material();
             auto* dd = interface_cast<IDrawData>(material_ptr.get());
-            if (!dd) return;
+            auto* mi = interface_cast<IMaterialInternal>(material_ptr.get());
+            if (!dd || !mi) return;
             VELK_PERF_SCOPE("renderer.upload_material");
-            // get_data_buffer re-serialises into the persistent buffer
-            // and flips dirty when bytes change; idempotent if already
-            // up-to-date. Multiple batches sharing one material upload
-            // at most once per frame (after the first call clears
-            // dirty, subsequent calls find !is_dirty and bail).
-            if (auto buf = dd->get_data_buffer(ctx.resources)) {
-                upload_buffer(buf.get());
+            // get_data_buffer re-serialises the material's bytes and flags the
+            // material arena dirty when they change (a dedicated flag, not the
+            // shared IBuffer::is_dirty the RT upload path consumes).
+            auto buf = dd->get_data_buffer(ctx.resources);
+            if (!buf) return;
+            const uint64_t need = buf->get_data_size();
+            const bool dirty = mi->take_material_dirty();
+            if (need == 0) {
+                mi->set_material_region({});  // release any existing region
+                return;
             }
+            if (mi->material_region_size() != need) {
+                // Align each region to its own record size so material_base
+                // (= offset / record size) stays integral for this material.
+                auto region = ctx.material_arena->alloc(need, ctx, need);
+                const uint64_t off = region.offset();
+                const bool ok = region.valid();
+                mi->set_material_region(std::move(region));
+                if (ok) ctx.material_arena->write_at(off, buf->get_data(), need);
+            } else if (dirty) {
+                ctx.material_arena->write_at(mi->material_region_offset(),
+                                             buf->get_data(), need);
+            }
+            // else: unchanged, keep the region and its bytes (no re-upload).
         };
         // Instance bytes live in the shared instance arena (set = 1 slot 3),
         // one persistent region per batch. The batch keeps its region across

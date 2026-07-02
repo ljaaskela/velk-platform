@@ -9,6 +9,7 @@
 #include <velk-render/ext/element_vertex.h>
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/interface/material/intf_material_internal.h>
@@ -109,6 +110,22 @@ public:
     uint64_t get_pipeline_key() const override { return 0; }
     void register_includes(IRenderContext&) const override {}
 
+    // Material arena region (set = 1 slot 4), managed by the renderer's
+    // upload sweep. Moving in a new region RAII-frees the previous one
+    // (deferred past the in-flight fence by the arena).
+    void set_material_region(ArenaRegion&& region) override
+    {
+        material_region_ = std::move(region);
+    }
+    uint64_t material_region_offset() const override { return material_region_.offset(); }
+    uint64_t material_region_size() const override { return material_region_.size(); }
+    bool take_material_dirty() override
+    {
+        bool d = material_dirty_;
+        material_dirty_ = false;
+        return d;
+    }
+
     /// Framework-level discard thresholds derived from the attached
     /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend
     /// mode → 0 (no discard, blending handles alpha); Opaque → a tiny
@@ -170,9 +187,14 @@ public:
             }
         }
         bool ok = true;
-        data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
-            ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
-        });
+        // write() is memcmp-gated and returns true only when the committed
+        // bytes actually changed; flag the material arena for a rewrite then.
+        // Independent of IBuffer::is_dirty (which the RT upload path clears).
+        if (data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
+                ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
+            })) {
+            material_dirty_ = true;
+        }
         return ok ? data_buffer_ : nullptr;
     }
 
@@ -218,6 +240,8 @@ private:
 
     ::velk::IProgramDataBuffer::Ptr data_buffer_;
     ScopedHandler options_sub_;
+    ArenaRegion material_region_;
+    bool material_dirty_ = true;  ///< Start dirty so the first frame writes the arena region.
 };
 
 } // namespace velk::ext

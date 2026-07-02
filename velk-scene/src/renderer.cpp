@@ -76,7 +76,8 @@ const uint VELK_LIGHTING_STANDARD = 1u; // Full PBR lighting via velk_pbr_shade.
 // view-level state (camera position, viewport, BVH, present_counter)
 // read directly from the `view_globals` UBO declared in velk.glsl.
 struct EvalContext {
-    uint64_t data_addr;    // material's per-draw GPU data pointer
+    uint64_t data_addr;    // material's per-draw GPU data pointer (RT / deferred compute path)
+    uint material_base;    // material record index into the set = 1 material arena (raster path)
     uint texture_id;       // bindless texture slot (0 if unused)
     uint shape_param;      // per-shape material slot (e.g. glyph index)
     vec2 uv;               // hit / fragment uv (TEXCOORD_0, 0..1 across the shape)
@@ -87,6 +88,20 @@ struct EvalContext {
     vec3 hit_pos;          // world-space hit point (or frag world position)
     vec4 tangent;          // world-space surface tangent (xyz) + handedness (w) for normal mapping; xyz=0 means no tangent basis (e.g. the RT path)
 };
+
+// Material data access, path-abstracted so one velk_eval_<name> snippet serves
+// both raster and compute. Each snippet declares a value struct T for its data
+// and a unique buffer_reference wrapper name Ref, then:
+//   VELK_MATERIAL_BUFFER(T, Ref)
+//   T d = VELK_LOAD_MATERIAL(T, Ref, ctx);
+// Default (RT / deferred compute): reach the record by address (ctx.data_addr).
+// The raster fragment composer overrides these to index the set = 1 material
+// arena by ctx.material_base instead. A compute shader that composes many
+// materials keeps them address-reached (heterogeneous structs can't share one
+// bound typed buffer); each Ref name is unique so the wrappers never collide.
+#define VELK_MATERIAL_BUFFER(T, Ref) \
+    layout(buffer_reference, std430) readonly buffer Ref { T data; };
+#define VELK_LOAD_MATERIAL(T, Ref, ctx) (Ref((ctx).data_addr).data)
 
 // Canonical material output. Produced by velk_eval_<name> once per
 // shading point and consumed by every path-specific driver.
@@ -289,6 +304,11 @@ FrameContext Renderer::make_frame_context()
         instance_arena_ = resources_->create_arena(IRenderBackend::kGlobalInstances,
                                                    kMaxInstanceDataSize);
     }
+    // Byte-granular (element_size 1): material records vary in size by
+    // material type, so each alloc aligns its offset to its own record size.
+    if (resources_ && !material_arena_) {
+        material_arena_ = resources_->create_arena(IRenderBackend::kGlobalMaterials, 1);
+    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -300,6 +320,7 @@ FrameContext Renderer::make_frame_context()
     ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
     ctx.globals_arena = globals_arena_.get();
     ctx.instance_arena = instance_arena_.get();
+    ctx.material_arena = material_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before

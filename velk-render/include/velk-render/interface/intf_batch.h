@@ -25,7 +25,7 @@ class ArenaRegion;
  *        (`get_data` returns the contiguous blob), and consumers
  *        (`emit_draw_calls` reads several offsets into the same buffer).
  *
- * Layout: `[args (32 B)][count (16 B)][header (48 B)][material_ptr (8 B)][pad (8 B)]` = 112 B fixed.
+ * Layout: `[args (32 B)][count (16 B)][header (48 B)]` = 96 B fixed.
  *
  * - args  (offset 0, 32 B) — indirect-draw command record. 16-byte
  *   aligned and oversized so any future args struct fits.
@@ -33,15 +33,15 @@ class ArenaRegion;
  *   the backend's indirect-with-count draw; 16-byte aligned.
  * - header (offset 48, 48 B) — `DrawDataHeader` the shader receives
  *   via push-constant. Persistent across frames; carries `instances_base`
- *   (index into the shared instance arena) and pointers to other
- *   persistent buffers (VBO, UV1), stable until the batch is rebuilt.
- * - material_ptr (offset 96, 8 B) — GPU pointer to the material's
- *   persistent `IProgramDataBuffer`. Stable per material lifetime.
- * - pad (offset 104, 8 B) — alignment to a 16-byte boundary.
+ *   (index into the shared instance arena), `material_base` (index into
+ *   the shared material arena), and pointers to other persistent buffers
+ *   (VBO, UV1), stable until the batch is rebuilt.
  *
- * Instance bytes no longer live here: they are suballocated in the shared
- * persistent instance arena (set = 1 slot 3) and read by index; see
- * `set_instance_binding` / `instance_region_offset`.
+ * Instance and material bytes no longer live here: instances are
+ * suballocated in the shared persistent instance arena (set = 1 slot 3)
+ * and materials in the material arena (set = 1 slot 4), both read by index;
+ * see `set_instance_region` / `instance_region_offset` and the material's
+ * own arena region.
  *
  * The DrawCall's root_constants carry `storage_gpu_address() + kHeaderOffset`
  * so the shader's push-constant pointer lands directly on the header.
@@ -54,9 +54,7 @@ struct BatchBufferLayout
     static constexpr size_t kCountSize         = 16;
     static constexpr size_t kHeaderOffset      = kCountOffset + kCountSize;
     static constexpr size_t kHeaderSize        = 48;
-    static constexpr size_t kMaterialPtrOffset = kHeaderOffset + kHeaderSize;
-    static constexpr size_t kMaterialPtrSize   = 8;
-    static constexpr size_t kBufferSize        = 112; // kMaterialPtrOffset + 16 (8 ptr + 8 pad)
+    static constexpr size_t kBufferSize        = kHeaderOffset + kHeaderSize; // 96
 };
 
 /**
