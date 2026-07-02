@@ -64,6 +64,14 @@ struct FrameContext
     /// Null before the Renderer assigns it.
     IGpuArena* material_arena = nullptr;
 
+    /// Shared light arena (set = 1 slot 5), owned by the Renderer. Each view
+    /// suballocates a persistent region for its light array; the RT and
+    /// deferred-lighting compute shaders read velk_lights by index
+    /// (lights_base = region offset / sizeof(GpuLight)). Persistent (not ring)
+    /// so the base is stable across frames and the cached deferred pass's
+    /// baked push constant stays valid. Null before the Renderer assigns it.
+    IGpuArena* lights_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

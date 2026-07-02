@@ -343,14 +343,33 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
             s.out.push_back(site.base);
         }, &lc);
 
-    // Stage the lights into the per-view persistent buffer. Stable GPU
-    // address across frames; bytes update only on real change. Notify
-    // observers so cached lighting/RT passes invalidate.
+    // Suballocate a persistent region in the shared light arena (set = 1
+    // slot 5) and write the GpuLight array. The region's offset is stable
+    // across frames, so the base the compute shaders read is baked once into
+    // cached passes. Re-allocate only when the light count changes (the base
+    // moves, so the cached lighting/RT passes must re-record); otherwise write
+    // in place each frame (data read fresh at the stable base, no re-record).
     auto& cache = view_caches_[&entry];
-    auto staged = cache.lights_buffer.upload(
-        rv.lights.data(), rv.lights.size() * sizeof(GpuLight), ctx);
-    rv.lights_addr = staged.address;
-    if (staged.changed) entry.notify_view_changed();
+    if (!ctx.lights_arena) return;
+    const uint64_t need = rv.lights.size() * sizeof(GpuLight);
+    if (cache.lights_region.size() != need) {
+        if (need == 0) {
+            cache.lights_region = {};  // release
+        } else {
+            auto region = ctx.lights_arena->alloc(need, ctx);
+            const uint64_t off = region.offset();
+            const bool ok = region.valid();
+            cache.lights_region = std::move(region);
+            if (ok) ctx.lights_arena->write_at(off, rv.lights.data(), need);
+        }
+        entry.notify_view_changed();  // base + light_count changed
+    } else if (need > 0) {
+        ctx.lights_arena->write_at(cache.lights_region.offset(),
+                                   rv.lights.data(), need);
+    }
+    rv.lights_base = (need > 0 && cache.lights_region.valid())
+        ? static_cast<uint32_t>(cache.lights_region.offset() / sizeof(GpuLight))
+        : 0u;
 }
 
 void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& ctx,

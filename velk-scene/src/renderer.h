@@ -139,6 +139,11 @@ private:
     /// velk_materials.data[material_base].
     IGpuArena::Ptr material_arena_;
 
+    /// Shared light arena (set = 1 slot 5): each view suballocates a
+    /// persistent region for its light array, so the RT and deferred compute
+    /// shaders read velk_lights.data[lights_base + i].
+    IGpuArena::Ptr lights_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.

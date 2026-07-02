@@ -12,6 +12,7 @@
 #include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
@@ -155,11 +156,12 @@ private:
         };
         ChangeCache<EnvKey> env_change;
 
-        /// Per-view persistent lights buffer. `prepare_lights` uploads
-        /// the GpuLight array into it so the device address on
-        /// `RenderView::lights_addr` is stable across frames; cached
-        /// lighting/RT passes can embed it without rotating each frame.
-        PersistentBuffer lights_buffer;
+        /// Per-view region in the shared light arena (set = 1 slot 5).
+        /// `prepare_lights` suballocates it and writes the GpuLight array;
+        /// the base (`RenderView::lights_base`) is stable across frames
+        /// (persistent region) so cached lighting/RT passes bake it once.
+        /// Re-allocated only when the light count changes.
+        ArenaRegion lights_region;
 
         /// Per-view persistent env material data buffer. Used as the
         /// fallback when the env material has no snippet-resolved

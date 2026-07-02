@@ -92,11 +92,12 @@ struct RenderView
     /// compose `velk_eval_shadow` from the snippet registry to match.
     vector<GpuLight> lights;
 
-    /// GPU device address of the per-view persistent lights buffer.
-    /// Stable across frames (only the bytes inside change), so paths
-    /// can embed it in cached `IRenderPass` PushC slots without
-    /// rotating the cache. 0 when there are no lights.
-    uint64_t lights_addr = 0;
+    /// Element base of this view's light array within the shared light
+    /// arena (set = 1 slot 5). The RT and deferred compute shaders read
+    /// velk_lights.data[lights_base + i]. Persistent region, so the base is
+    /// stable across frames (cached passes bake it); derived as
+    /// region.offset / sizeof(GpuLight) at prepare time. 0 when no lights.
+    uint32_t lights_base = 0;
 
     /// Raster batch cache for this view. Owned by the preparer; the
     /// span here is valid for the duration of the path's

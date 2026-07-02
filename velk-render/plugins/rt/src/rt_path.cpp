@@ -100,10 +100,6 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
 
-    // Persistent per-view lights buffer staged by ViewPreparer; address
-    // is stable across frames so cached RT passes can embed it.
-    uint64_t lights_addr = render_view.lights_addr;
-
     // Make a working copy of the shapes so we can plane-sort without
     // affecting other consumers of render_view.shapes (today nobody
     // else uses it, but RenderView is immutable from a path's POV).
@@ -202,9 +198,10 @@ void RtPath::build_passes(IViewEntry& entry,
     VELK_GPU_STRUCT RtRoot {
         uint64_t shapes_addr;      // primary-ray RtShape buffer BDA
         uint64_t env_data_addr;    // env material data BDA
-        uint64_t lights_addr;      // Light array BDA
         uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
         uint32_t light_count;
+        uint32_t lights_base;      // light array index (set = 1 slot 5)
+        uint32_t _pad_lights;
         uint32_t extras[4];        // image_index, width, height, shape_count
         uint32_t env[4];           // env_material_id, env_texture_id, _, _
     };
@@ -212,9 +209,9 @@ void RtPath::build_passes(IViewEntry& entry,
     RtRoot root{};
     root.shapes_addr = shapes_addr;
     root.env_data_addr = render_view.env.data_addr;
-    root.lights_addr = lights_addr;
     root.globals_base = render_view.view_globals_base;
     root.light_count = static_cast<uint32_t>(render_view.lights.size());
+    root.lights_base = render_view.lights_base;
     root.extras[0] = static_cast<uint32_t>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default));
     root.extras[1] = static_cast<uint32_t>(vp_w);
     root.extras[2] = static_cast<uint32_t>(vp_h);

@@ -21,7 +21,7 @@ float velk_shadow_hash(uint x)
 
 float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
 {
-    Light light = pc.lights.data[light_idx];
+    Light light = velk_lights.data[pc.lights_base + light_idx];
 
     // Shadow ray direction + maximum distance depend on light kind.
     // Directional lights occlude anything between the surface and

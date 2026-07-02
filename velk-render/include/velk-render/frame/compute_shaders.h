@@ -60,7 +60,9 @@ struct Light {
     vec4  params;          // x range, y cos(inner), z cos(outer), w light size (dir: angular radius rad; point/spot: world radius)
 };
 
-layout(buffer_reference, std430) readonly buffer LightList { Light data[]; };
+// Scene lights bound by index (set = 1 slot 5); this view's run starts at
+// pc.lights_base. Same buffer the RT compute reads.
+layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
 layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
     vec4 params; // x = intensity, y = rotation_rad, zw = _
@@ -91,8 +93,9 @@ layout(push_constant, scalar) uniform PC {
     uint light_count;          // 56
     uint env_texture_id;       // 60
     uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
-    uint _pad0;                // 68  aligns the BDA pointers below to 8
-    LightList lights;          // 72
+    uint _pad0;                // 68  keeps env_params (BDA) 8-aligned
+    uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
+    uint _pad_lights;          // 76  keeps env_params 8-aligned
     _EnvParamsBuf env_params;  // 80
     uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
     uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
@@ -616,7 +619,7 @@ void main()
         uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
                      + VELK_GLOBALS.present_counter * 26699u) | 1u;
         for (uint i = 0u; i < pc.light_count; ++i) {
-            Light light = pc.lights.data[i];
+            Light light = velk_lights.data[pc.lights_base + i];
             vec3 L;
             float atten = 1.0;
             if (light.flags.x == 0u) {
@@ -664,7 +667,7 @@ void main()
         // (one ray), demodulated (no albedo - reapplied at composite).
         vec3 direct_diffuse = vec3(0.0);
         if (res_light != 0xffffffffu && res_w > 0.0) {
-            Light chosen = pc.lights.data[res_light];
+            Light chosen = velk_lights.data[pc.lights_base + res_light];
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
@@ -1010,9 +1013,9 @@ struct Light {
     vec4  params;          // x = range, y = cos(inner), z = cos(outer), w = light size (dir: angular radius rad; point/spot: world radius)
 };
 
-layout(buffer_reference, std430) readonly buffer LightList {
-    Light data[];
-};
+// Scene lights bound by index (set = 1 slot 5); this view's run starts at
+// pc.lights_base. Same buffer the deferred-lighting compute reads.
+layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
 // RT root: per-dispatch state in a buffer reached via an 8-byte
 // push-constant pointer. Keeps the push-constant block at the same
@@ -1024,14 +1027,15 @@ layout(buffer_reference, std430) readonly buffer LightList {
 // The camera matrices, BVH root/counts/bases and present_counter live in
 // the bound FrameGlobals record (indexed by globals_base), not here, so
 // this struct no longer duplicates them. Only the RT-specific per-dispatch
-// state remains; shapes / env_data_addr / lights stay device addresses for
-// now (later slices bind them by index).
+// state remains; shapes / env_data_addr stay device addresses for now
+// (later slices bind them by index).
 layout(buffer_reference, scalar) readonly buffer RtRoot {
     RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
     uint64_t env_data_addr;
-    LightList lights;
     uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
+    uint lights_base;           // index into velk_lights (set = 1 slot 5)
+    uint _pad_lights;
     uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
 };
@@ -1524,7 +1528,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // and modulated by its shadow technique's visibility.
     vec3 direct = vec3(0.0);
     for (uint li = 0u; li < pc.light_count; ++li) {
-        Light light = pc.lights.data[li];
+        Light light = velk_lights.data[pc.lights_base + li];
         vec3 L;
         float atten = 1.0;
         if (light.flags.x == 0u) {
