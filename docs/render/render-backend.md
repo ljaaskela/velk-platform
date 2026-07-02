@@ -38,10 +38,10 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 "Bindless" traditionally refers to accessing GPU resources (textures, buffers) by address or index rather than binding them to fixed slots before each draw call. Velk's render backend takes this approach across the board:
 
   * **Bindless textures**: all textures live in a global array, accessed by index. One descriptor set bind per frame, zero per draw call.
-  * **Bindless buffers**: all shader data (instance arrays, material parameters, glyph tables, mesh vertices) is accessed via `buffer_reference` GPU pointers. Shaders navigate a pointer graph starting from a single push constant root address.
-  * **No descriptor set switching per draw**: each draw call receives one 8-byte push constant (a GPU address). The shader dereferences it to reach everything it needs.
+  * **Bindless buffers**: shader data is reached without per-draw descriptor binds. Most records (frame globals, per-instance arrays, material params, scene lights, BVH nodes/shapes, RT primary shapes) live in a handful of **`set = 1` storage buffers read by integer index**; the remaining large / variable buffers (mesh vertices, glyph tables, and the draw root itself) are still reached by `buffer_reference` GPU pointer. Both are the same reachability — base + offset — and the resource model is steadily moving the index-read way (away from raw `buffer_reference`) for portability.
+  * **No descriptor set switching per draw**: each draw call receives one 8-byte push constant (a GPU address of its `DrawDataHeader`). The shader dereferences it, then reaches globals / instances / material by index from `set = 1`.
   * **No vertex buffer binding**: there are no VAOs, vertex attribute descriptions or `vkCmdBindVertexBuffers`. Pipelines have empty vertex input state. 2D geometry is procedural (unit quads expanded in the vertex shader), 3D geometry uses vertex pulling from GPU buffers.
-  * **Inline per-frame data**: per-draw data is written into persistently mapped GPU memory, so per-frame allocations, staging copies and command-buffer transfers are not needed. Draw headers + material pointers live in a small fixed per-batch buffer; env / one-off data uses a per-frame bump-allocated staging buffer; view globals and per-instance arrays are index-read from shared `set = 1` arenas (`velk_globals`, `velk_instances`) — see [The GPU data model](#the-gpu-data-model). (This "index into a bound buffer" is the same reachability as a device address; it is the direction the resource model is moving, away from raw `buffer_reference`.)
+  * **Inline per-frame data**: per-draw data is written into persistently mapped GPU memory, so per-frame allocations, staging copies and command-buffer transfers are not needed. Draw headers live in a small fixed per-batch buffer; env / one-off data uses a per-frame bump-allocated staging buffer; globals, instances, material, lights and RT shapes are index-read from shared `set = 1` arenas — see [The GPU data model](#the-gpu-data-model).
 
 The result is that the per-draw-call CPU cost is dominated by the `vkCmdPushConstants` + `vkCmdDraw` calls themselves, which is the theoretical minimum. On the GPU side, the pointer dereference for draw data is a single memory load from L2-cached memory, comparable to a traditional uniform buffer read.
 
@@ -197,14 +197,12 @@ The renderer owns two GPU staging buffers (double-buffered, starting at 256 KB a
 ```mermaid
 block-beta
     columns 6
-    A["Instance data 0"]:2 B["DrawDataHeader 0<br/>+ material ptr"]:1 C["Instance data 1"]:2 D["DrawDataHeader 1<br/>+ material ptr"]:1
-    E["..."]:1 F["Instance data 2"]:2 G["DrawDataHeader 2<br/>+ material ptr"]:1 H["..."]:2
+    A["DrawDataHeader 0"]:1 B["DrawDataHeader 1"]:1 C["DrawDataHeader 2"]:1 D["..."]:3
 ```
 
-- **Instance data**: the per-instance array the shader reads by index from the shared instance arena (`instances_base + gl_InstanceIndex`). Every visual — 2D or 3D — packs this as an array of `ElementInstance` structs (see [Instance data](#instance-data) below).
-- **DrawDataHeader**: the root struct that the shader receives a pointer to. Contains GPU addresses pointing to the instance data, frame globals, and the draw's VBO, plus the bindless texture index. A per-draw 8-byte material pointer is written immediately after the header — material params live in a separate `IProgramDataBuffer` (dirty-tracked across frames) reached through that pointer.
+- **DrawDataHeader**: the root struct that the shader receives a pointer to. Carries the bindless texture index, the draw's VBO / UV1 addresses, and integer bases into the set = 1 arenas (globals, instances, material). It is the only thing written to the staging buffer for a draw — instances and material params live in their own persistent arenas, reached by index (see below).
 
-Each write returns the GPU address of what was written. The DrawDataHeader + material-pointer pair is written last (after the instance data), and its address goes into the `DrawCall`'s push constants.
+Each write returns the GPU address of what was written; the DrawDataHeader's address goes into the `DrawCall`'s push constants. Batches with persistent storage keep their header in a stable per-batch buffer instead of the per-frame staging buffer.
 
 #### Note
 
@@ -220,12 +218,12 @@ The DrawDataHeader is the root of the shader's data graph. The push constant car
 
 ```mermaid
 graph LR
-    PC["Push Constant<br/><i>8 bytes</i>"] -->|GPU ptr| DDH["DrawDataHeader<br/>+ material ptr"]
+    PC["Push Constant<br/><i>8 bytes</i>"] -->|GPU ptr| DDH["DrawDataHeader"]
     DDH -->|globals_base index| G["velk_globals[]<br/>view_projection, viewport, BVH"]
     DDH -->|instances_base index| I["velk_instances[]<br/>world_matrix, offset, size, color"]
+    DDH -->|material_base index| M["velk_materials[]<br/><i>per-material fields, dirty-tracked</i>"]
     DDH -->|vbo_address| V["VelkVertex3D[]<br/>position, normal, uv"]
     DDH -->|texture_id| T["Bindless Array<br/>sampler2D[]"]
-    DDH -->|material ptr| M["IProgramDataBuffer<br/><i>per-material, dirty-tracked</i>"]
 ```
 
 The C++ struct and the shader's `buffer_reference` layout mirror each other:
@@ -244,25 +242,25 @@ VELK_GPU_STRUCT DrawDataHeader
     uint64_t vbo_address;        ///< -> bound VBO (VelkVbo3D)
     uint64_t uv1_address;        ///< -> TEXCOORD_1 stream or context fallback
     uint32_t uv1_enabled;        ///< 0 = fallback (index 0), 1 = per-vertex
-    uint32_t _pad0;
+    uint32_t material_base;      ///< index into velk_materials[] (set = 1)
 };
 static_assert(sizeof(DrawDataHeader) == 48, ...);
 ```
 
 ```glsl
-// GLSL (velk.glsl provides VELK_DRAW_DATA / velk_instance; velk-ui.glsl declares velk_instances as ElementInstance)
+// GLSL (velk.glsl provides VELK_DRAW_DATA / velk_instance / velk_material;
+// velk-ui.glsl declares velk_instances as ElementInstance)
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(VelkVbo3D)  // globals_base, instances_base, texture_id, count, vbo, uv1, uv1_enabled, pad
-    OpaquePtr material;         // -> per-material data buffer
+    VELK_DRAW_DATA(VelkVbo3D)  // globals_base, instances_base, texture_id, count, vbo, uv1, uv1_enabled, material_base
 };
 
 layout(push_constant) uniform PC { DrawData root; };
 ```
 
-The `VELK_DRAW_DATA(VboType)` macro expands to the standard 48-byte header: `uint globals_base` + `uint _pad_globals`, `uint instances_base` + `uint _pad_instances`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint _pad_uv1`. The 8-byte `OpaquePtr material` field lives at offset 48 and addresses the material's per-draw GPU data buffer (an `IProgramDataBuffer` owned by the material, reused and dirty-tracked across frames). `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
+The `VELK_DRAW_DATA(VboType)` macro expands to the standard 48-byte header: `uint globals_base` + `uint _pad_globals`, `uint instances_base` + `uint _pad_instances`, `uint texture_id`, `uint instance_count`, `VboType vbo`, `VelkUv1Buffer uv1`, `uint uv1_enabled`, `uint material_base`. `material_base` (which reuses the header's former trailing pad, so the size stays 48) indexes the set = 1 material arena. `uv1` addresses the primitive's parallel TEXCOORD_1 vec2 stream, or a context-owned single-vertex fallback when `uv1_enabled == 0`; the vertex shader reads via the `velk_uv1(root)` macro which uses `uv1_enabled` as a branchless index multiplier.
 
-The C++ side writes indices and addresses; the GLSL side declares the pointer fields (`vbo`, `uv1`, `material`) as `buffer_reference` types, while view globals and instances are reached by **index** into set = 1 storage buffers: `velk_global_data(root)` reads `velk_globals.data[root.globals_base]`, and `velk_instance(root)` reads `velk_instances.data[root.instances_base + gl_InstanceIndex]` (no descriptor uploads, no vertex input). Vertex shaders that don't dereference the material pointer declare it as `OpaquePtr` (8-byte placeholder); eval-based fragment shaders reach it as `ctx.data_addr`.
+The C++ side writes indices and addresses; the GLSL side declares only the true pointer fields (`vbo`, `uv1`) as `buffer_reference` types, while globals, instances and material are reached by **index** into set = 1 storage buffers: `velk_global_data(root)` reads `velk_globals.data[root.globals_base]`, `velk_instance(root)` reads `velk_instances.data[root.instances_base + gl_InstanceIndex]`, and `velk_material(root)` reads `velk_materials.data[root.material_base]` (no descriptor uploads, no vertex input). Eval-based fragment shaders reach the material record through the `VELK_LOAD_MATERIAL` macro (see [Materials](materials.md)).
 
 ### Instance data
 
@@ -317,7 +315,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 
 | Include | Source | Provides |
 |--|--|--|
-| `velk.glsl` | velk-render (always available) | `GlobalData`, `VelkVertex3D`, `VelkVbo3D`, `velk_vertex3d(root)`, `OpaquePtr`, `VELK_DRAW_DATA(VboType)`, `VELK_INSTANCES(Type)`, `velk_instance(root)`, `velk_texture(id, uv)`, BVH / RT types |
+| `velk.glsl` | velk-render (always available) | `GlobalData`, `VelkVertex3D`, `VelkVbo3D`, `velk_vertex3d(root)`, `OpaquePtr`, `VELK_DRAW_DATA(VboType)`, `VELK_INSTANCES(Type)`, `velk_instance(root)`, `VELK_MATERIAL(Type)`, `velk_material(root)`, `velk_texture(id, uv)`, BVH / RT types |
 | `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
 Modules can register additional includes via `IRenderContext::register_shader_include()` — the text plugin registers `velk_text.glsl` for glyph coverage sampling.
@@ -331,7 +329,6 @@ With these includes, a complete UI vertex shader only needs its `DrawData` layou
 
 layout(buffer_reference, std430) readonly buffer DrawData {
     VELK_DRAW_DATA(VelkVbo3D)
-    OpaquePtr material;
 };
 
 layout(push_constant) uniform PC { DrawData root; };
@@ -402,7 +399,7 @@ Adding new primitive kinds (line strips, point clouds, terrain) is a matter of t
 
 ## Materials: Per-material GPU Data
 
-Materials supply a pipeline plus a per-draw GPU data block that the fragment shader reads. The block doesn't go in the per-frame staging buffer — it lives in an `IProgramDataBuffer` that the material owns, reuses across frames, and marks dirty only when its contents change. The staging-buffer entry for a draw is just the 32-byte `DrawDataHeader` followed by an 8-byte pointer to that material buffer.
+Materials supply a pipeline plus a per-material GPU data record that the fragment shader reads. The record lives in the Renderer-owned material arena (`set = 1` slot 4): each material suballocates a persistent region, dirty-tracked and rewritten only when its contents change. The `DrawDataHeader` carries a `material_base` index, and the fragment shader reads `velk_materials.data[material_base]`. On the CPU the material still serialises through an `IProgramDataBuffer` (for the byte-diff), whose bytes are copied into the arena region.
 
 The relevant interfaces (`velk-render/interface/intf_draw_data.h`, `intf_material.h`):
 
@@ -425,12 +422,12 @@ The result in GPU memory for one draw:
 ```mermaid
 block-beta
     columns 5
-    A["DrawDataHeader<br/>(32 B)<br/>globals, instances<br/>texture_id, count<br/>vbo"]:2 B["material ptr<br/>(8 B)"]:1 C["IProgramDataBuffer<br/>(per material, cross-frame)<br/>material fields..."]:2
+    A["DrawDataHeader<br/>(48 B)<br/>globals, instances<br/>material_base<br/>texture_id, vbo"]:2 B["-- index -->"]:1 C["velk_materials[material_base]<br/>(set = 1 slot 4, dirty-tracked)<br/>material fields..."]:2
 ```
 
-Each material defines a C++ `VELK_GPU_STRUCT` and a matching GLSL `buffer_reference` block that the shader dereferences via `ctx.data_addr` inside its eval body. The CPU struct size and the GLSL std430 layout must agree — see the [alignment section](#std430-alignment-and-the-drawdataheader) below, and [Materials](materials.md) for the full authoring story.
+Each material defines a C++ `VELK_GPU_STRUCT` and a matching GLSL value struct. In the raster fragment path the eval body reads its record by index (`velk_materials.data[material_base]`); in the RT / deferred compute path the same eval body reaches it by address instead. A per-eval `VELK_LOAD_MATERIAL` macro abstracts the two so one snippet serves both. The CPU struct size and the GLSL std430 stride must agree — see the [alignment section](#std430-alignment-and-the-drawdataheader) below, and [Materials](materials.md) for the full authoring story.
 
-No uniform reflection, name-based binding, or type introspection. Just a GPU pointer and two structs that agree on layout.
+No uniform reflection, name-based binding, or type introspection. Just an index and two structs that agree on layout.
 
 ## Textures: Bindless by Default
 
@@ -476,7 +473,7 @@ struct ElementInstance {  // value type, 128 bytes
 };
 ```
 
-The rule: use `buffer_reference` only for types that represent actual GPU pointers (DrawData, the RT `GlobalDataPtr` / `RtRoot`, instance buffer containers). Data that lives inside those buffers is plain structs, and view globals are reached by index into the set = 1 `velk_globals` buffer rather than by address.
+The rule: use `buffer_reference` only for types that represent actual GPU pointers (the graphics `DrawData` root, the VBO / UV1 / mesh-vertex containers). Data that lives in a `set = 1` arena — globals, instances, material, lights, BVH nodes/shapes, RT primary shapes — is a plain struct read by index. The RT root (`RtRoot`) is no longer a `buffer_reference`: it is pushed inline as a scalar push-constant block, and every field in it is an index or inline value.
 
 ### std430 alignment and the DrawDataHeader
 
@@ -504,12 +501,12 @@ VELK_GPU_STRUCT DrawDataHeader
     uint64_t vbo_address;        // 8 bytes, offset 24
     uint64_t uv1_address;        // 8 bytes, offset 32
     uint32_t uv1_enabled;        // 4 bytes, offset 40
-    uint32_t _pad0;              // 4 bytes, offset 44
+    uint32_t material_base;      // 4 bytes, offset 44 (index into velk_materials[])
 };
 static_assert(sizeof(DrawDataHeader) == 48, ...);
 ```
 
-The 8-byte material pointer follows at offset 48, 16-byte aligned. The material's own data buffer (reached through that pointer) is a separate std430 buffer that the material's C++ struct and the GLSL `buffer_reference` block must lay out identically. Custom material structs should use `VELK_GPU_STRUCT` (`alignas(16)`) so the compiler handles padding automatically and 16-byte-aligned GLSL fields never see an offset mismatch.
+The material's data record lives in the `set = 1` material arena at `material_base`, not after the header. It is a std430 buffer whose element the material's C++ struct and the GLSL block must lay out identically; the shader array stride must equal the C++ record size, so custom material structs should use `VELK_GPU_STRUCT` (`alignas(16)`) so the compiler handles padding automatically and 16-byte-aligned GLSL fields never see an offset mismatch. See [Materials](materials.md) for the full authoring story.
 
 ### Color space
 

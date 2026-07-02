@@ -101,12 +101,13 @@ The convenience method `renderer->render()` calls `present(prepare({}))` for the
 
 ### Per-frame GPU buffers
 
-Each frame slot owns its own GPU staging buffer. When `prepare()` writes instance data, draw headers, and material params, it writes into the slot's buffer, not a shared one. This means a prepared frame's GPU data is never overwritten by a subsequent `prepare()` call. The buffer remains valid and untouched until `present()` submits its draw calls and recycles the slot.
+Each frame slot owns its own GPU staging buffer. When `prepare()` writes one-off draw headers and env data, it writes into the slot's buffer, not a shared one. This means a prepared frame's GPU data is never overwritten by a subsequent `prepare()` call. The buffer remains valid and untouched until `present()` submits its draw calls and recycles the slot. (Persistent per-batch storage and the `set = 1` arenas are separate from these per-frame staging buffers.)
 
-The staging buffers are small (starting at 256 KB, growing on demand) because they only hold per-frame metadata: 
-* `DrawDataHeader` structs (32 bytes each)
-* inline instance data (32-48 bytes per quad) and 
-* material parameters. 
+The staging buffers are small (starting at 256 KB, growing on demand) because they only hold per-frame metadata:
+* `DrawDataHeader` structs (48 bytes each) for batches without persistent storage (e.g. env)
+* one-off / env draw data.
+
+Per-instance arrays and material parameters no longer live here: they are index-read from the Renderer-owned `set = 1` arenas (`velk_instances`, `velk_materials`).
 
 Heavy data like textures and persistent mesh buffers lives in separate GPU allocations outside the frame buffer. Even a complex frame with thousands of draw entries typically uses under 1 MB.
 
