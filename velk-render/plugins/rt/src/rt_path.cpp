@@ -207,13 +207,12 @@ void RtPath::build_passes(IViewEntry& entry,
         vs.rt_dirty = true;
     }
 
-    // Per-dispatch root struct mirroring the GLSL `RtRoot` buffer
-    // reference (compute_shaders.h). Lives in `vs.root_buffer` and is
-    // reached through an 8-byte BDA pushed as the only root constant.
-    // Camera matrices, BVH root/counts/bases and present_counter are read
-    // from the bound FrameGlobals record (globals_base) rather than
-    // duplicated here; every remaining field is an index or inline value
-    // (no device addresses left in the struct).
+    // Per-dispatch root struct mirroring the GLSL `PC` push-constant block
+    // (compute_shaders.h). Pushed inline (memcpy'd into the dispatch's root
+    // constants), no device address. Camera matrices, BVH root/counts/bases
+    // and present_counter are read from the bound FrameGlobals record
+    // (globals_base) rather than duplicated here; every remaining field is an
+    // index or inline value (no device addresses left in the struct).
     VELK_GPU_STRUCT RtRoot {
         uint32_t shapes_base;      // primary shape index (set = 1 slot 6)
         uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
@@ -239,17 +238,6 @@ void RtPath::build_passes(IViewEntry& entry,
     root.env[1] = render_view.env.texture_id;
     root.env[2] = 0;
     root.env[3] = 0;
-
-    if (!vs.root_buffer) {
-        GpuBufferDesc bd{};
-        bd.size = sizeof(RtRoot);
-        bd.cpu_writable = true;
-        vs.root_buffer = ctx.backend->create_gpu_buffer(bd);
-        if (!vs.root_buffer) return;
-        vs.rt_dirty = true;  // first-time alloc: cached secondary needs the new BDA
-    }
-    vs.root_buffer->update(0, sizeof(RtRoot), &root);
-    const uint64_t root_addr = vs.root_buffer->gpu_address();
 
     // color_target is always an IGpuTexture-castable wrapper.
     IGpuTexture* rt_tex = graph.resources().find_texture(vs.rt_output.get());
@@ -277,8 +265,12 @@ void RtPath::build_passes(IViewEntry& entry,
             dc.groups_x = (vp_w + 7) / 8;
             dc.groups_y = (vp_h + 7) / 8;
             dc.groups_z = 1;
-            dc.root_constants_size = sizeof(uint64_t);
-            std::memcpy(dc.root_constants, &root_addr, sizeof(uint64_t));
+            // RtRoot pushed inline (no device address). Baked into this cached
+            // secondary; re-recorded on rt_dirty (view / shape-count change).
+            static_assert(sizeof(RtRoot) <= sizeof(dc.root_constants),
+                          "RtRoot exceeds the push-constant budget");
+            dc.root_constants_size = sizeof(RtRoot);
+            std::memcpy(dc.root_constants, &root, sizeof(RtRoot));
 
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();

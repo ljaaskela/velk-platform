@@ -1019,17 +1019,16 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // this holds the back-to-front sort the primary loop composites.
 layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
 
-// RT root: per-dispatch state in a buffer reached via an 8-byte
-// push-constant pointer. Lets the cached secondary stay valid across
-// frames since the buffer's GPU address is stable while its contents
-// refresh in place. scalar layout matches the C++ `RtRoot` struct.
+// RT root: per-dispatch state pushed inline as a push constant (no device
+// address anywhere). scalar layout matches the C++ `RtRoot` struct.
 //
 // The camera matrices, BVH root/counts/bases and present_counter live in
 // the bound FrameGlobals record (indexed by globals_base), not here. Only
-// the RT-specific per-dispatch state remains, now all indices / inline data
-// (no device addresses left in the struct; the root pointer itself becomes
-// an inline push constant in a later slice).
-layout(buffer_reference, scalar) readonly buffer RtRoot {
+// the RT-specific per-dispatch state remains, all indices / inline data.
+// Baked into the cached secondary at record time like the deferred PC;
+// globals_base rotates with the globals ring but the cached pass re-records
+// on view change, and static globals match across ring slots.
+layout(push_constant, scalar) uniform PC {
     uint shapes_base;           // index into velk_shapes (set = 1 slot 6)
     uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
@@ -1037,12 +1036,7 @@ layout(buffer_reference, scalar) readonly buffer RtRoot {
     vec2 env_params;            // x = intensity, y = rotation_rad (inline)
     uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
-};
-
-layout(push_constant) uniform PC { RtRoot _root; };
-// Existing call sites (pc.shapes, pc.extras, ...) keep working via this
-// macro instead of being rewritten en masse.
-#define pc (_root)
+} pc;
 // This view's FrameGlobals, read by index from the bound globals buffer
 // (set = 1 slot 2, declared in velk.glsl) instead of a device address.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]

@@ -313,14 +313,24 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
     rv.view_globals_address = cache.view_globals_buffer->gpu_address();
 
-    // Also mirror into the shared globals arena (set = 1 slot 2) so the
-    // direct-push compute shaders read velk_globals.data[base] by index.
-    // Graphics and RT still use the address above until their root pointers
-    // migrate.
+    // Mirror into the shared globals arena (set = 1 slot 2) so shaders read
+    // velk_globals.data[base] by index. Persistent per-view region (fixed
+    // size, allocated once, written in place each frame): the base is stable
+    // across frames, so cached compute secondaries that bake it read this
+    // frame's globals rather than a rotating ring slot (which would freeze
+    // present_counter and flicker the RT noise).
     if (ctx.globals_arena) {
-        auto region = ctx.globals_arena->write(&globals, sizeof(globals), ctx);
-        rv.view_globals_base =
-            region.valid() ? static_cast<uint32_t>(region.offset / sizeof(FrameGlobals)) : 0u;
+        constexpr uint64_t need = sizeof(FrameGlobals);
+        if (cache.globals_region.size() != need) {
+            cache.globals_region = ctx.globals_arena->alloc(need, ctx);
+        }
+        if (cache.globals_region.valid()) {
+            ctx.globals_arena->write_at(cache.globals_region.offset(), &globals, need);
+            rv.view_globals_base = static_cast<uint32_t>(
+                cache.globals_region.offset() / sizeof(FrameGlobals));
+        } else {
+            rv.view_globals_base = 0u;
+        }
     }
 }
 

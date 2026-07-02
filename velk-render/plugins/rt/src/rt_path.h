@@ -77,12 +77,6 @@ private:
         /// those bytes are rewritten in place and read fresh via shapes_base.
         ::velk::ArenaRegion shapes_region;
 
-        /// Per-dispatch root struct (cam, BVH addresses, lights, ...)
-        /// reached through an 8-byte BDA push constant. CPU rewrites
-        /// it every frame; GPU address is stable so the cached
-        /// secondary's recorded push constant value never goes stale.
-        ::velk::IGpuBuffer::Ptr root_buffer;
-
         /// Cached RT compute+blit pass. Stable Ptr across frames so
         /// the graph compile short-circuits. Rebuilt only when
         /// `rt_dirty` is set by `on_render_state_changed` (camera /

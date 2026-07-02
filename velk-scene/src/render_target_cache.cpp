@@ -157,13 +157,23 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
                 rt_view.view_globals_address = vg->gpu_address();
             }
             // Mirror into the shared globals arena for index-based compute
-            // reads (same as the main view path in ViewPreparer).
+            // reads (same as the main view path in ViewPreparer). Persistent
+            // per-RTT region (fixed size, allocated once, written in place):
+            // stable base across frames so cached compute secondaries that
+            // bake it read fresh globals, not a rotating ring slot.
             if (ctx.globals_arena) {
-                auto region = ctx.globals_arena->write(&rt_globals, sizeof(rt_globals), ctx);
-                rt_view.view_globals_base =
-                    region.valid()
-                        ? static_cast<uint32_t>(region.offset / sizeof(FrameGlobals))
-                        : 0u;
+                constexpr uint64_t need = sizeof(FrameGlobals);
+                auto& region = globals_regions_[rtp.element];
+                if (region.size() != need) {
+                    region = ctx.globals_arena->alloc(need, ctx);
+                }
+                if (region.valid()) {
+                    ctx.globals_arena->write_at(region.offset(), &rt_globals, need);
+                    rt_view.view_globals_base = static_cast<uint32_t>(
+                        region.offset() / sizeof(FrameGlobals));
+                } else {
+                    rt_view.view_globals_base = 0u;
+                }
             }
         }
         rt_view.bvh = ctx.bvh;
