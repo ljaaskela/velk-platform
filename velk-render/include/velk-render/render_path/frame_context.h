@@ -72,6 +72,13 @@ struct FrameContext
     /// baked push constant stays valid. Null before the Renderer assigns it.
     IGpuArena* lights_arena = nullptr;
 
+    /// Shared primary-shapes arena (set = 1 slot 6), owned by the Renderer.
+    /// The RT path suballocates a persistent per-view region for its
+    /// painter-sorted RtShape list; the primary-ray loop reads
+    /// velk_shapes.data[shapes_base + i]. Persistent so the base is stable
+    /// (RT reads it fresh from RtRoot each frame). Null before assignment.
+    IGpuArena* primary_shapes_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

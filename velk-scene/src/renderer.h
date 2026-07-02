@@ -144,6 +144,11 @@ private:
     /// shaders read velk_lights.data[lights_base + i].
     IGpuArena::Ptr lights_arena_;
 
+    /// Shared primary-shapes arena (set = 1 slot 6): the RT path suballocates
+    /// a persistent per-view region for its painter-sorted RtShape list, read
+    /// at velk_shapes.data[shapes_base + i].
+    IGpuArena::Ptr primary_shapes_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.

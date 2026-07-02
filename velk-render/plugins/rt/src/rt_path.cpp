@@ -169,18 +169,38 @@ void RtPath::build_passes(IViewEntry& entry,
         shapes = std::move(sorted_shapes);
     }
 
-    // Persistent per-view shapes buffer. Camera move re-sorts bytes,
-    // PersistentBuffer signals changed → upload + new address. Static
-    // frames are a memcmp + no-op. Real change → invalidate cached pass.
-    auto shapes_staged = vs.shapes_buffer.upload(
-        shapes.data(), shapes.size() * sizeof(RtShape), ctx);
-    uint64_t shapes_addr = shapes_staged.address;
-    if (shapes_staged.changed) vs.rt_dirty = true;
+    // Suballocate a persistent region in the shared primary-shapes arena and
+    // write the painter-sorted list. The base is stable across frames and RT
+    // reads it fresh from RtRoot each dispatch, so only a shape-count change
+    // (region realloc) needs a re-record; camera-move re-sorts are written in
+    // place and picked up without one.
+    const uint64_t shapes_bytes = shapes.size() * sizeof(RtShape);
+    if (ctx.primary_shapes_arena) {
+        if (vs.shapes_region.size() != shapes_bytes) {
+            if (shapes_bytes == 0) {
+                vs.shapes_region = {};
+            } else {
+                auto region = ctx.primary_shapes_arena->alloc(shapes_bytes, ctx);
+                const uint64_t off = region.offset();
+                const bool ok = region.valid();
+                vs.shapes_region = std::move(region);
+                if (ok) ctx.primary_shapes_arena->write_at(off, shapes.data(), shapes_bytes);
+            }
+            vs.rt_dirty = true;  // shape count changed -> re-record
+        } else if (shapes_bytes > 0) {
+            ctx.primary_shapes_arena->write_at(vs.shapes_region.offset(),
+                                               shapes.data(), shapes_bytes);
+        }
+    }
+    const uint32_t shapes_base = (shapes_bytes > 0 && vs.shapes_region.valid())
+        ? static_cast<uint32_t>(vs.shapes_region.offset() / sizeof(RtShape))
+        : 0u;
 
-    // Catch BVH / shape-count drift that doesn't flow through view
-    // notify (BVH lives at scene scope, not view).
+    // Catch BVH / shape-count drift that doesn't flow through view notify
+    // (BVH lives at scene scope, not view). Bases (shapes/bvh) are excluded:
+    // they are read fresh from RtRoot / FrameGlobals, so they must not force
+    // a re-record.
     if (vs.rt_change.changed({
-            shapes_addr,
             render_view.bvh.root,
             render_view.bvh.node_count,
             static_cast<uint32_t>(shapes.size())})) {
@@ -192,22 +212,20 @@ void RtPath::build_passes(IViewEntry& entry,
     // reached through an 8-byte BDA pushed as the only root constant.
     // Camera matrices, BVH root/counts/bases and present_counter are read
     // from the bound FrameGlobals record (globals_base) rather than
-    // duplicated here; shapes / env_data / lights stay device addresses
-    // until later slices bind them by index. Field order keeps the uint64
-    // addresses first so scalar layout needs no padding (matches GLSL).
+    // duplicated here; every remaining field is an index or inline value
+    // (no device addresses left in the struct).
     VELK_GPU_STRUCT RtRoot {
-        uint64_t shapes_addr;      // primary-ray RtShape buffer BDA
-        float    env_params[2];    // x = intensity, y = rotation_rad (inline)
+        uint32_t shapes_base;      // primary shape index (set = 1 slot 6)
         uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
         uint32_t light_count;
         uint32_t lights_base;      // light array index (set = 1 slot 5)
-        uint32_t _pad_lights;
+        float    env_params[2];    // x = intensity, y = rotation_rad (inline)
         uint32_t extras[4];        // image_index, width, height, shape_count
         uint32_t env[4];           // env_material_id, env_texture_id, _, _
     };
 
     RtRoot root{};
-    root.shapes_addr = shapes_addr;
+    root.shapes_base = shapes_base;
     root.env_params[0] = render_view.env.intensity;
     root.env_params[1] = render_view.env.rotation_rad;
     root.globals_base = render_view.view_globals_base;

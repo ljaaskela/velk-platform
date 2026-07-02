@@ -315,6 +315,12 @@ FrameContext Renderer::make_frame_context()
         lights_arena_ = resources_->create_arena(IRenderBackend::kGlobalLights,
                                                  sizeof(GpuLight));
     }
+    // Homogeneous RtShape records; element_size = stride so shapes_base =
+    // region offset / sizeof(RtShape).
+    if (resources_ && !primary_shapes_arena_) {
+        primary_shapes_arena_ = resources_->create_arena(
+            IRenderBackend::kGlobalPrimaryShapes, sizeof(RtShape));
+    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -328,6 +334,7 @@ FrameContext Renderer::make_frame_context()
     ctx.instance_arena = instance_arena_.get();
     ctx.material_arena = material_arena_.get();
     ctx.lights_arena = lights_arena_.get();
+    ctx.primary_shapes_arena = primary_shapes_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before

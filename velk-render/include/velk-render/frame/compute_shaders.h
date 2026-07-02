@@ -1013,25 +1013,28 @@ struct Light {
 // pc.lights_base. Same buffer the deferred-lighting compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
+// Primary-ray painter-sorted RtShape list bound by index (set = 1 slot 6);
+// this view's run starts at pc.shapes_base. Separate from velk_bvh_shapes
+// (slot 1): the BVH holds build-order shapes for bounce/shadow traversal,
+// this holds the back-to-front sort the primary loop composites.
+layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
+
 // RT root: per-dispatch state in a buffer reached via an 8-byte
-// push-constant pointer. Keeps the push-constant block at the same
-// shape as forward / deferred (one BDA), and lets the cached secondary
-// stay valid across frames since the buffer's GPU address is stable
-// while its contents refresh in place. scalar layout matches the C++
-// `RtRoot` struct's natural packing (uint64 addresses first, 8-aligned).
+// push-constant pointer. Lets the cached secondary stay valid across
+// frames since the buffer's GPU address is stable while its contents
+// refresh in place. scalar layout matches the C++ `RtRoot` struct.
 //
 // The camera matrices, BVH root/counts/bases and present_counter live in
-// the bound FrameGlobals record (indexed by globals_base), not here, so
-// this struct no longer duplicates them. Only the RT-specific per-dispatch
-// state remains; the primary-ray shapes buffer stays a device address for
-// now (a later slice binds it by index).
+// the bound FrameGlobals record (indexed by globals_base), not here. Only
+// the RT-specific per-dispatch state remains, now all indices / inline data
+// (no device addresses left in the struct; the root pointer itself becomes
+// an inline push constant in a later slice).
 layout(buffer_reference, scalar) readonly buffer RtRoot {
-    RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
-    vec2 env_params;            // x = intensity, y = rotation_rad (inline)
+    uint shapes_base;           // index into velk_shapes (set = 1 slot 6)
     uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
     uint lights_base;           // index into velk_lights (set = 1 slot 5)
-    uint _pad_lights;
+    vec2 env_params;            // x = intensity, y = rotation_rad (inline)
     uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
     uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
 };
@@ -1680,7 +1683,7 @@ void main()
         vec3 accum = env_miss_color(primary.dir);
 
         for (uint i = 0u; i < shape_count; ++i) {
-            RtShape s = pc.shapes.data[i];
+            RtShape s = velk_shapes.data[pc.shapes_base + i];
             RayHit hit;
             if (!intersect_shape(primary, s, hit)) continue;
 

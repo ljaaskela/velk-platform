@@ -350,7 +350,8 @@ public:
         kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
         kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
         kGlobalLights    = 5,  ///< Persistent per-view light array, read at velk_lights.data[lights_base + i].
-        kGlobalBufferSlotCount = 6,
+        kGlobalPrimaryShapes = 6, ///< Persistent per-view painter-sorted RtShape list (RT primary rays), read at velk_shapes.data[shapes_base + i].
+        kGlobalBufferSlotCount = 7,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

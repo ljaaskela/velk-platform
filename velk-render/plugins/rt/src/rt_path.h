@@ -10,6 +10,7 @@
 
 #include <velk-render/plugin.h>
 #include <velk-render/ext/persistent_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/ext/render_path.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/render_path/frame_context.h>
@@ -69,11 +70,12 @@ private:
         // stay stable.
         ::velk::uvec2 output_size{};
 
-        /// Per-view persistent buffer holding the plane-sorted RtShape
-        /// list. Stable GPU address; sort order changes when the
-        /// camera moves (depth recomputed), at which point
-        /// PersistentBuffer signals `changed` and the upload happens.
-        ::velk::PersistentBuffer shapes_buffer;
+        /// Per-view region in the shared primary-shapes arena (set = 1 slot
+        /// 6) holding the plane-sorted RtShape list. Stable base across
+        /// frames (persistent); re-allocated only when the shape count
+        /// changes. Sort order / positions change when the camera moves;
+        /// those bytes are rewritten in place and read fresh via shapes_base.
+        ::velk::ArenaRegion shapes_region;
 
         /// Per-dispatch root struct (cam, BVH addresses, lights, ...)
         /// reached through an 8-byte BDA push constant. CPU rewrites
@@ -85,7 +87,7 @@ private:
         /// the graph compile short-circuits. Rebuilt only when
         /// `rt_dirty` is set by `on_render_state_changed` (camera /
         /// lights / env via view notify), `rt_output` recreation
-        /// (resize), shapes_buffer.upload reporting `changed`, or
+        /// (resize), a shape-count change (shapes-region realloc), or
         /// `rt_change` detecting BVH / shape-count drift.
         ::velk::IRenderPass::Ptr cached_rt_pass;
         bool rt_dirty = true;
@@ -93,23 +95,19 @@ private:
         ::velk::IGpuTexture* last_dst_texture = nullptr;
 
         /// PushC fingerprint covering inputs not propagated through the
-        /// view notify cascade (BVH topology + primary shapes_addr). When
-        /// the BVH or shape set changes mid-run these flip even though the
-        /// view itself hasn't notified. The BVH lives in a shared arena now,
-        /// so its buffer address is constant and not part of the key; the
-        /// counts / root carry topology change, and node/shape base are
-        /// deliberately excluded (they rotate per frame and are read fresh
-        /// from RtRoot, so they must not force a re-record).
+        /// view notify cascade (BVH topology + shape count). When the BVH or
+        /// shape set changes mid-run these flip even though the view itself
+        /// hasn't notified. Bases (bvh node/shape, primary shapes) are
+        /// deliberately excluded: they are read fresh from RtRoot /
+        /// FrameGlobals each dispatch, so they must not force a re-record.
         struct RtKey
         {
-            uint64_t shapes_addr;
             uint32_t bvh_root;
             uint32_t bvh_node_count;
             uint32_t shape_count;
             bool operator==(const RtKey& rhs) const
             {
-                return shapes_addr == rhs.shapes_addr
-                    && bvh_root == rhs.bvh_root
+                return bvh_root == rhs.bvh_root
                     && bvh_node_count == rhs.bvh_node_count
                     && shape_count == rhs.shape_count;
             }
