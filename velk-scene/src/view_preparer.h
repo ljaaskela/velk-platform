@@ -146,12 +146,14 @@ private:
         {
             uint32_t texture_id;
             uint32_t material_id;
-            uint64_t data_addr;
+            float    intensity;
+            float    rotation_rad;
             bool operator==(const EnvKey& rhs) const
             {
                 return texture_id == rhs.texture_id
                     && material_id == rhs.material_id
-                    && data_addr == rhs.data_addr;
+                    && intensity == rhs.intensity
+                    && rotation_rad == rhs.rotation_rad;
             }
         };
         ChangeCache<EnvKey> env_change;
@@ -162,13 +164,6 @@ private:
         /// (persistent region) so cached lighting/RT passes bake it once.
         /// Re-allocated only when the light count changes.
         ArenaRegion lights_region;
-
-        /// Per-view persistent env material data buffer. Used as the
-        /// fallback when the env material has no snippet-resolved
-        /// data buffer; replaces the per-frame `frame_buffer->write`
-        /// path so `RenderView::env.data_addr` is stable across
-        /// frames (cached lighting passes embed it).
-        PersistentBuffer env_data_buffer;
 
         /// Per-view FrameGlobals storage. Single 192-byte device-local
         /// allocation; `prepare_frame_globals` updates it in place each

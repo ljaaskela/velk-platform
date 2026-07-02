@@ -187,10 +187,10 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t light_count;
     uint32_t env_texture_id;
     uint32_t shadow_debug_image_id;
-    uint32_t _pad0;            // keeps env_data_addr (BDA) 8-aligned
+    uint32_t _pad0;            // filler; keeps the block layout at 96 bytes
     uint32_t lights_base;      // light array index (set = 1 slot 5)
-    uint32_t _pad_lights;      // keeps env_data_addr 8-aligned
-    uint64_t env_data_addr;
+    uint32_t _pad_lights;
+    float    env_params[2];    // x = intensity, y = rotation_rad (inline)
     uint32_t irr_image_id;     // demodulated diffuse irradiance output
     uint32_t _pad1;            // pads to 96 (VELK_GPU_STRUCT is alignas(16))
 };
@@ -603,7 +603,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.env_texture_id = render_view.env.texture_id;
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
     pc.lights_base = render_view.lights_base;
-    pc.env_data_addr = render_view.env.data_addr;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
     pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
 
     // No surface blit here anymore: the lighting pass writes the "rest" image

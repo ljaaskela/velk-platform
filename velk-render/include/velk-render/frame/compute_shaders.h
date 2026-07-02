@@ -64,10 +64,6 @@ struct Light {
 // pc.lights_base. Same buffer the RT compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
-layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
-    vec4 params; // x = intensity, y = rotation_rad, zw = _
-};
-
 // RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
@@ -93,10 +89,10 @@ layout(push_constant, scalar) uniform PC {
     uint light_count;          // 56
     uint env_texture_id;       // 60
     uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
-    uint _pad0;                // 68  keeps env_params (BDA) 8-aligned
+    uint _pad0;                // 68  filler; keeps the block layout at 96 bytes
     uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
-    uint _pad_lights;          // 76  keeps env_params 8-aligned
-    _EnvParamsBuf env_params;  // 80
+    uint _pad_lights;          // 76
+    vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
     uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
     uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
 } pc;
@@ -469,7 +465,7 @@ vec3 env_miss_color_lod(vec3 rd, float lod)
 {
     if (pc.env_texture_id == 0u) return vec3(0.0);
     const float PI = 3.14159265358979323846;
-    vec4 params = pc.env_params.params;
+    vec2 params = pc.env_params;
     float c = cos(params.y);
     float s = sin(params.y);
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
@@ -1027,11 +1023,11 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // The camera matrices, BVH root/counts/bases and present_counter live in
 // the bound FrameGlobals record (indexed by globals_base), not here, so
 // this struct no longer duplicates them. Only the RT-specific per-dispatch
-// state remains; shapes / env_data_addr stay device addresses for now
-// (later slices bind them by index).
+// state remains; the primary-ray shapes buffer stays a device address for
+// now (a later slice binds it by index).
 layout(buffer_reference, scalar) readonly buffer RtRoot {
     RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
-    uint64_t env_data_addr;
+    vec2 env_params;            // x = intensity, y = rotation_rad (inline)
     uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
     uint lights_base;           // index into velk_lights (set = 1 slot 5)
@@ -1477,22 +1473,17 @@ float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_
 // material's velk_fill_env, because materials may need to call this
 // (e.g. StandardMaterial's diffuse term) and calling velk_resolve_fill
 // from inside a fill would re-introduce the recursion GLSL forbids.
-// Mirrors EnvMaterial's equirect sampling; stays in sync with its
-// GPU data layout (vec4 params: x = intensity, y = rotation_rad).
-layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
-    vec4 params;
-};
-
+// Mirrors EnvMaterial's equirect sampling; env params (x = intensity,
+// y = rotation_rad) ride the push constant inline (pc.env_params).
 vec3 env_miss_color(vec3 rd) {
     if (pc.env.x == 0u) return vec3(0.0);
-    _EnvParamsBuf d = _EnvParamsBuf(pc.env_data_addr);
     const float PI = 3.14159265358979323846;
-    float c = cos(d.params.y);
-    float s = sin(d.params.y);
+    float c = cos(pc.env_params.y);
+    float s = sin(pc.env_params.y);
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
     float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
-    return velk_texture(pc.env.y, vec2(u, v)).rgb * d.params.x;
+    return velk_texture(pc.env.y, vec2(u, v)).rgb * pc.env_params.x;
 }
 )";
 

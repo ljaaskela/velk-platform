@@ -442,25 +442,21 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
         auto env_ref =
             ctx.snippets->resolve_material(env_prog.get(), ctx.make_resolve_context());
         rv.env.material_id = env_ref.mat_id;
-        rv.env.data_addr = env_ref.mat_addr;
     }
-    // Fallback for env materials without a snippet: stage into a
-    // per-view persistent buffer so the GPU address stays stable
-    // across frames. Without persistence, env_data_addr would rotate
-    // per-frame through frame_buffer staging and force the cached
-    // lighting pass to rebuild every frame, racing with in-flight
-    // slots that share the cached IRenderPass::Ptr.
-    if (rv.env.data_addr == 0) {
-        if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
-            size_t sz = dd->get_draw_data_size();
-            if (sz > 0) {
-                vector<uint8_t> scratch(sz, 0);
-                if (dd->write_draw_data(scratch.data(), sz) == ReturnValue::Success) {
-                    auto& cache = view_caches_[&entry];
-                    rv.env.data_addr =
-                        cache.env_data_buffer.upload(scratch.data(), sz, ctx).address;
-                }
-            }
+    // Env params (intensity, rotation_rad) ride the RT / deferred push
+    // constants inline, so serialise the env material's draw data and pull
+    // the two leading floats (EnvMaterial writes {intensity, rotation_rad,
+    // pad, pad}). No per-frame data buffer / device address needed.
+    if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
+        // 16-byte aligned: the env material's GPU struct is alignas(16)
+        // (VELK_GPU_STRUCT), so write_draw_data stores it with aligned SSE
+        // moves; a 4-aligned float[4] would fault.
+        alignas(16) float env_data[4] = {};
+        if (dd->get_draw_data_size() == sizeof(env_data)
+            && dd->write_draw_data(env_data, sizeof(env_data), ctx.resources)
+                   == ReturnValue::Success) {
+            rv.env.intensity = env_data[0];
+            rv.env.rotation_rad = env_data[1];
         }
     }
 
@@ -514,7 +510,8 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
     }
 
     auto& cache = view_caches_[&entry];
-    if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id, rv.env.data_addr})) {
+    if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id,
+                                  rv.env.intensity, rv.env.rotation_rad})) {
         entry.notify_view_changed();
     }
 }

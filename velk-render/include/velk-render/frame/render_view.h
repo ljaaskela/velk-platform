@@ -21,9 +21,10 @@ namespace velk {
  */
 struct ViewEnv
 {
-    uint32_t texture_id = 0;     ///< Bindless equirect HDR id (0 = no env).
-    uint32_t material_id = 0;    ///< Snippet id of the env material (0 = none).
-    uint64_t data_addr = 0;      ///< GPU address of env material's per-frame data block.
+    uint32_t texture_id = 0;      ///< Bindless equirect HDR id (0 = no env).
+    uint32_t material_id = 0;     ///< Snippet id of the env material (0 = none).
+    float    intensity = 0.f;     ///< Env exposure multiplier; pushed inline to the RT / deferred compute.
+    float    rotation_rad = 0.f;  ///< Env yaw rotation in radians; pushed inline alongside intensity.
 };
 
 /**

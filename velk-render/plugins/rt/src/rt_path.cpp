@@ -197,7 +197,7 @@ void RtPath::build_passes(IViewEntry& entry,
     // addresses first so scalar layout needs no padding (matches GLSL).
     VELK_GPU_STRUCT RtRoot {
         uint64_t shapes_addr;      // primary-ray RtShape buffer BDA
-        uint64_t env_data_addr;    // env material data BDA
+        float    env_params[2];    // x = intensity, y = rotation_rad (inline)
         uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
         uint32_t light_count;
         uint32_t lights_base;      // light array index (set = 1 slot 5)
@@ -208,7 +208,8 @@ void RtPath::build_passes(IViewEntry& entry,
 
     RtRoot root{};
     root.shapes_addr = shapes_addr;
-    root.env_data_addr = render_view.env.data_addr;
+    root.env_params[0] = render_view.env.intensity;
+    root.env_params[1] = render_view.env.rotation_rad;
     root.globals_base = render_view.view_globals_base;
     root.light_count = static_cast<uint32_t>(render_view.lights.size());
     root.lights_base = render_view.lights_base;
