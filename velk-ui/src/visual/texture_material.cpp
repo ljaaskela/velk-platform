@@ -19,11 +19,11 @@ constexpr string_view texture_eval_src = R"(
 struct TextureMaterialData {
     vec4 tint;
 };
-VELK_MATERIAL_BUFFER(TextureMaterialData, TextureMaterialRef)
+VELK_MATERIAL(TextureMaterialData)
 
 MaterialEval velk_eval_texture(EvalContext ctx)
 {
-    TextureMaterialData d = VELK_LOAD_MATERIAL(TextureMaterialData, TextureMaterialRef, ctx);
+    TextureMaterialData d = VELK_LOAD_MATERIAL(TextureMaterialData, ctx);
     vec4 sampled = velk_texture(ctx.texture_id, ctx.uv);
 
     MaterialEval e = velk_default_material_eval();

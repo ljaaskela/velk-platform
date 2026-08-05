@@ -35,15 +35,19 @@ class GpuArena : public ::velk::ext::ObjectCore<GpuArena, ::velk::IGpuArena>
 public:
     VELK_CLASS_UID(::velk::ClassId::GpuArena, "GpuArena");
 
-    void init(uint32_t slot, uint32_t element_size) override;
-    ArenaRegion alloc(uint64_t size, FrameContext& ctx, uint64_t alignment = 0) override;
+    void init(uint32_t slot, uint32_t element_size,
+              IGpuResourceManager* resources, IRenderBackend* backend) override;
+    ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void release_region(uint64_t offset, uint64_t size) override;
     void reclaim() override;
+    IBuffer::Ptr create_buffer(uint64_t size) override;
+    void* mapped_at(uint64_t offset) override;
     uint32_t slot() const override { return slot_; }
+    uint32_t element_size() const override { return element_size_; }
 
 private:
-    bool grow_persistent(uint64_t want, FrameContext& ctx);
+    bool grow_persistent(uint64_t want);
     void drain_zombies();
     void coalesce_free();
 
@@ -52,7 +56,8 @@ private:
     uint32_t slot_ = 0;
     uint32_t element_size_ = 1;
 
-    IRenderBackend* backend_ = nullptr;  ///< Cached for release_region / reclaim.
+    IGpuResourceManager* resources_ = nullptr;  ///< Allocates backing buffers.
+    IRenderBackend* backend_ = nullptr;          ///< Slot binding + fence markers.
     IGpuBuffer::Ptr persistent_buffer_;
     void* persistent_mapped_ = nullptr;
     uint64_t persistent_capacity_ = 0;

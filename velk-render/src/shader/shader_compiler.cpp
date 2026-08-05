@@ -36,7 +36,8 @@ struct RtShape {
     uint texture_id;
     uint shape_param;
     uint shape_kind;  // 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint64_t material_data_addr;
+    uint material_base;       // word index of this shape's record in the material arena
+    uint _pad0;
     uint64_t mesh_data_addr;  // shape_kind == 255: MeshData*; otherwise 0
 };
 

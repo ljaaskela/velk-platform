@@ -118,7 +118,7 @@ struct FrameContext
     /// Convenience: assemble a FrameResolveContext for snippet-registry calls.
     FrameResolveContext make_resolve_context() const
     {
-        return {render_ctx, resources, frame_buffer, defer_marker};
+        return {render_ctx, resources, frame_buffer, defer_marker, material_arena};
     }
 };
 

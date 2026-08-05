@@ -18,6 +18,8 @@ class IRenderContext;
 class IDrawData;
 class IFrameDataManager;
 class IGpuResourceManager;
+class IGpuArena;
+struct FrameContext;
 
 /**
  * @brief Bundle of velk-render-side per-frame deps a snippet registry
@@ -35,6 +37,13 @@ struct FrameResolveContext
     IGpuResourceManager*  resources         = nullptr;
     IFrameDataManager*    frame_buffer      = nullptr;
     uint64_t              completion_marker = 0;
+    /// Shared material arena (set = 1 slot 4). Materials read by index need
+    /// their region to exist by the time shapes are stamped with its base,
+    /// which happens during the BVH build, ahead of the renderer's material
+    /// upload sweep; resolve_material allocates it here if it does not exist
+    /// yet, the same way it ensures the persistent data buffer for materials
+    /// still read by address.
+    IGpuArena*            material_arena    = nullptr;
 };
 
 /**
@@ -61,6 +70,11 @@ public:
     {
         string_view fn_name;      ///< `velk_eval_<X>` function name returning MaterialEval.
         string      include_name; ///< Owned include filename registered with IRenderContext.
+        /// True when the compute-side include reads this material's record by
+        /// index out of the shared material arena (via a generated unpacker)
+        /// instead of chasing a device address. Producers filling RtShape use
+        /// it to decide whether to stamp a word base or an address.
+        bool        indexed = false;
     };
 
     struct ShadowTechInfo
@@ -78,7 +92,9 @@ public:
     struct MaterialRef
     {
         uint32_t mat_id = 0;
-        uint64_t mat_addr = 0;
+        /// Word index of the material's record in the set = 1 material arena;
+        /// goes onto the shape as RtShape::material_base.
+        uint32_t mat_base = 0;
     };
 
     /// @brief Clears per-frame state; persistent maps stay.
@@ -97,7 +113,7 @@ public:
     ///        id into `shape_kind`. Returns 0 for visuals without a snippet.
     virtual uint32_t register_intersect(IAnalyticShape* shape, IRenderContext& ctx) = 0;
 
-    /// @brief Returns a material's `(mat_id, mat_addr)` for this frame.
+    /// @brief Returns a material's `(mat_id, mat_base)` for this frame.
     ///        Writes draw-data to the frame buffer once per unique
     ///        program; subsequent lookups reuse the cached address.
     virtual MaterialRef resolve_material(IProgram* prog,
@@ -117,9 +133,8 @@ public:
     virtual const vector<uint32_t>&       frame_intersects() const = 0;
 
     /// Program data buffers touched during the current frame's
-    /// resolve_material / resolve_data_buffer calls. The renderer's
-    /// per-frame resource-upload pass iterates this list so each
-    /// shape's `material_data_addr` points at fresh GPU bytes.
+    /// resolve_material / resolve_data_buffer calls, held so the bytes
+    /// backing this frame's material records stay alive for its duration.
     virtual const vector<IBuffer::Ptr>& frame_data_buffers() const = 0;
 };
 

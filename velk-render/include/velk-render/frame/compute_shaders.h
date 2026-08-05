@@ -64,6 +64,12 @@ struct Light {
 // pc.lights_base. Same buffer the RT compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
+// Material records as raw words (set = 1 slot 4). This shader does not
+// evaluate materials, but it composes the same intersect snippets the RT
+// compute does, and an intersect may read its shape's record (text reads its
+// glyph-data bases from it) at the word base carried on the shape.
+layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
+
 // RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
@@ -982,6 +988,26 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // this holds the back-to-front sort the primary loop composites.
 layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
 
+// Material records as raw words (set = 1 slot 4). The raster path binds this
+// same slot as a typed block, which one pipeline can do because it compiles
+// for a single material type; this shader composes many, so it reads the
+// bytes and each material's generated velk_unpack_<T> rebuilds its own struct
+// from them. Materials whose layout cannot be derived stay on device
+// addresses and never touch this buffer.
+layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
+
+// This shader composes many materials, so slot 4 is bound above as raw words
+// and must not be re-declared as a typed block: VELK_MATERIAL(T) becomes a
+// no-op, and the composer replaces each material's VELK_MATERIAL(T) line with
+// its generated velk_unpack_<T>. The load pastes the type name onto that
+// function, so every snippet's `VELK_LOAD_MATERIAL(T, ctx)` resolves to its
+// own reader. A material whose record cannot be modelled gets no reader and
+// fails to compile here, rather than silently reading the wrong bytes.
+#undef VELK_MATERIAL
+#undef VELK_LOAD_MATERIAL
+#define VELK_MATERIAL(T)
+#define VELK_LOAD_MATERIAL(T, ctx) velk_unpack_##T((ctx).material_base)
+
 // RT root: per-dispatch state pushed inline as a push constant (no device
 // address anywhere). scalar layout matches the C++ `RtRoot` struct.
 //
@@ -1551,7 +1577,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
         // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
         RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +hit.shape_index];
         EvalContext ctx;
-        ctx.data_addr = s.material_data_addr;
+        ctx.material_base = s.material_base;
         ctx.texture_id = s.texture_id;
         ctx.shape_param = s.shape_param;
         ctx.uv = hit.uv;
@@ -1645,7 +1671,7 @@ void main()
             if (!intersect_shape(primary, s, hit)) continue;
 
             EvalContext ctx;
-            ctx.data_addr = s.material_data_addr;
+            ctx.material_base = s.material_base;
             ctx.texture_id = s.texture_id;
             ctx.shape_param = s.shape_param;
             ctx.uv = hit.uv;

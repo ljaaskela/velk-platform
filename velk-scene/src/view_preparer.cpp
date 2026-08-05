@@ -170,7 +170,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             if (mi->material_region_size() != need) {
                 // Align each region to its own record size so material_base
                 // (= offset / record size) stays integral for this material.
-                auto region = ctx.material_arena->alloc(need, ctx, need);
+                auto region = ctx.material_arena->alloc(need, need);
                 const uint64_t off = region.offset();
                 const bool ok = region.valid();
                 mi->set_material_region(std::move(region));
@@ -197,7 +197,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
                 return;
             }
             if (bp->instance_region_size() != need) {
-                auto region = ctx.instance_arena->alloc(need, ctx);
+                auto region = ctx.instance_arena->alloc(need);
                 const uint64_t off = region.offset();
                 const bool ok = region.valid();
                 bp->set_instance_region(std::move(region));
@@ -312,7 +312,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     if (ctx.globals_arena) {
         constexpr uint64_t need = sizeof(FrameGlobals);
         if (cache.globals_region.size() != need) {
-            cache.globals_region = ctx.globals_arena->alloc(need, ctx);
+            cache.globals_region = ctx.globals_arena->alloc(need);
         }
         if (cache.globals_region.valid()) {
             ctx.globals_arena->write_at(cache.globals_region.offset(), &globals, need);
@@ -356,7 +356,7 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
         if (need == 0) {
             cache.lights_region = {};  // release
         } else {
-            auto region = ctx.lights_arena->alloc(need, ctx);
+            auto region = ctx.lights_arena->alloc(need);
             const uint64_t off = region.offset();
             const bool ok = region.valid();
             cache.lights_region = std::move(region);
@@ -405,7 +405,7 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
                 }
             }
             site.geometry.material_id = mat.mat_id;
-            site.geometry.material_data_addr = mat.mat_addr;
+            site.geometry.material_base = mat.mat_base;
             site.geometry.texture_id = tex_id;
             if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
                 uint32_t kind = ctx.snippets->register_intersect(analytic, *ctx.render_ctx);

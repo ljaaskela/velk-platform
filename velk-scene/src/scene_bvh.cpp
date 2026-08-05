@@ -32,13 +32,13 @@ inline void hash_mix(uint64_t& h, uint64_t v)
 /// sees a partially rewritten one. Returns the element base
 /// (offset / @p stride), or 0 when there is nothing to upload.
 uint32_t upload_region(IGpuArena* arena, ArenaRegion& region, const void* data,
-                       uint64_t size, uint64_t stride, FrameContext& ctx)
+                       uint64_t size, uint64_t stride)
 {
     if (!arena || size == 0) {
         region = {};
         return 0;
     }
-    auto fresh = arena->alloc(size, ctx);
+    auto fresh = arena->alloc(size);
     if (!fresh.valid()) {
         region = {};
         return 0;
@@ -160,13 +160,13 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
         shape_base_ = upload_region(ctx.bvh_shapes_arena, shapes_region_,
                                     cached_shapes_.data(),
                                     cached_shapes_.size() * sizeof(RtShape),
-                                    sizeof(RtShape), ctx);
+                                    sizeof(RtShape));
     }
     if (rebuilt || !nodes_region_.valid()) {
         node_base_ = upload_region(ctx.bvh_nodes_arena, nodes_region_,
                                    cached_nodes_.data(),
                                    cached_nodes_.size() * sizeof(GpuBvhNode),
-                                   sizeof(GpuBvhNode), ctx);
+                                   sizeof(GpuBvhNode));
     }
 }
 

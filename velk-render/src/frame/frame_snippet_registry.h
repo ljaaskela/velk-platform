@@ -45,7 +45,7 @@ private:
     {
         IProgram* prog = nullptr;
         uint32_t  mat_id = 0;
-        uint64_t  mat_addr = 0;
+        uint32_t  mat_base = 0;
     };
 
     std::unordered_map<uint64_t, uint32_t> material_id_by_class_;

@@ -25,11 +25,11 @@ struct GradientMaterialData {
     vec4 end_color;
     vec4 angle_pad; // x = angle in degrees; yzw unused
 };
-VELK_MATERIAL_BUFFER(GradientMaterialData, GradientMaterialRef)
+VELK_MATERIAL(GradientMaterialData)
 
 MaterialEval velk_eval_gradient(EvalContext ctx)
 {
-    GradientMaterialData d = VELK_LOAD_MATERIAL(GradientMaterialData, GradientMaterialRef, ctx);
+    GradientMaterialData d = VELK_LOAD_MATERIAL(GradientMaterialData, ctx);
     float rad = radians(d.angle_pad.x);
     vec2 dir = vec2(cos(rad), sin(rad));
     float t = clamp(dot(ctx.uv - 0.5, dir) + 0.5, 0.0, 1.0);

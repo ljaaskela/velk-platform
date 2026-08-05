@@ -285,45 +285,69 @@ vector<ShaderParam> reflect_material_params(const uint32_t* spirv, size_t word_c
         return params;
     }
 
-    auto& mat_members = struct_members[params_struct_id];
-    auto& mat_names = member_names[params_struct_id];
-    auto& mat_offsets = member_offsets[params_struct_id];
-
-    for (uint32_t i = 0; i < static_cast<uint32_t>(mat_members.size()); ++i) {
-        auto nit = mat_names.find(i);
-        if (nit == mat_names.end()) {
-            continue;
+    // Walk the params struct, descending into nested structs. A member is a
+    // nested struct when its type id has no scalar / vector / matrix entry but
+    // does appear in struct_members; its members are emitted with the parent's
+    // byte offset added and the parent's name prefixed
+    // ("base_color.factor"), so a caller sees one flat parameter list
+    // regardless of how the material groups its fields.
+    auto flatten = [&](auto&& self, uint32_t struct_id, uint32_t base_offset,
+                       const string& prefix, uint32_t depth) -> void {
+        // Structs cannot contain themselves in valid SPIR-V; the cap only
+        // stops a malformed module from recursing forever.
+        constexpr uint32_t kMaxDepth = 8;
+        if (depth > kMaxDepth) {
+            return;
         }
-
-        const string& name = nit->second;
-        if (!name.empty() && name[0] == '_') {
-            continue; // padding
+        auto mit = struct_members.find(struct_id);
+        if (mit == struct_members.end()) {
+            return;
         }
+        auto& members = mit->second;
+        auto& names = member_names[struct_id];
+        auto& offsets = member_offsets[struct_id];
 
-        auto oit = mat_offsets.find(i);
-        if (oit == mat_offsets.end()) {
-            continue;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(members.size()); ++i) {
+            auto nit = names.find(i);
+            if (nit == names.end()) {
+                continue;
+            }
+
+            const string& name = nit->second;
+            if (!name.empty() && name[0] == '_') {
+                continue;  // padding
+            }
+
+            auto oit = offsets.find(i);
+            if (oit == offsets.end()) {
+                continue;
+            }
+            const uint32_t offset = base_offset + oit->second;
+
+            const uint32_t member_type_id = members[i];
+            auto tit = type_infos.find(member_type_id);
+            if (tit == type_infos.end()) {
+                // No leaf type: a nested struct, so descend. Anything else
+                // (unsupported type) has no struct entry either and is skipped.
+                self(self, member_type_id, offset, prefix + name + ".", depth + 1);
+                continue;
+            }
+
+            Uid uid = type_info_to_uid(tit->second.kind);
+            if (uid == Uid{}) {
+                continue;
+            }
+
+            ShaderParam param;
+            param.name = prefix + name;
+            param.type_uid = uid;
+            param.offset = offset;
+            param.size = type_info_size(tit->second.kind);
+            params.push_back(std::move(param));
         }
+    };
 
-        uint32_t member_type_id = mat_members[i];
-        auto tit = type_infos.find(member_type_id);
-        if (tit == type_infos.end()) {
-            continue;
-        }
-
-        auto& ti = tit->second;
-        Uid uid = type_info_to_uid(ti.kind);
-        if (uid == Uid{}) {
-            continue;
-        }
-
-        ShaderParam param;
-        param.name = string(name.c_str(), name.size());
-        param.type_uid = uid;
-        param.offset = oit->second;
-        param.size = type_info_size(ti.kind);
-        params.push_back(std::move(param));
-    }
+    flatten(flatten, params_struct_id, 0, string(), 0);
 
     return params;
 }

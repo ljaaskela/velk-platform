@@ -1,5 +1,7 @@
 #include "gpu_arena.h"
 
+#include "arena_buffer.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -8,16 +10,18 @@
 
 namespace velk::impl {
 
-void GpuArena::init(uint32_t slot, uint32_t element_size)
+void GpuArena::init(uint32_t slot, uint32_t element_size,
+                    IGpuResourceManager* resources, IRenderBackend* backend)
 {
     slot_ = slot;
     element_size_ = element_size ? element_size : 1u;
+    resources_ = resources;
+    backend_ = backend;
 }
 
-ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx, uint64_t alignment)
+ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
 {
-    if (!ctx.backend || size == 0) return {};
-    backend_ = ctx.backend;
+    if (!backend_ || size == 0) return {};
     drain_zombies();
 
     const uint64_t align = alignment ? alignment : element_size_;
@@ -26,7 +30,7 @@ ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx, uint64_t alignment
         uint64_t cap = need * 4;
         constexpr uint64_t kFloor = uint64_t(1) << 20;  // 1 MiB
         if (cap < kFloor) cap = kFloor;
-        if (!grow_persistent(cap, ctx)) return {};
+        if (!grow_persistent(cap)) return {};
         free_spans_.push_back({0, persistent_capacity_});
     }
 
@@ -50,7 +54,7 @@ ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx, uint64_t alignment
         const uint64_t old_cap = persistent_capacity_;
         uint64_t want = persistent_capacity_ * 2;
         if (want < persistent_capacity_ + need + align) want = persistent_capacity_ + need + align;
-        if (!grow_persistent(want, ctx)) return {};
+        if (!grow_persistent(want)) return {};
         free_spans_.push_back({old_cap, persistent_capacity_ - old_cap});
         coalesce_free();
     }
@@ -77,14 +81,30 @@ void GpuArena::release_region(uint64_t offset, uint64_t size)
 
 void GpuArena::reclaim() { drain_zombies(); }
 
-bool GpuArena::grow_persistent(uint64_t want, FrameContext& ctx)
+IBuffer::Ptr GpuArena::create_buffer(uint64_t size)
+{
+    auto buf = ::velk::instance().create<IBuffer>(ClassId::ArenaBuffer);
+    if (!buf) return {};
+    if (auto* ab = interface_cast<IArenaBufferInternal>(buf)) {
+        ab->init(this, size);
+    }
+    return buf;
+}
+
+void* GpuArena::mapped_at(uint64_t offset)
+{
+    if (!persistent_mapped_ || offset >= persistent_capacity_) return nullptr;
+    return static_cast<char*>(persistent_mapped_) + offset;
+}
+
+bool GpuArena::grow_persistent(uint64_t want)
 {
     want = (want + element_size_ - 1) / element_size_ * element_size_;
     GpuBufferDesc desc{};
     desc.size = want;
     desc.cpu_writable = true;
-    auto new_buffer = ctx.resources ? ctx.resources->create_gpu_buffer(desc)
-                                     : ctx.backend->create_gpu_buffer(desc);
+    auto new_buffer = resources_ ? resources_->create_gpu_buffer(desc)
+                                 : backend_->create_gpu_buffer(desc);
     if (!new_buffer) return false;
     void* new_mapped = new_buffer->map();
     if (new_mapped && persistent_mapped_ && persistent_capacity_) {
@@ -96,7 +116,7 @@ bool GpuArena::grow_persistent(uint64_t want, FrameContext& ctx)
     persistent_buffer_ = std::move(new_buffer);
     persistent_mapped_ = new_mapped;
     persistent_capacity_ = want;
-    ctx.backend->set_global_buffer(slot_, persistent_buffer_.get());
+    backend_->set_global_buffer(slot_, persistent_buffer_.get());
     return true;
 }
 

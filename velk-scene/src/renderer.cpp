@@ -76,8 +76,7 @@ const uint VELK_LIGHTING_STANDARD = 1u; // Full PBR lighting via velk_pbr_shade.
 // view-level state (camera position, viewport, BVH, present_counter)
 // read directly from the `view_globals` UBO declared in velk.glsl.
 struct EvalContext {
-    uint64_t data_addr;    // material's per-draw GPU data pointer (RT / deferred compute path)
-    uint material_base;    // material record index into the set = 1 material arena (raster path)
+    uint material_base;    // material record index into the set = 1 material arena
     uint texture_id;       // bindless texture slot (0 if unused)
     uint shape_param;      // per-shape material slot (e.g. glyph index)
     vec2 uv;               // hit / fragment uv (TEXCOORD_0, 0..1 across the shape)
@@ -89,19 +88,17 @@ struct EvalContext {
     vec4 tangent;          // world-space surface tangent (xyz) + handedness (w) for normal mapping; xyz=0 means no tangent basis (e.g. the RT path)
 };
 
-// Material data access, path-abstracted so one velk_eval_<name> snippet serves
-// both raster and compute. Each snippet declares a value struct T for its data
-// and a unique buffer_reference wrapper name Ref, then:
-//   VELK_MATERIAL_BUFFER(T, Ref)
-//   T d = VELK_LOAD_MATERIAL(T, Ref, ctx);
-// Default (RT / deferred compute): reach the record by address (ctx.data_addr).
-// The raster fragment composer overrides these to index the set = 1 material
-// arena by ctx.material_base instead. A compute shader that composes many
-// materials keeps them address-reached (heterogeneous structs can't share one
-// bound typed buffer); each Ref name is unique so the wrappers never collide.
-#define VELK_MATERIAL_BUFFER(T, Ref) \
-    layout(buffer_reference, std430) readonly buffer Ref { T data; };
-#define VELK_LOAD_MATERIAL(T, Ref, ctx) (Ref((ctx).data_addr).data)
+// Material data access. A snippet declares its value struct T, then:
+//   VELK_MATERIAL(T)
+//   T d = VELK_LOAD_MATERIAL(T, ctx);
+// Both paths reach the record by index out of the set = 1 material arena.
+// A raster pipeline compiles for one material, so VELK_MATERIAL(T) binds the
+// arena as a typed block and the load is a direct read. The compute composer
+// serves many materials from one shader, so it replaces the VELK_MATERIAL(T)
+// line with a generated velk_unpack_<T> that rebuilds the struct from the
+// arena's raw words, and defines the load to call it. The snippet is
+// identical either way.
+#define VELK_LOAD_MATERIAL(T, ctx) (velk_materials.data[(ctx).material_base])
 
 // Canonical material output. Produced by velk_eval_<name> once per
 // shading point and consumed by every path-specific driver.
@@ -183,6 +180,9 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     if (auto internal = interface_cast<IGpuResourceManagerInternal>(resources_)) {
         internal->init(backend_.get());
     }
+    // Plugins reach the manager through the render context (to claim a
+    // shared set = 1 arena); the renderer owns it.
+    if (render_ctx_) render_ctx_->set_resource_manager(resources_.get());
     snippets_ = instance().create<IFrameSnippetRegistry>(ClassId::FrameSnippetRegistry);
 
     frame_buffer_ = instance().create<IFrameDataManager>(ClassId::FrameDataManager);
@@ -692,7 +692,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                         }
                     }
                     site.geometry.material_id = mat.mat_id;
-                    site.geometry.material_data_addr = mat.mat_addr;
+                    site.geometry.material_base = mat.mat_base;
                     site.geometry.texture_id = tex_id;
 
                     if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {

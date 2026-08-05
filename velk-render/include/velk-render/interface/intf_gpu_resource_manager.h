@@ -61,6 +61,14 @@ public:
     /// `drain_deferred`. The caller owns the returned Ptr.
     virtual IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) = 0;
 
+    /// Returns the one arena bound to set = 1 @p slot, creating it on first
+    /// ask with @p element_size. Every caller for a slot gets the same arena
+    /// and suballocates a region from it, which is what lets a plugin claim a
+    /// slot without the renderer knowing the slot exists. The manager holds
+    /// the arena for its own lifetime; @p element_size is ignored after the
+    /// first call.
+    virtual IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size) = 0;
+
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last
     /// reference drops, the backend handle is auto-deferred for destroy

@@ -3,13 +3,15 @@
 
 #include <velk/api/velk.h>
 
+#include <velk-render/interface/intf_buffer.h>
+
 #include <cstdint>
 
 namespace velk {
 
-struct FrameContext;
-
 class IGpuArena;
+class IGpuResourceManager;
+class IRenderBackend;
 
 /// A byte range within an IGpuArena's bound buffer. The producer derives an
 /// element base (@c offset / element_size) and pushes it so the shader reads
@@ -86,11 +88,15 @@ class IGpuArena
                        VELK_UID("0267a3dc-1b37-4e65-bc3d-8bc24a6fd099")>
 {
 public:
-    /// One-time setup: @p slot is the set = 1 binding
-    /// (IRenderBackend::GlobalBufferSlot); @p element_size is the record
-    /// stride, which keeps region offsets a whole multiple of the element so
-    /// they divide cleanly into an element base.
-    virtual void init(uint32_t slot, uint32_t element_size) = 0;
+    /// One-time setup, called by the resource manager that creates the arena.
+    /// @p slot is the set = 1 binding (IRenderBackend::GlobalBufferSlot);
+    /// @p element_size is the record stride, which keeps region offsets a
+    /// whole multiple of the element so they divide cleanly into an element
+    /// base. @p resources and @p backend are retained for buffer allocation,
+    /// slot binding, and fence markers, so allocating needs no per-frame
+    /// context and callers outside the render loop can suballocate.
+    virtual void init(uint32_t slot, uint32_t element_size,
+                      IGpuResourceManager* resources, IRenderBackend* backend) = 0;
 
     /// Reserves a @p size-byte region from the arena's free-list (growing the
     /// buffer if no span fits) and returns an owning handle. The offset
@@ -104,8 +110,7 @@ public:
     /// share one arena but derive their shader base as @c offset / record_size
     /// pass their own record size so the base stays integral (e.g. per-material
     /// data whose struct size varies by material type).
-    virtual ArenaRegion alloc(uint64_t size, FrameContext& ctx,
-                              uint64_t alignment = 0) = 0;
+    virtual ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) = 0;
 
     /// Writes @p size bytes into the arena at @p offset (a region obtained
     /// from `alloc`). Call only when the region's contents change; unchanged
@@ -124,9 +129,33 @@ public:
     /// reclaim happens even without a new alloc.
     virtual void reclaim() = 0;
 
+    /// Creates an IBuffer whose storage is a region of this arena, sized
+    /// @p size bytes. The region's lifetime rides the returned Ptr, so it is
+    /// freed (fence-deferred) when the last reference drops, like any other
+    /// GPU resource.
+    ///
+    /// Arena memory is allocated for sequential writes, so reads from it are
+    /// slow: the returned buffer is **write-only from the CPU side**. It
+    /// serves `write`, and its `get_data` / `write_diff` report nothing, in
+    /// the same way FontGpuBuffer implements only the half of IBuffer that
+    /// makes sense for it. Consumers get its location with `get_gpu_ref`,
+    /// which returns a Kind::Index ref, never an address.
+    virtual IBuffer::Ptr create_buffer(uint64_t size) = 0;
+
+    /// Writable view of @p offset within the arena's mapped storage, or null
+    /// when unmapped. Write-only memory: never read through this pointer.
+    /// Exists for arena-backed buffers to let a caller's writer fill the
+    /// region in place instead of staging and copying.
+    virtual void* mapped_at(uint64_t offset) = 0;
+
     /// The set = 1 slot this arena's buffer is bound to.
     virtual uint32_t slot() const = 0;
+
+    /// Record stride. A region's shader base is its byte offset divided by
+    /// this, which is why offsets are kept a whole multiple of it.
+    virtual uint32_t element_size() const = 0;
 };
+
 
 inline void ArenaRegion::release()
 {

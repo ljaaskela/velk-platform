@@ -154,7 +154,7 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
                 constexpr uint64_t need = sizeof(FrameGlobals);
                 auto& region = globals_regions_[rtp.element];
                 if (region.size() != need) {
-                    region = ctx.globals_arena->alloc(need, ctx);
+                    region = ctx.globals_arena->alloc(need);
                 }
                 if (region.valid()) {
                     ctx.globals_arena->write_at(region.offset(), &rt_globals, need);

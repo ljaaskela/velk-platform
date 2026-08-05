@@ -117,7 +117,8 @@ VELK_GPU_STRUCT RtShape
     uint32_t texture_id;      ///< bindless index, 0 when unused
     uint32_t shape_param;     ///< per-shape material data (e.g. glyph index for text)
     uint32_t shape_kind;      ///< 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint64_t material_data_addr;
+    uint32_t material_base;   ///< Word index of this shape's record in the set = 1 material arena.
+    uint32_t _pad0;
     uint64_t mesh_data_addr;  ///< for shape_kind == 255: MeshData*; otherwise 0
 };
 static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");

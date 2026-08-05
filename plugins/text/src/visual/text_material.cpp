@@ -11,16 +11,17 @@ namespace velk::ui {
 
 namespace {
 
-// Material data layout: three 8-byte buffer addresses, written via
-// memcpy from the IBuffer::get_gpu_address() values. Std430 places each
-// uint64_t at an 8-byte boundary, so the three addresses pack to 24 bytes.
+// Material data layout: element bases into the three shared text arenas
+// (set = 1 slots 7-9). Plain uints, so the record is modellable and the
+// compute path reads it by index like every other material.
 VELK_GPU_STRUCT TextMaterialData
 {
-    uint64_t curves_address;
-    uint64_t bands_address;
-    uint64_t glyphs_address;
+    uint32_t curve_base;
+    uint32_t band_base;
+    uint32_t glyph_base;
+    uint32_t _pad;
 };
-static_assert(sizeof(TextMaterialData) == 32, "TextMaterialData must be 32 bytes");
+static_assert(sizeof(TextMaterialData) == 16, "TextMaterialData must be 16 bytes");
 
 // Eval body: glyph coverage from the slug buffers. Compute shaders
 // have no fragment-quad derivatives; override fwidth there with a
@@ -33,23 +34,23 @@ constexpr string_view text_eval_src = R"(
 #include "velk_text.glsl"
 
 struct TextMaterialData {
-    VelkTextCurveBuffer curves;
-    VelkTextBandBuffer bands;
-    VelkTextGlyphBuffer glyphs;
-    uvec2 _pad;  // match C++ sizeof: alignas(16) rounds the three addresses (24 B) up to 32 B
+    uint curve_base;
+    uint band_base;
+    uint glyph_base;
+    uint _pad;
 };
-VELK_MATERIAL_BUFFER(TextMaterialData, TextMaterialRef)
+VELK_MATERIAL(TextMaterialData)
 
 MaterialEval velk_eval_text(EvalContext ctx)
 {
-    TextMaterialData d = VELK_LOAD_MATERIAL(TextMaterialData, TextMaterialRef, ctx);
+    TextMaterialData d = VELK_LOAD_MATERIAL(TextMaterialData, ctx);
     // Glyph curves use FreeType's Y-up convention (y=0 at descender,
     // y=1 at ascender). ctx.uv arrives Y-down from raster varyings /
     // RT intersect_rect; flip here so both paths hit the same glyph
     // space.
     vec2 glyph_uv = vec2(ctx.uv.x, 1.0 - ctx.uv.y);
     float coverage = velk_text_coverage(glyph_uv, ctx.shape_param,
-                                         d.curves, d.bands, d.glyphs);
+                                        d.curve_base, d.band_base, d.glyph_base);
     MaterialEval e = velk_default_material_eval();
     e.color = vec4(ctx.base.rgb, ctx.base.a * coverage);
     e.normal = ctx.normal;
@@ -59,11 +60,9 @@ MaterialEval velk_eval_text(EvalContext ctx)
 
 } // namespace
 
-void TextMaterial::set_font_buffers(IBuffer::Ptr curves, IBuffer::Ptr bands, IBuffer::Ptr glyphs)
+void TextMaterial::set_font(IFont* font)
 {
-    curves_ = std::move(curves);
-    bands_  = std::move(bands);
-    glyphs_ = std::move(glyphs);
+    font_ = font;
 }
 
 size_t TextMaterial::get_draw_data_size() const
@@ -75,9 +74,10 @@ ReturnValue TextMaterial::write_draw_data(void* out, size_t size, ITextureResolv
 {
     if (size == sizeof(TextMaterialData)) {
         auto& p = *static_cast<TextMaterialData*>(out);
-        p.curves_address = get_gpu_address(curves_);
-        p.bands_address = get_gpu_address(bands_);
-        p.glyphs_address = get_gpu_address(glyphs_);
+        p.curve_base = font_ ? font_->curve_base() : 0u;
+        p.band_base  = font_ ? font_->band_base() : 0u;
+        p.glyph_base = font_ ? font_->glyph_base() : 0u;
+        p._pad = 0u;
         return ReturnValue::Success;
     }
     return ReturnValue::Fail;

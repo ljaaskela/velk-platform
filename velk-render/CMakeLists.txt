@@ -92,6 +92,8 @@ add_library(velk_render SHARED
     src/material/material_property.h
     src/material/spirv_material_reflect.h
     src/material/spirv_material_reflect.cpp
+    src/material/material_unpacker.h
+    src/material/material_unpacker.cpp
 
     # Mesh primitives
     src/mesh/mesh.h
@@ -111,6 +113,8 @@ add_library(velk_render SHARED
     src/resource/gpu_resource_manager.cpp
     src/resource/gpu_arena.h
     src/resource/gpu_arena.cpp
+    src/resource/arena_buffer.h
+    src/resource/arena_buffer.cpp
     src/resource/surface.h
 
     # Shadow / reflection / etc. techniques

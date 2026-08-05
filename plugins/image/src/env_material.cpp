@@ -71,12 +71,12 @@ constexpr string_view env_eval_src = R"(
 struct EnvMaterialData {
     vec4 params; // x = intensity, y = rotation_rad, zw unused
 };
-VELK_MATERIAL_BUFFER(EnvMaterialData, EnvMaterialRef)
+VELK_MATERIAL(EnvMaterialData)
 
 MaterialEval velk_eval_env(EvalContext ctx)
 {
     const float PI = 3.14159265358979323846;
-    EnvMaterialData d = VELK_LOAD_MATERIAL(EnvMaterialData, EnvMaterialRef, ctx);
+    EnvMaterialData d = VELK_LOAD_MATERIAL(EnvMaterialData, ctx);
 
     float c = cos(d.params.y);
     float s = sin(d.params.y);

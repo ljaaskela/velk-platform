@@ -270,14 +270,11 @@ inline string compose_eval_fragment(string_view driver_template,
     out.append(string_view("#version 450\n"
                            "#include \"velk.glsl\"\n"
                            "#include \"velk-ui.glsl\"\n"));
-    // Raster override: the material record lives in the set = 1 material arena
-    // (one type per pipeline), read by index instead of by address. The default
-    // (address) forms are declared in velk-ui.glsl for the compute paths.
-    out.append(string_view(
-        "#undef VELK_MATERIAL_BUFFER\n"
-        "#undef VELK_LOAD_MATERIAL\n"
-        "#define VELK_MATERIAL_BUFFER(T, Ref) VELK_MATERIAL(T)\n"
-        "#define VELK_LOAD_MATERIAL(T, Ref, ctx) (velk_materials.data[(ctx).material_base])\n"));
+    // A raster pipeline compiles for a single material, so VELK_MATERIAL(T)
+    // binds the arena as a typed block and the snippet's load is a direct
+    // indexed read. Those are the definitions declared in velk-ui.glsl, so
+    // nothing to override here; the compute composer is the one that swaps
+    // them out.
     out.append(eval_src);
     out.append(string_view("\n"));
 

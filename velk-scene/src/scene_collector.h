@@ -23,7 +23,7 @@ namespace velk {
 
 // What enumerate_scene_shapes passes to its callback. `geometry` is
 // pre-filled with origin/axes/color/params/shape_kind/shape_param; the
-// callback mutates material_id / material_data_addr / texture_id and
+// callback mutates material_id / material_base / texture_id and
 // pushes the record into its own output vector.
 //
 // `draw_entry` is non-null for rect-path shapes (one call per draw

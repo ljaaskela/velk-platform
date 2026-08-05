@@ -351,7 +351,13 @@ public:
         kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
         kGlobalLights    = 5,  ///< Persistent per-view light array, read at velk_lights.data[lights_base + i].
         kGlobalPrimaryShapes = 6, ///< Persistent per-view painter-sorted RtShape list (RT primary rays), read at velk_shapes.data[shapes_base + i].
-        kGlobalBufferSlotCount = 7,
+        /// Glyph outline data, one region per font. Claimed by the text
+        /// plugin via IGpuResourceManager::shared_arena; listed here because
+        /// the slot map is global, not because velk-render uses them.
+        kGlobalTextCurves = 7,
+        kGlobalTextBands  = 8,
+        kGlobalTextGlyphs = 9,
+        kGlobalBufferSlotCount = 10,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

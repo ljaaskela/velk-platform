@@ -135,13 +135,11 @@ private:
         mat4 prev_view_projection = mat4::identity();
         bool has_prev_view_projection = false;
 
-        /// Env fingerprint (texture id + material id + data address).
-        /// `prepare_env` resolves these from the snippet registry; on
-        /// the first frame the env material's persistent data buffer
-        /// may not have been uploaded yet → data_addr returns 0,
-        /// then becomes valid the next frame. The change signal lets
-        /// cached deferred-lighting / RT passes invalidate when env
-        /// state actually flips, not on a fixed schedule.
+        /// Env fingerprint (texture id + material id + inline params).
+        /// `prepare_env` resolves these from the snippet registry. The
+        /// change signal lets cached deferred-lighting / RT passes
+        /// invalidate when env state actually flips, not on a fixed
+        /// schedule.
         struct EnvKey
         {
             uint32_t texture_id;

@@ -12,6 +12,8 @@ namespace velk {
 /// Describes a single material parameter discovered in a shader's material struct.
 struct ShaderParam
 {
+    /// Member name. Members of nested structs are dotted paths from the
+    /// record root, e.g. "base_color.factor".
     string name;
     Uid type_uid;    ///< velk type UID (e.g. type_uid<float>(), type_uid<color>())
     uint32_t offset; ///< Byte offset within the material record (relative to the struct start)
@@ -24,6 +26,11 @@ struct ShaderParam
  * Looks for the set = 1 material block declared by VELK_MATERIAL(T) (a
  * `buffer VelkMaterials { T data[]; }`), follows its runtime array to the
  * element struct T, and enumerates T's members as the material inputs.
+ *
+ * Nested structs are flattened: their members are reported with the parent's
+ * byte offset folded in and its name prefixed, so a record that groups fields
+ * into sub-structs (as StandardMaterialData does) yields the same flat list a
+ * record with those fields inline would.
  *
  * Fields starting with '_' are treated as padding and skipped.
  *

@@ -180,7 +180,7 @@ void RtPath::build_passes(IViewEntry& entry,
             if (shapes_bytes == 0) {
                 vs.shapes_region = {};
             } else {
-                auto region = ctx.primary_shapes_arena->alloc(shapes_bytes, ctx);
+                auto region = ctx.primary_shapes_arena->alloc(shapes_bytes);
                 const uint64_t off = region.offset();
                 const bool ok = region.valid();
                 vs.shapes_region = std::move(region);

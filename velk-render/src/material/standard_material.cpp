@@ -107,14 +107,14 @@ struct StandardMaterialData {
     EmissiveParams          emissive;
     SpecularParams          specular;
 };
-VELK_MATERIAL_BUFFER(StandardMaterialData, StandardMaterialRef)
+VELK_MATERIAL(StandardMaterialData)
 
 // Per-property tex_coord selects TEXCOORD_0 (ctx.uv) or TEXCOORD_1 (ctx.uv1).
 #define VELK_STD_UV(ctx, tc) ((tc) == 0u ? (ctx).uv : (ctx).uv1)
 
 MaterialEval velk_eval_standard(EvalContext ctx)
 {
-    StandardMaterialData d = VELK_LOAD_MATERIAL(StandardMaterialData, StandardMaterialRef, ctx);
+    StandardMaterialData d = VELK_LOAD_MATERIAL(StandardMaterialData, ctx);
 
     // Base color = factor * texture (texture defaults to white when absent).
     vec4 base = d.base_color.factor;

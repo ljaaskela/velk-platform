@@ -49,6 +49,7 @@ public:
     void enable_transient_pool() override;
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) override;
+    IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size) override;
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) override;
@@ -133,6 +134,10 @@ private:
     std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
+
+    /// Arenas vended by shared_arena, one per set = 1 slot. Strong: no single
+    /// caller owns a slot, so the manager outlives every user of it.
+    std::unordered_map<uint32_t, IGpuArena::Ptr> shared_arenas_;
 
     /// Arenas created via create_arena; weak so the caller owns lifetime.
     /// drain_deferred ticks each live arena's deferred region reclaim.

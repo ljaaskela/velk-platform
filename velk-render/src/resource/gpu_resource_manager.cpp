@@ -35,8 +35,17 @@ IGpuArena::Ptr GpuResourceManager::create_arena(uint32_t slot, uint32_t element_
 {
     auto arena = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
     if (!arena) return {};
-    arena->init(slot, element_size);
+    arena->init(slot, element_size, this, backend_);
     arenas_.push_back(arena);  // weak-track for the reclaim tick
+    return arena;
+}
+
+IGpuArena::Ptr GpuResourceManager::shared_arena(uint32_t slot, uint32_t element_size)
+{
+    auto it = shared_arenas_.find(slot);
+    if (it != shared_arenas_.end()) return it->second;
+    auto arena = create_arena(slot, element_size);
+    if (arena) shared_arenas_[slot] = arena;
     return arena;
 }
 

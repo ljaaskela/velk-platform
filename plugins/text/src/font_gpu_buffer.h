@@ -31,6 +31,14 @@ public:
  * @brief IBuffer wrapper around one section of a `FontBuffers` (curves,
  *        bands, or glyph table).
  *
+ * @note Currently unused, and retained deliberately. Fonts publish their
+ * glyph data as regions of the shared text arenas, read by index. If the
+ * renderer ever moves back to reaching data by device address, most of that
+ * change is confined to the VELK_MATERIAL / VELK_LOAD_MATERIAL seam, but the
+ * font side is the exception: it needs per-font buffers with addresses of
+ * their own again, which is what this class provides. Do not delete it as
+ * dead code without that decision having been made.
+ *
  * The Font owns three of these, one per role. Each is a velk Object so it
  * can plug into the renderer's GPU resource lifecycle (observer, dirty
  * tracking, deferred destroy). The wrapper does not own the underlying
