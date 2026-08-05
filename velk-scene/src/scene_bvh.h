@@ -106,17 +106,25 @@ private:
     vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
 
-    /// Nodes / shapes are written into the Renderer-owned shared IGpuArenas
-    /// (set = 1) each rebuild; this BVH gets a suballocated region whose base
-    /// is stamped into FrameGlobals / RtRoot. The mesh-instance array stays a
-    /// PersistentBuffer (BDA) until the mesh chain migrates.
+    /// The mesh-instance array stays a PersistentBuffer (BDA) until the mesh
+    /// chain migrates.
     PersistentBuffer mesh_instances_buffer_;
+    /// Mesh-instance base at the last upload. A move rewrites every mesh
+    /// shape's mesh_data_addr, so the shape region has to be re-uploaded.
+    uint64_t last_mesh_instances_base_ = 0;
+
+    /// This BVH's regions in the Renderer-owned shared IGpuArenas (set = 1
+    /// slots 0/1). Held across frames and re-allocated (not overwritten) on
+    /// each real change, so an in-flight frame never reads a half-written
+    /// build. Freed deferred past the fence when replaced or dropped.
+    ArenaRegion nodes_region_;
+    ArenaRegion shapes_region_;
 
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
     uint32_t shape_count_ = 0;
-    uint32_t node_base_ = 0;   ///< Ring-region element base for nodes this frame.
-    uint32_t shape_base_ = 0;  ///< Ring-region element base for shapes this frame.
+    uint32_t node_base_ = 0;   ///< Element base of this BVH's node region.
+    uint32_t shape_base_ = 0;  ///< Element base of this BVH's shape region.
     bool dirty_ = true;
 };
 

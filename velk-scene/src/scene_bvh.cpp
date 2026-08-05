@@ -25,6 +25,30 @@ inline void hash_mix(uint64_t& h, uint64_t v)
     h = (h ^ v) * kFnvPrime;
 }
 
+/// Uploads @p size bytes into a FRESH region of @p arena and hands the old
+/// @p region back to the arena (freed deferred past the in-flight frame's
+/// fence). Allocating instead of overwriting in place is what makes a
+/// mid-flight BVH change safe: a frame still reading the previous build never
+/// sees a partially rewritten one. Returns the element base
+/// (offset / @p stride), or 0 when there is nothing to upload.
+uint32_t upload_region(IGpuArena* arena, ArenaRegion& region, const void* data,
+                       uint64_t size, uint64_t stride, FrameContext& ctx)
+{
+    if (!arena || size == 0) {
+        region = {};
+        return 0;
+    }
+    auto fresh = arena->alloc(size, ctx);
+    if (!fresh.valid()) {
+        region = {};
+        return 0;
+    }
+    const uint64_t offset = fresh.offset();
+    arena->write_at(offset, data, size);
+    region = std::move(fresh);
+    return static_cast<uint32_t>(offset / stride);
+}
+
 inline void hash_float(uint64_t& h, float f)
 {
     uint32_t bits;
@@ -90,8 +114,10 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
             dirty = false;
         }
     }
+    bool rebuilt = false;
     if (dirty || cached_nodes_.empty()) {
         VELK_PERF_SCOPE("renderer.bvh_build");
+        rebuilt = true;
         auto build = build_scene_bvh(scene, ctx.render_ctx, shape_cb, shape_user);
         cached_nodes_ = std::move(build.nodes);
         cached_shapes_ = std::move(build.shapes);
@@ -117,24 +143,30 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
             mesh_instances_base + i * sizeof(MeshInstanceData);
     }
 
-    // Shapes after mesh-instance stamping so any address change cascades
-    // into the shapes blob (the arena's write_diff catches it). The
-    // arenas self-register their buffers into compute set = 1; shaders
-    // read nodes / shapes by index. The returned address is kept only as
-    // a CPU-side change token for the RT pipeline cache key.
-    // Shared arenas owned by the Renderer: every scene's BVH suballocates a
-    // distinct region, so multiple BVHs in one frame never collide on the
-    // set = 1 slot. The returned region's element base selects this BVH's
-    // region; shaders read data[base + index].
-    if (ctx.bvh_shapes_arena) {
-        auto r = ctx.bvh_shapes_arena->write(cached_shapes_.data(),
-                                             cached_shapes_.size() * sizeof(RtShape), ctx);
-        shape_base_ = static_cast<uint32_t>(r.offset / sizeof(RtShape));
+    // Nodes / shapes live in persistent regions of the Renderer-owned shared
+    // arenas, so every scene's BVH holds a distinct region and multiple BVHs
+    // in one frame never collide on the set = 1 slot. The region's element
+    // base is stamped into FrameGlobals / RtRoot; shaders read
+    // data[base + index]. A frame that changes nothing uploads nothing.
+    //
+    // Shapes are considered changed when the topology was rebuilt or when the
+    // mesh-instance array moved (the stamping above rewrites every mesh
+    // shape's mesh_data_addr).
+    const bool shapes_dirty =
+        rebuilt || mesh_instances_base != last_mesh_instances_base_;
+    last_mesh_instances_base_ = mesh_instances_base;
+
+    if (shapes_dirty || !shapes_region_.valid()) {
+        shape_base_ = upload_region(ctx.bvh_shapes_arena, shapes_region_,
+                                    cached_shapes_.data(),
+                                    cached_shapes_.size() * sizeof(RtShape),
+                                    sizeof(RtShape), ctx);
     }
-    if (ctx.bvh_nodes_arena) {
-        auto r = ctx.bvh_nodes_arena->write(cached_nodes_.data(),
-                                            cached_nodes_.size() * sizeof(GpuBvhNode), ctx);
-        node_base_ = static_cast<uint32_t>(r.offset / sizeof(GpuBvhNode));
+    if (rebuilt || !nodes_region_.valid()) {
+        node_base_ = upload_region(ctx.bvh_nodes_arena, nodes_region_,
+                                   cached_nodes_.data(),
+                                   cached_nodes_.size() * sizeof(GpuBvhNode),
+                                   sizeof(GpuBvhNode), ctx);
     }
 }
 

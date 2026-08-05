@@ -49,8 +49,6 @@ public:
                               size_t size, const void* data) override;
 
     void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) override;
-    uint32_t current_frame_slot() const override { return recording_slot_; }
-    uint32_t frame_slot_count() const override { return kFrameOverlap; }
 
     IGpuTexture::Ptr create_texture(const TextureDesc& desc) override;
     void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) override;

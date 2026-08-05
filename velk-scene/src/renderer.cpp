@@ -285,9 +285,8 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
 FrameContext Renderer::make_frame_context()
 {
     // Shared arenas, created from the resource manager (which allocates their
-    // buffers and drives their deferred region reclaim). BVH arenas (slots
-    // 0/1) and the globals arena (slot 2) are ring/transient; the instance
-    // arena (slot 3) is a persistent suballocator.
+    // buffers and drives their deferred region reclaim). One per set = 1 slot,
+    // shared by every producer of that data so their regions never collide.
     if (resources_ && !bvh_nodes_arena_) {
         bvh_nodes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhNodes,
                                                     sizeof(GpuBvhNode));

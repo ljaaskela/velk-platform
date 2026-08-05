@@ -363,14 +363,6 @@ public:
     /// disturbed.
     virtual void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) = 0;
 
-    /// The in-flight frame slot currently being recorded
-    /// (0 .. frame_slot_count() - 1). begin_frame has already waited this
-    /// slot's fence, so a per-slot resource region indexed by it has no
-    /// in-flight reader and is safe to overwrite. IGpuArena uses this to
-    /// pick its ring-buffer region.
-    virtual uint32_t current_frame_slot() const = 0;
-    virtual uint32_t frame_slot_count() const = 0;
-
     /// @}
     /// @name Textures
     /// @{

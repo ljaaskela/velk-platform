@@ -14,47 +14,6 @@ void GpuArena::init(uint32_t slot, uint32_t element_size)
     element_size_ = element_size ? element_size : 1u;
 }
 
-GpuArenaRegion GpuArena::write(const void* data, uint64_t size, FrameContext& ctx)
-{
-    if (!ctx.backend) return {};
-    const uint32_t regions = ctx.backend->frame_slot_count();
-    const uint32_t slot = ctx.backend->current_frame_slot();
-
-    // Slot rotates once per frame, so a slot change marks a new frame: reset
-    // the bump so this frame's producers start at the sub-buffer base.
-    // Producers within one frame share the slot and bump past each other into
-    // distinct regions.
-    if (slot != last_slot_) {
-        bump_ = 0;
-        last_slot_ = slot;
-    }
-
-    const uint64_t aligned = (size + element_size_ - 1) / element_size_ * element_size_;
-
-    if (bump_ + aligned > sub_stride_ || !buffer_) {
-        // Grow the per-frame sub-buffer with 4x headroom over a 1 MiB floor so
-        // the stride settles on the first frame and does not grow again (a
-        // later growth re-binds the shared descriptor while in-flight frames
-        // read it). Element-aligned so offset / element stays integral.
-        uint64_t want = sub_stride_;
-        if (bump_ + aligned > want) {
-            want = (bump_ + aligned) * 4;
-            constexpr uint64_t kFloor = uint64_t(1) << 20;  // 1 MiB
-            if (want < kFloor) want = kFloor;
-        }
-        want = (want + element_size_ - 1) / element_size_ * element_size_;
-        sub_stride_ = want;
-        recreate_buffer(regions, ctx);
-    }
-
-    const uint64_t offset = uint64_t(slot) * sub_stride_ + bump_;
-    if (mapped_ && size) {
-        std::memcpy(static_cast<char*>(mapped_) + offset, data, static_cast<size_t>(size));
-    }
-    bump_ += aligned;
-    return GpuArenaRegion{offset, size};
-}
-
 ArenaRegion GpuArena::alloc(uint64_t size, FrameContext& ctx, uint64_t alignment)
 {
     if (!ctx.backend || size == 0) return {};
@@ -117,23 +76,6 @@ void GpuArena::release_region(uint64_t offset, uint64_t size)
 }
 
 void GpuArena::reclaim() { drain_zombies(); }
-
-void GpuArena::recreate_buffer(uint32_t regions, FrameContext& ctx)
-{
-    GpuBufferDesc desc{};
-    desc.size = uint64_t(regions) * sub_stride_;
-    desc.cpu_writable = true;
-    // Buffer from the resource manager (tracked + deferred-destroy on
-    // reassignment); the backend only binds it to the set = 1 slot. Reassigning
-    // buffer_ drops the old Ptr; ~VkGpuBuffer defers its own destroy past
-    // in-flight frames, so we must NOT also explicit-defer it here.
-    buffer_ = ctx.resources ? ctx.resources->create_gpu_buffer(desc)
-                            : ctx.backend->create_gpu_buffer(desc);
-    mapped_ = buffer_ ? buffer_->map() : nullptr;
-    if (buffer_) {
-        ctx.backend->set_global_buffer(slot_, buffer_.get());
-    }
-}
 
 bool GpuArena::grow_persistent(uint64_t want, FrameContext& ctx)
 {
