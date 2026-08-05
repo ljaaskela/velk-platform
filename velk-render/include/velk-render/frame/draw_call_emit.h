@@ -163,9 +163,10 @@ inline void emit_draw_calls(
         if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
             if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
                 const size_t rec = dd->get_draw_data_size();
-                if (rec != 0 && mi->material_region_size() != 0) {
-                    header.material_base = static_cast<uint32_t>(
-                        mi->material_region_offset() / rec);
+                auto buf = mi->material_buffer();
+                if (rec != 0 && buf) {
+                    header.material_base =
+                        static_cast<uint32_t>(get_gpu_ref(buf).get_base() / rec);
                 }
             }
         }

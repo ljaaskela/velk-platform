@@ -140,7 +140,13 @@ public:
     /// the same way FontGpuBuffer implements only the half of IBuffer that
     /// makes sense for it. Consumers get its location with `get_gpu_ref`,
     /// which returns a Kind::Index ref, never an address.
-    virtual IBuffer::Ptr create_buffer(uint64_t size) = 0;
+    /// @p alignment (0 = the arena's element_size) forces the region's offset
+    /// to a multiple of it, and is re-applied when the buffer regrows. An
+    /// arena whose records are read at more than one stride is byte-granular
+    /// (element_size 1), so its refs carry a byte offset and each consumer
+    /// divides by the stride it reads with; such a buffer passes its record
+    /// size here to keep those divisions integral.
+    virtual IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) = 0;
 
     /// Writable view of @p offset within the arena's mapped storage, or null
     /// when unmapped. Write-only memory: never read through this pointer.

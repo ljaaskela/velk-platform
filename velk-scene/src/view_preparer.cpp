@@ -143,43 +143,45 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             return mapped;
         };
         // Material draw data lives in the shared material arena (set = 1 slot
-        // 4), one persistent region per material aligned to its record size so
-        // the fragment shader's material_base (= offset / record size) is
-        // integral. Kept across steady-state frames; (re)allocated only when
-        // the record size changes and rewritten only when the bytes change.
-        // Multiple batches sharing one material upload at most once per frame
-        // (get_data_buffer clears dirty after the first).
+        // 4), in an arena-backed IBuffer per material. The material serialises
+        // straight into arena memory, so there is no CPU-side copy to diff
+        // against and no second write. The region is aligned to the record
+        // size, keeping both consumers' bases integral (raster divides the
+        // offset by the record size, the RT compute path by 4).
         auto upload_material = [&](const IBatch::Ptr& bp) {
             if (!bp || !ctx.material_arena) return;
             auto material_ptr = bp->material();
             auto* dd = interface_cast<IDrawData>(material_ptr.get());
             auto* mi = interface_cast<IMaterialInternal>(material_ptr.get());
             if (!dd || !mi) return;
-            VELK_PERF_SCOPE("renderer.upload_material");
-            // get_data_buffer re-serialises the material's bytes and flags the
-            // material arena dirty when they change (a dedicated flag, not the
-            // shared IBuffer::is_dirty the RT upload path consumes).
-            auto buf = dd->get_data_buffer(ctx.resources);
-            if (!buf) return;
-            const uint64_t need = buf->get_data_size();
-            const bool dirty = mi->take_material_dirty();
+            const uint64_t need = dd->get_draw_data_size();
             if (need == 0) {
-                mi->set_material_region({});  // release any existing region
+                mi->set_material_buffer({});  // release any existing region
                 return;
             }
-            if (mi->material_region_size() != need) {
-                // Align each region to its own record size so material_base
-                // (= offset / record size) stays integral for this material.
-                auto region = ctx.material_arena->alloc(need, need);
-                const uint64_t off = region.offset();
-                const bool ok = region.valid();
-                mi->set_material_region(std::move(region));
-                if (ok) ctx.material_arena->write_at(off, buf->get_data(), need);
-            } else if (dirty) {
-                ctx.material_arena->write_at(mi->material_region_offset(),
-                                             buf->get_data(), need);
+            auto buf = mi->material_buffer();
+            const bool dirty =
+                mi->take_material_dirty(ctx.resources->texture_generation());
+            const bool fresh = (!buf || buf->get_data_size() != need);
+            if (fresh) {
+                buf = ctx.material_arena->create_buffer(need, need);
+                mi->set_material_buffer(buf);
             }
-            // else: unchanged, keep the region and its bytes (no re-upload).
+            // Re-serialising every material every frame is the dominant cost
+            // of this sweep at bistro's material count, and arena memory
+            // cannot be diffed, so the write is gated on the material's own
+            // change notifications instead.
+            //
+            // The perf scope sits inside the gate deliberately: its count is
+            // records actually written, not materials visited, so the metric
+            // says whether the gating is working rather than how many batches
+            // exist.
+            if (buf && (fresh || dirty)) {
+                VELK_PERF_SCOPE("renderer.upload_material");
+                buf->write(static_cast<size_t>(need), [&](void* dst, size_t n) {
+                    dd->write_draw_data(dst, n, ctx.resources);
+                });
+            }
         };
         // Instance bytes live in the shared instance arena (set = 1 slot 3),
         // one persistent region per batch. The batch keeps its region across

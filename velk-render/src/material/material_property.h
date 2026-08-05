@@ -21,43 +21,57 @@ namespace velk::impl {
  * See design-notes/material_properties.md.
  */
 
-class BaseColorProperty
-    : public ext::Object<BaseColorProperty, IBaseColorProperty, IMaterialProperty>
+/**
+ * @brief Common base: self-observes and fires `on_property_changed` after any
+ *        write, so the owning material knows its record is stale.
+ *
+ * Same shape as MaterialOptions below. Every write reaches here, whether to
+ * IMaterialProperty's shared state or to the class-specific interface, so the
+ * owning material cannot miss a mutation.
+ */
+template <class T, class... Interfaces>
+class PropertyBase
+    : public ext::Object<T, Interfaces..., IMaterialProperty, IMetadataObserver>
+{
+public:
+    void on_state_changed(string_view, IMetadata&, Uid) override
+    {
+        ::velk::invoke_event(static_cast<IMaterialProperty*>(this), "on_property_changed");
+    }
+};
+
+class BaseColorProperty : public PropertyBase<BaseColorProperty, IBaseColorProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::BaseColorProperty, "BaseColorProperty");
 };
 
 class MetallicRoughnessProperty
-    : public ext::Object<MetallicRoughnessProperty, IMetallicRoughnessProperty, IMaterialProperty>
+    : public PropertyBase<MetallicRoughnessProperty, IMetallicRoughnessProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::MetallicRoughnessProperty, "MetallicRoughnessProperty");
 };
 
-class NormalProperty
-    : public ext::Object<NormalProperty, INormalProperty, IMaterialProperty>
+class NormalProperty : public PropertyBase<NormalProperty, INormalProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::NormalProperty, "NormalProperty");
 };
 
-class OcclusionProperty
-    : public ext::Object<OcclusionProperty, IOcclusionProperty, IMaterialProperty>
+class OcclusionProperty : public PropertyBase<OcclusionProperty, IOcclusionProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::OcclusionProperty, "OcclusionProperty");
 };
 
-class EmissiveProperty
-    : public ext::Object<EmissiveProperty, IEmissiveProperty, IMaterialProperty>
+class EmissiveProperty : public PropertyBase<EmissiveProperty, IEmissiveProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::EmissiveProperty, "EmissiveProperty");
 };
 
-class SpecularProperty
-    : public ext::Object<SpecularProperty, ISpecularProperty, IMaterialProperty>
+class SpecularProperty : public PropertyBase<SpecularProperty, ISpecularProperty>
 {
 public:
     VELK_CLASS_UID(ClassId::SpecularProperty, "SpecularProperty");

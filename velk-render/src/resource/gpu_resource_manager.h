@@ -50,6 +50,7 @@ public:
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size) override;
+    uint64_t texture_generation() const override { return texture_generation_; }
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(
         const TextureGroupDesc& desc) override;
@@ -134,6 +135,9 @@ private:
     std::unordered_map<IGpuResource*, IGpuBuffer*> tracked_gpu_buffers_;
     mutable std::mutex deferred_mutex_;
     vector<IBuffer::WeakPtr> observed_env_resources_;
+
+    /// Bumped on every bindless id assignment / drop; see texture_generation().
+    uint64_t texture_generation_ = 0;
 
     /// Arenas vended by shared_arena, one per set = 1 slot. Strong: no single
     /// caller owns a slot, so the manager outlives every user of it.

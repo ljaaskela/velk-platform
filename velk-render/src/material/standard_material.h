@@ -64,6 +64,9 @@ private:
     /// Attachments implementing IMaterialProperty, in attach order. Effective
     /// property for any class X is the last entry whose class_uid == X.
     vector<IMaterialProperty::Ptr> properties_;
+    /// Parallel to properties_: keeps each property's change subscription
+    /// alive, so a write to any of them marks this material's record stale.
+    vector<ScopedHandler> property_subs_;
 };
 
 } // namespace velk::impl

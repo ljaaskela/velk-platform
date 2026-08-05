@@ -81,12 +81,12 @@ void GpuArena::release_region(uint64_t offset, uint64_t size)
 
 void GpuArena::reclaim() { drain_zombies(); }
 
-IBuffer::Ptr GpuArena::create_buffer(uint64_t size)
+IBuffer::Ptr GpuArena::create_buffer(uint64_t size, uint64_t alignment)
 {
     auto buf = ::velk::instance().create<IBuffer>(ClassId::ArenaBuffer);
     if (!buf) return {};
     if (auto* ab = interface_cast<IArenaBufferInternal>(buf)) {
-        ab->init(this, size);
+        ab->init(this, size, alignment);
     }
     return buf;
 }

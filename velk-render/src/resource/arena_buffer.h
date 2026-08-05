@@ -16,8 +16,9 @@ class IArenaBufferInternal
                        VELK_UID("56774d3a-19e8-4d5e-af76-cc6d58efd37f")>
 {
 public:
-    /// Binds this buffer to @p arena and reserves @p size bytes.
-    virtual void init(IGpuArena* arena, uint64_t size) = 0;
+    /// Binds this buffer to @p arena and reserves @p size bytes, keeping
+    /// @p alignment across regrowth.
+    virtual void init(IGpuArena* arena, uint64_t size, uint64_t alignment) = 0;
 };
 
 /**
@@ -47,7 +48,7 @@ public:
     VELK_CLASS_UID(::velk::ClassId::ArenaBuffer, "ArenaBuffer");
 
     // IArenaBufferInternal
-    void init(IGpuArena* arena, uint64_t size) override;
+    void init(IGpuArena* arena, uint64_t size, uint64_t alignment) override;
 
     // IBuffer
     size_t get_data_size() const override { return static_cast<size_t>(region_.size()); }
@@ -63,6 +64,7 @@ public:
 private:
     IGpuArena* arena_ = nullptr;
     ArenaRegion region_;
+    uint64_t alignment_ = 0;
 };
 
 } // namespace velk::impl

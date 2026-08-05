@@ -2,11 +2,12 @@
 
 namespace velk::impl {
 
-void ArenaBuffer::init(IGpuArena* arena, uint64_t size)
+void ArenaBuffer::init(IGpuArena* arena, uint64_t size, uint64_t alignment)
 {
     arena_ = arena;
+    alignment_ = alignment;
     if (arena_ && size > 0) {
-        region_ = arena_->alloc(size);
+        region_ = arena_->alloc(size, alignment_);
     }
 }
 
@@ -18,7 +19,7 @@ bool ArenaBuffer::write(size_t sz, WriteFn fn, void* ctx)
     // deferred free is fenced but an in-place write is not, so a frame still
     // reading the old contents must keep them.
     if (region_.size() != static_cast<uint64_t>(sz)) {
-        region_ = arena_->alloc(static_cast<uint64_t>(sz));
+        region_ = arena_->alloc(static_cast<uint64_t>(sz), alignment_);
         if (!region_.valid()) return false;
     }
 

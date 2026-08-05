@@ -5,6 +5,7 @@
 #include "visual/text_material.h"
 
 #include <velk-render/interface/intf_gpu_resource_manager.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
 
@@ -97,6 +98,13 @@ void Font::ensure_gpu_data(IRenderContext& ctx)
         glyph_base_ = upload_section(arena.get(), glyph_buffer_,
                                      font_buffers_.glyphs(), glyphs);
         glyph_bytes_ = glyphs;
+    }
+
+    // Baking a glyph moves the sections to fresh regions, so the material's
+    // record now holds stale bases. Nothing wrote the material itself, so its
+    // own change notifications cannot catch this.
+    if (auto* mi = interface_cast<IMaterialInternal>(text_material_.get())) {
+        mi->mark_material_dirty();
     }
 }
 

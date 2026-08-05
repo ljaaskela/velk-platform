@@ -41,7 +41,7 @@ public:
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void release_region(uint64_t offset, uint64_t size) override;
     void reclaim() override;
-    IBuffer::Ptr create_buffer(uint64_t size) override;
+    IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) override;
     void* mapped_at(uint64_t offset) override;
     uint32_t slot() const override { return slot_; }
     uint32_t element_size() const override { return element_size_; }

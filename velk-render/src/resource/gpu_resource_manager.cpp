@@ -187,6 +187,7 @@ void GpuResourceManager::register_texture(ISurface* surf, IGpuTexture::Ptr tex)
     if (!surf) return;
     const TextureId tid = get_texture_id(tex);
     surf->set_gpu_handle(GpuResourceKey::Default, static_cast<uint64_t>(tid));
+    ++texture_generation_;
     texture_map_[surf] = std::move(tex);
     // Subscribe so dropping the wrapper auto-drops the texture entry.
     // Idempotent: re-registration on resize doesn't double-subscribe.
@@ -195,7 +196,9 @@ void GpuResourceManager::register_texture(ISurface* surf, IGpuTexture::Ptr tex)
 
 void GpuResourceManager::unregister_texture(ISurface* surf)
 {
-    texture_map_.erase(surf);
+    if (texture_map_.erase(surf) != 0) {
+        ++texture_generation_;
+    }
 }
 
 IGpuTexture* GpuResourceManager::ensure_texture_storage(ISurface* surf, const TextureDesc& desc)

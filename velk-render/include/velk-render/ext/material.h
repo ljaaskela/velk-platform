@@ -54,10 +54,12 @@ namespace velk::ext {
  */
 template <class T, class... Extra>
 class Material : public GpuResource<T, IMaterialInternal, IDrawData,
-                                    ::velk::IShaderSource, Extra...>
+                                    ::velk::IShaderSource,
+                                    ::velk::IMetadataObserver, Extra...>
 {
     using Base = GpuResource<T, IMaterialInternal, IDrawData,
-                             ::velk::IShaderSource, Extra...>;
+                             ::velk::IShaderSource,
+                             ::velk::IMetadataObserver, Extra...>;
 
 public:
     // Pipeline handle is stored as the resource's primary handle (key
@@ -110,21 +112,35 @@ public:
     uint64_t get_pipeline_key() const override { return 0; }
     void register_includes(IRenderContext&) const override {}
 
-    // Material arena region (set = 1 slot 4), managed by the renderer's
-    // upload sweep. Moving in a new region RAII-frees the previous one
-    // (deferred past the in-flight fence by the arena).
-    void set_material_region(ArenaRegion&& region) override
+    // Arena-backed buffer holding this material's draw data (set = 1 slot 4),
+    // created by the renderer's upload sweep. Dropping it frees the region,
+    // deferred past the in-flight fence by the arena.
+    void set_material_buffer(::velk::IBuffer::Ptr buf) override
     {
-        material_region_ = std::move(region);
+        material_buffer_ = std::move(buf);
     }
-    uint64_t material_region_offset() const override { return material_region_.offset(); }
-    uint64_t material_region_size() const override { return material_region_.size(); }
-    bool take_material_dirty() override
+    ::velk::IBuffer::Ptr material_buffer() const override { return material_buffer_; }
+
+    bool take_material_dirty(uint64_t texture_generation) override
     {
-        bool d = material_dirty_;
+        const bool d = material_dirty_ || texture_generation != texture_generation_;
         material_dirty_ = false;
+        texture_generation_ = texture_generation;
         return d;
     }
+
+    /// Any write to this material's own state marks its record for
+    /// re-serialisation. ext::Object registers an object implementing
+    /// IMetadataObserver against its own storage, so this covers every
+    /// `write_state` and dynamic-property write on the material, including
+    /// ShaderMaterial::set_input. Materials whose parameters live in attached
+    /// objects (StandardMaterial) additionally observe those attachments.
+    void on_state_changed(::velk::string_view, ::velk::IMetadata&, ::velk::Uid) override
+    {
+        material_dirty_ = true;
+    }
+
+    void mark_material_dirty() override { material_dirty_ = true; }
 
     /// Framework-level discard thresholds derived from the attached
     /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend
@@ -187,14 +203,9 @@ public:
             }
         }
         bool ok = true;
-        // write() is memcmp-gated and returns true only when the committed
-        // bytes actually changed; flag the material arena for a rewrite then.
-        // Independent of IBuffer::is_dirty (which the RT upload path clears).
-        if (data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
-                ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
-            })) {
-            material_dirty_ = true;
-        }
+        data_buffer_->write(sz, [this, &ok, resolver](void* dst, size_t n) {
+            ok = this->write_draw_data(dst, n, resolver) == ReturnValue::Success;
+        });
         return ok ? data_buffer_ : nullptr;
     }
 
@@ -240,8 +251,13 @@ private:
 
     ::velk::IProgramDataBuffer::Ptr data_buffer_;
     ScopedHandler options_sub_;
-    ArenaRegion material_region_;
-    bool material_dirty_ = true;  ///< Start dirty so the first frame writes the arena region.
+    ::velk::IBuffer::Ptr material_buffer_;
+    /// Starts true so the first frame always writes the record.
+    bool material_dirty_ = true;
+    /// Bindless-table generation this material's record was last written at.
+    /// Starts at a value the manager never returns, so the first write always
+    /// happens even if no texture has been registered yet.
+    uint64_t texture_generation_ = ~uint64_t(0);
 };
 
 } // namespace velk::ext

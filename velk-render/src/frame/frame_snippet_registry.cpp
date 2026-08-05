@@ -214,52 +214,37 @@ FrameSnippetRegistry::resolve_material(IProgram* prog, const FrameResolveContext
 
     uint32_t base = 0;
 
-    IBuffer::Ptr data_buf;
-    if (auto* dd = interface_cast<IDrawData>(prog)) {
-        data_buf = dd->get_data_buffer(ctx.resources);
-    }
-    if (data_buf) {
-        frame_data_buffers_.push_back(data_buf);
-    }
-
-    // The material's record lives in the shared material arena, and the shape
-    // carries its word base. The region is ensured here rather than relied on:
-    // shapes are stamped during the BVH build, which runs ahead of the
-    // renderer's material upload sweep, and a cached BVH would otherwise hold
-    // a stale base indefinitely.
+    // The material's record lives in the shared material arena, in an
+    // arena-backed IBuffer it serialises straight into. The buffer is ensured
+    // here rather than relied on: shapes are stamped during the BVH build,
+    // which runs ahead of the renderer's material upload sweep, and a cached
+    // BVH would otherwise hold a stale base indefinitely.
+    //
+    // The shape carries a *word* base, so the byte offset is divided by 4
+    // here; the raster path divides the same offset by the record size.
     {
         auto* mi = interface_cast<IMaterialInternal>(prog);
         auto* dd = interface_cast<IDrawData>(prog);
         if (mi && dd && ctx.material_arena) {
-            // Materials with a persistent buffer keep their region across
-            // frames and re-upload only when the sweep flags them dirty.
-            // Materials without one serialise straight into the region.
-            const uint64_t need = data_buf ? data_buf->get_data_size()
-                                           : dd->get_draw_data_size();
+            const uint64_t need = dd->get_draw_data_size();
             if (need > 0) {
-                if (mi->material_region_size() != need) {
-                    auto region = ctx.material_arena->alloc(need, need);
-                    const uint64_t off = region.offset();
-                    const bool ok = region.valid();
-                    mi->set_material_region(std::move(region));
-                    if (ok && data_buf) {
-                        ctx.material_arena->write_at(off, data_buf->get_data(), need);
-                    }
+                auto buf = mi->material_buffer();
+                const bool fresh = (!buf || buf->get_data_size() != need);
+                if (fresh) {
+                    buf = ctx.material_arena->create_buffer(need, need);
+                    mi->set_material_buffer(buf);
                 }
-                if (mi->material_region_size() == need) {
-                    const uint64_t off = mi->material_region_offset();
-                    if (!data_buf) {
-                        void* scratch = std::malloc(static_cast<size_t>(need));
-                        if (scratch) {
-                            std::memset(scratch, 0, static_cast<size_t>(need));
-                            if (dd->write_draw_data(scratch, static_cast<size_t>(need),
-                                                    ctx.resources) == ReturnValue::Success) {
-                                ctx.material_arena->write_at(off, scratch, need);
-                            }
-                            std::free(scratch);
-                        }
+                if (buf) {
+                    // Gated like the upload sweep; whichever of the two runs
+                    // first for a given material consumes the dirty flag.
+                    const uint64_t tex_gen =
+                        ctx.resources ? ctx.resources->texture_generation() : 0;
+                    if (fresh || mi->take_material_dirty(tex_gen)) {
+                        buf->write(static_cast<size_t>(need), [&](void* dst, size_t n) {
+                            dd->write_draw_data(dst, n, ctx.resources);
+                        });
                     }
-                    base = static_cast<uint32_t>(off / 4u);
+                    base = static_cast<uint32_t>(get_gpu_ref(buf).get_base() / 4u);
                 }
             }
         }

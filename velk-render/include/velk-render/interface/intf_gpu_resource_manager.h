@@ -92,6 +92,18 @@ public:
     virtual void register_texture(ISurface* surf, IGpuTexture::Ptr tex) = 0;
     virtual void unregister_texture(ISurface* surf) = 0;
 
+    /// Bumped whenever a surface's bindless id is assigned or dropped.
+    ///
+    /// Records that embed a resolved TextureId (every material with a texture)
+    /// are written once and then left alone, so an id that changes afterwards
+    /// would leave them pointing at nothing. Nothing notifies on
+    /// `set_gpu_handle`, and having each material track which surfaces its
+    /// record embeds would mean per-material-type wiring. Instead consumers
+    /// compare this counter against the value they last serialised at, and
+    /// re-serialise everything on the frames where it moved. Registration
+    /// happens at load and on render-target resize, so that is rare.
+    virtual uint64_t texture_generation() const = 0;
+
     /// Ensures @p surf has a backend texture allocated and registered.
     /// Returns the existing IGpuTexture* on cache hit; allocates fresh +
     /// registers + stamps `set_gpu_handle(Default, ...)` on first sight;
