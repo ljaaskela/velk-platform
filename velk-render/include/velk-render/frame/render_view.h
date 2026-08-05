@@ -59,15 +59,6 @@ struct RenderView
     int width = 0;
     int height = 0;
 
-    /// FrameGlobals GPU address. The view preparer writes a
-    /// `FrameGlobals` record into the per-frame staging buffer once per
-    /// view; this is the GPU address of that record. Producers stamp
-    /// it onto each IRenderPass they emit; the graph executor pushes it
-    /// into push-constant slot [0..8) at pass start. Shaders read
-    /// view-level state via the `GlobalData` buffer_reference declared
-    /// in the velk.glsl prelude. 0 when the viewport is degenerate.
-    uint64_t view_globals_address = 0;
-
     /// Element base of this view's FrameGlobals within the shared globals
     /// arena (set = 1 slot 2). Pushed to the direct-push compute shaders
     /// (deferred lighting / denoise / spatial) so they read

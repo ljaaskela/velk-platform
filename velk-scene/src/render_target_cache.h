@@ -85,11 +85,6 @@ private:
     /// emit per element; hive-pooled.
     std::unordered_map<IElement*, IViewEntry::Ptr> view_entries_;
 
-    /// Per-RTT FrameGlobals storage. Single 192-byte device-local
-    /// allocation per RTT element; updated in place each frame via
-    /// `IGpuBuffer::update`. BDA stable across the RTT's lifetime.
-    std::unordered_map<IElement*, IGpuBuffer::Ptr> view_globals_;
-
     /// Per-RTT region in the shared globals arena (set = 1 slot 2), fixed
     /// size. Persistent (allocated once, written in place) so the RTT's
     /// `view_globals_base` is stable across frames, matching the main-view

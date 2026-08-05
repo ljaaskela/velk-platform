@@ -171,12 +171,6 @@ private:
         /// frames: the compute shaders that bake it (RT / deferred / denoise /
         /// spatial) then read this frame's globals, not a rotating ring slot.
         ArenaRegion globals_region;
-
-        /// Per-view FrameGlobals storage. Single 192-byte device-local
-        /// allocation; `prepare_frame_globals` updates it in place each
-        /// frame via `IGpuBuffer::update`. BDA is stable across the
-        /// view's lifetime, so cached secondaries can bake it once.
-        IGpuBuffer::Ptr view_globals_buffer;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 

@@ -935,43 +935,6 @@ void main()
 }
 )";
 
-// Fullscreen composite pipeline: samples the deferred output texture
-// and alpha-blends it onto the surface. One triangle covering NDC
-// [-1, 3]; viewport-scaled by the view's subrect so the pass only
-// writes where that view owns pixels. Push constants carry the source
-// bindless texture id.
-[[maybe_unused]] constexpr string_view deferred_composite_vertex_src = R"(
-#version 450
-
-layout(location = 0) out vec2 v_uv;
-
-void main()
-{
-    // Standard fullscreen-triangle trick.
-    vec2 pos = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0 - 1.0;
-    gl_Position = vec4(pos, 0.0, 1.0);
-    v_uv = (pos + 1.0) * 0.5;
-}
-)";
-
-[[maybe_unused]] constexpr string_view deferred_composite_fragment_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(push_constant) uniform PC {
-    GlobalDataPtr globals;     // [0..8) FrameGlobals BDA (unused here)
-    uint src_tex_id;           // [8..)  CPU push starts here
-} pc;
-
-layout(location = 0) in vec2 v_uv;
-layout(location = 0) out vec4 frag_color;
-
-void main()
-{
-    frag_color = velk_texture(pc.src_tex_id, v_uv);
-}
-)";
-
 // Compute ray tracer prelude. Fixed header that precedes all material
 // snippets. Declares extensions, storage-image binding, shape struct,
 // push constants, intersect_rect, and the full stochastic-RT toolkit

@@ -448,7 +448,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_gbuffer_pass, vs.gbuffer_dirty, "deferred.gbuffer",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             IRenderTextureGroup* group = vs.gbuffer.get();
             auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
@@ -612,7 +612,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // produces the final image and blits it.
     emit_cached_view_pass(
         vs.cached_lighting_pass, vs.lighting_dirty, "deferred.lighting",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = lighting_pipeline.get();
@@ -703,7 +703,7 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_denoise_pass, vs.denoise_dirty, "deferred.temporal",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = temporal_pipeline.get();
@@ -787,7 +787,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
 
     emit_cached_view_pass(
         vs.cached_spatial_pass, vs.spatial_dirty, "deferred.spatial",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = spatial_pipeline.get();
@@ -850,7 +850,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_transparent_pass, vs.transparent_dirty, "deferred.transparent",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             auto* default_uv1 =
                 ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();

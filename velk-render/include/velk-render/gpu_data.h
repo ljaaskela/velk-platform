@@ -42,12 +42,10 @@ struct BvhBinding
 
 /// Per-frame global data written by the renderer, read by all shaders.
 ///
-/// Layout must match the `GlobalData` buffer_reference declaration in
-/// velk.glsl (scalar layout). The view preparer writes one of these
-/// per view per frame into the per-frame staging buffer and stamps
-/// the resulting GPU address onto each IRenderPass; the graph executor
-/// pushes that address into push-constant slot [0..8) at pass start,
-/// and shaders dereference it as `globals.X`.
+/// Layout must match the `GlobalData` struct declaration in velk.glsl
+/// (scalar layout). The view preparer writes one of these per view per
+/// frame into its persistent region of the shared globals arena
+/// (set = 1 slot 2); shaders read it as `velk_globals.data[base]`.
 struct FrameGlobals
 {
     float    view_projection[16];          ///< Combined view-projection matrix from the camera.
@@ -60,11 +58,10 @@ struct FrameGlobals
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint32_t bvh_node_base;                ///< Element base added to BVH node indices (IGpuArena ring region for this frame).
     uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
-    uint64_t _bvh_reserved;                ///< Was bvh_shapes_addr; reserved to keep the 256-byte layout.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
 };
 
-static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 248, "FrameGlobals layout must match velk.glsl");
 
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.

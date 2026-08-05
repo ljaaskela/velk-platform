@@ -37,8 +37,7 @@ struct CachedPassRecording
  * compile-time short-circuit can match. This helper owns the boilerplate:
  *
  *  - get-or-create the cached pass (first sight forces a rebuild);
- *  - when not dirty, refresh only the per-frame view-globals address and
- *    re-add the same Ptr (steady state);
+ *  - when not dirty, re-add the same Ptr (steady state);
  *  - when dirty, `reset()` the pass, invoke @p record for the recorder-
  *    specific work, install the command buffer / resource deps / held
  *    pipelines, clear the dirty flag, and add the pass to the graph.
@@ -50,12 +49,10 @@ struct CachedPassRecording
  * @param pass   In/out cached pass slot; created on first sight.
  * @param dirty  In/out dirty flag; cleared after a successful rebuild.
  * @param name   Static label for the pass (used by GPU-timing readout).
- * @param view_globals_address Per-frame FrameGlobals GPU address.
  */
 template <class RecordFn>
 inline void emit_cached_view_pass(IRenderPass::Ptr& pass, bool& dirty,
                                   const char* name,
-                                  uint64_t view_globals_address,
                                   IRenderGraph& graph, RecordFn&& record)
 {
     if (!pass) {
@@ -68,7 +65,6 @@ inline void emit_cached_view_pass(IRenderPass::Ptr& pass, bool& dirty,
     }
 
     if (!dirty) {
-        pass->set_view_globals_address(view_globals_address);
         graph.add_pass(pass);
         return;
     }
@@ -87,7 +83,6 @@ inline void emit_cached_view_pass(IRenderPass::Ptr& pass, bool& dirty,
     for (auto& w : rec.writes) {
         pass->add_write(w);
     }
-    pass->set_view_globals_address(view_globals_address);
     pass->set_held_pipelines(std::move(rec.held));
     dirty = false;
     graph.add_pass(pass);

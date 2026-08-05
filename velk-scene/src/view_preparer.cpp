@@ -303,17 +303,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     cache.prev_view_projection = rv.view_projection;
     cache.has_prev_view_projection = true;
 
-    if (!cache.view_globals_buffer) {
-        GpuBufferDesc desc{};
-        desc.size = sizeof(FrameGlobals);
-        desc.cpu_writable = false;
-        cache.view_globals_buffer = ctx.resources->create_gpu_buffer(desc);
-        if (!cache.view_globals_buffer) return;
-    }
-    cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
-    rv.view_globals_address = cache.view_globals_buffer->gpu_address();
-
-    // Mirror into the shared globals arena (set = 1 slot 2) so shaders read
+    // Into the shared globals arena (set = 1 slot 2); shaders read
     // velk_globals.data[base] by index. Persistent per-view region (fixed
     // size, allocated once, written in place each frame): the base is stable
     // across frames, so cached compute secondaries that bake it read this

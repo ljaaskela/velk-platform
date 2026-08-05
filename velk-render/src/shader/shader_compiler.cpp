@@ -115,9 +115,9 @@ layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 
 // Per-view FrameGlobals as a value type. `GlobalData` is the element of the
 // set = 1 globals buffer (velk_globals below); shaders reach it by index
-// (`velk_globals.data[globals_base]`) via velk_global_data(root), replacing
-// the old FrameGlobals device address. Layout matches the FrameGlobals struct
-// in gpu_data.h byte-for-byte under scalar layout.
+// (`velk_globals.data[globals_base]`) via velk_global_data(root). Layout
+// matches the FrameGlobals struct in gpu_data.h byte-for-byte under scalar
+// layout.
 struct GlobalData {
     mat4 view_projection;
     mat4 inverse_view_projection;
@@ -129,7 +129,6 @@ struct GlobalData {
     uint present_counter;
     uint bvh_node_base;   // element base into the BVH node ring region this frame
     uint bvh_shape_base;  // element base into the BVH shape ring region this frame
-    uvec2 _bvh_reserved;  // keeps the FrameGlobals layout (was bvh_shapes_addr)
     mat4 prev_view_projection;
 };
 
@@ -139,24 +138,6 @@ struct GlobalData {
 // to graphics as well as compute, so this no longer leaks a compute-only
 // descriptor into raster pipelines.
 layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { GlobalData data[]; } velk_globals;
-
-// Device-address form of GlobalData, retained for the paths still on
-// buffer_device_address (the RT RtRoot root pointer; the composite-blit
-// compute's unused slot). Migrates away when those root pointers do.
-layout(buffer_reference, scalar) readonly buffer GlobalDataPtr {
-    mat4 view_projection;
-    mat4 inverse_view_projection;
-    vec4 viewport;
-    vec4 cam_pos;
-    uint bvh_root;
-    uint bvh_node_count;
-    uint bvh_shape_count;
-    uint present_counter;
-    uint bvh_node_base;
-    uint bvh_shape_base;
-    uvec2 _bvh_reserved;
-    mat4 prev_view_projection;
-};
 
 // Storage-image arrays for compute imageStore are declared locally
 // per-shader (rgba8 -> binding 1, rgba32f -> binding 2, rgba16f ->

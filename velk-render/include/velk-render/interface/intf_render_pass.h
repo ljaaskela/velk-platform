@@ -55,14 +55,6 @@ public:
     /// Resources written by this pass.
     virtual array_view<const IGpuResource::Ptr> writes() const = 0;
 
-    /// Per-view FrameGlobals GPU address pushed into push-constant
-    /// slot [0..8) at pass start. Shaders dereference it as a
-    /// `GlobalData` buffer-reference / device-address read (declared
-    /// in the velk.glsl prelude). Returning 0 means the pass doesn't
-    /// bind a globals address (the executor leaves whatever was
-    /// previously pushed).
-    virtual uint64_t view_globals_address() const = 0;
-
     /// @name Producer mutators
     /// @{
 
@@ -75,13 +67,8 @@ public:
     /// scan.
     virtual void add_write(IGpuResource::Ptr resource) = 0;
 
-    /// Set the FrameGlobals GPU address pushed at pass start. Pass
-    /// 0 (default) for passes that don't touch view-level state — the
-    /// executor leaves whatever was previously pushed.
-    virtual void set_view_globals_address(uint64_t addr) = 0;
-
-    /// Clear reads, writes, command buffer, target seams, surface-blit
-    /// seam, and the view-globals address. Producers that cache an
+    /// Clear reads, writes, command buffer, target seams, and the
+    /// surface-blit seam. Producers that cache an
     /// `IRenderPass::Ptr` across frames call this at the top of each
     /// rebuild so the same Ptr identity carries fresh contents — the
     /// graph's compile-time short-circuit only fires when pass Ptrs
