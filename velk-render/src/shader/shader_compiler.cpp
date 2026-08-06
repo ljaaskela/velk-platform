@@ -69,7 +69,7 @@ struct MeshStaticData {
     uint     vbo_base;        // word base of this primitive's first vertex in velk_mesh_words
     uint     ibo_base;        // word base of this primitive's first index in velk_mesh_words
     uint     triangle_count;
-    uint     vertex_stride;   // bytes per vertex (32 for VelkVertex3D)
+    uint     vertex_stride;   // bytes per vertex, from the primitive (48 for VelkVertex3D)
     uint     blas_root;       // root index within this primitive's BLAS node run
     uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
     uint     blas_node_base;  // element base of the node run in velk_blas_nodes
@@ -95,9 +95,14 @@ struct MeshInstanceData {
 // in gpu_data.h.
 #define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
 
-// Mesh geometry accessors over the shared mesh-word arena (set = 1 slot 14),
-// which holds every mesh's VBO + IBO bytes as raw 32-bit words. The buffer is
-// declared by the compute preludes that trace meshes.
+// Every mesh's VBO + IBO bytes as raw 32-bit words (set = 1 slot 14). Both
+// paths read geometry from here: RT walks it by triangle, raster fetches the
+// current vertex. Declared here rather than per-shader since every stage can
+// see set = 1.
+layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
+
+// Mesh geometry accessors over that arena, for the RT side, which reaches a
+// primitive's runs through its MeshStaticData record.
 //
 // Indices: we always upload 32-bit indices (gltf_decoder.cpp normalises on
 // import), so an index is one word.
@@ -105,9 +110,10 @@ struct MeshInstanceData {
 #define velk_mesh_index(st, i) (velk_mesh_words.data[(st).ibo_base + (i)])
 
 // Vertices: a flat float array reached by word. Caller indexes using
-// `vertex_stride / 4` words per vertex; the 32-byte VelkVertex3D layout is
-// pos[0..2], normal[3..5], uv[6..7]. The words are float bits, and
-// uintBitsToFloat is a reinterpret, not a conversion.
+// `vertex_stride / 4` words per vertex and reads pos[0..2], normal[3..5],
+// uv[6..7]. Those sit at the same offsets in VelkVertex3D, whose trailing
+// tangent RT does not read, so both paths share one layout. The words are
+// float bits, and uintBitsToFloat is a reinterpret, not a conversion.
 //   float x = velk_mesh_vertex(st, o0 + 0u);
 #define velk_mesh_vertex(st, i) uintBitsToFloat(velk_mesh_words.data[(st).vbo_base + (i)])
 
@@ -172,29 +178,48 @@ vec4 velk_texture(uint id, vec2 uv)
 // full xyz. tangent = glTF TANGENT (xyz world-space dir + w handedness);
 // synthesized for procedural meshes that carry none.
 struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; vec4 tangent; };
-layout(buffer_reference, scalar) readonly buffer VelkVbo3D { VelkVertex3D data[]; };
 
-// Optional TEXCOORD_1 stream: one vec2 per vertex, in a buffer
-// parallel to the main VBO. When a primitive has no UV1, DrawData.uv1
-// points at a context-owned single-vertex fallback (vec2(0,0)) and
-// DrawData.uv1_enabled is 0 so `velk_uv1` reads only index 0. When
-// the primitive provides UV1, uv1_enabled is 1 and `velk_uv1` reads
-// gl_VertexIndex. Branchless via index multiplication — no shader
+// Words per VelkVertex3D: 12 floats (pos 0..2, normal 3..5, uv 6..7,
+// tangent 8..11). The RT side reads only the first 8 and so is indifferent to
+// the tangent, which is why it can share this layout.
+#define VELK_VERTEX3D_WORDS 12u
+
+// Vertex-shader helper: fetch current gl_VertexIndex from the mesh-word
+// arena at the draw's vertex base. Macro (not function) so velk.glsl doesn't
+// reference gl_VertexIndex at namespace scope (would break fragment shaders
+// that also include this file). The words are float bits; uintBitsToFloat is
+// a reinterpret, not a conversion.
+float velk_vertex_word(uint base, uint w)
+{
+    return uintBitsToFloat(velk_mesh_words.data[base + w]);
+}
+
+VelkVertex3D velk_unpack_vertex3d(uint base)
+{
+    VelkVertex3D v;
+    v.position = vec3(velk_vertex_word(base, 0u), velk_vertex_word(base, 1u),
+                      velk_vertex_word(base, 2u));
+    v.normal   = vec3(velk_vertex_word(base, 3u), velk_vertex_word(base, 4u),
+                      velk_vertex_word(base, 5u));
+    v.uv       = vec2(velk_vertex_word(base, 6u), velk_vertex_word(base, 7u));
+    v.tangent  = vec4(velk_vertex_word(base, 8u), velk_vertex_word(base, 9u),
+                      velk_vertex_word(base, 10u), velk_vertex_word(base, 11u));
+    return v;
+}
+
+#define velk_vertex3d(root) \
+    velk_unpack_vertex3d((root).vbo_base + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
+
+// Vertex-shader helper: fetch the current vertex's UV1, a vec2 stream
+// parallel to the main VBO. When a primitive has no UV1, `uv1_base` points at
+// a context-owned single-vertex fallback (vec2(0,0)) and `uv1_enabled` is 0,
+// so this reads vertex 0. Branchless via index multiplication — no shader
 // variants.
-layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
-
-// Vertex-shader helper: fetch current gl_VertexIndex from the VBO.
-// Macro (not function) so the readonly memory qualifier on the
-// buffer_reference is preserved at the call site, and so velk.glsl
-// doesn't reference gl_VertexIndex at namespace scope (would break
-// fragment shaders that also include this file).
-#define velk_vertex3d(root) ((root).vbo.data[gl_VertexIndex])
-
-// Vertex-shader helper: fetch the current vertex's UV1. Uses
-// uv1_enabled as a branchless index multiplier — 0 forces index 0 so
-// the single-vertex fallback buffer is always in range; 1 reads the
-// per-vertex stream at gl_VertexIndex.
-#define velk_uv1(root) ((root).uv1.data[(root).uv1_enabled * gl_VertexIndex])
+#define velk_uv1(root)                                                    \
+    vec2(velk_vertex_word((root).uv1_base,                                \
+                          (root).uv1_enabled * uint(gl_VertexIndex) * 2u), \
+         velk_vertex_word((root).uv1_base,                                \
+                          (root).uv1_enabled * uint(gl_VertexIndex) * 2u + 1u))
 
 // Per-view FrameGlobals from the draw root pointer. `root.globals_base` is
 // an index into the set = 1 globals buffer; the macro hides the field so
@@ -248,25 +273,21 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA(VelkVbo3D)
-//       vec4 my_material_param;  // optional material fields follow
+//       VELK_DRAW_DATA()
 //   };
-// `VboType` is a `buffer_reference`-typed handle to the vertex buffer
-// (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
-// The 48-byte header keeps everything 16-byte aligned for std430.
-// `globals_base` indexes the set = 1 globals buffer (read via
-// `velk_global_data(root)`); `instances_base` indexes the set = 1 instance
-// arena (read via `velk_instance(root)`); `material_base` indexes the set = 1
-// material arena (read via `velk_material(root)`).
-#define VELK_DRAW_DATA(VboType)                \
+// The 32-byte header is entirely indices and counts, so it needs no
+// alignment padding. Every field is read through an accessor rather than
+// directly, which keeps callers decoupled from this layout:
+// `velk_global_data(root)` (set = 1 globals), `velk_instance(root)` (instance
+// arena), `velk_material(root)` (material arena), `velk_vertex3d(root)` and
+// `velk_uv1(root)` (mesh-word arena).
+#define VELK_DRAW_DATA()                       \
     uint globals_base;                         \
-    uint _pad_globals;                         \
     uint instances_base;                       \
-    uint _pad_instances;                       \
     uint texture_id;                           \
     uint instance_count;                       \
-    VboType vbo;                               \
-    VelkUv1Buffer uv1;                         \
+    uint vbo_base;                             \
+    uint uv1_base;                             \
     uint uv1_enabled;                          \
     uint material_base;
 )";

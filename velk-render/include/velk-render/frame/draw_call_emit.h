@@ -145,22 +145,22 @@ inline void emit_draw_calls(
         header.instances_base = instances_base;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
-        // Vertex streams are read by address here even though the same bytes
-        // are indexed by RT, so ask for the device address explicitly rather
-        // than through get_gpu_address (which prefers the index model and
-        // would refuse an arena-backed buffer).
-        header.vbo_address = get_gpu_device_address(buffer);
-        if (!header.vbo_address) continue;
+        // Vertex streams are word bases into the mesh-word arena, the same
+        // bytes and the same model RT reads.
+        const GpuRef vbo_ref = get_gpu_ref(buffer);
+        if (vbo_ref.kind != GpuRef::Kind::Index) continue;
+        header.vbo_base = vbo_ref.get_base();
 
         if (auto uv1 = primitive->get_uv1_buffer()) {
-            uint64_t uv1_base = get_gpu_device_address(uv1);
-            if (!uv1_base) continue;
-            header.uv1_address = uv1_base + primitive->get_uv1_offset();
+            const GpuRef uv1_ref = get_gpu_ref(uv1);
+            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
+            header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
             header.uv1_enabled = 1;
         } else {
-            header.uv1_address = get_gpu_device_address(default_uv1);
+            const GpuRef uv1_ref = get_gpu_ref(default_uv1);
+            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
+            header.uv1_base = uv1_ref.get_base();
             header.uv1_enabled = 0;
-            if (!header.uv1_address) continue;
         }
 
         // Material draw-data lives in the shared material arena (set = 1 slot

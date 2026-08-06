@@ -29,7 +29,7 @@ inline constexpr string_view element_vertex_src = R"(
 #include "velk-ui.glsl"
 
 layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(VelkVbo3D)
+    VELK_DRAW_DATA()
 };
 
 layout(push_constant) uniform PC { DrawData root; };

@@ -252,26 +252,6 @@ uint64_t get_gpu_address(const T& ptr)
     return get_gpu_ref(ptr).get_address();
 }
 
-/**
- * @brief Device address of a buffer that serves BOTH models, bypassing the
- *        GpuRef preference for the index one.
- *
- * Mesh geometry is the case: RT indexes it (so it answers `get_gpu_ref` with
- * Kind::Index) while raster still dereferences it, and an arena-backed mesh
- * buffer really does have an address, namely its region's position inside the
- * arena's backing buffer. `get_gpu_address` deliberately refuses that read,
- * because for every other arena tenant it would be a bug.
- *
- * Only geometry needs this. It goes away when the graphics draw header stops
- * carrying vertex addresses.
- */
-template <typename T>
-uint64_t get_gpu_device_address(const T& ptr)
-{
-    auto* gb = interface_cast<IGpuBuffer>(ptr);
-    return gb ? gb->gpu_address() : 0;
-}
-
 } // namespace velk
 
 #endif // VELK_RENDER_INTF_BUFFER_H

@@ -78,11 +78,6 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshIn
 // velk_mesh_static(inst), plus the BLAS runs it points at (slots 12 / 13).
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-
-// Every mesh's VBO + IBO bytes as raw words (set = 1 slot 14), read via
-// velk_mesh_index / velk_mesh_vertex. Raster binds the same backing buffer
-// for indexed draws and still reaches vertices by address.
-layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
 
@@ -1007,11 +1002,6 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshIn
 // shader's mesh intersector is a linear triangle scan, and only the deferred
 // pass walks the acceleration structure.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-
-// Every mesh's VBO + IBO bytes as raw words (set = 1 slot 14), read via
-// velk_mesh_index / velk_mesh_vertex. Raster binds the same backing buffer
-// for indexed draws and still reaches vertices by address.
-layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
 
 // Material records as raw words (set = 1 slot 4). The raster path binds this
 // same slot as a typed block, which one pipeline can do because it compiles

@@ -72,14 +72,4 @@ GpuRef MeshBuffer::gpu_ref() const
                               static_cast<uint32_t>(region_.offset() / kMeshWordSize));
 }
 
-uint64_t MeshBuffer::gpu_address() const
-{
-    auto arena = arena_.lock();
-    if (!arena || !region_.valid()) return 0;
-    auto* backing = arena->buffer();
-    if (!backing) return 0;
-    const uint64_t base = backing->gpu_address();
-    return base ? base + region_.offset() : 0;
-}
-
 } // namespace velk::impl

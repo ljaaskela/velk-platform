@@ -18,13 +18,10 @@ namespace velk::impl {
  * slot 14), whose backing buffer carries `SHADER_DEVICE_ADDRESS |
  * INDEX_BUFFER` usage.
  *
- * The same bytes are reachable two ways, which is deliberate for as long as
- * the two paths use different models: RT indexes them
- * (`gpu_ref` -> a word base into the arena), raster dereferences them
- * (`gpu_address` -> the arena's address plus this region's offset, which is
- * what `DrawDataHeader::vbo_address` still wants) and `vkCmdBindIndexBuffer`
- * binds the arena's buffer at this region's offset plus `get_ibo_offset()`.
- * When the graphics draw header migrates, the address half goes away.
+ * Both paths reach these bytes the same way, by index: `gpu_ref` gives the
+ * word base RT and raster each add their own offsets to. The one address left
+ * in the picture is Vulkan's own: `vkCmdBindIndexBuffer` binds the arena's
+ * backing buffer at this region's offset plus `get_ibo_offset()`.
  *
  * Offsets reported by `get_ibo_offset` stay RELATIVE to this mesh's own
  * bytes; consumers that need an absolute position in the arena add the
@@ -54,12 +51,9 @@ public:
     // IMeshBufferInternal
     bool ensure_geometry(IGpuResourceManager& resources) override;
 
-    // IArenaBuffer: where RT indexes this geometry (word base into slot 14).
+    // IArenaBuffer: where both paths index this geometry (word base into
+    // slot 14).
     GpuRef gpu_ref() const override;
-
-    // IGpuBuffer: raster still dereferences the geometry, so the address is
-    // this region's position inside the arena's backing buffer.
-    uint64_t gpu_address() const override;
 
     /// Stubbed pending a real use case (glTF hot-reload, morph targets,
     /// streaming LOD). API shape is committed so enabling later is an

@@ -66,10 +66,12 @@ static_assert(sizeof(FrameGlobals) == 248, "FrameGlobals layout must match velk.
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Material data
- * no longer trails the header: it lives in the set = 1 material arena, indexed
- * by @c material_base (region offset / material record size), which reuses the
- * header's former trailing pad so the size stays 48.
+ * 32 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
+ * now an index or a count: the alignment pads existed only to keep the two
+ * 8-byte vertex-stream addresses aligned, and went with them.
+ *
+ * Material data does not trail the header: it lives in the set = 1 material
+ * arena, indexed by @c material_base (region offset / material record size).
  *
  * Multi-texture materials (e.g. StandardMaterial) embed their bindless
  * TextureIds directly in their own UBO via ITextureResolver, so the
@@ -79,18 +81,16 @@ static_assert(sizeof(FrameGlobals) == 248, "FrameGlobals layout must match velk.
 VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;      ///< Index into the set = 1 globals buffer; shaders read velk_globals.data[globals_base].
-    uint32_t _pad_globals;      ///< Keeps the following field at offset 8.
     uint32_t instances_base;    ///< Element base into the set = 1 instance arena; shader reads velk_instances.data[instances_base + gl_InstanceIndex].
-    uint32_t _pad_instances;    ///< Keeps texture_id at offset 16.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.
-    uint64_t vbo_address;       ///< GPU pointer to the draw's vertex buffer (mesh VBO).
-    uint64_t uv1_address;       ///< GPU pointer to the draw's TEXCOORD_1 stream (vec2 per vertex), or a context-owned single-vertex fallback when @c uv1_enabled is 0.
-    uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_address; 0 = fallback buffer, vertex shader reads index 0 only. Used as a branchless index multiplier in the vertex shader.
+    uint32_t vbo_base;          ///< Word base of the draw's vertex stream in the set = 1 mesh-word arena.
+    uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback when @c uv1_enabled is 0.
+    uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_base; 0 = fallback, vertex shader reads vertex 0 only. Used as a branchless index multiplier in the vertex shader.
     uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
 };
 
-static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for std430 alignment");
+static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for std430 alignment");
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
@@ -138,7 +138,7 @@ VELK_GPU_STRUCT MeshStaticData
     uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
     uint32_t ibo_base;        ///< word base of this primitive's first index in the mesh-word arena.
     uint32_t triangle_count;
-    uint32_t vertex_stride;   ///< bytes per vertex (32 for VelkVertex3D).
+    uint32_t vertex_stride;   ///< bytes per vertex, from the primitive (48 for VelkVertex3D).
     uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
     uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
     uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
