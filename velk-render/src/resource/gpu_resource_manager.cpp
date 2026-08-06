@@ -31,20 +31,22 @@ IGpuBuffer::Ptr GpuResourceManager::create_gpu_buffer(const GpuBufferDesc& desc)
     return gb;
 }
 
-IGpuArena::Ptr GpuResourceManager::create_arena(uint32_t slot, uint32_t element_size)
+IGpuArena::Ptr GpuResourceManager::create_arena(uint32_t slot, uint32_t element_size,
+                                                bool index_buffer, uint64_t reserve_bytes)
 {
     auto arena = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
     if (!arena) return {};
-    arena->init(slot, element_size, this, backend_);
+    arena->init(slot, element_size, this, backend_, index_buffer, reserve_bytes);
     arenas_.push_back(arena);  // weak-track for the reclaim tick
     return arena;
 }
 
-IGpuArena::Ptr GpuResourceManager::shared_arena(uint32_t slot, uint32_t element_size)
+IGpuArena::Ptr GpuResourceManager::shared_arena(uint32_t slot, uint32_t element_size,
+                                                bool index_buffer, uint64_t reserve_bytes)
 {
     auto it = shared_arenas_.find(slot);
     if (it != shared_arenas_.end()) return it->second;
-    auto arena = create_arena(slot, element_size);
+    auto arena = create_arena(slot, element_size, index_buffer, reserve_bytes);
     if (arena) shared_arenas_[slot] = arena;
     return arena;
 }

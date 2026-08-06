@@ -36,7 +36,9 @@ public:
     VELK_CLASS_UID(::velk::ClassId::GpuArena, "GpuArena");
 
     void init(uint32_t slot, uint32_t element_size,
-              IGpuResourceManager* resources, IRenderBackend* backend) override;
+              IGpuResourceManager* resources, IRenderBackend* backend,
+              bool index_buffer = false, uint64_t reserve_bytes = 0) override;
+    IGpuBuffer* buffer() const override { return persistent_buffer_.get(); }
     ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void release_region(uint64_t offset, uint64_t size) override;
@@ -55,6 +57,8 @@ private:
 
     uint32_t slot_ = 0;
     uint32_t element_size_ = 1;
+    bool index_buffer_ = false;      ///< Backing buffer gets INDEX_BUFFER usage.
+    uint64_t reserve_bytes_ = 0;     ///< Floor for the first allocation.
 
     IGpuResourceManager* resources_ = nullptr;  ///< Allocates backing buffers.
     IRenderBackend* backend_ = nullptr;          ///< Slot binding + fence markers.

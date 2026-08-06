@@ -213,6 +213,13 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         size_t bsize = buf->get_data_size();
         const uint8_t* bytes = buf->get_data();
         if (!bytes || bsize == 0 || resources_->find_buffer(buf)) return;
+        // The UV1 fallback is itself an IMeshBuffer, so it publishes into the
+        // mesh-word arena like any other geometry; its address (which the
+        // draw header still carries) comes from its region there.
+        if (auto* mbi = interface_cast<IMeshBufferInternal>(buf)) {
+            if (mbi->ensure_geometry(*resources_)) buf->clear_dirty();
+            return;
+        }
         GpuBufferDesc bdesc{};
         bdesc.size = bsize;
         bdesc.cpu_writable = true;
@@ -547,15 +554,21 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                         if (!bytes || bsize == 0) {
                             continue;
                         }
+                        // Mesh geometry lives in the shared mesh-word arena
+                        // (its backing buffer carries INDEX_BUFFER usage for
+                        // the indexed draws) rather than in an allocation of
+                        // its own, so RT can index the vertices and indices.
+                        if (auto* mbi = interface_cast<IMeshBufferInternal>(buf)) {
+                            if (mbi->ensure_geometry(*resources_)) {
+                                buf->clear_dirty();
+                                resources_uploaded = true;
+                            }
+                            continue;
+                        }
+
                         GpuBufferDesc bdesc{};
                         bdesc.size = bsize;
                         bdesc.cpu_writable = true;
-                        // IMeshBuffer carries an IBO half that needs
-                        // INDEX_BUFFER usage so it can be bound for
-                        // indexed draws.
-                        if (auto* mb = interface_cast<IMeshBuffer>(buf)) {
-                            bdesc.index_buffer = mb->get_ibo_size() > 0;
-                        }
                         auto* be = resources_->ensure_buffer_storage(buf, bdesc);
                         if (!be) continue;
                         if (auto gb = be->buffer.lock()) {
@@ -723,18 +736,18 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                         if (s.log && site.mesh_primitive) {
                             auto* mp = site.mesh_primitive;
                             auto buf = mp->get_buffer();
-                            uint64_t buffer_addr = get_gpu_address(buf);
                             uint32_t i_count = mp->get_index_count();
                             uint32_t v_stride = mp->get_vertex_stride();
                             uint32_t triangle_count = i_count / 3u;
+                            uint32_t geometry_base = buf ? get_gpu_ref(buf).get_base() : 0u;
                             uint32_t ibo_offset = static_cast<uint32_t>(
                                 buf ? buf->get_ibo_offset() : 0);
                             VELK_LOG(I, "BVH cb: inst=%p mesh_static_base=%u "
-                                        "buffer_addr=0x%016llx ibo_offset=0x%08x "
+                                        "geometry_base=%u ibo_offset=0x%08x "
                                         "triangle_count=%u v_stride=%u",
                                      (void*)mp,
                                      site.mesh_instance.mesh_static_base,
-                                     (unsigned long long)buffer_addr,
+                                     geometry_base,
                                      ibo_offset, triangle_count, v_stride);
                         }
                     }

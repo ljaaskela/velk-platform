@@ -66,17 +66,14 @@ layout(buffer_reference, std430) readonly buffer BvhNodeList { BvhNode data[]; }
 // describes lives in its own arenas (slots 12 / 13), reached by
 // blas_node_base / blas_tri_base rather than by trailing this record.
 struct MeshStaticData {
-    uint64_t buffer_addr;     // IMeshBuffer GPU address; same buffer holds VBO + IBO
-    uint     vbo_offset;      // bytes from buffer_addr to first vertex this primitive uses
-    uint     ibo_offset;      // bytes from buffer_addr to first index this primitive uses
+    uint     vbo_base;        // word base of this primitive's first vertex in velk_mesh_words
+    uint     ibo_base;        // word base of this primitive's first index in velk_mesh_words
     uint     triangle_count;
     uint     vertex_stride;   // bytes per vertex (32 for VelkVertex3D)
     uint     blas_root;       // root index within this primitive's BLAS node run
     uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
     uint     blas_node_base;  // element base of the node run in velk_blas_nodes
     uint     blas_tri_base;   // element base of the triangle-index run in velk_blas_tris
-    uint     _pad0;
-    uint     _pad1;
 };
 
 // Per-shape mesh instance data. Carries the per-element transforms plus
@@ -98,15 +95,21 @@ struct MeshInstanceData {
 // in gpu_data.h.
 #define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
 
-// Index reads from a glTF-style 16-bit-or-32-bit index buffer. We
-// always upload 32-bit indices (gltf_decoder.cpp normalises on import),
-// so MeshIndices is a uint[] view.
-layout(buffer_reference, std430) readonly buffer MeshIndices { uint data[]; };
+// Mesh geometry accessors over the shared mesh-word arena (set = 1 slot 14),
+// which holds every mesh's VBO + IBO bytes as raw 32-bit words. The buffer is
+// declared by the compute preludes that trace meshes.
+//
+// Indices: we always upload 32-bit indices (gltf_decoder.cpp normalises on
+// import), so an index is one word.
+//   uint i = velk_mesh_index(st, tri * 3u + 0u);
+#define velk_mesh_index(st, i) (velk_mesh_words.data[(st).ibo_base + (i)])
 
-// Vertex reads as a flat float array. Caller indexes into it using
-// `vertex_stride / 4` floats per vertex; the 32-byte VelkVertex3D
-// layout is pos[0..2], normal[3..5], uv[6..7].
-layout(buffer_reference, std430) readonly buffer MeshVertices { float data[]; };
+// Vertices: a flat float array reached by word. Caller indexes using
+// `vertex_stride / 4` words per vertex; the 32-byte VelkVertex3D layout is
+// pos[0..2], normal[3..5], uv[6..7]. The words are float bits, and
+// uintBitsToFloat is a reinterpret, not a conversion.
+//   float x = velk_mesh_vertex(st, o0 + 0u);
+#define velk_mesh_vertex(st, i) uintBitsToFloat(velk_mesh_words.data[(st).vbo_base + (i)])
 
 // Generic 8-byte buffer_reference placeholder. Use it wherever the
 // shader needs to preserve the layout of a typed pointer field without

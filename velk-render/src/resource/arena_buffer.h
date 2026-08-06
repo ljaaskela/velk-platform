@@ -62,7 +62,10 @@ public:
     GpuRef gpu_ref() const override;
 
 private:
-    IGpuArena* arena_ = nullptr;
+    /// Weak for the same reason ArenaRegion's reference is: an owner (a
+    /// material, a font) can outlive the renderer that owns the arenas, and
+    /// a write after the arena is gone must fail rather than call into it.
+    IGpuArena::WeakPtr arena_;
     ArenaRegion region_;
     uint64_t alignment_ = 0;
 };

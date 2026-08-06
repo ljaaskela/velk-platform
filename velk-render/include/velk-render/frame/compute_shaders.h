@@ -78,6 +78,11 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshIn
 // velk_mesh_static(inst), plus the BLAS runs it points at (slots 12 / 13).
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+
+// Every mesh's VBO + IBO bytes as raw words (set = 1 slot 14), read via
+// velk_mesh_index / velk_mesh_vertex. Raster binds the same backing buffer
+// for indexed draws and still reaches vertices by address.
+layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
 
@@ -247,8 +252,6 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     if (ld_scale < 1e-30) return false;
     vec3 ld = ld_unnorm / ld_scale;
 
-    MeshIndices  ib = MeshIndices (st.buffer_addr + uint64_t(st.ibo_offset));
-    MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
     uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
 
     // This primitive's BLAS runs inside the shared node / triangle arenas;
@@ -285,15 +288,15 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
             for (uint k = 0u; k < node.shape_count; ++k) {
                 uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
                 uint base = tri * 3u;
-                uint i0 = ib.data[base + 0u];
-                uint i1 = ib.data[base + 1u];
-                uint i2 = ib.data[base + 2u];
+                uint i0 = velk_mesh_index(st, base + 0u);
+                uint i1 = velk_mesh_index(st, base + 1u);
+                uint i2 = velk_mesh_index(st, base + 2u);
                 uint o0 = i0 * floats_per_vert;
                 uint o1 = i1 * floats_per_vert;
                 uint o2 = i2 * floats_per_vert;
-                vec3 v0 = vec3(vb.data[o0], vb.data[o0 + 1u], vb.data[o0 + 2u]);
-                vec3 v1 = vec3(vb.data[o1], vb.data[o1 + 1u], vb.data[o1 + 2u]);
-                vec3 v2 = vec3(vb.data[o2], vb.data[o2 + 1u], vb.data[o2 + 2u]);
+                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
+                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
+                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
 
                 // Möller-Trumbore. The det rejection threshold scales
                 // with the actual edge magnitudes so meshes whose
@@ -365,13 +368,13 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
     // (1-u-v, u, v) the weights for (V0, V1, V2).
     float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(vb.data[best_o0 + 3u], vb.data[best_o0 + 4u], vb.data[best_o0 + 5u]);
-    vec3 n1 = vec3(vb.data[best_o1 + 3u], vb.data[best_o1 + 4u], vb.data[best_o1 + 5u]);
-    vec3 n2 = vec3(vb.data[best_o2 + 3u], vb.data[best_o2 + 4u], vb.data[best_o2 + 5u]);
+    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
+    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
+    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
     vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(vb.data[best_o0 + 6u], vb.data[best_o0 + 7u]);
-    vec2 uv1 = vec2(vb.data[best_o1 + 6u], vb.data[best_o1 + 7u]);
-    vec2 uv2 = vec2(vb.data[best_o2 + 6u], vb.data[best_o2 + 7u]);
+    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
+    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
+    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
     vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
 
     // Convert local hit to world-space ray parameter.
@@ -1005,6 +1008,11 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshIn
 // pass walks the acceleration structure.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 
+// Every mesh's VBO + IBO bytes as raw words (set = 1 slot 14), read via
+// velk_mesh_index / velk_mesh_vertex. Raster binds the same backing buffer
+// for indexed draws and still reaches vertices by address.
+layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
+
 // Material records as raw words (set = 1 slot 4). The raster path binds this
 // same slot as a typed block, which one pipeline can do because it compiles
 // for a single material type; this shader composes many, so it reads the
@@ -1253,7 +1261,7 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         float t_aabb;
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
-
+)" R"(
     MeshInstanceData inst = velk_mesh_instance(shape);
     if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
     MeshStaticData st = velk_mesh_static(inst);
@@ -1262,8 +1270,6 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;
     vec3 ld = (inst.inv_world * vec4(ray.dir,    0.0)).xyz;
 
-    MeshIndices  ib = MeshIndices (st.buffer_addr + uint64_t(st.ibo_offset));
-    MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
     uint floats_per_vert = st.vertex_stride >> 2u;
 
     bool  found = false;
@@ -1275,15 +1281,15 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     uint  best_o2 = 0u;
 
     for (uint t = 0u; t < st.triangle_count; ++t) {
-        uint i0 = ib.data[t * 3u + 0u];
-        uint i1 = ib.data[t * 3u + 1u];
-        uint i2 = ib.data[t * 3u + 2u];
+        uint i0 = velk_mesh_index(st, t * 3u + 0u);
+        uint i1 = velk_mesh_index(st, t * 3u + 1u);
+        uint i2 = velk_mesh_index(st, t * 3u + 2u);
         uint o0 = i0 * floats_per_vert;
         uint o1 = i1 * floats_per_vert;
         uint o2 = i2 * floats_per_vert;
-        vec3 v0 = vec3(vb.data[o0], vb.data[o0 + 1u], vb.data[o0 + 2u]);
-        vec3 v1 = vec3(vb.data[o1], vb.data[o1 + 1u], vb.data[o1 + 2u]);
-        vec3 v2 = vec3(vb.data[o2], vb.data[o2 + 1u], vb.data[o2 + 2u]);
+        vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
+        vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
+        vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
         vec3 e1 = v1 - v0;
         vec3 e2 = v2 - v0;
         vec3 p  = cross(ld, e2);
@@ -1313,13 +1319,13 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
     // (1-u-v, u, v) the weights for (V0, V1, V2).
     float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(vb.data[best_o0 + 3u], vb.data[best_o0 + 4u], vb.data[best_o0 + 5u]);
-    vec3 n1 = vec3(vb.data[best_o1 + 3u], vb.data[best_o1 + 4u], vb.data[best_o1 + 5u]);
-    vec3 n2 = vec3(vb.data[best_o2 + 3u], vb.data[best_o2 + 4u], vb.data[best_o2 + 5u]);
+    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
+    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
+    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
     vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(vb.data[best_o0 + 6u], vb.data[best_o0 + 7u]);
-    vec2 uv1 = vec2(vb.data[best_o1 + 6u], vb.data[best_o1 + 7u]);
-    vec2 uv2 = vec2(vb.data[best_o2 + 6u], vb.data[best_o2 + 7u]);
+    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
+    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
+    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
     vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
 
     vec3 hit_local = lo + ld * best_t;

@@ -48,8 +48,12 @@ public:
     void init(IRenderBackend* backend) override;
     void enable_transient_pool() override;
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
-    IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size) override;
-    IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size) override;
+    IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size,
+                                bool index_buffer = false,
+                                uint64_t reserve_bytes = 0) override;
+    IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
+                                bool index_buffer = false,
+                                uint64_t reserve_bytes = 0) override;
     uint64_t texture_generation() const override { return texture_generation_; }
     IRenderTarget::Ptr create_render_texture(const TextureDesc& desc) override;
     IRenderTextureGroup::Ptr create_render_texture_group(

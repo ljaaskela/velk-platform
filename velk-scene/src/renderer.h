@@ -196,7 +196,7 @@ private:
 
     // One-shot flag set by request_bvh_log(), consumed in the next
     // BVH-emit cb. The cb walks every mesh instance and prints
-    // (instance_index, buffer_addr, ibo_offset, triangle_count) so the
+    // (instance_index, geometry_base, ibo_offset, triangle_count) so the
     // log can be compared against the F12-dumped shadow_debug image.
     bool log_bvh_next_ = false;
 

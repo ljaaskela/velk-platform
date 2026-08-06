@@ -123,16 +123,21 @@ inline void emit_draw_calls(
         if (!buffer) continue;
 
         // IBO half is optional: indexed draw when ibo_size > 0, plain
-        // vkCmdDraw when 0 (e.g. TriangleStrip unit quad).
+        // vkCmdDraw when 0 (e.g. TriangleStrip unit quad). The indices live in
+        // the shared mesh-word arena, so the bound buffer is the arena's
+        // backing buffer and the offset is this mesh's region plus the IBO
+        // half's position within it. The arena handle is re-asked rather than
+        // cached because growth replaces the backing buffer.
         IGpuBuffer* ibo_gb = nullptr;
         size_t ibo_offset = 0;
         if (buffer->get_ibo_size() > 0) {
-            auto* buf_entry = resources.find_buffer(buffer.get());
-            if (!buf_entry) continue;
-            auto igb = buf_entry->buffer.lock();
-            if (!igb) continue;
-            ibo_gb = igb.get();
-            ibo_offset = buffer->get_ibo_offset();
+            const GpuRef geometry = get_gpu_ref(buffer);
+            if (geometry.kind != GpuRef::Kind::Index) continue;
+            auto arena = resources.shared_arena(geometry.get_slot(), 4);
+            if (!arena) continue;
+            ibo_gb = arena->buffer();
+            if (!ibo_gb) continue;
+            ibo_offset = size_t(geometry.get_base()) * 4u + buffer->get_ibo_offset();
         }
 
         DrawDataHeader header{};
@@ -140,16 +145,20 @@ inline void emit_draw_calls(
         header.instances_base = instances_base;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
-        header.vbo_address = get_gpu_address(buffer);
+        // Vertex streams are read by address here even though the same bytes
+        // are indexed by RT, so ask for the device address explicitly rather
+        // than through get_gpu_address (which prefers the index model and
+        // would refuse an arena-backed buffer).
+        header.vbo_address = get_gpu_device_address(buffer);
         if (!header.vbo_address) continue;
 
         if (auto uv1 = primitive->get_uv1_buffer()) {
-            uint64_t uv1_base = get_gpu_address(uv1);
+            uint64_t uv1_base = get_gpu_device_address(uv1);
             if (!uv1_base) continue;
             header.uv1_address = uv1_base + primitive->get_uv1_offset();
             header.uv1_enabled = 1;
         } else {
-            header.uv1_address = get_gpu_address(default_uv1);
+            header.uv1_address = get_gpu_device_address(default_uv1);
             header.uv1_enabled = 0;
             if (!header.uv1_address) continue;
         }

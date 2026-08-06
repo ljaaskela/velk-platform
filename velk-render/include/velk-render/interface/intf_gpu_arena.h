@@ -59,8 +59,21 @@ public:
     /// base. @p resources and @p backend are retained for buffer allocation,
     /// slot binding, and fence markers, so allocating needs no per-frame
     /// context and callers outside the render loop can suballocate.
+    ///
+    /// @p index_buffer allocates the backing buffer with INDEX_BUFFER usage,
+    /// for an arena whose regions are also bound for indexed draws (mesh
+    /// geometry). @p reserve_bytes pre-sizes the first allocation; growth
+    /// recopies the whole arena, which is cheap for records and not for bulk
+    /// geometry, so a bulk tenant should reserve rather than grow into place.
     virtual void init(uint32_t slot, uint32_t element_size,
-                      IGpuResourceManager* resources, IRenderBackend* backend) = 0;
+                      IGpuResourceManager* resources, IRenderBackend* backend,
+                      bool index_buffer = false, uint64_t reserve_bytes = 0) = 0;
+
+    /// The arena's backing GPU buffer, for consumers that must bind it rather
+    /// than index it (mesh geometry bound as an index buffer). Null before the
+    /// first allocation. The handle CHANGES on growth, so callers must re-ask
+    /// each time rather than caching it.
+    virtual IGpuBuffer* buffer() const = 0;
 
     /// Reserves a @p size-byte region from the arena's free-list (growing the
     /// buffer if no span fits) and returns an owning handle. The offset

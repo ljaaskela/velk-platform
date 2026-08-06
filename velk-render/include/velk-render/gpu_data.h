@@ -135,19 +135,16 @@ inline constexpr uint32_t kRtShapeKindMesh = 255;
 /// trailing this record. Mirrors GLSL `MeshStaticData`.
 VELK_GPU_STRUCT MeshStaticData
 {
-    uint64_t buffer_addr;     ///< IMeshBuffer GPU address; same buffer holds VBO + IBO.
-    uint32_t vbo_offset;      ///< bytes from buffer_addr to first vertex this primitive uses.
-    uint32_t ibo_offset;      ///< bytes from buffer_addr to first index this primitive uses.
+    uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
+    uint32_t ibo_base;        ///< word base of this primitive's first index in the mesh-word arena.
     uint32_t triangle_count;
     uint32_t vertex_stride;   ///< bytes per vertex (32 for VelkVertex3D).
     uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
     uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
     uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
     uint32_t blas_tri_base;   ///< element base of the triangle-index run in the BLAS triangle arena.
-    uint32_t _pad0;
-    uint32_t _pad1;
 };
-static_assert(sizeof(MeshStaticData) == 48, "MeshStaticData layout mismatch");
+static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 
 /// Sentinel `MeshInstanceData::mesh_static_base` for a mesh whose static
 /// record is not resolvable yet (geometry not uploaded, no BLAS built).

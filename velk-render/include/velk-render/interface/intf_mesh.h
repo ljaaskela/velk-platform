@@ -217,6 +217,23 @@ public:
 };
 
 /**
+ * @brief Internal half of IMeshBuffer: publishes the geometry bytes into the
+ *        shared mesh-word arena.
+ *
+ * Sibling interface for the same reason IMeshPrimitiveInternal is one.
+ */
+class IMeshBufferInternal : public Interface<IMeshBufferInternal>
+{
+public:
+    /// Suballocates a region of the shared mesh-word arena (set = 1 slot 14)
+    /// and writes the VBO + IBO bytes into it, replacing the region when the
+    /// data changed size. Returns false while no region could be obtained.
+    /// The bytes are reachable two ways afterwards: by index for RT
+    /// (`get_gpu_ref`) and by device address for raster (`gpu_address`).
+    virtual bool ensure_geometry(IGpuResourceManager& resources) = 0;
+};
+
+/**
  * @brief A mesh: an authored group of geometry primitives.
  *
  * Matches glTF's mesh vocabulary: a container of IMeshPrimitives plus

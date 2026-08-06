@@ -11,12 +11,15 @@
 namespace velk::impl {
 
 void GpuArena::init(uint32_t slot, uint32_t element_size,
-                    IGpuResourceManager* resources, IRenderBackend* backend)
+                    IGpuResourceManager* resources, IRenderBackend* backend,
+                    bool index_buffer, uint64_t reserve_bytes)
 {
     slot_ = slot;
     element_size_ = element_size ? element_size : 1u;
     resources_ = resources;
     backend_ = backend;
+    index_buffer_ = index_buffer;
+    reserve_bytes_ = reserve_bytes;
 }
 
 ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
@@ -30,6 +33,8 @@ ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
         uint64_t cap = need * 4;
         constexpr uint64_t kFloor = uint64_t(1) << 20;  // 1 MiB
         if (cap < kFloor) cap = kFloor;
+        // A bulk tenant pre-sizes so it never pays the whole-arena recopy.
+        if (cap < reserve_bytes_) cap = reserve_bytes_;
         if (!grow_persistent(cap)) return {};
         free_spans_.push_back({0, persistent_capacity_});
     }
@@ -103,6 +108,7 @@ bool GpuArena::grow_persistent(uint64_t want)
     GpuBufferDesc desc{};
     desc.size = want;
     desc.cpu_writable = true;
+    desc.index_buffer = index_buffer_;
     auto new_buffer = resources_ ? resources_->create_gpu_buffer(desc)
                                  : backend_->create_gpu_buffer(desc);
     if (!new_buffer) return false;

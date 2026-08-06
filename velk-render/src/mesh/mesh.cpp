@@ -66,11 +66,14 @@ uint32_t MeshPrimitive::ensure_rt_data(IGpuResourceManager& resources)
         return kInvalidMeshStaticBase;
     }
 
-    // The geometry buffer may not be GPU-resident yet. Publish nothing and
+    // The geometry may not be in the mesh-word arena yet. Publish nothing and
     // leave the regions unallocated so a later frame retries, rather than
-    // baking a null address into a record we would then cache forever.
-    const uint64_t buffer_addr = get_gpu_address(buffer_);
-    if (buffer_addr == 0) return kInvalidMeshStaticBase;
+    // baking an unresolved base into a record we would then cache forever.
+    // Asking through GpuRef means a buffer that is NOT arena-backed reports
+    // the model mismatch instead of yielding a plausible-looking number.
+    const GpuRef geometry = get_gpu_ref(buffer_);
+    if (geometry.kind != GpuRef::Kind::Index) return kInvalidMeshStaticBase;
+    const uint32_t geometry_base = geometry.get_base();
 
     auto static_arena = resources.shared_arena(IRenderBackend::kGlobalMeshStatic,
                                                sizeof(MeshStaticData));
@@ -94,10 +97,13 @@ uint32_t MeshPrimitive::ensure_rt_data(IGpuResourceManager& resources)
     tris_arena->write_at(tris_region.offset(), rt_blas_.triangle_indices.data(), tris_bytes);
 
     MeshStaticData s{};
-    s.buffer_addr   = buffer_addr;
-    s.vbo_offset    = 0;  // IBO entries are global vertex indices in our
-                          // gltf-imported meshes; vb base = buffer base.
-    s.ibo_offset    = static_cast<uint32_t>(buffer_->get_ibo_offset()) + index_offset_;
+    // Bases are word indices into the shared mesh-word arena: this mesh's
+    // region base, plus the primitive's own byte offset within it / 4.
+    // IBO entries are global vertex indices in our gltf-imported meshes, so
+    // the vertex run starts at the region base itself.
+    s.vbo_base      = geometry_base;
+    s.ibo_base      = geometry_base
+                    + (static_cast<uint32_t>(buffer_->get_ibo_offset()) + index_offset_) / 4u;
     s.triangle_count = index_count_ / 3;
     s.vertex_stride = vertex_stride_;
     s.blas_root      = rt_blas_.root_index;
