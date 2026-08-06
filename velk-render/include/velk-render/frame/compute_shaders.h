@@ -81,7 +81,7 @@ layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStati
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
 
-// RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
+// RtShape / BvhNode come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
 // slot [0..8) (see velk.glsl GlobalData).

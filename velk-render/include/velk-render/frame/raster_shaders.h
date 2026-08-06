@@ -99,10 +99,7 @@ void main()
 //     alpha-discard threshold.
 
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA()
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_ROOT
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -144,10 +141,7 @@ void main()
 // would be wrong when geometry sits between the glass and the sky). Used by
 // the deferred path's transparent pass for BLEND / transmissive materials.
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA()
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_ROOT
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -188,10 +182,7 @@ void main()
 )";
 
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA()
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_ROOT
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;

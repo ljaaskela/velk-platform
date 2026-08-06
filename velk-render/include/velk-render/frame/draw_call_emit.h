@@ -72,19 +72,13 @@ inline void emit_draw_calls(
         IGpuPipeline* pipeline = resolve_pipeline(batch);
         if (!pipeline) continue;
 
-        // Per-batch persistent pool slice when available — a single
-        // VkBuffer per view holds all batch slices, the slice was
-        // bump-allocated and filled during BatchBuilder rebuild, and
-        // transform-only frames write through the mapped pointer in
-        // place. Falls through to per-frame staging for batches without
-        // a slice (e.g. env_batch, which lives outside the pool).
         // Each batch composes an IBuffer (impl::GpuBuffer) holding the
-        // [args(32)][count(16)][instance_data] layout. emit reads
-        // args/count at offsets 0 and 32 of the resolved backend handle;
-        // the vertex shader BDA-reads instances at storage_gpu_address +
-        // 48. Batches that haven't been allocated a backing buffer yet
-        // (env_batch, which lives outside the upload pipeline) fall
-        // through to per-frame staging.
+        // [args(32)][count(16)] blob, which is all that still has to be a
+        // buffer the GPU reads directly: the indirect commands. Instance,
+        // material and header bytes all live in shared arenas, reached by
+        // index. Batches with no backing buffer yet (env_batch, outside the
+        // upload pipeline) fall through to per-frame staging for the
+        // indirect commands only.
         IBuffer* storage_buf = batch.storage_buffer();
         IGpuBuffer* storage_gb = nullptr;
         if (storage_buf) {
@@ -180,22 +174,19 @@ inline void emit_draw_calls(
             }
         }
 
-        // Header destination: prefer the batch's own persistent storage
-        // (cross-frame stable address) when mapped. Falls back to per-frame
-        // staging for batches without backing storage (e.g. env_batch).
-        uint64_t draw_data_addr = 0;
-        uint8_t* persistent = batch.storage_mapped();
-        if (has_storage && persistent) {
-            std::memcpy(persistent + BatchBufferLayout::kHeaderOffset,
-                        &header, sizeof(header));
-            draw_data_addr = batch.storage_gpu_address() + BatchBufferLayout::kHeaderOffset;
-        } else {
-            auto reservation = frame_data.reserve(sizeof(DrawDataHeader));
-            if (!reservation.ptr) continue;
-            auto* dst = static_cast<uint8_t*>(reservation.ptr);
-            draw_data_addr = reservation.gpu_addr;
-            std::memcpy(dst, &header, sizeof(header));
-        }
+        // The header goes to this batch's persistent region of the shared
+        // draw-data arena, allocated by the upload sweep. Persistent rather
+        // than per-frame because the base below is baked into the recorded
+        // draw call: a rotating region would go stale on any frame the command
+        // buffer is reused rather than re-recorded.
+        if (batch.draw_data_region_size() != sizeof(DrawDataHeader)) continue;
+        auto draw_arena = resources.shared_arena(IRenderBackend::kGlobalDrawData,
+                                                 sizeof(DrawDataHeader));
+        if (!draw_arena) continue;
+        const uint64_t draw_data_offset = batch.draw_data_region_offset();
+        draw_arena->write_at(draw_data_offset, &header, sizeof(header));
+        const uint32_t draw_base =
+            static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
 
         // Always-indirect: pull args + count from the batch's own
         // storage buffer when available; fall back to writing a record
@@ -252,8 +243,8 @@ inline void emit_draw_calls(
         }
         call.max_draw_count = 1;
 
-        call.root_constants_size = sizeof(uint64_t);
-        std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
+        call.root_constants_size = sizeof(uint32_t);
+        std::memcpy(call.root_constants, &draw_base, sizeof(uint32_t));
 
         out_calls.push_back(call);
     }

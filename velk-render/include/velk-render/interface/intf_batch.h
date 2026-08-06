@@ -25,26 +25,23 @@ class ArenaRegion;
  *        (`get_data` returns the contiguous blob), and consumers
  *        (`emit_draw_calls` reads several offsets into the same buffer).
  *
- * Layout: `[args (32 B)][count (16 B)][header (48 B)]` = 96 B fixed.
+ * Layout: `[args (32 B)][count (16 B)]` = 48 B fixed.
  *
  * - args  (offset 0, 32 B) — indirect-draw command record. 16-byte
  *   aligned and oversized so any future args struct fits.
  * - count (offset 32, 16 B) — uint32 actual draw count consumed by
  *   the backend's indirect-with-count draw; 16-byte aligned.
- * - header (offset 48, 48 B) — `DrawDataHeader` the shader receives
- *   via push-constant. Persistent across frames; carries `instances_base`
- *   (index into the shared instance arena), `material_base` (index into
- *   the shared material arena), and pointers to other persistent buffers
- *   (VBO, UV1), stable until the batch is rebuilt.
  *
- * Instance and material bytes no longer live here: instances are
- * suballocated in the shared persistent instance arena (set = 1 slot 3)
- * and materials in the material arena (set = 1 slot 4), both read by index;
- * see `set_instance_region` / `instance_region_offset` and the material's
- * own arena region.
+ * That is the whole of it: what remains here is only what the GPU reads as
+ * a buffer in its own right. Everything the shader reads has moved to a
+ * shared arena and is reached by index — instances (set = 1 slot 3, see
+ * `set_instance_region`), materials (slot 4, the material's own region),
+ * and the `DrawDataHeader` itself (slot 15, see `set_draw_data_region`).
  *
- * The DrawCall's root_constants carry `storage_gpu_address() + kHeaderOffset`
- * so the shader's push-constant pointer lands directly on the header.
+ * The DrawDataHeader is not here either: it lives in the shared draw-data
+ * arena (set = 1 slot 15), and the DrawCall's root_constants carry its
+ * element base. What remains is only what Vulkan itself must read as a
+ * buffer: the indirect args and the draw count.
  */
 struct BatchBufferLayout
 {
@@ -52,9 +49,7 @@ struct BatchBufferLayout
     static constexpr size_t kArgsSize          = 32;
     static constexpr size_t kCountOffset       = kArgsOffset + kArgsSize;
     static constexpr size_t kCountSize         = 16;
-    static constexpr size_t kHeaderOffset      = kCountOffset + kCountSize;
-    static constexpr size_t kHeaderSize        = 48;
-    static constexpr size_t kBufferSize        = kHeaderOffset + kHeaderSize; // 96
+    static constexpr size_t kBufferSize        = kCountOffset + kCountSize; // 48
 };
 
 /**
@@ -69,8 +64,8 @@ struct BatchBufferLayout
  * boundary. `pipeline_key` is a stable hash on visual class / material;
  * resolved through `IRenderContext::find_pipeline()`. `texture_key` is
  * the bindless-source ISurface address resolved at emit time.
- * `instance_data` carries per-instance bytes the vertex shader reads
- * via a buffer-reference dereference. `world_aabb` is the union of
+ * `instance_data` carries per-instance bytes the vertex shader reads by
+ * index from the shared instance arena. `world_aabb` is the union of
  * every contained instance's bounds, used by frustum culling at emit
  * time.
  */
@@ -157,6 +152,24 @@ public:
     virtual bool take_instances_dirty() = 0;
     /// @}
 
+    /// @name Per-batch draw-data region — this batch's DrawDataHeader record
+    ///       in the shared draw-data arena (set = 1 slot 15). Persistent, so
+    ///       the element base baked into a recorded draw stays valid; every
+    ///       batch has one, including those with no storage buffer.
+    /// @{
+    /// @brief Takes ownership of this batch's draw-data region. Moving in a
+    ///        new region RAII-frees the previous one (deferred past the
+    ///        in-flight fence). Pass a default (empty) region to release.
+    virtual void set_draw_data_region(ArenaRegion&& region) = 0;
+
+    /// @brief Byte offset of this batch's draw-data region within the arena.
+    ///        `offset / sizeof(DrawDataHeader)` is the shader's `draw_base`.
+    virtual uint64_t draw_data_region_offset() const = 0;
+
+    /// @brief Byte size of this batch's draw-data region (0 if none).
+    virtual uint64_t draw_data_region_size() const = 0;
+    /// @}
+
     /// @name Persistent per-batch storage — each batch composes an
     ///       `IBuffer` (an `impl::GpuBuffer` instance) holding the
     ///       `BatchBufferLayout` blob, allocated and uploaded by the
@@ -164,9 +177,8 @@ public:
     ///       (`IGpuResourceManager::ensure_buffer_storage`).
     ///       `emit_draw_calls` resolves the backend handle via
     ///       `IGpuResourceManager::find_buffer(storage_buffer())->handle`
-    ///       for indirect args + count, and reads the header at
-    ///       `storage_gpu_address() + kHeaderOffset`. Instance bytes live in
-    ///       the shared instance arena, not here.
+    ///       for indirect args + count. Instance bytes and the draw header
+    ///       live in shared arenas, not here.
     /// @{
     /// @brief Composed storage buffer. Lifetime is owned by the batch;
     ///        consumers borrow the raw pointer.
@@ -175,14 +187,6 @@ public:
     /// @brief GPU virtual address of the start of the storage blob.
     virtual uint64_t storage_gpu_address() const = 0;
 
-    /// @brief Host-visible mapped pointer to the storage blob, or
-    ///        `nullptr` if the buffer hasn't been allocated yet (e.g.
-    ///        env_batch with no persistent storage). Consumers use
-    ///        `BatchBufferLayout` offsets to write per-batch data
-    ///        (e.g. the `DrawDataHeader`) directly into the persistent
-    ///        buffer; writes are visible to the GPU on the next submit
-    ///        via host-coherent memory.
-    virtual uint8_t* storage_mapped() const = 0;
     /// @}
 };
 

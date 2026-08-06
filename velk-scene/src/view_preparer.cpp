@@ -210,14 +210,27 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             }
             // else: unchanged, keep the region and its bytes (no re-upload).
         };
+        // Every batch owns one DrawDataHeader record in the shared draw-data
+        // arena, allocated once and held for the batch's lifetime. Allocated
+        // here rather than at emit time so emit only writes: the base is baked
+        // into the recorded draw call, so it must not move underneath it.
+        auto ensure_draw_data_region = [&](const IBatch::Ptr& bp) {
+            if (!bp || !ctx.resources) return;
+            if (bp->draw_data_region_size() == sizeof(DrawDataHeader)) return;
+            auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalDrawData,
+                                                     sizeof(DrawDataHeader));
+            if (!arena) return;
+            bp->set_draw_data_region(arena->alloc(sizeof(DrawDataHeader)));
+        };
         auto upload_batch = [&](IBatch::Ptr& bp) {
             if (!bp) return;
             auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
-            if (auto* mapped = upload_buffer(batch->storage_buffer())) {
-                batch->set_storage_mapping(mapped);
-            }
+            // Ensures the args + count blob is GPU-resident; nothing reads
+            // the mapping back, the indirect commands are read by the GPU.
+            upload_buffer(batch->storage_buffer());
             upload_instances(bp);
             upload_material(bp);
+            ensure_draw_data_region(bp);
         };
         for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {
@@ -227,6 +240,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
         // through the same arena and its material needs the upload sweep.
         upload_instances(rv.env_batch);
         upload_material(rv.env_batch);
+        ensure_draw_data_region(rv.env_batch);
     }
     rv.batches = &cache.batches;
 }

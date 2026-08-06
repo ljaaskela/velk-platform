@@ -61,12 +61,6 @@ public:
     /// overwrite without changing layout.
     void finalize_storage(uint32_t prim_count, bool indexed);
 
-    /// Renderer-side: called once after `ensure_buffer_storage` allocates
-    /// the backing GpuBufferHandle and the upload pass has memcpy'd the
-    /// blob. Captures the mapped pointer so `update_instance_at` can
-    /// write through directly on subsequent transform-only frames.
-    void set_storage_mapping(uint8_t* mapped_ptr) { storage_mapped_ = mapped_ptr; }
-
     uint64_t pipeline_key() const override { return pipeline_key_; }
     uint64_t texture_key() const override { return texture_key_; }
 
@@ -99,9 +93,15 @@ public:
         return d;
     }
 
+    void set_draw_data_region(ArenaRegion&& region) override
+    {
+        draw_data_region_ = std::move(region);
+    }
+    uint64_t draw_data_region_offset() const override { return draw_data_region_.offset(); }
+    uint64_t draw_data_region_size() const override { return draw_data_region_.size(); }
+
     IBuffer* storage_buffer() const override { return storage_.get(); }
     uint64_t storage_gpu_address() const override;
-    uint8_t* storage_mapped() const override { return storage_mapped_; }
 
 private:
     uint64_t pipeline_key_ = 0;
@@ -124,10 +124,6 @@ private:
     /// carrier (fixed 112 B). Created lazily on first finalize. Instance
     /// bytes are NOT here; they live in the shared instance arena.
     IBuffer::Ptr storage_;
-    /// Cached after each upload — host-visible pointer to the storage blob,
-    /// used by emit to write the header/material_ptr in place.
-    uint8_t* storage_mapped_ = nullptr;
-
     /// Persistent instance region in the shared arena (set = 1 slot 3), owned
     /// by this batch. Allocated on structural change, kept across steady-state
     /// frames, RAII-freed (deferred) when the batch is destroyed.
@@ -136,6 +132,11 @@ private:
     /// Set when instance bytes change (finalize_storage / update_instance_at);
     /// the upload sweep re-uploads the region only when this is set.
     bool instances_dirty_ = true;
+
+    /// This batch's DrawDataHeader record in the shared draw-data arena.
+    /// Allocated on first emit and held for the batch's lifetime, so the
+    /// element base baked into a recorded draw call stays valid.
+    ArenaRegion draw_data_region_;
 };
 
 } // namespace velk::impl

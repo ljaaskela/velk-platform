@@ -372,7 +372,11 @@ public:
         /// for indexed draws, so this arena carries INDEX_BUFFER usage and is
         /// pre-sized (growth recopies, and geometry is bulk).
         kGlobalMeshWords  = 14,
-        kGlobalBufferSlotCount = 15,
+        /// Per-draw DrawDataHeader records, one persistent region per batch.
+        /// The draw's push constant is the element index of its record, which
+        /// is the whole of what a raster pipeline is handed.
+        kGlobalDrawData   = 15,
+        kGlobalBufferSlotCount = 16,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

@@ -35,9 +35,6 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
         uint32_t count = 1;
         std::memcpy(bytes + Layout::kCountOffset, &count, sizeof(count));
     });
-    // Reset cached mapped pointer — a size change forces
-    // ensure_buffer_storage to reallocate, invalidating the prior map.
-    storage_mapped_ = nullptr;
     // Instance bytes were just (re)written; the upload sweep re-uploads the
     // arena region.
     instances_dirty_ = true;

@@ -25,11 +25,7 @@ constexpr string_view env_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(VelkVbo3D)
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_ROOT
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;

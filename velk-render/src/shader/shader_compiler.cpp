@@ -271,25 +271,33 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 //   MeshStaticData st = velk_mesh_static(inst);
 #define velk_mesh_static(inst) (velk_mesh_static_records.data[(inst).mesh_static_base])
 
-// Standard DrawData header fields. Use inside a buffer_reference block:
-//   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA()
-//   };
-// The 32-byte header is entirely indices and counts, so it needs no
-// alignment padding. Every field is read through an accessor rather than
-// directly, which keeps callers decoupled from this layout:
-// `velk_global_data(root)` (set = 1 globals), `velk_instance(root)` (instance
-// arena), `velk_material(root)` (material arena), `velk_vertex3d(root)` and
-// `velk_uv1(root)` (mesh-word arena).
-#define VELK_DRAW_DATA()                       \
-    uint globals_base;                         \
-    uint instances_base;                       \
-    uint texture_id;                           \
-    uint instance_count;                       \
-    uint vbo_base;                             \
-    uint uv1_base;                             \
-    uint uv1_enabled;                          \
+// Per-draw header: 32 bytes of indices and counts, one record per batch in
+// the set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.
+// Shaders never touch these fields directly; each is reached through an
+// accessor that hides the layout: velk_global_data(root), velk_instance(root),
+// velk_material(root), velk_vertex3d(root), velk_uv1(root).
+struct VelkDrawData {
+    uint globals_base;
+    uint instances_base;
+    uint texture_id;
+    uint instance_count;
+    uint vbo_base;
+    uint uv1_base;
+    uint uv1_enabled;
     uint material_base;
+};
+
+layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
+
+// Declares a raster shader's push constant: the element index of this draw's
+// record. Put it at file scope, once per shader:
+//   VELK_DRAW_ROOT
+// after which `root` names this draw's header. A raster pipeline is handed
+// nothing else; everything hangs off the accessors above.
+#define VELK_DRAW_ROOT \
+    layout(push_constant, std430) uniform VelkPC { uint draw_base; } velk_pc;
+
+#define root (velk_draw_data.data[velk_pc.draw_base])
 )";
 
 namespace {

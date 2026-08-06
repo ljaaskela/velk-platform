@@ -18,10 +18,11 @@ constexpr uint64_t kMeshArenaReserve = uint64_t(32) << 20;  // 32 MiB
 /// shader adds to reach a vertex float or an index uint.
 constexpr uint32_t kMeshWordSize = 4;
 
-/// Regions are 16-byte aligned, not word aligned. Raster still reads vertices
-/// through a buffer_reference block whose address must satisfy the block's own
-/// alignment, and a vertex struct containing a vec4 requires 16. Word
-/// alignment alone would let a region land mid-vec4 and corrupt those reads.
+/// Regions are 16-byte aligned. This was required while raster read vertices
+/// through a buffer_reference block, whose ADDRESS had to satisfy the block's
+/// own alignment (16 for a vertex struct containing a vec4). Both paths now
+/// read by index, so word alignment would suffice; 16 is kept because it costs
+/// a few bytes per mesh and keeps vertex records from straddling cache lines.
 constexpr uint64_t kMeshRegionAlign = 16;
 
 } // namespace
