@@ -57,8 +57,6 @@ add_library(velk_text SHARED
     src/glyph_baker.cpp
     src/font_buffers.h
     src/font_buffers.cpp
-    src/font_gpu_buffer.h
-    src/font_gpu_buffer.cpp
     src/visual/text_visual.h
     src/visual/text_visual.cpp
     src/visual/text_material.h

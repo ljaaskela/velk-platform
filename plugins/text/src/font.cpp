@@ -1,7 +1,6 @@
 #include "font.h"
 
 #include "embedded/inter_regular.h"
-#include "font_gpu_buffer.h"
 #include "visual/text_material.h"
 
 #include <velk-render/interface/intf_gpu_resource_manager.h>

@@ -29,7 +29,6 @@ namespace velk {
 //     shared `velk_eval_shadow` composer.
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -762,7 +761,6 @@ void main()
 // image. `reset` discards history on the first frame / resize.
 [[maybe_unused]] constexpr string_view deferred_denoise_compute_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -855,7 +853,6 @@ void main()
 // back in place from the output) for the surface blit.
 [[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -954,7 +951,6 @@ void main()
 [[maybe_unused]] constexpr string_view rt_compute_prelude_src = R"(
 #version 450
 #define VELK_COMPUTE 1
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 #include "velk-ui.glsl"
 

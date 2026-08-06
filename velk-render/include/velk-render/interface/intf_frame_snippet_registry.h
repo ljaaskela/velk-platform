@@ -15,7 +15,6 @@ class IProgram;
 class IShadowTechnique;
 class IAnalyticShape;
 class IRenderContext;
-class IDrawData;
 class IFrameDataManager;
 class IGpuResourceManager;
 class IGpuArena;
@@ -119,30 +118,12 @@ public:
     virtual MaterialRef resolve_material(IProgram* prog,
                                          const FrameResolveContext& ctx) = 0;
 
-    /// @brief Resolves the GPU address of any IDrawData's persistent
-    ///        data buffer. Returns 0 if the object has no persistent
-    ///        buffer (e.g. zero draw-data size).
-    ///
-    /// @note Currently unused, and retained deliberately. Mesh primitives were
-    /// its last caller; they now publish their RT geometry as regions of the
-    /// shared arenas, read by index. If the renderer ever moves back to
-    /// reaching data by device address, this is the machinery that serves any
-    /// IDrawData wanting a persistent buffer with an address of its own. Do
-    /// not delete it as dead code without that decision having been made.
-    virtual uint64_t resolve_data_buffer(IDrawData* dd,
-                                         const FrameResolveContext& ctx) = 0;
-
     virtual const vector<MaterialInfo>&   material_info_by_id() const = 0;
     virtual const vector<ShadowTechInfo>& shadow_tech_info_by_id() const = 0;
     virtual const vector<IntersectInfo>&  intersect_info_by_id() const = 0;
     virtual const vector<uint32_t>&       frame_materials() const = 0;
     virtual const vector<uint32_t>&       frame_shadow_techs() const = 0;
     virtual const vector<uint32_t>&       frame_intersects() const = 0;
-
-    /// Program data buffers touched during the current frame's
-    /// resolve_material / resolve_data_buffer calls, held so the bytes
-    /// backing this frame's material records stay alive for its duration.
-    virtual const vector<IBuffer::Ptr>& frame_data_buffers() const = 0;
 };
 
 } // namespace velk

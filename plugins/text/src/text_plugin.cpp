@@ -1,7 +1,6 @@
 #include "text_plugin.h"
 
 #include "font.h"
-#include "font_gpu_buffer.h"
 #include "visual/text_material.h"
 #include "visual/text_visual.h"
 
@@ -10,7 +9,6 @@ namespace velk::ui {
 ReturnValue TextPlugin::initialize(IVelk& velk, PluginConfig&)
 {
     auto rv = register_type<impl::Font>(velk);
-    rv &= register_type<FontGpuBuffer>(velk);
     rv &= register_type<TextMaterial>(velk);
     rv &= register_type<TextVisual>(velk);
 

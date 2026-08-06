@@ -10,7 +10,7 @@
 namespace velk::impl {
 
 /// Construction-time hook, kept off IArenaBuffer so consumers see only the
-/// read side. Mirrors IFontGpuBufferInternal.
+/// read side.
 class IArenaBufferInternal
     : public Interface<IArenaBufferInternal, IInterface,
                        VELK_UID("56774d3a-19e8-4d5e-af76-cc6d58efd37f")>
@@ -32,9 +32,9 @@ public:
  * Write-only from the CPU side, because arena storage is allocated for
  * sequential writes and reads from it are slow. `write` fills the region in
  * place, so the bytes are copied once. `get_data` and `write_diff` are not
- * served, in the same way FontGpuBuffer implements only the half of IBuffer
- * that suits it. Owners that need to diff their bytes should do so against
- * their own authoritative copy before writing.
+ * served: implementing only the half of IBuffer that the storage can actually
+ * support is deliberate. Owners that need to diff their bytes should do so
+ * against their own authoritative copy before writing.
  *
  * Growth reallocates: a `write` larger than the current region takes a fresh
  * one and drops the old, which is the required behaviour for data that changes

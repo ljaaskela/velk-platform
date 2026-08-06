@@ -13,11 +13,8 @@ namespace velk {
 // RenderContext as the "velk.glsl" virtual include. Exposed so the shader
 // cache can include its content in the cache key hash.
 const char* kVelkGlsl = R"(
-#extension GL_EXT_buffer_reference : require
-#extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Scene shape record: rect / cube / sphere / mesh with a pointer to
 // material data. Used by the BVH shape buffer and (duplicated today)
@@ -42,8 +39,6 @@ struct RtShape {
     uint _pad1;
 };
 
-layout(buffer_reference, std430) readonly buffer RtShapeList { RtShape data[]; };
-
 // BVH node — used both by the scene-wide TLAS and by the per-mesh
 // BLAS that lives in a primitive's MeshStaticData buffer. Inner nodes
 // have first_child / child_count; leaves have first_shape / shape_count
@@ -57,8 +52,6 @@ struct BvhNode {
     uint first_child;
     uint child_count;
 };
-
-layout(buffer_reference, std430) readonly buffer BvhNodeList { BvhNode data[]; };
 
 // Mesh-static metadata, owned by the IMeshPrimitive as a persistent region
 // of the shared mesh-static arena (set = 1 slot 11), so its element index is
@@ -87,7 +80,7 @@ struct MeshInstanceData {
     mat4     inv_world;        // world -> mesh-local (for transforming the ray)
     uint     mesh_static_base; // index into velk_mesh_static; stable across frames
     uint     _pad0;
-    uint64_t _pad1;
+    uvec2    _pad1;            // keeps the record at 144 B
 };
 
 // mesh_static_base value for a mesh whose static record is not resolvable
@@ -116,13 +109,6 @@ layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[
 // float bits, and uintBitsToFloat is a reinterpret, not a conversion.
 //   float x = velk_mesh_vertex(st, o0 + 0u);
 #define velk_mesh_vertex(st, i) uintBitsToFloat(velk_mesh_words.data[(st).vbo_base + (i)])
-
-// Generic 8-byte buffer_reference placeholder. Use it wherever the
-// shader needs to preserve the layout of a typed pointer field without
-// caring about the target's contents (e.g. fragment shaders that skip
-// the instance_data slot, or vertex shaders that don't dereference
-// typed sub-pointers inside a material block).
-layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
 
 // Framework-level bindless texture array. Every pipeline in the engine
 // shares this descriptor set binding; individual shaders reference a

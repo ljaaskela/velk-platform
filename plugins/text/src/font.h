@@ -19,14 +19,13 @@ namespace velk::ui::impl {
 
 /**
  * @brief Font implementation: FreeType outline source + HarfBuzz shaper +
- *        FontBuffers + three FontGpuBuffer wrappers.
+ *        FontBuffers, published into the shared text arenas.
  *
  * No glyph atlas. Glyph outlines are extracted lazily by the GlyphBaker
- * (via FontBuffers::ensure_glyph) and packed into three GPU buffers
- * (curves, bands, glyph table) that the renderer uploads via the
- * IBuffer path. The text material reads each buffer's GPU address inside
- * `write_gpu_data` and emits them as buffer references the slug shader
- * can dereference.
+ * (via FontBuffers::ensure_glyph) and packed into three runs (curves, bands,
+ * glyph table), each a region of a shared arena (set = 1 slots 7 to 9). The
+ * text material carries the three element bases, which the slug shader adds
+ * to its own indices.
  *
  * Font is not an ISurface: there are no pixels to bind.
  */

@@ -29,7 +29,6 @@ void FrameSnippetRegistry::begin_frame()
     frame_materials_.clear();
     frame_shadow_techs_.clear();
     frame_intersects_.clear();
-    frame_data_buffers_.clear();
 }
 
 namespace {
@@ -164,38 +163,6 @@ uint32_t FrameSnippetRegistry::register_intersect(IAnalyticShape* shape, IRender
     return id;
 }
 
-namespace {
-
-// Synchronously makes the persistent program-data buffer backend-ready:
-// allocates (or reallocates on size change) the GPU buffer, sets the
-// IBuffer's GPU address, and uploads the bytes if they are dirty.
-void ensure_data_buffer_uploaded(IBuffer* buf, const FrameResolveContext& ctx)
-{
-    if (!buf || !ctx.render_ctx || !ctx.resources) return;
-    if (!ctx.render_ctx->backend()) return;
-    size_t bsize = buf->get_data_size();
-    if (bsize == 0) return;
-
-    GpuBufferDesc bdesc{};
-    bdesc.size = bsize;
-    bdesc.cpu_writable = true;
-    auto* be = ctx.resources->ensure_buffer_storage(buf, bdesc);
-    if (!be) return;
-    if (buf->is_dirty()) {
-        const uint8_t* bytes = buf->get_data();
-        if (bytes) {
-            if (auto gb = be->buffer.lock()) {
-                if (auto* dst = gb->map()) {
-                    std::memcpy(dst, bytes, bsize);
-                }
-            }
-            buf->clear_dirty();
-        }
-    }
-}
-
-} // namespace
-
 IFrameSnippetRegistry::MaterialRef
 FrameSnippetRegistry::resolve_material(IProgram* prog, const FrameResolveContext& ctx)
 {
@@ -257,18 +224,6 @@ FrameSnippetRegistry::resolve_material(IProgram* prog, const FrameResolveContext
     }
     if (!seen) frame_materials_.push_back(id);
     return {id, base};
-}
-
-uint64_t FrameSnippetRegistry::resolve_data_buffer(IDrawData* dd, const FrameResolveContext& ctx)
-{
-    if (!dd) return 0;
-    auto data_buf = dd->get_data_buffer(ctx.resources);
-    if (!data_buf) return 0;
-    ensure_data_buffer_uploaded(data_buf.get(), ctx);
-    uint64_t addr = get_gpu_address(data_buf);
-    if (addr == 0) return 0;
-    frame_data_buffers_.push_back(data_buf);
-    return addr;
 }
 
 } // namespace velk

@@ -48,7 +48,6 @@ namespace velk::ui::embedded {
 [[maybe_unused]] constexpr string_view velk_text_glsl = R"(
 #ifndef VELK_TEXT_GLSL_INCLUDED
 #define VELK_TEXT_GLSL_INCLUDED
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
 const uint VELK_TEXT_BAND_COUNT = 8u;
@@ -147,15 +146,8 @@ float velk_text_combine_coverage(float xcov, float ycov, float xwgt, float ywgt)
 }
 
 // Main entry point. Returns coverage in [0, 1] for the sample uv inside the
-// glyph identified by glyph_index in the glyphs buffer.
-//
-// The buffer_reference declarations are intentionally not `readonly`:
-// SPIR-V's NonWritable decoration is not legal on a function parameter
-// that is a pointer to a PhysicalStorageBuffer, so the parameter qualifier
-// would have to match by also being `readonly`, which the validator
-// rejects. Dropping the qualifier on both sides keeps the function
-// portable; the buffers are still effectively read-only because nothing
-// in this shader writes to them.
+// glyph identified by glyph_index in the glyphs buffer. The three bases
+// locate this font's runs in the shared text arenas.
 float velk_text_coverage(
     vec2 uv,
     uint glyph_index,

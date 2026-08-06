@@ -113,10 +113,10 @@ public:
     ///
     /// Arena memory is allocated for sequential writes, so reads from it are
     /// slow: the returned buffer is **write-only from the CPU side**. It
-    /// serves `write`, and its `get_data` / `write_diff` report nothing, in
-    /// the same way FontGpuBuffer implements only the half of IBuffer that
-    /// makes sense for it. Consumers get its location with `get_gpu_ref`,
-    /// which returns a Kind::Index ref, never an address.
+    /// serves `write`, and its `get_data` / `write_diff` report nothing:
+    /// implementing only the half of IBuffer the storage supports is
+    /// deliberate. Consumers get its location with `get_gpu_ref`, which
+    /// returns a Kind::Index ref, never an address.
     /// @p alignment (0 = the arena's element_size) forces the region's offset
     /// to a multiple of it, and is re-applied when the buffer regrows. An
     /// arena whose records are read at more than one stride is byte-granular

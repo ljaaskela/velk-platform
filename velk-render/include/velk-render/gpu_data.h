@@ -161,7 +161,7 @@ VELK_GPU_STRUCT MeshInstanceData
     float    inv_world[16];   ///< column-major world -> mesh-local.
     uint32_t mesh_static_base;///< element index into the mesh-static arena; kInvalidMeshStaticBase when unresolved.
     uint32_t _pad0;
-    uint64_t _pad1;
+    uint32_t _pad1[2];        ///< keeps the record at 144 bytes.
 };
 static_assert(sizeof(MeshInstanceData) == 144, "MeshInstanceData layout mismatch");
 

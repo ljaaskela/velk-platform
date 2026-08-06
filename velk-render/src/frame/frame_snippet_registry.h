@@ -29,7 +29,6 @@ public:
     uint32_t register_intersect(IAnalyticShape* shape, IRenderContext& ctx) override;
 
     MaterialRef resolve_material(IProgram* prog, const FrameResolveContext& ctx) override;
-    uint64_t resolve_data_buffer(IDrawData* dd, const FrameResolveContext& ctx) override;
 
     const vector<MaterialInfo>&   material_info_by_id() const override { return material_info_by_id_; }
     const vector<ShadowTechInfo>& shadow_tech_info_by_id() const override { return shadow_tech_info_by_id_; }
@@ -37,8 +36,6 @@ public:
     const vector<uint32_t>&       frame_materials() const override { return frame_materials_; }
     const vector<uint32_t>&       frame_shadow_techs() const override { return frame_shadow_techs_; }
     const vector<uint32_t>&       frame_intersects() const override { return frame_intersects_; }
-
-    const vector<IBuffer::Ptr>& frame_data_buffers() const override { return frame_data_buffers_; }
 
 private:
     struct MaterialInstance
@@ -64,7 +61,6 @@ private:
     vector<uint32_t>         frame_materials_;
     vector<uint32_t>         frame_shadow_techs_;
     vector<uint32_t>         frame_intersects_;
-    vector<IBuffer::Ptr>     frame_data_buffers_;
 };
 
 } // namespace velk
