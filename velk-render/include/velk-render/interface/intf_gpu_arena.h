@@ -23,45 +23,9 @@ struct GpuArenaRegion
     bool valid() const { return size != 0; }
 };
 
-/// RAII handle to a suballocated region (from IGpuArena::alloc).
-/// Move-only; on destruction it tells its source arena to free the region
-/// (which the arena defers past the in-flight frame's fence). Deliberately
-/// lightweight, not an IGpuResource: there may be very many small regions.
-class ArenaRegion
-{
-public:
-    ArenaRegion() = default;
-    ArenaRegion(IGpuArena* arena, uint64_t offset, uint64_t size)
-        : arena_(arena), offset_(offset), size_(size) {}
-    ~ArenaRegion() { release(); }
-
-    ArenaRegion(ArenaRegion&& o) noexcept
-        : arena_(o.arena_), offset_(o.offset_), size_(o.size_) { o.arena_ = nullptr; }
-    ArenaRegion& operator=(ArenaRegion&& o) noexcept
-    {
-        if (this != &o) {
-            release();
-            arena_ = o.arena_; offset_ = o.offset_; size_ = o.size_;
-            o.arena_ = nullptr;
-        }
-        return *this;
-    }
-    ArenaRegion(const ArenaRegion&) = delete;
-    ArenaRegion& operator=(const ArenaRegion&) = delete;
-
-    bool valid() const { return arena_ != nullptr; }
-    uint64_t offset() const { return offset_; }
-    uint64_t size() const { return size_; }
-
-    /// Frees the region back to its arena (deferred past the in-flight fence)
-    /// and clears this handle. Called automatically on destruction / move.
-    void release();
-
-private:
-    IGpuArena* arena_ = nullptr;
-    uint64_t offset_ = 0;
-    uint64_t size_ = 0;
-};
+/// RAII handle to a suballocated region, returned by IGpuArena::alloc.
+/// Defined below the interface, since it holds an IGpuArena::WeakPtr.
+class ArenaRegion;
 
 /**
  * @brief A frame-invariant bound storage buffer (descriptor set = 1) read by
@@ -163,10 +127,64 @@ public:
 };
 
 
+/// RAII handle to a suballocated region (from IGpuArena::alloc).
+/// Move-only; on destruction it tells its source arena to free the region
+/// (which the arena defers past the in-flight frame's fence), or does nothing
+/// if the arena is already gone. The arena reference is weak because regions
+/// can outlive it: a mesh primitive is a scene asset, torn down after the
+/// renderer that owns the arenas. Deliberately lightweight, not an
+/// IGpuResource: there may be very many small regions.
+class ArenaRegion
+{
+public:
+    ArenaRegion() = default;
+    ArenaRegion(IGpuArena::WeakPtr arena, uint64_t offset, uint64_t size)
+        : arena_(std::move(arena)), offset_(offset), size_(size) {}
+    ~ArenaRegion() { release(); }
+
+    ArenaRegion(ArenaRegion&& o) noexcept
+        : arena_(std::move(o.arena_)), offset_(o.offset_), size_(o.size_)
+    {
+        o.arena_ = {};
+        o.offset_ = 0;
+        o.size_ = 0;
+    }
+    ArenaRegion& operator=(ArenaRegion&& o) noexcept
+    {
+        if (this != &o) {
+            release();
+            arena_ = std::move(o.arena_); offset_ = o.offset_; size_ = o.size_;
+            o.arena_ = {};
+            o.offset_ = 0;
+            o.size_ = 0;
+        }
+        return *this;
+    }
+    ArenaRegion(const ArenaRegion&) = delete;
+    ArenaRegion& operator=(const ArenaRegion&) = delete;
+
+    bool valid() const { return size_ != 0 && !arena_.expired(); }
+    uint64_t offset() const { return offset_; }
+    uint64_t size() const { return size_; }
+
+    /// Frees the region back to its arena (deferred past the in-flight fence)
+    /// and clears this handle. Called automatically on destruction / move.
+    /// A no-op once the arena has been destroyed.
+    void release();
+
+private:
+    IGpuArena::WeakPtr arena_;
+    uint64_t offset_ = 0;
+    uint64_t size_ = 0;
+};
+
 inline void ArenaRegion::release()
 {
-    if (arena_) arena_->release_region(offset_, size_);
-    arena_ = nullptr;
+    // The lock fails when the arena is already destroyed, which happens for
+    // holders that outlive the renderer (mesh primitives). Their bytes died
+    // with the arena's buffer, so there is nothing to give back.
+    if (auto arena = arena_.lock()) arena->release_region(offset_, size_);
+    arena_ = {};
     offset_ = 0;
     size_ = 0;
 }

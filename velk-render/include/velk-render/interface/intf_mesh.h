@@ -13,6 +13,8 @@
 
 namespace velk {
 
+class IGpuResourceManager;
+
 /**
  * @brief Combined vertex + index storage for one or more IMeshPrimitives.
  *
@@ -197,6 +199,21 @@ public:
                       const aabb& bounds,
                       const IMeshBuffer::Ptr& uv1_buffer,
                       uint32_t uv1_offset) = 0;
+
+    /**
+     * @brief Makes this primitive's RT geometry data GPU-resident and returns
+     *        the element index of its MeshStaticData record.
+     *
+     * Suballocates three persistent regions from the shared arenas (mesh
+     * static, BLAS nodes, BLAS triangle indices) on first call and keeps them
+     * for the primitive's lifetime, so the returned base is stable and shapes
+     * can cache it. `set_rt_blas` releases them, so the next call rebuilds.
+     *
+     * Returns @c kInvalidMeshStaticBase while the data is not resolvable yet
+     * (geometry not uploaded, no BLAS built) WITHOUT caching that result, so
+     * a later frame retries.
+     */
+    virtual uint32_t ensure_rt_data(IGpuResourceManager& resources) = 0;
 };
 
 /**

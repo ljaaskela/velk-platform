@@ -199,17 +199,16 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                     site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
                     site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
 
-                    // Per-frame instance data: world matrices + a
-                    // pointer placeholder. The renderer callback fills
-                    // mesh_static_addr from the primitive's persistent
-                    // IDrawData buffer (stable across frames). Static
-                    // mesh metadata (buffer_addr, offsets, counts,
-                    // stride) lives in that buffer — not duplicated
-                    // here.
+                    // Per-shape instance data: world matrices + an index
+                    // placeholder. The renderer callback fills
+                    // mesh_static_base by publishing the primitive's RT
+                    // data into the shared arenas (stable across frames).
+                    // Static mesh metadata (buffer_addr, offsets, counts,
+                    // stride) lives in that record — not duplicated here.
                     auto& mi = site.mesh_instance;
                     std::memcpy(mi.world,     world.m,     sizeof(mi.world));
                     std::memcpy(mi.inv_world, inv_world.m, sizeof(mi.inv_world));
-                    mi.mesh_static_addr = 0;  // resolved by the renderer cb.
+                    mi.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
                     site.mesh_primitive = prim_ptr.get();
                     site.has_mesh_data = true;
                     (void)buffer_addr;  // validated above; no longer carried inline.

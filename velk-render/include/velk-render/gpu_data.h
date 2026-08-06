@@ -128,9 +128,11 @@ static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 inline constexpr uint32_t kRtShapeKindMesh = 255;
 
 /// Mesh-static metadata: same for every element instance referencing a
-/// given IMeshPrimitive. Owned by the primitive (returned via
-/// IDrawData::get_data_buffer), so the GPU address is stable across
-/// frames and shapes can cache it. Mirrors GLSL `MeshStaticData`.
+/// given IMeshPrimitive. The primitive owns a persistent region of the
+/// shared mesh-static arena, so the element index is stable across frames
+/// and instances can cache it. The BLAS it describes lives in its own
+/// arenas, reached by `blas_node_base` / `blas_tri_base` rather than by
+/// trailing this record. Mirrors GLSL `MeshStaticData`.
 VELK_GPU_STRUCT MeshStaticData
 {
     uint64_t buffer_addr;     ///< IMeshBuffer GPU address; same buffer holds VBO + IBO.
@@ -138,10 +140,19 @@ VELK_GPU_STRUCT MeshStaticData
     uint32_t ibo_offset;      ///< bytes from buffer_addr to first index this primitive uses.
     uint32_t triangle_count;
     uint32_t vertex_stride;   ///< bytes per vertex (32 for VelkVertex3D).
-    uint32_t blas_root;       ///< root index in the trailing BLAS node array.
-    uint32_t blas_node_count; ///< length of the trailing BLAS node array.
+    uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
+    uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
+    uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
+    uint32_t blas_tri_base;   ///< element base of the triangle-index run in the BLAS triangle arena.
+    uint32_t _pad0;
+    uint32_t _pad1;
 };
-static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
+static_assert(sizeof(MeshStaticData) == 48, "MeshStaticData layout mismatch");
+
+/// Sentinel `MeshInstanceData::mesh_static_base` for a mesh whose static
+/// record is not resolvable yet (geometry not uploaded, no BLAS built).
+/// The intersector skips the shape; the CPU retries on a later frame.
+inline constexpr uint32_t kInvalidMeshStaticBase = 0xFFFFFFFFu;
 
 /// Per-shape mesh instance data. Holds the element's world matrices plus
 /// a pointer to the mesh-static buffer. Lives in the set = 1 mesh-instance
@@ -151,8 +162,9 @@ VELK_GPU_STRUCT MeshInstanceData
 {
     float    world[16];       ///< column-major mesh-local -> world.
     float    inv_world[16];   ///< column-major world -> mesh-local.
-    uint64_t mesh_static_addr;///< MeshStaticData* (persistent; stable across frames).
-    uint64_t _pad;
+    uint32_t mesh_static_base;///< element index into the mesh-static arena; kInvalidMeshStaticBase when unresolved.
+    uint32_t _pad0;
+    uint64_t _pad1;
 };
 static_assert(sizeof(MeshInstanceData) == 144, "MeshInstanceData layout mismatch");
 

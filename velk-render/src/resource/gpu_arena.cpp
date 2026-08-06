@@ -48,7 +48,7 @@ ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
             const uint64_t tail_off = aligned + need;
             const uint64_t tail_size = (span_off + span_size) - tail_off;
             if (tail_size > 0) free_spans_.push_back({tail_off, tail_size});
-            return ArenaRegion{this, aligned, need};
+            return ArenaRegion{get_self<IGpuArena>(), aligned, need};
         }
         // No span fits: grow (the fresh tail becomes a free span) and retry.
         const uint64_t old_cap = persistent_capacity_;

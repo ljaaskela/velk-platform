@@ -37,14 +37,14 @@ struct ShapeSite
     const DrawEntry* draw_entry = nullptr;
 
     /// Set when geometry.shape_kind == kRtShapeKindMesh. The renderer
-    /// callback fills `mesh_instance.mesh_static_addr` from the
-    /// primitive's IDrawData buffer; the collected record is uploaded to
-    /// the shared mesh-instance arena and its element index stamped into
-    /// geometry.mesh_instance_base.
+    /// callback fills `mesh_instance.mesh_static_base` by publishing the
+    /// primitive's RT geometry into the shared arenas; the collected record
+    /// is uploaded to the shared mesh-instance arena and its element index
+    /// stamped into geometry.mesh_instance_base.
     MeshInstanceData mesh_instance{};
     /// The mesh primitive backing this shape; used by the renderer
-    /// callback to resolve the per-mesh static-data buffer address via
-    /// IDrawData::get_data_buffer. Null for non-mesh shapes.
+    /// callback to publish the per-mesh static data via
+    /// IMeshPrimitiveInternal::ensure_rt_data. Null for non-mesh shapes.
     IMeshPrimitive* mesh_primitive = nullptr;
     bool has_mesh_data = false;
 

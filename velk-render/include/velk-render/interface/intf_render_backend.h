@@ -358,7 +358,16 @@ public:
         kGlobalTextBands  = 8,
         kGlobalTextGlyphs = 9,
         kGlobalMeshInstances = 10, ///< Per-shape mesh transforms, read at velk_mesh_instances.data[mesh_instance_base].
-        kGlobalBufferSlotCount = 11,
+        /// Per-primitive RT geometry metadata and its BLAS. Claimed by
+        /// MeshPrimitive via IGpuResourceManager::shared_arena, since primitives
+        /// are built outside the render loop. The BLAS keeps its own node arena
+        /// rather than sharing slot 0: BLAS runs are per-primitive and effectively
+        /// permanent, while TLAS runs churn on every rebuild, and one byte
+        /// free-list holding both would fragment.
+        kGlobalMeshStatic = 11,
+        kGlobalBlasNodes  = 12,
+        kGlobalBlasTris   = 13,
+        kGlobalBufferSlotCount = 14,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

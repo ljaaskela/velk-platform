@@ -74,10 +74,18 @@ layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint da
 // which resolves shape.mesh_instance_base. Same buffer the RT compute reads.
 layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
 
+// Per-primitive RT geometry metadata (set = 1 slot 11), read via
+// velk_mesh_static(inst), plus the BLAS runs it points at (slots 12 / 13).
+// A primitive's runs are allocated once at load and never move.
+layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
+layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
+
 // RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
 // slot [0..8) (see velk.glsl GlobalData).
+)" R"(
 
 // scalar layout: tight packing so the per-dispatch CPU struct (whose
 // `vec4 cam_pos` sits at offset 0 of the struct) lines up with the
@@ -218,9 +226,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
     MeshInstanceData inst = velk_mesh_instance(shape);
-    if (inst.mesh_static_addr == uint64_t(0)) return false;
-    MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
-    MeshStaticData st = st_ptr.data;
+    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    MeshStaticData st = velk_mesh_static(inst);
     if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
     if (st.blas_node_count == 0u) return false;
 
@@ -244,14 +251,10 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
     uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
 
-    // The MeshStaticData buffer layout is:
-    //   [MeshStaticData header: 32 B]
-    //   [BvhNode[blas_node_count]:  48 B each]
-    //   [uint  [blas_tri_count]:    4 B each]
-    BlasNodeList blas_nodes = BlasNodeList(inst.mesh_static_addr + uint64_t(32));
-    BlasTriList  blas_tris  = BlasTriList(
-        inst.mesh_static_addr + uint64_t(32)
-        + uint64_t(st.blas_node_count) * uint64_t(48));
+    // This primitive's BLAS runs inside the shared node / triangle arenas;
+    // node and triangle indices below are relative to these bases.
+    uint blas_node_base = st.blas_node_base;
+    uint blas_tri_base  = st.blas_tri_base;
 
     Ray local_ray;
     local_ray.origin = lo;
@@ -273,14 +276,14 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     stack[sp++] = st.blas_root;
     while (sp > 0) {
         uint ni = uint(stack[--sp]);
-        BvhNode node = blas_nodes.data[ni];
+        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
         float t_aabb;
         if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
 
         if (node.shape_count > 0u) {
             // Leaf: test triangles.
             for (uint k = 0u; k < node.shape_count; ++k) {
-                uint tri = blas_tris.data[node.first_shape + k];
+                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
                 uint base = tri * 3u;
                 uint i0 = ib.data[base + 0u];
                 uint i1 = ib.data[base + 1u];
@@ -330,8 +333,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
             // closest-hit on a triangle BLAS this lets the far subtree
             // get culled by `best_t` once a near hit lands.
             if (node.child_count == 2u) {
-                BvhNode l = blas_nodes.data[node.first_child];
-                BvhNode r = blas_nodes.data[node.first_child + 1u];
+                BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
+                BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
                 float t_l, t_r;
                 bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
                 bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
@@ -995,6 +998,13 @@ layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]
 // which resolves shape.mesh_instance_base. Same buffer the deferred pass reads.
 layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
 
+// Per-primitive RT geometry metadata (set = 1 slot 11), read via
+// velk_mesh_static(inst). A primitive's record is allocated once at load and
+// never moves. The BLAS arenas (slots 12 / 13) are not declared here: this
+// shader's mesh intersector is a linear triangle scan, and only the deferred
+// pass walks the acceleration structure.
+layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+
 // Material records as raw words (set = 1 slot 4). The raster path binds this
 // same slot as a typed block, which one pipeline can do because it compiles
 // for a single material type; this shader composes many, so it reads the
@@ -1245,9 +1255,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     }
 
     MeshInstanceData inst = velk_mesh_instance(shape);
-    if (inst.mesh_static_addr == uint64_t(0)) return false;
-    MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
-    MeshStaticData st = st_ptr.data;
+    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    MeshStaticData st = velk_mesh_static(inst);
     if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
 
     vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;

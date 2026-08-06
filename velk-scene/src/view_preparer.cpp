@@ -416,9 +416,10 @@ void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_sta
                 if (kind != 0) site.geometry.shape_kind = kind;
             }
             if (site.has_mesh_data) {
-                if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
-                    site.mesh_instance.mesh_static_addr =
-                        ctx.snippets->resolve_data_buffer(dd, resolve_ctx);
+                site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                if (auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive)) {
+                    site.mesh_instance.mesh_static_base =
+                        mpi->ensure_rt_data(*ctx.resources);
                 }
                 // Index within this view's mesh-instance run; the arena base
                 // is added once the whole run is uploaded below.

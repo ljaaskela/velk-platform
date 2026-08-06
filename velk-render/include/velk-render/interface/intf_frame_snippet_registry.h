@@ -122,6 +122,13 @@ public:
     /// @brief Resolves the GPU address of any IDrawData's persistent
     ///        data buffer. Returns 0 if the object has no persistent
     ///        buffer (e.g. zero draw-data size).
+    ///
+    /// @note Currently unused, and retained deliberately. Mesh primitives were
+    /// its last caller; they now publish their RT geometry as regions of the
+    /// shared arenas, read by index. If the renderer ever moves back to
+    /// reaching data by device address, this is the machinery that serves any
+    /// IDrawData wanting a persistent buffer with an address of its own. Do
+    /// not delete it as dead code without that decision having been made.
     virtual uint64_t resolve_data_buffer(IDrawData* dd,
                                          const FrameResolveContext& ctx) = 0;
 

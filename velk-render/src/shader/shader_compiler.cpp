@@ -60,24 +60,24 @@ struct BvhNode {
 
 layout(buffer_reference, std430) readonly buffer BvhNodeList { BvhNode data[]; };
 
-// Mesh-static metadata, owned by the IMeshPrimitive's persistent
-// IDrawData buffer (stable GPU address across frames). Mirrors
-// MeshStaticData in scene_collector.h. Layout is followed in the same
-// buffer by `blas_node_count` BvhNodes and a flat triangle-index
-// array; the shader derives those addresses from blas_node_count.
+// Mesh-static metadata, owned by the IMeshPrimitive as a persistent region
+// of the shared mesh-static arena (set = 1 slot 11), so its element index is
+// stable across frames. Mirrors MeshStaticData in gpu_data.h. The BLAS it
+// describes lives in its own arenas (slots 12 / 13), reached by
+// blas_node_base / blas_tri_base rather than by trailing this record.
 struct MeshStaticData {
     uint64_t buffer_addr;     // IMeshBuffer GPU address; same buffer holds VBO + IBO
     uint     vbo_offset;      // bytes from buffer_addr to first vertex this primitive uses
     uint     ibo_offset;      // bytes from buffer_addr to first index this primitive uses
     uint     triangle_count;
     uint     vertex_stride;   // bytes per vertex (32 for VelkVertex3D)
-    uint     blas_root;       // index of the BLAS root in the trailing BvhNode array
-    uint     blas_node_count; // length of the trailing BvhNode array
+    uint     blas_root;       // root index within this primitive's BLAS node run
+    uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
+    uint     blas_node_base;  // element base of the node run in velk_blas_nodes
+    uint     blas_tri_base;   // element base of the triangle-index run in velk_blas_tris
+    uint     _pad0;
+    uint     _pad1;
 };
-
-layout(buffer_reference, std430) readonly buffer MeshStaticPtr { MeshStaticData data; };
-layout(buffer_reference, std430) readonly buffer BlasNodeList { BvhNode data[]; };
-layout(buffer_reference, std430) readonly buffer BlasTriList  { uint     data[]; };
 
 // Per-shape mesh instance data. Carries the per-element transforms plus
 // a pointer to the mesh's static metadata. Lives in the shared
@@ -88,9 +88,15 @@ layout(buffer_reference, std430) readonly buffer BlasTriList  { uint     data[];
 struct MeshInstanceData {
     mat4     world;            // mesh-local -> world (for hit attributes)
     mat4     inv_world;        // world -> mesh-local (for transforming the ray)
-    uint64_t mesh_static_addr; // -> MeshStaticData; stable across frames
-    uint64_t _pad;
+    uint     mesh_static_base; // index into velk_mesh_static; stable across frames
+    uint     _pad0;
+    uint64_t _pad1;
 };
+
+// mesh_static_base value for a mesh whose static record is not resolvable
+// yet (geometry not uploaded, no BLAS built). Mirrors kInvalidMeshStaticBase
+// in gpu_data.h.
+#define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
 
 // Index reads from a glTF-style 16-bit-or-32-bit index buffer. We
 // always upload 32-bit indices (gltf_decoder.cpp normalises on import),
@@ -230,6 +236,12 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // preludes that trace meshes declare `velk_mesh_instances` themselves.
 //   MeshInstanceData inst = velk_mesh_instance(shape);
 #define velk_mesh_instance(shape) (velk_mesh_instances.data[(shape).mesh_instance_base])
+
+// Mesh intersector accessor: the per-primitive geometry metadata behind a
+// mesh instance, from the shared mesh-static arena (set = 1 slot 11). Guard
+// with `inst.mesh_static_base != VELK_INVALID_MESH_STATIC` first.
+//   MeshStaticData st = velk_mesh_static(inst);
+#define velk_mesh_static(inst) (velk_mesh_static_records.data[(inst).mesh_static_base])
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {

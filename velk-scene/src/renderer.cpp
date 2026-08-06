@@ -713,9 +713,11 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     // and uploaded by SceneBvh, which stamps the shape's
                     // mesh_instance_base with its element index.
                     if (site.has_mesh_data) {
-                        if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
-                            site.mesh_instance.mesh_static_addr =
-                                self.snippets_->resolve_data_buffer(dd, resolve_ctx);
+                        site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                        auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive);
+                        if (mpi && self.resources_) {
+                            site.mesh_instance.mesh_static_base =
+                                mpi->ensure_rt_data(*self.resources_);
                         }
 
                         if (s.log && site.mesh_primitive) {
@@ -727,11 +729,11 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                             uint32_t triangle_count = i_count / 3u;
                             uint32_t ibo_offset = static_cast<uint32_t>(
                                 buf ? buf->get_ibo_offset() : 0);
-                            VELK_LOG(I, "BVH cb: inst=%p mesh_static_addr=0x%016llx "
+                            VELK_LOG(I, "BVH cb: inst=%p mesh_static_base=%u "
                                         "buffer_addr=0x%016llx ibo_offset=0x%08x "
                                         "triangle_count=%u v_stride=%u",
                                      (void*)mp,
-                                     (unsigned long long)site.mesh_instance.mesh_static_addr,
+                                     site.mesh_instance.mesh_static_base,
                                      (unsigned long long)buffer_addr,
                                      ibo_offset, triangle_count, v_stride);
                         }
