@@ -169,6 +169,14 @@ private:
         /// frames: the compute shaders that bake it (RT / deferred / denoise /
         /// spatial) then read this frame's globals, not a rotating ring slot.
         ArenaRegion globals_region;
+
+        /// Per-view region in the shared mesh-instance arena (set = 1 slot
+        /// 10), holding the MeshInstanceData records for this view's mesh
+        /// shapes. `prepare_shapes` stamps each shape's `mesh_instance_base`
+        /// from it. Re-allocated only when the record count changes; the base
+        /// travels inside the shape array (re-uploaded each frame), so no
+        /// cached pass bakes it.
+        ArenaRegion mesh_instances_region;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -208,8 +216,17 @@ private:
 
     /// Walks scene shapes, resolves material / texture / intersect /
     /// mesh-data per shape, and accumulates RtShape records into @p rv.
-    void prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
-                        RenderView& rv);
+    /// Mesh shapes' MeshInstanceData records are uploaded to the shared
+    /// mesh-instance arena and their element index stamped into the shape.
+    void prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
+                        FrameContext& ctx, RenderView& rv);
+
+    /// Uploads @p instances into this view's persistent region of the shared
+    /// mesh-instance arena and shifts every mesh shape's run-relative
+    /// `mesh_instance_base` onto the region's element base.
+    void upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
+                               RenderView& rv,
+                               array_view<MeshInstanceData> instances);
 
     /// Resolves the camera's environment (texture + material) into @p rv.env.
     /// Also stamps @p rv.env_batch from the per-view cache, rebuilding

@@ -320,6 +320,12 @@ FrameContext Renderer::make_frame_context()
         primary_shapes_arena_ = resources_->create_arena(
             IRenderBackend::kGlobalPrimaryShapes, sizeof(RtShape));
     }
+    // Homogeneous MeshInstanceData records; element_size = stride so
+    // mesh_instance_base = region offset / sizeof(MeshInstanceData).
+    if (resources_ && !mesh_instances_arena_) {
+        mesh_instances_arena_ = resources_->create_arena(
+            IRenderBackend::kGlobalMeshInstances, sizeof(MeshInstanceData));
+    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -334,6 +340,7 @@ FrameContext Renderer::make_frame_context()
     ctx.material_arena = material_arena_.get();
     ctx.lights_arena = lights_arena_.get();
     ctx.primary_shapes_arena = primary_shapes_arena_.get();
+    ctx.mesh_instances_arena = mesh_instances_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -701,19 +708,15 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     }
 
                     // Mesh-kind shapes: resolve the per-mesh static data
-                    // address (stable across frames; cached on the cached
-                    // shape's MeshInstanceData). The per-frame instance
-                    // record itself is uploaded by SceneBvh during the
-                    // re-publish pass. We just write a placeholder addr
-                    // here for the first frame; SceneBvh's per-frame patch
-                    // overwrites it on every subsequent frame.
+                    // address (stable across frames). The instance record
+                    // itself is collected into the build's parallel array
+                    // and uploaded by SceneBvh, which stamps the shape's
+                    // mesh_instance_base with its element index.
                     if (site.has_mesh_data) {
                         if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
                             site.mesh_instance.mesh_static_addr =
                                 self.snippets_->resolve_data_buffer(dd, resolve_ctx);
                         }
-                        site.geometry.mesh_data_addr = self.frame_buffer_->write(
-                            &site.mesh_instance, sizeof(site.mesh_instance));
 
                         if (s.log && site.mesh_primitive) {
                             auto* mp = site.mesh_primitive;

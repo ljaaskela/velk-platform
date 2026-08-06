@@ -6,7 +6,6 @@
 #include <velk/api/velk.h>
 #include <velk/ext/object.h>
 
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_bvh.h>
 #include <velk-render/interface/intf_gpu_arena.h>
@@ -97,34 +96,27 @@ private:
     vector<GpuBvhNode> cached_nodes_;
     vector<RtShape>    cached_shapes_;
     /// Parallel to cached_shapes_: per-shape MeshInstanceData payload
-    /// (zeroed for non-mesh kinds). Re-uploaded each frame so the
-    /// mesh_data_addr GPU pointer stays valid as the per-frame buffer
-    /// rotates. The instance struct holds the per-element world
-    /// matrices plus a stable pointer to the mesh-owned static buffer
-    /// (resolved once by the renderer's BVH callback during a fresh
-    /// rebuild).
+    /// (zeroed for non-mesh kinds). The instance struct holds the
+    /// per-element world matrices plus a stable pointer to the mesh-owned
+    /// static buffer (resolved once by the renderer's BVH callback during
+    /// a fresh rebuild), so the array only changes when the build does.
     vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
 
-    /// The mesh-instance array stays a PersistentBuffer (BDA) until the mesh
-    /// chain migrates.
-    PersistentBuffer mesh_instances_buffer_;
-    /// Mesh-instance base at the last upload. A move rewrites every mesh
-    /// shape's mesh_data_addr, so the shape region has to be re-uploaded.
-    uint64_t last_mesh_instances_base_ = 0;
-
     /// This BVH's regions in the Renderer-owned shared IGpuArenas (set = 1
-    /// slots 0/1). Held across frames and re-allocated (not overwritten) on
+    /// slots 0/1/10). Held across frames and re-allocated (not overwritten) on
     /// each real change, so an in-flight frame never reads a half-written
     /// build. Freed deferred past the fence when replaced or dropped.
     ArenaRegion nodes_region_;
     ArenaRegion shapes_region_;
+    ArenaRegion mesh_instances_region_;
 
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
     uint32_t shape_count_ = 0;
     uint32_t node_base_ = 0;   ///< Element base of this BVH's node region.
     uint32_t shape_base_ = 0;  ///< Element base of this BVH's shape region.
+    uint32_t mesh_instance_base_ = 0;  ///< Element base of this BVH's mesh-instance region.
     bool dirty_ = true;
 };
 

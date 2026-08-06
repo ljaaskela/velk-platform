@@ -129,8 +129,8 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
         // meshes (e.g. MeshVisual from a glTF import). Emit one
         // Mesh-kind RtShape per IMeshPrimitive, with a MeshData payload
         // pointing at the existing IMeshBuffer's VBO+IBO regions. The
-        // renderer callback resolves mesh_data_addr to the GPU address of
-        // its uploaded MeshData record.
+        // renderer callback resolves the mesh-static address; the uploader
+        // stamps mesh_instance_base once the records are in the arena.
         if (auto vs3d = read_state<IVisual3D>(visual)) {
             auto mesh_obj = vs3d->mesh.template get<IMesh>();
             if (mesh_obj) {

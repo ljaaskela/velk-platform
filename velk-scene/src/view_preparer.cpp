@@ -374,14 +374,16 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
         : 0u;
 }
 
-void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
-                                  RenderView& rv)
+void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
+                                  FrameContext& ctx, RenderView& rv)
 {
     struct ShapeCollect {
         FrameContext& ctx;
         vector<RtShape>& shapes;
+        vector<MeshInstanceData>& mesh_instances;
     };
-    ShapeCollect sc{ctx, rv.shapes};
+    vector<MeshInstanceData> mesh_instances;
+    ShapeCollect sc{ctx, rv.shapes, mesh_instances};
     enumerate_scene_shapes(scene_state, ctx.render_ctx,
         +[](void* u, ShapeSite& site) {
             auto& s = *static_cast<ShapeCollect*>(u);
@@ -413,16 +415,57 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
                 uint32_t kind = ctx.snippets->register_intersect(analytic, *ctx.render_ctx);
                 if (kind != 0) site.geometry.shape_kind = kind;
             }
-            if (site.has_mesh_data && ctx.frame_buffer) {
+            if (site.has_mesh_data) {
                 if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
                     site.mesh_instance.mesh_static_addr =
                         ctx.snippets->resolve_data_buffer(dd, resolve_ctx);
                 }
-                site.geometry.mesh_data_addr = ctx.frame_buffer->write(
-                    &site.mesh_instance, sizeof(site.mesh_instance));
+                // Index within this view's mesh-instance run; the arena base
+                // is added once the whole run is uploaded below.
+                site.geometry.mesh_instance_base =
+                    static_cast<uint32_t>(s.mesh_instances.size());
+                s.mesh_instances.push_back(site.mesh_instance);
             }
             s.shapes.push_back(site.geometry);
         }, &sc);
+
+    upload_mesh_instances(entry, ctx, rv,
+                          {mesh_instances.data(), mesh_instances.size()});
+}
+
+void ViewPreparer::upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
+                                         RenderView& rv,
+                                         array_view<MeshInstanceData> instances)
+{
+    auto& cache = view_caches_[&entry];
+    if (!ctx.mesh_instances_arena) return;
+
+    const uint64_t need = instances.size() * sizeof(MeshInstanceData);
+    if (cache.mesh_instances_region.size() != need) {
+        if (need == 0) {
+            cache.mesh_instances_region = {};  // release
+        } else {
+            auto region = ctx.mesh_instances_arena->alloc(need);
+            const uint64_t off = region.offset();
+            const bool ok = region.valid();
+            cache.mesh_instances_region = std::move(region);
+            if (ok) ctx.mesh_instances_arena->write_at(off, instances.begin(), need);
+        }
+    } else if (need > 0) {
+        ctx.mesh_instances_arena->write_at(cache.mesh_instances_region.offset(),
+                                           instances.begin(), need);
+    }
+
+    // Shift each mesh shape's run-relative index onto the region's base. The
+    // shape array is re-uploaded every frame, so a moved base needs no
+    // invalidation of anything that caches it.
+    if (need == 0 || !cache.mesh_instances_region.valid()) return;
+    const uint32_t base = static_cast<uint32_t>(
+        cache.mesh_instances_region.offset() / sizeof(MeshInstanceData));
+    for (auto& shape : rv.shapes) {
+        if (shape.shape_kind != kRtShapeKindMesh) continue;
+        shape.mesh_instance_base += base;
+    }
 }
 
 void ViewPreparer::prepare_env(IViewEntry& entry,
@@ -558,7 +601,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     // declare a need for them.
     if (needs.batches) prepare_batches(entry, scene_state, batch_builder, ctx, rv);
     if (needs.lights)  prepare_lights(entry, scene_state, ctx, rv);
-    if (needs.shapes)  prepare_shapes(scene_state, ctx, rv);
+    if (needs.shapes)  prepare_shapes(entry, scene_state, ctx, rv);
 
     return rv;
 }

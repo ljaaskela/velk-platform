@@ -130,31 +130,32 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
     }
 
     VELK_PERF_SCOPE("renderer.bvh_upload");
-    // Stage the packed mesh-instance array first so we can stamp
-    // each mesh shape's `mesh_data_addr` with a stable per-instance
-    // address (base + i * sizeof(MeshInstanceData)).
-    uint64_t mesh_instances_base = mesh_instances_buffer_.upload(
-        cached_mesh_instances_.data(),
-        cached_mesh_instances_.size() * sizeof(MeshInstanceData),
-        ctx).address;
-    for (size_t i = 0; i < cached_shapes_.size() && i < cached_mesh_instances_.size(); ++i) {
-        if (cached_shapes_[i].shape_kind != kRtShapeKindMesh) continue;
-        cached_shapes_[i].mesh_data_addr =
-            mesh_instances_base + i * sizeof(MeshInstanceData);
-    }
-
-    // Nodes / shapes live in persistent regions of the Renderer-owned shared
-    // arenas, so every scene's BVH holds a distinct region and multiple BVHs
-    // in one frame never collide on the set = 1 slot. The region's element
-    // base is stamped into FrameGlobals / RtRoot; shaders read
-    // data[base + index]. A frame that changes nothing uploads nothing.
+    // Nodes / shapes / mesh instances live in persistent regions of the
+    // Renderer-owned shared arenas, so every scene's BVH holds a distinct
+    // region and multiple BVHs in one frame never collide on the set = 1 slot.
+    // The region's element base is stamped into FrameGlobals / RtRoot; shaders
+    // read data[base + index]. A frame that changes nothing uploads nothing.
     //
-    // Shapes are considered changed when the topology was rebuilt or when the
-    // mesh-instance array moved (the stamping above rewrites every mesh
-    // shape's mesh_data_addr).
-    const bool shapes_dirty =
-        rebuilt || mesh_instances_base != last_mesh_instances_base_;
-    last_mesh_instances_base_ = mesh_instances_base;
+    // Mesh instances go first: their base is stamped into each mesh shape, so
+    // it has to be settled before the shape array is uploaded. The array only
+    // changes when the build does (the renderer's callback fills it during a
+    // fresh walk), so a stable build keeps both the region and its bytes.
+    bool shapes_dirty = rebuilt;
+    if (rebuilt || !mesh_instances_region_.valid()) {
+        const uint32_t base = upload_region(
+            ctx.mesh_instances_arena, mesh_instances_region_,
+            cached_mesh_instances_.data(),
+            cached_mesh_instances_.size() * sizeof(MeshInstanceData),
+            sizeof(MeshInstanceData));
+        // A moved base rewrites every mesh shape's index, so the shape region
+        // has to follow it even on a frame that did not rebuild.
+        if (base != mesh_instance_base_) shapes_dirty = true;
+        mesh_instance_base_ = base;
+        for (size_t i = 0; i < cached_shapes_.size() && i < cached_mesh_instances_.size(); ++i) {
+            if (cached_shapes_[i].shape_kind != kRtShapeKindMesh) continue;
+            cached_shapes_[i].mesh_instance_base = base + static_cast<uint32_t>(i);
+        }
+    }
 
     if (shapes_dirty || !shapes_region_.valid()) {
         shape_base_ = upload_region(ctx.bvh_shapes_arena, shapes_region_,

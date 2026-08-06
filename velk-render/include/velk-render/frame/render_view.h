@@ -100,8 +100,8 @@ struct RenderView
     /// RT primary-buffer shapes for this view. Each entry has its
     /// `material_id` / `material_base` / `texture_id` / shape_kind
     /// fields pre-resolved through the frame snippet registry.
-    /// Mesh-kind shapes have `mesh_data_addr` set to the per-frame
-    /// MeshInstanceData record. Order is enumeration-order (no plane
+    /// Mesh-kind shapes have `mesh_instance_base` set to their record in
+    /// the shared mesh-instance arena. Order is enumeration-order (no plane
     /// sort); RT path back-to-front-sorts a local copy.
     vector<RtShape> shapes;
 };

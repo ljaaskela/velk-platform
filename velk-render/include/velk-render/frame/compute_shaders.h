@@ -70,6 +70,10 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // glyph-data bases from it) at the word base carried on the shape.
 layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
 
+// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
+// which resolves shape.mesh_instance_base. Same buffer the RT compute reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+
 // RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
@@ -213,8 +217,7 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         float t_aabb;
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
-    MeshInstancePtr inst_ptr = MeshInstancePtr(shape.mesh_data_addr);
-    MeshInstanceData inst = inst_ptr.data;
+    MeshInstanceData inst = velk_mesh_instance(shape);
     if (inst.mesh_static_addr == uint64_t(0)) return false;
     MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
     MeshStaticData st = st_ptr.data;
@@ -988,6 +991,10 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // this holds the back-to-front sort the primary loop composites.
 layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
 
+// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
+// which resolves shape.mesh_instance_base. Same buffer the deferred pass reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+
 // Material records as raw words (set = 1 slot 4). The raster path binds this
 // same slot as a typed block, which one pipeline can do because it compiles
 // for a single material type; this shader composes many, so it reads the
@@ -1237,8 +1244,7 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
 
-    MeshInstancePtr inst_ptr = MeshInstancePtr(shape.mesh_data_addr);
-    MeshInstanceData inst = inst_ptr.data;
+    MeshInstanceData inst = velk_mesh_instance(shape);
     if (inst.mesh_static_addr == uint64_t(0)) return false;
     MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
     MeshStaticData st = st_ptr.data;

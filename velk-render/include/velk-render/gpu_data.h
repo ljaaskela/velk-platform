@@ -103,7 +103,7 @@ static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for
 /// shape_kind:
 ///   0 = rect, 1 = cube, 2 = sphere — analytic primitives.
 ///   255 = mesh — triangle soup; `origin/u_axis` carry the world-space
-///   AABB and `mesh_data_addr` is a GPU pointer at a MeshData record.
+///   AABB and `mesh_instance_base` indexes the mesh-instance arena.
 ///   3..254 reserved for future analytic kinds.
 VELK_GPU_STRUCT RtShape
 {
@@ -119,7 +119,8 @@ VELK_GPU_STRUCT RtShape
     uint32_t shape_kind;      ///< 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
     uint32_t material_base;   ///< Word index of this shape's record in the set = 1 material arena.
     uint32_t _pad0;
-    uint64_t mesh_data_addr;  ///< for shape_kind == 255: MeshData*; otherwise 0
+    uint32_t mesh_instance_base; ///< for shape_kind == 255: element index into the set = 1 mesh-instance arena; otherwise 0
+    uint32_t _pad1;
 };
 static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 
@@ -142,8 +143,9 @@ VELK_GPU_STRUCT MeshStaticData
 };
 static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 
-/// Per-shape, per-frame mesh instance data. Holds the element's world
-/// matrices plus a pointer to the mesh-static buffer. Mirrors GLSL
+/// Per-shape mesh instance data. Holds the element's world matrices plus
+/// a pointer to the mesh-static buffer. Lives in the set = 1 mesh-instance
+/// arena; shapes reach their record by `mesh_instance_base`. Mirrors GLSL
 /// `MeshInstanceData`.
 VELK_GPU_STRUCT MeshInstanceData
 {

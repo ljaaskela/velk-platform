@@ -357,7 +357,8 @@ public:
         kGlobalTextCurves = 7,
         kGlobalTextBands  = 8,
         kGlobalTextGlyphs = 9,
-        kGlobalBufferSlotCount = 10,
+        kGlobalMeshInstances = 10, ///< Per-shape mesh transforms, read at velk_mesh_instances.data[mesh_instance_base].
+        kGlobalBufferSlotCount = 11,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

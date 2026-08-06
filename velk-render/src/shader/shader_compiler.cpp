@@ -23,8 +23,8 @@ const char* kVelkGlsl = R"(
 // material data. Used by the BVH shape buffer and (duplicated today)
 // by RT. shape_kind = 255 is the "complex" sentinel: the shape is a
 // triangle mesh, `origin/u_axis` carry the world-space AABB and
-// `mesh_data_addr` points at a MeshData record (defined below). The
-// field is 0 for non-mesh kinds.
+// `mesh_instance_base` indexes the mesh-instance buffer (set = 1 slot
+// 10). The field is 0 for non-mesh kinds.
 struct RtShape {
     vec4 origin;
     vec4 u_axis;
@@ -38,7 +38,8 @@ struct RtShape {
     uint shape_kind;  // 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
     uint material_base;       // word index of this shape's record in the material arena
     uint _pad0;
-    uint64_t mesh_data_addr;  // shape_kind == 255: MeshData*; otherwise 0
+    uint mesh_instance_base;  // shape_kind == 255: index into velk_mesh_instances; otherwise 0
+    uint _pad1;
 };
 
 layout(buffer_reference, std430) readonly buffer RtShapeList { RtShape data[]; };
@@ -78,19 +79,18 @@ layout(buffer_reference, std430) readonly buffer MeshStaticPtr { MeshStaticData 
 layout(buffer_reference, std430) readonly buffer BlasNodeList { BvhNode data[]; };
 layout(buffer_reference, std430) readonly buffer BlasTriList  { uint     data[]; };
 
-// Per-shape per-frame mesh instance data. Carries the per-element
-// transforms plus a pointer to the mesh's static metadata. Allocated
-// from the per-frame scratch buffer; SceneBvh patches each cached
-// shape's mesh_data_addr to this frame's copy. Mirrors
-// MeshInstanceData in scene_collector.h.
+// Per-shape mesh instance data. Carries the per-element transforms plus
+// a pointer to the mesh's static metadata. Lives in the shared
+// mesh-instance arena (set = 1 slot 10); each shape carries the element
+// index of its record in `mesh_instance_base`. The buffer itself is
+// declared by the compute preludes that trace meshes. Mirrors
+// MeshInstanceData in gpu_data.h.
 struct MeshInstanceData {
     mat4     world;            // mesh-local -> world (for hit attributes)
     mat4     inv_world;        // world -> mesh-local (for transforming the ray)
     uint64_t mesh_static_addr; // -> MeshStaticData; stable across frames
     uint64_t _pad;
 };
-
-layout(buffer_reference, std430) readonly buffer MeshInstancePtr { MeshInstanceData data; };
 
 // Index reads from a glTF-style 16-bit-or-32-bit index buffer. We
 // always upload 32-bit indices (gltf_decoder.cpp normalises on import),
@@ -223,6 +223,13 @@ layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
 // VELK_MATERIAL(...) declaration.
 //   CheckerParams m = velk_material(root);
 #define velk_material(root) (velk_materials.data[(root).material_base])
+
+// Mesh intersector accessor: a mesh-kind shape's transforms, from the shared
+// mesh-instance arena (set = 1 slot 10). Unlike materials and instances the
+// element type never varies, so there is no declaration macro; the compute
+// preludes that trace meshes declare `velk_mesh_instances` themselves.
+//   MeshInstanceData inst = velk_mesh_instance(shape);
+#define velk_mesh_instance(shape) (velk_mesh_instances.data[(shape).mesh_instance_base])
 
 // Standard DrawData header fields. Use inside a buffer_reference block:
 //   layout(buffer_reference, std430) readonly buffer DrawData {

@@ -79,6 +79,14 @@ struct FrameContext
     /// (RT reads it fresh from RtRoot each frame). Null before assignment.
     IGpuArena* primary_shapes_arena = nullptr;
 
+    /// Shared mesh-instance arena (set = 1 slot 10), owned by the Renderer.
+    /// Every producer of mesh-kind RtShapes (each scene's BVH, each RT view's
+    /// primary shape list) suballocates a persistent region for its
+    /// MeshInstanceData array and stamps `mesh_instance_base` into the shapes;
+    /// the mesh intersector reads velk_mesh_instances by that index. Null
+    /// before the Renderer assigns it.
+    IGpuArena* mesh_instances_arena = nullptr;
+
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled

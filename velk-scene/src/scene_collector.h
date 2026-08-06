@@ -38,9 +38,9 @@ struct ShapeSite
 
     /// Set when geometry.shape_kind == kRtShapeKindMesh. The renderer
     /// callback fills `mesh_instance.mesh_static_addr` from the
-    /// primitive's IDrawData buffer, then writes the instance record
-    /// into the per-frame buffer and stamps the resulting GPU address
-    /// into geometry.mesh_data_addr.
+    /// primitive's IDrawData buffer; the collected record is uploaded to
+    /// the shared mesh-instance arena and its element index stamped into
+    /// geometry.mesh_instance_base.
     MeshInstanceData mesh_instance{};
     /// The mesh primitive backing this shape; used by the renderer
     /// callback to resolve the per-mesh static-data buffer address via
@@ -80,8 +80,8 @@ struct BvhBuild
     /// Parallel to `shapes`. For shapes with shape_kind == kRtShapeKindMesh,
     /// contains the populated MeshInstanceData payload (world matrices
     /// + a stable pointer to the mesh's static-data buffer); for other
-    /// kinds the entry is zero. SceneBvh re-uploads these per frame and
-    /// patches the shapes' mesh_data_addr fields.
+    /// kinds the entry is zero. SceneBvh uploads these to the shared
+    /// mesh-instance arena and stamps the shapes' mesh_instance_base fields.
     vector<MeshInstanceData> mesh_instances;
     uint32_t root_index = 0;
 };
