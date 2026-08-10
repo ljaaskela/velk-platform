@@ -9,7 +9,7 @@ namespace velk {
 /// Framework-level GPU data structures.
 ///
 /// The universal per-instance type (`ElementInstance`) lives in
-/// `velk-ui/instance_types.h`; visuals fill its fields and the
+/// `velk-scene/instance_types.h`; visuals fill its fields and the
 /// renderer's batch builder writes the world matrix.
 
 /// Declares a struct with std430-compatible alignment (16 bytes).

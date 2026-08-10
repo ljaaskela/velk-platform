@@ -9,7 +9,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 - [The Core Idea](#the-core-idea)
 - [Architecture Overview](#architecture-overview)
 - [IRenderBackend interface](#irenderbackend-interface)
-  - [What is not there (on purpose)](#what-is-not-there-on-purpose)
+  - [Concepts the interface does not expose](#concepts-the-interface-does-not-expose)
 - [The DrawCall](#the-drawcall)
 - [Data Flow: How Pixels Get Drawn](#data-flow-how-pixels-get-drawn)
   - [The GPU resource model](#the-gpu-resource-model)
@@ -29,7 +29,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
   - [Color space](#color-space)
   - [Frame synchronization](#frame-synchronization)
   - [Dynamic rendering](#dynamic-rendering)
-- [What This Enables](#what-this-enables)
+- [Extension points](#extension-points)
 - [Vulkan Implementation Details](#vulkan-implementation-details)
 - [Future: Metal Backend](#future-metal-backend)
 
@@ -44,7 +44,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
   * **No vertex buffer binding**: there are no VAOs, vertex attribute descriptions or `vkCmdBindVertexBuffers`. Pipelines have empty vertex input state. 2D geometry is procedural (unit quads expanded in the vertex shader), 3D geometry uses vertex pulling from a shared mesh-word arena.
   * **Persistent, dirty-gated data**: per-draw data is written into persistently mapped GPU memory, so per-frame allocations, staging copies and command-buffer transfers are not needed. Each producer (batch, material, view, mesh primitive, font) owns a **stable region** of a shared arena and rewrites it only when its contents change; a steady-state frame uploads almost nothing. The one thing still written per frame is the small indirect-command blob each batch owns.
 
-The result is that the per-draw-call CPU cost is dominated by the `vkCmdPushConstants` + `vkCmdDraw` calls themselves, which is the theoretical minimum. On the GPU side, reaching the draw record is a single indexed load from an L2-cached storage buffer, comparable to a traditional uniform buffer read.
+Per draw call, the CPU issues a `vkCmdPushConstants` and a `vkCmdDraw*IndirectCount`, and nothing else: no descriptor binds, no vertex buffer binds, no uniform updates. On the GPU side, reaching the draw record is a single indexed load from an L2-cached storage buffer, comparable to a traditional uniform buffer read.
 
 However, this is *not* GPU-driven rendering (yet). The CPU still decides what to draw and builds the draw call list. Draws are issued through indirect-count commands (`vkCmdDraw*IndirectCount`), but the CPU writes the draw count and argument records; the GPU does not yet perform culling or sorting. The indirect substrate is in place so a future GPU-driven path can write those buffers instead. The "bindless" label describes the resource access model: once data is in GPU memory, shaders reach it by index into a permanently bound slot, not through per-draw API binding.
 
@@ -59,7 +59,7 @@ Modern GPUs have converged. Every current GPU supports:
 - **Coherent caches**: CPU writes to mapped GPU memory are visible to shaders
 - **Programmable vertex fetch**: shaders can read vertex data from arbitrary buffers
 
-When all GPUs support these features, the abstraction layer collapses. Instead of translating between "uniform buffers" and "push constants" and "constant buffers", you just write a struct into a shared buffer and give the shader the element index of it:
+Where all GPUs support these features, the translating abstraction is not needed. Instead of mapping between "uniform buffers", "push constants" and "constant buffers", write a struct into a shared buffer and give the shader its element index:
 * Instead of managing descriptor sets, you give the shader a texture index.
 * Instead of describing vertex layouts, the shader reads what it needs from a buffer.
 
@@ -145,17 +145,17 @@ The UI renderer registers default vertex and fragment shaders during setup. This
 
 The backend handles command buffer recording, synchronization, and image layout transitions internally; the renderer only speaks passes, dispatches, and barriers.
 
-### What is not there (on purpose)
+### Concepts the interface does not expose
 
-Notably absent:
-* vertex input descriptions
-* descriptor set layouts
-* pipeline layout objects
-* per-resource layout transitions (the backend derives them from pass targets)
-* explicit semaphore / fence management
-* uniform reflection (with the exception of [ShaderMaterial](./materials.md))
+Several things a graphics API abstraction usually exposes have no entry point here. Each is either handled inside the backend or unnecessary given the data model:
 
-A typical Vulkan abstraction might expose 40+ methods for these. Here they're either unnecessary (vertex input, uniform reflection) or hidden inside the backend (layouts, synchronization primitives).
+| Concept | Where it is handled |
+|--|--|
+| Vertex input descriptions | Pipelines are created with empty vertex input state; shaders read vertices by index from the mesh-word arena. |
+| Descriptor set layouts, pipeline layout objects | One fixed layout for every pipeline: set 0 for bindless images, set 1 for the sixteen arena slots, plus a 128-byte push-constant range. |
+| Per-resource layout transitions | Derived inside the backend from the pass targets and baked into the recorded secondary. |
+| Semaphores and fences | Owned by the backend. Frame completion is a timeline semaphore; see [Frame synchronization](#frame-synchronization). |
+| Uniform reflection | Not used for binding. `ShaderMaterial` reflects SPIR-V, but to discover parameter names and offsets, not to bind resources. |
 
 ## The DrawCall
 
@@ -378,7 +378,7 @@ This same shell is what the shared `element_vertex_src` runs for every visual, 2
 
 ## Geometry Without Geometry Objects
 
-There is no geometry API. Vertex data, index data, instance data, and material data are all just bytes in shared GPU buffers, reached by index. The shader decides what to read.
+There is no geometry API. Vertex data, index data, instance data and material data are bytes in shared GPU buffers, reached by index. The shader decides what to read.
 
 ### 2D UI: Unit quad + vertex pulling
 
@@ -402,7 +402,7 @@ The draw call is `vertex_count = 4, instance_count = N` (non-indexed, since the 
 
 `IMeshBuffer` holds VBO bytes followed by IBO bytes in one region of the shared mesh-word arena (`set = 1` slot 14). Multiple primitives in the same mesh commonly share one buffer (each with its own vertex/index offsets and counts) so a glTF asset imports without re-packing. The arena stores raw 32-bit words; both the raster vertex shader and the RT triangle walk read the same words, the former unpacking a `VelkVertex3D` from 12 of them.
 
-Every `DrawEntry` produced by a 3D visual carries one `IMeshPrimitive::Ptr`. A multi-primitive visual emits one `DrawEntry` per primitive, each with its own material, and the batch builder groups them by pipeline + primitive + material into draw calls. This is the same submit path as 2D; the primitive is just what locates the vertex/index words:
+Every `DrawEntry` produced by a 3D visual carries one `IMeshPrimitive::Ptr`. A multi-primitive visual emits one `DrawEntry` per primitive, each with its own material, and the batch builder groups them by pipeline + primitive + material into draw calls. This is the same submit path as 2D; the primitive is what locates the vertex/index words:
 
 ```cpp
 IMesh*          mesh = ...;              // authored container
@@ -465,7 +465,7 @@ Each material defines a C++ `VELK_GPU_STRUCT` and a matching GLSL value struct, 
 
 The snippet source is identical either way. Unsupported constructs (arrays, `mat3`, preprocessor directives inside the record) fail generation loudly rather than silently dropping a field. The CPU struct size and the GLSL std430 stride must agree; see the [alignment section](#std430-alignment-and-the-drawdataheader) below, and [Materials](materials.md) for the full authoring story.
 
-No uniform reflection, name-based binding, or type introspection. Just an index and two structs that agree on layout.
+The binding is an index, and correctness rests on the C++ struct and the GLSL struct agreeing on layout. There is no uniform reflection or name-based binding in this path; `ShaderMaterial` is the one case that reflects, and it does so to discover parameters, not to bind them.
 
 ## Textures: Bindless by Default
 
@@ -477,7 +477,7 @@ layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 float alpha = texture(velk_textures[nonuniformEXT(texture_id)], uv).r;
 ```
 
-The backend maintains a single global descriptor set with a variable-length sampler array (1024 slots). When a texture is created, it takes the next free slot, recycled from a free list of destroyed-texture slots or taken as the next never-used index. The slot index IS the `TextureId`. A destroyed texture's slot is returned to the free list once the GPU is past the frames that referenced it, so long-running sessions that churn textures don't exhaust the array. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
+The backend maintains a single global descriptor set with a variable-length sampler array (1024 slots). When a texture is created, it takes the next free slot, recycled from a free list of destroyed-texture slots or taken as the next never-used index. The slot index IS the `TextureId`. A destroyed texture's slot is returned to the free list once the GPU is past the frames that referenced it, so long-running sessions that churn textures do not exhaust the array. The descriptor set is written by the backend when a texture is created; callers pass the id around and sample with it.
 
 On the Vulkan side, this uses descriptor indexing (core since 1.2) with `UPDATE_AFTER_BIND` and `PARTIALLY_BOUND` flags. The descriptor set is bound once per frame and never changes.
 
@@ -499,7 +499,7 @@ struct ElementInstance {  // value type, 128 bytes
 
 No shader declares a `buffer_reference`, so no shader source requires `GL_EXT_buffer_reference` or `GL_EXT_shader_explicit_arithmetic_types_int64`, and no GLSL declaration anywhere contains a `uint64_t`.
 
-Two consequences worth knowing when writing shaders:
+Two consequences when writing shaders:
 
 - **A record's array stride must equal the C++ record size.** A mismatch misreads every element after the first, so it is worth getting right up front. `VELK_GPU_STRUCT` (`alignas(16)`) handles the C++ side, but watch std430's own rules: it derives struct alignment from the largest member, *not* by rounding up to 16 the way std140 does. When a record's largest member is smaller than a `vec4`, std430 computes a smaller stride than `alignas(16)` gives the C++ struct, and the difference has to be made up with explicit padding fields on the GLSL side.
 - **Region alignment is the arena's job.** Each producer's region is aligned to its own record size so `offset / record_size` lands on an integer element index.
@@ -558,15 +558,15 @@ At the start of each frame, the backend waits on the current set's fence, which 
 
 Vulkan 1.3's `VK_KHR_dynamic_rendering` is core; pipelines are compiled with `VkPipelineRenderingCreateInfo` against attachment formats only, and there are no `VkRenderPass` or `VkFramebuffer` objects in the backend. Producers call `record_begin_rendering(colors, depth)` on a cached secondary, which translates to `vkCmdBeginRendering` with the attachments resolved from the producer-supplied `IGpuTexture*`s. Layout transitions and load/store ops are baked into the secondary; multi-view stacking onto the same surface composite (e.g. main camera + perf overlay) is handled by overriding the first view's `LoadOp::Clear` to `Load` for subsequent views inside the backend.
 
-## What This Enables
+## Extension points
 
-The interface is around 25 methods (most of them defer-destroy or one-shot accessors). A new backend (Metal, D3D12) implements them and everything works. There is no backend-specific abstraction leaking into the renderer or the app.
+**A new backend** implements `IRenderBackend`, around 25 methods, most of them defer-destroy or one-shot accessors. No backend type appears in the renderer or in application code.
 
-Adding a new visual type means writing a shader and a struct. No interface changes, backend changes, or pipeline layout changes are needed.
+**A new visual type** is a shader plus an instance struct. It requires no interface, backend or pipeline-layout change, since the pipeline describes no vertex input and the instance record is read by index from slot 3.
 
-Adding a new material means supplying an eval body and a GPU data struct. The shader reaches the record through the same draw root as everything else.
+**A new material** is an eval body plus a GPU data struct, reached through the same draw root as every other material. See [Materials](materials.md).
 
-Compute shaders, mesh shaders, ray tracing: they all operate on the same GPU buffers through the same bound slots. The interface doesn't need to know about these dispatch models because it doesn't own the data layout. The shader does.
+**Compute, mesh-shader and ray-tracing dispatches** read the same `set = 1` slots as raster. The interface does not describe data layout, so it does not need to model the dispatch shape; the shader declares what it reads.
 
 Because nothing in the shader graph is a raw address, the model also maps onto APIs that forbid them; see [Why indices rather than device addresses](#why-indices-rather-than-device-addresses).
 
@@ -597,4 +597,4 @@ Metal 3 on Apple Silicon supports:
 - `MTLResourceStorageModeShared` for persistently mapped CPU/GPU memory
 - Bound device buffers indexed from MSL, for the same shader data access pattern
 
-The interface maps naturally to Metal. The shader data model (push constants = `setBytes`, bound buffers read by index, bindless textures) translates directly. Dynamic rendering corresponds to `MTLRenderPassDescriptor` configured per encoder; secondary command buffers correspond to `MTLIndirectCommandBuffer` or parallel render encoders. Note that macOS and iOS already work today through MoltenVK, so a native Metal backend is a positioning question rather than a capability gap.
+The interface maps onto Metal. The shader data model (push constants = `setBytes`, bound buffers read by index, bindless textures) translates directly. Dynamic rendering corresponds to `MTLRenderPassDescriptor` configured per encoder; secondary command buffers correspond to `MTLIndirectCommandBuffer` or parallel render encoders. Note that macOS and iOS already work today through MoltenVK, so a native Metal backend is a positioning question rather than a capability gap.

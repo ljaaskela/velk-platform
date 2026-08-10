@@ -198,7 +198,7 @@ auto mat = velk::material::create_standard(
     /*roughness*/  0.15f);
 ```
 
-The factory seeds the three most common parameters and materialises an `IMaterialOptions` attachment carrying the 3D-oriented pipeline defaults (back-face cull, depth test + write, opaque). Without that attachment a material falls back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend) and 3D meshes render in submission order. Every `StandardMaterial` you construct via the factory gets this right by default.
+The factory seeds the three most common parameters and materialises an `IMaterialOptions` attachment carrying the 3D-oriented pipeline defaults (back-face cull, depth test + write, opaque). Without that attachment a material falls back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend) and 3D meshes render in submission order.
 
 Attaching the material depends on the visual kind (see [Where materials live](#where-materials-live)):
 
@@ -231,11 +231,11 @@ mat.normal().set_scale(0.8f);
 mat.emissive().set_strength(3.0f);  // HDR emissive
 ```
 
-Why attachments rather than flat PROPs? Three reasons that all matter for framework scale:
+Inputs are attachments rather than fixed fields on the material, which has three consequences:
 
-1. **Overrides layer naturally.** Attaching a second property of the same class leaves the first as a dormant override; the most recently attached wins ("last-wins"). A glTF variant or a runtime theme swap doesn't have to mutate the original.
-2. **glTF extensions don't bloat the base interface.** `KHR_materials_clearcoat` or `KHR_materials_sheen` land as new `IMaterialProperty` subclasses; `IStandardMaterial` itself doesn't grow.
-3. **Every property is a first-class velk object.** It's animatable, bindable, serialisable via the importer, and discoverable by an editor.
+1. **Overrides layer.** Attaching a second property of the same class leaves the first in place as a dormant override; the most recently attached one is used ("last-wins"). A glTF variant or a runtime theme swap therefore does not mutate the original.
+2. **Extensions arrive as new classes.** `KHR_materials_clearcoat` or `KHR_materials_sheen` would be added as `IMaterialProperty` subclasses, leaving `IStandardMaterial` unchanged.
+3. **A property is an ordinary velk object.** It is animatable, bindable, serialisable via the importer, and readable by an editor through `IMetadata`.
 
 ### Textures and UV transforms
 
@@ -251,7 +251,7 @@ mat.base_color().set_uv_rotation(0.0f);  // radians
 mat.base_color().set_uv_scale({2.0f, 2.0f});
 ```
 
-The sampled texture multiplies the factor, matching glTF semantics. When no texture is bound the sampler returns white, so setting only the factor gives a flat-colored surface without any texture setup.
+The sampled texture multiplies the factor, matching glTF semantics. When no texture is bound the sampler returns white, so a property with only its factor set evaluates to that factor.
 
 ### Available properties
 
@@ -289,16 +289,16 @@ Start from `velk_default_material_eval()` and overwrite only the fields that mat
 #include "velk-ui.glsl"
 
 // A plain value struct for the material record...
-struct MyMaterialData {
+struct MyParams {
     vec4  color;
     float intensity;
 };
 // ...declared as the element type of the shared material arena.
-VELK_MATERIAL(MyMaterialData)
+VELK_MATERIAL(MyParams)
 
 MaterialEval velk_eval_my_material(EvalContext ctx)
 {
-    MyMaterialData d = VELK_LOAD_MATERIAL(MyMaterialData, ctx);
+    MyParams d = VELK_LOAD_MATERIAL(MyParams, ctx);
 
     MaterialEval e = velk_default_material_eval();
     e.color  = d.color * d.intensity;
@@ -307,7 +307,7 @@ MaterialEval velk_eval_my_material(EvalContext ctx)
 }
 ```
 
-No `main()`, no `gl_Position`, no `frag_color`. The body is pure shading logic; the driver templates handle the rest.
+An eval body defines this one function and nothing else. The driver templates supply `main()` and convert the returned `MaterialEval` into the output each path expects: `frag_color` in forward, the G-buffer attachments in deferred, a `BrdfSample` in the ray-trace fill.
 
 The material record is reached through two macros so one eval body works in every path: declare the record as a plain `struct`, follow it with `VELK_MATERIAL(Type)`, and load it with `VELK_LOAD_MATERIAL(Type, ctx)`. Both paths read the same `set = 1` material arena, but they get there differently:
 
@@ -339,16 +339,16 @@ A more elaborate eval showing texture sampling, per-instance tint, and a view-de
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-struct MyParams {
+struct FresnelParams {
     vec4  tint;
     float fresnel_power;
     float roughness;
 };
-VELK_MATERIAL(MyParams)
+VELK_MATERIAL(FresnelParams)
 
-MaterialEval velk_eval_my(EvalContext ctx)
+MaterialEval velk_eval_fresnel(EvalContext ctx)
 {
-    MyParams p = VELK_LOAD_MATERIAL(MyParams, ctx);
+    FresnelParams p = VELK_LOAD_MATERIAL(FresnelParams, ctx);
 
     vec4 tex = velk_texture(ctx.texture_id, ctx.uv);    // bindless sample
     vec3 n = normalize(ctx.normal);
@@ -410,7 +410,7 @@ Materials that sample textures override `get_textures()` to return the `ISurface
 
 ### Full fragment shaders (advanced)
 
-For materials that genuinely need a full fragment shader (`ShaderMaterial` is the canonical example, since it hosts user-supplied shaders), implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
+For materials that require a full fragment shader (`ShaderMaterial` is the canonical example, since it hosts user-supplied shaders), implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
 
 ```cpp
 uint64_t get_pipeline_handle(IRenderContext& ctx) override
@@ -428,12 +428,12 @@ return ensure_pipeline(ctx, my_compiled_frag, my_compiled_vert);
 On the shader side, a full fragment shader declares the draw root itself and can reach every field the renderer writes: frame globals, the per-instance array, the vertex stream, and the material record.
 
 ```glsl
-struct MyParams {
+struct TintParams {
     vec4 tint;
 };
-VELK_MATERIAL(MyParams)   // declares velk_materials as MyParams (set = 1 slot 4)
+VELK_MATERIAL(TintParams)  // declares velk_materials as TintParams (set = 1 slot 4)
 
-VELK_DRAW_DATA(root)      // the draw handle
+VELK_DRAW_DATA(root)       // the draw handle
 
 // Reads that an eval body can't make, but a full-fragment can:
 //   velk_global_data(root).cam_pos     // this view's frame globals
@@ -443,7 +443,7 @@ VELK_DRAW_DATA(root)      // the draw handle
 //   velk_draw(root).texture_id         // a header field with no accessor
 ```
 
-Vertex shaders declare the same `VELK_DRAW_DATA(root)` (or override `get_vertex_src()` to use the shared `element_vertex_src`). A shader only pays for the accessors it calls: a fragment shader that never touches instances or vertices simply doesn't reference them.
+Vertex shaders declare the same `VELK_DRAW_DATA(root)`, or override `get_vertex_src()` to use the shared `element_vertex_src`. Each accessor is independent, so a shader declares `VELK_DRAW_DATA(root)` and calls only the accessors it needs.
 
 This path is rare in first-party code. Prefer the eval body unless you're writing a material that cannot fit the eval contract (e.g. post-processing effects operating on a fullscreen quad).
 
@@ -460,11 +460,11 @@ constexpr velk::string_view my_frag = R"(
 #version 450
 #include "velk.glsl"
 
-struct MyParams {
+struct WaveParams {
     vec4  tint;
     float speed;
 };
-VELK_MATERIAL(MyParams)   // declares velk_materials as MyParams (set = 1 slot 4)
+VELK_MATERIAL(WaveParams)  // declares velk_materials as WaveParams (set = 1 slot 4)
 
 VELK_DRAW_DATA(root)
 
@@ -473,7 +473,7 @@ layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    MyParams p = velk_material(root);  // this draw's record from the material arena
+    WaveParams p = velk_material(root);  // this draw's record from the material arena
     frag_color = p.tint * (0.5 + 0.5 * sin(v_uv.x * p.speed));
 }
 )";
@@ -546,14 +546,14 @@ Shader bodies almost never name these fields. `velk.glsl` declares the struct an
 Material-specific data does not trail the header; it lives in the `set = 1` material arena (slot 4), one persistent region per material, dirty-tracked and rewritten only on change. The `ext::Material` base handles the lifecycle: `write_draw_data` fills a scratch buffer, the base diffs it against the previous frame, flags a material-dirty bit on change, and the renderer's upload sweep copies the bytes into the region.
 
 ```glsl
-struct MyMaterialData {
+struct MyParams {
     vec4  color;
     float intensity;
 };
-VELK_MATERIAL(MyMaterialData)
+VELK_MATERIAL(MyParams)
 
-MaterialEval velk_eval_my(EvalContext ctx) {
-    MyMaterialData d = VELK_LOAD_MATERIAL(MyMaterialData, ctx);
+MaterialEval velk_eval_my_material(EvalContext ctx) {
+    MyParams d = VELK_LOAD_MATERIAL(MyParams, ctx);
     // ...
 }
 ```
