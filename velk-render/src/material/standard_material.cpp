@@ -99,7 +99,7 @@ struct SpecularParams {
     uint tex_coord; uint color_tex_coord; uint _pad0; uint _pad1;
 };
 
-layout(buffer_reference, std430) readonly buffer StandardMaterialData {
+struct StandardMaterialData {
     BaseColorParams         base_color;
     MetallicRoughnessParams metallic_roughness;
     NormalParams            normal;
@@ -107,13 +107,14 @@ layout(buffer_reference, std430) readonly buffer StandardMaterialData {
     EmissiveParams          emissive;
     SpecularParams          specular;
 };
+VELK_MATERIAL(StandardMaterialData)
 
 // Per-property tex_coord selects TEXCOORD_0 (ctx.uv) or TEXCOORD_1 (ctx.uv1).
 #define VELK_STD_UV(ctx, tc) ((tc) == 0u ? (ctx).uv : (ctx).uv1)
 
 MaterialEval velk_eval_standard(EvalContext ctx)
 {
-    StandardMaterialData d = StandardMaterialData(ctx.data_addr);
+    StandardMaterialData d = VELK_LOAD_MATERIAL(StandardMaterialData, ctx);
 
     // Base color = factor * texture (texture defaults to white when absent).
     vec4 base = d.base_color.factor;
@@ -254,6 +255,12 @@ ReturnValue StandardMaterial::add_attachment(const IInterface::Ptr& attachment)
     if (succeeded(rv)) {
         if (auto p = interface_pointer_cast<IMaterialProperty>(attachment)) {
             properties_.push_back(p);
+            // This material's parameters live in its attached properties, each
+            // with its own storage, so self-observation does not see their
+            // writes. Each property fires on_property_changed instead.
+            property_subs_.push_back(ScopedHandler(
+                p->on_property_changed(), [this]() { this->mark_material_dirty(); }));
+            mark_material_dirty();  // the property set itself changed
         }
     }
     return rv;
@@ -264,12 +271,16 @@ ReturnValue StandardMaterial::remove_attachment(const IInterface::Ptr& attachmen
     auto rv = Base::remove_attachment(attachment);
     if (succeeded(rv)) {
         if (auto p = interface_pointer_cast<IMaterialProperty>(attachment)) {
-            for (auto it = properties_.begin(); it != properties_.end(); ++it) {
-                if (*it == p) {
-                    properties_.erase(it);
+            for (size_t i = 0; i < properties_.size(); ++i) {
+                if (properties_[i] == p) {
+                    properties_.erase(properties_.begin() + static_cast<long>(i));
+                    if (i < property_subs_.size()) {
+                        property_subs_.erase(property_subs_.begin() + static_cast<long>(i));
+                    }
                     break;
                 }
             }
+            mark_material_dirty();
         }
     }
     return rv;

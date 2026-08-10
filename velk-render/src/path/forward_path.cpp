@@ -67,8 +67,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
 
     // Get-or-create the per-view cache slot + first-sight subscription.
     // The pass rebuilds only when `dirty` is set (by on_render_state_changed
-    // or the resize check below); steady-state frames refresh just the
-    // per-frame view_globals_address (handled by emit_cached_view_pass).
+    // or the resize check below); steady-state frames re-add the same Ptr.
     auto [it, inserted] = cached_passes_.try_emplace(&entry);
     auto& cache = it->second;
     if (inserted) {
@@ -99,7 +98,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
 
     emit_cached_view_pass(
-        cache.pass, cache.dirty, "forward", render_view.view_globals_address, graph,
+        cache.pass, cache.dirty, "forward", graph,
         [&](CachedPassRecording& rec) {
             const ::velk::render::Frustum* frustum_ptr =
                 render_view.has_frustum ? &render_view.frustum : nullptr;
@@ -149,7 +148,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                 emit_draw_calls(
                     draw_calls,
                     env_batches, *ctx.frame_buffer, *ctx.resources,
-                    default_uv1, render_view.view_globals_address,
+                    default_uv1, render_view.view_globals_base,
                     resolve, /*frustum=*/nullptr);
             }
 
@@ -158,7 +157,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                 emit_draw_calls(
                     draw_calls,
                     *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-                    default_uv1, render_view.view_globals_address,
+                    default_uv1, render_view.view_globals_base,
                     resolve, frustum_ptr);
             }
 

@@ -55,9 +55,11 @@ struct ElementInstance {
     uvec4 params;
 };
 
-layout(buffer_reference, std430) readonly buffer ElementInstanceData {
-    ElementInstance data[];
-};
+// The shared instance arena (set = 1 slot 3), typed as ElementInstance (the
+// universal per-instance record). Every velk-ui shader reads its draw's
+// instance via velk_instance(root); fragment shaders that don't touch
+// instances simply never reference it.
+VELK_INSTANCES(ElementInstance)
 
 // ===== Material evaluation types =====
 // Shared across raster (forward / deferred fragment drivers) and RT
@@ -70,11 +72,12 @@ const uint VELK_LIGHTING_UNLIT   = 0u;  // Pass color straight through, no shadi
 const uint VELK_LIGHTING_STANDARD = 1u; // Full PBR lighting via velk_pbr_shade.
 
 // Everything a material eval function receives. Bundles instance + hit
-// context so adding a new per-hit input stays cheap. Evals that need
-// view-level state (camera position, viewport, BVH, present_counter)
-// read directly from the `view_globals` UBO declared in velk.glsl.
+// context so adding a new per-hit input stays cheap. View-level state
+// (camera position, viewport, BVH, present_counter) is deliberately NOT
+// here: reaching for it would tie the body to one path, since each path
+// gets at GlobalData differently.
 struct EvalContext {
-    uint64_t data_addr;    // material's per-draw GPU data pointer
+    uint material_base;    // material record index into the set = 1 material arena
     uint texture_id;       // bindless texture slot (0 if unused)
     uint shape_param;      // per-shape material slot (e.g. glyph index)
     vec2 uv;               // hit / fragment uv (TEXCOORD_0, 0..1 across the shape)
@@ -85,6 +88,18 @@ struct EvalContext {
     vec3 hit_pos;          // world-space hit point (or frag world position)
     vec4 tangent;          // world-space surface tangent (xyz) + handedness (w) for normal mapping; xyz=0 means no tangent basis (e.g. the RT path)
 };
+
+// Material data access. A snippet declares its value struct T, then:
+//   VELK_MATERIAL(T)
+//   T d = VELK_LOAD_MATERIAL(T, ctx);
+// Both paths reach the record by index out of the set = 1 material arena.
+// A raster pipeline compiles for one material, so VELK_MATERIAL(T) binds the
+// arena as a typed block and the load is a direct read. The compute composer
+// serves many materials from one shader, so it replaces the VELK_MATERIAL(T)
+// line with a generated velk_unpack_<T> that rebuilds the struct from the
+// arena's raw words, and defines the load to call it. The snippet is
+// identical either way.
+#define VELK_LOAD_MATERIAL(T, ctx) (velk_materials.data[(ctx).material_base])
 
 // Canonical material output. Produced by velk_eval_<name> once per
 // shading point and consumed by every path-specific driver.
@@ -166,6 +181,9 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     if (auto internal = interface_cast<IGpuResourceManagerInternal>(resources_)) {
         internal->init(backend_.get());
     }
+    // Plugins reach the manager through the render context (to claim a
+    // shared set = 1 arena); the renderer owns it.
+    if (render_ctx_) render_ctx_->set_resource_manager(resources_.get());
     snippets_ = instance().create<IFrameSnippetRegistry>(ClassId::FrameSnippetRegistry);
 
     frame_buffer_ = instance().create<IFrameDataManager>(ClassId::FrameDataManager);
@@ -196,6 +214,13 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         size_t bsize = buf->get_data_size();
         const uint8_t* bytes = buf->get_data();
         if (!bytes || bsize == 0 || resources_->find_buffer(buf)) return;
+        // The UV1 fallback is itself an IMeshBuffer, so it publishes into the
+        // mesh-word arena like any other geometry; its address (which the
+        // draw header still carries) comes from its region there.
+        if (auto* mbi = interface_cast<IMeshBufferInternal>(buf)) {
+            if (mbi->ensure_geometry(*resources_)) buf->clear_dirty();
+            return;
+        }
         GpuBufferDesc bdesc{};
         bdesc.size = bsize;
         bdesc.cpu_writable = true;
@@ -267,12 +292,63 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
 
 FrameContext Renderer::make_frame_context()
 {
+    // Shared arenas, created from the resource manager (which allocates their
+    // buffers and drives their deferred region reclaim). One per set = 1 slot,
+    // shared by every producer of that data so their regions never collide.
+    if (resources_ && !bvh_nodes_arena_) {
+        bvh_nodes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhNodes,
+                                                    sizeof(GpuBvhNode));
+    }
+    if (resources_ && !bvh_shapes_arena_) {
+        bvh_shapes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhShapes,
+                                                     sizeof(RtShape));
+    }
+    if (resources_ && !globals_arena_) {
+        globals_arena_ = resources_->create_arena(IRenderBackend::kGlobalGlobals,
+                                                  sizeof(FrameGlobals));
+    }
+    if (resources_ && !instance_arena_) {
+        instance_arena_ = resources_->create_arena(IRenderBackend::kGlobalInstances,
+                                                   kMaxInstanceDataSize);
+    }
+    // Byte-granular (element_size 1): material records vary in size by
+    // material type, so each alloc aligns its offset to its own record size.
+    if (resources_ && !material_arena_) {
+        material_arena_ = resources_->create_arena(IRenderBackend::kGlobalMaterials, 1);
+    }
+    // Homogeneous GpuLight records; element_size = stride so lights_base =
+    // region offset / sizeof(GpuLight).
+    if (resources_ && !lights_arena_) {
+        lights_arena_ = resources_->create_arena(IRenderBackend::kGlobalLights,
+                                                 sizeof(GpuLight));
+    }
+    // Homogeneous RtShape records; element_size = stride so shapes_base =
+    // region offset / sizeof(RtShape).
+    if (resources_ && !primary_shapes_arena_) {
+        primary_shapes_arena_ = resources_->create_arena(
+            IRenderBackend::kGlobalPrimaryShapes, sizeof(RtShape));
+    }
+    // Homogeneous MeshInstanceData records; element_size = stride so
+    // mesh_instance_base = region offset / sizeof(MeshInstanceData).
+    if (resources_ && !mesh_instances_arena_) {
+        mesh_instances_arena_ = resources_->create_arena(
+            IRenderBackend::kGlobalMeshInstances, sizeof(MeshInstanceData));
+    }
+
     FrameContext ctx{};
     ctx.backend = backend_.get();
     ctx.render_ctx = render_ctx_;
     ctx.frame_buffer = frame_buffer_.get();
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
+    ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
+    ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
+    ctx.globals_arena = globals_arena_.get();
+    ctx.instance_arena = instance_arena_.get();
+    ctx.material_arena = material_arena_.get();
+    ctx.lights_arena = lights_arena_.get();
+    ctx.primary_shapes_arena = primary_shapes_arena_.get();
+    ctx.mesh_instances_arena = mesh_instances_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -479,15 +555,21 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                         if (!bytes || bsize == 0) {
                             continue;
                         }
+                        // Mesh geometry lives in the shared mesh-word arena
+                        // (its backing buffer carries INDEX_BUFFER usage for
+                        // the indexed draws) rather than in an allocation of
+                        // its own, so RT can index the vertices and indices.
+                        if (auto* mbi = interface_cast<IMeshBufferInternal>(buf)) {
+                            if (mbi->ensure_geometry(*resources_)) {
+                                buf->clear_dirty();
+                                resources_uploaded = true;
+                            }
+                            continue;
+                        }
+
                         GpuBufferDesc bdesc{};
                         bdesc.size = bsize;
                         bdesc.cpu_writable = true;
-                        // IMeshBuffer carries an IBO half that needs
-                        // INDEX_BUFFER usage so it can be bound for
-                        // indexed draws.
-                        if (auto* mb = interface_cast<IMeshBuffer>(buf)) {
-                            bdesc.index_buffer = mb->get_ibo_size() > 0;
-                        }
                         auto* be = resources_->ensure_buffer_storage(buf, bdesc);
                         if (!be) continue;
                         if (auto gb = be->buffer.lock()) {
@@ -631,7 +713,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                         }
                     }
                     site.geometry.material_id = mat.mat_id;
-                    site.geometry.material_data_addr = mat.mat_addr;
+                    site.geometry.material_base = mat.mat_base;
                     site.geometry.texture_id = tex_id;
 
                     if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
@@ -640,35 +722,33 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     }
 
                     // Mesh-kind shapes: resolve the per-mesh static data
-                    // address (stable across frames; cached on the cached
-                    // shape's MeshInstanceData). The per-frame instance
-                    // record itself is uploaded by SceneBvh during the
-                    // re-publish pass. We just write a placeholder addr
-                    // here for the first frame; SceneBvh's per-frame patch
-                    // overwrites it on every subsequent frame.
+                    // address (stable across frames). The instance record
+                    // itself is collected into the build's parallel array
+                    // and uploaded by SceneBvh, which stamps the shape's
+                    // mesh_instance_base with its element index.
                     if (site.has_mesh_data) {
-                        if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
-                            site.mesh_instance.mesh_static_addr =
-                                self.snippets_->resolve_data_buffer(dd, resolve_ctx);
+                        site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                        auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive);
+                        if (mpi && self.resources_) {
+                            site.mesh_instance.mesh_static_base =
+                                mpi->ensure_rt_data(*self.resources_);
                         }
-                        site.geometry.mesh_data_addr = self.frame_buffer_->write(
-                            &site.mesh_instance, sizeof(site.mesh_instance));
 
                         if (s.log && site.mesh_primitive) {
                             auto* mp = site.mesh_primitive;
                             auto buf = mp->get_buffer();
-                            uint64_t buffer_addr = get_gpu_address(buf);
                             uint32_t i_count = mp->get_index_count();
                             uint32_t v_stride = mp->get_vertex_stride();
                             uint32_t triangle_count = i_count / 3u;
+                            uint32_t geometry_base = buf ? get_gpu_ref(buf).get_base() : 0u;
                             uint32_t ibo_offset = static_cast<uint32_t>(
                                 buf ? buf->get_ibo_offset() : 0);
-                            VELK_LOG(I, "BVH cb: inst=%p mesh_static_addr=0x%016llx "
-                                        "buffer_addr=0x%016llx ibo_offset=0x%08x "
+                            VELK_LOG(I, "BVH cb: inst=%p mesh_static_base=%u "
+                                        "geometry_base=%u ibo_offset=0x%08x "
                                         "triangle_count=%u v_stride=%u",
                                      (void*)mp,
-                                     (unsigned long long)site.mesh_instance.mesh_static_addr,
-                                     (unsigned long long)buffer_addr,
+                                     site.mesh_instance.mesh_static_base,
+                                     geometry_base,
                                      ibo_offset, triangle_count, v_stride);
                         }
                     }
@@ -723,17 +803,15 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             auto bit = scene_bvhs.find(scene);
             if (bit != scene_bvhs.end() && bit->second) {
                 auto* b = bit->second;
-                ctx.bvh_nodes_addr = b->nodes_addr();
-                ctx.bvh_shapes_addr = b->shapes_addr();
-                ctx.bvh_root = b->get_root_index();
-                ctx.bvh_node_count = b->get_node_count();
-                ctx.bvh_shape_count = b->get_shape_count();
+                ctx.bvh.root = b->get_root_index();
+                ctx.bvh.node_count = b->get_node_count();
+                ctx.bvh.shape_count = b->get_shape_count();
+                ctx.bvh.node_base = b->get_node_base();
+                ctx.bvh.shape_base = b->get_shape_base();
+                // The BVH writes its node/shape data into the shared set = 1
+                // arenas during rebuild; nothing to bind here.
             } else {
-                ctx.bvh_nodes_addr = 0;
-                ctx.bvh_shapes_addr = 0;
-                ctx.bvh_root = 0;
-                ctx.bvh_node_count = 0;
-                ctx.bvh_shape_count = 0;
+                ctx.bvh = {};
             }
             ctx.view_camera_trait = camera_trait.get();
 
@@ -750,11 +828,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             pv.slot = &view_slot;
             pv.camera_trait = camera_trait;
             pv.pipelines = std::move(pipelines_scratch_);
-            pv.bvh_nodes_addr = ctx.bvh_nodes_addr;
-            pv.bvh_shapes_addr = ctx.bvh_shapes_addr;
-            pv.bvh_root = ctx.bvh_root;
-            pv.bvh_node_count = ctx.bvh_node_count;
-            pv.bvh_shape_count = ctx.bvh_shape_count;
+            pv.bvh = ctx.bvh;
             pv.render_view = view_preparer_.prepare(*view_slot.entry,
                                                     view_slot.camera_element,
                                                     sit->second, ctx,
@@ -777,11 +851,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
 
         // Phase 2: emit each prepared view's pipelines into slot.graph.
         for (auto& pv : prepared_views_) {
-            ctx.bvh_nodes_addr = pv.bvh_nodes_addr;
-            ctx.bvh_shapes_addr = pv.bvh_shapes_addr;
-            ctx.bvh_root = pv.bvh_root;
-            ctx.bvh_node_count = pv.bvh_node_count;
-            ctx.bvh_shape_count = pv.bvh_shape_count;
+            ctx.bvh = pv.bvh;
             ctx.view_camera_trait = pv.camera_trait.get();
 
             IRenderTarget::Ptr color_target =

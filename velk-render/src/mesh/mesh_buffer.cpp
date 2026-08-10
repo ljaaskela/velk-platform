@@ -1,8 +1,31 @@
 #include "mesh/mesh_buffer.h"
 
+#include <velk-render/interface/intf_gpu_resource_manager.h>
+#include <velk-render/interface/intf_render_backend.h>
+
 #include <cstring>
 
 namespace velk::impl {
+
+namespace {
+
+/// Geometry is bulk and arena growth recopies the whole buffer, so the
+/// mesh-word arena starts large enough that a typical scene never grows it.
+/// Growth still works (doubling), it just costs a full copy when it happens.
+constexpr uint64_t kMeshArenaReserve = uint64_t(32) << 20;  // 32 MiB
+
+/// Word granularity: bases are 32-bit word indices, which is what the RT
+/// shader adds to reach a vertex float or an index uint.
+constexpr uint32_t kMeshWordSize = 4;
+
+/// Regions are 16-byte aligned. This was required while raster read vertices
+/// through a buffer_reference block, whose ADDRESS had to satisfy the block's
+/// own alignment (16 for a vertex struct containing a vec4). Both paths now
+/// read by index, so word alignment would suffice; 16 is kept because it costs
+/// a few bytes per mesh and keeps vertex records from straddling cache lines.
+constexpr uint64_t kMeshRegionAlign = 16;
+
+} // namespace
 
 void MeshBuffer::set_data(const void* vbo_data, size_t vbo_size,
                           const void* ibo_data, size_t ibo_size)
@@ -18,6 +41,36 @@ void MeshBuffer::set_data(const void* vbo_data, size_t vbo_size,
     vbo_size_ = vbo_size;
     ibo_size_ = ibo_size;
     set_dirty();
+}
+
+bool MeshBuffer::ensure_geometry(IGpuResourceManager& resources)
+{
+    const uint64_t need = vbo_size_ + ibo_size_;
+    if (need == 0) return false;
+
+    auto arena = resources.shared_arena(IRenderBackend::kGlobalMeshWords,
+                                        kMeshWordSize, true, kMeshArenaReserve);
+    if (!arena) return false;
+    arena_ = arena;
+
+    // A size change takes a fresh region; the old one retires on the fence.
+    if (region_.size() != need) {
+        region_ = arena->alloc(need, kMeshRegionAlign);
+        if (!region_.valid()) return false;
+    }
+
+    const uint8_t* bytes = get_data();
+    if (!bytes) return false;
+    arena->write_at(region_.offset(), bytes, need);
+    return true;
+}
+
+GpuRef MeshBuffer::gpu_ref() const
+{
+    auto arena = arena_.lock();
+    if (!arena || !region_.valid()) return {};
+    return GpuRef::from_index(arena->slot(),
+                              static_cast<uint32_t>(region_.offset() / kMeshWordSize));
 }
 
 } // namespace velk::impl

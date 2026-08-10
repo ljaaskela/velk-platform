@@ -143,9 +143,10 @@ public:
 
         /// Cached lighting (compute + blit) pass. All PushC inputs are
         /// stable across frames now: gbuffer attachments (Step B),
-        /// deferred_output / shadow_debug (Step C), lights_addr +
-        /// light_count via write_diff notification (Step D), cam_pos
-        /// notify via Step A. Rebuilt only when `lighting_dirty` is
+        /// deferred_output / shadow_debug (Step C), lights_base +
+        /// light_count (persistent light arena; re-record only on light
+        /// count change), cam_pos notify via Step A. Rebuilt only when
+        /// `lighting_dirty` is
         /// set by `on_render_state_changed` (camera / batch / lights
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;

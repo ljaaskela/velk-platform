@@ -14,6 +14,7 @@
 #include <velk-render/interface/intf_frame_data_manager.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_program.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_surface.h>
@@ -54,7 +55,7 @@ inline void emit_draw_calls(
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
     IBuffer* default_uv1,
-    uint64_t view_globals_address,
+    uint32_t view_globals_base,
     ResolvePipelineFn resolve_pipeline,
     const ::velk::render::Frustum* frustum = nullptr)
 {
@@ -71,19 +72,13 @@ inline void emit_draw_calls(
         IGpuPipeline* pipeline = resolve_pipeline(batch);
         if (!pipeline) continue;
 
-        // Per-batch persistent pool slice when available — a single
-        // VkBuffer per view holds all batch slices, the slice was
-        // bump-allocated and filled during BatchBuilder rebuild, and
-        // transform-only frames write through the mapped pointer in
-        // place. Falls through to per-frame staging for batches without
-        // a slice (e.g. env_batch, which lives outside the pool).
         // Each batch composes an IBuffer (impl::GpuBuffer) holding the
-        // [args(32)][count(16)][instance_data] layout. emit reads
-        // args/count at offsets 0 and 32 of the resolved backend handle;
-        // the vertex shader BDA-reads instances at storage_gpu_address +
-        // 48. Batches that haven't been allocated a backing buffer yet
-        // (env_batch, which lives outside the upload pipeline) fall
-        // through to per-frame staging.
+        // [args(32)][count(16)] blob, which is all that still has to be a
+        // buffer the GPU reads directly: the indirect commands. Instance,
+        // material and header bytes all live in shared arenas, reached by
+        // index. Batches with no backing buffer yet (env_batch, outside the
+        // upload pipeline) fall through to per-frame staging for the
+        // indirect commands only.
         IBuffer* storage_buf = batch.storage_buffer();
         IGpuBuffer* storage_gb = nullptr;
         if (storage_buf) {
@@ -93,17 +88,18 @@ inline void emit_draw_calls(
                 }
             }
         }
-        const bool has_storage = (storage_gb != nullptr && batch.storage_gpu_address() != 0);
-        uint64_t instances_addr = 0;
-        if (has_storage) {
-            instances_addr = batch.storage_gpu_address() + BatchBufferLayout::kInstanceOffset;
-        } else {
-            auto instance_bytes = batch.instance_data();
-            instances_addr =
-                frame_data.write(instance_bytes.begin(), instance_bytes.size());
-            if (!instances_addr) continue;
+        // A resolved, still-live IGpuBuffer is exactly the residency question:
+        // the manager only registers an entry once the allocation succeeded.
+        const bool has_storage = (storage_gb != nullptr);
+        // Instance data lives in the shared instance arena (set = 1 slot 3),
+        // suballocated per batch by the upload sweep. The header carries the
+        // element base (region offset / stride) the vertex shader adds to
+        // gl_InstanceIndex. Batches with no instance data (e.g. env) get 0.
+        uint32_t instances_base = 0;
+        if (batch.instance_stride() != 0 && batch.instance_region_size() != 0) {
+            instances_base = static_cast<uint32_t>(
+                batch.instance_region_offset() / batch.instance_stride());
         }
-
         uint32_t texture_id = 0;
         if (batch.texture_key() != 0) {
             auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
@@ -123,72 +119,76 @@ inline void emit_draw_calls(
         if (!buffer) continue;
 
         // IBO half is optional: indexed draw when ibo_size > 0, plain
-        // vkCmdDraw when 0 (e.g. TriangleStrip unit quad).
+        // vkCmdDraw when 0 (e.g. TriangleStrip unit quad). The indices live in
+        // the shared mesh-word arena, so the bound buffer is the arena's
+        // backing buffer and the offset is this mesh's region plus the IBO
+        // half's position within it. The arena handle is re-asked rather than
+        // cached because growth replaces the backing buffer.
         IGpuBuffer* ibo_gb = nullptr;
         size_t ibo_offset = 0;
         if (buffer->get_ibo_size() > 0) {
-            auto* buf_entry = resources.find_buffer(buffer.get());
-            if (!buf_entry) continue;
-            auto igb = buf_entry->buffer.lock();
-            if (!igb) continue;
-            ibo_gb = igb.get();
-            ibo_offset = buffer->get_ibo_offset();
+            const GpuRef geometry = get_gpu_ref(buffer);
+            if (geometry.kind != GpuRef::Kind::Index) continue;
+            auto arena = resources.shared_arena(geometry.get_slot(), 4);
+            if (!arena) continue;
+            ibo_gb = arena->buffer();
+            if (!ibo_gb) continue;
+            ibo_offset = size_t(geometry.get_base()) * 4u + buffer->get_ibo_offset();
         }
 
         DrawDataHeader header{};
-        header.globals_addr = view_globals_address;
-        header.instances_address = instances_addr;
+        header.globals_base = view_globals_base;
+        header.instances_base = instances_base;
         header.texture_id = texture_id;
         header.instance_count = batch.instance_count();
-        header.vbo_address = get_gpu_address(buffer);
-        if (!header.vbo_address) continue;
+        // Vertex streams are word bases into the mesh-word arena, the same
+        // bytes and the same model RT reads.
+        const GpuRef vbo_ref = get_gpu_ref(buffer);
+        if (vbo_ref.kind != GpuRef::Kind::Index) continue;
+        header.vbo_base = vbo_ref.get_base();
 
         if (auto uv1 = primitive->get_uv1_buffer()) {
-            uint64_t uv1_base = get_gpu_address(uv1);
-            if (!uv1_base) continue;
-            header.uv1_address = uv1_base + primitive->get_uv1_offset();
+            const GpuRef uv1_ref = get_gpu_ref(uv1);
+            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
+            header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
             header.uv1_enabled = 1;
         } else {
-            header.uv1_address = get_gpu_address(default_uv1);
+            const GpuRef uv1_ref = get_gpu_ref(default_uv1);
+            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
+            header.uv1_base = uv1_ref.get_base();
             header.uv1_enabled = 0;
-            if (!header.uv1_address) continue;
         }
 
-        // Material draw-data lives in a persistent IProgramDataBuffer
-        // owned by the material; ViewPreparer's per-batch upload sweep
-        // ensure_buffer_storage's it and uploads when dirty (same path
-        // as VBOs / IBOs / batch storage). Here we just read its stable
-        // GPU address.
+        // Material draw-data lives in the shared material arena (set = 1 slot
+        // 4), suballocated + written by ViewPreparer's upload sweep. The header
+        // carries the element base (region offset / record size) the fragment
+        // shader adds to reach velk_materials.data[material_base]. Materials
+        // with no draw data (record size 0) get base 0.
         auto material_ptr = batch.material();
-        uint64_t material_addr = 0;
-        if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
-            if (auto buf = dd->get_data_buffer(static_cast<ITextureResolver*>(&resources))) {
-                material_addr = get_gpu_address(buf);
+        if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
+            if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
+                const size_t rec = dd->get_draw_data_size();
+                auto buf = mi->material_buffer();
+                if (rec != 0 && buf) {
+                    header.material_base =
+                        static_cast<uint32_t>(get_gpu_ref(buf).get_base() / rec);
+                }
             }
         }
 
-        // Header + material_ptr destination: prefer the batch's own
-        // persistent storage (cross-frame stable address) when mapped.
-        // Falls back to per-frame staging for batches without backing
-        // storage (e.g. env_batch).
-        uint64_t draw_data_addr = 0;
-        uint8_t* persistent = batch.storage_mapped();
-        if (has_storage && persistent) {
-            std::memcpy(persistent + BatchBufferLayout::kHeaderOffset,
-                        &header, sizeof(header));
-            std::memcpy(persistent + BatchBufferLayout::kMaterialPtrOffset,
-                        &material_addr, sizeof(material_addr));
-            draw_data_addr = batch.storage_gpu_address() + BatchBufferLayout::kHeaderOffset;
-        } else {
-            constexpr size_t kMaterialPtrSize = sizeof(uint64_t);
-            size_t total_size = sizeof(DrawDataHeader) + kMaterialPtrSize;
-            auto reservation = frame_data.reserve(total_size);
-            if (!reservation.ptr) continue;
-            auto* dst = static_cast<uint8_t*>(reservation.ptr);
-            draw_data_addr = reservation.gpu_addr;
-            std::memcpy(dst, &header, sizeof(header));
-            std::memcpy(dst + sizeof(DrawDataHeader), &material_addr, kMaterialPtrSize);
-        }
+        // The header goes to this batch's persistent region of the shared
+        // draw-data arena, allocated by the upload sweep. Persistent rather
+        // than per-frame because the base below is baked into the recorded
+        // draw call: a rotating region would go stale on any frame the command
+        // buffer is reused rather than re-recorded.
+        if (batch.draw_data_region_size() != sizeof(DrawDataHeader)) continue;
+        auto draw_arena = resources.shared_arena(IRenderBackend::kGlobalDrawData,
+                                                 sizeof(DrawDataHeader));
+        if (!draw_arena) continue;
+        const uint64_t draw_data_offset = batch.draw_data_region_offset();
+        draw_arena->write_at(draw_data_offset, &header, sizeof(header));
+        const uint32_t draw_base =
+            static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
 
         // Always-indirect: pull args + count from the batch's own
         // storage buffer when available; fall back to writing a record
@@ -220,10 +220,10 @@ inline void emit_draw_calls(
                     uint32_t firstInstance;
                 } args{ primitive->get_index_count(), batch.instance_count(),
                         0, 0, 0 };
-                uint64_t args_addr = frame_data.write(&args, sizeof(args));
-                if (!args_addr) continue;
+                uint64_t args_offset = frame_data.write(&args, sizeof(args));
+                if (args_offset == IFrameDataManager::kInvalidOffset) continue;
                 call.args_buffer = frame_data.active_buffer();
-                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+                call.args_buffer_offset = args_offset;
             } else {
                 struct {
                     uint32_t vertexCount;
@@ -232,21 +232,21 @@ inline void emit_draw_calls(
                     uint32_t firstInstance;
                 } args{ primitive->get_vertex_count(), batch.instance_count(),
                         0, 0 };
-                uint64_t args_addr = frame_data.write(&args, sizeof(args));
-                if (!args_addr) continue;
+                uint64_t args_offset = frame_data.write(&args, sizeof(args));
+                if (args_offset == IFrameDataManager::kInvalidOffset) continue;
                 call.args_buffer = frame_data.active_buffer();
-                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+                call.args_buffer_offset = args_offset;
             }
             uint32_t count_value = 1;
-            uint64_t count_addr = frame_data.write(&count_value, sizeof(count_value), 4);
-            if (!count_addr) continue;
+            uint64_t count_offset = frame_data.write(&count_value, sizeof(count_value), 4);
+            if (count_offset == IFrameDataManager::kInvalidOffset) continue;
             call.count_buffer = frame_data.active_buffer();
-            call.count_buffer_offset = count_addr - frame_data.active_buffer_base();
+            call.count_buffer_offset = count_offset;
         }
         call.max_draw_count = 1;
 
-        call.root_constants_size = sizeof(uint64_t);
-        std::memcpy(call.root_constants, &draw_data_addr, sizeof(uint64_t));
+        call.root_constants_size = sizeof(uint32_t);
+        std::memcpy(call.root_constants, &draw_base, sizeof(uint32_t));
 
         out_calls.push_back(call);
     }

@@ -56,20 +56,6 @@ public:
     virtual bool closest_hit(vec3 origin, vec3 dir, BvhHit& out) const = 0;
 
     /**
-     * @brief Returns the BVH nodes buffer for GPU consumption.
-     *
-     * Backend-neutral: callers read the buffer's GPU address via
-     * IBuffer::get_gpu_address() and the renderer handles upload via
-     * the standard is_dirty / clear_dirty flow.
-     */
-    virtual IBuffer::Ptr get_nodes_buffer() const = 0;
-
-    /**
-     * @brief Returns the BVH shapes buffer for GPU consumption.
-     */
-    virtual IBuffer::Ptr get_shapes_buffer() const = 0;
-
-    /**
      * @brief Index of the BVH's root node within the nodes buffer.
      */
     virtual uint32_t get_root_index() const = 0;
@@ -83,6 +69,17 @@ public:
      * @brief Number of shapes currently indexed by the BVH.
      */
     virtual uint32_t get_shape_count() const = 0;
+
+    /**
+     * @brief Element base to add to node / shape indices this frame.
+     *
+     * The BVH nodes / shapes live in IGpuArena ring regions; the base is
+     * the region's element offset for the current frame. Shaders read
+     * `data[base + index]`; the renderer stamps these into FrameGlobals /
+     * RtRoot. Valid only for the frame in which the BVH was last rebuilt.
+     */
+    virtual uint32_t get_node_base() const = 0;
+    virtual uint32_t get_shape_base() const = 0;
 
     /**
      * @brief Marks the BVH as stale so the next access rebuilds.

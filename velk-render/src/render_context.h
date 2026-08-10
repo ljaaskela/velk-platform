@@ -77,6 +77,8 @@ public:
     }
 
     IRenderBackend::Ptr backend() const override { return backend_; }
+    IGpuResourceManager* resources() const override { return resources_; }
+    void set_resource_manager(IGpuResourceManager* resources) override { resources_ = resources; }
 
     IMeshBuilder& get_mesh_builder() override;
 
@@ -102,6 +104,9 @@ private:
     /// Mutable: find_pipeline prunes expired entries during its scan.
     mutable vector<PipelineCacheEntry> pipeline_cache_;
     ShaderIncludeMap shader_includes_;
+    /// Installed by the renderer, which owns it. Raw: the renderer outlives
+    /// the context's use of it.
+    IGpuResourceManager* resources_ = nullptr;
     mutable ShaderCache shader_cache_;
     IShader::Ptr default_vertex_shader_;
     IShader::Ptr default_fragment_shader_;

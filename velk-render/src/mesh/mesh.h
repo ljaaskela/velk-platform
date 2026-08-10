@@ -5,9 +5,9 @@
 #include <velk/vector.h>
 
 #include <velk-render/blas.h>
-#include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_mesh.h>
-#include <velk-render/interface/intf_program_data_buffer.h>
 #include <velk-render/plugin.h>
 
 #include <mutex>
@@ -18,13 +18,13 @@ namespace velk::impl {
 /// IMeshBuffer (may be shared with sibling primitives), the attribute
 /// layout, topology, bounds, and a material ObjectRef.
 ///
-/// Also implements IDrawData: returns a persistent buffer carrying
-/// MeshStaticData for the RT/shadow path. The GPU address of that
-/// buffer is stable across frames (matches StandardMaterial's pattern)
-/// so RtShape records can cache it once and only the per-frame
-/// instance data has to be re-uploaded.
+/// Also owns this primitive's RT geometry data: persistent regions of the
+/// shared mesh-static / BLAS-node / BLAS-triangle arenas, published through
+/// `ensure_rt_data`. The element bases are stable for the primitive's
+/// lifetime, so mesh instances cache the mesh-static index once and only the
+/// per-shape transforms change per frame.
 class MeshPrimitive
-    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitive, IMeshPrimitiveInternal, IDrawData>
+    : public ::velk::ext::Object<MeshPrimitive, IMeshPrimitive, IMeshPrimitiveInternal>
 {
 public:
     VELK_CLASS_UID(::velk::ClassId::MeshPrimitive, "MeshPrimitive");
@@ -60,20 +60,16 @@ public:
     IMeshBuffer::Ptr get_uv1_buffer() const override { return uv1_buffer_; }
     uint32_t get_uv1_offset() const override { return uv1_offset_; }
 
-    // IDrawData: persistent MeshStaticData buffer for the RT/shadow
-    // path. Triangle-list primitives backed by an indexed buffer return
-    // a populated buffer; everything else returns nullptr (we don't yet
-    // emit RT shapes for non-triangle topologies).
-    size_t get_draw_data_size() const override;
-    ReturnValue write_draw_data(void* out, size_t size,
-                                ::velk::ITextureResolver* resolver = nullptr) const override;
-    IBuffer::Ptr get_data_buffer(::velk::ITextureResolver* resolver = nullptr) override;
+    // IMeshPrimitiveInternal: publishes MeshStaticData + the BLAS into the
+    // shared arenas. Triangle-list primitives backed by an indexed buffer
+    // with a built BLAS return a valid base; everything else returns
+    // kInvalidMeshStaticBase (we don't emit RT shapes for those).
+    uint32_t ensure_rt_data(IGpuResourceManager& resources) override;
 
-    /// Stores a pre-built BLAS for this primitive. Subsequent
-    /// `get_data_buffer` calls serialise the nodes + triangle indices
-    /// after the MeshStaticData header so the RT path can walk the
-    /// per-primitive acceleration structure instead of doing a linear
-    /// triangle scan.
+    /// Stores a pre-built BLAS for this primitive and releases the current
+    /// arena regions, so the next `ensure_rt_data` republishes the nodes +
+    /// triangle indices and the RT path walks the acceleration structure
+    /// instead of doing a linear triangle scan.
     void set_rt_blas(BlasBuild blas) override;
 
 private:
@@ -89,10 +85,18 @@ private:
     IMeshBuffer::Ptr uv1_buffer_;
     uint32_t uv1_offset_ = 0;
 
-    /// Lazily allocated on first get_data_buffer call. Holds
-    /// MeshStaticData followed by the BLAS node array and the BLAS
-    /// triangle-index array. Stable GPU address across frames.
-    ::velk::IProgramDataBuffer::Ptr rt_data_buffer_;
+    /// This primitive's regions in the shared RT arenas (set = 1 slots
+    /// 11 / 12 / 13), allocated together on the first successful
+    /// `ensure_rt_data` and held for the primitive's lifetime so
+    /// `rt_static_base_` stays stable. Freed deferred past the fence when
+    /// `set_rt_blas` replaces the build or the primitive is destroyed.
+    ArenaRegion rt_static_region_;
+    ArenaRegion rt_blas_nodes_region_;
+    ArenaRegion rt_blas_tris_region_;
+
+    /// Element index of `rt_static_region_`, or kInvalidMeshStaticBase
+    /// while the RT data is not published.
+    uint32_t rt_static_base_ = kInvalidMeshStaticBase;
 
     /// Pre-built BLAS for the RT path. Empty until `set_rt_blas` runs;
     /// `get_draw_data_size` and `write_draw_data` include the BLAS

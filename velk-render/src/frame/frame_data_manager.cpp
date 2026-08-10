@@ -12,10 +12,10 @@ uint64_t FrameDataManager::write(const void* data, size_t size, size_t alignment
 {
     auto r = reserve(size, alignment);
     if (!r.ptr) {
-        return 0;
+        return kInvalidOffset;
     }
     std::memcpy(r.ptr, data, size);
-    return r.gpu_addr;
+    return r.offset;
 }
 
 IFrameDataManager::WriteResult FrameDataManager::reserve(size_t size, size_t alignment)
@@ -32,13 +32,13 @@ IFrameDataManager::WriteResult FrameDataManager::reserve(size_t size, size_t ali
     }
 
     auto* ptr = static_cast<uint8_t*>(active_->ptr) + write_offset_;
-    uint64_t gpu_addr = active_->gpu_base + write_offset_;
+    const uint64_t offset = write_offset_;
     write_offset_ += size;
     if (write_offset_ > peak_usage_) {
         peak_usage_ = write_offset_;
     }
 
-    return {ptr, gpu_addr};
+    return {ptr, offset};
 }
 
 void FrameDataManager::begin_frame(Slot& slot)
@@ -104,7 +104,6 @@ void FrameDataManager::alloc_slot(Slot& slot, IRenderBackend& /*backend*/, IGpuR
     slot.buffer = resources.create_gpu_buffer(desc);
     if (!slot.buffer) return;
     slot.ptr = slot.buffer->map();
-    slot.gpu_base = slot.buffer->gpu_address();
     slot.buffer_size = buffer_size_;
 }
 

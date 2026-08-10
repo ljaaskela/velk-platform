@@ -129,8 +129,8 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
         // meshes (e.g. MeshVisual from a glTF import). Emit one
         // Mesh-kind RtShape per IMeshPrimitive, with a MeshData payload
         // pointing at the existing IMeshBuffer's VBO+IBO regions. The
-        // renderer callback resolves mesh_data_addr to the GPU address of
-        // its uploaded MeshData record.
+        // renderer callback resolves the mesh-static address; the uploader
+        // stamps mesh_instance_base once the records are in the arena.
         if (auto vs3d = read_state<IVisual3D>(visual)) {
             auto mesh_obj = vs3d->mesh.template get<IMesh>();
             if (mesh_obj) {
@@ -142,8 +142,10 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                     if (!prim_state) continue;
                     auto buf = prim_ptr->get_buffer();
                     if (!buf) continue;
-                    uint64_t buffer_addr = get_gpu_address(buf);
-                    if (buffer_addr == 0) continue;
+                    // Skip until the geometry is GPU-resident. Asked as a ref
+                    // rather than an address: the bytes live in the mesh-word
+                    // arena, so there is a base and no address to test.
+                    if (!get_gpu_ref(buf).valid()) continue;
                     uint32_t v_count = prim_ptr->get_vertex_count();
                     uint32_t i_count = prim_ptr->get_index_count();
                     uint32_t v_stride = prim_ptr->get_vertex_stride();
@@ -199,20 +201,18 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                     site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
                     site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
 
-                    // Per-frame instance data: world matrices + a
-                    // pointer placeholder. The renderer callback fills
-                    // mesh_static_addr from the primitive's persistent
-                    // IDrawData buffer (stable across frames). Static
-                    // mesh metadata (buffer_addr, offsets, counts,
-                    // stride) lives in that buffer — not duplicated
-                    // here.
+                    // Per-shape instance data: world matrices + an index
+                    // placeholder. The renderer callback fills
+                    // mesh_static_base by publishing the primitive's RT
+                    // data into the shared arenas (stable across frames).
+                    // Static mesh metadata (geometry bases, counts, stride)
+                    // lives in that record — not duplicated here.
                     auto& mi = site.mesh_instance;
                     std::memcpy(mi.world,     world.m,     sizeof(mi.world));
                     std::memcpy(mi.inv_world, inv_world.m, sizeof(mi.inv_world));
-                    mi.mesh_static_addr = 0;  // resolved by the renderer cb.
+                    mi.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
                     site.mesh_primitive = prim_ptr.get();
                     site.has_mesh_data = true;
-                    (void)buffer_addr;  // validated above; no longer carried inline.
 
                     cb(user, site);
                 }

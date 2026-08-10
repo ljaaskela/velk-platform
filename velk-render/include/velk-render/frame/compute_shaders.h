@@ -29,7 +29,6 @@ namespace velk {
 //     shared `velk_eval_shadow` composer.
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -37,6 +36,19 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 1, rgba8)   uniform writeonly image2D gStorageImages[];
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+// Scene TLAS, bound by index (set = 1) instead of chased through a
+// buffer_device_address in globals. The renderer stamps the same
+// scene-wide BVH buffers into set_global_buffer each frame; indexed by
+// first_child / first_shape are relative to this frame's ring region;
+// VELK_NODE_BASE / VELK_SHAPE_BASE add the region base (see IGpuArena).
+layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
+layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
+// velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
+// selects this view's record.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
+#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
@@ -47,16 +59,32 @@ struct Light {
     vec4  params;          // x range, y cos(inner), z cos(outer), w light size (dir: angular radius rad; point/spot: world radius)
 };
 
-layout(buffer_reference, std430) readonly buffer LightList { Light data[]; };
+// Scene lights bound by index (set = 1 slot 5); this view's run starts at
+// pc.lights_base. Same buffer the RT compute reads.
+layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
-layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
-    vec4 params; // x = intensity, y = rotation_rad, zw = _
-};
+// Material records as raw words (set = 1 slot 4). This shader does not
+// evaluate materials, but it composes the same intersect snippets the RT
+// compute does, and an intersect may read its shape's record (text reads its
+// glyph-data bases from it) at the word base carried on the shape.
+layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
 
-// RtShape / RtShapeList / BvhNode / BvhNodeList come from velk.glsl.
+// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
+// which resolves shape.mesh_instance_base. Same buffer the RT compute reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+
+// Per-primitive RT geometry metadata (set = 1 slot 11), read via
+// velk_mesh_static(inst), plus the BLAS runs it points at (slots 12 / 13).
+// A primitive's runs are allocated once at load and never move.
+layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
+layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
+
+// RtShape / BvhNode come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
 // are dereferenced via `globals.X`; the address is in push-constant
 // slot [0..8) (see velk.glsl GlobalData).
+)" R"(
 
 // scalar layout: tight packing so the per-dispatch CPU struct (whose
 // `vec4 cam_pos` sits at offset 0 of the struct) lines up with the
@@ -64,7 +92,8 @@ layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
 // std430 would round vec4 up to a 16-byte alignment and shift every
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // offset 0  (8 bytes, FrameGlobals BDA)
+    uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
+    uint _pad_globals;         // 4         (keeps cam_pos at offset 8)
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -77,9 +106,10 @@ layout(push_constant, scalar) uniform PC {
     uint light_count;          // 56
     uint env_texture_id;       // 60
     uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
-    uint _pad0;                // 68  aligns the BDA pointers below to 8
-    LightList lights;          // 72
-    _EnvParamsBuf env_params;  // 80
+    uint _pad0;                // 68  filler; keeps the block layout at 96 bytes
+    uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
+    uint _pad_lights;          // 76
+    vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
     uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
     uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
 } pc;
@@ -194,11 +224,9 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         float t_aabb;
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
-    MeshInstancePtr inst_ptr = MeshInstancePtr(shape.mesh_data_addr);
-    MeshInstanceData inst = inst_ptr.data;
-    if (inst.mesh_static_addr == uint64_t(0)) return false;
-    MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
-    MeshStaticData st = st_ptr.data;
+    MeshInstanceData inst = velk_mesh_instance(shape);
+    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    MeshStaticData st = velk_mesh_static(inst);
     if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
     if (st.blas_node_count == 0u) return false;
 
@@ -218,18 +246,12 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     if (ld_scale < 1e-30) return false;
     vec3 ld = ld_unnorm / ld_scale;
 
-    MeshIndices  ib = MeshIndices (st.buffer_addr + uint64_t(st.ibo_offset));
-    MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
     uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
 
-    // The MeshStaticData buffer layout is:
-    //   [MeshStaticData header: 32 B]
-    //   [BvhNode[blas_node_count]:  48 B each]
-    //   [uint  [blas_tri_count]:    4 B each]
-    BlasNodeList blas_nodes = BlasNodeList(inst.mesh_static_addr + uint64_t(32));
-    BlasTriList  blas_tris  = BlasTriList(
-        inst.mesh_static_addr + uint64_t(32)
-        + uint64_t(st.blas_node_count) * uint64_t(48));
+    // This primitive's BLAS runs inside the shared node / triangle arenas;
+    // node and triangle indices below are relative to these bases.
+    uint blas_node_base = st.blas_node_base;
+    uint blas_tri_base  = st.blas_tri_base;
 
     Ray local_ray;
     local_ray.origin = lo;
@@ -251,24 +273,24 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     stack[sp++] = st.blas_root;
     while (sp > 0) {
         uint ni = uint(stack[--sp]);
-        BvhNode node = blas_nodes.data[ni];
+        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
         float t_aabb;
         if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
 
         if (node.shape_count > 0u) {
             // Leaf: test triangles.
             for (uint k = 0u; k < node.shape_count; ++k) {
-                uint tri = blas_tris.data[node.first_shape + k];
+                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
                 uint base = tri * 3u;
-                uint i0 = ib.data[base + 0u];
-                uint i1 = ib.data[base + 1u];
-                uint i2 = ib.data[base + 2u];
+                uint i0 = velk_mesh_index(st, base + 0u);
+                uint i1 = velk_mesh_index(st, base + 1u);
+                uint i2 = velk_mesh_index(st, base + 2u);
                 uint o0 = i0 * floats_per_vert;
                 uint o1 = i1 * floats_per_vert;
                 uint o2 = i2 * floats_per_vert;
-                vec3 v0 = vec3(vb.data[o0], vb.data[o0 + 1u], vb.data[o0 + 2u]);
-                vec3 v1 = vec3(vb.data[o1], vb.data[o1 + 1u], vb.data[o1 + 2u]);
-                vec3 v2 = vec3(vb.data[o2], vb.data[o2 + 1u], vb.data[o2 + 2u]);
+                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
+                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
+                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
 
                 // Möller-Trumbore. The det rejection threshold scales
                 // with the actual edge magnitudes so meshes whose
@@ -308,8 +330,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
             // closest-hit on a triangle BLAS this lets the far subtree
             // get culled by `best_t` once a near hit lands.
             if (node.child_count == 2u) {
-                BvhNode l = blas_nodes.data[node.first_child];
-                BvhNode r = blas_nodes.data[node.first_child + 1u];
+                BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
+                BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
                 float t_l, t_r;
                 bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
                 bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
@@ -340,13 +362,13 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
     // (1-u-v, u, v) the weights for (V0, V1, V2).
     float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(vb.data[best_o0 + 3u], vb.data[best_o0 + 4u], vb.data[best_o0 + 5u]);
-    vec3 n1 = vec3(vb.data[best_o1 + 3u], vb.data[best_o1 + 4u], vb.data[best_o1 + 5u]);
-    vec3 n2 = vec3(vb.data[best_o2 + 3u], vb.data[best_o2 + 4u], vb.data[best_o2 + 5u]);
+    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
+    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
+    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
     vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(vb.data[best_o0 + 6u], vb.data[best_o0 + 7u]);
-    vec2 uv1 = vec2(vb.data[best_o1 + 6u], vb.data[best_o1 + 7u]);
-    vec2 uv2 = vec2(vb.data[best_o2 + 6u], vb.data[best_o2 + 7u]);
+    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
+    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
+    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
     vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
 
     // Convert local hit to world-space ray parameter.
@@ -388,18 +410,18 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 // any realistic UI scene depth.
 bool trace_any_hit(Ray ray, float t_max)
 {
-    if (pc.globals.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[32];
     int sp = 0;
-    stack[sp++] = pc.globals.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.globals.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = pc.globals.bvh_shapes.data[node.first_shape + i];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -410,8 +432,8 @@ bool trace_any_hit(Ray ray, float t_max)
         // Falls back to natural order for non-binary or single-child
         // nodes (none today, but kept defensive).
         if (node.child_count == 2u) {
-            BvhNode l = pc.globals.bvh_nodes.data[node.first_child];
-            BvhNode r = pc.globals.bvh_nodes.data[node.first_child + 1u];
+            BvhNode l = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child];
+            BvhNode r = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child + 1u];
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -452,7 +474,7 @@ vec3 env_miss_color_lod(vec3 rd, float lod)
 {
     if (pc.env_texture_id == 0u) return vec3(0.0);
     const float PI = 3.14159265358979323846;
-    vec4 params = pc.env_params.params;
+    vec2 params = pc.env_params;
     float c = cos(params.y);
     float s = sin(params.y);
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
@@ -543,7 +565,7 @@ void main()
     // the environment. Falls back to black when the view has no env.
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
-        mat4 inv_vp = pc.globals.inverse_view_projection;
+        mat4 inv_vp = VELK_GLOBALS.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
         vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
@@ -600,9 +622,9 @@ void main()
         vec3  res_radiance = vec3(0.0);
         float total_w = 0.0;
         uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
-                     + pc.globals.present_counter * 26699u) | 1u;
+                     + VELK_GLOBALS.present_counter * 26699u) | 1u;
         for (uint i = 0u; i < pc.light_count; ++i) {
-            Light light = pc.lights.data[i];
+            Light light = velk_lights.data[pc.lights_base + i];
             vec3 L;
             float atten = 1.0;
             if (light.flags.x == 0u) {
@@ -650,7 +672,7 @@ void main()
         // (one ray), demodulated (no albedo - reapplied at composite).
         vec3 direct_diffuse = vec3(0.0);
         if (res_light != 0xffffffffu && res_w > 0.0) {
-            Light chosen = pc.lights.data[res_light];
+            Light chosen = velk_lights.data[pc.lights_base + res_light];
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
@@ -693,7 +715,7 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         float ao = 1.0;
-        if (pc.globals.bvh_node_count != 0u) {
+        if (VELK_GLOBALS.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
             ao_r.origin = world_pos + N * 0.01;
@@ -739,14 +761,17 @@ void main()
 // image. `reset` discards history on the first frame / resize.
 [[maybe_unused]] constexpr string_view deferred_denoise_compute_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
+// velk_globals (set = 1 slot 2) is declared in velk.glsl.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // prev_view_projection (+ view_projection)
+    uint globals_base;         // offset 0  (view's FrameGlobals index)
+    uint _pad_globals;
     uint normal_id;
     uint worldpos_id;
     uint irr_id;               // current-frame noisy diffuse irradiance (sampled)
@@ -787,7 +812,7 @@ void main()
     float count = 1.0;
     float m2_acc = cur_lum * cur_lum; // accumulated 2nd moment of luminance
     if (pc.reset == 0u) {
-        vec4 prev_clip = pc.globals.prev_view_projection * vec4(world_pos, 1.0);
+        vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(world_pos, 1.0);
         if (prev_clip.w > 1e-6) {
             vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
             if (all(greaterThanEqual(prev_uv, vec2(0.0))) &&
@@ -828,14 +853,17 @@ void main()
 // back in place from the output) for the surface blit.
 [[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
+// velk_globals (set = 1 slot 2) is declared in velk.glsl.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
 layout(push_constant, scalar) uniform PC {
-    GlobalData globals;        // cam_pos (for depth-relative edge stops)
+    uint globals_base;         // offset 0  (view's FrameGlobals index; cam_pos via VELK_GLOBALS)
+    uint _pad_globals;
     uint albedo_id;
     uint material_id;
     uint normal_id;
@@ -885,7 +913,7 @@ void main()
 
     // Wider taps when unconverged; tightens to a 5x5 once converged.
     int step = int(mix(3.0, 1.0, clamp(count / 16.0, 0.0, 1.0)) + 0.5);
-    float depth = max(length(pc.globals.cam_pos.xyz - world_pos), 1e-3);
+    float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
 
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
@@ -914,43 +942,6 @@ void main()
 }
 )";
 
-// Fullscreen composite pipeline: samples the deferred output texture
-// and alpha-blends it onto the surface. One triangle covering NDC
-// [-1, 3]; viewport-scaled by the view's subrect so the pass only
-// writes where that view owns pixels. Push constants carry the source
-// bindless texture id.
-[[maybe_unused]] constexpr string_view deferred_composite_vertex_src = R"(
-#version 450
-
-layout(location = 0) out vec2 v_uv;
-
-void main()
-{
-    // Standard fullscreen-triangle trick.
-    vec2 pos = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0 - 1.0;
-    gl_Position = vec4(pos, 0.0, 1.0);
-    v_uv = (pos + 1.0) * 0.5;
-}
-)";
-
-[[maybe_unused]] constexpr string_view deferred_composite_fragment_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(push_constant) uniform PC {
-    GlobalData globals;        // [0..8) FrameGlobals BDA (unused here)
-    uint src_tex_id;           // [8..)  CPU push starts here
-} pc;
-
-layout(location = 0) in vec2 v_uv;
-layout(location = 0) out vec4 frag_color;
-
-void main()
-{
-    frag_color = velk_texture(pc.src_tex_id, v_uv);
-}
-)";
-
 // Compute ray tracer prelude. Fixed header that precedes all material
 // snippets. Declares extensions, storage-image binding, shape struct,
 // push constants, intersect_rect, and the full stochastic-RT toolkit
@@ -960,13 +951,23 @@ void main()
 [[maybe_unused]] constexpr string_view rt_compute_prelude_src = R"(
 #version 450
 #define VELK_COMPUTE 1
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
+
+// Scene TLAS bound by index (set = 1); same buffers as the deferred
+// pass. Replaces the RtRoot BDA fields bvh_nodes / bvh_shapes for the
+// array reads (bvh_root / bvh_node_count scalars still come from RtRoot).
+layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
+layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
+// BVH bases (and the rest of the per-view frame state: inv-VP, cam, bvh root
+// / counts, present_counter) come from the bound FrameGlobals record, indexed
+// by pc.globals_base — see VELK_GLOBALS below.
+#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
+#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
 
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {
@@ -977,37 +978,68 @@ struct Light {
     vec4  params;          // x = range, y = cos(inner), z = cos(outer), w = light size (dir: angular radius rad; point/spot: world radius)
 };
 
-layout(buffer_reference, std430) readonly buffer LightList {
-    Light data[];
-};
+// Scene lights bound by index (set = 1 slot 5); this view's run starts at
+// pc.lights_base. Same buffer the deferred-lighting compute reads.
+layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
-// RT root: per-dispatch state in a buffer reached via an 8-byte
-// push-constant pointer. Keeps the push-constant block at the same
-// shape as forward / deferred (one BDA), and lets the cached secondary
-// stay valid across frames since the buffer's GPU address is stable
-// while its contents (cam_pos, BVH addresses, etc.) refresh in place.
-// scalar layout matches the C++ `RtRoot` struct's natural packing.
-layout(buffer_reference, scalar) readonly buffer RtRoot {
-    GlobalData globals;
-    mat4 inv_view_projection;
-    vec4 cam_pos;
-    uvec4 extras;       // x=image_index, y=width, z=height, w=shape_count
-    uvec4 env;          // x=env_material_id, y=env_texture_id, zw=_
-    RtShapeList shapes;         // primary-ray buffer, painter-sorted back-to-front
-    RtShapeList bvh_shapes;     // element-grouped buffer; BvhNode ranges index here
-    BvhNodeList bvh_nodes;
-    uint bvh_root;
-    uint bvh_node_count;
-    uint64_t env_data_addr;
-    LightList lights;
+// Primary-ray painter-sorted RtShape list bound by index (set = 1 slot 6);
+// this view's run starts at pc.shapes_base. Separate from velk_bvh_shapes
+// (slot 1): the BVH holds build-order shapes for bounce/shadow traversal,
+// this holds the back-to-front sort the primary loop composites.
+layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
+
+// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
+// which resolves shape.mesh_instance_base. Same buffer the deferred pass reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+
+// Per-primitive RT geometry metadata (set = 1 slot 11), read via
+// velk_mesh_static(inst). A primitive's record is allocated once at load and
+// never moves. The BLAS arenas (slots 12 / 13) are not declared here: this
+// shader's mesh intersector is a linear triangle scan, and only the deferred
+// pass walks the acceleration structure.
+layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+
+// Material records as raw words (set = 1 slot 4). The raster path binds this
+// same slot as a typed block, which one pipeline can do because it compiles
+// for a single material type; this shader composes many, so it reads the
+// bytes and each material's generated velk_unpack_<T> rebuilds its own struct
+// from them. Materials whose layout cannot be derived stay on device
+// addresses and never touch this buffer.
+layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
+
+// This shader composes many materials, so slot 4 is bound above as raw words
+// and must not be re-declared as a typed block: VELK_MATERIAL(T) becomes a
+// no-op, and the composer replaces each material's VELK_MATERIAL(T) line with
+// its generated velk_unpack_<T>. The load pastes the type name onto that
+// function, so every snippet's `VELK_LOAD_MATERIAL(T, ctx)` resolves to its
+// own reader. A material whose record cannot be modelled gets no reader and
+// fails to compile here, rather than silently reading the wrong bytes.
+#undef VELK_MATERIAL
+#undef VELK_LOAD_MATERIAL
+#define VELK_MATERIAL(T)
+#define VELK_LOAD_MATERIAL(T, ctx) velk_unpack_##T((ctx).material_base)
+
+// RT root: per-dispatch state pushed inline as a push constant (no device
+// address anywhere). scalar layout matches the C++ `RtRoot` struct.
+//
+// The camera matrices, BVH root/counts/bases and present_counter live in
+// the bound FrameGlobals record (indexed by globals_base), not here. Only
+// the RT-specific per-dispatch state remains, all indices / inline data.
+// Baked into the cached secondary at record time like the deferred PC;
+// globals_base rotates with the globals ring but the cached pass re-records
+// on view change, and static globals match across ring slots.
+layout(push_constant, scalar) uniform PC {
+    uint shapes_base;           // index into velk_shapes (set = 1 slot 6)
+    uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
-    uint _lights_pad;
-};
-
-layout(push_constant) uniform PC { RtRoot _root; };
-// Existing call sites (pc.bvh_root, pc.cam_pos, ...) keep working via
-// this macro instead of being rewritten en masse.
-#define pc (_root)
+    uint lights_base;           // index into velk_lights (set = 1 slot 5)
+    vec2 env_params;            // x = intensity, y = rotation_rad (inline)
+    uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
+    uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
+} pc;
+// This view's FrameGlobals, read by index from the bound globals buffer
+// (set = 1 slot 2, declared in velk.glsl) instead of a device address.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
 
 // ===== Core ray / hit / fill-context types =====
 struct Ray {
@@ -1215,19 +1247,15 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         float t_aabb;
         if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
     }
-
-    MeshInstancePtr inst_ptr = MeshInstancePtr(shape.mesh_data_addr);
-    MeshInstanceData inst = inst_ptr.data;
-    if (inst.mesh_static_addr == uint64_t(0)) return false;
-    MeshStaticPtr st_ptr = MeshStaticPtr(inst.mesh_static_addr);
-    MeshStaticData st = st_ptr.data;
+)" R"(
+    MeshInstanceData inst = velk_mesh_instance(shape);
+    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    MeshStaticData st = velk_mesh_static(inst);
     if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
 
     vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;
     vec3 ld = (inst.inv_world * vec4(ray.dir,    0.0)).xyz;
 
-    MeshIndices  ib = MeshIndices (st.buffer_addr + uint64_t(st.ibo_offset));
-    MeshVertices vb = MeshVertices(st.buffer_addr + uint64_t(st.vbo_offset));
     uint floats_per_vert = st.vertex_stride >> 2u;
 
     bool  found = false;
@@ -1239,15 +1267,15 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     uint  best_o2 = 0u;
 
     for (uint t = 0u; t < st.triangle_count; ++t) {
-        uint i0 = ib.data[t * 3u + 0u];
-        uint i1 = ib.data[t * 3u + 1u];
-        uint i2 = ib.data[t * 3u + 2u];
+        uint i0 = velk_mesh_index(st, t * 3u + 0u);
+        uint i1 = velk_mesh_index(st, t * 3u + 1u);
+        uint i2 = velk_mesh_index(st, t * 3u + 2u);
         uint o0 = i0 * floats_per_vert;
         uint o1 = i1 * floats_per_vert;
         uint o2 = i2 * floats_per_vert;
-        vec3 v0 = vec3(vb.data[o0], vb.data[o0 + 1u], vb.data[o0 + 2u]);
-        vec3 v1 = vec3(vb.data[o1], vb.data[o1 + 1u], vb.data[o1 + 2u]);
-        vec3 v2 = vec3(vb.data[o2], vb.data[o2 + 1u], vb.data[o2 + 2u]);
+        vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
+        vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
+        vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
         vec3 e1 = v1 - v0;
         vec3 e2 = v2 - v0;
         vec3 p  = cross(ld, e2);
@@ -1277,13 +1305,13 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
     // (1-u-v, u, v) the weights for (V0, V1, V2).
     float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(vb.data[best_o0 + 3u], vb.data[best_o0 + 4u], vb.data[best_o0 + 5u]);
-    vec3 n1 = vec3(vb.data[best_o1 + 3u], vb.data[best_o1 + 4u], vb.data[best_o1 + 5u]);
-    vec3 n2 = vec3(vb.data[best_o2 + 3u], vb.data[best_o2 + 4u], vb.data[best_o2 + 5u]);
+    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
+    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
+    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
     vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(vb.data[best_o0 + 6u], vb.data[best_o0 + 7u]);
-    vec2 uv1 = vec2(vb.data[best_o1 + 6u], vb.data[best_o1 + 7u]);
-    vec2 uv2 = vec2(vb.data[best_o2 + 6u], vb.data[best_o2 + 7u]);
+    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
+    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
+    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
     vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
 
     vec3 hit_local = lo + ld * best_t;
@@ -1374,18 +1402,18 @@ const int kBvhStackSize = 128;
 bool trace_closest_hit(Ray ray, out RayHit hit) {
     hit.t = 1e30;
     hit.shape_index = 0xffffffffu;
-    if (pc.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[kBvhStackSize];
     int sp = 0;
-    stack[sp++] = pc.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
         for (uint i = 0u; i < node.shape_count; ++i) {
             uint idx = node.first_shape + i;
-            RtShape s = pc.bvh_shapes.data[idx];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +idx];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < hit.t) {
                 hit = h;
@@ -1401,17 +1429,17 @@ bool trace_closest_hit(Ray ray, out RayHit hit) {
 
 // Any-hit BVH traversal for shadow rays: first confirmed blocker wins.
 bool trace_any_hit(Ray ray, float t_max) {
-    if (pc.bvh_node_count == 0u) return false;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
     uint stack[kBvhStackSize];
     int sp = 0;
-    stack[sp++] = pc.bvh_root;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = pc.bvh_nodes.data[ni];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_enter)) continue;
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = pc.bvh_shapes.data[node.first_shape + i];
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
             RayHit h;
             if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
         }
@@ -1438,22 +1466,17 @@ float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_
 // material's velk_fill_env, because materials may need to call this
 // (e.g. StandardMaterial's diffuse term) and calling velk_resolve_fill
 // from inside a fill would re-introduce the recursion GLSL forbids.
-// Mirrors EnvMaterial's equirect sampling; stays in sync with its
-// GPU data layout (vec4 params: x = intensity, y = rotation_rad).
-layout(buffer_reference, std430) readonly buffer _EnvParamsBuf {
-    vec4 params;
-};
-
+// Mirrors EnvMaterial's equirect sampling; env params (x = intensity,
+// y = rotation_rad) ride the push constant inline (pc.env_params).
 vec3 env_miss_color(vec3 rd) {
     if (pc.env.x == 0u) return vec3(0.0);
-    _EnvParamsBuf d = _EnvParamsBuf(pc.env_data_addr);
     const float PI = 3.14159265358979323846;
-    float c = cos(d.params.y);
-    float s = sin(d.params.y);
+    float c = cos(pc.env_params.y);
+    float s = sin(pc.env_params.y);
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
     float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) / PI + 0.5;
-    return velk_texture(pc.env.y, vec2(u, v)).rgb * d.params.x;
+    return velk_texture(pc.env.y, vec2(u, v)).rgb * pc.env_params.x;
 }
 )";
 
@@ -1489,7 +1512,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // and modulated by its shadow technique's visibility.
     vec3 direct = vec3(0.0);
     for (uint li = 0u; li < pc.light_count; ++li) {
-        Light light = pc.lights.data[li];
+        Light light = velk_lights.data[pc.lights_base + li];
         vec3 L;
         float atten = 1.0;
         if (light.flags.x == 0u) {
@@ -1559,9 +1582,9 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             return acc;
         }
         // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
-        RtShape s = pc.bvh_shapes.data[hit.shape_index];
+        RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +hit.shape_index];
         EvalContext ctx;
-        ctx.data_addr = s.material_data_addr;
+        ctx.material_base = s.material_base;
         ctx.texture_id = s.texture_id;
         ctx.shape_param = s.shape_param;
         ctx.uv = hit.uv;
@@ -1603,7 +1626,7 @@ void main()
     uint shape_count = pc.extras.w;
     if (coord.x >= int(w) || coord.y >= int(h)) return;
 
-    rng_init(uvec2(coord), pc.globals.present_counter);
+    rng_init(uvec2(coord), VELK_GLOBALS.present_counter);
 
     // Per-pixel primary sample count. Each sample fires one jittered
     // primary ray through the painter-sorted loop; the results are
@@ -1622,8 +1645,8 @@ void main()
         // different between frames.
         vec2 jitter = vec2(rng_next_float(), rng_next_float());
         vec2 ndc = (vec2(coord) + jitter) / vec2(float(w), float(h)) * 2.0 - 1.0;
-        vec4 near_h = pc.inv_view_projection * vec4(ndc, 0.0, 1.0);
-        vec4 far_h  = pc.inv_view_projection * vec4(ndc, 1.0, 1.0);
+        vec4 near_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 0.0, 1.0);
+        vec4 far_h  = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 1.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
         vec3 far_w  = far_h.xyz  / far_h.w;
 
@@ -1650,12 +1673,12 @@ void main()
         vec3 accum = env_miss_color(primary.dir);
 
         for (uint i = 0u; i < shape_count; ++i) {
-            RtShape s = pc.shapes.data[i];
+            RtShape s = velk_shapes.data[pc.shapes_base + i];
             RayHit hit;
             if (!intersect_shape(primary, s, hit)) continue;
 
             EvalContext ctx;
-            ctx.data_addr = s.material_data_addr;
+            ctx.material_base = s.material_base;
             ctx.texture_id = s.texture_id;
             ctx.shape_param = s.shape_param;
             ctx.uv = hit.uv;

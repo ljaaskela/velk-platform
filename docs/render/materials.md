@@ -1,6 +1,6 @@
 # Materials
 
-Materials define how geometry is shaded. Every material provides a pipeline (compiled shader) and optionally GPU data that the shader reads via buffer device address.
+Materials define how geometry is shaded. Every material provides a pipeline (compiled shader) and optionally a GPU data record that the shader reads by index out of the shared material arena.
 
 There are two ways to create materials:
 
@@ -22,8 +22,10 @@ There are two ways to create materials:
   - [Textures and UV transforms](#textures-and-uv-transforms)
   - [Available properties](#available-properties)
 - [Application-defined materials (ext::Material)](#application-defined-materials-extmaterial)
+  - [Eval bodies](#eval-bodies)
+  - [Reading scene data from an eval body](#reading-scene-data-from-an-eval-body)
   - [C++ side](#c-side)
-  - [Shader side](#shader-side)
+  - [Full fragment shaders (advanced)](#full-fragment-shaders-advanced)
 - [Shader materials (ShaderMaterial)](#shader-materials-shadermaterial)
   - [Creating a shader material](#creating-a-shader-material)
   - [How it works](#how-it-works)
@@ -64,21 +66,23 @@ The renderer treats both paths uniformly: each `DrawEntry` emitted by a visual c
 Shader includes are registered via `IRenderContext::register_shader_include()`. Any module can register its own include, and shaders reference them with `#include "name"`.
 
 **velk.glsl** (provided by velk-render, registered automatically):
-- `GlobalData` — frame globals buffer reference (view_projection, inverse_view_projection, viewport, cam_pos, BVH metadata + shape/node arrays).
-- `VelkVertex3D` — the unified vertex layout (`vec3 position`, `vec3 normal`, `vec2 uv`, 32 B tight scalar packing).
-- `VelkVbo3D` — buffer reference to a `VelkVertex3D` array.
-- `velk_vertex3d(root)` — macro that fetches the current `gl_VertexIndex` from the bound VBO.
-- `OpaquePtr` — 8-byte buffer_reference placeholder for typed pointer fields the shader doesn't dereference (e.g. the material-data pointer in a vertex shader that doesn't care about the material).
-- `VELK_DRAW_DATA(InstancesType, VboType)` — macro expanding to the 32-byte DrawDataHeader fields (see [DrawData struct layout](#drawdata-struct-layout)).
-- `velk_texture(id, uv)` — bindless texture sample helper.
-- `BvhNode`, `RtShape`, `Ray`, `RayHit` — ray-trace types used by shadow / bounce shaders.
+- `VELK_DRAW_DATA(Name)`: the one declaration a raster shader makes. Declares the push constant (a single `uint draw_base`) under the name you give it, conventionally `root`; every accessor below takes that handle. See [DrawData struct layout](#drawdata-struct-layout).
+- `velk_draw(root)`: this draw's raw `DrawDataHeader` record, for the fields with no accessor of their own.
+- `GlobalData` / `velk_global_data(root)`: the frame-globals record read by index from the `set = 1` globals arena (view_projection, inverse_view_projection, viewport, cam_pos, BVH metadata).
+- `VelkVertex3D`: the unified vertex layout (`vec3 position`, `vec3 normal`, `vec2 uv`, `vec4 tangent`; 48 B tight scalar packing).
+- `velk_vertex3d(root)` / `velk_uv1(root)`: fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
+- `VELK_INSTANCES(Type)` / `velk_instance(root)`: declare the set = 1 instance arena as `Type` and read this draw's instance by index.
+- `VELK_MATERIAL(Type)` / `velk_material(root)`: declare the set = 1 material arena as `Type` and read this draw's material record by index (for full custom fragment shaders / ShaderMaterial).
+- `velk_texture(id, uv)`: bindless texture sample helper.
+- `BvhNode`, `RtShape`, `MeshInstanceData`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
 
 **velk-ui.glsl** (provided by velk-scene, registered on renderer init):
-- `ElementInstance` — the universal per-instance record shared by every visual: `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
-- `ElementInstanceData` — buffer_reference array of `ElementInstance`.
-- `EvalContext` — everything a material eval body receives: `data_addr`, `texture_id`, `shape_param`, `uv`, `base`, `ray_dir`, `normal`, `hit_pos`.
-- `MaterialEval` — the canonical eval output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
-- `velk_default_material_eval()` — returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
+- `ElementInstance`: the universal per-instance record shared by every visual, holding `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
+- `VELK_INSTANCES(ElementInstance)`: binds the shared instance arena as `ElementInstance`; read via `velk_instance(root)`.
+- `EvalContext`: everything a material eval body receives, namely `material_base` (read via `VELK_LOAD_MATERIAL`), `texture_id`, `shape_param`, `uv`, `uv1`, `base`, `ray_dir`, `normal`, `hit_pos`, `tangent`.
+- `VELK_LOAD_MATERIAL(Type, ctx)`: reads this shading point's material record. Pairs with the `VELK_MATERIAL(Type)` declaration; see [Eval bodies](#eval-bodies).
+- `MaterialEval`: the canonical eval output, carrying `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
+- `velk_default_material_eval()`: returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
 
 Other modules can register their own includes. The text plugin registers `velk_text.glsl` (curve/band/glyph buffers + coverage sampling); application code can add its own via `IRenderContext::register_shader_include()`.
 
@@ -108,7 +112,7 @@ The cache key for a shader combines:
 - A stage discriminator so a vertex shader and fragment shader with identical source never collide.
 - A 64-bit hash of all currently registered shader includes (sorted by name). Folding this into every per-shader key means any change to a virtual include such as `velk.glsl` or `velk-ui.glsl` automatically invalidates entries that depend on it. Old entries become orphans rather than corrupt cache hits, and the next compile rewrites them under the new key.
 
-There is no version file and no bulk wipe — invalidation is implicit in the key.
+There is no version file and no bulk wipe; invalidation is implicit in the key.
 
 ### What is cached and what is not
 
@@ -120,7 +124,7 @@ Set the environment variable `VELK_SHADER_CACHE_DISABLED=1` to bypass the cache 
 
 ## Pipeline options
 
-Every `IMaterial` carries an optional `IMaterialOptions` attachment that controls the pipeline's rasterizer / depth / blend state (cull mode, front-face winding, depth test / write, alpha mode + cutoff, etc.). It is the single channel through which per-material pipeline state flows — `create_pipeline` / `compile_pipeline` read it, and `ext::Material` subscribes to its `on_options_changed` event to invalidate the cached pipeline handle and trigger a recompile on next draw.
+Every `IMaterial` carries an optional `IMaterialOptions` attachment that controls the pipeline's rasterizer / depth / blend state (cull mode, front-face winding, depth test / write, alpha mode + cutoff, etc.). It is the single channel through which per-material pipeline state flows: `create_pipeline` / `compile_pipeline` read it, and `ext::Material` subscribes to its `on_options_changed` event to invalidate the cached pipeline handle and trigger a recompile on next draw.
 
 The `Material` wrapper exposes three entry points:
 
@@ -139,7 +143,7 @@ m.options().set_cull_mode(velk::CullMode::Back);
 if (m.has_options()) { /* ... */ }
 
 // Batched write: a single StateWriter scope (one on_changed fire,
-// one pipeline invalidation) — prefer this when setting several
+// one pipeline invalidation). Prefer this when setting several
 // fields at once.
 m.set_options([](velk::IMaterialOptions::State& s) {
     s.cull_mode   = velk::CullMode::None;
@@ -148,9 +152,9 @@ m.set_options([](velk::IMaterialOptions::State& s) {
 });
 ```
 
-Defaults are defined on the `IMaterialOptions` interface itself (back-face cull, clockwise front-face, depth test + write on, opaque alpha). Materials that want a non-default pipeline state attach one and write the fields they care about; materials that leave the attachment unset fall back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend) — use `m.options()` once (without writes) to materialize the attachment with 3D-oriented interface defaults.
+Defaults are defined on the `IMaterialOptions` interface itself (back-face cull, clockwise front-face, depth test + write on, opaque alpha). Materials that want a non-default pipeline state attach one and write the fields they care about; materials that leave the attachment unset fall back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend). Use `m.options()` once (without writes) to materialize the attachment with 3D-oriented interface defaults.
 
-Never access `IObjectStorage` / `add_attachment` directly from user code to configure options — always go through `options()` / `set_options()`.
+Never access `IObjectStorage` / `add_attachment` directly from user code to configure options; always go through `options()` / `set_options()`.
 
 ### Winding / culling defaults
 
@@ -276,7 +280,7 @@ MaterialEval velk_eval_my_material(EvalContext ctx);
 
 The framework composes the full forward fragment shader, the deferred G-buffer shader, and the ray-trace fill shader around this one body.
 
-`EvalContext` carries everything the body might need — `globals` (pointer to `FrameGlobals`), `data_addr` (pointer to the material's per-draw GPU data), `texture_id`, `shape_param`, `uv`, `base` (instance tint), `ray_dir`, `normal`, `hit_pos`. `MaterialEval` is the canonical output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`. Both types come from the `velk-ui.glsl` include and are documented in that file.
+`EvalContext` carries everything the body might need: the material record (reached via `VELK_LOAD_MATERIAL`, backed by `material_base` on every path), `texture_id`, `shape_param`, `uv`, `uv1`, `base` (instance tint), `ray_dir`, `normal`, `hit_pos`, `tangent`. `MaterialEval` is the canonical output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`. Both types come from the `velk-ui.glsl` include and are documented in that file.
 
 Start from `velk_default_material_eval()` and overwrite only the fields that matter to the material:
 
@@ -284,14 +288,17 @@ Start from `velk_default_material_eval()` and overwrite only the fields that mat
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer MyMaterialData {
+// A plain value struct for the material record...
+struct MyMaterialData {
     vec4  color;
     float intensity;
 };
+// ...declared as the element type of the shared material arena.
+VELK_MATERIAL(MyMaterialData)
 
 MaterialEval velk_eval_my_material(EvalContext ctx)
 {
-    MyMaterialData d = MyMaterialData(ctx.data_addr);
+    MyMaterialData d = VELK_LOAD_MATERIAL(MyMaterialData, ctx);
 
     MaterialEval e = velk_default_material_eval();
     e.color  = d.color * d.intensity;
@@ -302,23 +309,29 @@ MaterialEval velk_eval_my_material(EvalContext ctx)
 
 No `main()`, no `gl_Position`, no `frag_color`. The body is pure shading logic; the driver templates handle the rest.
 
+The material record is reached through two macros so one eval body works in every path: declare the record as a plain `struct`, follow it with `VELK_MATERIAL(Type)`, and load it with `VELK_LOAD_MATERIAL(Type, ctx)`. Both paths read the same `set = 1` material arena, but they get there differently:
+
+- **Raster.** A pipeline compiles for one material, so `VELK_MATERIAL(Type)` binds slot 4 as a typed `Type[]` and the load is `velk_materials.data[ctx.material_base]`.
+- **RT / deferred compute.** One shader serves every material in the scene, so a typed array is impossible. The composer replaces the `VELK_MATERIAL(Type)` line with a generated `velk_unpack_Type(uint b)` that rebuilds the struct field by field from the arena's raw words, and redefines the load to call it.
+
+The snippet source is the same either way, and you never touch `ctx.material_base` directly. The generator computes std430 offsets itself and validates them against SPIR-V reflection, so an alignment trap cannot silently shift a field; constructs it cannot handle (arrays, `mat3`, preprocessor directives inside the record) fail the build loudly instead.
+
 ### Reading scene data from an eval body
 
-The whole point of `EvalContext` is that an eval never reaches out to `root.global_data` / `root.instance_data` / `root.vbo` directly. Those live on the driver-composed fragment shader, and if an eval referenced them it would stop being portable across forward / deferred / RT. Everything an eval plausibly needs is pre-resolved into `EvalContext` by the driver before it's called.
+The whole point of `EvalContext` is that an eval never reaches out to `root` directly. `root` exists only on the driver-composed raster shader, and if an eval referenced it the body would stop being portable across forward / deferred / RT. Everything an eval plausibly needs is pre-resolved into `EvalContext` by the driver before it's called.
 
 | Field | Type | Source | What it carries |
 |---|---|---|---|
-| `globals` | `GlobalData` | frame globals buffer | Buffer reference to `FrameGlobals`: `view_projection`, `inverse_view_projection`, `viewport`, `cam_pos`, and the scene BVH (`bvh_nodes`, `bvh_shapes`, metadata). Dereference fields directly (`ctx.globals.cam_pos.xyz`). |
-| `data_addr` | `uint64_t` | `DrawDataHeader` material pointer | GPU address of the material's per-draw data buffer. Cast to your material's buffer_reference type. |
-| `texture_id` | `uint`   | `DrawDataHeader.texture_id`      | Bindless slot of the draw's primary texture. 0 when no texture is bound. Sample via `velk_texture(ctx.texture_id, uv)`. Materials with multiple named textures (StandardMaterial, custom multi-texture materials) embed their own `uint32_t` texture id fields in the material struct reached through `ctx.data_addr`. |
-| `shape_param` | `uint`  | `ElementInstance.params[0]`      | Per-shape material data — glyph index for text, slot index for future custom uses. |
+| material record | your struct | `material_base` | The material's per-draw data in the `set = 1` material arena. Reached via `VELK_LOAD_MATERIAL(Type, ctx)`, an indexed read on the raster path and a generated unpack on the compute path. Don't touch `ctx.material_base` directly. |
+| `texture_id` | `uint`   | `DrawDataHeader.texture_id`      | Bindless slot of the draw's primary texture. 0 when no texture is bound. Sample via `velk_texture(ctx.texture_id, uv)`. Materials with multiple named textures (StandardMaterial, custom multi-texture materials) embed their own `uint32_t` texture id fields in their material record. |
+| `shape_param` | `uint`  | `ElementInstance.params[0]`      | Per-shape material data: glyph index for text, slot index for future custom uses. |
 | `uv`          | `vec2`  | fragment interpolation / RT hit  | 0..1 shape coordinates at the shading point. |
 | `base`        | `vec4`  | `ElementInstance.color`          | Visual-level tint (color set on the 2D visual, or white on 3D). Multiply this into your result when the material should respect per-instance color. |
 | `ray_dir`     | `vec3`  | view / ray direction             | Normalised direction from camera/ray origin to the hit point. Use for Fresnel, view-dependent shading. |
 | `normal`      | `vec3`  | world-space shading normal       | The surface normal at the shading point, already transformed into world space. Overwrite if you compute a bumped normal. |
 | `hit_pos`     | `vec3`  | world-space shading position     | The world-space position of the shading point. Use for light-to-surface vectors, triplanar mapping, effects tied to world coordinates. |
 
-Most geometric needs are already folded into the world-space fields (`ctx.ray_dir`, `ctx.hit_pos`, `ctx.normal`), so `ctx.globals` is only needed when an eval truly wants camera position, viewport, or BVH state directly. The BVH pointers are there if you know what you're doing, but evals are not the place to trace secondary rays — that's the RT driver's job. If you find yourself reaching for `ctx.globals.bvh_*` from inside an eval, step back and consider whether the work belongs on the ray-trace path instead.
+Most geometric needs are already folded into the world-space fields (`ctx.ray_dir`, `ctx.hit_pos`, `ctx.normal`), which is deliberately all an eval gets: view globals and the BVH are not exposed on `EvalContext`, because reaching for them would tie the body to one path (the driver composes the same body into forward / deferred / RT). If an eval wants to trace secondary rays, that work belongs on the ray-trace driver, not in the shared body.
 
 A more elaborate eval showing texture sampling, per-instance tint, and a view-dependent tweak:
 
@@ -326,15 +339,16 @@ A more elaborate eval showing texture sampling, per-instance tint, and a view-de
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer MyParams {
+struct MyParams {
     vec4  tint;
     float fresnel_power;
     float roughness;
 };
+VELK_MATERIAL(MyParams)
 
 MaterialEval velk_eval_my(EvalContext ctx)
 {
-    MyParams p = MyParams(ctx.data_addr);
+    MyParams p = VELK_LOAD_MATERIAL(MyParams, ctx);
 
     vec4 tex = velk_texture(ctx.texture_id, ctx.uv);    // bindless sample
     vec3 n = normalize(ctx.normal);
@@ -396,7 +410,7 @@ Materials that sample textures override `get_textures()` to return the `ISurface
 
 ### Full fragment shaders (advanced)
 
-For materials that genuinely need a full fragment shader — `ShaderMaterial` is the canonical example, since it hosts user-supplied shaders — implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
+For materials that genuinely need a full fragment shader (`ShaderMaterial` is the canonical example, since it hosts user-supplied shaders), implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
 
 ```cpp
 uint64_t get_pipeline_handle(IRenderContext& ctx) override
@@ -411,30 +425,25 @@ Pre-compiled `IShader::Ptr` handles work too:
 return ensure_pipeline(ctx, my_compiled_frag, my_compiled_vert);
 ```
 
-On the shader side, a full fragment shader owns its own `DrawData` block and can reach every field the renderer writes — frame globals, the per-instance array, the bound VBO, and the material pointer:
+On the shader side, a full fragment shader declares the draw root itself and can reach every field the renderer writes: frame globals, the per-instance array, the vertex stream, and the material record.
 
 ```glsl
-layout(buffer_reference, std430) readonly buffer MyParams {
+struct MyParams {
     vec4 tint;
 };
+VELK_MATERIAL(MyParams)   // declares velk_materials as MyParams (set = 1 slot 4)
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)  // globals, instances, texture_id, count, vbo
-    MyParams material;                              // per-draw material pointer
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)      // the draw handle
 
 // Reads that an eval body can't make, but a full-fragment can:
-//   root.instance_data.data[i].world_matrix   // other instances in the draw
-//   root.vbo.data[gl_VertexIndex]              // raw VBO fetch
-//   root.material.tint                         // material without the ctx.data_addr cast
-//
-// (root.global_data is also available here, but eval bodies can reach
-// the same data via ctx.globals, so it's not a differentiator.)
+//   velk_global_data(root).cam_pos     // this view's frame globals
+//   velk_instance(root).world_matrix   // this draw's instance
+//   velk_vertex3d(root).position       // this vertex, from the mesh-word arena
+//   velk_material(root).tint           // this draw's material record
+//   velk_draw(root).texture_id         // a header field with no accessor
 ```
 
-Vertex shaders declare the same block (or override `get_vertex_src()` to use the shared `element_vertex_src`). Fragment shaders that don't touch instances or the VBO can use `OpaquePtr` for those slots to keep the layout intact without declaring the types.
+Vertex shaders declare the same `VELK_DRAW_DATA(root)` (or override `get_vertex_src()` to use the shared `element_vertex_src`). A shader only pays for the accessors it calls: a fragment shader that never touches instances or vertices simply doesn't reference them.
 
 This path is rare in first-party code. Prefer the eval body unless you're writing a material that cannot fit the eval contract (e.g. post-processing effects operating on a fullscreen quad).
 
@@ -451,24 +460,20 @@ constexpr velk::string_view my_frag = R"(
 #version 450
 #include "velk.glsl"
 
-layout(buffer_reference, std430) readonly buffer MyParams {
+struct MyParams {
     vec4  tint;
     float speed;
 };
+VELK_MATERIAL(MyParams)   // declares velk_materials as MyParams (set = 1 slot 4)
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)  // fragment shader doesn't touch instances / VBO
-    MyParams material;                    // pointer to the per-draw material buffer
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 1) in vec2 v_uv;
 layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    MyParams p = root.material;  // dereference the 8-byte pointer at offset 48
+    MyParams p = velk_material(root);  // this draw's record from the material arena
     frag_color = p.tint * (0.5 + 0.5 * sin(v_uv.x * p.speed));
 }
 )";
@@ -482,7 +487,7 @@ sm.input<float>("speed").set_value(10.f);
 ### How it works
 
 1. `create_shader_material` compiles the GLSL to `IShader` handles via `compile_shader()` and links them into a pipeline via `create_pipeline()`. If no vertex source is given, the registered default vertex shader is used
-2. The vertex shader SPIR-V is reflected to find fields in the `DrawData` struct after the standard 6 header fields (32 bytes)
+2. The fragment shader SPIR-V is reflected to find the material record: it locates the `VelkMaterials` block declared by `VELK_MATERIAL(T)`, follows its runtime array to the element struct `T`, and enumerates `T`'s fields (falls back to the vertex shader if the fragment declares no material block)
 3. For each discovered field, a dynamic property is created on the material's inputs object
 4. `input<T>("name")` returns a typed `Property<T>` accessor for the named parameter
 
@@ -507,60 +512,53 @@ This enables workflows like:
 
 ## DrawData struct layout
 
-Both material types share the same per-draw layout. Every draw call passes a single GPU pointer via push constants to a `DrawData` struct whose first 48 bytes are the standard `DrawDataHeader`:
+Both material types share the same per-draw layout. Every draw call pushes one `uint`, the element index of its `DrawDataHeader` in the `set = 1` draw-data arena (slot 15). The header is 32 bytes of indices and counts:
 
 ```cpp
 // velk-render/gpu_data.h
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_address;    // -> FrameGlobals
-    uint64_t instances_address;  // -> per-instance array
+    uint32_t globals_base;       // index into velk_globals[]   (set = 1 slot 2)
+    uint32_t instances_base;     // element base into velk_instances[] (slot 3)
     uint32_t texture_id;         // bindless index, 0 = none
     uint32_t instance_count;
-    uint64_t vbo_address;        // -> bound VBO (VelkVbo3D)
-    uint64_t uv1_address;        // -> TEXCOORD_1 stream or fallback
-    uint32_t uv1_enabled;        // 0 = fallback (index 0), 1 = per-vertex
-    uint32_t _pad0;
+    uint32_t vbo_base;           // word base of the vertex stream (slot 14)
+    uint32_t uv1_base;           // word base of TEXCOORD_1, or of a single-vertex fallback
+    uint32_t uv1_enabled;        // 0 = fallback (vertex 0 only), 1 = per-vertex
+    uint32_t material_base;      // element base into velk_materials[] (slot 4)
 };
-static_assert(sizeof(DrawDataHeader) == 48, ...);
+static_assert(sizeof(DrawDataHeader) == 32, ...);
 ```
 
 | Offset | Field | Type | Size |
 |--------|-------|------|------|
-| 0  | `globals_address`   | uint64 (buffer_reference) | 8 |
-| 8  | `instances_address` | uint64 (buffer_reference) | 8 |
-| 16 | `texture_id`        | uint32 | 4 |
-| 20 | `instance_count`    | uint32 | 4 |
-| 24 | `vbo_address`       | uint64 (buffer_reference) | 8 |
-| 32 | `uv1_address`       | uint64 (buffer_reference) | 8 |
-| 40 | `uv1_enabled`       | uint32 | 4 |
-| 44 | `_pad0`             | uint32 | 4 |
-| **48** | **material data pointer** | **uint64 (buffer_reference)** | **8** |
+| 0  | `globals_base`      | uint32 (index into velk_globals[]) | 4 |
+| 4  | `instances_base`    | uint32 (element base into velk_instances[]) | 4 |
+| 8  | `texture_id`        | uint32 | 4 |
+| 12 | `instance_count`    | uint32 | 4 |
+| 16 | `vbo_base`          | uint32 (word base into velk_mesh_words[]) | 4 |
+| 20 | `uv1_base`          | uint32 (word base into velk_mesh_words[]) | 4 |
+| 24 | `uv1_enabled`       | uint32 | 4 |
+| 28 | `material_base`     | uint32 (element base into velk_materials[]) | 4 |
 
-On the GLSL side, declare these fields with the `VELK_DRAW_DATA(InstancesType, VboType)` macro (expanded from `velk.glsl`); the shared `element_vertex_src` shows the canonical pattern:
+Shader bodies almost never name these fields. `velk.glsl` declares the struct and its buffer once; a shader writes `VELK_DRAW_DATA(root)` to declare the push constant, then reads each field through the accessor that owns it (`velk_global_data(root)`, `velk_instance(root)`, `velk_material(root)`, `velk_vertex3d(root)`, `velk_uv1(root)`). Going through the accessors is what keeps the layout an implementation detail: the header can be resized or its fields given new meanings without any shader body changing. The exceptions are `texture_id` and `material_base`, which the composed raster drivers copy into `EvalContext` via `velk_draw(root)`.
 
-```glsl
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
-    OpaquePtr material;   // pointer to the material's per-draw data
-};
-```
-
-Material-specific data is **not inlined after the header** — it lives in a separate `IProgramDataBuffer` (one per material, reused across frames with dirty-tracking) and the 8-byte pointer at offset 48 addresses it. The `ext::Material` base handles the buffer lifecycle: `write_draw_data` fills a scratch buffer, the base diffs it against the previous frame, and only re-uploads on change. The shader dereferences the pointer to reach the material's fields:
+Material-specific data does not trail the header; it lives in the `set = 1` material arena (slot 4), one persistent region per material, dirty-tracked and rewritten only on change. The `ext::Material` base handles the lifecycle: `write_draw_data` fills a scratch buffer, the base diffs it against the previous frame, flags a material-dirty bit on change, and the renderer's upload sweep copies the bytes into the region.
 
 ```glsl
-layout(buffer_reference, std430) readonly buffer MyMaterialData {
+struct MyMaterialData {
     vec4  color;
     float intensity;
 };
+VELK_MATERIAL(MyMaterialData)
 
 MaterialEval velk_eval_my(EvalContext ctx) {
-    MyMaterialData d = MyMaterialData(ctx.data_addr);   // ctx.data_addr is the material pointer
+    MyMaterialData d = VELK_LOAD_MATERIAL(MyMaterialData, ctx);
     // ...
 }
 ```
 
-The C++ `MyParams` struct and the GLSL `MyMaterialData` fields must match in layout. Use `VELK_GPU_STRUCT` on the C++ side and std430 on the GLSL side to guarantee they agree.
+The C++ struct and the GLSL struct must match in layout, and because the shader reads the record out of a typed array, the GLSL std430 stride must equal the C++ record size. Use `VELK_GPU_STRUCT` on the C++ side and std430 on the GLSL side. Watch the one case where they disagree: std430 takes a struct's alignment from its largest member rather than rounding to 16, so a record whose biggest field is smaller than a `vec4` needs explicit trailing padding on the GLSL side to reach the `alignas(16)` size C++ gives it.
 
 ## Supported parameter types
 

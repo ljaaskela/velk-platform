@@ -1,6 +1,6 @@
 # Text plugin
 
-The text plugin (`velk_text`) brings font loading and text rendering support into velk-ui. Loaded automatically by the runtime — no manual setup needed.
+The text plugin (`velk_text`) brings font loading and text rendering support into velk-ui. Loaded automatically by the runtime; no manual setup needed.
 
 ## Contents
 - [Approach](#approach)
@@ -33,7 +33,7 @@ In typical situations this approach offers very acceptable performance, see [per
 
 ## Usage
 
-The plugin is loaded automatically by `velk::create_app()`. Its `initialize()` registers `Font`, `FontGpuBuffer`, `TextMaterial`, and `TextVisual`, and creates a shared default font (embedded Inter Regular) accessible via `ITextPlugin::default_font()` or the convenience helper `velk::ui::get_default_font()`.
+The plugin is loaded automatically by `velk::create_app()`. Its `initialize()` registers `Font`, `TextMaterial`, and `TextVisual`, and creates a shared default font (embedded Inter Regular) accessible via `ITextPlugin::default_font()` or the convenience helper `velk::ui::get_default_font()`.
 
 If you're not using the runtime, load it manually:
 
@@ -107,9 +107,9 @@ flowchart LR
     A["FreeType outline<br/><i>FT_LOAD_NO_SCALE</i>"]
     B["<b>GlyphBaker</b><br/>quadratic Bezier extraction<br>bbox normalization to [0, 1]²<br>8×8 band assignment, sorted by max orthogonal coord"]
     C["<b>FontBuffers</b> (CPU side)<br/>three flat append-only buffers:<br>curves, bands, glyph table<br>per-section dirty flags"]
-    D["<b>FontGpuBuffer</b><br>(one per section, implements IBuffer)<br/>observable GPU resource: dirty / upload / regrow / deferred-destroy"]
-    E["<b>Renderer upload path</b><br/>backend create_buffer + map + memcpy, per section<br/>publishes GPU virtual address back to IBuffer via set_gpu_address"]
-    F["<b>TextMaterial</b> (owned by Font, shared by all visuals using it)<br/>eval body + vertex shader, lazy-compiled with velk_text.glsl include<br/>write_draw_data emits the three buffer GPU addresses per draw"]
+    D["<b>Shared text arenas</b> (set = 1 slots 7 / 8 / 9)<br/>the Font holds one ArenaRegion per section<br/>reallocated on growth, freed behind the frame fence"]
+    E["<b>Font::ensure_gpu_data</b><br/>writes each dirty section into its region<br/>and publishes the element base"]
+    F["<b>TextMaterial</b> (owned by Font, shared by all visuals using it)<br/>eval body + vertex shader, lazy-compiled with velk_text.glsl include<br/>write_draw_data emits the three arena bases per draw"]
     G["<b>Slug fragment shader</b><br/>reads glyph record, walks h+v band curves<br/>computes analytic coverage"]
 
     A --> B --> C --> D --> E --> F --> G
@@ -134,8 +134,10 @@ Subsequent references return the cached entry.
 
     where `N = BakedGlyph::BAND_COUNT = 8`. Curves within each band are sorted descending by their max coordinate on the orthogonal axis, so the shader can early-exit once a curve falls outside the sample's footprint.
   * **Glyph table**: array of `GlyphRecord` (32 bytes), one per baked glyph. Holds bbox in font units, curve_offset, curve_count, band_data_offset.
-  * **Per-instance**: `TextInstance` (48 bytes, padded for std430 array stride) carries pos, size, color, glyph_index.
-  * **Per-batch material data**: three `uint64_t` GPU addresses for the curves, bands, and glyph table buffers, written into the staging buffer right after the `DrawDataHeader`. The shader binds them via `buffer_reference` and walks them in `velk_text_coverage`.
+  * **Per-instance**: the universal `ElementInstance` (128 bytes), one per glyph quad. `offset` carries the glyph's position, `size` its extents, `col` its colour, and `params[0]` the glyph index. Text uses no instance type of its own.
+  * **Per-material data**: `TextMaterialData`, three `uint32_t` element bases (curves, bands, glyph table) into the font's regions of the three shared text arenas, plus padding to 16 bytes. It lives in the material arena like any other material record, and the shader passes the three bases into `velk_text_coverage`, which indexes the arenas directly.
+
+The three sections are shared arenas rather than per-font buffers, so a scene with many fonts still binds three descriptors, and the font's data leaves the per-frame upload sweep entirely. A font that bakes new glyphs reallocates its region and marks its material dirty so the new bases are republished.
 
 For printable ASCII rendered with Inter, the entire per-font upload is about 92 KB (48 KB curves, 41 KB bands, 3 KB glyph table). This scales linearly with the number of unique glyphs actually used.
 
@@ -185,6 +187,5 @@ Public ClassIds for the plugin's main types. Construct via `instance().create<I>
 | `velk::ui::ClassId::Font` | `IFont` | FreeType + HarfBuzz font instance. Shapes text and lazy-bakes glyphs into GPU curve / band / glyph buffers. Properties (in font units): `ascender`, `descender`, `line_height`, `units_per_em`. |
 | `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
 | `velk::ui::ClassId::TextMaterial` | `IMaterial` | Material that runs the analytic-coverage fragment shader. Owned by each `Font` and shared by all `TextVisual`s using that font (so they batch into one draw call). Not normally constructed by user code. |
-| `velk::ui::ClassId::FontGpuBuffer` | `IBuffer` | Internal GPU resource backing the font's curve / band / glyph data. Not normally touched by user code. |
 
-The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `default_font()` — usually accessed through the header-only convenience `velk::ui::get_default_font()`.
+The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `default_font()`, usually accessed through the header-only convenience `velk::ui::get_default_font()`.

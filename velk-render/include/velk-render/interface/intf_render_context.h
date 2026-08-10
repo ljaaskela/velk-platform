@@ -82,6 +82,8 @@ inline uint64_t pipeline_target_layout(array_view<const PixelFormat> color_forma
     return h | 0x8000000000000000ull;
 }
 
+class IGpuResourceManager;
+
 /**
  * @brief Owns the render backend and provides rendering infrastructure.
  *
@@ -190,6 +192,16 @@ public:
 
     /** @brief Returns the render backend. */
     virtual IRenderBackend::Ptr backend() const = 0;
+
+    /// The renderer's GPU resource manager, or null before the renderer has
+    /// installed it. Plugins reach it to claim a shared set = 1 arena
+    /// (`shared_arena`) for data of their own; velk-render itself does not
+    /// own it, which is why this is an accessor rather than a member.
+    virtual IGpuResourceManager* resources() const = 0;
+
+    /// Installs the resource manager. Called once by the renderer during
+    /// init; not for general use.
+    virtual void set_resource_manager(IGpuResourceManager* resources) = 0;
 
     /**
      * @brief Returns the context-owned mesh builder.

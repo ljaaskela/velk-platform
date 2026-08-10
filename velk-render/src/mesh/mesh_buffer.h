@@ -2,6 +2,7 @@
 #define VELK_RENDER_MESH_BUFFER_H
 
 #include <velk-render/ext/gpu_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/plugin.h>
@@ -13,18 +14,26 @@ namespace velk::impl {
  *
  * One owned byte vector holds both VBO and IBO contents: VBO bytes at
  * offset 0, IBO bytes at offset `vbo_size_` (== `get_ibo_offset()`).
- * The whole vector is uploaded as a single VkBuffer with
- * `SHADER_DEVICE_ADDRESS | INDEX_BUFFER` usage, so both the bindless
- * VBO reads and `vkCmdBindIndexBuffer(..., ibo_offset, UINT32)` target
- * the same allocation.
+ * Those bytes live in a region of the shared mesh-word arena (set = 1
+ * slot 14), whose backing buffer carries `INDEX_BUFFER` usage.
+ *
+ * Both paths reach these bytes the same way, by index: `gpu_ref` gives the
+ * word base RT and raster each add their own offsets to. Nothing here is
+ * addressed: `vkCmdBindIndexBuffer` binds the arena's backing buffer by
+ * handle, at this region's offset plus `get_ibo_offset()`.
+ *
+ * Offsets reported by `get_ibo_offset` stay RELATIVE to this mesh's own
+ * bytes; consumers that need an absolute position in the arena add the
+ * region's base themselves (via `get_gpu_ref`).
  *
  * Meshes without an IBO (e.g. the TriangleStrip unit quad) pass
- * `ibo_size == 0` to `set_data`; the renderer's upload pass sees the
- * zero size and skips the `INDEX_BUFFER` usage bit.
+ * `ibo_size == 0` to `set_data` and are simply never bound for indexed draws.
  */
 class MeshBuffer
     : public ::velk::ext::GpuBuffer<MeshBuffer,
                                     ::velk::IMeshBuffer,
+                                    ::velk::IMeshBufferInternal,
+                                    ::velk::IArenaBuffer,
                                     ::velk::IGpuBuffer,
                                     ::velk::IGpuBufferStorageOwner>
 {
@@ -37,6 +46,13 @@ public:
     size_t get_vbo_size() const override { return vbo_size_; }
     size_t get_ibo_size() const override { return ibo_size_; }
     size_t get_ibo_offset() const override { return vbo_size_; }
+
+    // IMeshBufferInternal
+    bool ensure_geometry(IGpuResourceManager& resources) override;
+
+    // IArenaBuffer: where both paths index this geometry (word base into
+    // slot 14).
+    GpuRef gpu_ref() const override;
 
     /// Stubbed pending a real use case (glTF hot-reload, morph targets,
     /// streaming LOD). API shape is committed so enabling later is an
@@ -75,6 +91,12 @@ public:
 private:
     size_t vbo_size_ = 0;
     size_t ibo_size_ = 0;
+
+    /// This mesh's bytes inside the shared mesh-word arena, held for the
+    /// buffer's lifetime so its base is stable. Weak arena reference: mesh
+    /// buffers are scene assets and can outlive the renderer.
+    IGpuArena::WeakPtr arena_;
+    ArenaRegion region_;
 };
 
 } // namespace velk::impl

@@ -2,6 +2,7 @@
 
 #include "shader/shader.h"
 #include "shader/shader_compiler.h"
+#include "material/material_unpacker.h"
 #include "material/spirv_material_reflect.h"
 #include "resource/surface.h"
 
@@ -298,6 +299,34 @@ void RenderContextImpl::register_shader_include(string_view name, string_view co
     shader_includes_[name] = content;
 }
 
+namespace {
+
+/// Parses @p src's material record with the std430 rules the compute-side
+/// record reader is generated from, and compares the result against the
+/// compiler's reflected offsets. Logs and returns on any disagreement; the
+/// parsed layout is not used for anything else here, so a failure is a loud
+/// warning rather than a dropped material.
+void check_material_layout(string_view src, const vector<ShaderParam>& params)
+{
+    const string_view type = find_material_type(src);
+    if (type.size() == 0) {
+        return;  // material with no record
+    }
+    const MaterialLayout parsed = parse_material_layout(src, type);
+    if (!parsed.ok) {
+        VELK_LOG(E, "material layout: cannot derive layout for %.*s: %s",
+                 static_cast<int>(type.size()), type.data(), parsed.error.c_str());
+        return;
+    }
+    const string mismatch = validate_material_layout(parsed, params);
+    if (!mismatch.empty()) {
+        VELK_LOG(E, "material layout: %.*s disagrees with the compiler: %s",
+                 static_cast<int>(type.size()), type.data(), mismatch.c_str());
+    }
+}
+
+} // namespace
+
 IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_source,
                                                          string_view vertex_source)
 {
@@ -311,20 +340,29 @@ IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_so
     // between now and then is honored, same as every other material.
     mat->set_sources(vertex_source, fragment_source);
 
-    // Reflect material parameters from the vertex shader SPIR-V for
-    // dynamic-property setup. Compilation hits the shader cache on
+    // Reflect material parameters from the SPIR-V for dynamic-property setup.
+    // The material record (VELK_MATERIAL block) is read in the fragment
+    // shader, so reflect that; fall back to the vertex shader for materials
+    // that declare the block there. Compilation hits the shader cache on the
     // second run (inside the renderer's pipeline compile).
-    auto vert = vertex_source.empty()
-                    ? default_vertex_shader_
-                    : compile_shader(vertex_source, ShaderStage::Vertex);
-    if (vert) {
-        auto vert_data = vert->get_data();
-        if (!vert_data.empty()) {
-            auto params = reflect_material_params(vert_data.begin(), vert_data.size());
-            if (!params.empty()) {
-                mat->setup_inputs(params);
-            }
-        }
+    auto reflect_stage = [&](const string_view& src, ShaderStage stage,
+                             const IShader::Ptr& fallback) -> bool {
+        auto sh = src.empty() ? fallback : compile_shader(src, stage);
+        if (!sh) return false;
+        auto data = sh->get_data();
+        if (data.empty()) return false;
+        auto params = reflect_material_params(data.begin(), data.size());
+        if (params.empty()) return false;
+        // Cross-check the std430 rules used to generate compute-side record
+        // readers against the compiler's own offsets. A disagreement here
+        // would surface later as corrupted material data in the RT path, so
+        // it is reported at material-creation time instead.
+        check_material_layout(src, params);
+        mat->setup_inputs(params);
+        return true;
+    };
+    if (!reflect_stage(fragment_source, ShaderStage::Fragment, nullptr)) {
+        reflect_stage(vertex_source, ShaderStage::Vertex, default_vertex_shader_);
     }
 
     return mat;

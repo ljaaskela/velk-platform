@@ -15,12 +15,14 @@
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shadow_technique.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/interface/material/intf_material.h>
+#include <velk-render/interface/material/intf_material_internal.h>
 #include <velk-scene/interface/intf_environment.h>
 #include <velk-scene/interface/intf_visual.h>
 
@@ -140,37 +142,105 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             buf->clear_dirty();
             return mapped;
         };
+        // Material draw data lives in the shared material arena (set = 1 slot
+        // 4), in an arena-backed IBuffer per material. The material serialises
+        // straight into arena memory, so there is no CPU-side copy to diff
+        // against and no second write. The region is aligned to the record
+        // size, keeping both consumers' bases integral (raster divides the
+        // offset by the record size, the RT compute path by 4).
         auto upload_material = [&](const IBatch::Ptr& bp) {
-            if (!bp) return;
+            if (!bp || !ctx.material_arena) return;
             auto material_ptr = bp->material();
             auto* dd = interface_cast<IDrawData>(material_ptr.get());
-            if (!dd) return;
-            VELK_PERF_SCOPE("renderer.upload_material");
-            // get_data_buffer re-serialises into the persistent buffer
-            // and flips dirty when bytes change; idempotent if already
-            // up-to-date. Multiple batches sharing one material upload
-            // at most once per frame (after the first call clears
-            // dirty, subsequent calls find !is_dirty and bail).
-            if (auto buf = dd->get_data_buffer(ctx.resources)) {
-                upload_buffer(buf.get());
+            auto* mi = interface_cast<IMaterialInternal>(material_ptr.get());
+            if (!dd || !mi) return;
+            const uint64_t need = dd->get_draw_data_size();
+            if (need == 0) {
+                mi->set_material_buffer({});  // release any existing region
+                return;
             }
+            auto buf = mi->material_buffer();
+            const bool dirty =
+                mi->take_material_dirty(ctx.resources->texture_generation());
+            const bool fresh = (!buf || buf->get_data_size() != need);
+            if (fresh) {
+                buf = ctx.material_arena->create_buffer(need, need);
+                mi->set_material_buffer(buf);
+            }
+            // Re-serialising every material every frame is the dominant cost
+            // of this sweep at bistro's material count, and arena memory
+            // cannot be diffed, so the write is gated on the material's own
+            // change notifications instead.
+            //
+            // The perf scope sits inside the gate deliberately: its count is
+            // records actually written, not materials visited, so the metric
+            // says whether the gating is working rather than how many batches
+            // exist.
+            if (buf && (fresh || dirty)) {
+                VELK_PERF_SCOPE("renderer.upload_material");
+                buf->write(static_cast<size_t>(need), [&](void* dst, size_t n) {
+                    dd->write_draw_data(dst, n, ctx.resources);
+                });
+            }
+        };
+        // Instance bytes live in the shared instance arena (set = 1 slot 3),
+        // one persistent region per batch. The batch keeps its region across
+        // steady-state frames (stable `instances_base`, no re-upload); we
+        // (re)allocate only when the instance count changes and re-upload only
+        // when the batch flags its bytes dirty. The region is RAII-freed
+        // (deferred past the in-flight fence) when the batch is destroyed.
+        auto upload_instances = [&](const IBatch::Ptr& bp) {
+            if (!bp || !ctx.instance_arena) return;
+            auto blob = bp->instance_data();
+            const uint64_t need = blob.size();
+            const bool dirty = bp->take_instances_dirty();
+            if (need == 0) {
+                bp->set_instance_region({});  // release any existing region
+                return;
+            }
+            if (bp->instance_region_size() != need) {
+                auto region = ctx.instance_arena->alloc(need);
+                const uint64_t off = region.offset();
+                const bool ok = region.valid();
+                bp->set_instance_region(std::move(region));
+                if (ok) ctx.instance_arena->write_at(off, blob.begin(), need);
+            } else if (dirty) {
+                ctx.instance_arena->write_at(bp->instance_region_offset(),
+                                             blob.begin(), need);
+            }
+            // else: unchanged, keep the region and its bytes (no re-upload).
+        };
+        // Every batch owns one DrawDataHeader record in the shared draw-data
+        // arena, allocated once and held for the batch's lifetime. Allocated
+        // here rather than at emit time so emit only writes: the base is baked
+        // into the recorded draw call, so it must not move underneath it.
+        auto ensure_draw_data_region = [&](const IBatch::Ptr& bp) {
+            if (!bp || !ctx.resources) return;
+            if (bp->draw_data_region_size() == sizeof(DrawDataHeader)) return;
+            auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalDrawData,
+                                                     sizeof(DrawDataHeader));
+            if (!arena) return;
+            bp->set_draw_data_region(arena->alloc(sizeof(DrawDataHeader)));
         };
         auto upload_batch = [&](IBatch::Ptr& bp) {
             if (!bp) return;
             auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
-            if (auto* mapped = upload_buffer(batch->storage_buffer())) {
-                batch->set_storage_mapping(mapped);
-            }
+            // Ensures the args + count blob is GPU-resident; nothing reads
+            // the mapping back, the indirect commands are read by the GPU.
+            upload_buffer(batch->storage_buffer());
+            upload_instances(bp);
             upload_material(bp);
+            ensure_draw_data_region(bp);
         };
         for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {
             for (auto& bp : rtp.batches) upload_batch(bp);
         }
-        // env_batch has no persistent storage of its own (instance
-        // bytes still go through per-frame staging), but its material's
-        // persistent data buffer needs the same upload sweep.
+        // env_batch has no per-batch storage buffer, but its instances go
+        // through the same arena and its material needs the upload sweep.
+        upload_instances(rv.env_batch);
         upload_material(rv.env_batch);
+        ensure_draw_data_region(rv.env_batch);
     }
     rv.batches = &cache.batches;
 }
@@ -232,11 +302,11 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.cam_pos[0] = rv.cam_pos.x;
     globals.cam_pos[1] = rv.cam_pos.y;
     globals.cam_pos[2] = rv.cam_pos.z;
-    globals.bvh_root = rv.bvh_root;
-    globals.bvh_node_count = rv.bvh_node_count;
-    globals.bvh_shape_count = rv.bvh_shape_count;
-    globals.bvh_nodes_addr = rv.bvh_nodes_addr;
-    globals.bvh_shapes_addr = rv.bvh_shapes_addr;
+    globals.bvh_root = rv.bvh.root;
+    globals.bvh_node_count = rv.bvh.node_count;
+    globals.bvh_shape_count = rv.bvh.shape_count;
+    globals.bvh_node_base = rv.bvh.node_base;
+    globals.bvh_shape_base = rv.bvh.shape_base;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];
@@ -249,15 +319,25 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     cache.prev_view_projection = rv.view_projection;
     cache.has_prev_view_projection = true;
 
-    if (!cache.view_globals_buffer) {
-        GpuBufferDesc desc{};
-        desc.size = sizeof(FrameGlobals);
-        desc.cpu_writable = false;
-        cache.view_globals_buffer = ctx.resources->create_gpu_buffer(desc);
-        if (!cache.view_globals_buffer) return;
+    // Into the shared globals arena (set = 1 slot 2); shaders read
+    // velk_globals.data[base] by index. Persistent per-view region (fixed
+    // size, allocated once, written in place each frame): the base is stable
+    // across frames, so cached compute secondaries that bake it read this
+    // frame's globals rather than a rotating ring slot (which would freeze
+    // present_counter and flicker the RT noise).
+    if (ctx.globals_arena) {
+        constexpr uint64_t need = sizeof(FrameGlobals);
+        if (cache.globals_region.size() != need) {
+            cache.globals_region = ctx.globals_arena->alloc(need);
+        }
+        if (cache.globals_region.valid()) {
+            ctx.globals_arena->write_at(cache.globals_region.offset(), &globals, need);
+            rv.view_globals_base = static_cast<uint32_t>(
+                cache.globals_region.offset() / sizeof(FrameGlobals));
+        } else {
+            rv.view_globals_base = 0u;
+        }
     }
-    cache.view_globals_buffer->update(0, sizeof(FrameGlobals), &globals);
-    rv.view_globals_address = cache.view_globals_buffer->gpu_address();
 }
 
 void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_state,
@@ -279,24 +359,45 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
             s.out.push_back(site.base);
         }, &lc);
 
-    // Stage the lights into the per-view persistent buffer. Stable GPU
-    // address across frames; bytes update only on real change. Notify
-    // observers so cached lighting/RT passes invalidate.
+    // Suballocate a persistent region in the shared light arena (set = 1
+    // slot 5) and write the GpuLight array. The region's offset is stable
+    // across frames, so the base the compute shaders read is baked once into
+    // cached passes. Re-allocate only when the light count changes (the base
+    // moves, so the cached lighting/RT passes must re-record); otherwise write
+    // in place each frame (data read fresh at the stable base, no re-record).
     auto& cache = view_caches_[&entry];
-    auto staged = cache.lights_buffer.upload(
-        rv.lights.data(), rv.lights.size() * sizeof(GpuLight), ctx);
-    rv.lights_addr = staged.address;
-    if (staged.changed) entry.notify_view_changed();
+    if (!ctx.lights_arena) return;
+    const uint64_t need = rv.lights.size() * sizeof(GpuLight);
+    if (cache.lights_region.size() != need) {
+        if (need == 0) {
+            cache.lights_region = {};  // release
+        } else {
+            auto region = ctx.lights_arena->alloc(need);
+            const uint64_t off = region.offset();
+            const bool ok = region.valid();
+            cache.lights_region = std::move(region);
+            if (ok) ctx.lights_arena->write_at(off, rv.lights.data(), need);
+        }
+        entry.notify_view_changed();  // base + light_count changed
+    } else if (need > 0) {
+        ctx.lights_arena->write_at(cache.lights_region.offset(),
+                                   rv.lights.data(), need);
+    }
+    rv.lights_base = (need > 0 && cache.lights_region.valid())
+        ? static_cast<uint32_t>(cache.lights_region.offset() / sizeof(GpuLight))
+        : 0u;
 }
 
-void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
-                                  RenderView& rv)
+void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
+                                  FrameContext& ctx, RenderView& rv)
 {
     struct ShapeCollect {
         FrameContext& ctx;
         vector<RtShape>& shapes;
+        vector<MeshInstanceData>& mesh_instances;
     };
-    ShapeCollect sc{ctx, rv.shapes};
+    vector<MeshInstanceData> mesh_instances;
+    ShapeCollect sc{ctx, rv.shapes, mesh_instances};
     enumerate_scene_shapes(scene_state, ctx.render_ctx,
         +[](void* u, ShapeSite& site) {
             auto& s = *static_cast<ShapeCollect*>(u);
@@ -322,22 +423,64 @@ void ViewPreparer::prepare_shapes(const SceneState& scene_state, FrameContext& c
                 }
             }
             site.geometry.material_id = mat.mat_id;
-            site.geometry.material_data_addr = mat.mat_addr;
+            site.geometry.material_base = mat.mat_base;
             site.geometry.texture_id = tex_id;
             if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
                 uint32_t kind = ctx.snippets->register_intersect(analytic, *ctx.render_ctx);
                 if (kind != 0) site.geometry.shape_kind = kind;
             }
-            if (site.has_mesh_data && ctx.frame_buffer) {
-                if (auto* dd = interface_cast<IDrawData>(site.mesh_primitive)) {
-                    site.mesh_instance.mesh_static_addr =
-                        ctx.snippets->resolve_data_buffer(dd, resolve_ctx);
+            if (site.has_mesh_data) {
+                site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                if (auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive)) {
+                    site.mesh_instance.mesh_static_base =
+                        mpi->ensure_rt_data(*ctx.resources);
                 }
-                site.geometry.mesh_data_addr = ctx.frame_buffer->write(
-                    &site.mesh_instance, sizeof(site.mesh_instance));
+                // Index within this view's mesh-instance run; the arena base
+                // is added once the whole run is uploaded below.
+                site.geometry.mesh_instance_base =
+                    static_cast<uint32_t>(s.mesh_instances.size());
+                s.mesh_instances.push_back(site.mesh_instance);
             }
             s.shapes.push_back(site.geometry);
         }, &sc);
+
+    upload_mesh_instances(entry, ctx, rv,
+                          {mesh_instances.data(), mesh_instances.size()});
+}
+
+void ViewPreparer::upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
+                                         RenderView& rv,
+                                         array_view<MeshInstanceData> instances)
+{
+    auto& cache = view_caches_[&entry];
+    if (!ctx.mesh_instances_arena) return;
+
+    const uint64_t need = instances.size() * sizeof(MeshInstanceData);
+    if (cache.mesh_instances_region.size() != need) {
+        if (need == 0) {
+            cache.mesh_instances_region = {};  // release
+        } else {
+            auto region = ctx.mesh_instances_arena->alloc(need);
+            const uint64_t off = region.offset();
+            const bool ok = region.valid();
+            cache.mesh_instances_region = std::move(region);
+            if (ok) ctx.mesh_instances_arena->write_at(off, instances.begin(), need);
+        }
+    } else if (need > 0) {
+        ctx.mesh_instances_arena->write_at(cache.mesh_instances_region.offset(),
+                                           instances.begin(), need);
+    }
+
+    // Shift each mesh shape's run-relative index onto the region's base. The
+    // shape array is re-uploaded every frame, so a moved base needs no
+    // invalidation of anything that caches it.
+    if (need == 0 || !cache.mesh_instances_region.valid()) return;
+    const uint32_t base = static_cast<uint32_t>(
+        cache.mesh_instances_region.offset() / sizeof(MeshInstanceData));
+    for (auto& shape : rv.shapes) {
+        if (shape.shape_kind != kRtShapeKindMesh) continue;
+        shape.mesh_instance_base += base;
+    }
 }
 
 void ViewPreparer::prepare_env(IViewEntry& entry,
@@ -359,25 +502,21 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
         auto env_ref =
             ctx.snippets->resolve_material(env_prog.get(), ctx.make_resolve_context());
         rv.env.material_id = env_ref.mat_id;
-        rv.env.data_addr = env_ref.mat_addr;
     }
-    // Fallback for env materials without a snippet: stage into a
-    // per-view persistent buffer so the GPU address stays stable
-    // across frames. Without persistence, env_data_addr would rotate
-    // per-frame through frame_buffer staging and force the cached
-    // lighting pass to rebuild every frame, racing with in-flight
-    // slots that share the cached IRenderPass::Ptr.
-    if (rv.env.data_addr == 0) {
-        if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
-            size_t sz = dd->get_draw_data_size();
-            if (sz > 0) {
-                vector<uint8_t> scratch(sz, 0);
-                if (dd->write_draw_data(scratch.data(), sz) == ReturnValue::Success) {
-                    auto& cache = view_caches_[&entry];
-                    rv.env.data_addr =
-                        cache.env_data_buffer.upload(scratch.data(), sz, ctx).address;
-                }
-            }
+    // Env params (intensity, rotation_rad) ride the RT / deferred push
+    // constants inline, so serialise the env material's draw data and pull
+    // the two leading floats (EnvMaterial writes {intensity, rotation_rad,
+    // pad, pad}). No per-frame data buffer / device address needed.
+    if (auto* dd = interface_cast<IDrawData>(env_prog.get())) {
+        // 16-byte aligned: the env material's GPU struct is alignas(16)
+        // (VELK_GPU_STRUCT), so write_draw_data stores it with aligned SSE
+        // moves; a 4-aligned float[4] would fault.
+        alignas(16) float env_data[4] = {};
+        if (dd->get_draw_data_size() == sizeof(env_data)
+            && dd->write_draw_data(env_data, sizeof(env_data), ctx.resources)
+                   == ReturnValue::Success) {
+            rv.env.intensity = env_data[0];
+            rv.env.rotation_rad = env_data[1];
         }
     }
 
@@ -431,7 +570,8 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
     }
 
     auto& cache = view_caches_[&entry];
-    if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id, rv.env.data_addr})) {
+    if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id,
+                                  rv.env.intensity, rv.env.rotation_rad})) {
         entry.notify_view_changed();
     }
 }
@@ -468,11 +608,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     // Always-on: viewport / camera / BVH addrs / frame globals upload /
     // env. Cheap and used by every path.
     prepare_camera(entry, camera_element, ctx, rv);
-    rv.bvh_nodes_addr = ctx.bvh_nodes_addr;
-    rv.bvh_shapes_addr = ctx.bvh_shapes_addr;
-    rv.bvh_root = ctx.bvh_root;
-    rv.bvh_node_count = ctx.bvh_node_count;
-    rv.bvh_shape_count = ctx.bvh_shape_count;
+    rv.bvh = ctx.bvh;
     prepare_frame_globals(entry, ctx, rv);
     prepare_env(entry, camera_element, ctx, rv);
 
@@ -480,7 +616,7 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     // declare a need for them.
     if (needs.batches) prepare_batches(entry, scene_state, batch_builder, ctx, rv);
     if (needs.lights)  prepare_lights(entry, scene_state, ctx, rv);
-    if (needs.shapes)  prepare_shapes(scene_state, ctx, rv);
+    if (needs.shapes)  prepare_shapes(entry, scene_state, ctx, rv);
 
     return rv;
 }

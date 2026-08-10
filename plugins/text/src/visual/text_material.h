@@ -4,20 +4,19 @@
 #include <velk-render/ext/material.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/plugin.h>
 
 namespace velk::ui {
 
 /**
- * @brief Internal interface for binding a TextMaterial to a font's three
- *        GPU buffers (curves, bands, glyph table).
+ * @brief Internal interface for binding a TextMaterial to the font whose
+ *        glyph data it reads.
  */
 class ITextMaterialInternal : public Interface<ITextMaterialInternal>
 {
 public:
-    virtual void set_font_buffers(IBuffer::Ptr curves,
-                                  IBuffer::Ptr bands,
-                                  IBuffer::Ptr glyphs) = 0;
+    virtual void set_font(IFont* font) = 0;
 };
 
 /**
@@ -36,9 +35,7 @@ public:
     VELK_CLASS_UID(::velk::ui::ClassId::TextMaterial, "TextMaterial");
 
     // ITextMaterialInternal
-    void set_font_buffers(IBuffer::Ptr curves,
-                          IBuffer::Ptr bands,
-                          IBuffer::Ptr glyphs) override;
+    void set_font(IFont* font) override;
 
     // IMaterial
     size_t get_draw_data_size() const override;
@@ -51,9 +48,7 @@ public:
 private:
     using Base = ::velk::ext::Material<TextMaterial, ITextMaterialInternal>;
 
-    IBuffer::Ptr curves_;
-    IBuffer::Ptr bands_;
-    IBuffer::Ptr glyphs_;
+    IFont* font_ = nullptr;  ///< Owns this material; outlives it.
 };
 
 } // namespace velk::ui

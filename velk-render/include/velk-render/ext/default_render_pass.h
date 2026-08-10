@@ -16,10 +16,9 @@ namespace velk::impl {
  *
  * Hive-pooled via `velk::instance().create<IRenderPass>(ClassId::DefaultRenderPass)`.
  * Producers use the IRenderPass mutator surface (`add_read`, `add_write`,
- * `set_command_buffer`, `set_target_*`, `set_surface_blit`,
- * `set_view_globals_address`); they don't reach for this concrete
- * type so plugins outside velk-render can build passes through the
- * interface alone.
+ * `set_command_buffer`, `set_target_*`, `set_surface_blit`); they
+ * don't reach for this concrete type so plugins outside velk-render
+ * can build passes through the interface alone.
  */
 class DefaultRenderPass : public ::velk::ext::RenderState<DefaultRenderPass, IRenderPass>
 {
@@ -31,12 +30,10 @@ public:
 
     array_view<const IGpuResource::Ptr> reads() const override;
     array_view<const IGpuResource::Ptr> writes() const override;
-    uint64_t view_globals_address() const override;
     IGpuCommandBuffer::Ptr command_buffer() const override { return command_buffer_; }
 
     void add_read(IGpuResource::Ptr resource) override;
     void add_write(IGpuResource::Ptr resource) override;
-    void set_view_globals_address(uint64_t addr) override;
     void set_command_buffer(IGpuCommandBuffer::Ptr cmd) override
     {
         command_buffer_ = std::move(cmd);
@@ -51,7 +48,6 @@ private:
     vector<IGpuResource::Ptr> reads_;
     vector<IGpuResource::Ptr> writes_;
     const char* name_ = "";
-    uint64_t view_globals_address_ = 0;
     IGpuCommandBuffer::Ptr command_buffer_;
     /// Strong refs to the pipelines this pass's command buffer binds;
     /// the pipeline cache holds only weak refs, so this keeps them alive

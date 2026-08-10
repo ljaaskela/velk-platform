@@ -12,7 +12,7 @@ VkGpuBuffer::~VkGpuBuffer()
 }
 
 void VkGpuBuffer::init(IRenderBackend* backend, ::VkBuffer buffer, VmaAllocation allocation,
-                       void* mapped, size_t size, uint64_t address)
+                       void* mapped, size_t size)
 {
     assert(buffer_ == VK_NULL_HANDLE);
     backend_ = backend;
@@ -20,7 +20,6 @@ void VkGpuBuffer::init(IRenderBackend* backend, ::VkBuffer buffer, VmaAllocation
     allocation_ = allocation;
     mapped_ = mapped;
     size_ = size;
-    address_ = address;
 }
 
 void VkGpuBuffer::update(size_t offset, size_t size, const void* data)

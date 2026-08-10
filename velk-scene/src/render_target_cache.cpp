@@ -8,6 +8,7 @@
 #include <velk-render/detail/intf_gpu_resource_manager_internal.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-scene/interface/intf_render_to_texture.h>
 
@@ -130,11 +131,11 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_globals.viewport[1] = static_cast<float>(rte.height);
         rt_globals.viewport[2] = 1.0f / static_cast<float>(rte.width);
         rt_globals.viewport[3] = 1.0f / static_cast<float>(rte.height);
-        rt_globals.bvh_root = ctx.bvh_root;
-        rt_globals.bvh_node_count = ctx.bvh_node_count;
-        rt_globals.bvh_shape_count = ctx.bvh_shape_count;
-        rt_globals.bvh_nodes_addr = ctx.bvh_nodes_addr;
-        rt_globals.bvh_shapes_addr = ctx.bvh_shapes_addr;
+        rt_globals.bvh_root = ctx.bvh.root;
+        rt_globals.bvh_node_count = ctx.bvh.node_count;
+        rt_globals.bvh_shape_count = ctx.bvh.shape_count;
+        rt_globals.bvh_node_base = ctx.bvh.node_base;
+        rt_globals.bvh_shape_base = ctx.bvh.shape_base;
         rt_globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
         RenderView rt_view{};
         rt_view.batches = &rtp.batches;
@@ -144,23 +145,27 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_view.width = rte.width;
         rt_view.height = rte.height;
         if (ctx.backend && ctx.resources) {
-            auto& vg = view_globals_[rtp.element];
-            if (!vg) {
-                GpuBufferDesc desc{};
-                desc.size = sizeof(FrameGlobals);
-                desc.cpu_writable = false;
-                vg = ctx.resources->create_gpu_buffer(desc);
-            }
-            if (vg) {
-                vg->update(0, sizeof(FrameGlobals), &rt_globals);
-                rt_view.view_globals_address = vg->gpu_address();
+            // Into the shared globals arena for index-based reads (same as the
+            // main view path in ViewPreparer). Persistent per-RTT region (fixed
+            // size, allocated once, written in place): stable base across
+            // frames so cached compute secondaries that bake it read fresh
+            // globals, not a rotating ring slot.
+            if (ctx.globals_arena) {
+                constexpr uint64_t need = sizeof(FrameGlobals);
+                auto& region = globals_regions_[rtp.element];
+                if (region.size() != need) {
+                    region = ctx.globals_arena->alloc(need);
+                }
+                if (region.valid()) {
+                    ctx.globals_arena->write_at(region.offset(), &rt_globals, need);
+                    rt_view.view_globals_base = static_cast<uint32_t>(
+                        region.offset() / sizeof(FrameGlobals));
+                } else {
+                    rt_view.view_globals_base = 0u;
+                }
             }
         }
-        rt_view.bvh_root = ctx.bvh_root;
-        rt_view.bvh_node_count = ctx.bvh_node_count;
-        rt_view.bvh_shape_count = ctx.bvh_shape_count;
-        rt_view.bvh_nodes_addr = ctx.bvh_nodes_addr;
-        rt_view.bvh_shapes_addr = ctx.bvh_shapes_addr;
+        rt_view.bvh = ctx.bvh;
 
         auto& entry_ptr = view_entries_[rtp.element];
         if (!entry_ptr) {

@@ -12,11 +12,6 @@ array_view<const IGpuResource::Ptr> DefaultRenderPass::writes() const
     return array_view<const IGpuResource::Ptr>(writes_.data(), writes_.size());
 }
 
-uint64_t DefaultRenderPass::view_globals_address() const
-{
-    return view_globals_address_;
-}
-
 void DefaultRenderPass::add_read(IGpuResource::Ptr resource)
 {
     reads_.push_back(std::move(resource));
@@ -27,16 +22,10 @@ void DefaultRenderPass::add_write(IGpuResource::Ptr resource)
     writes_.push_back(std::move(resource));
 }
 
-void DefaultRenderPass::set_view_globals_address(uint64_t addr)
-{
-    view_globals_address_ = addr;
-}
-
 void DefaultRenderPass::reset()
 {
     reads_.clear();
     writes_.clear();
-    view_globals_address_ = 0;
     command_buffer_.reset();
 }
 

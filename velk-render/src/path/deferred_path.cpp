@@ -173,7 +173,8 @@ namespace {
 // CPU mirror of the deferred lighting push-constant block
 // (`layout(push_constant) PC` in deferred_compute_prelude_src).
 VELK_GPU_STRUCT DeferredComputePushC {
-    uint64_t globals;          // FrameGlobals BDA, GLSL pc.globals
+    uint32_t globals_base;     // FrameGlobals arena index, GLSL pc.globals_base
+    uint32_t _pad_globals;
     float    cam_pos[4];
     uint32_t output_image_id;
     uint32_t albedo_tex_id;
@@ -186,9 +187,10 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t light_count;
     uint32_t env_texture_id;
     uint32_t shadow_debug_image_id;
-    uint32_t _pad0;            // aligns the BDA pointers below to 8
-    uint64_t lights_addr;
-    uint64_t env_data_addr;
+    uint32_t _pad0;            // filler; keeps the block layout at 96 bytes
+    uint32_t lights_base;      // light array index (set = 1 slot 5)
+    uint32_t _pad_lights;
+    float    env_params[2];    // x = intensity, y = rotation_rad (inline)
     uint32_t irr_image_id;     // demodulated diffuse irradiance output
     uint32_t _pad1;            // pads to 96 (VELK_GPU_STRUCT is alignas(16))
 };
@@ -197,7 +199,8 @@ static_assert(sizeof(DeferredComputePushC) == 96, "Deferred compute PushC layout
 // Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
 // mirrors the PC block in deferred_denoise_compute_src).
 VELK_GPU_STRUCT DenoisePushC {
-    uint64_t globals;
+    uint32_t globals_base;
+    uint32_t _pad_globals;
     uint32_t normal_id;
     uint32_t worldpos_id;
     uint32_t irr_id;
@@ -215,7 +218,8 @@ VELK_GPU_STRUCT DenoisePushC {
 // Push constants for the spatial filter + composite pass (mirrors the PC block
 // in deferred_spatial_composite_compute_src).
 VELK_GPU_STRUCT SpatialPushC {
-    uint64_t globals;
+    uint32_t globals_base;
+    uint32_t _pad_globals;
     uint32_t albedo_id;
     uint32_t material_id;
     uint32_t normal_id;
@@ -444,7 +448,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_gbuffer_pass, vs.gbuffer_dirty, "deferred.gbuffer",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             IRenderTextureGroup* group = vs.gbuffer.get();
             auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
@@ -470,7 +474,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                 *ctx.frame_buffer,
                 *ctx.resources,
                 default_uv1,
-                render_view.view_globals_address,
+                render_view.view_globals_base,
                 resolve,
                 render_view.has_frustum ? &render_view.frustum : nullptr);
 
@@ -581,12 +585,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // stamped flags[1] with the registered id; the deferred compute's
     // velk_eval_shadow switch is composed from the same registry, so
     // any tech ordering works.
-    // Persistent per-view lights buffer staged by ViewPreparer; address
-    // is stable across frames so cached lighting passes can embed it.
-    uint64_t lights_addr = render_view.lights_addr;
-
     DeferredComputePushC pc{};
-    pc.globals = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.cam_pos[0] = render_view.cam_pos.x;
     pc.cam_pos[1] = render_view.cam_pos.y;
     pc.cam_pos[2] = render_view.cam_pos.z;
@@ -602,8 +602,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.env_texture_id = render_view.env.texture_id;
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
-    pc.lights_addr = lights_addr;
-    pc.env_data_addr = render_view.env.data_addr;
+    pc.lights_base = render_view.lights_base;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
     pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
 
     // No surface blit here anymore: the lighting pass writes the "rest" image
@@ -611,7 +612,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // produces the final image and blits it.
     emit_cached_view_pass(
         vs.cached_lighting_pass, vs.lighting_dirty, "deferred.lighting",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = lighting_pipeline.get();
@@ -674,7 +675,7 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
     const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
 
     DenoisePushC pc{};
-    pc.globals = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
     pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
     pc.irr_id      = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
@@ -702,7 +703,7 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_denoise_pass, vs.denoise_dirty, "deferred.temporal",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = temporal_pipeline.get();
@@ -769,7 +770,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     }
 
     SpatialPushC pc{};
-    pc.globals     = render_view.view_globals_address;
+    pc.globals_base = render_view.view_globals_base;
     pc.albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
     pc.material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
     pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
@@ -786,7 +787,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
 
     emit_cached_view_pass(
         vs.cached_spatial_pass, vs.spatial_dirty, "deferred.spatial",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = spatial_pipeline.get();
@@ -849,7 +850,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     emit_cached_view_pass(
         vs.cached_transparent_pass, vs.transparent_dirty, "deferred.transparent",
-        render_view.view_globals_address, graph,
+        graph,
         [&](CachedPassRecording& rec) {
             auto* default_uv1 =
                 ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
@@ -876,7 +877,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
             vector<DrawCall> draw_calls;
             emit_draw_calls(
                 draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-                default_uv1, render_view.view_globals_address, resolve,
+                default_uv1, render_view.view_globals_base, resolve,
                 render_view.has_frustum ? &render_view.frustum : nullptr);
 
             // No transparent geometry this view: leave an empty (no-op) pass.

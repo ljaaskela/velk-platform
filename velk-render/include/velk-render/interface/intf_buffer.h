@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <velk/api/velk.h>
 #include <velk-render/interface/intf_gpu_buffer.h>
 
 namespace velk {
@@ -112,14 +113,100 @@ public:
 };
 
 /**
- * @brief Convenience: returns the BDA of @p ptr's underlying GPU
- *        buffer. Returns 0 if @p ptr has no GPU storage.
+ * @brief Where a shader finds a buffer's contents.
+ *
+ * Replaces a bare `uint64_t` address, which said nothing about what the number
+ * meant and so allowed an element base to travel under an address-shaped name.
+ * No shader dereferences a GPU pointer any more, so the only way a shader
+ * reaches a buffer is by indexing a bound `set = 1` arena; `Kind` is kept as a
+ * named seam because a second backend may introduce another way.
+ *
+ * Construct only through the factories, so `kind` can never disagree with the
+ * payload. A default-constructed ref is `None`, meaning "no GPU storage yet".
+ * Note that a buffer bound wholesale (indirect args, an index buffer) has no
+ * shader-visible handle at all and so answers `None`.
+ */
+struct GpuRef
+{
+    enum class Kind : uint32_t
+    {
+        None,   ///< No storage yet, or nothing a shader can index.
+        Index,  ///< Region of a bound set = 1 arena; the shader indexes it.
+    };
+
+    Kind kind = Kind::None;
+    struct { uint32_t base; uint32_t slot; } index;
+
+    constexpr GpuRef() : kind(Kind::None), index{0, 0} {}
+
+    static GpuRef from_index(uint32_t slot, uint32_t base)
+    {
+        GpuRef r;
+        r.kind = Kind::Index;
+        r.index.slot = slot;
+        r.index.base = base;
+        return r;
+    }
+
+    bool valid() const { return kind != Kind::None; }
+
+    /// Element base within its arena. Base 0 is a valid value and cannot
+    /// double as a sentinel, so reading a ref that holds no index is reported
+    /// rather than defaulted.
+    uint32_t get_base() const
+    {
+        if (kind != Kind::Index) {
+            VELK_LOG(E, "GpuRef: read as arena index, but holds nothing");
+            return 0;
+        }
+        return index.base;
+    }
+
+    /// The set = 1 binding this ref indexes. Not needed by shaders (the
+    /// binding is declared statically); consumers use it to check a ref came
+    /// from the slot they read.
+    uint32_t get_slot() const
+    {
+        if (kind != Kind::Index) {
+            VELK_LOG(E, "GpuRef: slot read, but the ref holds no arena index");
+            return 0;
+        }
+        return index.slot;
+    }
+};
+
+/**
+ * @brief Implemented by buffers whose storage is a region of an IGpuArena,
+ *        so consumers can ask where the shader should index.
+ *
+ * This is what `get_gpu_ref` looks for, and the only source of a valid ref.
+ *
+ * Chain: IInterface -> IArenaBuffer
+ */
+class IArenaBuffer
+    : public Interface<IArenaBuffer, IInterface,
+                       VELK_UID("8e4723bb-dc6a-4b1e-a0eb-b069836ab2df")>
+{
+public:
+    /// Kind::Index once storage exists, Kind::None before.
+    virtual GpuRef gpu_ref() const = 0;
+};
+
+/**
+ * @brief Convenience: returns where a shader indexes @p ptr's contents, or an
+ *        invalid ref when there is nowhere yet.
+ *
+ * Doubles as the residency test for arena-backed data: `valid()` is false
+ * until the bytes have been suballocated. A buffer that is not arena-backed
+ * answers `None`, since a shader has no way to reach it by hand.
  */
 template <typename T>
-uint64_t get_gpu_address(const T& ptr)
+GpuRef get_gpu_ref(const T& ptr)
 {
-    auto* gb = interface_cast<IGpuBuffer>(ptr);
-    return gb ? gb->gpu_address() : 0;
+    if (auto* ab = interface_cast<IArenaBuffer>(ptr)) {
+        return ab->gpu_ref();
+    }
+    return {};
 }
 
 } // namespace velk

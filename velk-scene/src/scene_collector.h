@@ -23,7 +23,7 @@ namespace velk {
 
 // What enumerate_scene_shapes passes to its callback. `geometry` is
 // pre-filled with origin/axes/color/params/shape_kind/shape_param; the
-// callback mutates material_id / material_data_addr / texture_id and
+// callback mutates material_id / material_base / texture_id and
 // pushes the record into its own output vector.
 //
 // `draw_entry` is non-null for rect-path shapes (one call per draw
@@ -37,14 +37,14 @@ struct ShapeSite
     const DrawEntry* draw_entry = nullptr;
 
     /// Set when geometry.shape_kind == kRtShapeKindMesh. The renderer
-    /// callback fills `mesh_instance.mesh_static_addr` from the
-    /// primitive's IDrawData buffer, then writes the instance record
-    /// into the per-frame buffer and stamps the resulting GPU address
-    /// into geometry.mesh_data_addr.
+    /// callback fills `mesh_instance.mesh_static_base` by publishing the
+    /// primitive's RT geometry into the shared arenas; the collected record
+    /// is uploaded to the shared mesh-instance arena and its element index
+    /// stamped into geometry.mesh_instance_base.
     MeshInstanceData mesh_instance{};
     /// The mesh primitive backing this shape; used by the renderer
-    /// callback to resolve the per-mesh static-data buffer address via
-    /// IDrawData::get_data_buffer. Null for non-mesh shapes.
+    /// callback to publish the per-mesh static data via
+    /// IMeshPrimitiveInternal::ensure_rt_data. Null for non-mesh shapes.
     IMeshPrimitive* mesh_primitive = nullptr;
     bool has_mesh_data = false;
 
@@ -80,8 +80,8 @@ struct BvhBuild
     /// Parallel to `shapes`. For shapes with shape_kind == kRtShapeKindMesh,
     /// contains the populated MeshInstanceData payload (world matrices
     /// + a stable pointer to the mesh's static-data buffer); for other
-    /// kinds the entry is zero. SceneBvh re-uploads these per frame and
-    /// patches the shapes' mesh_data_addr fields.
+    /// kinds the entry is zero. SceneBvh uploads these to the shared
+    /// mesh-instance arena and stamps the shapes' mesh_instance_base fields.
     vector<MeshInstanceData> mesh_instances;
     uint32_t root_index = 0;
 };

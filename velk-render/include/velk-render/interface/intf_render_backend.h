@@ -337,6 +337,57 @@ public:
                                       size_t size,
                                       const void* data) = 0;
 
+    /// Fixed binding slots in the per-frame "global buffer" descriptor
+    /// set (set = 1) that compute shaders read by index instead of by
+    /// chasing a buffer_device_address. First step of the
+    /// index-not-address resource model; GpuHive pages claim further
+    /// slots later. Keep in sync with the set = 1 declarations in the
+    /// compute shader preludes.
+    enum GlobalBufferSlot : uint32_t {
+        kGlobalBvhNodes  = 0,
+        kGlobalBvhShapes = 1,
+        kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read at velk_globals.data[globals_base].
+        kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
+        kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
+        kGlobalLights    = 5,  ///< Persistent per-view light array, read at velk_lights.data[lights_base + i].
+        kGlobalPrimaryShapes = 6, ///< Persistent per-view painter-sorted RtShape list (RT primary rays), read at velk_shapes.data[shapes_base + i].
+        /// Glyph outline data, one region per font. Claimed by the text
+        /// plugin via IGpuResourceManager::shared_arena; listed here because
+        /// the slot map is global, not because velk-render uses them.
+        kGlobalTextCurves = 7,
+        kGlobalTextBands  = 8,
+        kGlobalTextGlyphs = 9,
+        kGlobalMeshInstances = 10, ///< Per-shape mesh transforms, read at velk_mesh_instances.data[mesh_instance_base].
+        /// Per-primitive RT geometry metadata and its BLAS. Claimed by
+        /// MeshPrimitive via IGpuResourceManager::shared_arena, since primitives
+        /// are built outside the render loop. The BLAS keeps its own node arena
+        /// rather than sharing slot 0: BLAS runs are per-primitive and effectively
+        /// permanent, while TLAS runs churn on every rebuild, and one byte
+        /// free-list holding both would fragment.
+        kGlobalMeshStatic = 11,
+        kGlobalBlasNodes  = 12,
+        kGlobalBlasTris   = 13,
+        /// Mesh geometry (VBO + IBO bytes) as raw 32-bit words, one region per
+        /// IMeshBuffer. Read by index for RT; the same backing buffer is bound
+        /// for indexed draws, so this arena carries INDEX_BUFFER usage and is
+        /// pre-sized (growth recopies, and geometry is bulk).
+        kGlobalMeshWords  = 14,
+        /// Per-draw DrawDataHeader records, one persistent region per batch.
+        /// The draw's push constant is the element index of its record, which
+        /// is the whole of what a raster pipeline is handed.
+        kGlobalDrawData   = 15,
+        kGlobalBufferSlotCount = 16,
+    };
+
+    /// Binds @p buffer at slot @p binding of the current frame's set = 1
+    /// descriptor set, so compute shaders read it as a bound storage
+    /// buffer. Call once per frame during prepare (after begin_frame),
+    /// each frame the buffer is needed; pass null to leave the slot
+    /// unbound. @p buffer must outlive the frame. The slot's set is only
+    /// updated after its fence has fired, so no in-flight frame is
+    /// disturbed.
+    virtual void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) = 0;
+
     /// @}
     /// @name Textures
     /// @{

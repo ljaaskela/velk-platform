@@ -48,6 +48,8 @@ public:
     void record_buffer_update(IGpuBuffer& target, size_t offset,
                               size_t size, const void* data) override;
 
+    void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) override;
+
     IGpuTexture::Ptr create_texture(const TextureDesc& desc) override;
     void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) override;
     bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
@@ -133,10 +135,37 @@ public:
     /// @}
 
 public:
+    /// @name Dynamic-rendering entry points
+    /// Resolved once after device creation. Dynamic rendering is Vulkan 1.3
+    /// core but is also reachable on a 1.2 device through
+    /// `VK_KHR_dynamic_rendering`, and only one of the two symbols is loaded
+    /// depending on which path the device took, so recorders call through
+    /// these rather than naming either directly.
+    /// @{
+    PFN_vkCmdBeginRendering cmd_begin_rendering() const { return cmd_begin_rendering_; }
+    PFN_vkCmdEndRendering   cmd_end_rendering() const { return cmd_end_rendering_; }
+    /// @}
 
 private:
+    /// Picks whichever of the core / KHR dynamic-rendering symbols volk
+    /// managed to load. Call after volkLoadDevice.
+    bool resolve_dynamic_rendering();
+
+    /// True if the selected physical device exposes @p name.
+    bool has_device_extension(const char* name) const;
+
+    /// Verifies the physical device supports everything create_device is about
+    /// to ask for, naming whatever is missing. Without this a missing feature
+    /// surfaces only as a bare vkCreateDevice failure.
+    bool check_required_features(
+        const VkPhysicalDeviceVulkan12Features& wanted12,
+        const VkPhysicalDeviceDynamicRenderingFeatures& wanted_dynamic_rendering);
+
     // Vulkan core
     VkInstance instance_ = VK_NULL_HANDLE;
+    uint32_t instance_api_version_ = 0;
+    PFN_vkCmdBeginRendering cmd_begin_rendering_ = nullptr;
+    PFN_vkCmdEndRendering   cmd_end_rendering_ = nullptr;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
@@ -247,6 +276,21 @@ private:
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
+
+    // "Global buffer" descriptor set (set = 1): scene-global storage
+    // buffers (BVH nodes/shapes today; GpuArena/GpuHive pages later) that
+    // compute shaders read by index rather than by buffer_device_address.
+    // A SINGLE frame-invariant set, bound by the primary and by every
+    // (simultaneous-use) secondary command buffer that records compute.
+    // Per-frame data variance lives in the buffer CONTENTS (refreshed in
+    // place via IGpuArena), not the descriptor: producers rewrite the
+    // descriptor only when a buffer's address changes (first bind + the
+    // rare growth realloc), so steady state never touches it. The arena
+    // writes it during prepare, after the set was bound, so the binding
+    // is UPDATE_AFTER_BIND.
+    VkDescriptorPool bound_buffer_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout bound_buffer_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet bound_buffer_set_ = VK_NULL_HANDLE;
     VkSampler linear_sampler_ = VK_NULL_HANDLE;  ///< Default Repeat+Linear sampler. Kept as the fallback when no per-texture desc is supplied.
     uint32_t next_bindless_index_ = 1; // 0 reserved for "no texture"
 
@@ -417,6 +461,7 @@ private:
     bool create_command_pool();
     bool create_sync_objects();
     bool create_bindless_descriptor();
+    bool create_bound_buffer_descriptor();
     bool create_pipeline_layout();
 
     bool create_swapchain(SurfaceData& sd);

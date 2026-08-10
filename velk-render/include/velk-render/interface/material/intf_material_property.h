@@ -30,7 +30,11 @@ public:
         (PROP, int, tex_coord, 0),
         (PROP, vec2, uv_offset, {}),
         (PROP, float, uv_rotation, 0.f),
-        (PROP, vec2, uv_scale, (vec2{1.f, 1.f}))
+        (PROP, vec2, uv_scale, (vec2{1.f, 1.f})),
+        /// Fires after any write to this property, including the
+        /// class-specific factors, so the owning material can mark its GPU
+        /// record for re-serialisation. Mirrors IMaterialOptions.
+        (EVT,  on_property_changed)
     )
 };
 

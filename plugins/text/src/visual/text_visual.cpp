@@ -172,23 +172,16 @@ vector<DrawEntry> TextVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
     return result;
 }
 
-vector<IBuffer::Ptr> TextVisual::get_gpu_resources(::velk::IRenderContext& /*ctx*/) const
+vector<IBuffer::Ptr> TextVisual::get_gpu_resources(::velk::IRenderContext& ctx) const
 {
-    auto font = font_.as_ptr<IFont>();
-    if (!font) {
-        return {};
+    // The font's glyph data lives in the shared text arenas rather than in
+    // per-font buffers, so there is nothing for the renderer to upload. This
+    // hook is still the per-frame point where a render context is in hand,
+    // which is what the font needs to (re)claim its regions after baking.
+    if (auto font = font_.as_ptr<IFont>()) {
+        font->ensure_gpu_data(ctx);
     }
-    vector<IBuffer::Ptr> out;
-    if (auto b = font->get_curve_buffer()) {
-        out.push_back(std::move(b));
-    }
-    if (auto b = font->get_band_buffer()) {
-        out.push_back(std::move(b));
-    }
-    if (auto b = font->get_glyph_buffer()) {
-        out.push_back(std::move(b));
-    }
-    return out;
+    return {};
 }
 
 namespace {
@@ -202,20 +195,22 @@ constexpr string_view text_intersect_src = R"(
 #define fwidth(x) vec2(1.0 / 32.0)
 #include "velk_text.glsl"
 
-layout(buffer_reference, std430) buffer TextIntersectData {
-    VelkTextCurveBuffer curves;
-    VelkTextBandBuffer bands;
-    VelkTextGlyphBuffer glyphs;
-};
-
 bool velk_intersect_text_glyph(Ray ray, RtShape shape, out RayHit hit)
 {
     if (!intersect_rect(ray, shape, hit)) return false;
-    if (shape.material_data_addr == 0u) return true;
-    TextIntersectData d = TextIntersectData(shape.material_data_addr);
+    if (shape.material_base == 0u) return true;
+    // The shape carries the word base of its TextMaterial record. The three
+    // bases are read straight out of the material arena rather than through
+    // the material's generated reader: intersect snippets and material
+    // snippets have independent active sets, so a frame can compose this
+    // intersect without the text material's declarations being present.
+    uint b = shape.material_base;
+    uint curve_base = velk_material_words.data[b + 0u];
+    uint band_base  = velk_material_words.data[b + 1u];
+    uint glyph_base = velk_material_words.data[b + 2u];
     vec2 glyph_uv = vec2(hit.uv.x, 1.0 - hit.uv.y);
     float coverage = velk_text_coverage(glyph_uv, shape.shape_param,
-                                         d.curves, d.bands, d.glyphs);
+                                        curve_base, band_base, glyph_base);
     return coverage >= 0.5;
 }
 )";

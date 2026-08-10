@@ -17,36 +17,61 @@ namespace velk {
 /// The compiler pads the struct automatically, no manual _pad fields needed.
 #define VELK_GPU_STRUCT struct alignas(16)
 
+/// Renderer-side description of how a view reaches the scene BVH for
+/// index-based shader reads. Carried through RenderView / FrameContext and
+/// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c shape_base
+/// locate the BVH's regions in the shared node / shape arenas; @c root and
+/// the counts are relative to them. Not uploaded directly; the GPU structs
+/// mirror these fields individually.
+struct BvhBinding
+{
+    uint32_t root        = 0;
+    uint32_t node_count  = 0;
+    uint32_t shape_count = 0;
+    uint32_t node_base   = 0;
+    uint32_t shape_base  = 0;
+
+    bool operator==(const BvhBinding& o) const
+    {
+        return root == o.root && node_count == o.node_count
+            && shape_count == o.shape_count && node_base == o.node_base
+            && shape_base == o.shape_base;
+    }
+    bool operator!=(const BvhBinding& o) const { return !(*this == o); }
+};
+
 /// Per-frame global data written by the renderer, read by all shaders.
 ///
-/// Layout must match the `GlobalData` buffer_reference declaration in
-/// velk.glsl (scalar layout). The view preparer writes one of these
-/// per view per frame into the per-frame staging buffer and stamps
-/// the resulting GPU address onto each IRenderPass; the graph executor
-/// pushes that address into push-constant slot [0..8) at pass start,
-/// and shaders dereference it as `globals.X`.
+/// Layout must match the `GlobalData` struct declaration in velk.glsl
+/// (scalar layout). The view preparer writes one of these per view per
+/// frame into its persistent region of the shared globals arena
+/// (set = 1 slot 2); shaders read it as `velk_globals.data[base]`.
 struct FrameGlobals
 {
     float    view_projection[16];          ///< Combined view-projection matrix from the camera.
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
-    uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
+    uint32_t bvh_root;                     ///< Index of the root BvhNode, relative to bvh_node_base; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
-    uint64_t bvh_nodes_addr;               ///< GPU pointer to the BvhNode array.
-    uint64_t bvh_shapes_addr;              ///< GPU pointer to the scene's RtShape array.
+    uint32_t bvh_node_base;                ///< Element base added to BVH node indices (this BVH's region of the node arena).
+    uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
 };
 
-static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 248, "FrameGlobals layout must match velk.glsl");
 
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430) so material
- * data that follows can begin at offset 48 with its own alignment intact.
+ * 32 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
+ * now an index or a count: the alignment pads existed only to keep the two
+ * 8-byte vertex-stream addresses aligned, and went with them.
+ *
+ * Material data does not trail the header: it lives in the set = 1 material
+ * arena, indexed by @c material_base (region offset / material record size).
  *
  * Multi-texture materials (e.g. StandardMaterial) embed their bindless
  * TextureIds directly in their own UBO via ITextureResolver, so the
@@ -55,21 +80,21 @@ static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.
  */
 VELK_GPU_STRUCT DrawDataHeader
 {
-    uint64_t globals_addr;      ///< Buffer-reference to the per-view FrameGlobals; shaders deref this to construct `globals`.
-    uint64_t instances_address; ///< GPU pointer to the instance data array.
+    uint32_t globals_base;      ///< Index into the set = 1 globals buffer; shaders read velk_globals.data[globals_base].
+    uint32_t instances_base;    ///< Element base into the set = 1 instance arena; shader reads velk_instances.data[instances_base + gl_InstanceIndex].
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t instance_count;    ///< Number of instances in this draw.
-    uint64_t vbo_address;       ///< GPU pointer to the draw's vertex buffer (mesh VBO).
-    uint64_t uv1_address;       ///< GPU pointer to the draw's TEXCOORD_1 stream (vec2 per vertex), or a context-owned single-vertex fallback when @c uv1_enabled is 0.
-    uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_address; 0 = fallback buffer, vertex shader reads index 0 only. Used as a branchless index multiplier in the vertex shader.
-    uint32_t _pad0;
+    uint32_t vbo_base;          ///< Word base of the draw's vertex stream in the set = 1 mesh-word arena.
+    uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback when @c uv1_enabled is 0.
+    uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_base; 0 = fallback, vertex shader reads vertex 0 only. Used as a branchless index multiplier in the vertex shader.
+    uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
 };
 
-static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for std430 alignment");
+static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for std430 alignment");
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
-// Plain POD, no scene deps — packed for std430 / buffer_reference reads.
+// Plain POD, no scene deps; packed for std430 indexed reads.
 
 /// GPU-side shape record. Mirrors the RtShape struct in the RT compute
 /// prelude and the deferred lighting compute. Geometry + material +
@@ -78,7 +103,7 @@ static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for
 /// shape_kind:
 ///   0 = rect, 1 = cube, 2 = sphere — analytic primitives.
 ///   255 = mesh — triangle soup; `origin/u_axis` carry the world-space
-///   AABB and `mesh_data_addr` is a GPU pointer at a MeshData record.
+///   AABB and `mesh_instance_base` indexes the mesh-instance arena.
 ///   3..254 reserved for future analytic kinds.
 VELK_GPU_STRUCT RtShape
 {
@@ -92,8 +117,10 @@ VELK_GPU_STRUCT RtShape
     uint32_t texture_id;      ///< bindless index, 0 when unused
     uint32_t shape_param;     ///< per-shape material data (e.g. glyph index for text)
     uint32_t shape_kind;      ///< 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint64_t material_data_addr;
-    uint64_t mesh_data_addr;  ///< for shape_kind == 255: MeshData*; otherwise 0
+    uint32_t material_base;   ///< Word index of this shape's record in the set = 1 material arena.
+    uint32_t _pad0;
+    uint32_t mesh_instance_base; ///< for shape_kind == 255: element index into the set = 1 mesh-instance arena; otherwise 0
+    uint32_t _pad1;
 };
 static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 
@@ -101,30 +128,40 @@ static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 inline constexpr uint32_t kRtShapeKindMesh = 255;
 
 /// Mesh-static metadata: same for every element instance referencing a
-/// given IMeshPrimitive. Owned by the primitive (returned via
-/// IDrawData::get_data_buffer), so the GPU address is stable across
-/// frames and shapes can cache it. Mirrors GLSL `MeshStaticData`.
+/// given IMeshPrimitive. The primitive owns a persistent region of the
+/// shared mesh-static arena, so the element index is stable across frames
+/// and instances can cache it. The BLAS it describes lives in its own
+/// arenas, reached by `blas_node_base` / `blas_tri_base` rather than by
+/// trailing this record. Mirrors GLSL `MeshStaticData`.
 VELK_GPU_STRUCT MeshStaticData
 {
-    uint64_t buffer_addr;     ///< IMeshBuffer GPU address; same buffer holds VBO + IBO.
-    uint32_t vbo_offset;      ///< bytes from buffer_addr to first vertex this primitive uses.
-    uint32_t ibo_offset;      ///< bytes from buffer_addr to first index this primitive uses.
+    uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
+    uint32_t ibo_base;        ///< word base of this primitive's first index in the mesh-word arena.
     uint32_t triangle_count;
-    uint32_t vertex_stride;   ///< bytes per vertex (32 for VelkVertex3D).
-    uint32_t blas_root;       ///< root index in the trailing BLAS node array.
-    uint32_t blas_node_count; ///< length of the trailing BLAS node array.
+    uint32_t vertex_stride;   ///< bytes per vertex, from the primitive (48 for VelkVertex3D).
+    uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
+    uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
+    uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
+    uint32_t blas_tri_base;   ///< element base of the triangle-index run in the BLAS triangle arena.
 };
 static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 
-/// Per-shape, per-frame mesh instance data. Holds the element's world
-/// matrices plus a pointer to the mesh-static buffer. Mirrors GLSL
+/// Sentinel `MeshInstanceData::mesh_static_base` for a mesh whose static
+/// record is not resolvable yet (geometry not uploaded, no BLAS built).
+/// The intersector skips the shape; the CPU retries on a later frame.
+inline constexpr uint32_t kInvalidMeshStaticBase = 0xFFFFFFFFu;
+
+/// Per-shape mesh instance data. Holds the element's world matrices plus
+/// a pointer to the mesh-static buffer. Lives in the set = 1 mesh-instance
+/// arena; shapes reach their record by `mesh_instance_base`. Mirrors GLSL
 /// `MeshInstanceData`.
 VELK_GPU_STRUCT MeshInstanceData
 {
     float    world[16];       ///< column-major mesh-local -> world.
     float    inv_world[16];   ///< column-major world -> mesh-local.
-    uint64_t mesh_static_addr;///< MeshStaticData* (persistent; stable across frames).
-    uint64_t _pad;
+    uint32_t mesh_static_base;///< element index into the mesh-static arena; kInvalidMeshStaticBase when unresolved.
+    uint32_t _pad0;
+    uint32_t _pad1[2];        ///< keeps the record at 144 bytes.
 };
 static_assert(sizeof(MeshInstanceData) == 144, "MeshInstanceData layout mismatch");
 

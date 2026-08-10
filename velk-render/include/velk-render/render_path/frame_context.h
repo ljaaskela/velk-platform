@@ -4,6 +4,7 @@
 #include <velk/interface/intf_interface.h>
 
 #include <velk-render/frame/draw_call_emit.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
 #include <velk-render/interface/intf_frame_snippet_registry.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
@@ -13,6 +14,8 @@
 #include <velk-render/render_types.h>
 
 namespace velk {
+
+class IGpuArena;
 
 /**
  * @brief Shared non-owning context passed to per-view render paths.
@@ -30,6 +33,59 @@ struct FrameContext
     IFrameDataManager* frame_buffer = nullptr;
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
+
+    /// Shared BVH arenas (set = 1 slots 0/1), owned by the Renderer and
+    /// reused by every scene's BVH so multiple BVHs suballocate distinct
+    /// regions of one buffer instead of fighting over the slot. Null before
+    /// the Renderer assigns them.
+    IGpuArena* bvh_nodes_arena = nullptr;
+    IGpuArena* bvh_shapes_arena = nullptr;
+
+    /// Shared per-view FrameGlobals arena (set = 1 slot 2), owned by the
+    /// Renderer. Each view writes its FrameGlobals here and pushes the
+    /// returned element base so the direct-push compute shaders (deferred
+    /// lighting / denoise / spatial) read velk_globals.data[base] instead
+    /// of chasing a buffer_device_address. Null before the Renderer assigns
+    /// it. Graphics and RT still reach globals via the per-view buffer's
+    /// address until their root pointers migrate.
+    IGpuArena* globals_arena = nullptr;
+
+    /// Shared instance arena (set = 1 slot 3), owned by the Renderer. Each
+    /// frame every batch writes its instance blob into the fenced ring;
+    /// vertex shaders read velk_instances by index. Null before the Renderer
+    /// assigns it.
+    IGpuArena* instance_arena = nullptr;
+
+    /// Shared material arena (set = 1 slot 4), owned by the Renderer. Each
+    /// material suballocates a persistent region for its draw data, aligned
+    /// to its own record size, and fragment shaders read velk_materials by
+    /// index (material_base = region offset / record size). Byte-granular
+    /// (element_size 1) since material records vary in size by material type.
+    /// Null before the Renderer assigns it.
+    IGpuArena* material_arena = nullptr;
+
+    /// Shared light arena (set = 1 slot 5), owned by the Renderer. Each view
+    /// suballocates a persistent region for its light array; the RT and
+    /// deferred-lighting compute shaders read velk_lights by index
+    /// (lights_base = region offset / sizeof(GpuLight)). Persistent (not ring)
+    /// so the base is stable across frames and the cached deferred pass's
+    /// baked push constant stays valid. Null before the Renderer assigns it.
+    IGpuArena* lights_arena = nullptr;
+
+    /// Shared primary-shapes arena (set = 1 slot 6), owned by the Renderer.
+    /// The RT path suballocates a persistent per-view region for its
+    /// painter-sorted RtShape list; the primary-ray loop reads
+    /// velk_shapes.data[shapes_base + i]. Persistent so the base is stable
+    /// (RT reads it fresh from RtRoot each frame). Null before assignment.
+    IGpuArena* primary_shapes_arena = nullptr;
+
+    /// Shared mesh-instance arena (set = 1 slot 10), owned by the Renderer.
+    /// Every producer of mesh-kind RtShapes (each scene's BVH, each RT view's
+    /// primary shape list) suballocates a persistent region for its
+    /// MeshInstanceData array and stamps `mesh_instance_base` into the shapes;
+    /// the mesh intersector reads velk_mesh_instances by that index. Null
+    /// before the Renderer assigns it.
+    IGpuArena* mesh_instances_arena = nullptr;
 
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
@@ -62,19 +118,15 @@ struct FrameContext
     /// without a back-pointer to the trait. Null between dispatches.
     IInterface* view_camera_trait = nullptr;
 
-    // Scene-wide BVH built once per frame in build_frame_passes before
-    // any view renders; consumed by paths when they stamp out
-    // FrameGlobals. Zero when the view's scene has no BVH.
-    uint64_t bvh_nodes_addr = 0;
-    uint64_t bvh_shapes_addr = 0;
-    uint32_t bvh_root = 0;
-    uint32_t bvh_node_count = 0;
-    uint32_t bvh_shape_count = 0;
+    // Scene-wide BVH built once per frame in build_frame_passes before any
+    // view renders; consumed by paths when they stamp out FrameGlobals /
+    // RtRoot. Empty when the view's scene has no BVH.
+    BvhBinding bvh{};
 
     /// Convenience: assemble a FrameResolveContext for snippet-registry calls.
     FrameResolveContext make_resolve_context() const
     {
-        return {render_ctx, resources, frame_buffer, defer_marker};
+        return {render_ctx, resources, frame_buffer, defer_marker, material_arena};
     }
 };
 

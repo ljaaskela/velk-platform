@@ -13,18 +13,15 @@ namespace velk {
 // RenderContext as the "velk.glsl" virtual include. Exposed so the shader
 // cache can include its content in the cache key hash.
 const char* kVelkGlsl = R"(
-#extension GL_EXT_buffer_reference : require
-#extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Scene shape record: rect / cube / sphere / mesh with a pointer to
 // material data. Used by the BVH shape buffer and (duplicated today)
 // by RT. shape_kind = 255 is the "complex" sentinel: the shape is a
 // triangle mesh, `origin/u_axis` carry the world-space AABB and
-// `mesh_data_addr` points at a MeshData record (defined below). The
-// field is 0 for non-mesh kinds.
+// `mesh_instance_base` indexes the mesh-instance buffer (set = 1 slot
+// 10). The field is 0 for non-mesh kinds.
 struct RtShape {
     vec4 origin;
     vec4 u_axis;
@@ -36,11 +33,11 @@ struct RtShape {
     uint texture_id;
     uint shape_param;
     uint shape_kind;  // 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint64_t material_data_addr;
-    uint64_t mesh_data_addr;  // shape_kind == 255: MeshData*; otherwise 0
+    uint material_base;       // word index of this shape's record in the material arena
+    uint _pad0;
+    uint mesh_instance_base;  // shape_kind == 255: index into velk_mesh_instances; otherwise 0
+    uint _pad1;
 };
-
-layout(buffer_reference, std430) readonly buffer RtShapeList { RtShape data[]; };
 
 // BVH node — used both by the scene-wide TLAS and by the per-mesh
 // BLAS that lives in a primitive's MeshStaticData buffer. Inner nodes
@@ -56,71 +53,74 @@ struct BvhNode {
     uint child_count;
 };
 
-layout(buffer_reference, std430) readonly buffer BvhNodeList { BvhNode data[]; };
-
-// Mesh-static metadata, owned by the IMeshPrimitive's persistent
-// IDrawData buffer (stable GPU address across frames). Mirrors
-// MeshStaticData in scene_collector.h. Layout is followed in the same
-// buffer by `blas_node_count` BvhNodes and a flat triangle-index
-// array; the shader derives those addresses from blas_node_count.
+// Mesh-static metadata, owned by the IMeshPrimitive as a persistent region
+// of the shared mesh-static arena (set = 1 slot 11), so its element index is
+// stable across frames. Mirrors MeshStaticData in gpu_data.h. The BLAS it
+// describes lives in its own arenas (slots 12 / 13), reached by
+// blas_node_base / blas_tri_base rather than by trailing this record.
 struct MeshStaticData {
-    uint64_t buffer_addr;     // IMeshBuffer GPU address; same buffer holds VBO + IBO
-    uint     vbo_offset;      // bytes from buffer_addr to first vertex this primitive uses
-    uint     ibo_offset;      // bytes from buffer_addr to first index this primitive uses
+    uint     vbo_base;        // word base of this primitive's first vertex in velk_mesh_words
+    uint     ibo_base;        // word base of this primitive's first index in velk_mesh_words
     uint     triangle_count;
-    uint     vertex_stride;   // bytes per vertex (32 for VelkVertex3D)
-    uint     blas_root;       // index of the BLAS root in the trailing BvhNode array
-    uint     blas_node_count; // length of the trailing BvhNode array
+    uint     vertex_stride;   // bytes per vertex, from the primitive (48 for VelkVertex3D)
+    uint     blas_root;       // root index within this primitive's BLAS node run
+    uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
+    uint     blas_node_base;  // element base of the node run in velk_blas_nodes
+    uint     blas_tri_base;   // element base of the triangle-index run in velk_blas_tris
 };
 
-layout(buffer_reference, std430) readonly buffer MeshStaticPtr { MeshStaticData data; };
-layout(buffer_reference, std430) readonly buffer BlasNodeList { BvhNode data[]; };
-layout(buffer_reference, std430) readonly buffer BlasTriList  { uint     data[]; };
-
-// Per-shape per-frame mesh instance data. Carries the per-element
-// transforms plus a pointer to the mesh's static metadata. Allocated
-// from the per-frame scratch buffer; SceneBvh patches each cached
-// shape's mesh_data_addr to this frame's copy. Mirrors
-// MeshInstanceData in scene_collector.h.
+// Per-shape mesh instance data. Carries the per-element transforms plus
+// a pointer to the mesh's static metadata. Lives in the shared
+// mesh-instance arena (set = 1 slot 10); each shape carries the element
+// index of its record in `mesh_instance_base`. The buffer itself is
+// declared by the compute preludes that trace meshes. Mirrors
+// MeshInstanceData in gpu_data.h.
 struct MeshInstanceData {
     mat4     world;            // mesh-local -> world (for hit attributes)
     mat4     inv_world;        // world -> mesh-local (for transforming the ray)
-    uint64_t mesh_static_addr; // -> MeshStaticData; stable across frames
-    uint64_t _pad;
+    uint     mesh_static_base; // index into velk_mesh_static; stable across frames
+    uint     _pad0;
+    uvec2    _pad1;            // keeps the record at 144 B
 };
 
-layout(buffer_reference, std430) readonly buffer MeshInstancePtr { MeshInstanceData data; };
+// mesh_static_base value for a mesh whose static record is not resolvable
+// yet (geometry not uploaded, no BLAS built). Mirrors kInvalidMeshStaticBase
+// in gpu_data.h.
+#define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
 
-// Index reads from a glTF-style 16-bit-or-32-bit index buffer. We
-// always upload 32-bit indices (gltf_decoder.cpp normalises on import),
-// so MeshIndices is a uint[] view.
-layout(buffer_reference, std430) readonly buffer MeshIndices { uint data[]; };
+// Every mesh's VBO + IBO bytes as raw 32-bit words (set = 1 slot 14). Both
+// paths read geometry from here: RT walks it by triangle, raster fetches the
+// current vertex. Declared here rather than per-shader since every stage can
+// see set = 1.
+layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[]; } velk_mesh_words;
 
-// Vertex reads as a flat float array. Caller indexes into it using
-// `vertex_stride / 4` floats per vertex; the 32-byte VelkVertex3D
-// layout is pos[0..2], normal[3..5], uv[6..7].
-layout(buffer_reference, std430) readonly buffer MeshVertices { float data[]; };
+// Mesh geometry accessors over that arena, for the RT side, which reaches a
+// primitive's runs through its MeshStaticData record.
+//
+// Indices: we always upload 32-bit indices (gltf_decoder.cpp normalises on
+// import), so an index is one word.
+//   uint i = velk_mesh_index(st, tri * 3u + 0u);
+#define velk_mesh_index(st, i) (velk_mesh_words.data[(st).ibo_base + (i)])
 
-// Generic 8-byte buffer_reference placeholder. Use it wherever the
-// shader needs to preserve the layout of a typed pointer field without
-// caring about the target's contents (e.g. fragment shaders that skip
-// the instance_data slot, or vertex shaders that don't dereference
-// typed sub-pointers inside a material block).
-layout(buffer_reference, std430) readonly buffer OpaquePtr { uint _dummy; };
+// Vertices: a flat float array reached by word. Caller indexes using
+// `vertex_stride / 4` words per vertex and reads pos[0..2], normal[3..5],
+// uv[6..7]. Those sit at the same offsets in VelkVertex3D, whose trailing
+// tangent RT does not read, so both paths share one layout. The words are
+// float bits, and uintBitsToFloat is a reinterpret, not a conversion.
+//   float x = velk_mesh_vertex(st, o0 + 0u);
+#define velk_mesh_vertex(st, i) uintBitsToFloat(velk_mesh_words.data[(st).vbo_base + (i)])
 
 // Framework-level bindless texture array. Every pipeline in the engine
 // shares this descriptor set binding; individual shaders reference a
 // texture by index rather than declaring their own samplers.
 layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 
-// Per-view FrameGlobals. The renderer writes one FrameGlobals record
-// into the per-frame staging buffer per view per frame and pushes its
-// GPU address into push-constant slot [0..8) at pass start. Each
-// shader's `layout(push_constant)` block must declare a `GlobalData
-// globals;` field at offset 0 to receive that address; shaders then
-// read view-level state via `globals.X`. Layout matches the FrameGlobals
-// struct in gpu_data.h byte-for-byte under scalar layout.
-layout(buffer_reference, scalar) readonly buffer GlobalData {
+// Per-view FrameGlobals as a value type. `GlobalData` is the element of the
+// set = 1 globals buffer (velk_globals below); shaders reach it by index
+// (`velk_globals.data[globals_base]`) via velk_global_data(root). Layout
+// matches the FrameGlobals struct in gpu_data.h byte-for-byte under scalar
+// layout.
+struct GlobalData {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
@@ -129,10 +129,17 @@ layout(buffer_reference, scalar) readonly buffer GlobalData {
     uint bvh_node_count;
     uint bvh_shape_count;
     uint present_counter;
-    BvhNodeList bvh_nodes;
-    RtShapeList bvh_shapes;
+    uint bvh_node_base;   // element base of this BVH's region in the node arena
+    uint bvh_shape_base;  // element base of this BVH's region in the shape arena
     mat4 prev_view_projection;
 };
+
+// Frame-invariant per-view globals, bound at set = 1 slot 2 and read by
+// index in every stage (graphics via velk_global_data(root), compute via the
+// per-source VELK_GLOBALS macro). Declared once here: set = 1 is now visible
+// to graphics as well as compute, so this no longer leaks a compute-only
+// descriptor into raster pipelines.
+layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { GlobalData data[]; } velk_globals;
 
 // Storage-image arrays for compute imageStore are declared locally
 // per-shader (rgba8 -> binding 1, rgba32f -> binding 2, rgba16f ->
@@ -157,56 +164,142 @@ vec4 velk_texture(uint id, vec2 uv)
 // full xyz. tangent = glTF TANGENT (xyz world-space dir + w handedness);
 // synthesized for procedural meshes that carry none.
 struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; vec4 tangent; };
-layout(buffer_reference, scalar) readonly buffer VelkVbo3D { VelkVertex3D data[]; };
 
-// Optional TEXCOORD_1 stream: one vec2 per vertex, in a buffer
-// parallel to the main VBO. When a primitive has no UV1, DrawData.uv1
-// points at a context-owned single-vertex fallback (vec2(0,0)) and
-// DrawData.uv1_enabled is 0 so `velk_uv1` reads only index 0. When
-// the primitive provides UV1, uv1_enabled is 1 and `velk_uv1` reads
-// gl_VertexIndex. Branchless via index multiplication — no shader
+// Words per VelkVertex3D: 12 floats (pos 0..2, normal 3..5, uv 6..7,
+// tangent 8..11). The RT side reads only the first 8 and so is indifferent to
+// the tangent, which is why it can share this layout.
+#define VELK_VERTEX3D_WORDS 12u
+
+// Vertex-shader helper: fetch current gl_VertexIndex from the mesh-word
+// arena at the draw's vertex base. Macro (not function) so velk.glsl doesn't
+// reference gl_VertexIndex at namespace scope (would break fragment shaders
+// that also include this file). The words are float bits; uintBitsToFloat is
+// a reinterpret, not a conversion.
+float velk_vertex_word(uint base, uint w)
+{
+    return uintBitsToFloat(velk_mesh_words.data[base + w]);
+}
+
+VelkVertex3D velk_unpack_vertex3d(uint base)
+{
+    VelkVertex3D v;
+    v.position = vec3(velk_vertex_word(base, 0u), velk_vertex_word(base, 1u),
+                      velk_vertex_word(base, 2u));
+    v.normal   = vec3(velk_vertex_word(base, 3u), velk_vertex_word(base, 4u),
+                      velk_vertex_word(base, 5u));
+    v.uv       = vec2(velk_vertex_word(base, 6u), velk_vertex_word(base, 7u));
+    v.tangent  = vec4(velk_vertex_word(base, 8u), velk_vertex_word(base, 9u),
+                      velk_vertex_word(base, 10u), velk_vertex_word(base, 11u));
+    return v;
+}
+
+// Every accessor below takes the draw handle declared by VELK_DRAW_DATA(Name)
+// and reaches its record through velk_draw() (defined at the bottom of this
+// file, next to the record type).
+#define velk_vertex3d(root) \
+    velk_unpack_vertex3d(velk_draw(root).vbo_base + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
+
+// Vertex-shader helper: fetch the current vertex's UV1, a vec2 stream
+// parallel to the main VBO. When a primitive has no UV1, `uv1_base` points at
+// a context-owned single-vertex fallback (vec2(0,0)) and `uv1_enabled` is 0,
+// so this reads vertex 0. Branchless via index multiplication — no shader
 // variants.
-layout(buffer_reference, scalar) readonly buffer VelkUv1Buffer { vec2 data[]; };
+#define velk_uv1(root)                                                             \
+    vec2(velk_vertex_word(velk_draw(root).uv1_base,                                \
+                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u), \
+         velk_vertex_word(velk_draw(root).uv1_base,                                \
+                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u + 1u))
 
-// Vertex-shader helper: fetch current gl_VertexIndex from the VBO.
-// Macro (not function) so the readonly memory qualifier on the
-// buffer_reference is preserved at the call site, and so velk.glsl
-// doesn't reference gl_VertexIndex at namespace scope (would break
-// fragment shaders that also include this file).
-#define velk_vertex3d(root) ((root).vbo.data[gl_VertexIndex])
-
-// Vertex-shader helper: fetch the current vertex's UV1. Uses
-// uv1_enabled as a branchless index multiplier — 0 forces index 0 so
-// the single-vertex fallback buffer is always in range; 1 reads the
-// per-vertex stream at gl_VertexIndex.
-#define velk_uv1(root) ((root).uv1.data[(root).uv1_enabled * gl_VertexIndex])
-
-// Per-view FrameGlobals from the draw root pointer. `root.globals_addr`
-// is already typed as `GlobalData` (a buffer-reference); the macro
-// hides the field name so callers stay decoupled from the header layout.
+// Per-view FrameGlobals for this draw. The header's `globals_base` is an index
+// into the set = 1 globals buffer; the macro hides the field so callers stay
+// decoupled from the header layout.
 //   GlobalData globals = velk_global_data(root);
-#define velk_global_data(root) ((root).globals_addr)
+#define velk_global_data(root) (velk_globals.data[velk_draw(root).globals_base])
 
-// Standard DrawData header fields. Use inside a buffer_reference block:
-//   layout(buffer_reference, std430) readonly buffer DrawData {
-//       VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
-//       vec4 my_material_param;  // optional material fields follow
-//   };
-// `VboType` is a `buffer_reference`-typed handle to the vertex buffer
-// (typically `VelkVbo3D`, the unified scalar-packed vertex layout).
-// The 48-byte header keeps everything 16-byte aligned for std430.
-// `globals_addr` is the per-view FrameGlobals address; cast it via
-// `GlobalData(root.globals_addr)` to access the view-projection,
-// camera position, BVH addrs, etc.
-#define VELK_DRAW_DATA(InstancesType, VboType) \
-    GlobalData globals_addr;                   \
-    InstancesType instance_data;               \
-    uint texture_id;                           \
-    uint instance_count;                       \
-    VboType vbo;                               \
-    VelkUv1Buffer uv1;                         \
-    uint uv1_enabled;                          \
-    uint _pad_uv1;
+// Per-shader typed view of the shared instance arena (set = 1 slot 3).
+// Declare once at file scope with the shader's instance struct:
+//   VELK_INSTANCES(ElementInstance)
+// The buffer holds every batch's instance data; each draw reads its own run
+// at `instances_base + gl_InstanceIndex`. Different shaders bind the same
+// slot with their own element type (the buffer is raw bytes; each pipeline
+// interprets its own run).
+#define VELK_INSTANCES(InstancesType) \
+    layout(set = 1, binding = 3, scalar) readonly buffer VelkInstances { InstancesType data[]; } velk_instances;
+
+// Vertex-shader accessor: this draw's instance for the current
+// gl_InstanceIndex. Requires a matching VELK_INSTANCES(...) declaration.
+//   ElementInstance inst = velk_instance(root);
+#define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + gl_InstanceIndex])
+
+// Per-pipeline typed view of the shared material arena (set = 1 slot 4).
+// Declare once at file scope with this pipeline's material struct:
+//   VELK_MATERIAL(CheckerParams)
+// The buffer holds every material's draw data; this draw reads its own record
+// at `material_base`. Each graphics pipeline binds the same slot with its own
+// material struct (the arena is raw bytes; each material's region is aligned to
+// its record size so the element index lands on it). Raster only: the RT /
+// deferred compute path serves many material types from one shader, so its
+// composer replaces this line with a generated velk_unpack_<T> that rebuilds
+// the struct from the arena's raw words.
+#define VELK_MATERIAL(MaterialType) \
+    layout(set = 1, binding = 4, std430) readonly buffer VelkMaterials { MaterialType data[]; } velk_materials;
+
+// Fragment-shader accessor: this draw's material record. Requires a matching
+// VELK_MATERIAL(...) declaration.
+//   CheckerParams m = velk_material(root);
+#define velk_material(root) (velk_materials.data[velk_draw(root).material_base])
+
+// Mesh intersector accessor: a mesh-kind shape's transforms, from the shared
+// mesh-instance arena (set = 1 slot 10). Unlike materials and instances the
+// element type never varies, so there is no declaration macro; the compute
+// preludes that trace meshes declare `velk_mesh_instances` themselves.
+//   MeshInstanceData inst = velk_mesh_instance(shape);
+#define velk_mesh_instance(shape) (velk_mesh_instances.data[(shape).mesh_instance_base])
+
+// Mesh intersector accessor: the per-primitive geometry metadata behind a
+// mesh instance, from the shared mesh-static arena (set = 1 slot 11). Guard
+// with `inst.mesh_static_base != VELK_INVALID_MESH_STATIC` first.
+//   MeshStaticData st = velk_mesh_static(inst);
+#define velk_mesh_static(inst) (velk_mesh_static_records.data[(inst).mesh_static_base])
+
+// Per-draw header: 32 bytes of indices and counts, one record per batch in
+// the set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.
+// Shader bodies reach these through accessors that hide the layout rather than
+// naming the fields: velk_global_data(root), velk_instance(root),
+// velk_material(root), velk_vertex3d(root), velk_uv1(root). The two fields with
+// no accessor of their own, texture_id and material_base, are read by the
+// composed raster drivers via velk_draw(root).
+struct VelkDrawData {
+    uint globals_base;
+    uint instances_base;
+    uint texture_id;
+    uint instance_count;
+    uint vbo_base;
+    uint uv1_base;
+    uint uv1_enabled;
+    uint material_base;
+};
+
+layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
+
+// Declares a raster shader's push constant and names it. Put it at file scope,
+// once per shader (a shader may have only one push-constant block):
+//   VELK_DRAW_DATA(root)
+// after which `root` is what every accessor above takes. A raster pipeline is
+// handed nothing else; everything hangs off `root`.
+//
+// The accessors require only that their argument has a `draw_base` member, not
+// that it IS this block, so a future GPU-driven path can select a record per
+// draw (from gl_DrawID, say) by passing a local struct instead, leaving every
+// shader body unchanged.
+#define VELK_DRAW_DATA(Name) \
+    layout(push_constant, std430) uniform VelkPC { uint draw_base; } Name;
+
+// This draw's header record. Shaders normally go through the field accessors
+// above; use this only to read a header field that has no accessor, as the
+// composed raster drivers do for texture_id / material_base.
+//   uint tex = velk_draw(root).texture_id;
+#define velk_draw(r) (velk_draw_data.data[(r).draw_base])
 )";
 
 namespace {

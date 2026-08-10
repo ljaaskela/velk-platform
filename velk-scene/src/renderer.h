@@ -118,6 +118,43 @@ private:
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
 
+    /// Shared BVH arenas (set = 1 slots 0/1), created once and handed to
+    /// every scene's BVH via FrameContext so multiple BVHs suballocate
+    /// distinct regions instead of colliding on the slot.
+    IGpuArena::Ptr bvh_nodes_arena_;
+    IGpuArena::Ptr bvh_shapes_arena_;
+
+    /// Shared per-view FrameGlobals arena (set = 1 slot 2), created once
+    /// and handed to every view via FrameContext so multiple views
+    /// suballocate distinct regions of one buffer.
+    IGpuArena::Ptr globals_arena_;
+
+    /// Shared instance arena (set = 1 slot 3): every batch writes its
+    /// instance blob into the fenced ring each frame, so vertex shaders read
+    /// velk_instances.data[instances_base + i].
+    IGpuArena::Ptr instance_arena_;
+
+    /// Shared material arena (set = 1 slot 4): each material suballocates a
+    /// persistent region for its draw data, so fragment shaders read
+    /// velk_materials.data[material_base].
+    IGpuArena::Ptr material_arena_;
+
+    /// Shared light arena (set = 1 slot 5): each view suballocates a
+    /// persistent region for its light array, so the RT and deferred compute
+    /// shaders read velk_lights.data[lights_base + i].
+    IGpuArena::Ptr lights_arena_;
+
+    /// Shared primary-shapes arena (set = 1 slot 6): the RT path suballocates
+    /// a persistent per-view region for its painter-sorted RtShape list, read
+    /// at velk_shapes.data[shapes_base + i].
+    IGpuArena::Ptr primary_shapes_arena_;
+
+    /// Shared mesh-instance arena (set = 1 slot 10): every producer of
+    /// mesh-kind shapes suballocates a persistent region for its
+    /// MeshInstanceData array, read at
+    /// velk_mesh_instances.data[mesh_instance_base].
+    IGpuArena::Ptr mesh_instances_arena_;
+
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.
@@ -148,11 +185,7 @@ private:
         RenderView render_view{};
         IInterface::Ptr camera_trait;
         vector<IViewPipeline::Ptr> pipelines;
-        uint64_t bvh_nodes_addr = 0;
-        uint64_t bvh_shapes_addr = 0;
-        uint32_t bvh_root = 0;
-        uint32_t bvh_node_count = 0;
-        uint32_t bvh_shape_count = 0;
+        BvhBinding bvh{};
     };
     vector<PreparedView> prepared_views_;
 
@@ -163,7 +196,7 @@ private:
 
     // One-shot flag set by request_bvh_log(), consumed in the next
     // BVH-emit cb. The cb walks every mesh instance and prints
-    // (instance_index, buffer_addr, ibo_offset, triangle_count) so the
+    // (instance_index, geometry_base, ibo_offset, triangle_count) so the
     // log can be compared against the F12-dumped shadow_debug image.
     bool log_bvh_next_ = false;
 

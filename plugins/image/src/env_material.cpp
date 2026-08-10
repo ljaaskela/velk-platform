@@ -25,12 +25,7 @@ constexpr string_view env_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, VelkVbo3D)
-    OpaquePtr material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;
@@ -39,6 +34,7 @@ layout(location = 3) out vec3 v_world_pos;
 layout(location = 4) out vec3 v_world_normal;
 layout(location = 5) flat out uint v_shape_param;
 layout(location = 6) out vec2 v_uv1;
+layout(location = 7) out vec4 v_world_tangent;
 
 void main()
 {
@@ -61,20 +57,22 @@ void main()
     v_world_normal = vec3(0.0);
     v_shape_param = 0u;
     v_uv1 = vec2(0.0);
+    v_world_tangent = vec4(0.0);
 }
 )";
 
 // Env eval: rotate incoming ray direction around Y, convert to
 // equirectangular UV, sample the env texture.
 constexpr string_view env_eval_src = R"(
-layout(buffer_reference, std430) readonly buffer EnvMaterialData {
+struct EnvMaterialData {
     vec4 params; // x = intensity, y = rotation_rad, zw unused
 };
+VELK_MATERIAL(EnvMaterialData)
 
 MaterialEval velk_eval_env(EvalContext ctx)
 {
     const float PI = 3.14159265358979323846;
-    EnvMaterialData d = EnvMaterialData(ctx.data_addr);
+    EnvMaterialData d = VELK_LOAD_MATERIAL(EnvMaterialData, ctx);
 
     float c = cos(d.params.y);
     float s = sin(d.params.y);

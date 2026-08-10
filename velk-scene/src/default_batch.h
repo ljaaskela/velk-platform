@@ -6,6 +6,7 @@
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-scene/plugin.h>
 
 #include <cstdint>
@@ -60,12 +61,6 @@ public:
     /// overwrite without changing layout.
     void finalize_storage(uint32_t prim_count, bool indexed);
 
-    /// Renderer-side: called once after `ensure_buffer_storage` allocates
-    /// the backing GpuBufferHandle and the upload pass has memcpy'd the
-    /// blob. Captures the mapped pointer so `update_instance_at` can
-    /// write through directly on subsequent transform-only frames.
-    void set_storage_mapping(uint8_t* mapped_ptr) { storage_mapped_ = mapped_ptr; }
-
     uint64_t pipeline_key() const override { return pipeline_key_; }
     uint64_t texture_key() const override { return texture_key_; }
 
@@ -85,9 +80,27 @@ public:
     void update_instance_at(uint32_t instance_index,
                             array_view<const uint8_t> bytes) override;
 
+    void set_instance_region(ArenaRegion&& region) override
+    {
+        instance_region_ = std::move(region);
+    }
+    uint64_t instance_region_offset() const override { return instance_region_.offset(); }
+    uint64_t instance_region_size() const override { return instance_region_.size(); }
+    bool take_instances_dirty() override
+    {
+        bool d = instances_dirty_;
+        instances_dirty_ = false;
+        return d;
+    }
+
+    void set_draw_data_region(ArenaRegion&& region) override
+    {
+        draw_data_region_ = std::move(region);
+    }
+    uint64_t draw_data_region_offset() const override { return draw_data_region_.offset(); }
+    uint64_t draw_data_region_size() const override { return draw_data_region_.size(); }
+
     IBuffer* storage_buffer() const override { return storage_.get(); }
-    uint64_t storage_gpu_address() const override;
-    uint8_t* storage_mapped() const override { return storage_mapped_; }
 
 private:
     uint64_t pipeline_key_ = 0;
@@ -106,13 +119,23 @@ private:
     IShaderSource::Ptr shader_source_;
     PipelineOptions pipeline_options_{};
 
-    /// Composed `[args(32)][count(16)][instance_data]` blob carrier.
-    /// Created lazily on first finalize. Lifetime tied to the batch.
+    /// Composed `[args(32)][count(16)][header(48)][material_ptr(16)]` blob
+    /// carrier (fixed 112 B). Created lazily on first finalize. Instance
+    /// bytes are NOT here; they live in the shared instance arena.
     IBuffer::Ptr storage_;
-    /// Cached after each upload — host-visible pointer for in-place
-    /// transform updates. Cleared by finalize_storage when the blob is
-    /// resized (since ensure_buffer_storage will reallocate).
-    uint8_t* storage_mapped_ = nullptr;
+    /// Persistent instance region in the shared arena (set = 1 slot 3), owned
+    /// by this batch. Allocated on structural change, kept across steady-state
+    /// frames, RAII-freed (deferred) when the batch is destroyed.
+    /// offset / instance_stride is the shader instances_base.
+    ArenaRegion instance_region_;
+    /// Set when instance bytes change (finalize_storage / update_instance_at);
+    /// the upload sweep re-uploads the region only when this is set.
+    bool instances_dirty_ = true;
+
+    /// This batch's DrawDataHeader record in the shared draw-data arena.
+    /// Allocated on first emit and held for the batch's lifetime, so the
+    /// element base baked into a recorded draw call stays valid.
+    ArenaRegion draw_data_region_;
 };
 
 } // namespace velk::impl

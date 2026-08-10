@@ -31,6 +31,26 @@ IGpuBuffer::Ptr GpuResourceManager::create_gpu_buffer(const GpuBufferDesc& desc)
     return gb;
 }
 
+IGpuArena::Ptr GpuResourceManager::create_arena(uint32_t slot, uint32_t element_size,
+                                                bool index_buffer, uint64_t reserve_bytes)
+{
+    auto arena = ::velk::instance().create<IGpuArena>(ClassId::GpuArena);
+    if (!arena) return {};
+    arena->init(slot, element_size, this, backend_, index_buffer, reserve_bytes);
+    arenas_.push_back(arena);  // weak-track for the reclaim tick
+    return arena;
+}
+
+IGpuArena::Ptr GpuResourceManager::shared_arena(uint32_t slot, uint32_t element_size,
+                                                bool index_buffer, uint64_t reserve_bytes)
+{
+    auto it = shared_arenas_.find(slot);
+    if (it != shared_arenas_.end()) return it->second;
+    auto arena = create_arena(slot, element_size, index_buffer, reserve_bytes);
+    if (arena) shared_arenas_[slot] = arena;
+    return arena;
+}
+
 bool GpuResourceManager::transient_desc_matches(const TextureDesc& a, const TextureDesc& b)
 {
     return a.width == b.width && a.height == b.height &&
@@ -169,6 +189,7 @@ void GpuResourceManager::register_texture(ISurface* surf, IGpuTexture::Ptr tex)
     if (!surf) return;
     const TextureId tid = get_texture_id(tex);
     surf->set_gpu_handle(GpuResourceKey::Default, static_cast<uint64_t>(tid));
+    ++texture_generation_;
     texture_map_[surf] = std::move(tex);
     // Subscribe so dropping the wrapper auto-drops the texture entry.
     // Idempotent: re-registration on resize doesn't double-subscribe.
@@ -177,7 +198,9 @@ void GpuResourceManager::register_texture(ISurface* surf, IGpuTexture::Ptr tex)
 
 void GpuResourceManager::unregister_texture(ISurface* surf)
 {
-    texture_map_.erase(surf);
+    if (texture_map_.erase(surf) != 0) {
+        ++texture_generation_;
+    }
 }
 
 IGpuTexture* GpuResourceManager::ensure_texture_storage(ISurface* surf, const TextureDesc& desc)
@@ -250,6 +273,18 @@ void GpuResourceManager::add_env_observer(const IBuffer::WeakPtr& res)
 void GpuResourceManager::drain_deferred(IRenderBackend& /*backend*/)
 {
     std::lock_guard<std::mutex> lock(deferred_mutex_);
+
+    // Reclaim freed arena regions whose in-flight frame has retired, and
+    // prune arenas the caller has dropped.
+    for (size_t i = 0; i < arenas_.size();) {
+        if (auto a = arenas_[i].lock()) {
+            a->reclaim();
+            ++i;
+        } else {
+            arenas_[i] = arenas_.back();
+            arenas_.pop_back();
+        }
+    }
 
     // Transient-pool tick: age idle texture entries; drop the Ptr after
     // `kMaxIdleFrames` consecutive idle ticks, which routes through

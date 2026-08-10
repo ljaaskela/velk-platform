@@ -34,24 +34,29 @@ public:
     {
         IGpuBuffer::Ptr buffer;
         void* ptr = nullptr;
-        uint64_t gpu_base = 0;
         size_t buffer_size = 0;
     };
 
     /** @brief Result of a raw write reservation. */
     struct WriteResult
     {
-        void* ptr = nullptr;       ///< CPU pointer to write into, or nullptr on overflow.
-        uint64_t gpu_addr = 0;     ///< GPU address of the reserved region.
+        void* ptr = nullptr;   ///< CPU pointer to write into, or nullptr on overflow.
+        uint64_t offset = 0;   ///< Byte offset of the reserved region within the active buffer.
     };
 
     static constexpr size_t kInitialSize = 1024 * 1024;
+
+    /// @brief Returned by @c write when the region did not fit. Zero is a
+    ///        valid offset (the first write of a frame lands there), so
+    ///        failure needs a value that cannot be a real one.
+    static constexpr uint64_t kInvalidOffset = ~uint64_t(0);
 
     /// @brief Sets the initial buffer size. Call before init_slot.
     virtual void init(size_t initial_size = kInitialSize) = 0;
 
     /// @brief Writes data to the active slot's buffer.
-    /// @returns GPU address of the written region, or 0 on overflow.
+    /// @returns Byte offset of the written region within @c active_buffer,
+    ///          ready to hand to a draw call, or @c kInvalidOffset on overflow.
     virtual uint64_t write(const void* data, size_t size, size_t alignment = 16) = 0;
 
     /// @brief Reserves space without writing. Caller fills the returned ptr.
@@ -90,10 +95,6 @@ public:
 
     /// @brief Active slot's underlying GPU buffer. nullptr if no slot is active.
     virtual IGpuBuffer* active_buffer() const = 0;
-
-    /// @brief Active slot's GPU base address. Subtract from a written
-    ///        gpu_addr to get a buffer offset for descriptor binding.
-    virtual uint64_t active_buffer_base() const = 0;
 };
 
 } // namespace velk

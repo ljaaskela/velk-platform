@@ -6,9 +6,9 @@
 #include <velk/api/velk.h>
 #include <velk/ext/object.h>
 
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_bvh.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-scene/plugin.h>
 
@@ -56,11 +56,6 @@ public:
     void rebuild(IScene* scene, FrameContext& ctx, bool dirty,
                  ShapeCb shape_cb, void* shape_user);
 
-    /// Frame-local GPU addresses. Only valid for the frame in which
-    /// `rebuild` was called.
-    uint64_t nodes_addr() const { return nodes_addr_; }
-    uint64_t shapes_addr() const { return shapes_addr_; }
-
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
     {
@@ -75,12 +70,11 @@ public:
         return false;
     }
 
-    IBuffer::Ptr get_nodes_buffer() const override { return nodes_buffer_.buffer(); }
-    IBuffer::Ptr get_shapes_buffer() const override { return shapes_buffer_.buffer(); }
-
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
     uint32_t get_shape_count() const override { return shape_count_; }
+    uint32_t get_node_base() const override { return node_base_; }
+    uint32_t get_shape_base() const override { return shape_base_; }
 
     void invalidate() override { dirty_ = true; }
 
@@ -102,29 +96,27 @@ private:
     vector<GpuBvhNode> cached_nodes_;
     vector<RtShape>    cached_shapes_;
     /// Parallel to cached_shapes_: per-shape MeshInstanceData payload
-    /// (zeroed for non-mesh kinds). Re-uploaded each frame so the
-    /// mesh_data_addr GPU pointer stays valid as the per-frame buffer
-    /// rotates. The instance struct holds the per-element world
-    /// matrices plus a stable pointer to the mesh-owned static buffer
-    /// (resolved once by the renderer's BVH callback during a fresh
-    /// rebuild).
+    /// (zeroed for non-mesh kinds). The instance struct holds the
+    /// per-element world matrices plus a stable pointer to the mesh-owned
+    /// static buffer (resolved once by the renderer's BVH callback during
+    /// a fresh rebuild), so the array only changes when the build does.
     vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
 
-    /// Persistent per-bvh GPU buffers backing nodes / shapes / mesh-
-    /// instance arrays. PersistentBuffer wraps the standard
-    /// "lazy-create + write_diff + ensure_buffer_storage + map+memcpy"
-    /// pipeline; addresses stay stable until the underlying buffer
-    /// reallocates (size change).
-    PersistentBuffer nodes_buffer_;
-    PersistentBuffer shapes_buffer_;
-    PersistentBuffer mesh_instances_buffer_;
+    /// This BVH's regions in the Renderer-owned shared IGpuArenas (set = 1
+    /// slots 0/1/10). Held across frames and re-allocated (not overwritten) on
+    /// each real change, so an in-flight frame never reads a half-written
+    /// build. Freed deferred past the fence when replaced or dropped.
+    ArenaRegion nodes_region_;
+    ArenaRegion shapes_region_;
+    ArenaRegion mesh_instances_region_;
 
-    uint64_t nodes_addr_ = 0;
-    uint64_t shapes_addr_ = 0;
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
     uint32_t shape_count_ = 0;
+    uint32_t node_base_ = 0;   ///< Element base of this BVH's node region.
+    uint32_t shape_base_ = 0;  ///< Element base of this BVH's shape region.
+    uint32_t mesh_instance_base_ = 0;  ///< Element base of this BVH's mesh-instance region.
     bool dirty_ = true;
 };
 

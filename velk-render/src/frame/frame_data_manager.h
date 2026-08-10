@@ -37,7 +37,6 @@ public:
     size_t get_peak_usage() const override { return peak_usage_; }
 
     IGpuBuffer* active_buffer() const override { return active_ ? active_->buffer.get() : nullptr; }
-    uint64_t active_buffer_base() const override { return active_ ? active_->gpu_base : 0; }
 
 private:
     void alloc_slot(Slot& slot, IRenderBackend& backend, IGpuResourceManager& resources);

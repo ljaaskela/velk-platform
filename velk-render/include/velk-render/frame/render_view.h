@@ -21,9 +21,10 @@ namespace velk {
  */
 struct ViewEnv
 {
-    uint32_t texture_id = 0;     ///< Bindless equirect HDR id (0 = no env).
-    uint32_t material_id = 0;    ///< Snippet id of the env material (0 = none).
-    uint64_t data_addr = 0;      ///< GPU address of env material's per-frame data block.
+    uint32_t texture_id = 0;      ///< Bindless equirect HDR id (0 = no env).
+    uint32_t material_id = 0;     ///< Snippet id of the env material (0 = none).
+    float    intensity = 0.f;     ///< Env exposure multiplier; pushed inline to the RT / deferred compute.
+    float    rotation_rad = 0.f;  ///< Env yaw rotation in radians; pushed inline alongside intensity.
 };
 
 /**
@@ -58,21 +59,15 @@ struct RenderView
     int width = 0;
     int height = 0;
 
-    /// FrameGlobals GPU address. The view preparer writes a
-    /// `FrameGlobals` record into the per-frame staging buffer once per
-    /// view; this is the GPU address of that record. Producers stamp
-    /// it onto each IRenderPass they emit; the graph executor pushes it
-    /// into push-constant slot [0..8) at pass start. Shaders read
-    /// view-level state via the `GlobalData` buffer_reference declared
-    /// in the velk.glsl prelude. 0 when the viewport is degenerate.
-    uint64_t view_globals_address = 0;
+    /// Element base of this view's FrameGlobals within the shared globals
+    /// arena (set = 1 slot 2). Pushed to the direct-push compute shaders
+    /// (deferred lighting / denoise / spatial) so they read
+    /// velk_globals.data[view_globals_base] instead of a device address.
+    /// Derived as region.offset / sizeof(FrameGlobals) at prepare time.
+    uint32_t view_globals_base = 0;
 
-    /// Scene-wide BVH addresses (zero when the view's scene has no BVH).
-    uint64_t bvh_nodes_addr = 0;
-    uint64_t bvh_shapes_addr = 0;
-    uint32_t bvh_root = 0;
-    uint32_t bvh_node_count = 0;
-    uint32_t bvh_shape_count = 0;
+    /// How this view reaches the scene BVH (empty when no BVH).
+    BvhBinding bvh{};
 
     /// Camera environment, if any.
     ViewEnv env{};
@@ -89,11 +84,12 @@ struct RenderView
     /// compose `velk_eval_shadow` from the snippet registry to match.
     vector<GpuLight> lights;
 
-    /// GPU device address of the per-view persistent lights buffer.
-    /// Stable across frames (only the bytes inside change), so paths
-    /// can embed it in cached `IRenderPass` PushC slots without
-    /// rotating the cache. 0 when there are no lights.
-    uint64_t lights_addr = 0;
+    /// Element base of this view's light array within the shared light
+    /// arena (set = 1 slot 5). The RT and deferred compute shaders read
+    /// velk_lights.data[lights_base + i]. Persistent region, so the base is
+    /// stable across frames (cached passes bake it); derived as
+    /// region.offset / sizeof(GpuLight) at prepare time. 0 when no lights.
+    uint32_t lights_base = 0;
 
     /// Raster batch cache for this view. Owned by the preparer; the
     /// span here is valid for the duration of the path's
@@ -102,10 +98,10 @@ struct RenderView
     const vector<IBatch::Ptr>* batches = nullptr;
 
     /// RT primary-buffer shapes for this view. Each entry has its
-    /// `material_id` / `material_data_addr` / `texture_id` / shape_kind
+    /// `material_id` / `material_base` / `texture_id` / shape_kind
     /// fields pre-resolved through the frame snippet registry.
-    /// Mesh-kind shapes have `mesh_data_addr` set to the per-frame
-    /// MeshInstanceData record. Order is enumeration-order (no plane
+    /// Mesh-kind shapes have `mesh_instance_base` set to their record in
+    /// the shared mesh-instance arena. Order is enumeration-order (no plane
     /// sort); RT path back-to-front-sorts a local copy.
     vector<RtShape> shapes;
 };

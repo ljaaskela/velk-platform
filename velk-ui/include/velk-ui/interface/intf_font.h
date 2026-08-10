@@ -117,14 +117,21 @@ public:
      */
     virtual GlyphInfo ensure_glyph(uint32_t glyph_id) = 0;
 
-    /// @name GPU-bound buffers
-    /// The Font owns these. Their contents grow as glyphs are baked. The
-    /// renderer uploads them, the text material reads their GPU addresses
-    /// to bind them via buffer_reference in the slug coverage shader.
+    /// @name GPU-bound glyph outline data
+    /// The Font owns these. Their contents grow as glyphs are baked.
     /// @{
-    virtual IBuffer::Ptr get_curve_buffer() const = 0;
-    virtual IBuffer::Ptr get_band_buffer() const = 0;
-    virtual IBuffer::Ptr get_glyph_buffer() const = 0;
+
+    /// Ensures this font's curve / band / glyph data is resident in the
+    /// shared set = 1 arenas, reallocating and re-uploading only when a
+    /// section has grown or changed. Safe to call every frame; a no-op once
+    /// the data is current. Must run before the bases below are read.
+    virtual void ensure_gpu_data(IRenderContext& ctx) = 0;
+
+    /// Element bases into the text arenas, for the shader to index from.
+    /// Zero until `ensure_gpu_data` has succeeded.
+    virtual uint32_t curve_base() const = 0;
+    virtual uint32_t band_base() const = 0;
+    virtual uint32_t glyph_base() const = 0;
     /// @}
 
     /**

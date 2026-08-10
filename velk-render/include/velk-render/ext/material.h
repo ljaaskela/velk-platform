@@ -9,6 +9,7 @@
 #include <velk-render/ext/element_vertex.h>
 #include <velk-render/ext/gpu_resource.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/interface/material/intf_material_internal.h>
@@ -53,10 +54,12 @@ namespace velk::ext {
  */
 template <class T, class... Extra>
 class Material : public GpuResource<T, IMaterialInternal, IDrawData,
-                                    ::velk::IShaderSource, Extra...>
+                                    ::velk::IShaderSource,
+                                    ::velk::IMetadataObserver, Extra...>
 {
     using Base = GpuResource<T, IMaterialInternal, IDrawData,
-                             ::velk::IShaderSource, Extra...>;
+                             ::velk::IShaderSource,
+                             ::velk::IMetadataObserver, Extra...>;
 
 public:
     // Pipeline handle is stored as the resource's primary handle (key
@@ -108,6 +111,36 @@ public:
     string_view get_fn_name(string_view) const override { return {}; }
     uint64_t get_pipeline_key() const override { return 0; }
     void register_includes(IRenderContext&) const override {}
+
+    // Arena-backed buffer holding this material's draw data (set = 1 slot 4),
+    // created by the renderer's upload sweep. Dropping it frees the region,
+    // deferred past the in-flight fence by the arena.
+    void set_material_buffer(::velk::IBuffer::Ptr buf) override
+    {
+        material_buffer_ = std::move(buf);
+    }
+    ::velk::IBuffer::Ptr material_buffer() const override { return material_buffer_; }
+
+    bool take_material_dirty(uint64_t texture_generation) override
+    {
+        const bool d = material_dirty_ || texture_generation != texture_generation_;
+        material_dirty_ = false;
+        texture_generation_ = texture_generation;
+        return d;
+    }
+
+    /// Any write to this material's own state marks its record for
+    /// re-serialisation. ext::Object registers an object implementing
+    /// IMetadataObserver against its own storage, so this covers every
+    /// `write_state` and dynamic-property write on the material, including
+    /// ShaderMaterial::set_input. Materials whose parameters live in attached
+    /// objects (StandardMaterial) additionally observe those attachments.
+    void on_state_changed(::velk::string_view, ::velk::IMetadata&, ::velk::Uid) override
+    {
+        material_dirty_ = true;
+    }
+
+    void mark_material_dirty() override { material_dirty_ = true; }
 
     /// Framework-level discard thresholds derived from the attached
     /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend
@@ -218,6 +251,13 @@ private:
 
     ::velk::IProgramDataBuffer::Ptr data_buffer_;
     ScopedHandler options_sub_;
+    ::velk::IBuffer::Ptr material_buffer_;
+    /// Starts true so the first frame always writes the record.
+    bool material_dirty_ = true;
+    /// Bindless-table generation this material's record was last written at.
+    /// Starts at a value the manager never returns, so the first write always
+    /// happens even if no texture has been registered yet.
+    uint64_t texture_generation_ = ~uint64_t(0);
 };
 
 } // namespace velk::ext

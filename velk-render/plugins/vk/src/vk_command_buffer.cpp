@@ -81,6 +81,16 @@ void VkCommandBuffer::begin_recording()
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
                             0, nullptr);
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes +
+    // globals). Compute dispatches recorded into this secondary statically
+    // use it; it is a single set, so binding it here is valid even though
+    // the secondary is shared across in-flight frames. record_begin_rendering
+    // rebinds it for GRAPHICS (raster reads the globals slot by index).
+    vkCmdBindDescriptorSets(cmd_,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            backend_->pipeline_layout_,
+                            1, 1, &backend_->bound_buffer_set_,
+                            0, nullptr);
 }
 
 void VkCommandBuffer::end_recording()
@@ -298,7 +308,7 @@ void VkCommandBuffer::record_begin_rendering(
     rendering_info.pColorAttachments = (n_colors > 0) ? color_infos : nullptr;
     rendering_info.pDepthAttachment = (depth && depth->texture) ? &depth_info : nullptr;
 
-    vkCmdBeginRendering(cmd_, &rendering_info);
+    backend_->cmd_begin_rendering()(cmd_, &rendering_info);
 
     // Record-time bookkeeping for the matching record_end_rendering.
     // Re-bind the bindless graphics descriptor here — secondary inherit
@@ -308,6 +318,15 @@ void VkCommandBuffer::record_begin_rendering(
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             backend_->pipeline_layout_,
                             0, 1, &backend_->descriptor_set_,
+                            0, nullptr);
+    // set 1 for GRAPHICS: raster reads the globals slot by index
+    // (velk_global_data). begin_recording bound it for COMPUTE only;
+    // rebind for the graphics bind point. Same frame-invariant single set,
+    // so binding it per render pass is valid on the shared secondary.
+    vkCmdBindDescriptorSets(cmd_,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            backend_->pipeline_layout_,
+                            1, 1, &backend_->bound_buffer_set_,
                             0, nullptr);
 
     rendering_color_count_ = static_cast<uint32_t>(n_colors);
@@ -322,7 +341,7 @@ void VkCommandBuffer::record_end_rendering()
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;
     RENDER_LOG("vk.cmdbuf.record_end_rendering this=%p cb=%p", (void*)this, (void*)cmd_);
 
-    vkCmdEndRendering(cmd_);
+    backend_->cmd_end_rendering()(cmd_);
 
     // Transition color attachments to SHADER_READ_ONLY so subsequent
     // samples (post-process effects, deferred-lighting bindless reads)

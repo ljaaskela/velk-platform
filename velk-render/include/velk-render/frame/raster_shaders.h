@@ -99,11 +99,7 @@ void main()
 //     alpha-discard threshold.
 
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
-    OpaquePtr material;
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -120,8 +116,8 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
@@ -145,11 +141,7 @@ void main()
 // would be wrong when geometry sits between the glass and the sky). Used by
 // the deferred path's transparent pass for BLEND / transmissive materials.
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
-    OpaquePtr material;
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -166,8 +158,8 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
@@ -190,11 +182,7 @@ void main()
 )";
 
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
-    OpaquePtr material;
-};
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -220,8 +208,8 @@ void main()
     velk_visual_discard();
 
     EvalContext ctx;
-    ctx.data_addr   = uint64_t(root.material);
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
@@ -273,6 +261,11 @@ inline string compose_eval_fragment(string_view driver_template,
     out.append(string_view("#version 450\n"
                            "#include \"velk.glsl\"\n"
                            "#include \"velk-ui.glsl\"\n"));
+    // A raster pipeline compiles for a single material, so VELK_MATERIAL(T)
+    // binds the arena as a typed block and the snippet's load is a direct
+    // indexed read. Those are the definitions declared in velk-ui.glsl, so
+    // nothing to override here; the compute composer is the one that swaps
+    // them out.
     out.append(eval_src);
     out.append(string_view("\n"));
 

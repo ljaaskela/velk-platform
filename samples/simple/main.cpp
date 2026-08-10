@@ -197,18 +197,7 @@ int velk_simple::run_app(int argc, char* argv[])
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-layout(buffer_reference, std430) readonly buffer CheckerParams {
-    vec4 color_a;
-    vec4 color_b;
-    float scale;
-};
-
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(ElementInstanceData, VelkVbo3D)
-    CheckerParams material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) out vec2 v_local_uv;
 
@@ -216,7 +205,7 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     vec2 q = velk_vertex3d(root).position.xy;
-    ElementInstance inst = root.instance_data.data[gl_InstanceIndex];
+    ElementInstance inst = velk_instance(root);
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
     gl_Position = globals.view_projection * inst.world_matrix * local_pos;
     v_local_uv = q;
@@ -227,37 +216,58 @@ void main()
 #version 450
 #include "velk.glsl"
 
-layout(buffer_reference, std430) readonly buffer CheckerParams {
+// Grouped into a sub-struct so this sample covers nested material records:
+// reflection flattens them to dotted input names ("colors.color_a") at
+// absolute offsets. The layout is identical to declaring the three fields
+// inline.
+struct CheckerColors {
     vec4 color_a;
     vec4 color_b;
+};
+struct CheckerParams {
+    CheckerColors colors;
     float scale;
+    // Multi-declarator form, placed mid-record so that mishandling it shifts
+    // every field after it. Both are set to 1.0, so a correct read is a no-op.
+    float pulse_a, pulse_b;
+    // vec3 after a lone float is the std430 alignment trap: the vec3 aligns
+    // to 16, so it starts at 48 (not 36) and occupies 12 of the next 16
+    // bytes. Kept here so layout validation exercises it.
+    vec3 tint;
+    uint tint_enabled;
 };
+VELK_MATERIAL(CheckerParams)
 
-layout(buffer_reference, std430) readonly buffer DrawData {
-    VELK_DRAW_DATA(OpaquePtr, OpaquePtr)
-    CheckerParams material;
-};
-
-layout(push_constant) uniform PC { DrawData root; };
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec2 v_local_uv;
 layout(location = 0) out vec4 frag_color;
 
 void main()
 {
-    float s = root.material.scale;
-    vec2 cell = floor(v_local_uv * s);
+    CheckerParams m = velk_material(root);
+    vec2 cell = floor(v_local_uv * m.scale);
     float checker = mod(cell.x + cell.y, 2.0);
-    frag_color = mix(root.material.color_a, root.material.color_b, checker);
+    frag_color = mix(m.colors.color_a, m.colors.color_b, checker);
+    if (m.tint_enabled != 0u) {
+        frag_color.rgb *= m.tint;
+    }
+    frag_color.rgb *= mix(m.pulse_a, m.pulse_b, checker);
 }
 )";
 
         auto sm = velk::create_shader_material(
             static_cast<velk::IRenderContext&>(*ctx.as<velk::IRenderContext>()), checker_frag, checker_vert);
         if (sm) {
-            sm.set_input<velk::color>("color_a", {0.15f, 0.15f, 0.25f, 0.6f});
-            sm.set_input<velk::color>("color_b", {0.25f, 0.2f, 0.35f, 0.6f});
+            sm.set_input<velk::color>("colors.color_a", {0.15f, 0.15f, 0.25f, 0.6f});
+            sm.set_input<velk::color>("colors.color_b", {0.25f, 0.2f, 0.35f, 0.6f});
             sm.set_input<float>("scale", 8.0f);
+            // Exercises the vec3-after-float offset: a wrong layout shows up
+            // as a visibly wrong tint rather than a silent pass.
+            sm.set_input<velk::vec3>("tint", {1.0f, 0.8f, 0.6f});
+            sm.set_input<uint32_t>("tint_enabled", 1u);
+            sm.set_input<float>("pulse_a", 1.0f);
+            sm.set_input<float>("pulse_b", 1.0f);
 
             auto header = scene.root().child_at(0).child_at(0);
             auto v = velk::Visual2D(header.find_attachment<velk::IVisual>());

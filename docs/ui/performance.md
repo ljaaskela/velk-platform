@@ -50,7 +50,7 @@ The render backend is designed to minimize CPU overhead per draw call and avoid 
 
 **No CPU-side resource binding.** Traditional backends spend CPU time per draw call binding vertex buffers, updating descriptor sets, and setting uniforms. The bindless model reduces this to a single `vkCmdPushConstants` (8 bytes) per draw. All other data is already in GPU memory, reachable via address dereference.
 
-**No vertex input overhead.** There are no VAOs, no vertex buffer binds, no vertex attribute descriptions. Pipelines have empty vertex input state. Shaders read instance data directly from GPU buffers via `buffer_reference` pointers.
+**No vertex input overhead.** There are no VAOs, no vertex buffer binds, no vertex attribute descriptions. Pipelines have empty vertex input state. Shaders read instance and vertex data straight out of shared, permanently bound GPU buffers by integer index.
 
 **One descriptor bind per frame.** The bindless texture array is bound once at the start of each frame. Individual draw calls reference textures by index, with no per-draw descriptor updates.
 

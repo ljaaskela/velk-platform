@@ -54,7 +54,6 @@ public:
 
     // IGpuBuffer (null-safe forwards to the attached storage)
     size_t   size_bytes() const override { return gpu_buffer_ ? gpu_buffer_->size_bytes() : 0; }
-    uint64_t gpu_address() const override { return gpu_buffer_ ? gpu_buffer_->gpu_address() : 0; }
     void*    map() override          { return gpu_buffer_ ? gpu_buffer_->map() : nullptr; }
     void     update(size_t offset, size_t size, const void* data) override
     {
@@ -63,6 +62,7 @@ public:
 
     // IGpuBufferStorageOwner
     void attach_gpu_buffer(IGpuBuffer::Ptr gb) override { gpu_buffer_ = std::move(gb); }
+    IGpuBuffer::Ptr attached_gpu_buffer() const override { return gpu_buffer_; }
     const IGpuBuffer::Ptr& gpu_buffer() const { return gpu_buffer_; }
 
     // IBuffer

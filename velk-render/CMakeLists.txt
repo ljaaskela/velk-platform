@@ -92,6 +92,8 @@ add_library(velk_render SHARED
     src/material/material_property.h
     src/material/spirv_material_reflect.h
     src/material/spirv_material_reflect.cpp
+    src/material/material_unpacker.h
+    src/material/material_unpacker.cpp
 
     # Mesh primitives
     src/mesh/mesh.h
@@ -109,6 +111,10 @@ add_library(velk_render SHARED
     src/resource/program_data_buffer.h
     src/resource/gpu_resource_manager.h
     src/resource/gpu_resource_manager.cpp
+    src/resource/gpu_arena.h
+    src/resource/gpu_arena.cpp
+    src/resource/arena_buffer.h
+    src/resource/arena_buffer.cpp
     src/resource/surface.h
 
     # Shadow / reflection / etc. techniques
@@ -145,7 +151,6 @@ add_library(velk_render SHARED
     include/velk-render/interface/intf_window_surface.h
     include/velk-render/ext/material.h
     include/velk-render/ext/gpu_resource.h
-    include/velk-render/ext/persistent_buffer.h
     include/velk-render/ext/render_state.h
     include/velk-render/interface/intf_render_state.h
     include/velk-render/interface/intf_gpu_resource.h
@@ -169,6 +174,7 @@ add_library(velk_render SHARED
     # Per-frame runtime interfaces (interfaces under interface/, shared
     # types stay in frame/, render-graph impl in src/frame/)
     include/velk-render/interface/intf_gpu_resource_manager.h
+    include/velk-render/interface/intf_gpu_arena.h
     include/velk-render/interface/intf_frame_data_manager.h
     include/velk-render/interface/intf_frame_snippet_registry.h
     include/velk-render/interface/intf_render_graph.h

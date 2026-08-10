@@ -178,6 +178,9 @@ bool VkBackend::init(void* params)
     }
     volkLoadDevice(device_);
 
+    if (!resolve_dynamic_rendering()) {
+        return false;
+    }
     if (!create_allocator()) {
         return false;
     }
@@ -188,6 +191,9 @@ bool VkBackend::init(void* params)
         return false;
     }
     if (!create_bindless_descriptor()) {
+        return false;
+    }
+    if (!create_bound_buffer_descriptor()) {
         return false;
     }
     if (!create_pipeline_layout()) {
@@ -250,6 +256,8 @@ void VkBackend::shutdown()
     vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptor_layout_, nullptr);
     vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+    vkDestroyDescriptorSetLayout(device_, bound_buffer_layout_, nullptr);
+    vkDestroyDescriptorPool(device_, bound_buffer_pool_, nullptr);
     // linear_sampler_ lives inside sampler_cache_ (primed at init); loop
     // destroys everything in one pass.
     for (auto& [key, sampler] : sampler_cache_) {
@@ -310,10 +318,23 @@ void VkBackend::shutdown()
 
 bool VkBackend::create_vk_instance()
 {
+    // 1.2 is the real floor: everything the backend needs is 1.2 core except
+    // dynamic rendering, which a 1.2 device supplies through
+    // VK_KHR_dynamic_rendering. Ask for 1.3 when the loader has it so a modern
+    // driver takes the core path and skips the extension.
+    instance_api_version_ = VK_API_VERSION_1_2;
+    if (vkEnumerateInstanceVersion) {
+        uint32_t loader_version = VK_API_VERSION_1_0;
+        if (vkEnumerateInstanceVersion(&loader_version) == VK_SUCCESS &&
+            loader_version >= VK_API_VERSION_1_3) {
+            instance_api_version_ = VK_API_VERSION_1_3;
+        }
+    }
+
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "velk-ui";
-    app_info.apiVersion = VK_API_VERSION_1_3;
+    app_info.apiVersion = instance_api_version_;
 
     vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
@@ -424,11 +445,89 @@ bool VkBackend::select_physical_device()
     vkGetPhysicalDeviceProperties(physical_device_, &props);
     VELK_LOG(I, "VkBackend: using %s", props.deviceName);
 
+    if (props.apiVersion < VK_API_VERSION_1_2) {
+        VELK_LOG(E, "VkBackend: device reports Vulkan %u.%u, 1.2 is the minimum",
+                 VK_API_VERSION_MAJOR(props.apiVersion),
+                 VK_API_VERSION_MINOR(props.apiVersion));
+        return false;
+    }
+
     // GPU timing support: timestampComputeAndGraphics guarantees the
     // graphics/compute queues report valid timestamp bits. A zero period
     // means timestamps are unsupported; leave the feature disabled.
     if (props.limits.timestampComputeAndGraphics && props.limits.timestampPeriod > 0.f) {
         timestamp_period_ns_ = props.limits.timestampPeriod;
+    }
+    return true;
+}
+
+bool VkBackend::has_device_extension(const char* name) const
+{
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, nullptr);
+    if (count == 0) return false;
+
+    vector<VkExtensionProperties> props(count);
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, props.data());
+    for (const auto& p : props) {
+        if (std::strcmp(p.extensionName, name) == 0) return true;
+    }
+    return false;
+}
+
+bool VkBackend::check_required_features(
+    const VkPhysicalDeviceVulkan12Features& wanted12,
+    const VkPhysicalDeviceDynamicRenderingFeatures& wanted_dynamic_rendering)
+{
+    VkPhysicalDeviceDynamicRenderingFeatures have_dr{};
+    have_dr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    VkPhysicalDeviceVulkan12Features have12{};
+    have12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    have12.pNext = &have_dr;
+    VkPhysicalDeviceFeatures2 have{};
+    have.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    have.pNext = &have12;
+    vkGetPhysicalDeviceFeatures2(physical_device_, &have);
+
+    bool ok = true;
+    auto require = [&ok](VkBool32 wanted, VkBool32 supported, const char* name) {
+        if (wanted && !supported) {
+            VELK_LOG(E, "VkBackend: device does not support required feature '%s'", name);
+            ok = false;
+        }
+    };
+
+#define VELK_REQUIRE_12(field) require(wanted12.field, have12.field, #field)
+    VELK_REQUIRE_12(descriptorIndexing);
+    VELK_REQUIRE_12(scalarBlockLayout);
+    VELK_REQUIRE_12(descriptorBindingPartiallyBound);
+    VELK_REQUIRE_12(descriptorBindingVariableDescriptorCount);
+    VELK_REQUIRE_12(descriptorBindingSampledImageUpdateAfterBind);
+    VELK_REQUIRE_12(descriptorBindingStorageImageUpdateAfterBind);
+    VELK_REQUIRE_12(descriptorBindingStorageBufferUpdateAfterBind);
+    VELK_REQUIRE_12(drawIndirectCount);
+    VELK_REQUIRE_12(runtimeDescriptorArray);
+    VELK_REQUIRE_12(shaderSampledImageArrayNonUniformIndexing);
+    VELK_REQUIRE_12(shaderStorageImageArrayNonUniformIndexing);
+    VELK_REQUIRE_12(timelineSemaphore);
+#undef VELK_REQUIRE_12
+
+    require(wanted_dynamic_rendering.dynamicRendering, have_dr.dynamicRendering,
+            "dynamicRendering");
+
+    return ok;
+}
+
+bool VkBackend::resolve_dynamic_rendering()
+{
+    // Exactly one of the pair is loaded, depending on whether the device took
+    // the 1.3 core path or the VK_KHR_dynamic_rendering path.
+    cmd_begin_rendering_ = vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
+    cmd_end_rendering_   = vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR;
+
+    if (!cmd_begin_rendering_ || !cmd_end_rendering_) {
+        VELK_LOG(E, "VkBackend: dynamic rendering entry points unavailable");
+        return false;
     }
     return true;
 }
@@ -442,23 +541,53 @@ bool VkBackend::create_device()
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &priority;
 
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    // Dynamic rendering is 1.3 core; on a 1.2 device it comes from
+    // VK_KHR_dynamic_rendering instead. The feature struct is the same either
+    // way, so only the extension list differs.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+    const bool core_dynamic_rendering = instance_api_version_ >= VK_API_VERSION_1_3 &&
+                                        props.apiVersion >= VK_API_VERSION_1_3;
 
-    // Vulkan 1.2 features: BDA + descriptor indexing
+    const char* extensions[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr};
+    uint32_t extension_count = 1;
+    if (!core_dynamic_rendering) {
+        if (!has_device_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+            VELK_LOG(E,
+                     "VkBackend: device is Vulkan %u.%u and does not expose %s; "
+                     "dynamic rendering is required",
+                     VK_API_VERSION_MAJOR(props.apiVersion),
+                     VK_API_VERSION_MINOR(props.apiVersion),
+                     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+            return false;
+        }
+        extensions[extension_count++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+    }
+
+    // Vulkan 1.2 features: descriptor indexing. Deliberately NOT
+    // bufferDeviceAddress: no shader dereferences a GPU pointer, every buffer
+    // is reached by indexing a bound set = 1 slot. Re-enabling it would be the
+    // first step of going back to an address-based resource model.
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    features12.bufferDeviceAddress = VK_TRUE;
     features12.descriptorIndexing = VK_TRUE;
-    // Per-block scalar packing (opt-in via `layout(scalar)` on a
-    // buffer_reference block). Used by the 3D mesh vertex path so
-    // `Vertex3D { vec3 pos; vec3 normal; vec2 uv; }` packs tightly to
-    // 32 bytes instead of std430's 48-byte vec3=16-align stride.
+    // Per-block scalar packing (opt-in via `layout(scalar)` on a block). Used
+    // by the 3D mesh vertex path so `VelkVertex3D` packs tightly rather than
+    // padding each vec3 to 16 bytes.
     features12.scalarBlockLayout = VK_TRUE;
     features12.descriptorBindingPartiallyBound = VK_TRUE;
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
-    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    // The shared arena set (set = 1) fills its STORAGE_BUFFER descriptors
+    // during prepare, after the set was bound at begin_frame.
+    //
+    // Deliberately NOT enabled: descriptorBindingUniformBufferUpdateAfterBind.
+    // No descriptor in either set is a uniform buffer, and that sub-feature is
+    // excluded from the Vulkan Roadmap 2022 required set, so asking for it
+    // would narrow the supported device population for nothing. Re-enable only
+    // alongside an actual UNIFORM_BUFFER descriptor.
+    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     // Required for vkCmdDrawIndexedIndirectCount / vkCmdDrawIndirectCount —
     // the always-indirect emission path lets the GPU determine the actual
     // draw count later (post-culling) without a CPU readback.
@@ -468,25 +597,29 @@ bool VkBackend::create_device()
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     features12.timelineSemaphore = VK_TRUE;
 
-    // Vulkan 1.3: dynamic rendering. Lets vkCmdBeginRendering bind
-    // attachments inline at record time without VkRenderPass /
-    // VkFramebuffer objects.
-    VkPhysicalDeviceVulkan13Features features13{};
-    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    features13.dynamicRendering = VK_TRUE;
-    features12.pNext = &features13;
+    // Lets vkCmdBeginRendering bind attachments inline at record time without
+    // VkRenderPass / VkFramebuffer objects.
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering{};
+    dynamic_rendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamic_rendering.dynamicRendering = VK_TRUE;
+    features12.pNext = &dynamic_rendering;
 
+    // No base 1.0 feature is required: the engine asks only for 1.2 features
+    // plus dynamic rendering.
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features12;
-    features2.features.shaderInt64 = VK_TRUE;
+
+    if (!check_required_features(features12, dynamic_rendering)) {
+        return false;
+    }
 
     VkDeviceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     ci.pNext = &features2;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &queue_ci;
-    ci.enabledExtensionCount = 1;
+    ci.enabledExtensionCount = extension_count;
     ci.ppEnabledExtensionNames = extensions;
 
     if (vkCreateDevice(physical_device_, &ci, nullptr, &device_) != VK_SUCCESS) {
@@ -505,11 +638,10 @@ bool VkBackend::create_allocator()
     vma_funcs.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
 
     VmaAllocatorCreateInfo ci{};
-    ci.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     ci.physicalDevice = physical_device_;
     ci.device = device_;
     ci.instance = instance_;
-    ci.vulkanApiVersion = VK_API_VERSION_1_3;
+    ci.vulkanApiVersion = instance_api_version_;
     ci.pVulkanFunctions = &vma_funcs;
 
     if (vmaCreateAllocator(&ci, &allocator_) != VK_SUCCESS) {
@@ -697,12 +829,10 @@ bool VkBackend::create_bindless_descriptor()
     //   2: storage-image array for compute imageStore writes (rgba32f-format)
     //   3: storage-image array for compute imageStore writes (rgba16f-format)
     //
-    // Per-view FrameGlobals are NOT a descriptor — shaders dereference a
-    // GPU address pushed via push constants ([0..8) of the per-stage push
-    // range). That keeps the descriptor set spec-compliant when bindings
-    // 0..3 are flagged UPDATE_AFTER_BIND (which is required for the
-    // transient-pool path where bindless descriptors are written
-    // mid-command-buffer).
+    // This set is images only. Every buffer a shader reads lives in set = 1
+    // (see below). Bindings 0..3 are flagged UPDATE_AFTER_BIND, which the
+    // transient-pool path requires because bindless descriptors are written
+    // mid-command-buffer.
     VkDescriptorSetLayoutBinding bindings[4]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -782,6 +912,73 @@ bool VkBackend::create_bindless_descriptor()
     return vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_) == VK_SUCCESS;
 }
 
+bool VkBackend::create_bound_buffer_descriptor()
+{
+    // set = 1: a small fixed set of bound storage buffers that compute
+    // shaders read by index (BVH nodes/shapes; GpuArena/GpuHive pages
+    // later). A SINGLE frame-invariant set, bound by both the primary and
+    // every simultaneous-use secondary. Per-frame variance lives in the
+    // buffer contents (IGpuArena refreshes them in place); the descriptor
+    // is rewritten only when a buffer's address changes (first bind + the
+    // rare growth realloc), so steady state never disturbs in-flight
+    // reads. UPDATE_AFTER_BIND because the arena writes the descriptor
+    // during prepare, after the set was bound. PARTIALLY_BOUND lets no-BVH
+    // frames leave the slots unbound (shaders gate on bvh_node_count == 0).
+    VkDescriptorSetLayoutBinding bindings[IRenderBackend::kGlobalBufferSlotCount]{};
+    VkDescriptorBindingFlags binding_flags[IRenderBackend::kGlobalBufferSlotCount]{};
+    for (uint32_t i = 0; i < IRenderBackend::kGlobalBufferSlotCount; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        // ALL stages: graphics now reads the globals slot by index too
+        // (velk_global_data), so set = 1 must be visible to raster, not
+        // just compute. BVH slots stay compute-only in practice; a shared
+        // stage mask is simpler than per-slot flags and costs nothing.
+        bindings[i].stageFlags = VK_SHADER_STAGE_ALL;
+        binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    }
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
+    flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flags_ci.bindingCount = IRenderBackend::kGlobalBufferSlotCount;
+    flags_ci.pBindingFlags = binding_flags;
+
+    VkDescriptorSetLayoutCreateInfo layout_ci{};
+    layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_ci.pNext = &flags_ci;
+    layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layout_ci.bindingCount = IRenderBackend::kGlobalBufferSlotCount;
+    layout_ci.pBindings = bindings;
+
+    if (vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr, &bound_buffer_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pool_size.descriptorCount = IRenderBackend::kGlobalBufferSlotCount;
+
+    VkDescriptorPoolCreateInfo pool_ci{};
+    pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pool_ci.maxSets = 1;
+    pool_ci.poolSizeCount = 1;
+    pool_ci.pPoolSizes = &pool_size;
+
+    if (vkCreateDescriptorPool(device_, &pool_ci, nullptr, &bound_buffer_pool_) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc_info.descriptorPool = bound_buffer_pool_;
+    alloc_info.descriptorSetCount = 1;
+    alloc_info.pSetLayouts = &bound_buffer_layout_;
+
+    return vkAllocateDescriptorSets(device_, &alloc_info, &bound_buffer_set_) == VK_SUCCESS;
+}
+
 bool VkBackend::create_pipeline_layout()
 {
     VkPushConstantRange push_range{};
@@ -789,10 +986,13 @@ bool VkBackend::create_pipeline_layout()
     push_range.offset = 0;
     push_range.size = kMaxRootConstantsSize;
 
+    // set 0 = bindless arrays (shared), set 1 = per-frame bound buffers.
+    VkDescriptorSetLayout set_layouts[2] = { descriptor_layout_, bound_buffer_layout_ };
+
     VkPipelineLayoutCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    ci.setLayoutCount = 1;
-    ci.pSetLayouts = &descriptor_layout_;
+    ci.setLayoutCount = 2;
+    ci.pSetLayouts = set_layouts;
     ci.pushConstantRangeCount = 1;
     ci.pPushConstantRanges = &push_range;
 
@@ -1190,9 +1390,8 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
-    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (desc.index_buffer) {
         buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -1214,11 +1413,6 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
         return {};
     }
 
-    VkBufferDeviceAddressInfo addr_info{};
-    addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-    addr_info.buffer = buffer;
-    uint64_t address = vkGetBufferDeviceAddress(device_, &addr_info);
-
     auto gb = ::velk::instance().create<::velk::IGpuBuffer>(
         ::velk::ClassId::VkGpuBuffer);
     auto* vk_gb = interface_cast<IVkGpuBuffer>(gb.get());
@@ -1226,7 +1420,7 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
         vmaDestroyBuffer(allocator_, buffer, allocation);
         return {};
     }
-    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size, address);
+    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size);
     return gb;
 }
 
@@ -1241,6 +1435,43 @@ void VkBackend::record_buffer_update(IGpuBuffer& target, size_t offset,
     auto& sync = frame_sync_[recording_slot_];
     vkCmdUpdateBuffer(sync.command_buffer, buffer, offset, size, data);
     sync.pending_buffer_update_barrier = true;
+}
+
+void VkBackend::set_global_buffer(uint32_t binding, IGpuBuffer* buffer)
+{
+    if (binding >= IRenderBackend::kGlobalBufferSlotCount) return;
+
+    // The caller may pass a raw IGpuBuffer or a CPU-shadow IBuffer
+    // wrapper whose backend handle lives on its attached storage.
+    auto* vk_gb = interface_cast<IVkGpuBuffer>(buffer);
+    IGpuBuffer::Ptr storage;  // keeps resolved storage alive across the cast
+    if (!vk_gb) {
+        if (auto* owner = interface_cast<IGpuBufferStorageOwner>(buffer)) {
+            storage = owner->attached_gpu_buffer();
+            vk_gb = interface_cast<IVkGpuBuffer>(storage.get());
+        }
+    }
+
+    ::VkBuffer vk_buffer = vk_gb ? vk_gb->vk_buffer() : VK_NULL_HANDLE;
+    // Null / unresolved: leave the slot as-is. PARTIALLY_BOUND keeps the
+    // descriptor valid as long as the shader does not access it (no-BVH
+    // frames gate on bvh_node_count == 0).
+    if (vk_buffer == VK_NULL_HANDLE) return;
+
+    VkDescriptorBufferInfo info{};
+    info.buffer = vk_buffer;
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = bound_buffer_set_;
+    write.dstBinding = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &info;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
 void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_marker)
@@ -2091,6 +2322,16 @@ void VkBackend::begin_frame()
                             pipeline_layout_,
                             0, 1, &descriptor_set_,
                             0, nullptr);
+    // set 1: the frame-invariant bound-buffer set (BVH nodes/shapes +
+    // globals). Bound here for compute dispatches recorded inline on the
+    // primary; simultaneous-use secondaries bind it themselves (compute in
+    // begin_recording, graphics in record_begin_rendering). The arena fills
+    // its descriptors during prepare.
+    vkCmdBindDescriptorSets(sync.command_buffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline_layout_,
+                            1, 1, &bound_buffer_set_,
+                            0, nullptr);
 
     frame_open_ = true;
     for (auto* rt : live_render_targets_) rt->mark_cleared_this_frame(false);
@@ -2140,10 +2381,9 @@ void VkBackend::record_draw_loop(::VkCommandBuffer cb,
 
         if (call.root_constants_size > 0) {
             // Per-draw push at offset 0: the 8-byte DrawData address
-            // (root pointer). The DrawData header carries
-            // `globals_addr` so shaders synthesise globals via a
-            // buffer-reference cast on `root.globals_addr` — no
-            // separate FrameGlobals push needed for graphics.
+            // (root pointer). The DrawData header carries `globals_base`,
+            // an index the shader uses to read velk_globals (set = 1) —
+            // no separate FrameGlobals push needed for graphics.
             vkCmdPushConstants(cb,
                                pipeline_layout_,
                                VK_SHADER_STAGE_ALL,

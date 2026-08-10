@@ -9,9 +9,9 @@
 
 #include "batch_builder.h"
 
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/frame/render_view.h>
 #include <velk-scene/interface/intf_scene_observer.h>
@@ -134,45 +134,48 @@ private:
         mat4 prev_view_projection = mat4::identity();
         bool has_prev_view_projection = false;
 
-        /// Env fingerprint (texture id + material id + data address).
-        /// `prepare_env` resolves these from the snippet registry; on
-        /// the first frame the env material's persistent data buffer
-        /// may not have been uploaded yet → data_addr returns 0,
-        /// then becomes valid the next frame. The change signal lets
-        /// cached deferred-lighting / RT passes invalidate when env
-        /// state actually flips, not on a fixed schedule.
+        /// Env fingerprint (texture id + material id + inline params).
+        /// `prepare_env` resolves these from the snippet registry. The
+        /// change signal lets cached deferred-lighting / RT passes
+        /// invalidate when env state actually flips, not on a fixed
+        /// schedule.
         struct EnvKey
         {
             uint32_t texture_id;
             uint32_t material_id;
-            uint64_t data_addr;
+            float    intensity;
+            float    rotation_rad;
             bool operator==(const EnvKey& rhs) const
             {
                 return texture_id == rhs.texture_id
                     && material_id == rhs.material_id
-                    && data_addr == rhs.data_addr;
+                    && intensity == rhs.intensity
+                    && rotation_rad == rhs.rotation_rad;
             }
         };
         ChangeCache<EnvKey> env_change;
 
-        /// Per-view persistent lights buffer. `prepare_lights` uploads
-        /// the GpuLight array into it so the device address on
-        /// `RenderView::lights_addr` is stable across frames; cached
-        /// lighting/RT passes can embed it without rotating each frame.
-        PersistentBuffer lights_buffer;
+        /// Per-view region in the shared light arena (set = 1 slot 5).
+        /// `prepare_lights` suballocates it and writes the GpuLight array;
+        /// the base (`RenderView::lights_base`) is stable across frames
+        /// (persistent region) so cached lighting/RT passes bake it once.
+        /// Re-allocated only when the light count changes.
+        ArenaRegion lights_region;
 
-        /// Per-view persistent env material data buffer. Used as the
-        /// fallback when the env material has no snippet-resolved
-        /// data buffer; replaces the per-frame `frame_buffer->write`
-        /// path so `RenderView::env.data_addr` is stable across
-        /// frames (cached lighting passes embed it).
-        PersistentBuffer env_data_buffer;
+        /// Per-view region in the shared globals arena (set = 1 slot 2),
+        /// fixed size (one FrameGlobals). Persistent (allocated once, written
+        /// in place each frame) so `view_globals_base` is stable across
+        /// frames: the compute shaders that bake it (RT / deferred / denoise /
+        /// spatial) then read this frame's globals, not a rotating ring slot.
+        ArenaRegion globals_region;
 
-        /// Per-view FrameGlobals storage. Single 192-byte device-local
-        /// allocation; `prepare_frame_globals` updates it in place each
-        /// frame via `IGpuBuffer::update`. BDA is stable across the
-        /// view's lifetime, so cached secondaries can bake it once.
-        IGpuBuffer::Ptr view_globals_buffer;
+        /// Per-view region in the shared mesh-instance arena (set = 1 slot
+        /// 10), holding the MeshInstanceData records for this view's mesh
+        /// shapes. `prepare_shapes` stamps each shape's `mesh_instance_base`
+        /// from it. Re-allocated only when the record count changes; the base
+        /// travels inside the shape array (re-uploaded each frame), so no
+        /// cached pass bakes it.
+        ArenaRegion mesh_instances_region;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -212,8 +215,17 @@ private:
 
     /// Walks scene shapes, resolves material / texture / intersect /
     /// mesh-data per shape, and accumulates RtShape records into @p rv.
-    void prepare_shapes(const SceneState& scene_state, FrameContext& ctx,
-                        RenderView& rv);
+    /// Mesh shapes' MeshInstanceData records are uploaded to the shared
+    /// mesh-instance arena and their element index stamped into the shape.
+    void prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
+                        FrameContext& ctx, RenderView& rv);
+
+    /// Uploads @p instances into this view's persistent region of the shared
+    /// mesh-instance arena and shifts every mesh shape's run-relative
+    /// `mesh_instance_base` onto the region's element base.
+    void upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
+                               RenderView& rv,
+                               array_view<MeshInstanceData> instances);
 
     /// Resolves the camera's environment (texture + material) into @p rv.env.
     /// Also stamps @p rv.env_batch from the per-view cache, rebuilding

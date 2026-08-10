@@ -92,8 +92,8 @@ void BatchBuilder::rebuild_commands(IElement* element, IRenderContext* render_ct
             }
         }
         // Surface every referenced primitive's buffer for the upload pass.
-        // Includes the optional UV1 stream so its GPU address is ready by
-        // the time batch_builder writes it into DrawDataHeader::uv1_address.
+        // Includes the optional UV1 stream so its arena region exists by the
+        // time batch_builder writes its base into DrawDataHeader::uv1_base.
         auto push_primitive_buffer = [&](IMeshPrimitive* p) {
             if (!p) return;
             if (auto buf = interface_pointer_cast<IBuffer>(p->get_buffer())) {

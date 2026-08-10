@@ -1,0 +1,74 @@
+#ifndef VELK_RENDER_GPU_ARENA_H
+#define VELK_RENDER_GPU_ARENA_H
+
+#include <velk/ext/object.h>
+#include <velk/vector.h>
+
+#include <velk-render/interface/intf_gpu_arena.h>
+#include <velk-render/interface/intf_gpu_buffer.h>
+#include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/plugin.h>
+
+namespace velk::impl {
+
+/**
+ * @brief Bound storage buffer (set = 1) suballocated into regions read by
+ *        index instead of by device address.
+ *
+ * One buffer with a byte free-list. `alloc` returns an owning `ArenaRegion`
+ * whose offset survives across frames; `write_at` fills it. Dropping the handle
+ * frees the region, deferred past the in-flight frame's completion marker
+ * (`reclaim`, driven by GpuResourceManager::drain_deferred), so a range is
+ * never reused while an earlier frame may still read it.
+ *
+ * Producers whose data changes wholesale (the BVH) allocate a fresh region and
+ * drop the old handle rather than overwriting in place, which is what keeps a
+ * mid-flight change safe; producers whose bytes drift in small ways (globals,
+ * lights, instances) write in place at a stable base.
+ *
+ * Backing buffers come from the resource manager; the backend only binds them
+ * to the set = 1 slot. Buffers are re-bound only on growth (rare after
+ * warmup), so steady state never touches the descriptor.
+ */
+class GpuArena : public ::velk::ext::ObjectCore<GpuArena, ::velk::IGpuArena>
+{
+public:
+    VELK_CLASS_UID(::velk::ClassId::GpuArena, "GpuArena");
+
+    void init(uint32_t slot, uint32_t element_size,
+              IGpuResourceManager* resources, IRenderBackend* backend,
+              bool index_buffer = false, uint64_t reserve_bytes = 0) override;
+    IGpuBuffer* buffer() const override { return persistent_buffer_.get(); }
+    ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
+    void write_at(uint64_t offset, const void* data, uint64_t size) override;
+    void release_region(uint64_t offset, uint64_t size) override;
+    void reclaim() override;
+    IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) override;
+    void* mapped_at(uint64_t offset) override;
+    uint32_t slot() const override { return slot_; }
+    uint32_t element_size() const override { return element_size_; }
+
+private:
+    bool grow_persistent(uint64_t want);
+    void drain_zombies();
+    void coalesce_free();
+
+    struct Zombie { uint64_t offset; uint64_t size; uint64_t marker; };
+
+    uint32_t slot_ = 0;
+    uint32_t element_size_ = 1;
+    bool index_buffer_ = false;      ///< Backing buffer gets INDEX_BUFFER usage.
+    uint64_t reserve_bytes_ = 0;     ///< Floor for the first allocation.
+
+    IGpuResourceManager* resources_ = nullptr;  ///< Allocates backing buffers.
+    IRenderBackend* backend_ = nullptr;          ///< Slot binding + fence markers.
+    IGpuBuffer::Ptr persistent_buffer_;
+    void* persistent_mapped_ = nullptr;
+    uint64_t persistent_capacity_ = 0;
+    vector<GpuArenaRegion> free_spans_;
+    vector<Zombie> zombies_;             ///< Freed regions awaiting their fence.
+};
+
+} // namespace velk::impl
+
+#endif // VELK_RENDER_GPU_ARENA_H

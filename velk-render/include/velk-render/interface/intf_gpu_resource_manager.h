@@ -5,6 +5,7 @@
 #include <velk/uid.h>
 
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -54,6 +55,25 @@ public:
     /// Ptr defers the backend allocation for destruction.
     virtual IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) = 0;
 
+    /// Creates an IGpuArena bound to set = 1 @p slot with the given element
+    /// size, allocating its backing buffer(s) from this manager. The manager
+    /// weak-tracks it and drives its deferred region reclaim from
+    /// `drain_deferred`. The caller owns the returned Ptr.
+    /// @p index_buffer / @p reserve_bytes are forwarded to IGpuArena::init.
+    virtual IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size,
+                                        bool index_buffer = false,
+                                        uint64_t reserve_bytes = 0) = 0;
+
+    /// Returns the one arena bound to set = 1 @p slot, creating it on first
+    /// ask with @p element_size. Every caller for a slot gets the same arena
+    /// and suballocates a region from it, which is what lets a plugin claim a
+    /// slot without the renderer knowing the slot exists. The manager holds
+    /// the arena for its own lifetime; @p element_size, @p index_buffer and
+    /// @p reserve_bytes are ignored after the first call.
+    virtual IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
+                                        bool index_buffer = false,
+                                        uint64_t reserve_bytes = 0) = 0;
+
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last
     /// reference drops, the backend handle is auto-deferred for destroy
@@ -76,6 +96,18 @@ public:
     virtual IGpuTexture* find_texture(ISurface* surf) const = 0;
     virtual void register_texture(ISurface* surf, IGpuTexture::Ptr tex) = 0;
     virtual void unregister_texture(ISurface* surf) = 0;
+
+    /// Bumped whenever a surface's bindless id is assigned or dropped.
+    ///
+    /// Records that embed a resolved TextureId (every material with a texture)
+    /// are written once and then left alone, so an id that changes afterwards
+    /// would leave them pointing at nothing. Nothing notifies on
+    /// `set_gpu_handle`, and having each material track which surfaces its
+    /// record embeds would mean per-material-type wiring. Instead consumers
+    /// compare this counter against the value they last serialised at, and
+    /// re-serialise everything on the frames where it moved. Registration
+    /// happens at load and on render-target resize, so that is rare.
+    virtual uint64_t texture_generation() const = 0;
 
     /// Ensures @p surf has a backend texture allocated and registered.
     /// Returns the existing IGpuTexture* on cache hit; allocates fresh +

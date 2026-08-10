@@ -17,33 +17,31 @@
 
 namespace velk {
 
+class ArenaRegion;
+
 /**
  * @brief Persistent per-batch storage layout shared between producers
  *        (BatchBuilder fills the prefix), the IBatch implementation
  *        (`get_data` returns the contiguous blob), and consumers
  *        (`emit_draw_calls` reads several offsets into the same buffer).
  *
- * Layout: `[args (32 B)][count (16 B)][header (48 B)][material_ptr (8 B)][pad (8 B)][instance_data (rest)]`.
+ * Layout: `[args (32 B)][count (16 B)]` = 48 B fixed.
  *
  * - args  (offset 0, 32 B) — indirect-draw command record. 16-byte
  *   aligned and oversized so any future args struct fits.
  * - count (offset 32, 16 B) — uint32 actual draw count consumed by
  *   the backend's indirect-with-count draw; 16-byte aligned.
- * - header (offset 48, 48 B) — `DrawDataHeader` the shader receives
- *   via push-constant. Persistent across frames; addresses inside
- *   reference other persistent buffers (instance data, VBO, UV1) so
- *   the value is stable until the batch is rebuilt or a referenced
- *   buffer is reallocated.
- * - material_ptr (offset 96, 8 B) — GPU pointer to the material's
- *   persistent `IProgramDataBuffer`. Stable per material lifetime.
- * - pad (offset 104, 8 B) — alignment so the instance-data slice
- *   that follows starts on a natural 16-byte boundary.
- * - instance_data (offset 112, rest) — per-instance bytes the vertex
- *   shader reads via a buffer-reference dereference of
- *   `storage_gpu_address() + kInstanceOffset`.
  *
- * The DrawCall's root_constants carry `storage_gpu_address() + kHeaderOffset`
- * so the shader's push-constant pointer lands directly on the header.
+ * That is the whole of it: what remains here is only what the GPU reads as
+ * a buffer in its own right. Everything the shader reads has moved to a
+ * shared arena and is reached by index — instances (set = 1 slot 3, see
+ * `set_instance_region`), materials (slot 4, the material's own region),
+ * and the `DrawDataHeader` itself (slot 15, see `set_draw_data_region`).
+ *
+ * The DrawDataHeader is not here either: it lives in the shared draw-data
+ * arena (set = 1 slot 15), and the DrawCall's root_constants carry its
+ * element base. What remains is only what Vulkan itself must read as a
+ * buffer: the indirect args and the draw count.
  */
 struct BatchBufferLayout
 {
@@ -51,11 +49,7 @@ struct BatchBufferLayout
     static constexpr size_t kArgsSize          = 32;
     static constexpr size_t kCountOffset       = kArgsOffset + kArgsSize;
     static constexpr size_t kCountSize         = 16;
-    static constexpr size_t kHeaderOffset      = kCountOffset + kCountSize;
-    static constexpr size_t kHeaderSize        = 48;
-    static constexpr size_t kMaterialPtrOffset = kHeaderOffset + kHeaderSize;
-    static constexpr size_t kMaterialPtrSize   = 8;
-    static constexpr size_t kInstanceOffset    = 112; // kMaterialPtrOffset + 16 (8 ptr + 8 pad)
+    static constexpr size_t kBufferSize        = kCountOffset + kCountSize; // 48
 };
 
 /**
@@ -70,8 +64,8 @@ struct BatchBufferLayout
  * boundary. `pipeline_key` is a stable hash on visual class / material;
  * resolved through `IRenderContext::find_pipeline()`. `texture_key` is
  * the bindless-source ISurface address resolved at emit time.
- * `instance_data` carries per-instance bytes the vertex shader reads
- * via a buffer-reference dereference. `world_aabb` is the union of
+ * `instance_data` carries per-instance bytes the vertex shader reads by
+ * index from the shared instance arena. `world_aabb` is the union of
  * every contained instance's bounds, used by frustum culling at emit
  * time.
  */
@@ -124,11 +118,57 @@ public:
     ///        slot without touching the rest of the batch. The byte
     ///        range overwritten is `[instance_index * instance_stride,
     ///        instance_index * instance_stride + bytes.size())` within
-    ///        the batch's persistent storage's instance-data region.
-    ///        @p bytes.size() must be `<= instance_stride`. Out-of-range
-    ///        slots are silently ignored.
+    ///        the batch's suballocated region in the shared instance
+    ///        arena, written in place through the pointer captured by
+    ///        `set_instance_binding`. @p bytes.size() must be
+    ///        `<= instance_stride`. Out-of-range slots are silently ignored.
     virtual void update_instance_at(uint32_t instance_index,
                                     array_view<const uint8_t> bytes) = 0;
+
+    /// @name Shared instance arena binding — instance bytes live in the
+    ///       Renderer-owned instance arena (set = 1 slot 3), not in the
+    ///       per-batch storage buffer. The batch owns a persistent
+    ///       `ArenaRegion` (allocated on structural change, kept across
+    ///       steady-state frames, RAII-freed when the batch is destroyed);
+    ///       the vertex shader reads `velk_instances.data[instances_base + i]`
+    ///       where `instances_base = offset / instance_stride`.
+    /// @{
+    /// @brief Takes ownership of this batch's instance region. Moving in a new
+    ///        region RAII-frees the previous one (deferred past the in-flight
+    ///        fence by the arena). Pass a default (empty) region to release.
+    virtual void set_instance_region(ArenaRegion&& region) = 0;
+
+    /// @brief Byte offset of this batch's instance region within the arena.
+    ///        `offset / instance_stride` is the shader `instances_base`.
+    virtual uint64_t instance_region_offset() const = 0;
+
+    /// @brief Byte size of this batch's instance region (0 if none).
+    virtual uint64_t instance_region_size() const = 0;
+
+    /// @brief Returns whether the instance bytes changed since the last call
+    ///        and clears the flag. Set by `finalize_storage` (structural
+    ///        rebuild) and `update_instance_at`; the upload sweep re-uploads
+    ///        the region only when set, so unchanged batches never re-upload.
+    virtual bool take_instances_dirty() = 0;
+    /// @}
+
+    /// @name Per-batch draw-data region — this batch's DrawDataHeader record
+    ///       in the shared draw-data arena (set = 1 slot 15). Persistent, so
+    ///       the element base baked into a recorded draw stays valid; every
+    ///       batch has one, including those with no storage buffer.
+    /// @{
+    /// @brief Takes ownership of this batch's draw-data region. Moving in a
+    ///        new region RAII-frees the previous one (deferred past the
+    ///        in-flight fence). Pass a default (empty) region to release.
+    virtual void set_draw_data_region(ArenaRegion&& region) = 0;
+
+    /// @brief Byte offset of this batch's draw-data region within the arena.
+    ///        `offset / sizeof(DrawDataHeader)` is the shader's `draw_base`.
+    virtual uint64_t draw_data_region_offset() const = 0;
+
+    /// @brief Byte size of this batch's draw-data region (0 if none).
+    virtual uint64_t draw_data_region_size() const = 0;
+    /// @}
 
     /// @name Persistent per-batch storage — each batch composes an
     ///       `IBuffer` (an `impl::GpuBuffer` instance) holding the
@@ -137,25 +177,14 @@ public:
     ///       (`IGpuResourceManager::ensure_buffer_storage`).
     ///       `emit_draw_calls` resolves the backend handle via
     ///       `IGpuResourceManager::find_buffer(storage_buffer())->handle`
-    ///       for indirect args + count, and dereferences
-    ///       `storage_gpu_address() + kInstanceOffset` for instance
-    ///       bytes (buffer-reference / device-address read).
+    ///       for indirect args + count. Instance bytes and the draw header
+    ///       live in shared arenas, not here.
     /// @{
     /// @brief Composed storage buffer. Lifetime is owned by the batch;
-    ///        consumers borrow the raw pointer.
+    ///        consumers borrow the raw pointer. Null, or not yet resolvable
+    ///        through the resource manager, until the blob is resident.
     virtual IBuffer* storage_buffer() const = 0;
 
-    /// @brief GPU virtual address of the start of the storage blob.
-    virtual uint64_t storage_gpu_address() const = 0;
-
-    /// @brief Host-visible mapped pointer to the storage blob, or
-    ///        `nullptr` if the buffer hasn't been allocated yet (e.g.
-    ///        env_batch with no persistent storage). Consumers use
-    ///        `BatchBufferLayout` offsets to write per-batch data
-    ///        (e.g. the `DrawDataHeader`) directly into the persistent
-    ///        buffer; writes are visible to the GPU on the next submit
-    ///        via host-coherent memory.
-    virtual uint8_t* storage_mapped() const = 0;
     /// @}
 };
 

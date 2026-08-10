@@ -57,8 +57,7 @@ private:
     /// Per-view persistent `IRenderPass::Ptr`. The pass identity is
     /// stable across frames so the graph's compile-time short-circuit
     /// can match. Only rebuilds the pass contents when `dirty` is set
-    /// by `on_render_state_changed`; non-dirty frames refresh just the
-    /// per-frame `view_globals_address` and re-add the same Ptr.
+    /// by `on_render_state_changed`; non-dirty frames re-add the same Ptr.
     /// **Known latent bug:** the dirty flag fires only on batch-set
     /// changes (and once camera detection lands, on camera moves).
     /// Frustum cull result depends on camera matrix; until camera

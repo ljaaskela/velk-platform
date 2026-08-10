@@ -48,7 +48,6 @@ namespace velk::ui::embedded {
 [[maybe_unused]] constexpr string_view velk_text_glsl = R"(
 #ifndef VELK_TEXT_GLSL_INCLUDED
 #define VELK_TEXT_GLSL_INCLUDED
-#extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
 const uint VELK_TEXT_BAND_COUNT = 8u;
@@ -68,17 +67,13 @@ struct VelkTextGlyphRecord {
     uint _pad;
 };
 
-layout(buffer_reference, std430) buffer VelkTextCurveBuffer {
-    VelkTextQuadCurve data[];
-};
-
-layout(buffer_reference, std430) buffer VelkTextBandBuffer {
-    uint data[];
-};
-
-layout(buffer_reference, std430) buffer VelkTextGlyphBuffer {
-    VelkTextGlyphRecord data[];
-};
+// Glyph outline data, bound by index (set = 1 slots 7-9). Every font
+// suballocates a region of each; a text draw adds its font's base to every
+// index. Bound rather than reached by address so the record that names them
+// is plain indices and can be read the same way on raster and compute.
+layout(set = 1, binding = 7, std430) readonly buffer VelkTextCurves { VelkTextQuadCurve data[]; } velk_text_curves;
+layout(set = 1, binding = 8, std430) readonly buffer VelkTextBands { uint data[]; } velk_text_bands;
+layout(set = 1, binding = 9, std430) readonly buffer VelkTextGlyphs { VelkTextGlyphRecord data[]; } velk_text_glyphs;
 
 // Bit-hack root eligibility table from Lengyel's reference. Returns a 2-bit
 // code indicating which roots of the sample-relative quadratic in y can
@@ -151,23 +146,16 @@ float velk_text_combine_coverage(float xcov, float ycov, float xwgt, float ywgt)
 }
 
 // Main entry point. Returns coverage in [0, 1] for the sample uv inside the
-// glyph identified by glyph_index in the glyphs buffer.
-//
-// The buffer_reference declarations are intentionally not `readonly`:
-// SPIR-V's NonWritable decoration is not legal on a function parameter
-// that is a pointer to a PhysicalStorageBuffer, so the parameter qualifier
-// would have to match by also being `readonly`, which the validator
-// rejects. Dropping the qualifier on both sides keeps the function
-// portable; the buffers are still effectively read-only because nothing
-// in this shader writes to them.
+// glyph identified by glyph_index in the glyphs buffer. The three bases
+// locate this font's runs in the shared text arenas.
 float velk_text_coverage(
     vec2 uv,
     uint glyph_index,
-    VelkTextCurveBuffer curves,
-    VelkTextBandBuffer bands,
-    VelkTextGlyphBuffer glyphs)
+    uint curve_base,
+    uint band_base,
+    uint glyph_base)
 {
-    VelkTextGlyphRecord g = glyphs.data[glyph_index];
+    VelkTextGlyphRecord g = velk_text_glyphs.data[glyph_base + glyph_index];
 
     if (g.curve_count == 0u) {
         return 0.0;
@@ -185,14 +173,14 @@ float velk_text_coverage(
                       0, int(VELK_TEXT_BAND_COUNT) - 1);
 
     uint base = g.band_data_offset;
-    uint h_offset_lo = bands.data[base + uint(hband)];
-    uint h_offset_hi = bands.data[base + uint(hband) + 1u];
-    uint h_total     = bands.data[base + VELK_TEXT_BAND_COUNT];
+    uint h_offset_lo = velk_text_bands.data[band_base + base + uint(hband)];
+    uint h_offset_hi = velk_text_bands.data[band_base + base + uint(hband) + 1u];
+    uint h_total     = velk_text_bands.data[band_base + base + VELK_TEXT_BAND_COUNT];
     uint h_curves_base = base + VELK_TEXT_BAND_COUNT + 1u;
 
     uint v_offsets_base = h_curves_base + h_total;
-    uint v_offset_lo = bands.data[v_offsets_base + uint(vband)];
-    uint v_offset_hi = bands.data[v_offsets_base + uint(vband) + 1u];
+    uint v_offset_lo = velk_text_bands.data[band_base + v_offsets_base + uint(vband)];
+    uint v_offset_hi = velk_text_bands.data[band_base + v_offsets_base + uint(vband) + 1u];
     uint v_curves_base = v_offsets_base + VELK_TEXT_BAND_COUNT + 1u;
 
     float xcov = 0.0;
@@ -202,8 +190,8 @@ float velk_text_coverage(
     // bail when the largest x in the curve falls left of the sample by more
     // than half a pixel.
     for (uint i = h_offset_lo; i < h_offset_hi; ++i) {
-        uint local_idx = bands.data[h_curves_base + i];
-        VelkTextQuadCurve c = curves.data[g.curve_offset + local_idx];
+        uint local_idx = velk_text_bands.data[band_base + h_curves_base + i];
+        VelkTextQuadCurve c = velk_text_curves.data[curve_base + g.curve_offset + local_idx];
         vec2 p0 = c.p0 - uv;
         vec2 p1 = c.p1 - uv;
         vec2 p2 = c.p2 - uv;
@@ -229,8 +217,8 @@ float velk_text_coverage(
 
     // Vertical band: ray toward +y. Curves sorted descending by max y.
     for (uint i = v_offset_lo; i < v_offset_hi; ++i) {
-        uint local_idx = bands.data[v_curves_base + i];
-        VelkTextQuadCurve c = curves.data[g.curve_offset + local_idx];
+        uint local_idx = velk_text_bands.data[band_base + v_curves_base + i];
+        VelkTextQuadCurve c = velk_text_curves.data[curve_base + g.curve_offset + local_idx];
         vec2 p0 = c.p0 - uv;
         vec2 p1 = c.p1 - uv;
         vec2 p2 = c.p2 - uv;

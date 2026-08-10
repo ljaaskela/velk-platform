@@ -159,9 +159,8 @@ public:
      *                          attachment (debug readback / overlay).
      *   - "shadow.debug"     — RT-shadow diagnostic RGBA32F texture
      *                      (IRenderTarget); each pixel carries
-     *                      (buffer_addr_lo, buffer_addr_hi, ibo_offset,
-     *                      triangle_count) of the BLAS instance the
-     *                      shadow ray walked.
+     *                      geometry / BLAS identifying values of the
+     *                      instance the shadow ray walked.
      *
      * Returns null when the view has no path / the path doesn't produce
      * that output.
@@ -172,7 +171,7 @@ public:
 
     /**
      * @brief Requests a one-shot dump of every mesh shape's MeshStaticData
-     *        (instance index, buffer_addr, ibo_offset, triangle_count) to
+     *        (instance index, geometry base, ibo_offset, triangle_count) to
      *        the log on the next BVH rebuild. Used together with the F12
      *        shadow-debug image dump so CPU-emitted values can be compared
      *        per-pixel against GPU-observed values.

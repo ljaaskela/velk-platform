@@ -1,8 +1,12 @@
 #include "font.h"
 
 #include "embedded/inter_regular.h"
-#include "font_gpu_buffer.h"
 #include "visual/text_material.h"
+
+#include <velk-render/interface/intf_gpu_resource_manager.h>
+#include <velk-render/interface/material/intf_material_internal.h>
+#include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_context.h>
 
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
@@ -36,25 +40,70 @@ Font::~Font()
 void Font::init_buffers()
 {
     auto& instance = ::velk::instance();
-    curve_buffer_ = instance.create<IBuffer>(ClassId::FontGpuBuffer);
-    band_buffer_  = instance.create<IBuffer>(ClassId::FontGpuBuffer);
-    glyph_buffer_ = instance.create<IBuffer>(ClassId::FontGpuBuffer);
-    if (auto i = interface_cast<IFontGpuBufferInternal>(curve_buffer_)) {
-        i->init(&font_buffers_, FontGpuBufferRole::Curves);
-    }
-    if (auto i = interface_cast<IFontGpuBufferInternal>(band_buffer_)) {
-        i->init(&font_buffers_, FontGpuBufferRole::Bands);
-    }
-    if (auto i = interface_cast<IFontGpuBufferInternal>(glyph_buffer_)) {
-        i->init(&font_buffers_, FontGpuBufferRole::Glyphs);
-    }
-
-    // The font owns one TextMaterial bound to its three GPU buffers. Every
+    // The font owns one TextMaterial reading this font's glyph data. Every
     // text visual using this font shares this material instance, which is
     // what lets the renderer batch them into a single draw call.
     text_material_ = instance.create<IMaterial>(ClassId::TextMaterial);
     if (auto m = interface_cast<ITextMaterialInternal>(text_material_)) {
-        m->set_font_buffers(curve_buffer_, band_buffer_, glyph_buffer_);
+        m->set_font(this);
+    }
+}
+
+uint32_t Font::upload_section(IGpuArena* arena, IBuffer::Ptr& buf,
+                              const void* data, uint64_t size)
+{
+    if (!arena || size == 0 || !data) return 0;
+    if (!buf) {
+        buf = arena->create_buffer(size);
+        if (!buf) return 0;
+    }
+    const bool ok = buf->write(static_cast<size_t>(size),
+                               [&](void* dst, size_t n) { std::memcpy(dst, data, n); });
+    if (!ok) return 0;
+    return get_gpu_ref(buf).get_base();
+}
+
+void Font::ensure_gpu_data(IRenderContext& ctx)
+{
+    auto* resources = ctx.resources();
+    if (!resources) return;
+
+    // Glyph baking only appends, so a section is current unless its byte
+    // count grew since the last upload.
+    const uint64_t curves = font_buffers_.curves_bytes();
+    const uint64_t bands = font_buffers_.bands_bytes();
+    const uint64_t glyphs = font_buffers_.glyphs_bytes();
+    if (curves == curve_bytes_ && bands == band_bytes_ && glyphs == glyph_bytes_) {
+        return;
+    }
+
+    if (curves != curve_bytes_) {
+        auto arena = resources->shared_arena(IRenderBackend::kGlobalTextCurves,
+                                             sizeof(QuadCurve));
+        curve_base_ = upload_section(arena.get(), curve_buffer_,
+                                     font_buffers_.curves(), curves);
+        curve_bytes_ = curves;
+    }
+    if (bands != band_bytes_) {
+        auto arena = resources->shared_arena(IRenderBackend::kGlobalTextBands,
+                                             sizeof(uint32_t));
+        band_base_ = upload_section(arena.get(), band_buffer_,
+                                    font_buffers_.bands(), bands);
+        band_bytes_ = bands;
+    }
+    if (glyphs != glyph_bytes_) {
+        auto arena = resources->shared_arena(IRenderBackend::kGlobalTextGlyphs,
+                                             sizeof(GlyphRecord));
+        glyph_base_ = upload_section(arena.get(), glyph_buffer_,
+                                     font_buffers_.glyphs(), glyphs);
+        glyph_bytes_ = glyphs;
+    }
+
+    // Baking a glyph moves the sections to fresh regions, so the material's
+    // record now holds stale bases. Nothing wrote the material itself, so its
+    // own change notifications cannot catch this.
+    if (auto* mi = interface_cast<IMaterialInternal>(text_material_.get())) {
+        mi->mark_material_dirty();
     }
 }
 

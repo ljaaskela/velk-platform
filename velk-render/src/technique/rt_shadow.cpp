@@ -21,7 +21,7 @@ float velk_shadow_hash(uint x)
 
 float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
 {
-    Light light = pc.lights.data[light_idx];
+    Light light = velk_lights.data[pc.lights_base + light_idx];
 
     // Shadow ray direction + maximum distance depend on light kind.
     // Directional lights occlude anything between the surface and
@@ -50,7 +50,7 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
         float spread = (light.flags.x == 0u) ? tan(size) : (size / max(t_max, 1e-4));
         uvec3 q = floatBitsToUint(world_pos);
         uint seed = (q.x * 1973u + q.y * 9277u + q.z * 26699u
-                     + pc.globals.present_counter * 53891u) | 1u;
+                     + VELK_GLOBALS.present_counter * 53891u) | 1u;
         vec3 up = abs(L.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
         vec3 T  = normalize(cross(up, L));
         vec3 B  = cross(L, T);

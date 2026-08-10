@@ -8,6 +8,9 @@
 #include <velk-scene/interface/intf_element.h>
 #include <velk-scene/interface/intf_visual.h>
 
+#include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/plugin.h>
+
 #include <cstring>
 
 namespace velk::impl {
@@ -20,6 +23,30 @@ constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
 inline void hash_mix(uint64_t& h, uint64_t v)
 {
     h = (h ^ v) * kFnvPrime;
+}
+
+/// Uploads @p size bytes into a FRESH region of @p arena and hands the old
+/// @p region back to the arena (freed deferred past the in-flight frame's
+/// fence). Allocating instead of overwriting in place is what makes a
+/// mid-flight BVH change safe: a frame still reading the previous build never
+/// sees a partially rewritten one. Returns the element base
+/// (offset / @p stride), or 0 when there is nothing to upload.
+uint32_t upload_region(IGpuArena* arena, ArenaRegion& region, const void* data,
+                       uint64_t size, uint64_t stride)
+{
+    if (!arena || size == 0) {
+        region = {};
+        return 0;
+    }
+    auto fresh = arena->alloc(size);
+    if (!fresh.valid()) {
+        region = {};
+        return 0;
+    }
+    const uint64_t offset = fresh.offset();
+    arena->write_at(offset, data, size);
+    region = std::move(fresh);
+    return static_cast<uint32_t>(offset / stride);
 }
 
 inline void hash_float(uint64_t& h, float f)
@@ -87,8 +114,10 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
             dirty = false;
         }
     }
+    bool rebuilt = false;
     if (dirty || cached_nodes_.empty()) {
         VELK_PERF_SCOPE("renderer.bvh_build");
+        rebuilt = true;
         auto build = build_scene_bvh(scene, ctx.render_ctx, shape_cb, shape_user);
         cached_nodes_ = std::move(build.nodes);
         cached_shapes_ = std::move(build.shapes);
@@ -101,27 +130,45 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
     }
 
     VELK_PERF_SCOPE("renderer.bvh_upload");
-    // Stage the packed mesh-instance array first so we can stamp
-    // each mesh shape's `mesh_data_addr` with a stable per-instance
-    // address (base + i * sizeof(MeshInstanceData)).
-    uint64_t mesh_instances_base = mesh_instances_buffer_.upload(
-        cached_mesh_instances_.data(),
-        cached_mesh_instances_.size() * sizeof(MeshInstanceData),
-        ctx).address;
-    for (size_t i = 0; i < cached_shapes_.size() && i < cached_mesh_instances_.size(); ++i) {
-        if (cached_shapes_[i].shape_kind != kRtShapeKindMesh) continue;
-        cached_shapes_[i].mesh_data_addr =
-            mesh_instances_base + i * sizeof(MeshInstanceData);
+    // Nodes / shapes / mesh instances live in persistent regions of the
+    // Renderer-owned shared arenas, so every scene's BVH holds a distinct
+    // region and multiple BVHs in one frame never collide on the set = 1 slot.
+    // The region's element base is stamped into FrameGlobals / RtRoot; shaders
+    // read data[base + index]. A frame that changes nothing uploads nothing.
+    //
+    // Mesh instances go first: their base is stamped into each mesh shape, so
+    // it has to be settled before the shape array is uploaded. The array only
+    // changes when the build does (the renderer's callback fills it during a
+    // fresh walk), so a stable build keeps both the region and its bytes.
+    bool shapes_dirty = rebuilt;
+    if (rebuilt || !mesh_instances_region_.valid()) {
+        const uint32_t base = upload_region(
+            ctx.mesh_instances_arena, mesh_instances_region_,
+            cached_mesh_instances_.data(),
+            cached_mesh_instances_.size() * sizeof(MeshInstanceData),
+            sizeof(MeshInstanceData));
+        // A moved base rewrites every mesh shape's index, so the shape region
+        // has to follow it even on a frame that did not rebuild.
+        if (base != mesh_instance_base_) shapes_dirty = true;
+        mesh_instance_base_ = base;
+        for (size_t i = 0; i < cached_shapes_.size() && i < cached_mesh_instances_.size(); ++i) {
+            if (cached_shapes_[i].shape_kind != kRtShapeKindMesh) continue;
+            cached_shapes_[i].mesh_instance_base = base + static_cast<uint32_t>(i);
+        }
     }
 
-    // Shapes after mesh-instance stamping so any address change cascades
-    // into the shapes blob (PersistentBuffer's write_diff catches it).
-    shapes_addr_ = shapes_buffer_.upload(
-        cached_shapes_.data(),
-        cached_shapes_.size() * sizeof(RtShape), ctx).address;
-    nodes_addr_ = nodes_buffer_.upload(
-        cached_nodes_.data(),
-        cached_nodes_.size() * sizeof(GpuBvhNode), ctx).address;
+    if (shapes_dirty || !shapes_region_.valid()) {
+        shape_base_ = upload_region(ctx.bvh_shapes_arena, shapes_region_,
+                                    cached_shapes_.data(),
+                                    cached_shapes_.size() * sizeof(RtShape),
+                                    sizeof(RtShape));
+    }
+    if (rebuilt || !nodes_region_.valid()) {
+        node_base_ = upload_region(ctx.bvh_nodes_arena, nodes_region_,
+                                   cached_nodes_.data(),
+                                   cached_nodes_.size() * sizeof(GpuBvhNode),
+                                   sizeof(GpuBvhNode));
+    }
 }
 
 } // namespace velk::impl
