@@ -1,7 +1,6 @@
 #ifndef VELK_UI_RENDER_TARGET_CACHE_H
 #define VELK_UI_RENDER_TARGET_CACHE_H
 
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk/vector.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_buffer.h>

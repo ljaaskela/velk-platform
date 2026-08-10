@@ -228,8 +228,8 @@ public:
     /// Suballocates a region of the shared mesh-word arena (set = 1 slot 14)
     /// and writes the VBO + IBO bytes into it, replacing the region when the
     /// data changed size. Returns false while no region could be obtained.
-    /// The bytes are reachable two ways afterwards: by index for RT
-    /// (`get_gpu_ref`) and by device address for raster (`gpu_address`).
+    /// Both paths reach the bytes the same way afterwards, by word index off
+    /// the region base (`get_gpu_ref`).
     virtual bool ensure_geometry(IGpuResourceManager& resources) = 0;
 };
 

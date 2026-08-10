@@ -218,10 +218,10 @@ inline void emit_draw_calls(
                     uint32_t firstInstance;
                 } args{ primitive->get_index_count(), batch.instance_count(),
                         0, 0, 0 };
-                uint64_t args_addr = frame_data.write(&args, sizeof(args));
-                if (!args_addr) continue;
+                uint64_t args_offset = frame_data.write(&args, sizeof(args));
+                if (args_offset == IFrameDataManager::kInvalidOffset) continue;
                 call.args_buffer = frame_data.active_buffer();
-                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+                call.args_buffer_offset = args_offset;
             } else {
                 struct {
                     uint32_t vertexCount;
@@ -230,16 +230,16 @@ inline void emit_draw_calls(
                     uint32_t firstInstance;
                 } args{ primitive->get_vertex_count(), batch.instance_count(),
                         0, 0 };
-                uint64_t args_addr = frame_data.write(&args, sizeof(args));
-                if (!args_addr) continue;
+                uint64_t args_offset = frame_data.write(&args, sizeof(args));
+                if (args_offset == IFrameDataManager::kInvalidOffset) continue;
                 call.args_buffer = frame_data.active_buffer();
-                call.args_buffer_offset = args_addr - frame_data.active_buffer_base();
+                call.args_buffer_offset = args_offset;
             }
             uint32_t count_value = 1;
-            uint64_t count_addr = frame_data.write(&count_value, sizeof(count_value), 4);
-            if (!count_addr) continue;
+            uint64_t count_offset = frame_data.write(&count_value, sizeof(count_value), 4);
+            if (count_offset == IFrameDataManager::kInvalidOffset) continue;
             call.count_buffer = frame_data.active_buffer();
-            call.count_buffer_offset = count_addr - frame_data.active_buffer_base();
+            call.count_buffer_offset = count_offset;
         }
         call.max_draw_count = 1;
 

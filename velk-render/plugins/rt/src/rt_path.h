@@ -9,7 +9,6 @@
 #include <velk/api/change.h>
 
 #include <velk-render/plugin.h>
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/ext/render_path.h>
 #include <velk-render/interface/intf_buffer.h>

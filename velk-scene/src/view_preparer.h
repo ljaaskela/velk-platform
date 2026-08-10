@@ -9,7 +9,6 @@
 
 #include "batch_builder.h"
 
-#include <velk-render/ext/persistent_buffer.h>
 #include <velk-render/ext/render_state.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_gpu_arena.h>
