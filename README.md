@@ -15,8 +15,8 @@ The user-facing entry point. Wraps render context creation, window management, p
 ### Rendering foundation ([velk-render](velk-render/))
 
 Bindless GPU rendering abstraction:
-* Minimal backend interface relying on buffer device addresses, bindless textures, push-constant-driven draw calls.
-* Includes a Vulkan 1.3 backend (`velk::vk`) with BDA, bindless descriptors, and dynamic rendering.
+* Minimal backend interface relying on shared, permanently bound buffers indexed by the shader, bindless textures, and push-constant-driven draw calls.
+* Includes a Vulkan 1.2 backend (`velk::vk`) with bindless descriptors and dynamic rendering.
 
 ### Scene model + renderer ([velk-scene](velk-scene/))
 
@@ -40,13 +40,64 @@ Declarative UI policy on top of velk-scene:
 
 ## Documentation
 
-User documentation lives at [`docs/`](docs/) — see [`docs/README.md`](docs/README.md) for the index. Quick links:
+User documentation lives at [`docs/`](docs/); see [`docs/README.md`](docs/README.md) for the index. Quick links:
 
 * **[Getting started](docs/getting-started.md)** Minimal example walkthrough
 * **[Runtime](docs/runtime/runtime.md)** Application setup, frame loop, both creation modes
 * **[Scene](docs/ui/scene.md)** / **[Traits](docs/ui/traits.md)** / **[Input](docs/ui/input.md)** Scene + UI authoring
 * **[Rendering](docs/render/rendering.md)** / **[Render backend](docs/render/render-backend.md)** Internals
 * **[Text](docs/plugins/text.md)** / **[Image](docs/plugins/image.md)** Bundled plugins
+
+## Project structure
+
+```
+velk-ui/
+  CMakeLists.txt
+  README.md               This file
+  android/                Gradle project: builds the tree for Android and packages an APK
+    velk-platform/        NDK entry point; its CMakeLists builds the whole velk-ui tree
+    samples/simple/       NativeActivity app module wrapping the simple sample
+  docs/                   User documentation (see docs/README.md for the index)
+    getting-started.md    Minimal example walkthrough
+    render/               Renderer internals
+      rendering.md        IRenderer, prepare / present split, frame slots
+      render-backend.md   GPU resource model, bindless design, IRenderBackend
+      materials.md        Material authoring, eval bodies, shader includes
+      mesh.md             IMesh / IMeshPrimitive / IMeshBuffer
+      lighting.md         Lights, shadows, environment / IBL
+    ui/                   Scene, traits, input, update cycle, performance
+    runtime/              Application setup and frame loop
+    plugins/              Bundled plugin docs (text, image, gltf)
+  plugins/                Feature plugins (each compiled into its own dll)
+    gltf/                 glTF 2.0 import
+    image/                Raster image + HDR environment decoding
+    text/                 FreeType + HarfBuzz shaping, analytic glyph coverage
+  samples/                Desktop sample apps
+    simple/               2D UI, render-to-texture, custom shader materials
+    fluent/               3D scene, ray-traced path
+    winding_test/         Front-face / depth convention regression check
+  velk-render/            Rendering foundation
+    include/velk-render/
+      interface/          Abstract interfaces (backend, buffers, textures, materials)
+      ext/                CRTP helpers (ext::Material, ext::GpuBuffer, ...)
+      api/                User-facing typed wrappers
+      frame/              Draw-call emission, shader sources, render graph
+      render_path/        Forward / deferred / ray-trace path interfaces
+    src/                  Implementation
+    plugins/
+      vk/                 Vulkan backend (velk::vk)
+      rt/                 Software ray-tracing render path
+  velk-runtime/           Application runtime: window management, plugin loading, frame loop
+    plugins/
+      glfw/               Desktop window + input
+      android/            NativeActivity window, asset protocol, log sink
+  velk-scene/             Scene model, transforms, BVH, batching, the renderer
+  velk-ui/                UI framework: layout, 2D visuals, materials, input routing
+```
+
+Note the two Android directories are different layers: `velk-runtime/plugins/android/`
+is C++ that runs on Android and builds one runtime plugin, while `android/` is the
+Gradle build shell that compiles the whole repo and wraps it in an APK.
 
 ## Quick start
 
