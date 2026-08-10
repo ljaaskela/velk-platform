@@ -463,9 +463,14 @@ bool VkBackend::create_device()
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
-    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
-    // The per-frame "global buffer" set (set = 1) fills its STORAGE_BUFFER
-    // descriptors during prepare, after the set was bound at begin_frame.
+    // The shared arena set (set = 1) fills its STORAGE_BUFFER descriptors
+    // during prepare, after the set was bound at begin_frame.
+    //
+    // Deliberately NOT enabled: descriptorBindingUniformBufferUpdateAfterBind.
+    // No descriptor in either set is a uniform buffer, and that sub-feature is
+    // excluded from the Vulkan Roadmap 2022 required set, so asking for it
+    // would narrow the supported device population for nothing. Re-enable only
+    // alongside an actual UNIFORM_BUFFER descriptor.
     features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     // Required for vkCmdDrawIndexedIndirectCount / vkCmdDrawIndirectCount —
     // the always-indirect emission path lets the GPU determine the actual
@@ -705,12 +710,10 @@ bool VkBackend::create_bindless_descriptor()
     //   2: storage-image array for compute imageStore writes (rgba32f-format)
     //   3: storage-image array for compute imageStore writes (rgba16f-format)
     //
-    // Per-view FrameGlobals are NOT a descriptor — shaders dereference a
-    // GPU address pushed via push constants ([0..8) of the per-stage push
-    // range). That keeps the descriptor set spec-compliant when bindings
-    // 0..3 are flagged UPDATE_AFTER_BIND (which is required for the
-    // transient-pool path where bindless descriptors are written
-    // mid-command-buffer).
+    // This set is images only. Every buffer a shader reads lives in set = 1
+    // (see below). Bindings 0..3 are flagged UPDATE_AFTER_BIND, which the
+    // transient-pool path requires because bindless descriptors are written
+    // mid-command-buffer.
     VkDescriptorSetLayoutBinding bindings[4]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;

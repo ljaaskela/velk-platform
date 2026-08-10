@@ -155,10 +155,10 @@ public:
         : arena_(std::move(arena)), offset_(offset), size_(size) {}
     ~ArenaRegion() { release(); }
 
+    // Moving the WeakPtr already clears the source; only the PODs need it.
     ArenaRegion(ArenaRegion&& o) noexcept
         : arena_(std::move(o.arena_)), offset_(o.offset_), size_(o.size_)
     {
-        o.arena_ = {};
         o.offset_ = 0;
         o.size_ = 0;
     }
@@ -167,7 +167,6 @@ public:
         if (this != &o) {
             release();
             arena_ = std::move(o.arena_); offset_ = o.offset_; size_ = o.size_;
-            o.arena_ = {};
             o.offset_ = 0;
             o.size_ = 0;
         }
@@ -197,7 +196,9 @@ inline void ArenaRegion::release()
     // holders that outlive the renderer (mesh primitives). Their bytes died
     // with the arena's buffer, so there is nothing to give back.
     if (auto arena = arena_.lock()) arena->release_region(offset_, size_);
-    arena_ = {};
+    // Explicit type: `= {}` is ambiguous, since weak_ptr is assignable from
+    // both a weak_ptr and a shared_ptr.
+    arena_ = IGpuArena::WeakPtr{};
     offset_ = 0;
     size_ = 0;
 }

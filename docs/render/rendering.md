@@ -10,7 +10,7 @@ For the GPU data model and backend architecture, see [render-backend.md](render-
   - [One surface, multiple cameras](#one-surface-multiple-cameras)
   - [Multiple scenes](#multiple-scenes)
   - [Relationship diagram](#relationship-diagram)
-- [prepare / present split](#prepare-present-split)
+- [prepare / present split](#prepare--present-split)
   - [Per-frame GPU buffers](#per-frame-gpu-buffers)
   - [Threading model](#threading-model)
 - [FrameDesc: selective rendering](#framedesc-selective-rendering)

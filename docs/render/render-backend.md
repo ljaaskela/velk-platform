@@ -18,7 +18,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
   - [Instance data](#instance-data)
   - [Shader includes](#shader-includes)
 - [Geometry Without Geometry Objects](#geometry-without-geometry-objects)
-  - [2D UI: Procedural quads](#2d-ui-procedural-quads)
+  - [2D UI: Unit quad + vertex pulling](#2d-ui-unit-quad--vertex-pulling)
   - [3D meshes: Vertex pulling](#3d-meshes-vertex-pulling)
 - [Materials: Per-material GPU Data](#materials-per-material-gpu-data)
 - [Textures: Bindless by Default](#textures-bindless-by-default)
