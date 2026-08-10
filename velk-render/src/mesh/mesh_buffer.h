@@ -15,13 +15,12 @@ namespace velk::impl {
  * One owned byte vector holds both VBO and IBO contents: VBO bytes at
  * offset 0, IBO bytes at offset `vbo_size_` (== `get_ibo_offset()`).
  * Those bytes live in a region of the shared mesh-word arena (set = 1
- * slot 14), whose backing buffer carries `SHADER_DEVICE_ADDRESS |
- * INDEX_BUFFER` usage.
+ * slot 14), whose backing buffer carries `INDEX_BUFFER` usage.
  *
  * Both paths reach these bytes the same way, by index: `gpu_ref` gives the
- * word base RT and raster each add their own offsets to. The one address left
- * in the picture is Vulkan's own: `vkCmdBindIndexBuffer` binds the arena's
- * backing buffer at this region's offset plus `get_ibo_offset()`.
+ * word base RT and raster each add their own offsets to. Nothing here is
+ * addressed: `vkCmdBindIndexBuffer` binds the arena's backing buffer by
+ * handle, at this region's offset plus `get_ibo_offset()`.
  *
  * Offsets reported by `get_ibo_offset` stay RELATIVE to this mesh's own
  * bytes; consumers that need an absolute position in the arena add the

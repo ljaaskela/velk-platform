@@ -94,7 +94,7 @@ static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
-// Plain POD, no scene deps — packed for std430 indexed reads.
+// Plain POD, no scene deps; packed for std430 indexed reads.
 
 /// GPU-side shape record. Mirrors the RtShape struct in the RT compute
 /// prelude and the deferred lighting compute. Geometry + material +

@@ -66,23 +66,23 @@ The renderer treats both paths uniformly: each `DrawEntry` emitted by a visual c
 Shader includes are registered via `IRenderContext::register_shader_include()`. Any module can register its own include, and shaders reference them with `#include "name"`.
 
 **velk.glsl** (provided by velk-render, registered automatically):
-- `VELK_DRAW_DATA(Name)` — the one declaration a raster shader makes. Declares the push constant (a single `uint draw_base`) under the name you give it, conventionally `root`; every accessor below takes that handle. See [DrawData struct layout](#drawdata-struct-layout).
-- `velk_draw(root)` — this draw's raw `DrawDataHeader` record, for the fields with no accessor of their own.
-- `GlobalData` / `velk_global_data(root)` — the frame-globals record read by index from the `set = 1` globals arena (view_projection, inverse_view_projection, viewport, cam_pos, BVH metadata).
-- `VelkVertex3D` — the unified vertex layout (`vec3 position`, `vec3 normal`, `vec2 uv`, `vec4 tangent`; 48 B tight scalar packing).
-- `velk_vertex3d(root)` / `velk_uv1(root)` — fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
-- `VELK_INSTANCES(Type)` / `velk_instance(root)` — declare the set = 1 instance arena as `Type` and read this draw's instance by index.
-- `VELK_MATERIAL(Type)` / `velk_material(root)` — declare the set = 1 material arena as `Type` and read this draw's material record by index (for full custom fragment shaders / ShaderMaterial).
-- `velk_texture(id, uv)` — bindless texture sample helper.
-- `BvhNode`, `RtShape`, `MeshInstanceData`, `MeshStaticData` and their accessor macros — the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
+- `VELK_DRAW_DATA(Name)`: the one declaration a raster shader makes. Declares the push constant (a single `uint draw_base`) under the name you give it, conventionally `root`; every accessor below takes that handle. See [DrawData struct layout](#drawdata-struct-layout).
+- `velk_draw(root)`: this draw's raw `DrawDataHeader` record, for the fields with no accessor of their own.
+- `GlobalData` / `velk_global_data(root)`: the frame-globals record read by index from the `set = 1` globals arena (view_projection, inverse_view_projection, viewport, cam_pos, BVH metadata).
+- `VelkVertex3D`: the unified vertex layout (`vec3 position`, `vec3 normal`, `vec2 uv`, `vec4 tangent`; 48 B tight scalar packing).
+- `velk_vertex3d(root)` / `velk_uv1(root)`: fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
+- `VELK_INSTANCES(Type)` / `velk_instance(root)`: declare the set = 1 instance arena as `Type` and read this draw's instance by index.
+- `VELK_MATERIAL(Type)` / `velk_material(root)`: declare the set = 1 material arena as `Type` and read this draw's material record by index (for full custom fragment shaders / ShaderMaterial).
+- `velk_texture(id, uv)`: bindless texture sample helper.
+- `BvhNode`, `RtShape`, `MeshInstanceData`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
 
 **velk-ui.glsl** (provided by velk-scene, registered on renderer init):
-- `ElementInstance` — the universal per-instance record shared by every visual: `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
-- `VELK_INSTANCES(ElementInstance)` — binds the shared instance arena as `ElementInstance`; read via `velk_instance(root)`.
-- `EvalContext` — everything a material eval body receives: `material_base` (read via `VELK_LOAD_MATERIAL`), `texture_id`, `shape_param`, `uv`, `uv1`, `base`, `ray_dir`, `normal`, `hit_pos`, `tangent`.
-- `VELK_LOAD_MATERIAL(Type, ctx)` — reads this shading point's material record. Pairs with the `VELK_MATERIAL(Type)` declaration; see [Eval bodies](#eval-bodies).
-- `MaterialEval` — the canonical eval output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
-- `velk_default_material_eval()` — returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
+- `ElementInstance`: the universal per-instance record shared by every visual, holding `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.
+- `VELK_INSTANCES(ElementInstance)`: binds the shared instance arena as `ElementInstance`; read via `velk_instance(root)`.
+- `EvalContext`: everything a material eval body receives, namely `material_base` (read via `VELK_LOAD_MATERIAL`), `texture_id`, `shape_param`, `uv`, `uv1`, `base`, `ray_dir`, `normal`, `hit_pos`, `tangent`.
+- `VELK_LOAD_MATERIAL(Type, ctx)`: reads this shading point's material record. Pairs with the `VELK_MATERIAL(Type)` declaration; see [Eval bodies](#eval-bodies).
+- `MaterialEval`: the canonical eval output, carrying `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
+- `velk_default_material_eval()`: returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
 
 Other modules can register their own includes. The text plugin registers `velk_text.glsl` (curve/band/glyph buffers + coverage sampling); application code can add its own via `IRenderContext::register_shader_include()`.
 
@@ -112,7 +112,7 @@ The cache key for a shader combines:
 - A stage discriminator so a vertex shader and fragment shader with identical source never collide.
 - A 64-bit hash of all currently registered shader includes (sorted by name). Folding this into every per-shader key means any change to a virtual include such as `velk.glsl` or `velk-ui.glsl` automatically invalidates entries that depend on it. Old entries become orphans rather than corrupt cache hits, and the next compile rewrites them under the new key.
 
-There is no version file and no bulk wipe — invalidation is implicit in the key.
+There is no version file and no bulk wipe; invalidation is implicit in the key.
 
 ### What is cached and what is not
 
@@ -124,7 +124,7 @@ Set the environment variable `VELK_SHADER_CACHE_DISABLED=1` to bypass the cache 
 
 ## Pipeline options
 
-Every `IMaterial` carries an optional `IMaterialOptions` attachment that controls the pipeline's rasterizer / depth / blend state (cull mode, front-face winding, depth test / write, alpha mode + cutoff, etc.). It is the single channel through which per-material pipeline state flows — `create_pipeline` / `compile_pipeline` read it, and `ext::Material` subscribes to its `on_options_changed` event to invalidate the cached pipeline handle and trigger a recompile on next draw.
+Every `IMaterial` carries an optional `IMaterialOptions` attachment that controls the pipeline's rasterizer / depth / blend state (cull mode, front-face winding, depth test / write, alpha mode + cutoff, etc.). It is the single channel through which per-material pipeline state flows: `create_pipeline` / `compile_pipeline` read it, and `ext::Material` subscribes to its `on_options_changed` event to invalidate the cached pipeline handle and trigger a recompile on next draw.
 
 The `Material` wrapper exposes three entry points:
 
@@ -143,7 +143,7 @@ m.options().set_cull_mode(velk::CullMode::Back);
 if (m.has_options()) { /* ... */ }
 
 // Batched write: a single StateWriter scope (one on_changed fire,
-// one pipeline invalidation) — prefer this when setting several
+// one pipeline invalidation). Prefer this when setting several
 // fields at once.
 m.set_options([](velk::IMaterialOptions::State& s) {
     s.cull_mode   = velk::CullMode::None;
@@ -152,9 +152,9 @@ m.set_options([](velk::IMaterialOptions::State& s) {
 });
 ```
 
-Defaults are defined on the `IMaterialOptions` interface itself (back-face cull, clockwise front-face, depth test + write on, opaque alpha). Materials that want a non-default pipeline state attach one and write the fields they care about; materials that leave the attachment unset fall back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend) — use `m.options()` once (without writes) to materialize the attachment with 3D-oriented interface defaults.
+Defaults are defined on the `IMaterialOptions` interface itself (back-face cull, clockwise front-face, depth test + write on, opaque alpha). Materials that want a non-default pipeline state attach one and write the fields they care about; materials that leave the attachment unset fall back to `PipelineOptions` struct defaults (2D-safe: no cull, no depth, alpha blend). Use `m.options()` once (without writes) to materialize the attachment with 3D-oriented interface defaults.
 
-Never access `IObjectStorage` / `add_attachment` directly from user code to configure options — always go through `options()` / `set_options()`.
+Never access `IObjectStorage` / `add_attachment` directly from user code to configure options; always go through `options()` / `set_options()`.
 
 ### Winding / culling defaults
 
@@ -280,7 +280,7 @@ MaterialEval velk_eval_my_material(EvalContext ctx);
 
 The framework composes the full forward fragment shader, the deferred G-buffer shader, and the ray-trace fill shader around this one body.
 
-`EvalContext` carries everything the body might need — the material record (reached via `VELK_LOAD_MATERIAL`, backed by `material_base` on every path), `texture_id`, `shape_param`, `uv`, `uv1`, `base` (instance tint), `ray_dir`, `normal`, `hit_pos`, `tangent`. `MaterialEval` is the canonical output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`. Both types come from the `velk-ui.glsl` include and are documented in that file.
+`EvalContext` carries everything the body might need: the material record (reached via `VELK_LOAD_MATERIAL`, backed by `material_base` on every path), `texture_id`, `shape_param`, `uv`, `uv1`, `base` (instance tint), `ray_dir`, `normal`, `hit_pos`, `tangent`. `MaterialEval` is the canonical output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`. Both types come from the `velk-ui.glsl` include and are documented in that file.
 
 Start from `velk_default_material_eval()` and overwrite only the fields that matter to the material:
 
@@ -324,7 +324,7 @@ The whole point of `EvalContext` is that an eval never reaches out to `root` dir
 |---|---|---|---|
 | material record | your struct | `material_base` | The material's per-draw data in the `set = 1` material arena. Reached via `VELK_LOAD_MATERIAL(Type, ctx)`, an indexed read on the raster path and a generated unpack on the compute path. Don't touch `ctx.material_base` directly. |
 | `texture_id` | `uint`   | `DrawDataHeader.texture_id`      | Bindless slot of the draw's primary texture. 0 when no texture is bound. Sample via `velk_texture(ctx.texture_id, uv)`. Materials with multiple named textures (StandardMaterial, custom multi-texture materials) embed their own `uint32_t` texture id fields in their material record. |
-| `shape_param` | `uint`  | `ElementInstance.params[0]`      | Per-shape material data — glyph index for text, slot index for future custom uses. |
+| `shape_param` | `uint`  | `ElementInstance.params[0]`      | Per-shape material data: glyph index for text, slot index for future custom uses. |
 | `uv`          | `vec2`  | fragment interpolation / RT hit  | 0..1 shape coordinates at the shading point. |
 | `base`        | `vec4`  | `ElementInstance.color`          | Visual-level tint (color set on the 2D visual, or white on 3D). Multiply this into your result when the material should respect per-instance color. |
 | `ray_dir`     | `vec3`  | view / ray direction             | Normalised direction from camera/ray origin to the hit point. Use for Fresnel, view-dependent shading. |
@@ -410,7 +410,7 @@ Materials that sample textures override `get_textures()` to return the `ISurface
 
 ### Full fragment shaders (advanced)
 
-For materials that genuinely need a full fragment shader — `ShaderMaterial` is the canonical example, since it hosts user-supplied shaders — implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
+For materials that genuinely need a full fragment shader (`ShaderMaterial` is the canonical example, since it hosts user-supplied shaders), implement `get_fragment_src()` (and `get_vertex_src()`) and leave `get_eval_src()` empty. The batch builder sees the full-fragment path and compiles straight from those sources via `ensure_pipeline()`, bypassing the eval-driver composition.
 
 ```cpp
 uint64_t get_pipeline_handle(IRenderContext& ctx) override
@@ -425,7 +425,7 @@ Pre-compiled `IShader::Ptr` handles work too:
 return ensure_pipeline(ctx, my_compiled_frag, my_compiled_vert);
 ```
 
-On the shader side, a full fragment shader declares the draw root itself and can reach every field the renderer writes — frame globals, the per-instance array, the vertex stream, and the material record:
+On the shader side, a full fragment shader declares the draw root itself and can reach every field the renderer writes: frame globals, the per-instance array, the vertex stream, and the material record.
 
 ```glsl
 struct MyParams {
@@ -512,7 +512,7 @@ This enables workflows like:
 
 ## DrawData struct layout
 
-Both material types share the same per-draw layout. Every draw call pushes one `uint` — the element index of its `DrawDataHeader` in the `set = 1` draw-data arena (slot 15). The header is 32 bytes of indices and counts:
+Both material types share the same per-draw layout. Every draw call pushes one `uint`, the element index of its `DrawDataHeader` in the `set = 1` draw-data arena (slot 15). The header is 32 bytes of indices and counts:
 
 ```cpp
 // velk-render/gpu_data.h
@@ -541,9 +541,9 @@ static_assert(sizeof(DrawDataHeader) == 32, ...);
 | 24 | `uv1_enabled`       | uint32 | 4 |
 | 28 | `material_base`     | uint32 (element base into velk_materials[]) | 4 |
 
-Shader bodies almost never name these fields. `velk.glsl` declares the struct and its buffer once; a shader writes `VELK_DRAW_DATA(root)` to declare the push constant, then reads each field through the accessor that owns it (`velk_global_data(root)`, `velk_instance(root)`, `velk_material(root)`, `velk_vertex3d(root)`, `velk_uv1(root)`). That indirection is why the header could lose 16 bytes and change every field's meaning without a single shader body being edited. The exceptions are `texture_id` and `material_base`, which the composed raster drivers copy into `EvalContext` via `velk_draw(root)`.
+Shader bodies almost never name these fields. `velk.glsl` declares the struct and its buffer once; a shader writes `VELK_DRAW_DATA(root)` to declare the push constant, then reads each field through the accessor that owns it (`velk_global_data(root)`, `velk_instance(root)`, `velk_material(root)`, `velk_vertex3d(root)`, `velk_uv1(root)`). Going through the accessors is what keeps the layout an implementation detail: the header can be resized or its fields given new meanings without any shader body changing. The exceptions are `texture_id` and `material_base`, which the composed raster drivers copy into `EvalContext` via `velk_draw(root)`.
 
-Material-specific data does not trail the header — it lives in the `set = 1` material arena (slot 4), one persistent region per material, dirty-tracked and rewritten only on change. The `ext::Material` base handles the lifecycle: `write_draw_data` fills a scratch buffer, the base diffs it against the previous frame, flags a material-dirty bit on change, and the renderer's upload sweep copies the bytes into the region.
+Material-specific data does not trail the header; it lives in the `set = 1` material arena (slot 4), one persistent region per material, dirty-tracked and rewritten only on change. The `ext::Material` base handles the lifecycle: `write_draw_data` fills a scratch buffer, the base diffs it against the previous frame, flags a material-dirty bit on change, and the renderer's upload sweep copies the bytes into the region.
 
 ```glsl
 struct MyMaterialData {

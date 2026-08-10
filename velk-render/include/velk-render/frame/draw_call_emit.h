@@ -88,7 +88,9 @@ inline void emit_draw_calls(
                 }
             }
         }
-        const bool has_storage = (storage_gb != nullptr && batch.storage_gpu_address() != 0);
+        // A resolved, still-live IGpuBuffer is exactly the residency question:
+        // the manager only registers an entry once the allocation succeeded.
+        const bool has_storage = (storage_gb != nullptr);
         // Instance data lives in the shared instance arena (set = 1 slot 3),
         // suballocated per batch by the upload sweep. The header carries the
         // element base (region offset / stride) the vertex shader adds to

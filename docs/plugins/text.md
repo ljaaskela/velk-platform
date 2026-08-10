@@ -1,6 +1,6 @@
 # Text plugin
 
-The text plugin (`velk_text`) brings font loading and text rendering support into velk-ui. Loaded automatically by the runtime — no manual setup needed.
+The text plugin (`velk_text`) brings font loading and text rendering support into velk-ui. Loaded automatically by the runtime; no manual setup needed.
 
 ## Contents
 - [Approach](#approach)
@@ -188,4 +188,4 @@ Public ClassIds for the plugin's main types. Construct via `instance().create<I>
 | `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
 | `velk::ui::ClassId::TextMaterial` | `IMaterial` | Material that runs the analytic-coverage fragment shader. Owned by each `Font` and shared by all `TextVisual`s using that font (so they batch into one draw call). Not normally constructed by user code. |
 
-The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `default_font()` — usually accessed through the header-only convenience `velk::ui::get_default_font()`.
+The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `default_font()`, usually accessed through the header-only convenience `velk::ui::get_default_font()`.

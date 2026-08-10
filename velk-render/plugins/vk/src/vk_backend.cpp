@@ -178,6 +178,9 @@ bool VkBackend::init(void* params)
     }
     volkLoadDevice(device_);
 
+    if (!resolve_dynamic_rendering()) {
+        return false;
+    }
     if (!create_allocator()) {
         return false;
     }
@@ -315,10 +318,23 @@ void VkBackend::shutdown()
 
 bool VkBackend::create_vk_instance()
 {
+    // 1.2 is the real floor: everything the backend needs is 1.2 core except
+    // dynamic rendering, which a 1.2 device supplies through
+    // VK_KHR_dynamic_rendering. Ask for 1.3 when the loader has it so a modern
+    // driver takes the core path and skips the extension.
+    instance_api_version_ = VK_API_VERSION_1_2;
+    if (vkEnumerateInstanceVersion) {
+        uint32_t loader_version = VK_API_VERSION_1_0;
+        if (vkEnumerateInstanceVersion(&loader_version) == VK_SUCCESS &&
+            loader_version >= VK_API_VERSION_1_3) {
+            instance_api_version_ = VK_API_VERSION_1_3;
+        }
+    }
+
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "velk-ui";
-    app_info.apiVersion = VK_API_VERSION_1_3;
+    app_info.apiVersion = instance_api_version_;
 
     vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
@@ -429,11 +445,89 @@ bool VkBackend::select_physical_device()
     vkGetPhysicalDeviceProperties(physical_device_, &props);
     VELK_LOG(I, "VkBackend: using %s", props.deviceName);
 
+    if (props.apiVersion < VK_API_VERSION_1_2) {
+        VELK_LOG(E, "VkBackend: device reports Vulkan %u.%u, 1.2 is the minimum",
+                 VK_API_VERSION_MAJOR(props.apiVersion),
+                 VK_API_VERSION_MINOR(props.apiVersion));
+        return false;
+    }
+
     // GPU timing support: timestampComputeAndGraphics guarantees the
     // graphics/compute queues report valid timestamp bits. A zero period
     // means timestamps are unsupported; leave the feature disabled.
     if (props.limits.timestampComputeAndGraphics && props.limits.timestampPeriod > 0.f) {
         timestamp_period_ns_ = props.limits.timestampPeriod;
+    }
+    return true;
+}
+
+bool VkBackend::has_device_extension(const char* name) const
+{
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, nullptr);
+    if (count == 0) return false;
+
+    vector<VkExtensionProperties> props(count);
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &count, props.data());
+    for (const auto& p : props) {
+        if (std::strcmp(p.extensionName, name) == 0) return true;
+    }
+    return false;
+}
+
+bool VkBackend::check_required_features(
+    const VkPhysicalDeviceVulkan12Features& wanted12,
+    const VkPhysicalDeviceDynamicRenderingFeatures& wanted_dynamic_rendering)
+{
+    VkPhysicalDeviceDynamicRenderingFeatures have_dr{};
+    have_dr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    VkPhysicalDeviceVulkan12Features have12{};
+    have12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    have12.pNext = &have_dr;
+    VkPhysicalDeviceFeatures2 have{};
+    have.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    have.pNext = &have12;
+    vkGetPhysicalDeviceFeatures2(physical_device_, &have);
+
+    bool ok = true;
+    auto require = [&ok](VkBool32 wanted, VkBool32 supported, const char* name) {
+        if (wanted && !supported) {
+            VELK_LOG(E, "VkBackend: device does not support required feature '%s'", name);
+            ok = false;
+        }
+    };
+
+#define VELK_REQUIRE_12(field) require(wanted12.field, have12.field, #field)
+    VELK_REQUIRE_12(descriptorIndexing);
+    VELK_REQUIRE_12(scalarBlockLayout);
+    VELK_REQUIRE_12(descriptorBindingPartiallyBound);
+    VELK_REQUIRE_12(descriptorBindingVariableDescriptorCount);
+    VELK_REQUIRE_12(descriptorBindingSampledImageUpdateAfterBind);
+    VELK_REQUIRE_12(descriptorBindingStorageImageUpdateAfterBind);
+    VELK_REQUIRE_12(descriptorBindingStorageBufferUpdateAfterBind);
+    VELK_REQUIRE_12(drawIndirectCount);
+    VELK_REQUIRE_12(runtimeDescriptorArray);
+    VELK_REQUIRE_12(shaderSampledImageArrayNonUniformIndexing);
+    VELK_REQUIRE_12(shaderStorageImageArrayNonUniformIndexing);
+    VELK_REQUIRE_12(timelineSemaphore);
+#undef VELK_REQUIRE_12
+
+    require(wanted_dynamic_rendering.dynamicRendering, have_dr.dynamicRendering,
+            "dynamicRendering");
+
+    return ok;
+}
+
+bool VkBackend::resolve_dynamic_rendering()
+{
+    // Exactly one of the pair is loaded, depending on whether the device took
+    // the 1.3 core path or the VK_KHR_dynamic_rendering path.
+    cmd_begin_rendering_ = vkCmdBeginRendering ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
+    cmd_end_rendering_   = vkCmdEndRendering ? vkCmdEndRendering : vkCmdEndRenderingKHR;
+
+    if (!cmd_begin_rendering_ || !cmd_end_rendering_) {
+        VELK_LOG(E, "VkBackend: dynamic rendering entry points unavailable");
+        return false;
     }
     return true;
 }
@@ -447,17 +541,39 @@ bool VkBackend::create_device()
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &priority;
 
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    // Dynamic rendering is 1.3 core; on a 1.2 device it comes from
+    // VK_KHR_dynamic_rendering instead. The feature struct is the same either
+    // way, so only the extension list differs.
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+    const bool core_dynamic_rendering = instance_api_version_ >= VK_API_VERSION_1_3 &&
+                                        props.apiVersion >= VK_API_VERSION_1_3;
 
-    // Vulkan 1.2 features: BDA + descriptor indexing
+    const char* extensions[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr};
+    uint32_t extension_count = 1;
+    if (!core_dynamic_rendering) {
+        if (!has_device_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+            VELK_LOG(E,
+                     "VkBackend: device is Vulkan %u.%u and does not expose %s; "
+                     "dynamic rendering is required",
+                     VK_API_VERSION_MAJOR(props.apiVersion),
+                     VK_API_VERSION_MINOR(props.apiVersion),
+                     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+            return false;
+        }
+        extensions[extension_count++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+    }
+
+    // Vulkan 1.2 features: descriptor indexing. Deliberately NOT
+    // bufferDeviceAddress: no shader dereferences a GPU pointer, every buffer
+    // is reached by indexing a bound set = 1 slot. Re-enabling it would be the
+    // first step of going back to an address-based resource model.
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    features12.bufferDeviceAddress = VK_TRUE;
     features12.descriptorIndexing = VK_TRUE;
-    // Per-block scalar packing (opt-in via `layout(scalar)` on a
-    // buffer_reference block). Used by the 3D mesh vertex path so
-    // `Vertex3D { vec3 pos; vec3 normal; vec2 uv; }` packs tightly to
-    // 32 bytes instead of std430's 48-byte vec3=16-align stride.
+    // Per-block scalar packing (opt-in via `layout(scalar)` on a block). Used
+    // by the 3D mesh vertex path so `VelkVertex3D` packs tightly rather than
+    // padding each vec3 to 16 bytes.
     features12.scalarBlockLayout = VK_TRUE;
     features12.descriptorBindingPartiallyBound = VK_TRUE;
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
@@ -481,25 +597,29 @@ bool VkBackend::create_device()
     features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     features12.timelineSemaphore = VK_TRUE;
 
-    // Vulkan 1.3: dynamic rendering. Lets vkCmdBeginRendering bind
-    // attachments inline at record time without VkRenderPass /
-    // VkFramebuffer objects.
-    VkPhysicalDeviceVulkan13Features features13{};
-    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    features13.dynamicRendering = VK_TRUE;
-    features12.pNext = &features13;
+    // Lets vkCmdBeginRendering bind attachments inline at record time without
+    // VkRenderPass / VkFramebuffer objects.
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering{};
+    dynamic_rendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamic_rendering.dynamicRendering = VK_TRUE;
+    features12.pNext = &dynamic_rendering;
 
+    // No base 1.0 feature is required: the engine asks only for 1.2 features
+    // plus dynamic rendering.
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features12;
-    features2.features.shaderInt64 = VK_TRUE;
+
+    if (!check_required_features(features12, dynamic_rendering)) {
+        return false;
+    }
 
     VkDeviceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     ci.pNext = &features2;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &queue_ci;
-    ci.enabledExtensionCount = 1;
+    ci.enabledExtensionCount = extension_count;
     ci.ppEnabledExtensionNames = extensions;
 
     if (vkCreateDevice(physical_device_, &ci, nullptr, &device_) != VK_SUCCESS) {
@@ -518,11 +638,10 @@ bool VkBackend::create_allocator()
     vma_funcs.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
 
     VmaAllocatorCreateInfo ci{};
-    ci.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     ci.physicalDevice = physical_device_;
     ci.device = device_;
     ci.instance = instance_;
-    ci.vulkanApiVersion = VK_API_VERSION_1_3;
+    ci.vulkanApiVersion = instance_api_version_;
     ci.pVulkanFunctions = &vma_funcs;
 
     if (vmaCreateAllocator(&ci, &allocator_) != VK_SUCCESS) {
@@ -1271,9 +1390,8 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
     VkBufferCreateInfo buf_ci{};
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
-    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (desc.index_buffer) {
         buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -1295,11 +1413,6 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
         return {};
     }
 
-    VkBufferDeviceAddressInfo addr_info{};
-    addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-    addr_info.buffer = buffer;
-    uint64_t address = vkGetBufferDeviceAddress(device_, &addr_info);
-
     auto gb = ::velk::instance().create<::velk::IGpuBuffer>(
         ::velk::ClassId::VkGpuBuffer);
     auto* vk_gb = interface_cast<IVkGpuBuffer>(gb.get());
@@ -1307,7 +1420,7 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
         vmaDestroyBuffer(allocator_, buffer, allocation);
         return {};
     }
-    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size, address);
+    vk_gb->init(this, buffer, allocation, info.pMappedData, desc.size);
     return gb;
 }
 

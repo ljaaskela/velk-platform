@@ -101,7 +101,6 @@ public:
     uint64_t draw_data_region_size() const override { return draw_data_region_.size(); }
 
     IBuffer* storage_buffer() const override { return storage_.get(); }
-    uint64_t storage_gpu_address() const override;
 
 private:
     uint64_t pipeline_key_ = 0;

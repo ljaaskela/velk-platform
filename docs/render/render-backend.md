@@ -13,6 +13,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 - [The DrawCall](#the-drawcall)
 - [Data Flow: How Pixels Get Drawn](#data-flow-how-pixels-get-drawn)
   - [The GPU resource model](#the-gpu-resource-model)
+    - [Why indices rather than device addresses](#why-indices-rather-than-device-addresses)
   - [Per-frame staging buffer](#per-frame-staging-buffer)
   - [The DrawDataHeader](#the-drawdataheader)
   - [Instance data](#instance-data)
@@ -38,14 +39,14 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 "Bindless" traditionally refers to accessing GPU resources (textures, buffers) by address or index rather than binding them to fixed slots before each draw call. Velk's render backend takes this approach across the board:
 
   * **Bindless textures**: all textures live in a global array, accessed by index. One descriptor set bind per frame, zero per draw call.
-  * **Bindless buffers**: shader data is reached without per-draw descriptor binds. Every record the GPU reads — the draw header itself, frame globals, per-instance arrays, material params, scene lights, BVH nodes/shapes, RT primary shapes, mesh instances / static data / BLAS runs, mesh vertex + index words, glyph curve tables — lives in one of sixteen **`set = 1` storage buffers read by integer index**. **No shader in the engine dereferences a GPU pointer**: there is no `buffer_reference` in any shader source. See [The GPU resource model](#the-gpu-resource-model).
+  * **Bindless buffers**: shader data is reached without per-draw descriptor binds. Every record the GPU reads (the draw header itself, frame globals, per-instance arrays, material params, scene lights, BVH nodes/shapes, RT primary shapes, mesh instances / static data / BLAS runs, mesh vertex + index words, glyph curve tables) lives in one of sixteen **`set = 1` storage buffers read by integer index**. **No shader in the engine dereferences a GPU pointer**: there is no `buffer_reference` in any shader source. See [The GPU resource model](#the-gpu-resource-model).
   * **No descriptor set switching per draw**: each draw call receives one 4-byte push constant, the element index of its `DrawDataHeader` in the draw-data arena. From that record the shader reaches globals / instances / material / vertex streams, all by index.
   * **No vertex buffer binding**: there are no VAOs, vertex attribute descriptions or `vkCmdBindVertexBuffers`. Pipelines have empty vertex input state. 2D geometry is procedural (unit quads expanded in the vertex shader), 3D geometry uses vertex pulling from a shared mesh-word arena.
   * **Persistent, dirty-gated data**: per-draw data is written into persistently mapped GPU memory, so per-frame allocations, staging copies and command-buffer transfers are not needed. Each producer (batch, material, view, mesh primitive, font) owns a **stable region** of a shared arena and rewrites it only when its contents change; a steady-state frame uploads almost nothing. The one thing still written per frame is the small indirect-command blob each batch owns.
 
 The result is that the per-draw-call CPU cost is dominated by the `vkCmdPushConstants` + `vkCmdDraw` calls themselves, which is the theoretical minimum. On the GPU side, reaching the draw record is a single indexed load from an L2-cached storage buffer, comparable to a traditional uniform buffer read.
 
-However, this is *not* GPU-driven rendering (yet). The CPU still decides what to draw and builds the draw call list. Draws are issued through indirect-count commands (`vkCmdDraw*IndirectCount`), but the CPU writes the draw count and argument records — the GPU does not yet perform culling or sorting. The indirect substrate is in place so a future GPU-driven path can write those buffers instead. The "bindless" label describes the resource access model: once data is in GPU memory, shaders reach it by address, not by API-managed binding.
+However, this is *not* GPU-driven rendering (yet). The CPU still decides what to draw and builds the draw call list. Draws are issued through indirect-count commands (`vkCmdDraw*IndirectCount`), but the CPU writes the draw count and argument records; the GPU does not yet perform culling or sorting. The indirect substrate is in place so a future GPU-driven path can write those buffers instead. The "bindless" label describes the resource access model: once data is in GPU memory, shaders reach it by index into a permanently bound slot, not through per-draw API binding.
 
 ## The Core Idea
 
@@ -62,7 +63,7 @@ When all GPUs support these features, the abstraction layer collapses. Instead o
 * Instead of managing descriptor sets, you give the shader a texture index.
 * Instead of describing vertex layouts, the shader reads what it needs from a buffer.
 
-The essay reaches for buffer device addresses (64-bit GPU pointers) as the mechanism. Velk started there and deliberately moved off it: a handle into a pool is what velk already uses on the CPU side, and an index into a bound buffer is the same reachability at the same cost. See [The GPU resource model](#the-gpu-resource-model) for what that buys and what it costs.
+Where the essay reaches for buffer device addresses as the mechanism, velk reaches for an index into a bound buffer: the same base + offset at the same cost, minus the raw pointer. See [Why indices rather than device addresses](#why-indices-rather-than-device-addresses).
 
 ## Architecture Overview
 
@@ -102,10 +103,10 @@ The following methods from `IRenderBackend` give the renderer everything it need
 * `record_buffer_update`: Inline `vkCmdUpdateBuffer`-style write for small (<64 KB) device-local updates.
 * `defer_destroy_gpu_buffer`: Queue a buffer for destruction after the in-flight frame's GPU completion marker resolves.
 
-This is the single mechanism for getting all data to the GPU: frame globals, instance data, vertex data, index data, material parameters. Above it, `IGpuArena` suballocates one such buffer into stable per-producer regions — see [The GPU resource model](#the-gpu-resource-model).
+This is the single mechanism for getting all data to the GPU: frame globals, instance data, vertex data, index data, material parameters. Above it, `IGpuArena` suballocates one such buffer into stable per-producer regions; see [The GPU resource model](#the-gpu-resource-model).
 
 **Textures** are bindless by design:
-* `create_texture`: Create a texture from a `TextureDesc` (dimensions, format, usage — Sampled / RenderTarget / Storage / ColorAttachment). Returns an `IGpuTexture::Ptr`; the texture's bindless `TextureId` (a `uint32_t` index into the global sampled-texture array) is reachable via the `IGpuTexture` interface.
+* `create_texture`: Create a texture from a `TextureDesc` (dimensions, format, and usage: Sampled / RenderTarget / Storage / ColorAttachment). Returns an `IGpuTexture::Ptr`; the texture's bindless `TextureId` (a `uint32_t` index into the global sampled-texture array) is reachable via the `IGpuTexture` interface.
 * `upload_texture`: Upload pixel data via a staging buffer; fills mip 0 and generates the rest via blit-downsampling.
 * `read_texture`: GPU → CPU readback (for screenshots, golden-image tests).
 * `create_depth_attachment_texture`: Convenience for the depth side of dynamic-rendering passes.
@@ -113,7 +114,7 @@ This is the single mechanism for getting all data to the GPU: frame globals, ins
 
 The texture id can be used in any shader and any draw call. The backend manages the descriptor array internally.
 
-**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. The group is a producer-side wrapper, not a backend concept — there is no group-aware `begin_pass` overload.
+**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. The group is a producer-side wrapper, not a backend concept; there is no group-aware `begin_pass` overload.
 
 **Pipelines** link shaders plus rasterizer state. Pipelines are compiled against dynamic-rendering attachment formats, never against an explicit render pass:
 
@@ -125,20 +126,20 @@ The shader itself defines what data it reads and how (everything is available th
 
 Above the backend, `IRenderContext` provides a higher-level API that separates shader compilation from pipeline creation:
 
-* `compile_shader(source, stage, key = 0)`: Compiles GLSL source to an `IShader::Ptr` handle that owns the compiled bytecode. Consults an on-disk SPIR-V cache before falling back to shaderc — see [Materials → Shader cache](materials.md#shader-cache). Built-in shaders pass a `constexpr make_hash64(source)` as the cache key; leaving `key` as 0 hashes the source at runtime.
+* `compile_shader(source, stage, key = 0)`: Compiles GLSL source to an `IShader::Ptr` handle that owns the compiled bytecode. Consults an on-disk SPIR-V cache before falling back to shaderc; see [Materials → Shader cache](materials.md#shader-cache). Built-in shaders pass a `constexpr make_hash64(source)` as the cache key; leaving `key` as 0 hashes the source at runtime.
 * `compile_pipeline_dynamic(frag_src, vert_src, key, color_formats, depth_format, options, cache_group = nullptr)`: Compiles GLSL sources, links them, and registers the resulting pipeline in the context's cache under a `PipelineCacheKey{user_key, target_format, target_group}`. Producers call this lazily on first cache miss against the active path's attachment formats.
 * `create_compute_pipeline(compute_shader, key)` / `compile_compute_pipeline(source, key)`: Compute equivalents.
 
 The UI renderer registers default vertex and fragment shaders during setup. This means materials typically only need to provide a fragment shader.
 
-**Frame lifecycle** — a frame is a `begin_frame` → `close_frame` → `submit_frame` sequence. The split lets all command recording happen on one thread (where the renderer runs `prepare`) while the GPU submit + present run on another (where it runs `present`); see [rendering](rendering.md). The backend has no `begin_pass` / `end_pass` calls: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
+**Frame lifecycle.** A frame is a `begin_frame` → `close_frame` → `submit_frame` sequence. The split lets all command recording happen on one thread (where the renderer runs `prepare`) while the GPU submit + present run on another (where it runs `present`); see [rendering](rendering.md). The backend has no `begin_pass` / `end_pass` calls: producers record their own `vkCmdBeginRendering` / `vkCmdEndRendering` inside cached secondary command buffers via `IGpuCommandBuffer`.
 
 * `begin_frame`: Waits on the GPU fence for the slot being reused, then starts primary command buffer recording. Runs on the recording thread.
 * `acquire_swapchain_texture(surface_id)`: Returns the per-surface composite as a stable `IRenderTarget::Ptr`. Producers render into the composite as if it were any `IGpuTexture`; the backend emits the final composite-to-swap blit at present time (in `submit_frame`). Wrapper is stable across frames; the swapchain image rotation is hidden inside the backend.
-* `create_command_buffer`: Allocates an `IGpuCommandBuffer` (Vulkan secondary) that producers record once (draws / dispatches / texture blits / `record_begin_rendering`+`record_end_rendering`) and the executor replays each frame. One overload — no target argument needed for dynamic-rendering secondaries.
+* `create_command_buffer`: Allocates an `IGpuCommandBuffer` (Vulkan secondary) that producers record once (draws / dispatches / texture blits / `record_begin_rendering`+`record_end_rendering`) and the executor replays each frame. One overload; no target argument is needed for dynamic-rendering secondaries.
 * `execute`: Replays a recorded command buffer (`vkCmdExecuteCommands` on the primary).
 * `blit_to_texture`: Blits between two textures (used internally by `IGpuCommandBuffer::record_blit_to_texture` for cacheable texture-to-texture copies).
-* `barrier`: Inserts a pipeline barrier between passes — call when a pass reads output the previous one wrote.
+* `barrier`: Inserts a pipeline barrier between passes. Call when a pass reads output the previous one wrote.
 * `close_frame`: Finalizes the frame on the recording thread. Snapshots the present target (composite image + swapchain) so the swap-image acquire and present can run on the submit thread without touching shared surface state. The primary is left open for `submit_frame` to finish.
 * `submit_frame`: Acquires the swap image, records and runs the composite-to-swap blit, ends the primary, submits to the GPU queue, and presents. Swapchain acquire and present both happen here so the swapchain is only ever used from one thread.
 
@@ -189,13 +190,13 @@ The backend always dispatches indirectly: `vkCmdDrawIndexedIndirectCount` when `
 
 The `root_constants` field carries up to `kMaxRootConstantsSize` (128) bytes that get pushed directly to the shader via push constants (Vulkan) or `setBytes` (Metal). 128 is Vulkan's spec-guaranteed minimum, so any conformant driver works.
 
-A raster draw uses 4 of those bytes: the element index of its `DrawDataHeader`. The rest of the space is what lets more elaborate dispatches push their whole per-dispatch state inline — the RT path's `RtRoot` (64 bytes of indices, counts and inline params) is pushed directly rather than living in a buffer.
+A raster draw uses 4 of those bytes: the element index of its `DrawDataHeader`. The rest of the space is what lets more elaborate dispatches push their whole per-dispatch state inline: the RT path's `RtRoot` (64 bytes of indices, counts and inline params) is pushed directly rather than living in a buffer.
 
 ## Data Flow: How Pixels Get Drawn
 
 ### The GPU resource model
 
-Everything the GPU reads lives in a **shared arena**: one large buffer bound to a fixed `set = 1` slot, suballocated into regions. A producer (a batch, a material, a view, a mesh primitive, a font) holds an `ArenaRegion` — a move-only RAII handle over a byte range — and publishes an **element index** derived from its region offset. Shaders read `velk_<thing>.data[base + i]`.
+Everything the GPU reads lives in a **shared arena**: one large buffer bound to a fixed `set = 1` slot, suballocated into regions. A producer (a batch, a material, a view, a mesh primitive, a font) holds an `ArenaRegion` (a move-only RAII handle over a byte range) and publishes an **element index** derived from its region offset. Shaders read `velk_<thing>.data[base + i]`.
 
 ```
 set = 1 slot   Arena                       Held by
@@ -221,13 +222,24 @@ Three properties make this work:
 
 Arenas come from `IGpuResourceManager::create_arena` / `shared_arena(slot, element_size)`; the backing allocation is an ordinary `IGpuBuffer` from `create_gpu_buffer`, so a Metal or WebGPU backend supplies its own with no arena changes. Growth doubles and recopies, and re-binds the one frame-invariant descriptor for that slot.
 
-**Why indices and not device addresses.** Velk bans raw pointers on the CPU side already: objects live in paged hives and are reached by handle, stable across churn. A GPU pointer graph was the one place the engine violated its own rule. Indices restore the symmetry, cost nothing measurable (index-into-bound-buffer and pointer-chase both compile to base + offset), and are the difference between running and not running on WebGPU, where raw addresses cannot be bounds-checked and are structurally excluded. The backend still enables `bufferDeviceAddress` and `IGpuBuffer::gpu_address()` still exists, but no shader consumes one.
+#### Why indices rather than device addresses
+
+A shader could reach the same bytes through a 64-bit buffer device address. Velk indexes instead, for four reasons:
+
+- **It matches how velk reaches everything else.** Objects live in paged hives and are reached by handle, never by raw pointer, so that allocations can move and churn without invalidating references. An index into a bound buffer is that same discipline on the GPU side; an address graph would be the one place the engine contradicts its own model.
+- **It costs nothing.** `velk_globals.data[base]` and a pointer dereference both compile to base + offset off a register. The choice is about which base the hardware gets handed, not about how much work it does.
+- **It ports.** WebGPU has no buffer device addresses and no proposal for one. Raw addresses cannot be bounds-checked inside the web sandbox, so they are structurally excluded rather than merely missing. Indices are core there, and on Metal, and on Vulkan.
+- **It survives relocation.** An arena that grows replaces its backing allocation. Every address into the old one would be stale; an element base is unchanged, because it was never tied to where the buffer happens to live.
+
+The cost is that the shader can only reach data the CPU has bound to a slot, so anything a shader must reach has to live in one of the sixteen arenas. In exchange, every GPU reference is a small integer that means something in isolation, and out-of-range reads land inside a known buffer instead of anywhere in memory.
+
+Nothing in the engine can produce an address: `bufferDeviceAddress` is not enabled, buffers carry no `SHADER_DEVICE_ADDRESS` usage, and `IGpuBuffer` has no `gpu_address()`. A buffer the GPU consumes wholesale (indirect args, an index buffer) is bound by handle and has no shader-visible reference at all, so `get_gpu_ref` answers `None` for it.
 
 ### Per-frame staging buffer
 
-A bump-allocated staging buffer per in-flight frame slot (persistently mapped, 1 MB initial, growing on demand) survives for one job: the indirect-draw commands of batches that have no persistent storage buffer of their own, such as the environment batch. Everything else a draw needs is in an arena region.
+One bump-allocated staging buffer per in-flight frame slot (persistently mapped, 1 MB initial, growing on demand) serves a single purpose: the indirect-draw commands of batches that have no persistent storage buffer of their own, such as the environment batch. Everything else a draw needs is in an arena region.
 
-Each batch that does have storage owns a 48-byte blob, `[args(32)][count(16)]` — the `VkDrawIndexedIndirectCommand` record plus the draw count. That is exactly what still has to be a buffer the GPU reads in its own right, because `vkCmdDrawIndexedIndirectCount` takes buffer handles, not indices.
+Each batch that does have storage owns a 48-byte blob, `[args(32)][count(16)]`: the `VkDrawIndexedIndirectCommand` record plus the draw count. That is exactly what still has to be a buffer the GPU reads in its own right, because `vkCmdDrawIndexedIndirectCount` takes buffer handles, not indices.
 
 ### The DrawDataHeader
 
@@ -269,7 +281,7 @@ static_assert(sizeof(DrawDataHeader) == 32, ...);
 VELK_DRAW_DATA(root)
 ```
 
-`VELK_DRAW_DATA(Name)` expands to `layout(push_constant, std430) uniform VelkPC { uint draw_base; } Name;` — so `root` is the push-constant block itself, and `velk_draw(root)` is this draw's record. Shader bodies name neither: every field is reached through an accessor that takes the handle, so the header's layout can change without touching a shader body.
+`VELK_DRAW_DATA(Name)` expands to `layout(push_constant, std430) uniform VelkPC { uint draw_base; } Name;`, so `root` is the push-constant block itself and `velk_draw(root)` is this draw's record. Shader bodies name neither: every field is reached through an accessor that takes the handle, so the header's layout can change without touching a shader body.
 
 | Accessor | Reads |
 |--|--|
@@ -286,18 +298,18 @@ Eval-based fragment shaders reach the material record through `VELK_LOAD_MATERIA
 
 ### Instance data
 
-`instances_base` in the header is an element index into the shared instance arena (set = 1 slot 3), a Renderer-owned persistent storage buffer where every batch suballocates a stable region for its instances. The shader reads its draw's instance via `velk_instance(root)`. Instances are `ElementInstance` structs — the universal per-instance record: every visual (rect, rounded rect, text glyph, texture, image, env, cube, sphere, future glTF meshes) packs this one layout, so there's only one GLSL instance type to learn and one vertex shader pattern that handles everything.
+`instances_base` in the header is an element index into the shared instance arena (set = 1 slot 3), a Renderer-owned persistent storage buffer where every batch suballocates a stable region for its instances. The shader reads its draw's instance via `velk_instance(root)`. Instances are `ElementInstance` structs, the universal per-instance record: every visual (rect, rounded rect, text glyph, texture, image, env, cube, sphere, future glTF meshes) packs this one layout, so there's only one GLSL instance type to learn and one vertex shader pattern that handles everything.
 
 ```cpp
 // C++ (velk-scene/instance_types.h)
 
 VELK_GPU_STRUCT ElementInstance
 {
-    mat4     world_matrix;  ///< 64 B — filled by batch_builder per instance.
-    vec4     offset;        ///< 16 B — xyz = local offset (glyph pos for text, 0 otherwise).
-    vec4     size;          ///< 16 B — xyz = extents (size.z = 0 for 2D visuals).
-    color    col;           ///< 16 B — visual tint.
-    uint32_t params[4];     ///< 16 B — params[0] = shape_param (glyph index, ...); others reserved.
+    mat4     world_matrix;  ///< 64 B, filled by batch_builder per instance.
+    vec4     offset;        ///< 16 B, xyz = local offset (glyph pos for text, 0 otherwise).
+    vec4     size;          ///< 16 B, xyz = extents (size.z = 0 for 2D visuals).
+    color    col;           ///< 16 B, visual tint.
+    uint32_t params[4];     ///< 16 B, params[0] = shape_param (glyph index, ...); others reserved.
 };
 static_assert(sizeof(ElementInstance) == 128, ...);
 ```
@@ -327,7 +339,7 @@ inst.col    = state->color;
 entry.set_instance(inst);
 ```
 
-2D visuals leave `size.z = 0` and `offset = 0`; text glyphs set per-glyph `offset` and `params[0] = glyph_index`; 3D primitives fill all three xyz extents in `size`. The `world_matrix` slot is left zero-initialised by the visual — the batch builder writes the element's transform into it when concatenating instances into the batch's arena region.
+2D visuals leave `size.z = 0` and `offset = 0`; text glyphs set per-glyph `offset` and `params[0] = glyph_index`; 3D primitives fill all three xyz extents in `size`. The `world_matrix` slot is left zero-initialised by the visual; the batch builder writes the element's transform into it when concatenating instances into the batch's arena region.
 
 Material parameters use the same authoring pattern: a C++ struct (`VELK_GPU_STRUCT`) mirrors the GLSL layout and is written via `write_draw_data()`. See [Materials](./materials.md) for the full authoring story.
 
@@ -340,7 +352,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 | `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `velk_texture(id, uv)`, BVH / RT / mesh types and their accessors |
 | `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
-Modules can register additional includes via `IRenderContext::register_shader_include()` — the text plugin registers `velk_text.glsl` for glyph coverage sampling.
+Modules can register additional includes via `IRenderContext::register_shader_include()`; the text plugin registers `velk_text.glsl` for glyph coverage sampling.
 
 With these includes, a complete UI vertex shader needs one declaration token and `main()`:
 
@@ -362,7 +374,7 @@ void main()
 }
 ```
 
-This same shell is what the shared `element_vertex_src` runs for every visual — 2D or 3D. The only difference is what's in the bound VBO (the unit quad for 2D, a cube/sphere/glTF mesh for 3D) and whether `inst.size.z` is zero.
+This same shell is what the shared `element_vertex_src` runs for every visual, 2D or 3D. The only difference is what's in the bound VBO (the unit quad for 2D, a cube/sphere/glTF mesh for 3D) and whether `inst.size.z` is zero.
 
 ## Geometry Without Geometry Objects
 
@@ -390,7 +402,7 @@ The draw call is `vertex_count = 4, instance_count = N` (non-indexed, since the 
 
 `IMeshBuffer` holds VBO bytes followed by IBO bytes in one region of the shared mesh-word arena (`set = 1` slot 14). Multiple primitives in the same mesh commonly share one buffer (each with its own vertex/index offsets and counts) so a glTF asset imports without re-packing. The arena stores raw 32-bit words; both the raster vertex shader and the RT triangle walk read the same words, the former unpacking a `VelkVertex3D` from 12 of them.
 
-Every `DrawEntry` produced by a 3D visual carries one `IMeshPrimitive::Ptr`. A multi-primitive visual emits one `DrawEntry` per primitive — each with its own material — and the batch builder groups them by pipeline + primitive + material into draw calls. This is the same submit path as 2D; the primitive is just what locates the vertex/index words:
+Every `DrawEntry` produced by a 3D visual carries one `IMeshPrimitive::Ptr`. A multi-primitive visual emits one `DrawEntry` per primitive, each with its own material, and the batch builder groups them by pipeline + primitive + material into draw calls. This is the same submit path as 2D; the primitive is just what locates the vertex/index words:
 
 ```cpp
 IMesh*          mesh = ...;              // authored container
@@ -405,7 +417,7 @@ uint32_t count    = p->get_index_count();
 
 The index buffer bound for the indexed draw is the arena's own backing buffer at the mesh's offset; `IGpuArena::buffer()` is re-asked per draw because growth replaces it.
 
-The shader pulls vertices by index, exactly as in 2D — no vertex input state on the pipeline. The shared `element_vertex_src` is the one vertex shader every visual runs:
+The shader pulls vertices by index, exactly as in 2D, with no vertex input state on the pipeline. The shared `element_vertex_src` is the one vertex shader every visual runs:
 
 ```glsl
 VelkVertex3D    v    = velk_vertex3d(root);
@@ -451,7 +463,7 @@ Each material defines a C++ `VELK_GPU_STRUCT` and a matching GLSL value struct, 
 - **Raster.** A pipeline compiles for exactly one material, so `VELK_MATERIAL(T)` binds slot 4 as a typed `T[]` and the load is a direct indexed read.
 - **RT / deferred compute.** One shader serves every material type in the scene, so a typed array is impossible. The composer instead parses the snippet's struct declaration, computes its std430 offsets, validates them against SPIR-V reflection, and generates a `T velk_unpack_T(uint b)` that rebuilds the struct from the arena's raw words. It splices that in place of the snippet's `VELK_MATERIAL(T)` line and defines the load to call it.
 
-The snippet source is identical either way. Unsupported constructs (arrays, `mat3`, preprocessor directives inside the record) fail generation loudly rather than silently dropping a field. The CPU struct size and the GLSL std430 stride must agree — see the [alignment section](#std430-alignment-and-the-drawdataheader) below, and [Materials](materials.md) for the full authoring story.
+The snippet source is identical either way. Unsupported constructs (arrays, `mat3`, preprocessor directives inside the record) fail generation loudly rather than silently dropping a field. The CPU struct size and the GLSL std430 stride must agree; see the [alignment section](#std430-alignment-and-the-drawdataheader) below, and [Materials](materials.md) for the full authoring story.
 
 No uniform reflection, name-based binding, or type introspection. Just an index and two structs that agree on layout.
 
@@ -465,7 +477,7 @@ layout(set = 0, binding = 0) uniform sampler2D velk_textures[];
 float alpha = texture(velk_textures[nonuniformEXT(texture_id)], uv).r;
 ```
 
-The backend maintains a single global descriptor set with a variable-length sampler array (1024 slots). When a texture is created, it takes the next free slot — recycled from a free list of destroyed-texture slots, or the next never-used index. The slot index IS the `TextureId`. A destroyed texture's slot is returned to the free list once the GPU is past the frames that referenced it, so long-running sessions that churn textures don't exhaust the array. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
+The backend maintains a single global descriptor set with a variable-length sampler array (1024 slots). When a texture is created, it takes the next free slot, recycled from a free list of destroyed-texture slots or taken as the next never-used index. The slot index IS the `TextureId`. A destroyed texture's slot is returned to the free list once the GPU is past the frames that referenced it, so long-running sessions that churn textures don't exhaust the array. No descriptor set updates from the caller's perspective, no binding calls, no slot management.
 
 On the Vulkan side, this uses descriptor indexing (core since 1.2) with `UPDATE_AFTER_BIND` and `PARTIALLY_BOUND` flags. The descriptor set is bound once per frame and never changes.
 
@@ -485,11 +497,11 @@ struct ElementInstance {  // value type, 128 bytes
 };
 ```
 
-There is no `buffer_reference` anywhere in the engine's shaders, and consequently no `GL_EXT_buffer_reference` or `GL_EXT_shader_explicit_arithmetic_types_int64` extension requirement in any shader source. The last `uint64_t` in any GLSL declaration was a padding field left behind by a removed address; it is a `uvec2` now.
+No shader declares a `buffer_reference`, so no shader source requires `GL_EXT_buffer_reference` or `GL_EXT_shader_explicit_arithmetic_types_int64`, and no GLSL declaration anywhere contains a `uint64_t`.
 
 Two consequences worth knowing when writing shaders:
 
-- **A record's array stride must equal the C++ record size.** With addresses, a size mismatch only misread the one field; with a typed array it misreads every element after the first. `VELK_GPU_STRUCT` (`alignas(16)`) handles the C++ side, but watch std430's own rules: it derives struct alignment from the largest member, *not* by rounding up to 16 the way std140 does. When a record's largest member is smaller than a `vec4`, std430 will compute a smaller stride than `alignas(16)` gives the C++ struct, and the difference has to be made up with explicit padding fields on the GLSL side.
+- **A record's array stride must equal the C++ record size.** A mismatch misreads every element after the first, so it is worth getting right up front. `VELK_GPU_STRUCT` (`alignas(16)`) handles the C++ side, but watch std430's own rules: it derives struct alignment from the largest member, *not* by rounding up to 16 the way std140 does. When a record's largest member is smaller than a `vec4`, std430 computes a smaller stride than `alignas(16)` gives the C++ struct, and the difference has to be made up with explicit padding fields on the GLSL side.
 - **Region alignment is the arena's job.** Each producer's region is aligned to its own record size so `offset / record_size` lands on an integer element index.
 
 The RT root (`RtRoot`) is not a buffer at all: it is 64 bytes of indices, counts and inline values pushed straight into the push-constant block.
@@ -506,7 +518,7 @@ When writing custom materials or draw data, the CPU-side struct layout must matc
 | `vec4` | 16 | 16 |
 | `uvec2` | 8 | 8 |
 
-The `DrawDataHeader` packs exactly to 32 bytes, 16-byte aligned (`VELK_GPU_STRUCT` rounds the size up to a multiple of 16). Eight `uint`s, no padding: the two alignment pads it used to carry existed only to keep its 8-byte vertex-stream addresses aligned, and went with them.
+The `DrawDataHeader` packs exactly to 32 bytes, 16-byte aligned (`VELK_GPU_STRUCT` rounds the size up to a multiple of 16). Eight `uint`s and no padding: with every field 4 bytes and the count a multiple of four, nothing needs aligning.
 
 ```cpp
 VELK_GPU_STRUCT DrawDataHeader
@@ -544,7 +556,7 @@ At the start of each frame, the backend waits on the current set's fence, which 
 
 ### Dynamic rendering
 
-Vulkan 1.3's `VK_KHR_dynamic_rendering` is core; pipelines are compiled with `VkPipelineRenderingCreateInfo` against attachment formats only — there are no `VkRenderPass` or `VkFramebuffer` objects in the backend. Producers call `record_begin_rendering(colors, depth)` on a cached secondary, which translates to `vkCmdBeginRendering` with the attachments resolved from the producer-supplied `IGpuTexture*`s. Layout transitions and load/store ops are baked into the secondary; multi-view stacking onto the same surface composite (e.g. main camera + perf overlay) is handled by overriding the first view's `LoadOp::Clear` to `Load` for subsequent views inside the backend.
+Vulkan 1.3's `VK_KHR_dynamic_rendering` is core; pipelines are compiled with `VkPipelineRenderingCreateInfo` against attachment formats only, and there are no `VkRenderPass` or `VkFramebuffer` objects in the backend. Producers call `record_begin_rendering(colors, depth)` on a cached secondary, which translates to `vkCmdBeginRendering` with the attachments resolved from the producer-supplied `IGpuTexture*`s. Layout transitions and load/store ops are baked into the secondary; multi-view stacking onto the same surface composite (e.g. main camera + perf overlay) is handled by overriding the first view's `LoadOp::Clear` to `Load` for subsequent views inside the backend.
 
 ## What This Enables
 
@@ -556,13 +568,13 @@ Adding a new material means supplying an eval body and a GPU data struct. The sh
 
 Compute shaders, mesh shaders, ray tracing: they all operate on the same GPU buffers through the same bound slots. The interface doesn't need to know about these dispatch models because it doesn't own the data layout. The shader does.
 
-Because nothing in the shader graph is a raw address, the model also maps onto APIs that forbid them: WebGPU has no buffer device addresses and no proposal for them, but a bound storage buffer plus an integer index is core there.
+Because nothing in the shader graph is a raw address, the model also maps onto APIs that forbid them; see [Why indices rather than device addresses](#why-indices-rather-than-device-addresses).
 
 ## Vulkan Implementation Details
 
 The Vulkan backend (`velk::vk`) uses:
 
-- **Vulkan 1.3** with `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`, `scalarBlockLayout`, `dynamicRendering`, `synchronization2`, `timelineSemaphore`. `bufferDeviceAddress` is still enabled, but no shader consumes an address any more.
+- **Vulkan 1.2** as the floor, with `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`, `scalarBlockLayout`, `drawIndirectCount`, `runtimeDescriptorArray`, `timelineSemaphore` and the update-after-bind binding flags. Dynamic rendering is the one thing beyond 1.2: a 1.3 device supplies it as core, a 1.2 device through `VK_KHR_dynamic_rendering`, and the backend resolves whichever pair of entry points loaded. Notably **not** required: `bufferDeviceAddress`, `descriptorBindingUniformBufferUpdateAfterBind`, `shaderInt64`, `synchronization2`. Every requested feature is checked against `vkGetPhysicalDeviceFeatures2` at startup and the missing one named, rather than surfacing as a bare `vkCreateDevice` failure.
 - **`VK_EXT_debug_utils`** always enabled (free when no debugger attached) so RenderDoc / Nsight captures group events under producer-supplied labels
 - **VMA** (Vulkan Memory Allocator) for all allocations, with `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT`
 - **volk** for function loading (no link-time Vulkan dependency)

@@ -135,10 +135,37 @@ public:
     /// @}
 
 public:
+    /// @name Dynamic-rendering entry points
+    /// Resolved once after device creation. Dynamic rendering is Vulkan 1.3
+    /// core but is also reachable on a 1.2 device through
+    /// `VK_KHR_dynamic_rendering`, and only one of the two symbols is loaded
+    /// depending on which path the device took, so recorders call through
+    /// these rather than naming either directly.
+    /// @{
+    PFN_vkCmdBeginRendering cmd_begin_rendering() const { return cmd_begin_rendering_; }
+    PFN_vkCmdEndRendering   cmd_end_rendering() const { return cmd_end_rendering_; }
+    /// @}
 
 private:
+    /// Picks whichever of the core / KHR dynamic-rendering symbols volk
+    /// managed to load. Call after volkLoadDevice.
+    bool resolve_dynamic_rendering();
+
+    /// True if the selected physical device exposes @p name.
+    bool has_device_extension(const char* name) const;
+
+    /// Verifies the physical device supports everything create_device is about
+    /// to ask for, naming whatever is missing. Without this a missing feature
+    /// surfaces only as a bare vkCreateDevice failure.
+    bool check_required_features(
+        const VkPhysicalDeviceVulkan12Features& wanted12,
+        const VkPhysicalDeviceDynamicRenderingFeatures& wanted_dynamic_rendering);
+
     // Vulkan core
     VkInstance instance_ = VK_NULL_HANDLE;
+    uint32_t instance_api_version_ = 0;
+    PFN_vkCmdBeginRendering cmd_begin_rendering_ = nullptr;
+    PFN_vkCmdEndRendering   cmd_end_rendering_ = nullptr;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue graphics_queue_ = VK_NULL_HANDLE;

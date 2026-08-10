@@ -308,7 +308,7 @@ void VkCommandBuffer::record_begin_rendering(
     rendering_info.pColorAttachments = (n_colors > 0) ? color_infos : nullptr;
     rendering_info.pDepthAttachment = (depth && depth->texture) ? &depth_info : nullptr;
 
-    vkCmdBeginRendering(cmd_, &rendering_info);
+    backend_->cmd_begin_rendering()(cmd_, &rendering_info);
 
     // Record-time bookkeeping for the matching record_end_rendering.
     // Re-bind the bindless graphics descriptor here — secondary inherit
@@ -341,7 +341,7 @@ void VkCommandBuffer::record_end_rendering()
     if (cmd_ == VK_NULL_HANDLE || !backend_) return;
     RENDER_LOG("vk.cmdbuf.record_end_rendering this=%p cb=%p", (void*)this, (void*)cmd_);
 
-    vkCmdEndRendering(cmd_);
+    backend_->cmd_end_rendering()(cmd_);
 
     // Transition color attachments to SHADER_READ_ONLY so subsequent
     // samples (post-process effects, deferred-lighting bindless reads)

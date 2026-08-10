@@ -44,17 +44,16 @@ public:
 
     /**
      * @brief Returns a persistent IBuffer holding this program's current
-     *        draw-data bytes. Stable GPU address across frames (as long
-     *        as the data size doesn't change), so consumers caching the
-     *        address in shape records remain valid across frames.
+     *        draw-data bytes. Its arena region is stable across frames (as
+     *        long as the data size doesn't change), so consumers caching the
+     *        element base in shape records remain valid across frames.
      *
      * Materials implementing this method own the buffer internally; the
      * renderer picks it up through the standard IBuffer upload path
-     * (is_dirty / clear_dirty / set_gpu_address) and holds a strong ref
-     * for the duration of any frame that captured its address, so the
-     * material can reset or replace the buffer at any time without
-     * synchronising with the renderer — the IGpuResource observer
-     * mechanism handles deferred GPU-handle destruction.
+     * (is_dirty / clear_dirty) and holds a strong ref for the duration of
+     * any frame that read from it, so the material can reset or replace the
+     * buffer at any time without synchronising with the renderer; the
+     * IGpuResource observer mechanism handles deferred GPU-handle destruction.
      *
      * Default returns nullptr for programs that have no persistent
      * buffer; such programs fall back to per-frame serialisation via

@@ -113,43 +113,31 @@ public:
 };
 
 /**
- * @brief Where a shader finds a buffer's contents, in whichever model that
- *        buffer uses.
+ * @brief Where a shader finds a buffer's contents.
  *
  * Replaces a bare `uint64_t` address, which said nothing about what the number
  * meant and so allowed an element base to travel under an address-shaped name.
- * The two models are alternatives, not coexisting fields, hence the union: when
- * a ref holds an address there is no `slot` to misread.
+ * No shader dereferences a GPU pointer any more, so the only way a shader
+ * reaches a buffer is by indexing a bound `set = 1` arena; `Kind` is kept as a
+ * named seam because a second backend may introduce another way.
  *
  * Construct only through the factories, so `kind` can never disagree with the
- * payload. A default-constructed ref is `None`, which reads as "no GPU storage
- * yet" rather than as address 0.
+ * payload. A default-constructed ref is `None`, meaning "no GPU storage yet".
+ * Note that a buffer bound wholesale (indirect args, an index buffer) has no
+ * shader-visible handle at all and so answers `None`.
  */
 struct GpuRef
 {
     enum class Kind : uint32_t
     {
-        None,     ///< No storage yet, or the buffer has none.
-        Address,  ///< buffer_device_address; the shader dereferences it.
-        Index,    ///< Region of a bound set = 1 arena; the shader indexes it.
+        None,   ///< No storage yet, or nothing a shader can index.
+        Index,  ///< Region of a bound set = 1 arena; the shader indexes it.
     };
 
     Kind kind = Kind::None;
-    union
-    {
-        struct { uint32_t base; uint32_t slot; } index;
-        uint64_t address;
-    };
+    struct { uint32_t base; uint32_t slot; } index;
 
-    constexpr GpuRef() : kind(Kind::None), address(0) {}
-
-    static GpuRef from_address(uint64_t addr)
-    {
-        GpuRef r;
-        r.kind = Kind::Address;
-        r.address = addr;
-        return r;
-    }
+    constexpr GpuRef() : kind(Kind::None), index{0, 0} {}
 
     static GpuRef from_index(uint32_t slot, uint32_t base)
     {
@@ -162,27 +150,13 @@ struct GpuRef
 
     bool valid() const { return kind != Kind::None; }
 
-    /// Device address. 0 when there is no storage yet, which callers already
-    /// treat as "not ready"; null is never a valid address. Reading an
-    /// index-backed ref this way is a producer bug and is reported.
-    uint64_t get_address() const
-    {
-        if (kind == Kind::Index) {
-            VELK_LOG(E, "GpuRef: read as address, but holds an arena index (slot %u base %u)",
-                     index.slot, index.base);
-            return 0;
-        }
-        return kind == Kind::Address ? address : 0;
-    }
-
-    /// Element base within its arena. Unlike an address, base 0 is a valid
-    /// value and cannot double as a sentinel, so reading a ref that holds no
-    /// index is reported rather than defaulted.
+    /// Element base within its arena. Base 0 is a valid value and cannot
+    /// double as a sentinel, so reading a ref that holds no index is reported
+    /// rather than defaulted.
     uint32_t get_base() const
     {
         if (kind != Kind::Index) {
-            VELK_LOG(E, "GpuRef: read as arena index, but holds %s",
-                     kind == Kind::Address ? "an address" : "nothing");
+            VELK_LOG(E, "GpuRef: read as arena index, but holds nothing");
             return 0;
         }
         return index.base;
@@ -205,8 +179,7 @@ struct GpuRef
  * @brief Implemented by buffers whose storage is a region of an IGpuArena,
  *        so consumers can ask where the shader should index.
  *
- * `get_gpu_ref` looks for this before falling back to IGpuBuffer's address,
- * which is what lets a consumer be handed either model behind one accessor.
+ * This is what `get_gpu_ref` looks for, and the only source of a valid ref.
  *
  * Chain: IInterface -> IArenaBuffer
  */
@@ -220,13 +193,12 @@ public:
 };
 
 /**
- * @brief Convenience: returns @p ptr's GPU reference, or an invalid ref when
- *        it has no GPU storage.
+ * @brief Convenience: returns where a shader indexes @p ptr's contents, or an
+ *        invalid ref when there is nowhere yet.
  *
- * Arena-backed buffers answer with a Kind::Index ref; buffers with their own
- * GPU allocation answer with Kind::Address. Consumers that can handle either
- * branch on `kind`; consumers that require one model use the corresponding
- * accessor and get a reported error if handed the other.
+ * Doubles as the residency test for arena-backed data: `valid()` is false
+ * until the bytes have been suballocated. A buffer that is not arena-backed
+ * answers `None`, since a shader has no way to reach it by hand.
  */
 template <typename T>
 GpuRef get_gpu_ref(const T& ptr)
@@ -234,22 +206,7 @@ GpuRef get_gpu_ref(const T& ptr)
     if (auto* ab = interface_cast<IArenaBuffer>(ptr)) {
         return ab->gpu_ref();
     }
-    auto* gb = interface_cast<IGpuBuffer>(ptr);
-    if (!gb) return {};
-    const uint64_t addr = gb->gpu_address();
-    return addr ? GpuRef::from_address(addr) : GpuRef{};
-}
-
-/**
- * @brief Convenience for the consumers that specifically want a device
- *        address to stamp into a GPU struct. Returns 0 when @p ptr has no
- *        storage yet; reports and returns 0 if it is arena-backed, since
- *        such a buffer has no address to give.
- */
-template <typename T>
-uint64_t get_gpu_address(const T& ptr)
-{
-    return get_gpu_ref(ptr).get_address();
+    return {};
 }
 
 } // namespace velk

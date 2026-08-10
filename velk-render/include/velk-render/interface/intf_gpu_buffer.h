@@ -27,7 +27,6 @@ class IGpuBuffer
 {
 public:
     virtual size_t   size_bytes() const = 0;
-    virtual uint64_t gpu_address() const = 0;
 
     /// Persistent CPU mapping for host-visible allocations; nullptr
     /// when device-local.

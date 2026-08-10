@@ -1,6 +1,6 @@
 # Rendering
 
-This document is the **internal reference** for `IRenderer` and the prepare/submit pipeline. For everyday use, the runtime sets up the renderer for you and you call `app.update()` / `app.present()` instead of touching the renderer directly — see [runtime.md](../runtime/runtime.md). Read this when you need to drive the renderer manually, when you want to understand what `app.prepare()` and `app.submit()` do internally, or when you're implementing a custom render path.
+This document is the **internal reference** for `IRenderer` and the prepare/submit pipeline. For everyday use, the runtime sets up the renderer for you and you call `app.update()` / `app.present()` instead of touching the renderer directly; see [runtime.md](../runtime/runtime.md). Read this when you need to drive the renderer manually, when you want to understand what `app.prepare()` and `app.submit()` do internally, or when you're implementing a custom render path.
 
 For the GPU data model and backend architecture, see [render-backend.md](render-backend.md). For what `velk::instance().update()` does (which runs before any rendering), see [update-cycle.md](../ui/update-cycle.md).
 
@@ -32,7 +32,7 @@ auto renderer = velk::ui::create_renderer(*render_ctx);
 renderer->add_view(camera_element, surface);
 ```
 
-When using the runtime, `app.add_view(window, camera)` does the equivalent — it pulls the surface from the window and forwards to `renderer->add_view`.
+When using the runtime, `app.add_view(window, camera)` does the equivalent: it pulls the surface from the window and forwards to `renderer->add_view`.
 
 **Surfaces** (`ISurface`) represent render targets. A surface maps to a backend swapchain with a `surface_id`. It has width and height properties but no knowledge of scenes or cameras. Surfaces are created via `IRenderContext::create_surface()`.
 
@@ -103,7 +103,7 @@ The convenience method `renderer->render()` calls `present(prepare({}))` for the
 
 Each frame slot owns its own GPU staging buffer (1 MB initial, growing on demand). Whatever `prepare()` writes there goes into the slot's own buffer, not a shared one, so a prepared frame's data is never overwritten by a subsequent `prepare()` call; it stays valid until `present()` submits the frame and recycles the slot.
 
-Very little still goes through it. Its one remaining job is the indirect-draw commands of batches that have no persistent storage buffer of their own (the environment batch). Everything else — draw headers, per-instance arrays, material records, view globals, lights, mesh geometry, glyph tables — lives in a **stable region of a shared `set = 1` arena** owned by its producer and rewritten only when its contents change. See [the GPU resource model](render-backend.md#the-gpu-resource-model).
+Very little still goes through it. Its one remaining job is the indirect-draw commands of batches that have no persistent storage buffer of their own (the environment batch). Everything else (draw headers, per-instance arrays, material records, view globals, lights, mesh geometry, glyph tables) lives in a **stable region of a shared `set = 1` arena** owned by its producer and rewritten only when its contents change. See [the GPU resource model](render-backend.md#the-gpu-resource-model).
 
 Because those regions are stable and their frees are deferred behind the frame-completion fence, an in-flight GPU read can never see its bytes reassigned, and a steady-state frame uploads almost nothing.
 
@@ -119,7 +119,7 @@ The renderer does not create threads. The application decides the threading stra
 - **Threaded**: prepare on the main thread, send the `Frame` handle to a render thread, present from there.
 - **Platform-driven**: e.g. on Android, prepare from the framework's update callback and present from `onDrawFrame` on the render thread.
 
-The runtime layer wraps these patterns — see [runtime.md](../runtime/runtime.md) for `app.prepare()` / `app.submit()` and how to split them across threads. The frame slot system below is what makes this safe regardless of the threading strategy.
+The runtime layer wraps these patterns; see [runtime.md](../runtime/runtime.md) for `app.prepare()` / `app.submit()` and how to split them across threads. The frame slot system below is what makes this safe regardless of the threading strategy.
 
 ## FrameDesc: selective rendering
 
@@ -196,7 +196,7 @@ A single `prepare()` call can target any combination of surfaces. The resulting 
    g. Run the upload sweep: allocate / refresh each producer's arena region (instances, draw headers, material records, view globals, lights) for those whose data changed
    h. Build the `DrawCall` array and emit the view's passes into the frame graph
 4. Compile + execute the frame graph (records the primary command buffer), then `backend->close_frame()`
-5. Return the `Frame` handle — the frame is now fully recorded
+5. Return the `Frame` handle; the frame is now fully recorded
 
 ## What present() does internally
 

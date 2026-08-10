@@ -181,11 +181,9 @@ public:
     ///       live in shared arenas, not here.
     /// @{
     /// @brief Composed storage buffer. Lifetime is owned by the batch;
-    ///        consumers borrow the raw pointer.
+    ///        consumers borrow the raw pointer. Null, or not yet resolvable
+    ///        through the resource manager, until the blob is resident.
     virtual IBuffer* storage_buffer() const = 0;
-
-    /// @brief GPU virtual address of the start of the storage blob.
-    virtual uint64_t storage_gpu_address() const = 0;
 
     /// @}
 };

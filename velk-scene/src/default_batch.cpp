@@ -54,9 +54,4 @@ void DefaultBatch::update_instance_at(uint32_t instance_index,
     instances_dirty_ = true;
 }
 
-uint64_t DefaultBatch::storage_gpu_address() const
-{
-    return get_gpu_address(storage_);
-}
-
 } // namespace velk::impl
