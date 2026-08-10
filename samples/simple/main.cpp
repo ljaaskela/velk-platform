@@ -192,6 +192,13 @@ int velk_simple::run_app(int argc, char* argv[])
     {
         auto ctx = app.render_context();
 
+        // This vertex shader and its fragment are a closed pair with their own
+        // single varying, so they declare it rather than using
+        // VELK_VARYINGS_OUT / VELK_VARYINGS_IN (which describe the eight-varying
+        // contract element_vertex_src writes). The name is deliberately not
+        // `v_local_uv`: that belongs to the shared set at location 1, and
+        // reusing it here at location 0 would invite copying this into a shader
+        // that pairs with the shared vertex.
         constexpr velk::string_view checker_vert = R"(
 #version 450
 #include "velk.glsl"
@@ -199,7 +206,7 @@ int velk_simple::run_app(int argc, char* argv[])
 
 VELK_DRAW_DATA(root)
 
-layout(location = 0) out vec2 v_local_uv;
+layout(location = 0) out vec2 v_quad_uv;
 
 void main()
 {
@@ -208,7 +215,7 @@ void main()
     ElementInstance inst = velk_instance(root);
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
     gl_Position = globals.view_projection * inst.world_matrix * local_pos;
-    v_local_uv = q;
+    v_quad_uv = q;
 }
 )";
 
@@ -240,13 +247,13 @@ VELK_MATERIAL(CheckerParams)
 
 VELK_DRAW_DATA(root)
 
-layout(location = 0) in vec2 v_local_uv;
-layout(location = 0) out vec4 frag_color;
+layout(location = 0) in vec2 v_quad_uv;
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
     CheckerParams m = velk_material(root);
-    vec2 cell = floor(v_local_uv * m.scale);
+    vec2 cell = floor(v_quad_uv * m.scale);
     float checker = mod(cell.x + cell.y, 2.0);
     frag_color = mix(m.colors.color_a, m.colors.color_b, checker);
     if (m.tint_enabled != 0u) {

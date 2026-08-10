@@ -73,6 +73,9 @@ Shader includes are registered via `IRenderContext::register_shader_include()`. 
 - `velk_vertex3d(root)` / `velk_uv1(root)`: fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
 - `VELK_INSTANCES(Type)` / `velk_instance(root)`: declare the set = 1 instance arena as `Type` and read this draw's instance by index.
 - `VELK_MATERIAL(Type)` / `velk_material(root)`: declare the set = 1 material arena as `Type` and read this draw's material record by index (for full custom fragment shaders / ShaderMaterial).
+- `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`: the eight varyings `element_vertex_src` writes and every composed fragment driver reads (`v_color`, `v_local_uv`, `v_size`, `v_world_pos`, `v_world_normal`, `v_shape_param`, `v_uv1`, `v_world_tangent`). Declare all of them even when the shader ignores some, so the stage interfaces match.
+- `VELK_FRAG_OUT(Name)`: single-target colour output at location 0. Takes the name so the identifier a shader assigns to is one it declared.
+- `VELK_GBUFFER_OUT`: the five deferred G-buffer attachments, in render-target-group order.
 - `velk_texture(id, uv)`: bindless texture sample helper.
 - `BvhNode`, `RtShape`, `MeshInstanceData`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
 
@@ -90,9 +93,20 @@ Other modules can register their own includes. The text plugin registers `velk_t
 
 The UI renderer registers default vertex and fragment shaders via `IRenderContext`. These are used when a material or `compile_pipeline` call omits a shader:
 
-**Default vertex shader** outputs:
-- `location 0`: `v_color` (vec4) from the instance color
-- `location 1`: `v_local_uv` (vec2) as the 0..1 quad coordinate
+**Default vertex shader** is `element_vertex_src`. It writes the full varying set declared by `VELK_VARYINGS_OUT`:
+
+| Location | Name | Contents |
+|--|--|--|
+| 0 | `v_color` | vec4, the instance colour |
+| 1 | `v_local_uv` | vec2, 0..1 across the shape |
+| 2 | `v_size` | vec2, flat, the instance extents |
+| 3 | `v_world_pos` | vec3, world-space position |
+| 4 | `v_world_normal` | vec3, world-space normal |
+| 5 | `v_shape_param` | uint, flat, `params[0]` (glyph index, ...) |
+| 6 | `v_uv1` | vec2, TEXCOORD_1, or `v_local_uv` when the primitive has none |
+| 7 | `v_world_tangent` | vec4, world-space tangent + handedness |
+
+A fragment shader declares the matching `VELK_VARYINGS_IN`, including the entries it ignores, so the stage interfaces line up.
 
 **Default fragment shader**: passes through `v_color` as a solid fill.
 
@@ -434,6 +448,8 @@ struct TintParams {
 VELK_MATERIAL(TintParams)  // declares velk_materials as TintParams (set = 1 slot 4)
 
 VELK_DRAW_DATA(root)       // the draw handle
+VELK_VARYINGS_IN           // the varyings element_vertex_src writes
+VELK_FRAG_OUT(frag_color)
 
 // Reads that an eval body can't make, but a full-fragment can:
 //   velk_global_data(root).cam_pos     // this view's frame globals
@@ -467,14 +483,13 @@ struct WaveParams {
 VELK_MATERIAL(WaveParams)  // declares velk_materials as WaveParams (set = 1 slot 4)
 
 VELK_DRAW_DATA(root)
-
-layout(location = 1) in vec2 v_uv;
-layout(location = 0) out vec4 frag_color;
+VELK_VARYINGS_IN
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
     WaveParams p = velk_material(root);  // this draw's record from the material arena
-    frag_color = p.tint * (0.5 + 0.5 * sin(v_uv.x * p.speed));
+    frag_color = p.tint * (0.5 + 0.5 * sin(v_local_uv.x * p.speed));
 }
 )";
 

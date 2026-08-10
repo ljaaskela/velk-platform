@@ -20,21 +20,14 @@ namespace velk {
 
 [[maybe_unused]] constexpr string_view default_fragment_src = R"(
 #version 450
+#include "velk.glsl"
 
-// The shared element vertex shader writes the full canonical varying
-// set (locations 0..6). Declare every input even when unused so the
-// SPIR-V interface matches and the validator doesn't warn about
-// dropped outputs.
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-layout(location = 6) in vec2 v_uv1;
-layout(location = 7) in vec4 v_world_tangent;
+// Declares every varying the shared element vertex shader writes, even
+// the ones this shader ignores, so the SPIR-V interface matches and the
+// validator doesn't warn about dropped outputs.
+VELK_VARYINGS_IN
 
-layout(location = 0) out vec4 frag_color;
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
@@ -51,23 +44,13 @@ void main()
 // Materials that want lighting (StandardMaterial) override this.
 [[maybe_unused]] constexpr string_view default_gbuffer_fragment_src = R"(
 #version 450
+#include "velk.glsl"
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-layout(location = 6) in vec2 v_uv1;
-layout(location = 7) in vec4 v_world_tangent;
+VELK_VARYINGS_IN
 
 // G-buffer attachment locations. Must match deferred_gbuffer.h's
 // GBufferAttachment enum; coupled to the deferred lighting compute.
-layout(location = 0) out vec4 g_albedo;
-layout(location = 1) out vec4 g_normal;
-layout(location = 2) out vec4 g_world_pos;
-layout(location = 3) out vec4 g_material;
-layout(location = 4) out vec4 g_emissive;
+VELK_GBUFFER_OUT
 
 // Forward decl; the gbuffer-pipeline composer appends either the
 // visual's discard snippet or an empty stub after this fragment's body.
@@ -101,16 +84,9 @@ void main()
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
 VELK_DRAW_DATA(root)
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-layout(location = 6) in vec2 v_uv1;
-layout(location = 7) in vec4 v_world_tangent;
+VELK_VARYINGS_IN
 
-layout(location = 0) out vec4 frag_color;
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
@@ -143,16 +119,9 @@ void main()
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
 VELK_DRAW_DATA(root)
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-layout(location = 6) in vec2 v_uv1;
-layout(location = 7) in vec4 v_world_tangent;
+VELK_VARYINGS_IN
 
-layout(location = 0) out vec4 frag_color;
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
@@ -184,20 +153,9 @@ void main()
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
 VELK_DRAW_DATA(root)
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-layout(location = 6) in vec2 v_uv1;
-layout(location = 7) in vec4 v_world_tangent;
+VELK_VARYINGS_IN
 
-layout(location = 0) out vec4 g_albedo;
-layout(location = 1) out vec4 g_normal;
-layout(location = 2) out vec4 g_world_pos;
-layout(location = 3) out vec4 g_material;
-layout(location = 4) out vec4 g_emissive;
+VELK_GBUFFER_OUT
 
 // Composer appends either the visual's discard snippet or an empty stub.
 void velk_visual_discard();

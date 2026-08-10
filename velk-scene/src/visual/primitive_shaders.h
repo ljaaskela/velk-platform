@@ -12,9 +12,14 @@ namespace velk::impl {
 inline constexpr uint64_t kPrimitive3DPipelineKey = make_hash64("VelkPrimitive3D");
 
 // Vertex shader: reads interleaved vec3 position + vec3 normal + vec2
-// uv from the mesh's VBO, offsets + scales by the element instance,
-// applies the element's world matrix, and emits the canonical set of
-// varyings the forward/deferred fragment drivers consume.
+// uv from the mesh's VBO, offsets + scales by the element instance, and
+// applies the element's world matrix.
+//
+// These two sources are a CLOSED PAIR with their own varying set
+// (locations 0..4), used only when a primitive has no material. They are
+// NOT the shared contract: `element_vertex_src` and the composed fragment
+// drivers exchange eight varyings via VELK_VARYINGS_OUT / VELK_VARYINGS_IN.
+// Do not pair either half here with a driver-composed shader.
 inline constexpr string_view primitive3d_vertex_src = R"(
 #version 450
 #include "velk.glsl"

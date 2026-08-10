@@ -44,15 +44,10 @@ namespace {
 // (ext::element_vertex_src) is the standard one used by every visual.
 constexpr velk::string_view front_facing_frag = R"(
 #version 450
+#include "velk.glsl"
 
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_local_uv;
-layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
-layout(location = 4) in vec3 v_world_normal;
-layout(location = 5) flat in uint v_shape_param;
-
-layout(location = 0) out vec4 frag_color;
+VELK_VARYINGS_IN
+VELK_FRAG_OUT(frag_color)
 
 void main()
 {
