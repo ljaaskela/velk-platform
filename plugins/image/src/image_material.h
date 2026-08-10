@@ -15,7 +15,7 @@ namespace velk::ui::impl {
  * body produces forward / deferred / RT-fill variants. The texture is
  * bound via the `texture` property on the state; the renderer
  * resolves the draw-call's `texture_key` to a bindless index and
- * exposes it as `root.texture_id` in the fragment driver.
+ * exposes it as `ctx.texture_id` to the eval body.
  */
 class ImageMaterial : public ::velk::ext::Material<ImageMaterial, IImageMaterial>
 {

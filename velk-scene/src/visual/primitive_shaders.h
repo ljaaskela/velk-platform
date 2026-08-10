@@ -20,7 +20,7 @@ inline constexpr string_view primitive3d_vertex_src = R"(
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;

@@ -20,9 +20,9 @@ namespace velk {
 /// Renderer-side description of how a view reaches the scene BVH for
 /// index-based shader reads. Carried through RenderView / FrameContext and
 /// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c shape_base
-/// select this frame's IGpuArena ring region; @c root and the counts are
-/// relative to it. Not uploaded directly; the GPU structs mirror these
-/// fields individually.
+/// locate the BVH's regions in the shared node / shape arenas; @c root and
+/// the counts are relative to them. Not uploaded directly; the GPU structs
+/// mirror these fields individually.
 struct BvhBinding
 {
     uint32_t root        = 0;
@@ -52,11 +52,11 @@ struct FrameGlobals
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
-    uint32_t bvh_root;                     ///< Index of the root BvhNode (relative to this frame's ring region); 0 if no BVH.
+    uint32_t bvh_root;                     ///< Index of the root BvhNode, relative to bvh_node_base; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
-    uint32_t bvh_node_base;                ///< Element base added to BVH node indices (IGpuArena ring region for this frame).
+    uint32_t bvh_node_base;                ///< Element base added to BVH node indices (this BVH's region of the node arena).
     uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
 };
@@ -94,7 +94,7 @@ static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
-// Plain POD, no scene deps — packed for std430 / buffer_reference reads.
+// Plain POD, no scene deps — packed for std430 indexed reads.
 
 /// GPU-side shape record. Mirrors the RtShape struct in the RT compute
 /// prelude and the deferred lighting compute. Geometry + material +

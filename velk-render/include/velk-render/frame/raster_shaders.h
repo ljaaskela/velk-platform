@@ -99,7 +99,7 @@ void main()
 //     alpha-discard threshold.
 
 [[maybe_unused]] constexpr string_view forward_fragment_driver_template = R"(
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -116,8 +116,8 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.material_base = root.material_base;
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
@@ -141,7 +141,7 @@ void main()
 // would be wrong when geometry sits between the glass and the sky). Used by
 // the deferred path's transparent pass for BLEND / transmissive materials.
 [[maybe_unused]] constexpr string_view transparent_fragment_driver_template = R"(
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -158,8 +158,8 @@ void main()
 {
     GlobalData globals = velk_global_data(root);
     EvalContext ctx;
-    ctx.material_base = root.material_base;
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
@@ -182,7 +182,7 @@ void main()
 )";
 
 [[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
@@ -208,8 +208,8 @@ void main()
     velk_visual_discard();
 
     EvalContext ctx;
-    ctx.material_base = root.material_base;
-    ctx.texture_id  = root.texture_id;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
     ctx.shape_param = v_shape_param;
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;

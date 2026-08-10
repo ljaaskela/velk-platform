@@ -10,7 +10,9 @@ A multi-material model (e.g. a car body with paint, glass, trim) is one `IMesh` 
 
 ## Buffers
 
-`IMeshBuffer` holds VBO bytes followed by IBO bytes in one allocation (VBO at offset 0, IBO at `get_ibo_offset()`). A primitive without indices reports `get_ibo_size() == 0`; the backend skips the index bind and dispatches a non-indexed draw.
+`IMeshBuffer` holds VBO bytes followed by IBO bytes in one region (VBO at offset 0, IBO at `get_ibo_offset()`). A primitive without indices reports `get_ibo_size() == 0`; the backend skips the index bind and dispatches a non-indexed draw.
+
+The region is a suballocation of the engine-wide mesh-word arena rather than a standalone allocation, so every mesh in the scene shares one GPU buffer and one bound descriptor. Shaders reach a mesh by word index, and the indexed draw binds the arena's backing buffer at the mesh's offset. `get_gpu_ref(buffer)` reports residency and yields the word base; it is `Kind::None` until the bytes are uploaded.
 
 Two sibling primitives in the same mesh may return the same `IMeshBuffer::Ptr` from `get_buffer()`. Each primitive's `get_vertex_offset()` / `get_vertex_count()` / `get_index_offset()` / `get_index_count()` describe its range into the shared buffer. Callers key batching by buffer pointer and offsets, and the backend issues the right offset arguments to `vkCmdBindIndexBuffer` / the vertex-pulling shader.
 

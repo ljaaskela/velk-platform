@@ -197,7 +197,7 @@ int velk_simple::run_app(int argc, char* argv[])
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) out vec2 v_local_uv;
 
@@ -238,7 +238,7 @@ struct CheckerParams {
 };
 VELK_MATERIAL(CheckerParams)
 
-VELK_DRAW_ROOT
+VELK_DRAW_DATA(root)
 
 layout(location = 0) in vec2 v_local_uv;
 layout(location = 0) out vec4 frag_color;

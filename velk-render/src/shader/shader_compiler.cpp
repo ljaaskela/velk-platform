@@ -129,8 +129,8 @@ struct GlobalData {
     uint bvh_node_count;
     uint bvh_shape_count;
     uint present_counter;
-    uint bvh_node_base;   // element base into the BVH node ring region this frame
-    uint bvh_shape_base;  // element base into the BVH shape ring region this frame
+    uint bvh_node_base;   // element base of this BVH's region in the node arena
+    uint bvh_shape_base;  // element base of this BVH's region in the shape arena
     mat4 prev_view_projection;
 };
 
@@ -193,25 +193,28 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
     return v;
 }
 
+// Every accessor below takes the draw handle declared by VELK_DRAW_DATA(Name)
+// and reaches its record through velk_draw() (defined at the bottom of this
+// file, next to the record type).
 #define velk_vertex3d(root) \
-    velk_unpack_vertex3d((root).vbo_base + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
+    velk_unpack_vertex3d(velk_draw(root).vbo_base + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
 
 // Vertex-shader helper: fetch the current vertex's UV1, a vec2 stream
 // parallel to the main VBO. When a primitive has no UV1, `uv1_base` points at
 // a context-owned single-vertex fallback (vec2(0,0)) and `uv1_enabled` is 0,
 // so this reads vertex 0. Branchless via index multiplication — no shader
 // variants.
-#define velk_uv1(root)                                                    \
-    vec2(velk_vertex_word((root).uv1_base,                                \
-                          (root).uv1_enabled * uint(gl_VertexIndex) * 2u), \
-         velk_vertex_word((root).uv1_base,                                \
-                          (root).uv1_enabled * uint(gl_VertexIndex) * 2u + 1u))
+#define velk_uv1(root)                                                             \
+    vec2(velk_vertex_word(velk_draw(root).uv1_base,                                \
+                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u), \
+         velk_vertex_word(velk_draw(root).uv1_base,                                \
+                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u + 1u))
 
-// Per-view FrameGlobals from the draw root pointer. `root.globals_base` is
-// an index into the set = 1 globals buffer; the macro hides the field so
-// callers stay decoupled from the header layout.
+// Per-view FrameGlobals for this draw. The header's `globals_base` is an index
+// into the set = 1 globals buffer; the macro hides the field so callers stay
+// decoupled from the header layout.
 //   GlobalData globals = velk_global_data(root);
-#define velk_global_data(root) (velk_globals.data[(root).globals_base])
+#define velk_global_data(root) (velk_globals.data[velk_draw(root).globals_base])
 
 // Per-shader typed view of the shared instance arena (set = 1 slot 3).
 // Declare once at file scope with the shader's instance struct:
@@ -226,7 +229,7 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 // Vertex-shader accessor: this draw's instance for the current
 // gl_InstanceIndex. Requires a matching VELK_INSTANCES(...) declaration.
 //   ElementInstance inst = velk_instance(root);
-#define velk_instance(root) (velk_instances.data[(root).instances_base + gl_InstanceIndex])
+#define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + gl_InstanceIndex])
 
 // Per-pipeline typed view of the shared material arena (set = 1 slot 4).
 // Declare once at file scope with this pipeline's material struct:
@@ -235,14 +238,16 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 // at `material_base`. Each graphics pipeline binds the same slot with its own
 // material struct (the arena is raw bytes; each material's region is aligned to
 // its record size so the element index lands on it). Raster only: the RT /
-// deferred compute path reaches heterogeneous materials by address instead.
+// deferred compute path serves many material types from one shader, so its
+// composer replaces this line with a generated velk_unpack_<T> that rebuilds
+// the struct from the arena's raw words.
 #define VELK_MATERIAL(MaterialType) \
     layout(set = 1, binding = 4, std430) readonly buffer VelkMaterials { MaterialType data[]; } velk_materials;
 
 // Fragment-shader accessor: this draw's material record. Requires a matching
 // VELK_MATERIAL(...) declaration.
 //   CheckerParams m = velk_material(root);
-#define velk_material(root) (velk_materials.data[(root).material_base])
+#define velk_material(root) (velk_materials.data[velk_draw(root).material_base])
 
 // Mesh intersector accessor: a mesh-kind shape's transforms, from the shared
 // mesh-instance arena (set = 1 slot 10). Unlike materials and instances the
@@ -259,9 +264,11 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 
 // Per-draw header: 32 bytes of indices and counts, one record per batch in
 // the set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.
-// Shaders never touch these fields directly; each is reached through an
-// accessor that hides the layout: velk_global_data(root), velk_instance(root),
-// velk_material(root), velk_vertex3d(root), velk_uv1(root).
+// Shader bodies reach these through accessors that hide the layout rather than
+// naming the fields: velk_global_data(root), velk_instance(root),
+// velk_material(root), velk_vertex3d(root), velk_uv1(root). The two fields with
+// no accessor of their own, texture_id and material_base, are read by the
+// composed raster drivers via velk_draw(root).
 struct VelkDrawData {
     uint globals_base;
     uint instances_base;
@@ -275,15 +282,24 @@ struct VelkDrawData {
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
 
-// Declares a raster shader's push constant: the element index of this draw's
-// record. Put it at file scope, once per shader:
-//   VELK_DRAW_ROOT
-// after which `root` names this draw's header. A raster pipeline is handed
-// nothing else; everything hangs off the accessors above.
-#define VELK_DRAW_ROOT \
-    layout(push_constant, std430) uniform VelkPC { uint draw_base; } velk_pc;
+// Declares a raster shader's push constant and names it. Put it at file scope,
+// once per shader (a shader may have only one push-constant block):
+//   VELK_DRAW_DATA(root)
+// after which `root` is what every accessor above takes. A raster pipeline is
+// handed nothing else; everything hangs off `root`.
+//
+// The accessors require only that their argument has a `draw_base` member, not
+// that it IS this block, so a future GPU-driven path can select a record per
+// draw (from gl_DrawID, say) by passing a local struct instead, leaving every
+// shader body unchanged.
+#define VELK_DRAW_DATA(Name) \
+    layout(push_constant, std430) uniform VelkPC { uint draw_base; } Name;
 
-#define root (velk_draw_data.data[velk_pc.draw_base])
+// This draw's header record. Shaders normally go through the field accessors
+// above; use this only to read a header field that has no accessor, as the
+// composed raster drivers do for texture_id / material_base.
+//   uint tex = velk_draw(root).texture_id;
+#define velk_draw(r) (velk_draw_data.data[(r).draw_base])
 )";
 
 namespace {

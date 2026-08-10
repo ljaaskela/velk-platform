@@ -101,17 +101,13 @@ The convenience method `renderer->render()` calls `present(prepare({}))` for the
 
 ### Per-frame GPU buffers
 
-Each frame slot owns its own GPU staging buffer. When `prepare()` writes one-off draw headers and env data, it writes into the slot's buffer, not a shared one. This means a prepared frame's GPU data is never overwritten by a subsequent `prepare()` call. The buffer remains valid and untouched until `present()` submits its draw calls and recycles the slot. (Persistent per-batch storage and the `set = 1` arenas are separate from these per-frame staging buffers.)
+Each frame slot owns its own GPU staging buffer (1 MB initial, growing on demand). Whatever `prepare()` writes there goes into the slot's own buffer, not a shared one, so a prepared frame's data is never overwritten by a subsequent `prepare()` call; it stays valid until `present()` submits the frame and recycles the slot.
 
-The staging buffers are small (starting at 256 KB, growing on demand) because they only hold per-frame metadata:
-* `DrawDataHeader` structs (48 bytes each) for batches without persistent storage (e.g. env)
-* one-off / env draw data.
+Very little still goes through it. Its one remaining job is the indirect-draw commands of batches that have no persistent storage buffer of their own (the environment batch). Everything else — draw headers, per-instance arrays, material records, view globals, lights, mesh geometry, glyph tables — lives in a **stable region of a shared `set = 1` arena** owned by its producer and rewritten only when its contents change. See [the GPU resource model](render-backend.md#the-gpu-resource-model).
 
-Per-instance arrays and material parameters no longer live here: they are index-read from the Renderer-owned `set = 1` arenas (`velk_instances`, `velk_materials`).
+Because those regions are stable and their frees are deferred behind the frame-completion fence, an in-flight GPU read can never see its bytes reassigned, and a steady-state frame uploads almost nothing.
 
-Heavy data like textures and persistent mesh buffers lives in separate GPU allocations outside the frame buffer. Even a complex frame with thousands of draw entries typically uses under 1 MB.
-
-Globals (view-projection matrix, viewport) are written to a separate persistent buffer that is updated in-place during `prepare()`. This is safe because the values are only read by the GPU during `submit()`, which happens after `prepare()` completes.
+Heavy data like textures lives in separate GPU allocations. Even a complex frame with thousands of draw entries typically writes well under 1 MB per frame.
 
 ### Threading model
 
@@ -197,7 +193,7 @@ A single `prepare()` call can target any combination of surfaces. The resulting 
    d. `rebuild_commands()` for dirty elements (query `IVisual` attachments)
    e. Upload dirty textures (e.g. glyph atlas updates)
    f. `rebuild_batches()` if batches are dirty (group by pipeline + texture)
-   g. Write instance data, draw headers, and material params to the GPU staging buffer
+   g. Run the upload sweep: allocate / refresh each producer's arena region (instances, draw headers, material records, view globals, lights) for those whose data changed
    h. Build the `DrawCall` array and emit the view's passes into the frame graph
 4. Compile + execute the frame graph (records the primary command buffer), then `backend->close_frame()`
 5. Return the `Frame` handle — the frame is now fully recorded
