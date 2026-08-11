@@ -120,6 +120,15 @@ inline constexpr Uid RenderPlugin{"4dc6ab8e-3887-4def-a08e-59259ca39567"};
 /** @brief Compute-shader path tracer (RtPath) sub-plugin. Loaded after velk_render. */
 inline constexpr Uid RtPlugin{"b7c7c6a9-43a6-435c-b193-be467b1c9e85"};
 
+/**
+ * @brief GLSL shader compiler (shaderc) sub-plugin.
+ *
+ * Loaded on demand by RenderContext the first time a shader has to be
+ * compiled. A build whose shader cache is fully populated never loads it, and
+ * need not ship it at all.
+ */
+inline constexpr Uid GlslCompilerPlugin{"96e5f2ff-356b-43ad-9f54-476212bfb7c6"};
+
 } // namespace PluginId
 
 } // namespace velk

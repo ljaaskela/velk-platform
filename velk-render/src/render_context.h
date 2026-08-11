@@ -2,7 +2,6 @@
 #define VELK_RENDER_CONTEXT_IMPL_H
 
 #include "shader/shader_cache.h"
-#include "shader/shader_compiler.h"
 
 #include <velk/ext/object.h>
 

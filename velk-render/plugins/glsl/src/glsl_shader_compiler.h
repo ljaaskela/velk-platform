@@ -5,6 +5,7 @@
 
 #include <velk-render/interface/intf_shader_compiler.h>
 #include <velk-render/plugin.h>
+#include <velk-render/plugins/glsl/plugin.h>
 
 #include <unordered_map>
 

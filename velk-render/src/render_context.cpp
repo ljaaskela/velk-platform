@@ -1,7 +1,7 @@
 #include "render_context.h"
 
 #include "shader/shader.h"
-#include "shader/shader_compiler.h"
+#include "shader/velk_glsl.h"
 #include "material/material_unpacker.h"
 #include "material/spirv_material_reflect.h"
 #include "resource/surface.h"
@@ -63,9 +63,14 @@ bool RenderContextImpl::init(const RenderConfig& config)
         return false;
     }
 
+    // The compiler ships as its own plugin (velk_glsl), which is the only
+    // thing that links shaderc. Loaded on demand here rather than being a hard
+    // link dependency of velk_render, so the compiler can be swapped without
+    // touching this library.
+    get_or_load_plugin<IPlugin>(PluginId::GlslCompilerPlugin);
     shader_compiler_ = instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler);
     if (!shader_compiler_) {
-        VELK_LOG(E, "RenderContext::init: failed to create shader compiler");
+        VELK_LOG(E, "RenderContext::init: no shader compiler (velk_glsl plugin missing?)");
         backend_ = nullptr;
         return false;
     }

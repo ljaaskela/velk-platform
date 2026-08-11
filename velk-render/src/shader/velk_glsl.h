@@ -1,5 +1,5 @@
-#ifndef VELK_RENDER_SHADER_COMPILER_H
-#define VELK_RENDER_SHADER_COMPILER_H
+#ifndef VELK_RENDER_VELK_GLSL_H
+#define VELK_RENDER_VELK_GLSL_H
 
 #include <velk/string_view.h>
 
@@ -12,4 +12,4 @@ extern const string_view kVelkGlsl;
 
 } // namespace velk
 
-#endif // VELK_RENDER_SHADER_COMPILER_H
+#endif // VELK_RENDER_VELK_GLSL_H

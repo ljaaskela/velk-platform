@@ -1,4 +1,4 @@
-#include "shader/glsl_shader_compiler.h"
+#include "glsl_shader_compiler.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>

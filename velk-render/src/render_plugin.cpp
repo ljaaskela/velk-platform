@@ -23,7 +23,6 @@
 #include "render_context.h"
 #include "resource/render_texture.h"
 #include "technique/rt_shadow.h"
-#include "shader/glsl_shader_compiler.h"
 #include "shader/shader.h"
 #include "material/shader_material.h"
 #include "material/standard_material.h"
@@ -44,7 +43,6 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<GpuResourceManager>(velk, alloc);
     rv &= register_type<FrameDataManager>(velk, alloc);
     rv &= register_type<FrameSnippetRegistry>(velk, alloc);
-    rv &= register_type<impl::GlslShaderCompiler>(velk, alloc);
     rv &= register_type<::velk::ext::AnyValue<UpdateRate>>(velk, alloc);
 
     // Hive types
