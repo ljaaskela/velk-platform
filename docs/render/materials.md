@@ -63,7 +63,7 @@ The renderer treats both paths uniformly: each `DrawEntry` emitted by a visual c
 
 ## Shader includes
 
-Shader includes are registered via `IRenderContext::register_shader_include()`. Any module can register its own include, and shaders reference them with `#include "name"`.
+Shader includes are registered via `IRenderContext::register_shader_include()`, which forwards to the active `IShaderCompiler`. Any module can register its own include, and shaders reference them with `#include "name"`. Registration works at any time, not only during startup: composed material snippets are registered while the application runs.
 
 **velk.glsl** (provided by velk-render, registered automatically):
 - `VELK_DRAW_DATA(Name)`: the one declaration a raster shader makes. Declares the push constant (a single `uint draw_base`) under the name you give it, conventionally `root`; every accessor below takes that handle. See [DrawData struct layout](#drawdata-struct-layout).
@@ -114,7 +114,9 @@ Most materials only need to provide a fragment shader. The default vertex shader
 
 ## Shader cache
 
-`IRenderContext::compile_shader()` consults an on-disk cache before invoking shaderc. shaderc compilations are around 70 ms each on a typical desktop, and a small UI scene easily compiles 15+ shaders, so eliminating that on warm runs cuts roughly a second off first-frame latency.
+`IRenderContext::compile_shader()` consults an on-disk cache before invoking the compiler. Compilations are around 70 ms each on a typical desktop, and a small UI scene easily compiles 15+ shaders, so eliminating that on warm runs cuts roughly a second off first-frame latency.
+
+Compilation itself sits behind `IShaderCompiler`, implemented by the `velk_glsl` plugin, which is the only thing in the tree that links shaderc. The render context reaches every compile through that interface, so the compiler can be replaced without touching velk-render.
 
 ### How it works
 
@@ -124,7 +126,7 @@ The cache key for a shader combines:
 
 - A 64-bit hash of the GLSL source. Built-in shaders pass this as a `constexpr make_hash64(source)` constant via the optional `key` parameter to `compile_shader()`. User shaders (e.g. anything passed to `create_shader_material()`) leave the parameter as 0 and the runtime hashes the source on the fly. The runtime hash cost is negligible (microseconds) at typical shader sizes.
 - A stage discriminator so a vertex shader and fragment shader with identical source never collide.
-- A 64-bit hash of all currently registered shader includes (sorted by name). Folding this into every per-shader key means any change to a virtual include such as `velk.glsl` or `velk-ui.glsl` automatically invalidates entries that depend on it. Old entries become orphans rather than corrupt cache hits, and the next compile rewrites them under the new key.
+- A dependency hash supplied by the compiler (`IShaderCompiler::dependency_hash()`). For the GLSL compiler that is a 64-bit hash of all currently registered shader includes, sorted by name. Folding it into every per-shader key means any change to a virtual include such as `velk.glsl` or `velk-ui.glsl` automatically invalidates entries that depend on it. Old entries become orphans rather than corrupt cache hits, and the next compile rewrites them under the new key. The render context does not model dependencies itself, because what a shader depends on beyond its own source is language-specific.
 
 There is no version file and no bulk wipe; invalidation is implicit in the key.
 

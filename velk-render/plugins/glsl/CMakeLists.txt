@@ -1,11 +1,15 @@
 find_package(Vulkan REQUIRED)
 
-# shaderc: source built from the NDK via ndk-build on Android (static combined
-# archive), shaderc_shared.dll from the Vulkan SDK on desktop (the SDK's
-# shaderc_combined.lib is built with a newer MSVC than v142 ships and pulls in
-# unresolved STL symbols when statically linked against an older toolchain).
+# shaderc is linked statically on both platforms: built from NDK source via
+# ndk-build on Android, and from the Vulkan SDK's shaderc_combined.lib on
+# desktop. The plugin is therefore self-contained, and is the only thing in the
+# tree that links shaderc at all.
 #
-# This plugin is the only thing in the tree that links shaderc.
+# TOOLCHAIN FLOOR: shaderc_combined.lib is built against a recent MSVC STL and
+# references __std_find_trivial_1 / __std_find_trivial_8. Toolsets that predate
+# those fail to link it. Verified working with MSVC 14.44; verified failing
+# with v142 / 14.29. Anyone hitting those unresolved symbols needs a newer
+# toolset, not a source change.
 if(ANDROID)
     set(NDK_SHADERC_DIR "${ANDROID_NDK}/sources/third_party/shaderc")
     set(NDK_SHADERC_OUT "${CMAKE_CURRENT_BINARY_DIR}/shaderc-ndk-build")
@@ -62,13 +66,13 @@ if(ANDROID)
     target_link_libraries(shaderc INTERFACE ${SHADERC_COMPONENT_LIBS})
     target_include_directories(shaderc INTERFACE "${NDK_SHADERC_DIR}/libshaderc/include")
 else()
-    find_library(SHADERC_LIB shaderc_shared PATHS "$ENV{VULKAN_SDK}/Lib" "${Vulkan_INCLUDE_DIRS}/../Lib")
-    if(NOT SHADERC_LIB)
-        message(FATAL_ERROR "shaderc_shared.lib not found. Ensure VULKAN_SDK is set.")
+    find_library(SHADERC_STATIC_LIB shaderc_combined PATHS "$ENV{VULKAN_SDK}/Lib" "${Vulkan_INCLUDE_DIRS}/../Lib")
+    if(NOT SHADERC_STATIC_LIB)
+        message(FATAL_ERROR "shaderc_combined.lib not found. Ensure VULKAN_SDK is set.")
     endif()
-    add_library(shaderc SHARED IMPORTED GLOBAL)
+    add_library(shaderc STATIC IMPORTED GLOBAL)
     set_target_properties(shaderc PROPERTIES
-        IMPORTED_IMPLIB "${SHADERC_LIB}"
+        IMPORTED_LOCATION "${SHADERC_STATIC_LIB}"
         INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIRS}"
     )
 endif()
@@ -94,22 +98,4 @@ target_include_directories(velk_glsl
 
 target_compile_definitions(velk_glsl PRIVATE VELK_EXPORTS)
 
-if(NOT ANDROID)
-    # shaderc_shared.dll must sit alongside velk_glsl.dll at runtime.
-    #
-    # Static linking against the SDK's shaderc_combined.lib does NOT work with
-    # the v142 toolset: that archive is built against a newer MSVC STL and
-    # pulls in __std_find_trivial_1 / __std_find_trivial_8, which 14.29 does
-    # not provide. Retested 2026-08-11. Building shaderc from source the way
-    # Android does is not an option here either, since the Vulkan SDK ships no
-    # shaderc sources.
-    get_filename_component(SHADERC_DIR "${SHADERC_LIB}" DIRECTORY)
-    get_filename_component(VULKAN_BIN_DIR "${SHADERC_DIR}/../Bin" ABSOLUTE)
-    add_custom_command(TARGET velk_glsl POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VULKAN_BIN_DIR}/shaderc_shared.dll"
-            "$<TARGET_FILE_DIR:velk_glsl>"
-        COMMENT "Copying shaderc_shared.dll"
-    )
-endif()
 

@@ -44,6 +44,7 @@ bool Application::init(const ApplicationConfig& config)
     reg.load_plugin("plugin:velk_render");
     reg.load_plugin("plugin:velk_scene");
     reg.load_plugin("plugin:velk_vk");
+    reg.load_plugin("plugin:velk_glsl");
     reg.load_plugin("plugin:velk_rt");
     reg.load_plugin("plugin:velk_text");
     reg.load_plugin("plugin:velk_image");

@@ -63,10 +63,11 @@ bool RenderContextImpl::init(const RenderConfig& config)
         return false;
     }
 
-    // The compiler ships as its own plugin (velk_glsl), which is the only
-    // thing that links shaderc. Loaded on demand here rather than being a hard
-    // link dependency of velk_render, so the compiler can be swapped without
-    // touching this library.
+    // The compiler ships as its own plugin (velk_glsl), the only thing that
+    // links shaderc, so it can be swapped without touching this library. Its
+    // library is loaded by name alongside the other plugins by the runtime;
+    // this only instantiates the already-registered plugin type, same as the
+    // backend above.
     get_or_load_plugin<IPlugin>(PluginId::GlslCompilerPlugin);
     shader_compiler_ = instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler);
     if (!shader_compiler_) {
