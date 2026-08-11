@@ -64,7 +64,7 @@ uint32_t resolve_snippet_id(IInterface* src_carrier, string_view role,
     string include_name;
     include_name.append(fn);
     include_name.append(string_view(".glsl", 5));
-    ctx.register_shader_include(include_name, body);
+    ctx.shaders().register_include(include_name, body);
     src->register_includes(ctx);
 
     uint32_t id = static_cast<uint32_t>(info_by_id.size()) + first_id;
@@ -112,7 +112,7 @@ bool install_indexed_material_include(const string& include_name,
     out.append(generate_material_unpacker(fn_name, type, layout));
     out.append(body.substr(line_end + 1));
 
-    ctx.register_shader_include(include_name, out);
+    ctx.shaders().register_include(include_name, out);
     return true;
 }
 

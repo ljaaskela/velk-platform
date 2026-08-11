@@ -17,12 +17,16 @@ For the architectural overview, see [Runtime](runtime/runtime.md). For the under
 
 ## Building
 
-Requires CMake 3.14+, MSVC 2019 (C++17), and the Vulkan SDK (for shaderc).
+Requires CMake 3.14+, a C++17 compiler, Ninja, and the Vulkan SDK (for shaderc). On
+Windows this means Visual Studio 2022: the SDK's `shaderc_combined.lib` is linked
+statically and needs a recent MSVC STL, which the VS2019 v142 toolset does not provide.
+
+Run these from a Visual Studio x64 developer prompt, so the MSVC toolchain is on the path:
 
 ```bash
-cmake -B build -G "Visual Studio 16 2019" -A x64 -T v142
-cmake --build build --config Release
-./build/bin/Release/velk_ui_app.exe
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/bin/velk_ui_simple.exe
 ```
 
 velk is built from source automatically. The `VELK_SOURCE_DIR` cache variable defaults to `../velk`.

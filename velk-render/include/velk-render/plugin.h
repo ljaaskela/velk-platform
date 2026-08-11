@@ -11,6 +11,10 @@ inline constexpr Uid RenderContext{"4a7c9e12-5d83-4b1f-a6e0-8f2d3c4b5a69"};
 inline constexpr Uid Renderer{"8f4bdd2c-865b-4266-a1f1-abb921c9d60b"};
 inline constexpr Uid WindowSurface{"ee9a45db-d4e3-44c4-bbee-19c244a5f32a"};
 inline constexpr Uid ShaderMaterial{"04a29568-7677-42ee-9858-83b87196057f"};
+/** @brief GLSL shader compiler. Create via instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler). */
+inline constexpr Uid GlslShaderCompiler{"d51d1904-aa13-406d-9293-d81a6c344e9e"};
+/** @brief Shader compilation + cache subsystem. Owned by the render context; reached via IRenderContext::shaders(). */
+inline constexpr Uid ShaderManager{"517d56e1-8744-406e-88a5-584f4ce3bfbb"};
 inline constexpr Uid StandardMaterial{"4559e280-879d-4154-9565-d7346897588f"};
 
 /** @brief Material property classes. Attached to StandardMaterial; see design-notes/material_properties.md. */
@@ -117,6 +121,15 @@ inline constexpr Uid RenderPlugin{"4dc6ab8e-3887-4def-a08e-59259ca39567"};
 
 /** @brief Compute-shader path tracer (RtPath) sub-plugin. Loaded after velk_render. */
 inline constexpr Uid RtPlugin{"b7c7c6a9-43a6-435c-b193-be467b1c9e85"};
+
+/**
+ * @brief GLSL shader compiler (shaderc) sub-plugin.
+ *
+ * Loaded on demand by RenderContext the first time a shader has to be
+ * compiled. A build whose shader cache is fully populated never loads it, and
+ * need not ship it at all.
+ */
+inline constexpr Uid GlslCompilerPlugin{"96e5f2ff-356b-43ad-9f54-476212bfb7c6"};
 
 } // namespace PluginId
 

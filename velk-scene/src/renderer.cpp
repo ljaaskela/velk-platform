@@ -190,14 +190,15 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
 
     // Register velk-ui shader include for UI instance types
 
-    ctx->register_shader_include("velk-ui.glsl", velk_ui_glsl);
+    ctx->shaders().register_include("velk-ui.glsl", velk_ui_glsl);
 
     // Register default shaders. Visuals and materials that do not provide
     // their own shader sources fall back to these (see compile_pipeline:
     // empty source -> registered default). Built-in UI pipelines are now
     // compiled lazily by batch_builder on first sight of a new visual type.
-    ctx->set_default_vertex_shader(ctx->compile_shader(default_vertex_src, ShaderStage::Vertex));
-    ctx->set_default_fragment_shader(ctx->compile_shader(default_fragment_src, ShaderStage::Fragment));
+    auto& shaders = ctx->shaders();
+    shaders.set_default_vertex_shader(shaders.compile(default_vertex_src, ShaderStage::Vertex));
+    shaders.set_default_fragment_shader(shaders.compile(default_fragment_src, ShaderStage::Fragment));
 
     frame_buffer_->init();
     for (auto& slot : frame_slots_) {

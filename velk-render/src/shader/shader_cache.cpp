@@ -1,14 +1,12 @@
 #include "shader/shader_cache.h"
 
 #include <velk/api/velk.h>
-#include <velk/hash.h>
 #include <velk/interface/intf_velk.h>
 #include <velk/interface/resource/intf_resource.h>
 #include <velk/interface/resource/intf_resource_protocol.h>
 #include <velk/interface/resource/intf_resource_store.h>
 #include <velk/interface/types.h>
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -78,32 +76,6 @@ string blob_uri(uint64_t key)
 }
 
 } // namespace
-
-uint64_t hash_shader_includes(const ShaderIncludeMap& includes)
-{
-    // Sort by name so the hash is deterministic across runs (unordered_map
-    // iteration order may differ).
-    vector<const std::pair<const string, string>*> sorted;
-    sorted.reserve(includes.size());
-    for (auto& kv : includes) {
-        sorted.push_back(&kv);
-    }
-    std::sort(sorted.begin(), sorted.end(),
-              [](auto* a, auto* b) {
-                  return std::strcmp(a->first.c_str(), b->first.c_str()) < 0;
-              });
-
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (auto* kv : sorted) {
-        // Mix in name and content separately so that ("ab","c") and
-        // ("a","bc") don't collide.
-        h ^= make_hash64(kv->first);
-        h *= 0x100000001b3ULL;
-        h ^= make_hash64(kv->second);
-        h *= 0x100000001b3ULL;
-    }
-    return h;
-}
 
 void ShaderCache::ensure_initialized()
 {

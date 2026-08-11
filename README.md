@@ -189,19 +189,28 @@ Build & run:
 
 ## Building
 
-Requires CMake 3.14+, MSVC 2019 (C++17), and the Vulkan SDK (for shaderc).
+Requires CMake 3.14+, a C++17 compiler, Ninja, and the Vulkan SDK (for shaderc).
+
+On Windows this means Visual Studio 2022. The Vulkan SDK's `shaderc_combined.lib` is
+linked statically and needs a recent MSVC STL, so the VS2019 v142 toolset cannot build
+it. Verified with MSVC 14.44.
 
 Velk is built from source automatically. The `VELK_SOURCE_DIR` cache variable defaults to `../velk`.
 
+Build from a Visual Studio x64 developer prompt, so the MSVC toolchain is on the path:
+
 ```bash
-cmake -B build -G "Visual Studio 16 2019" -A x64 -T v142
-cmake --build build --config Release
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
+
+Opening the folder in Visual Studio works too: `CMakeSettings.json` defines Ninja
+configurations against the `msvc_x64_x64` environment.
 
 ## Running
 
 ```bash
-./build/bin/Release/velk_ui_app.exe
+./build/bin/velk_ui_simple.exe
 ```
 
 ## Dependencies
@@ -211,4 +220,4 @@ cmake --build build --config Release
 * Vulkan SDK (shaderc for runtime GLSL to SPIR-V compilation)
 * volk, VMA (Vulkan function loader and memory allocator, header-only via Vulkan SDK)
 * FreeType 2.13, HarfBuzz 10.2 (vendored in `plugins/text/third_party/`)
-* CMake 3.14+
+* CMake 3.14+, Ninja

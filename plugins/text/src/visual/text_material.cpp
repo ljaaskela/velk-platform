@@ -97,7 +97,7 @@ string_view TextMaterial::get_fn_name(string_view role) const
 
 void TextMaterial::register_includes(IRenderContext& ctx) const
 {
-    ctx.register_shader_include("velk_text.glsl", embedded::velk_text_glsl);
+    ctx.shaders().register_include("velk_text.glsl", embedded::velk_text_glsl);
 }
 
 } // namespace velk::ui

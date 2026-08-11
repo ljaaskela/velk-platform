@@ -14,6 +14,7 @@
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_shader.h>
+#include <velk-render/interface/intf_shader_manager.h>
 #include <velk-render/interface/intf_window_surface.h>
 #include <velk-render/render_types.h>
 
@@ -111,18 +112,12 @@ public:
                                                   string_view vertex_source = {}) = 0;
 
     /**
-     * @brief Compiles GLSL source to a reusable shader handle.
+     * @brief Shader compilation and caching.
      *
-     * @param source GLSL source code.
-     * @param stage Shader stage (Vertex or Fragment).
-     * @param key Optional cache key. When non-zero, the SPIR-V is read from /
-     *            written to the shader cache under this key. When zero, a hash
-     *            of @p source is computed at runtime. Built-in shaders should
-     *            pass a constexpr `make_hash64(source)` to avoid the runtime
-     *            hash. User shaders pass 0.
+     * Owns the active shader compiler, the registered dependencies, and the
+     * on-disk SPIR-V cache.
      */
-    virtual IShader::Ptr compile_shader(string_view source, ShaderStage stage,
-                                        uint64_t key = 0) = 0;
+    virtual IShaderManager& shaders() = 0;
 
     /**
      * @brief Compiles a graphics pipeline against dynamic-rendering attachment
@@ -169,26 +164,12 @@ public:
      */
     virtual IGpuPipeline::Ptr compile_compute_pipeline(string_view compute_source, uint64_t key = 0) = 0;
 
-    /** @brief Registers a default vertex shader used when create_pipeline receives nullptr. */
-    virtual void set_default_vertex_shader(const IShader::Ptr& shader) = 0;
-
-    /** @brief Registers a default fragment shader used when create_pipeline receives nullptr. */
-    virtual void set_default_fragment_shader(const IShader::Ptr& shader) = 0;
-
     /**
      * @brief Looks up a compiled pipeline in the unified cache by key.
      *
      * Returns nullptr if no pipeline has been compiled for @p key yet.
      */
     virtual IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const = 0;
-
-    /**
-     * @brief Registers a virtual shader include.
-     *
-     * Shaders can then use `#include "name"` to pull in the content.
-     * Modules register their own includes (e.g. velk-ui registers "velk-ui.glsl").
-     */
-    virtual void register_shader_include(string_view name, string_view content) = 0;
 
     /** @brief Returns the render backend. */
     virtual IRenderBackend::Ptr backend() const = 0;
