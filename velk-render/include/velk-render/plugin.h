@@ -11,6 +11,8 @@ inline constexpr Uid RenderContext{"4a7c9e12-5d83-4b1f-a6e0-8f2d3c4b5a69"};
 inline constexpr Uid Renderer{"8f4bdd2c-865b-4266-a1f1-abb921c9d60b"};
 inline constexpr Uid WindowSurface{"ee9a45db-d4e3-44c4-bbee-19c244a5f32a"};
 inline constexpr Uid ShaderMaterial{"04a29568-7677-42ee-9858-83b87196057f"};
+/** @brief GLSL shader compiler. Create via instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler). */
+inline constexpr Uid GlslShaderCompiler{"d51d1904-aa13-406d-9293-d81a6c344e9e"};
 inline constexpr Uid StandardMaterial{"4559e280-879d-4154-9565-d7346897588f"};
 
 /** @brief Material property classes. Attached to StandardMaterial; see design-notes/material_properties.md. */

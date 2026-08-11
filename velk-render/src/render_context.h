@@ -7,6 +7,7 @@
 #include <velk/ext/object.h>
 
 #include <velk-render/interface/intf_render_context.h>
+#include <velk-render/interface/intf_shader_compiler.h>
 #include <velk-render/plugin.h>
 
 #include <velk/vector.h>
@@ -103,7 +104,7 @@ private:
     IMeshBuffer::Ptr default_uv1_;
     /// Mutable: find_pipeline prunes expired entries during its scan.
     mutable vector<PipelineCacheEntry> pipeline_cache_;
-    ShaderIncludeMap shader_includes_;
+    IShaderCompiler::Ptr shader_compiler_;
     /// Installed by the renderer, which owns it. Raw: the renderer outlives
     /// the context's use of it.
     IGpuResourceManager* resources_ = nullptr;

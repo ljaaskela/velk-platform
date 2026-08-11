@@ -1,8 +1,6 @@
 #ifndef VELK_RENDER_SHADER_CACHE_H
 #define VELK_RENDER_SHADER_CACHE_H
 
-#include "shader/shader_compiler.h"
-
 #include <velk/string.h>
 #include <velk/vector.h>
 
@@ -54,10 +52,6 @@ private:
     bool initialized_ = false;
     string cache_dir_; ///< Filesystem path to the cache directory; ends in '/'.
 };
-
-/// Computes a deterministic hash over the contents of @p includes (sorted
-/// by name) so it can be folded into per-shader cache keys.
-uint64_t hash_shader_includes(const ShaderIncludeMap& includes);
 
 } // namespace velk
 

@@ -63,10 +63,17 @@ bool RenderContextImpl::init(const RenderConfig& config)
         return false;
     }
 
-    // Register the framework-level velk.glsl include so it appears in
-    // shader_includes_ alongside any plugin-registered includes. The shader
-    // cache uses this map to compute its per-shader cache keys.
-    shader_includes_["velk.glsl"] = string(kVelkGlsl);
+    shader_compiler_ = instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler);
+    if (!shader_compiler_) {
+        VELK_LOG(E, "RenderContext::init: failed to create shader compiler");
+        backend_ = nullptr;
+        return false;
+    }
+
+    // Register the framework-level velk.glsl include alongside any
+    // plugin-registered ones. Its content reaches the shader cache key through
+    // the compiler's dependency hash.
+    shader_compiler_->register_include("velk.glsl", kVelkGlsl);
 
     mesh_builder_ = instance().create<IMeshBuilder>(ClassId::MeshBuilder);
     if (!mesh_builder_) {
@@ -174,8 +181,7 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
     case ShaderStage::Fragment: stage_mix = kStageFragmentMix; break;
     case ShaderStage::Compute:  stage_mix = kStageComputeMix;  break;
     }
-    uint64_t include_hash = hash_shader_includes(shader_includes_);
-    uint64_t cache_key = key ^ stage_mix ^ include_hash;
+    uint64_t cache_key = key ^ stage_mix ^ shader_compiler_->dependency_hash();
 
     auto cached = shader_cache_.read(cache_key);
     if (!cached.empty()) {
@@ -186,8 +192,7 @@ IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage s
         }
     }
 
-    auto* includes = shader_includes_.empty() ? nullptr : &shader_includes_;
-    auto spirv = compile_glsl_to_spirv(source, stage, includes);
+    auto spirv = shader_compiler_->compile(source, stage);
     if (spirv.empty()) {
         return nullptr;
     }
@@ -296,7 +301,7 @@ void RenderContextImpl::set_default_fragment_shader(const IShader::Ptr& shader)
 
 void RenderContextImpl::register_shader_include(string_view name, string_view content)
 {
-    shader_includes_[name] = content;
+    shader_compiler_->register_include(name, content);
 }
 
 namespace {
