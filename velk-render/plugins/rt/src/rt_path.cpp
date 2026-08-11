@@ -50,14 +50,14 @@ IGpuPipeline::Ptr RtPath::ensure_pipeline(FrameContext& ctx)
     // The weak pipeline cache is the source of truth: reuse the live
     // pipeline for this snippet combo if it's still held by a live RT pass,
     // otherwise compose + compile a fresh one.
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
 
     string src = compose_rt_compute(*ctx.snippets);
 
-    return ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
+    return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
 void RtPath::build_passes(IViewEntry& entry,

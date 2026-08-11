@@ -88,7 +88,7 @@ struct FrameContext
     IGpuArena* mesh_instances_arena = nullptr;
 
     /// Color attachment format the active path is writing into.
-    /// Pipeline lookups (`render_ctx->find_pipeline`) reconstruct their
+    /// Pipeline lookups (`render_ctx->pipelines().find`) reconstruct their
     /// cache key using this format; raster pipelines must be compiled
     /// against a
     /// dynamic-rendering setup matching this format. Always overwritten

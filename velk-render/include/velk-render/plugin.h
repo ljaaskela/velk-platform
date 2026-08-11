@@ -15,6 +15,8 @@ inline constexpr Uid ShaderMaterial{"04a29568-7677-42ee-9858-83b87196057f"};
 inline constexpr Uid GlslShaderCompiler{"d51d1904-aa13-406d-9293-d81a6c344e9e"};
 /** @brief Shader compilation + cache subsystem. Owned by the render context; reached via IRenderContext::shaders(). */
 inline constexpr Uid ShaderManager{"517d56e1-8744-406e-88a5-584f4ce3bfbb"};
+/** @brief Pipeline compile + weak intern pool. Owned by the render context; reached via IRenderContext::pipelines(). */
+inline constexpr Uid PipelineManager{"ec839835-324b-4e32-b7d9-85a385a8ad5d"};
 inline constexpr Uid StandardMaterial{"4559e280-879d-4154-9565-d7346897588f"};
 
 /** @brief Material property classes. Attached to StandardMaterial; see design-notes/material_properties.md. */

@@ -100,14 +100,14 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
         }
         gbuffer_key = forward_key ^ perturb;
     }
-    // Cache lookup must match what compile_pipeline_dynamic stores:
+    // Cache lookup must match what compile_dynamic stores:
     // color_formats[0] (Albedo = RGBA8) plus the MRT layout signature
     // derived from the full gbuffer format set (stable across resize).
     const auto gbuffer_formats = array_view<const PixelFormat>(
         kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
     PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], DepthFormat::Default,
                           pipeline_target_layout(gbuffer_formats)};
-    if (auto pipeline = ctx.find_pipeline(gkey)) {
+    if (auto pipeline = ctx.pipelines().find(gkey)) {
         return pipeline;
     }
 
@@ -154,12 +154,12 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
     po.blend_mode = BlendMode::Opaque;
 
     // Gbuffer compiles against kGBufferFormats + DepthFormat::Default. The
-    // layout signature (computed inside compile_pipeline_dynamic from these
+    // layout signature (computed inside compile_dynamic from these
     // formats) differentiates gbuffer pipelines from forward ones using the
     // same user_key.
     // Compile and return the strong Ptr directly (cache is weak, so a
     // find-after-compile would already be dead).
-    return ctx.compile_pipeline_dynamic(
+    return ctx.pipelines().compile_dynamic(
         string_view(composed), vsrc,
         gbuffer_key, gbuffer_formats,
         DepthFormat::Default,
@@ -266,7 +266,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // The weak pipeline cache is the source of truth: if the pipeline for
     // this snippet combo is still alive (held by a live pass), reuse it;
     // otherwise compose + compile a fresh one.
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
@@ -328,7 +328,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     append_literal("    }\n");
     append_literal("}\n");
 
-    return ctx.render_ctx->compile_compute_pipeline(string_view(src), key);
+    return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
 } // namespace
@@ -344,22 +344,22 @@ IGpuPipeline::Ptr DeferredPath::ensure_denoise_pipeline(FrameContext& ctx)
     // Standalone compute; fixed key (no snippet variance). Bit 62 set to match
     // the compute-pipeline key convention.
     constexpr uint64_t key = 0x4465'6e6f'6973'6531ULL;
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
-    return ctx.render_ctx->compile_compute_pipeline(deferred_denoise_compute_src, key);
+    return ctx.render_ctx->pipelines().compile_compute(deferred_denoise_compute_src, key);
 }
 
 IGpuPipeline::Ptr DeferredPath::ensure_spatial_pipeline(FrameContext& ctx)
 {
     if (!ctx.render_ctx) return {};
     constexpr uint64_t key = 0x5370'6174'6961'6c31ULL;
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
-    return ctx.render_ctx->compile_compute_pipeline(deferred_spatial_composite_compute_src, key);
+    return ctx.render_ctx->pipelines().compile_compute(deferred_spatial_composite_compute_src, key);
 }
 
 IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,

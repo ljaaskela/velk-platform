@@ -185,12 +185,12 @@ constexpr uint64_t kBloomCombineKey    = 0x426c6f6f6d43'01ULL; // "BloomC\1"
                                  ::velk::string_view src)
 {
     if (!ctx.render_ctx) return {};
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             ::velk::PipelineCacheKey{key, ::velk::PixelFormat::RGBA8,
                                      ::velk::DepthFormat::None, 0})) {
         return p;
     }
-    return ctx.render_ctx->compile_compute_pipeline(src, key);
+    return ctx.render_ctx->pipelines().compile_compute(src, key);
 }
 
 } // namespace

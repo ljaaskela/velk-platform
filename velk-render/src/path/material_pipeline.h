@@ -75,7 +75,7 @@ struct PipelineContentHasher
  *
  * Composes the forward fragment shader from the material's IShaderSource
  * (eval source + eval entry point + `forward_fragment_driver_template`)
- * and calls `IRenderContext::compile_pipeline_dynamic`. Returns the
+ * and calls `IRenderContext::pipelines().compile_dynamic`. Returns the
  * compiled pipeline as a strong `Ptr` (the caller must keep it alive —
  * the cache holds only a weak ref); @p out_key receives the cache key.
  *
@@ -103,7 +103,7 @@ inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
         driver_template, eval_src, eval_fn,
         mat->get_forward_discard_threshold());
     PixelFormat formats[1] = {color_format};
-    return ctx.compile_pipeline_dynamic(
+    return ctx.pipelines().compile_dynamic(
         string_view(frag), vertex_src,
         user_key,
         array_view<const PixelFormat>(formats, 1),
@@ -208,7 +208,7 @@ inline IGpuPipeline::Ptr resolve_or_compile_forward(
         user_key = batch.pipeline_key();
     }
 
-    if (auto pipeline = ctx.find_pipeline(
+    if (auto pipeline = ctx.pipelines().find(
             PipelineCacheKey{user_key, target_format, depth_format, 0})) {
         return pipeline;
     }
@@ -227,7 +227,7 @@ inline IGpuPipeline::Ptr resolve_or_compile_forward(
             auto frag_src = src ? src->get_source(shader_role::kFragment) : string_view{};
             if (!frag_src.empty() && !vertex_src.empty()) {
                 PixelFormat formats[1] = {target_format};
-                compiled = ctx.compile_pipeline_dynamic(
+                compiled = ctx.pipelines().compile_dynamic(
                     frag_src, vertex_src,
                     user_key,
                     array_view<const PixelFormat>(formats, 1),
@@ -242,7 +242,7 @@ inline IGpuPipeline::Ptr resolve_or_compile_forward(
         auto vsrc = shader_source_ptr->get_source(shader_role::kVertex);
         auto fsrc = shader_source_ptr->get_source(shader_role::kFragment);
         PixelFormat formats[1] = {target_format};
-        compiled = ctx.compile_pipeline_dynamic(
+        compiled = ctx.pipelines().compile_dynamic(
             fsrc, vsrc,
             user_key,
             array_view<const PixelFormat>(formats, 1),

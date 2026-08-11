@@ -79,12 +79,12 @@ constexpr uint64_t kTonemapPipelineKey = 0x546f6e656d617002ULL; // "Tonema\2"
     if (!ctx.render_ctx) return {};
     // Weak cache is the source of truth: reuse if a live tonemap pass still
     // holds it, otherwise compile.
-    if (auto p = ctx.render_ctx->find_pipeline(
+    if (auto p = ctx.render_ctx->pipelines().find(
             ::velk::PipelineCacheKey{kTonemapPipelineKey, ::velk::PixelFormat::RGBA8,
                                      ::velk::DepthFormat::None, 0})) {
         return p;
     }
-    return ctx.render_ctx->compile_compute_pipeline(
+    return ctx.render_ctx->pipelines().compile_compute(
         tonemap_compute_src, kTonemapPipelineKey);
 }
 

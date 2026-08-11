@@ -62,7 +62,7 @@ struct BatchBufferLayout
  *
  * Fields are renderer-facing only — no scene types reach across this
  * boundary. `pipeline_key` is a stable hash on visual class / material;
- * resolved through `IRenderContext::find_pipeline()`. `texture_key` is
+ * resolved through `IRenderContext::pipelines().find()`. `texture_key` is
  * the bindless-source ISurface address resolved at emit time.
  * `instance_data` carries per-instance bytes the vertex shader reads by
  * index from the shared instance arena. `world_aabb` is the union of
@@ -75,7 +75,7 @@ class IBatch
 {
 public:
     /// @brief Stable hash on visual class / material; resolved through
-    ///        `IRenderContext::find_pipeline()`. 0 if no pipeline yet.
+    ///        `IRenderContext::pipelines().find()`. 0 if no pipeline yet.
     virtual uint64_t pipeline_key() const = 0;
 
     /// @brief Bindless-source ISurface address, or 0 when unused.
