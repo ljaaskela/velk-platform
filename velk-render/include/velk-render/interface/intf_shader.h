@@ -21,7 +21,7 @@ enum class ShaderStage : uint8_t
  * @brief A compiled shader handle.
  *
  * Owns the compiled bytecode and destroys it automatically when the last
- * reference is released. Created via IRenderContext::compile_shader().
+ * reference is released. Created via IRenderContext::shaders().compile().
  */
 class IShader : public Interface<IShader>
 {

@@ -1,7 +1,7 @@
 #ifndef VELK_RENDER_CONTEXT_IMPL_H
 #define VELK_RENDER_CONTEXT_IMPL_H
 
-#include "shader/shader_cache.h"
+#include "shader/shader_manager.h"
 
 #include <velk/ext/object.h>
 
@@ -41,8 +41,7 @@ public:
     IWindowSurface::Ptr create_surface(const SurfaceConfig& config) override;
     IMaterial::Ptr create_shader_material(string_view fragment_source, string_view vertex_source) override;
 
-    IShader::Ptr compile_shader(string_view source, ShaderStage stage,
-                                uint64_t key = 0) override;
+    IShaderManager& shaders() override { return *shader_manager_; }
     IGpuPipeline::Ptr compile_pipeline_dynamic(string_view fragment_source,
                                       string_view vertex_source,
                                       uint64_t key,
@@ -52,11 +51,6 @@ public:
                                       uint64_t* out_key = nullptr) override;
     IGpuPipeline::Ptr create_compute_pipeline(const IShader::Ptr& compute, uint64_t key = 0) override;
     IGpuPipeline::Ptr compile_compute_pipeline(string_view compute_source, uint64_t key = 0) override;
-
-    void set_default_vertex_shader(const IShader::Ptr& shader) override;
-    void set_default_fragment_shader(const IShader::Ptr& shader) override;
-
-    void register_shader_include(string_view name, string_view content) override;
 
     IGpuPipeline::Ptr find_pipeline(const PipelineCacheKey& key) const override
     {
@@ -103,13 +97,10 @@ private:
     IMeshBuffer::Ptr default_uv1_;
     /// Mutable: find_pipeline prunes expired entries during its scan.
     mutable vector<PipelineCacheEntry> pipeline_cache_;
-    IShaderCompiler::Ptr shader_compiler_;
+    IShaderManager::Ptr shader_manager_;
     /// Installed by the renderer, which owns it. Raw: the renderer outlives
     /// the context's use of it.
     IGpuResourceManager* resources_ = nullptr;
-    mutable ShaderCache shader_cache_;
-    IShader::Ptr default_vertex_shader_;
-    IShader::Ptr default_fragment_shader_;
     uint64_t next_pipeline_key_ = PipelineKey::CustomBase;
     bool initialized_ = false;
 };

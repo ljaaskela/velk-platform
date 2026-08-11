@@ -80,7 +80,7 @@ public:
      *
      * The consumer calls this once when the class is first encountered,
      * before compiling any pipeline that references it. Implementations
-     * call `ctx.register_shader_include(name, src)` for each dependency.
+     * call `ctx.shaders().register_include(name, src)` for each dependency.
      * Idempotent.
      */
     virtual void register_includes(IRenderContext& ctx) const = 0;

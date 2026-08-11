@@ -63,23 +63,12 @@ bool RenderContextImpl::init(const RenderConfig& config)
         return false;
     }
 
-    // The compiler ships as its own plugin (velk_glsl), the only thing that
-    // links shaderc, so it can be swapped without touching this library. Its
-    // library is loaded by name alongside the other plugins by the runtime;
-    // this only instantiates the already-registered plugin type, same as the
-    // backend above.
-    get_or_load_plugin<IPlugin>(PluginId::GlslCompilerPlugin);
-    shader_compiler_ = instance().create<IShaderCompiler>(ClassId::GlslShaderCompiler);
-    if (!shader_compiler_) {
-        VELK_LOG(E, "RenderContext::init: no shader compiler (velk_glsl plugin missing?)");
+    shader_manager_ = instance().create<IShaderManager>(ClassId::ShaderManager);
+    if (!shader_manager_ || !shader_manager_->init()) {
+        VELK_LOG(E, "RenderContext::init: failed to create shader manager");
         backend_ = nullptr;
         return false;
     }
-
-    // Register the framework-level velk.glsl include alongside any
-    // plugin-registered ones. Its content reaches the shader cache key through
-    // the compiler's dependency hash.
-    shader_compiler_->register_include("velk.glsl", kVelkGlsl);
 
     mesh_builder_ = instance().create<IMeshBuilder>(ClassId::MeshBuilder);
     if (!mesh_builder_) {
@@ -161,57 +150,6 @@ IBuffer::Ptr RenderContextImpl::get_default_buffer(DefaultBufferType type) const
     return nullptr;
 }
 
-IShader::Ptr RenderContextImpl::compile_shader(string_view source, ShaderStage stage, uint64_t key)
-{
-    if (!initialized_ || source.empty()) {
-        return nullptr;
-    }
-
-    if (key == 0) {
-        key = make_hash64(source);
-    }
-
-    shader_cache_.ensure_initialized();
-
-    // Combined cache key: source key XOR stage discriminator XOR hash of all
-    // currently-registered includes. Folding the include hash into the key
-    // means that any change to a virtual include (e.g. velk.glsl) naturally
-    // invalidates affected entries; old entries with the previous include
-    // content become orphans rather than corrupt cache hits.
-    constexpr uint64_t kStageVertexMix = 0x68f3df8b8e0c8b8dULL;
-    constexpr uint64_t kStageFragmentMix = 0xa24baed4963ee407ULL;
-    constexpr uint64_t kStageComputeMix = 0x5a3b1d2f6e9c8411ULL;
-    uint64_t stage_mix = kStageFragmentMix;
-    switch (stage) {
-    case ShaderStage::Vertex:   stage_mix = kStageVertexMix;   break;
-    case ShaderStage::Fragment: stage_mix = kStageFragmentMix; break;
-    case ShaderStage::Compute:  stage_mix = kStageComputeMix;  break;
-    }
-    uint64_t cache_key = key ^ stage_mix ^ shader_compiler_->dependency_hash();
-
-    auto cached = shader_cache_.read(cache_key);
-    if (!cached.empty()) {
-        auto shader = instance().create<IShader>(Shader::static_class_id());
-        if (shader) {
-            shader->init(std::move(cached));
-            return shader;
-        }
-    }
-
-    auto spirv = shader_compiler_->compile(source, stage);
-    if (spirv.empty()) {
-        return nullptr;
-    }
-
-    shader_cache_.write(cache_key, spirv);
-
-    auto shader = instance().create<IShader>(Shader::static_class_id());
-    if (!shader) {
-        return nullptr;
-    }
-    shader->init(std::move(spirv));
-    return shader;
-}
 
 IGpuPipeline::Ptr RenderContextImpl::compile_pipeline_dynamic(
     string_view fragment_source, string_view vertex_source,
@@ -223,11 +161,11 @@ IGpuPipeline::Ptr RenderContextImpl::compile_pipeline_dynamic(
         return {};
     }
     auto vert_src = vertex_source.empty() ? nullptr
-                  : compile_shader(vertex_source, ShaderStage::Vertex);
+                  : shader_manager_->compile(vertex_source, ShaderStage::Vertex);
     auto frag_src = fragment_source.empty() ? nullptr
-                  : compile_shader(fragment_source, ShaderStage::Fragment);
-    const auto& vert_shader = vert_src ? vert_src : default_vertex_shader_;
-    const auto& frag_shader = frag_src ? frag_src : default_fragment_shader_;
+                  : shader_manager_->compile(fragment_source, ShaderStage::Fragment);
+    IShader::Ptr vert_shader = vert_src ? vert_src : shader_manager_->default_vertex_shader();
+    IShader::Ptr frag_shader = frag_src ? frag_src : shader_manager_->default_fragment_shader();
     if (!vert_shader || !frag_shader) {
         VELK_LOG(E, "compile_pipeline_dynamic: missing vertex or fragment shader");
         return {};
@@ -288,26 +226,11 @@ IGpuPipeline::Ptr RenderContextImpl::compile_compute_pipeline(string_view comput
     if (compute_source.empty()) {
         return {};
     }
-    auto compute = compile_shader(compute_source, ShaderStage::Compute);
+    auto compute = shader_manager_->compile(compute_source, ShaderStage::Compute);
     if (!compute) {
         return {};
     }
     return create_compute_pipeline(compute, key);
-}
-
-void RenderContextImpl::set_default_vertex_shader(const IShader::Ptr& shader)
-{
-    default_vertex_shader_ = shader;
-}
-
-void RenderContextImpl::set_default_fragment_shader(const IShader::Ptr& shader)
-{
-    default_fragment_shader_ = shader;
-}
-
-void RenderContextImpl::register_shader_include(string_view name, string_view content)
-{
-    shader_compiler_->register_include(name, content);
 }
 
 namespace {
@@ -358,7 +281,7 @@ IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_so
     // second run (inside the renderer's pipeline compile).
     auto reflect_stage = [&](const string_view& src, ShaderStage stage,
                              const IShader::Ptr& fallback) -> bool {
-        auto sh = src.empty() ? fallback : compile_shader(src, stage);
+        auto sh = src.empty() ? fallback : shader_manager_->compile(src, stage);
         if (!sh) return false;
         auto data = sh->get_data();
         if (data.empty()) return false;
@@ -373,7 +296,7 @@ IMaterial::Ptr RenderContextImpl::create_shader_material(string_view fragment_so
         return true;
     };
     if (!reflect_stage(fragment_source, ShaderStage::Fragment, nullptr)) {
-        reflect_stage(vertex_source, ShaderStage::Vertex, default_vertex_shader_);
+        reflect_stage(vertex_source, ShaderStage::Vertex, shader_manager_->default_vertex_shader());
     }
 
     return mat;

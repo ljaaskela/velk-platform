@@ -15,6 +15,8 @@ add_library(velk_render SHARED
     src/shader/shader_cache.cpp
     src/shader/velk_glsl.h
     src/shader/velk_glsl.cpp
+    src/shader/shader_manager.h
+    src/shader/shader_manager.cpp
 
     # Material implementations
     src/material/shader_material.h
@@ -77,6 +79,7 @@ add_library(velk_render SHARED
     include/velk-render/interface/material/intf_standard_material.h
     include/velk-render/interface/intf_shader.h
     include/velk-render/interface/intf_shader_compiler.h
+    include/velk-render/interface/intf_shader_manager.h
     include/velk-render/api/material/material.h
     include/velk-render/api/material/standard_material.h
     include/velk-render/api/material/material_options.h

@@ -231,7 +231,7 @@ string_view TextVisual::get_fn_name(::velk::string_view role) const
 
 void TextVisual::register_includes(::velk::IRenderContext& ctx) const
 {
-    ctx.register_shader_include("velk_text.glsl", embedded::velk_text_glsl);
+    ctx.shaders().register_include("velk_text.glsl", embedded::velk_text_glsl);
 }
 
 } // namespace velk::ui

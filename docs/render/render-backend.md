@@ -126,7 +126,8 @@ The shader itself defines what data it reads and how (everything is available th
 
 Above the backend, `IRenderContext` provides a higher-level API that separates shader compilation from pipeline creation:
 
-* `compile_shader(source, stage, key = 0)`: Compiles GLSL source to an `IShader::Ptr` handle that owns the compiled bytecode. Consults an on-disk SPIR-V cache before falling back to the compiler, which is reached through `IShaderCompiler` and implemented by the `velk_glsl` plugin; see [Materials → Shader cache](materials.md#shader-cache). Built-in shaders pass a `constexpr make_hash64(source)` as the cache key; leaving `key` as 0 hashes the source at runtime.
+* `shaders()`: The shader subsystem (`IShaderManager`), owning the active compiler, the registered includes, and the SPIR-V cache.
+* `shaders().compile(source, stage, key = 0)`: Compiles GLSL source to an `IShader::Ptr` handle that owns the compiled bytecode. Consults an on-disk SPIR-V cache before falling back to the compiler, which is reached through `IShaderCompiler` and implemented by the `velk_glsl` plugin; see [Materials → Shader cache](materials.md#shader-cache). Built-in shaders pass a `constexpr make_hash64(source)` as the cache key; leaving `key` as 0 hashes the source at runtime.
 * `compile_pipeline_dynamic(frag_src, vert_src, key, color_formats, depth_format, options, cache_group = nullptr)`: Compiles GLSL sources, links them, and registers the resulting pipeline in the context's cache under a `PipelineCacheKey{user_key, target_format, target_group}`. Producers call this lazily on first cache miss against the active path's attachment formats.
 * `create_compute_pipeline(compute_shader, key)` / `compile_compute_pipeline(source, key)`: Compute equivalents.
 
@@ -352,7 +353,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 | `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`, `VELK_FRAG_OUT(Name)`, `VELK_GBUFFER_OUT`, `velk_texture(id, uv)`, BVH / RT / mesh types and their accessors |
 | `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
-Modules can register additional includes via `IRenderContext::register_shader_include()`; the text plugin registers `velk_text.glsl` for glyph coverage sampling.
+Modules can register additional includes via `IRenderContext::shaders().register_include()`; the text plugin registers `velk_text.glsl` for glyph coverage sampling.
 
 With these includes, a complete UI vertex shader needs one declaration token and `main()`:
 
