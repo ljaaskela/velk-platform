@@ -6,6 +6,8 @@
 #include <velk/ext/core_object.h>
 #include <velk/interface/resource/intf_resource.h>
 
+#include <cstring>
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO    // we feed bytes directly, no FILE*
 #define STBI_NO_FAILURE_STRINGS
@@ -56,12 +58,14 @@ IResource::Ptr ImageDecoder::decode(const IResource::Ptr& inner) const
     }
 
     // Copy decoded RGBA8 pixels into a velk vector and free stb's buffer.
+    // Bulk copy: a per-byte loop here costs seconds across a large scene's
+    // texture set. stb's buffer cannot be adopted directly, so one memcpy is
+    // the floor. (resize still zero-fills first, so each byte is written
+    // twice; removing that needs an uninitialized resize on velk::vector.)
     size_t byte_count = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
     vector<uint8_t> pixels;
     pixels.resize(byte_count);
-    for (size_t i = 0; i < byte_count; ++i) {
-        pixels[i] = decoded[i];
-    }
+    std::memcpy(pixels.data(), decoded, byte_count);
     stbi_image_free(decoded);
 
     img->init(inner->uri(), w, h, PixelFormat::RGBA8_SRGB, std::move(pixels));

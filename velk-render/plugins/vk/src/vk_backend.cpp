@@ -1669,7 +1669,18 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
 
     std::memcpy(staging_info.pMappedData, pixels, data_size);
 
-    auto cb = begin_one_shot_commands();
+    // Inside a batch, record into the shared command buffer and keep the
+    // staging buffer alive until that batch is submitted. Outside one, this
+    // is the original submit-and-wait per upload.
+    ::VkCommandBuffer cb;
+    if (upload_batching_) {
+        if (upload_cb_ == VK_NULL_HANDLE) {
+            upload_cb_ = begin_one_shot_commands();
+        }
+        cb = upload_cb_;
+    } else {
+        cb = begin_one_shot_commands();
+    }
 
     const uint32_t mip_levels = vk_t->vk_mip_levels();
     const VkImage image = vk_t->vk_image();
@@ -1763,9 +1774,47 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
     }
 
-    end_one_shot_commands(cb);
+    if (upload_batching_) {
+        // Staging must stay mapped and alive until the batch is submitted.
+        pending_staging_.push_back(PendingStaging{staging, staging_alloc});
+        pending_staging_bytes_ += data_size;
+        if (pending_staging_bytes_ >= kUploadBatchBudget) {
+            flush_upload_batch();
+        }
+    } else {
+        end_one_shot_commands(cb);
+        vmaDestroyBuffer(allocator_, staging, staging_alloc);
+    }
+}
 
-    vmaDestroyBuffer(allocator_, staging, staging_alloc);
+void VkBackend::begin_upload_batch()
+{
+    if (upload_batching_) {
+        VELK_LOG(W, "VkBackend: begin_upload_batch while a batch is already open");
+        return;
+    }
+    upload_batching_ = true;
+}
+
+void VkBackend::end_upload_batch()
+{
+    flush_upload_batch();
+    upload_batching_ = false;
+}
+
+void VkBackend::flush_upload_batch()
+{
+    if (upload_cb_ != VK_NULL_HANDLE) {
+        // Blocks until the uploads complete, so the textures are ready for
+        // sampling and the staging buffers are safe to free.
+        end_one_shot_commands(upload_cb_);
+        upload_cb_ = VK_NULL_HANDLE;
+    }
+    for (auto& s : pending_staging_) {
+        vmaDestroyBuffer(allocator_, s.buffer, s.allocation);
+    }
+    pending_staging_.clear();
+    pending_staging_bytes_ = 0;
 }
 
 bool VkBackend::read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,

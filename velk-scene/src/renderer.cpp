@@ -510,9 +510,13 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             batch_builder_.rebuild_commands(element, render_ctx_);
         }
 
-        // Upload dirty GPU resources
+        // Upload dirty GPU resources. Bracketed as one batch so a scene load
+        // does not stall the GPU once per texture; the batch flushes itself
+        // when its staging budget fills, and end_upload_batch blocks until
+        // every upload has completed.
         bool resources_uploaded = false;
         if (has_changes) {
+            backend_->begin_upload_batch();
             for (auto& [elem, cache] : batch_builder_.element_cache()) {
                 for (auto& weak : cache.gpu_resources) {
                     auto buf_ptr = weak.lock();
@@ -583,6 +587,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                     }
                 }
             }
+            backend_->end_upload_batch();
         }
 
         if (has_visual_changes || resources_uploaded) {

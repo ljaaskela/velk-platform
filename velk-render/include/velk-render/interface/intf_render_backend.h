@@ -423,6 +423,27 @@ public:
     virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
 
     /**
+     * @brief Opens a texture upload batch.
+     *
+     * Uploads issued while a batch is open are recorded into shared command
+     * buffers and submitted in chunks, instead of one submit-and-wait per
+     * texture. Loading a scene's whole texture set otherwise stalls the GPU
+     * once per texture.
+     *
+     * Staging memory is bounded: the batch flushes itself whenever the
+     * pending staging bytes exceed an internal budget, so an arbitrarily
+     * large batch does not grow host memory without limit.
+     *
+     * Calls do not nest. `end_upload_batch` must be called to submit the
+     * remainder; it blocks until every upload in the batch has completed, so
+     * the textures are ready for sampling when it returns.
+     */
+    virtual void begin_upload_batch() = 0;
+
+    /** @brief Submits any pending uploads and closes the batch. */
+    virtual void end_upload_batch() = 0;
+
+    /**
      * @brief Reads back a texture's pixels from the GPU into host memory.
      *
      * Synchronous: allocates a host-readable staging buffer, submits a

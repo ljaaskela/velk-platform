@@ -52,6 +52,8 @@ public:
 
     IGpuTexture::Ptr create_texture(const TextureDesc& desc) override;
     void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) override;
+    void begin_upload_batch() override;
+    void end_upload_batch() override;
     bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
                       PixelFormat& out_format, uvec2& out_dims) override;
 
@@ -483,6 +485,30 @@ private:
     void end_one_shot_commands(::VkCommandBuffer cb);
     void transition_image_layout(::VkCommandBuffer cb, VkImage image, VkImageLayout old_layout,
                                  VkImageLayout new_layout, uint32_t mip_levels = 1);
+
+    /// Submits the open batch command buffer (if any), waits for it, and
+    /// releases the staging buffers it referenced. Safe to call with nothing
+    /// pending.
+    void flush_upload_batch();
+
+    /// A staging buffer that must outlive recording and stay alive until the
+    /// batch it belongs to has been submitted and completed.
+    struct PendingStaging
+    {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+    };
+
+    /// Open batch state. `upload_batching_` distinguishes "inside a batch"
+    /// from "one-shot upload", which still submits immediately.
+    bool upload_batching_ = false;
+    ::VkCommandBuffer upload_cb_ = VK_NULL_HANDLE;
+    vector<PendingStaging> pending_staging_;
+    size_t pending_staging_bytes_ = 0;
+
+    /// Staging budget before a batch flushes itself. Bounds host memory while
+    /// still collapsing a scene's texture set into a handful of submits.
+    static constexpr size_t kUploadBatchBudget = 256ull * 1024ull * 1024ull;
 };
 
 } // namespace velk::vk
