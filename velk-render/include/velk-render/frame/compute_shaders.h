@@ -113,8 +113,8 @@ layout(push_constant, scalar) uniform PC {
     uint irr_image_id;         // 88  visibility RATIO out (denoised downstream)
     uint unshadowed_image_id;  // 92  unshadowed diffuse out (sharp; composite multiplies)
     uint _pad1;                // 96  pads block to 112 (CPU struct is alignas(16))
-    uint _pad2;                // 100
-    uint _pad3;                // 104
+    uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
+    uint gi_probe_dims;        // 104 probe grid, 10 bits per axis
     uint _pad4;                // 108
 } pc;
 
@@ -538,6 +538,51 @@ vec3 velk_tonemap_aces(vec3 x)
     const float e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
+// Indirect diffuse from the GI probe field (G1, cascade 0). Reconstructs
+// irradiance from the probe's SH L1 against this surface's normal.
+//
+// Nearest probe, not trilinear: eight neighbours would be 32 texture fetches
+// per pixel, and the point of this first cut is to see whether the field is
+// right at all. It will look blocky, which is expected and is what
+// interpolation fixes later.
+vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
+{
+    if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(0.0);
+    uvec3 dims = uvec3(pc.gi_probe_dims & 1023u,
+                       (pc.gi_probe_dims >> 10) & 1023u,
+                       (pc.gi_probe_dims >> 20) & 1023u);
+    if (dims.x == 0u || dims.y == 0u || dims.z == 0u) return vec3(0.0);
+
+    // The same lattice over the BVH root the probe pass builds.
+    BvhNode groot = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
+    vec3 gmin = groot.aabb_min.xyz;
+    vec3 gext = max(groot.aabb_max.xyz - gmin, vec3(1e-6));
+    vec3 gt = clamp((world_pos - gmin) / gext, vec3(0.0), vec3(1.0));
+    uvec3 pi = uvec3(min(gt * vec3(dims), vec3(dims) - vec3(1.0)));
+
+    uint atlas_w = dims.x * dims.z;
+    uint atlas_h = dims.y * 4u;
+    vec3 sh[4];
+    for (int c = 0; c < 4; ++c) {
+        ivec2 texel = ivec2(int(pi.x + pi.z * dims.x), int(pi.y) + c * int(dims.y));
+        vec2 uv = (vec2(texel) + 0.5) / vec2(float(atlas_w), float(atlas_h));
+        sh[c] = velk_texture(pc.gi_probe_id, uv).rgb;
+    }
+
+    // Lambertian convolution of an L1 radiance SH: A0*Y00*L00 + A1*Y1m*L1m,
+    // with A0 = pi and A1 = 2pi/3 - then divided by pi.
+    //
+    // The 1/pi is a convention match, not physics. This renderer omits it
+    // everywhere: direct light is albedo * N.L * radiance rather than
+    // albedo * E / pi, and the env stand-in fed a raw radiance sample in as
+    // irradiance. True irradiance from a uniform sky of radiance R is pi*R, so
+    // returning E unscaled makes GI 3.14x brighter than everything it sits
+    // beside, which reads as a flat over-lit wash.
+    vec3 e = 0.282095 * sh[0]
+           + 0.325735 * (sh[1] * N.y + sh[2] * N.z + sh[3] * N.x);
+    return max(e, vec3(0.0));
+}
+
 )";
 
 // Deferred lighting main: full PBR + env IBL + stochastic single-light shadow.
@@ -1238,8 +1283,23 @@ void main()
         //
         // The env term is folded into the same ratio rather than kept beside
         // it, so the binary AO ray's aliasing is denoised too.
-        unshadowed_out = unshadowed_direct + env_diffuse;
-        vec3 shadowed_total = direct_diffuse + env_diffuse * ao;
+        // Indirect bounce from the probe field. It joins the UNSHADOWED term
+        // rather than the ratio: it is already a visibility-resolved gather
+        // (the probe rays did the occlusion), so multiplying it by the
+        // stochastic shadow ratio would darken it a second time.
+        vec3 gi = velk_gi_indirect(world_pos, N);
+        // The probe field REPLACES the env-diffuse stand-in rather than adding
+        // to it. `env_diffuse` is one raw radiance sample along N used as
+        // irradiance; the probes compute the same quantity properly, as a
+        // cosine-weighted gather that already includes sky visibility. Adding
+        // both counts the sky twice, which in a daylit scene washes everything
+        // flat - and the probe field supersedes the AO term too, since its
+        // occlusion is real rather than a single 0.3-unit ray.
+        bool has_gi = pc.gi_probe_id != 0u;
+        vec3 ambient_unshadowed = has_gi ? gi : env_diffuse;
+        vec3 ambient_shadowed   = has_gi ? gi : env_diffuse * ao;
+        unshadowed_out = unshadowed_direct + ambient_unshadowed;
+        vec3 shadowed_total = direct_diffuse + ambient_shadowed;
         irr = shadowed_total / max(unshadowed_out, vec3(1e-4));
         // Alpha marks "this pixel traced a ray this frame". The temporal pass
         // keeps history untouched where it is 0 rather than folding in a zero.
@@ -2086,6 +2146,10 @@ vec3 env_miss_color(vec3 rd) {
 // velk_eval_shadow, ggx_sample_half, rng_next_vec2 — all in scope at
 // that point.
 [[maybe_unused]] constexpr string_view rt_pbr_shade_src = R"(
+// Set to a light index to shade against that light alone (see the loop bounds
+// below); -1 shades against all of them. Per-invocation, like any GLSL global.
+int velk_single_light = -1;
+
 BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 {
     vec3 N = normalize(eval.normal);
@@ -2107,7 +2171,17 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // Lambertian diffuse term scaled by its distance / spot attenuation
     // and modulated by its shadow technique's visibility.
     vec3 direct = vec3(0.0);
-    for (uint li = 0u; li < pc.light_count; ++li) {
+    // Single-light mode. -1 (the default) shades against every light, which is
+    // what primary RT rays want. A GI probe sets one index and scales by the
+    // light count instead: probe hits accumulate over many frames, so one
+    // light per hit converges to the same answer while keeping the per-hit
+    // cost independent of how many lights the scene has. Shading every probe
+    // hit against all of them would be ~21 shadow rays per probe ray in
+    // bistro, which is what makes the obvious implementation unaffordable.
+    uint li_begin = (velk_single_light >= 0) ? uint(velk_single_light) : 0u;
+    uint li_end   = (velk_single_light >= 0) ? uint(velk_single_light) + 1u : pc.light_count;
+    float li_weight = (velk_single_light >= 0) ? float(pc.light_count) : 1.0;
+    for (uint li = li_begin; li < li_end; ++li) {
         Light light = velk_lights.data[pc.lights_base + li];
         vec3 L;
         float atten = 1.0;
@@ -2129,7 +2203,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
         if (NdotL <= 0.0 || atten <= 0.0) continue;
         float shadow = velk_eval_shadow(light.flags.y, li, ctx.hit_pos, N);
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
-        direct += base * (1.0 - metallic) * NdotL * radiance;
+        direct += base * (1.0 - metallic) * NdotL * radiance * li_weight;
     }
 
     // Diffuse term: crude "irradiance at the normal" via a single env
@@ -2319,6 +2393,167 @@ void main()
 
     imageStore(gStorageImages[nonuniformEXT(pc.extras.x)], coord,
                vec4(final * (1.0 / float(kPrimarySamples)), 1.0));
+}
+)";
+
+// G1: world-space GI probes, cascade 0. Composed with the RT body, so probe
+// hits get the same material evaluation primary rays do - real albedo and
+// emission rather than a vertex-tint approximation.
+//
+// One workgroup per probe, one thread per direction: the RT prelude fixes the
+// workgroup at 8x8 = 64, which is the direction count wanted here anyway. The
+// 64 results reduce in shared memory to 4 spherical-harmonic coefficients, so
+// a probe costs four texel writes per frame however many rays fed it.
+//
+// Cost is independent of light count by construction: each hit shades against
+// ONE uniformly chosen light (velk_single_light), scaled by the count, and the
+// temporal blend converges.
+[[maybe_unused]] constexpr string_view probe_gi_main_src = R"(
+shared vec3 s_sh[4][64];
+
+// Probe grid dimensions, packed 10 bits per axis.
+uvec3 velk_probe_dims()
+{
+    uint p = pc.env.z;
+    return uvec3(p & 1023u, (p >> 10) & 1023u, (p >> 20) & 1023u);
+}
+
+// Fibonacci sphere, rotated per frame so successive frames fill the gaps
+// between directions instead of resampling the same 64.
+vec3 velk_probe_dir(uint i, uint n, float phase)
+{
+    float k = float(i) + 0.5;
+    float phi = acos(1.0 - 2.0 * k / float(n));
+    float theta = 3.14159265 * (1.0 + sqrt(5.0)) * k + phase;
+    return vec3(cos(theta) * sin(phi), sin(theta) * sin(phi), cos(phi));
+}
+
+float velk_probe_hash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x) * (1.0 / 4294967296.0);
+}
+
+void main()
+{
+    // Cascade 0 shape: MANY probes with FEW directions each. The hierarchy
+    // exists so that near probes trace short rays at high spatial resolution
+    // and each level above trades 4x fewer probes for 4x more directions.
+    // 64 directions per probe would be DDGI, not a cascade, and costs 8x the
+    // rays for angular resolution the levels above are meant to supply.
+    //
+    // The RT prelude fixes the workgroup at 64 threads, so one group covers
+    // 8 probes x 8 directions, with eight independent reductions inside it.
+    const uint kDirs = 8u;
+    const uint kProbesPerGroup = 8u;
+
+    uvec3 dims = velk_probe_dims();
+    uint probe_count = dims.x * dims.y * dims.z;
+    uint lane = gl_LocalInvocationIndex;
+    uint probe_local = lane / kDirs;
+    uint dir = lane - probe_local * kDirs;
+    uint probe = gl_WorkGroupID.x * kProbesPerGroup + probe_local;
+    // No early return before the barriers: every thread must reach them.
+    // `probe_live` rather than `active`, which GLSL reserves.
+    bool probe_live = probe < probe_count && probe_count > 0u;
+
+    // Probe positions come from the BVH root's AABB, so the grid follows
+    // whatever scene is loaded with nothing plumbed from the CPU.
+    BvhNode root = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
+    vec3 bmin = root.aabb_min.xyz;
+    vec3 extent = root.aabb_max.xyz - bmin;
+    uvec3 pc3 = uvec3(0u);
+    vec3 origin = bmin;
+    if (probe_live) {
+        pc3 = uvec3(probe % dims.x, (probe / dims.x) % dims.y,
+                    probe / (dims.x * dims.y));
+        origin = bmin + extent * ((vec3(pc3) + 0.5) / vec3(dims));
+    }
+
+    // Rotating the direction set per frame matters far more with 8 directions
+    // than with 64: successive frames fill the gaps, and the temporal blend
+    // integrates them.
+    float phase = velk_probe_hash(VELK_GLOBALS.present_counter * 747796405u) * 6.28318531;
+    vec3 d = velk_probe_dir(dir, kDirs, phase);
+
+    vec3 radiance = vec3(0.0);
+    if (probe_live) {
+        Ray ray;
+        ray.origin = origin;
+        ray.dir = d;
+        RayHit hit;
+        if (trace_closest_hit(ray, hit)) {
+            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE + hit.shape_index];
+            EvalContext ectx;
+            ectx.material_base = s.material_base;
+            ectx.texture_id = s.texture_id;
+            ectx.shape_param = s.shape_param;
+            ectx.uv = hit.uv;
+            ectx.uv1 = hit.uv;
+            ectx.base = s.color;
+            ectx.ray_dir = ray.dir;
+            ectx.normal = hit.normal;
+            ectx.hit_pos = ray.origin + hit.t * ray.dir;
+            ectx.tangent = vec4(0.0);
+
+            // Full material evaluation. Measured FASTER than hand-rolled
+            // single-light shading (2.8 ms vs 3.5 ms at 256 probes), because
+            // materials that terminate early never trace a shadow ray at all,
+            // where the hand-rolled version traced one per hit unconditionally.
+            if (pc.light_count > 0u) {
+                uint pick = uint(velk_probe_hash(probe * 9781u + dir * 6271u
+                                 + VELK_GLOBALS.present_counter * 26699u)
+                                 * float(pc.light_count));
+                velk_single_light = int(min(pick, pc.light_count - 1u));
+            }
+            BrdfSample bs = velk_resolve_fill(s.material_id, ectx);
+            velk_single_light = -1;
+            radiance = bs.emission.rgb * clamp(bs.emission.a, 0.0, 1.0);
+        } else {
+            radiance = env_miss_color(d);
+        }
+    }
+
+    // Project into SH L1. 4*pi/N is the Monte Carlo weight for directions
+    // distributed uniformly over the sphere.
+    const float kY0 = 0.282095;
+    const float kY1 = 0.488603;
+    float w = 4.0 * 3.14159265 / float(kDirs);
+    s_sh[0][lane] = radiance * (kY0 * w);
+    s_sh[1][lane] = radiance * (kY1 * d.y * w);
+    s_sh[2][lane] = radiance * (kY1 * d.z * w);
+    s_sh[3][lane] = radiance * (kY1 * d.x * w);
+    barrier();
+
+    // Reduce within each probe's 8-lane block. The barrier stays outside the
+    // conditional so every thread reaches it.
+    for (uint stride = kDirs >> 1; stride > 0u; stride >>= 1) {
+        if (dir < stride) {
+            for (int c = 0; c < 4; ++c) s_sh[c][lane] += s_sh[c][lane + stride];
+        }
+        barrier();
+    }
+
+    if (dir != 0u || !probe_live) return;
+
+    // Atlas: x = px + pz * dims.x, y = py + coefficient * dims.y.
+    uint atlas_w = dims.x * dims.z;
+    uint atlas_h = dims.y * 4u;
+    for (int c = 0; c < 4; ++c) {
+        ivec2 texel = ivec2(int(pc3.x + pc3.z * dims.x), int(pc3.y) + c * int(dims.y));
+        vec2 uv = (vec2(texel) + 0.5) / vec2(float(atlas_w), float(atlas_h));
+        vec3 prev = velk_texture(pc.env.w, uv).rgb;
+        // Fixed blend rather than a running count: probes re-converge cheaply
+        // and a fixed rate stops moving lights smearing indefinitely.
+        float blend = (VELK_GLOBALS.present_counter == 0u) ? 1.0 : 0.05;
+        // RGBA32F, not F16: the RT prelude declares the f32 storage array, and
+        // the atlas is small enough that the extra precision is free.
+        // s_sh[c][lane] is this probe's block total, lane being its dir-0 slot.
+        imageStore(gStorageImagesF32[nonuniformEXT(pc.env.w)], texel,
+                   vec4(mix(prev, s_sh[c][lane], blend), 1.0));
+    }
 }
 )";
 

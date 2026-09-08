@@ -170,6 +170,13 @@ public:
         /// target it draws into is recreated.
         IRenderPass::Ptr cached_transparent_pass;
         bool transparent_dirty = true;
+
+        /// G1: world-space GI probe atlas (cascade 0). SH L1 per probe, laid
+        /// out x = px + pz * dims.x, y = py + coefficient * dims.y. Read back
+        /// by the probe pass for its temporal blend, so it persists across
+        /// frames rather than being transient.
+        IRenderTarget::Ptr gi_probes;
+        IRenderPass::Ptr cached_probe_pass;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -199,6 +206,12 @@ private:
     /// Resolves the diffuse-irradiance temporal-accumulate pipeline
     /// (standalone compute). Strong Ptr; the temporal pass holds it.
     IGpuPipeline::Ptr ensure_denoise_pipeline(FrameContext& ctx);
+
+    /// G1: world-space GI probe pass. Composed with the RT body so probe hits
+    /// get real material evaluation.
+    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx);
+    void emit_probe_pass(ViewState& vs, const RenderView& render_view,
+                         FrameContext& ctx, IRenderGraph& graph);
 
     /// Resolves the spatial filter + composite pipeline (standalone compute).
     /// Strong Ptr; the spatial pass holds it.

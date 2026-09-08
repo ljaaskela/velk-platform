@@ -196,8 +196,8 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t irr_image_id;     // visibility RATIO output (denoised downstream)
     uint32_t unshadowed_image_id; // unshadowed diffuse output (sharp)
     uint32_t _pad1;            // pads to 112 (VELK_GPU_STRUCT is alignas(16))
-    uint32_t _pad2;
-    uint32_t _pad3;
+    uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
+    uint32_t gi_probe_dims;    // probe grid, 10 bits per axis
     uint32_t _pad4;
 };
 static_assert(sizeof(DeferredComputePushC) == 112, "Deferred compute PushC layout mismatch");
@@ -357,6 +357,127 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
                                              with_area_lights);
 }
 
+namespace {
+
+// G1 cascade 0: 6912 probes x 8 directions = 55k rays.
+//
+// Sizing history, so the numbers are not re-derived: 256 probes x 64 dirs
+// measured 2.8 ms (171 ns/ray), but 16k threads does not saturate the GPU, so
+// that was launch latency. 6912 x 64 = 442k rays measured 10.6 ms (24 ns/ray),
+// which is the honest per-ray cost - about 19 ns of shading on top of G0's
+// ~5 ns of tracing. 442k rays is over budget, and the fix is the cascade
+// shape rather than cheaper shading: cascade 0 wants MANY probes with FEW
+// directions, with each level above trading 4x fewer probes for 4x more
+// directions. Four such levels land around 221k rays total.
+constexpr uint32_t kProbeDimX = 24;
+constexpr uint32_t kProbeDimY = 12;
+constexpr uint32_t kProbeDimZ = 24;
+
+// CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
+VELK_GPU_STRUCT ProbePushC {
+    uint32_t shapes_base;
+    uint32_t globals_base;
+    uint32_t light_count;
+    uint32_t lights_base;
+    float    env_params[2];
+    uint32_t extras[4];
+    uint32_t env[4];           // x = env material, y = env texture,
+                               // z = packed grid dims, w = probe atlas image
+};
+
+} // namespace
+
+IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
+{
+    if (!ctx.render_ctx || !ctx.snippets) return {};
+
+    // Keyed like the RT pipeline (the composed snippet set decides the source)
+    // plus a tag, since it shares that body under a different main.
+    constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
+    constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
+    uint64_t key = kFnvBasis ^ 0x4749'50726f626573ULL;
+    for (auto id : ctx.snippets->frame_materials()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    for (auto id : ctx.snippets->frame_shadow_techs()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    for (auto id : ctx.snippets->frame_intersects()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    key |= 0x2000000000000000ULL;
+
+    if (auto p = ctx.render_ctx->pipelines().find(
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
+        return p;
+    }
+    string src = compose_rt_compute(*ctx.snippets, probe_gi_main_src);
+    return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
+}
+
+void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
+                                   FrameContext& ctx, IRenderGraph& graph)
+{
+    const int atlas_w = static_cast<int>(kProbeDimX * kProbeDimZ);
+    const int atlas_h = static_cast<int>(kProbeDimY * 4u);  // 4 SH coefficients
+
+    if (!vs.gi_probes) {
+        TextureDesc td{};
+        td.width = atlas_w;
+        td.height = atlas_h;
+        td.format = PixelFormat::RGBA32F;
+        td.usage = TextureUsage::Storage;
+        // Clamped + linear: the lighting pass will interpolate between probes.
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        vs.gi_probes = graph.resources().create_render_texture(td);
+    }
+    if (!vs.gi_probes) return;
+
+    auto pipeline = ensure_probe_pipeline(ctx);
+    if (!pipeline) return;
+
+    ProbePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.lights_base = render_view.lights_base;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
+    pc.env[0] = render_view.env.material_id;
+    pc.env[1] = render_view.env.texture_id;
+    pc.env[2] = kProbeDimX | (kProbeDimY << 10) | (kProbeDimZ << 20);
+    pc.env[3] =
+        static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
+
+    bool dirty = true;
+    emit_cached_view_pass(
+        vs.cached_probe_pass, dirty, "gi.probes", graph,
+        [&](CachedPassRecording& rec) {
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            // 64-thread groups covering 8 probes x 8 directions each.
+            dc.groups_x = (kProbeDimX * kProbeDimY * kProbeDimZ) / 8u;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+            if (auto cmd = ctx.backend->create_command_buffer()) {
+                cmd->begin_recording();
+                cmd->push_label("GI: probe update");
+                cmd->record_dispatch(dc);
+                cmd->pop_label();
+                cmd->end_recording();
+                rec.cmd = std::move(cmd);
+            }
+            // Read AND written: the temporal blend samples last frame's value.
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+            rec.held.push_back(std::move(pipeline));
+        });
+}
+
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)
 {
     if (ltc_matrix_ && ltc_magnitude_) return true;
@@ -492,6 +613,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    // GI probes update before lighting, so lighting reads a field built from
+    // this frame's geometry.
+    emit_probe_pass(vs, render_view, ctx, graph);
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
@@ -697,6 +821,11 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
     pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
+    if (vs.gi_probes) {
+        pc.gi_probe_id =
+            static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
+        pc.gi_probe_dims = kProbeDimX | (kProbeDimY << 10) | (kProbeDimZ << 20);
+    }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
 
