@@ -14,6 +14,7 @@
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/frame/raster_shaders.h>
 #include "path/deferred_gbuffer.h"
+#include "path/ltc_table.h"
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shader_source.h>
@@ -187,9 +188,9 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t light_count;
     uint32_t env_texture_id;
     uint32_t shadow_debug_image_id;
-    uint32_t _pad0;            // filler; keeps the block layout at 96 bytes
+    uint32_t ltc_matrix_id;    // LTC transform table; 0 = area specular off
     uint32_t lights_base;      // light array index (set = 1 slot 5)
-    uint32_t _pad_lights;
+    uint32_t ltc_magnitude_id; // LTC energy / Fresnel table
     float    env_params[2];    // x = intensity, y = rotation_rad (inline)
     uint32_t irr_image_id;     // demodulated diffuse irradiance output
     uint32_t _pad1;            // pads to 96 (VELK_GPU_STRUCT is alignas(16))
@@ -337,6 +338,55 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull);
+}
+
+bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)
+{
+    if (ltc_matrix_ && ltc_magnitude_) return true;
+    if (ltc_upload_failed_ || !ctx.backend) return false;
+
+    TextureDesc td;
+    td.width = ltc::kLtcSize;
+    td.height = ltc::kLtcSize;
+    td.format = PixelFormat::RGBA32F;
+    td.usage = TextureUsage::Sampled;
+    // Clamp: the fit is defined only on [0,1]^2, and wrapping would fold
+    // grazing angles back onto head-on ones. Linear between texel centres,
+    // which is what the generator's (i + 0.5) / N sampling assumes.
+    td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+    td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+    td.sampler.wrap_r = SamplerAddressMode::ClampToEdge;
+    td.sampler.mag_filter = SamplerFilter::Linear;
+    td.sampler.min_filter = SamplerFilter::Linear;
+    td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+
+    auto upload = [&](const float* src, int channels) -> IRenderTarget::Ptr {
+        auto rt = graph.resources().create_render_texture(td);
+        if (!rt) return {};
+        auto* gt = graph.resources().find_texture(rt.get());
+        if (!gt) return {};
+        // The tables are 4- and 2-channel; the texture is RGBA32F either way,
+        // so the 2-channel one is widened here rather than burning a second
+        // format on it.
+        vector<float> rgba(static_cast<size_t>(ltc::kLtcSize) * ltc::kLtcSize * 4, 0.f);
+        for (size_t i = 0; i < static_cast<size_t>(ltc::kLtcSize) * ltc::kLtcSize; ++i) {
+            for (int c = 0; c < channels; ++c) rgba[i * 4 + c] = src[i * channels + c];
+        }
+        ctx.backend->upload_texture(*gt, reinterpret_cast<const uint8_t*>(rgba.data()),
+                                    ltc::kLtcSize, ltc::kLtcSize);
+        return rt;
+    };
+
+    ltc_matrix_ = upload(ltc::kLtcMatrix, 4);
+    ltc_magnitude_ = upload(ltc::kLtcMagnitude, 2);
+    if (!ltc_matrix_ || !ltc_magnitude_) {
+        ltc_matrix_ = {};
+        ltc_magnitude_ = {};
+        ltc_upload_failed_ = true;  // do not retry every frame
+        VELK_LOG(W, "deferred: LTC table upload failed; area lights stay diffuse-only");
+        return false;
+    }
+    return true;
 }
 
 IGpuPipeline::Ptr DeferredPath::ensure_denoise_pipeline(FrameContext& ctx)
@@ -603,6 +653,11 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.env_texture_id = render_view.env.texture_id;
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
+    // Zero means "no table", which the shader reads as diffuse-only area
+    // lights rather than as a black highlight.
+    const bool ltc_ready = ensure_ltc_tables(ctx, graph);
+    pc.ltc_matrix_id = ltc_ready ? get_texture_id(ltc_matrix_) : 0u;
+    pc.ltc_magnitude_id = ltc_ready ? get_texture_id(ltc_magnitude_) : 0u;
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;

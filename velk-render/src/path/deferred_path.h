@@ -165,6 +165,21 @@ public:
 private:
     std::unordered_map<IViewEntry*, ViewState> view_states_;
 
+    /// LTC lookup for analytic area-light specular (Heitz et al. 2016). The
+    /// fit depends only on roughness and view angle, never on the scene, so
+    /// one pair of tables is created on first use and shared by every view.
+    /// Generated offline by `design-notes/spike_ltc/ltc_fit.cpp` into
+    /// `ltc_table.h`; nothing is fitted at runtime.
+    ///   ltc_matrix: the transform, as (m00, m02, m11, m20) with m22 == 1.
+    ///   ltc_magnitude: (lobe energy, Fresnel weight) for the split-sum term.
+    IRenderTarget::Ptr ltc_matrix_;
+    IRenderTarget::Ptr ltc_magnitude_;
+    bool ltc_upload_failed_ = false;
+
+    /// Creates and uploads the LTC tables once. Returns false if they are
+    /// unavailable, in which case area lights fall back to diffuse only.
+    bool ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph);
+
     /// Resolves the deferred-lighting compute pipeline for the active
     /// snippet set, compiling on a (weak) cache miss. Returns a strong Ptr
     /// the caller must keep alive (the lighting pass holds it).

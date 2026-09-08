@@ -106,9 +106,9 @@ layout(push_constant, scalar) uniform PC {
     uint light_count;          // 56
     uint env_texture_id;       // 60
     uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
-    uint _pad0;                // 68  filler; keeps the block layout at 96 bytes
+    uint ltc_matrix_id;        // 68  LTC transform table; 0 = area specular off
     uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
-    uint _pad_lights;          // 76
+    uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
     vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
     uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
     uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
@@ -661,9 +661,72 @@ float velk_occ_form_factor(vec3 op[kOccPolyMax], int n,
     return abs(velk_form_factor(op, n).z);
 }
 
-// Irradiance from a square area light at `world_pos` with normal `N`, with
-// scene geometry subtracted analytically. Rects, boxes and spheres block;
-// triangle meshes do not, having no silhouette cheap enough to clip yet.
+)"
+                                                                      R"(
+// Inverse of the LTC transform for (roughness, N.V), from the fitted table.
+// The table stores M as (m00, m02, m11, m20) with m22 == 1, and M has no
+// coupling between y and the xz plane, so the inverse is closed-form rather
+// than a general 3x3 solve. Returned unnormalised: the polygon integral
+// normalises its vertices as directions, so any uniform scale on M cancels.
+mat3 velk_ltc_minv(float roughness, float ndotv)
+{
+    // Table axes match the generator: x = roughness, y = sqrt(1 - N.V), which
+    // spends resolution near grazing where the lobe changes fastest.
+    vec2 uv = vec2(clamp(roughness, 0.0, 1.0), sqrt(clamp(1.0 - ndotv, 0.0, 1.0)));
+    vec4 t = velk_texture(pc.ltc_matrix_id, uv);
+    float a = t.x, b = t.y, c = t.z, d = t.w;
+    float k = a - b * d;
+    if (abs(k) < 1e-6) k = (k < 0.0) ? -1e-6 : 1e-6;
+    // Columns, GLSL-style: mat3(col0, col1, col2).
+    return mat3(vec3(1.0, 0.0, -d),
+                vec3(0.0, k / max(c, 1e-6), 0.0),
+                vec3(-b, 0.0, a));
+}
+
+// One occluder polygon's contribution to BOTH terms, from a single clip of the
+// shared spatial rejection. `op` holds its corners in the shading frame.
+//
+// Diffuse and specular differ only by the transform applied before the
+// integral, so the traversal, the corner construction and the "is it even
+// between the point and the light" tests are done once. The spatial tests must
+// happen in the ORIGINAL space (they are about position, not lobe shape); the
+// transform is applied only to the surviving region.
+void velk_occ_accum(vec3 op[kOccPolyMax], int n,
+                    vec3 lc, vec3 lnf, vec3 lp[kOccPolyMax], int ln_count,
+                    mat3 minv, vec3 lps[kOccPolyMax], int ls_count,
+                    inout float f_occ, inout float s_occ)
+{
+    n = velk_clip_half(op, n, vec3(0.0, 0.0, 1.0));
+    if (n < 3) return;
+    n = velk_clip_at(op, n, lc, lnf);
+    if (n < 3) return;
+
+    vec3 od[kOccPolyMax];
+    for (int i = 0; i < n; ++i) od[i] = op[i];
+    int nd = velk_clip_by_poly(od, n, lp, ln_count);
+    if (nd >= 3) f_occ += abs(velk_form_factor(od, nd).z);
+
+    if (ls_count >= 3) {
+        vec3 os[kOccPolyMax];
+        for (int i = 0; i < n; ++i) os[i] = minv * op[i];
+        int ns = velk_clip_half(os, n, vec3(0.0, 0.0, 1.0));
+        if (ns >= 3) {
+            ns = velk_clip_by_poly(os, ns, lps, ls_count);
+            if (ns >= 3) s_occ += abs(velk_form_factor(os, ns).z);
+        }
+    }
+}
+
+// Diffuse irradiance (.x) and the LTC specular integral (.y) from a square area
+// light at `world_pos`, with scene geometry subtracted analytically from BOTH.
+// Rects, boxes and spheres block; triangle meshes do not, having no silhouette
+// cheap enough to clip yet.
+//
+// The specular shadow is analytic here rather than a stochastically estimated
+// shadowed/unshadowed ratio: the LTC transform maps the GGX lobe onto a clamped
+// cosine, so the identical polygon subtraction applies to transformed vertices.
+// That keeps specular noise-free too, and costs one extra clip per occluder
+// rather than a second traversal.
 //
 // C2a scope: each occluder's overlap with the light is subtracted
 // independently. That is exact for a single blocker and for blockers that do
@@ -671,11 +734,16 @@ float velk_occ_form_factor(vec3 op[kOccPolyMax], int n,
 // region is subtracted twice. Front-to-back convex subtraction (which keeps
 // the visible region as disjoint pieces and is what the Step A harness
 // validated) is C2b.
-float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
+vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float roughness)
 {
-    // Shading frame with N as +Z.
-    vec3 nt = (abs(N.y) < 0.9) ? normalize(cross(vec3(0.0, 1.0, 0.0), N))
-                               : normalize(cross(vec3(1.0, 0.0, 0.0), N));
+    // Shading frame with N as +Z and the view in the +XZ half-plane. The
+    // diffuse integral only reads .z so it does not care about the rotation
+    // about N, while LTC requires exactly this frame - so one frame serves
+    // both and every polygon is built once.
+    vec3 nt = V - N * dot(V, N);
+    nt = (dot(nt, nt) > 1e-12) ? normalize(nt)
+                              : ((abs(N.y) < 0.9) ? normalize(cross(vec3(0.0, 1.0, 0.0), N))
+                                                  : normalize(cross(vec3(1.0, 0.0, 0.0), N)));
     vec3 nb = cross(N, nt);
 
     vec3 ln = normalize(light.direction.xyz);
@@ -709,11 +777,33 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
     for (int i = 0; i < 4; ++i) {
         lp[i] = vec3(dot(lw[i], nt), dot(lw[i], nb), dot(lw[i], N));
     }
+    // Unclipped corners are kept: the specular polygon is transformed from
+    // these and clipped in ITS own space, since the horizon that matters there
+    // is the transformed one.
+    vec3 lraw[4];
+    for (int i = 0; i < 4; ++i) {
+        lraw[i] = vec3(dot(lw[i], nt), dot(lw[i], nb), dot(lw[i], N));
+        lp[i] = lraw[i];
+    }
     int ln_count = velk_clip_half(lp, 4, vec3(0.0, 0.0, 1.0));
-    if (ln_count < 3) return 0.0;
+    if (ln_count < 3) return vec2(0.0);
 
     vec3 f_total = velk_form_factor(lp, ln_count);
     float f_max = abs(f_total.z);
+
+    // Specular: the same emitter through the LTC transform. A zero table id
+    // means the fit is unavailable, and the light stays diffuse-only rather
+    // than losing its highlight to a black or garbage lookup.
+    mat3 minv = mat3(1.0);
+    vec3 lps[kOccPolyMax];
+    int ls_count = 0;
+    float s_max = 0.0;
+    if (pc.ltc_matrix_id != 0u) {
+        minv = velk_ltc_minv(roughness, clamp(dot(N, V), 0.0, 1.0));
+        for (int i = 0; i < 4; ++i) lps[i] = minv * lraw[i];
+        ls_count = velk_clip_half(lps, 4, vec3(0.0, 0.0, 1.0));
+        if (ls_count >= 3) s_max = abs(velk_form_factor(lps, ls_count).z);
+    }
 
     // Light plane in the shading frame, with its normal oriented so the
     // shading point tests positive. Occluders are then kept on that same
@@ -744,13 +834,16 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
     }
 
     float f_occ = 0.0;
+    float s_occ = 0.0;
     if (VELK_GLOBALS.bvh_node_count > 0u) {
         uint stack[32];
         int sp = 0;
         stack[sp++] = VELK_GLOBALS.bvh_root;
         // Stops early once the light is fully blocked: nothing further can
         // change the result, and this is the common case deep in a shadow.
-        while (sp > 0 && f_occ < f_max) {
+        // BOTH terms have to be saturated, since the specular lobe can still
+        // see a sliver of emitter after the diffuse hemisphere is covered.
+        while (sp > 0 && (f_occ < f_max || s_occ < s_max)) {
             uint ni = stack[--sp];
             BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
 
@@ -806,7 +899,8 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
                         for (int k = 0; k < 4; ++k) {
                             op[k] = vec3(dot(fw[k], nt), dot(fw[k], nb), dot(fw[k], N));
                         }
-                        f_occ += velk_occ_form_factor(op, 4, lc, lnf, lp, ln_count);
+                        velk_occ_accum(op, 4, lc, lnf, lp, ln_count,
+                                       minv, lps, ls_count, f_occ, s_occ);
                     }
                 } else if (s.shape_kind == 2u) {
                     // Sphere. Its silhouette is a cone, approximated by a
@@ -835,7 +929,8 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
                         vec3 pw = dv * sd;
                         op[k] = vec3(dot(pw, nt), dot(pw, nb), dot(pw, N));
                     }
-                    f_occ += velk_occ_form_factor(op, 8, lc, lnf, lp, ln_count);
+                    velk_occ_accum(op, 8, lc, lnf, lp, ln_count,
+                                   minv, lps, ls_count, f_occ, s_occ);
                 } else {
                     // Rect. Every shape emitted from a draw entry is one,
                     // spanned by origin + u_axis + v_axis, whether or not its
@@ -851,7 +946,8 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
                     for (int k = 0; k < 4; ++k) {
                         op[k] = vec3(dot(ow[k], nt), dot(ow[k], nb), dot(ow[k], N));
                     }
-                    f_occ += velk_occ_form_factor(op, 4, lc, lnf, lp, ln_count);
+                    velk_occ_accum(op, 4, lc, lnf, lp, ln_count,
+                                   minv, lps, ls_count, f_occ, s_occ);
                 }
             }
 
@@ -862,7 +958,8 @@ float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
     }
 
     float e = (f_max - f_occ) / (2.0 * 3.14159265);
-    return max(e, 0.0);
+    float s = (s_max - s_occ) / (2.0 * 3.14159265);
+    return vec2(max(e, 0.0), max(s, 0.0));
 }
 )";
 
@@ -944,19 +1041,31 @@ void main()
         // Analytic area lights, accumulated outside the reservoir. Their
         // diffuse term is exact and noise-free, so they neither need a shadow
         // ray nor belong in the stochastic estimator.
-        // Slice C1: unshadowed only. Occluder subtraction is C2, specular is
-        // deferred until the diffuse term is confirmed.
+        // Both terms are analytic, including their shadows, so neither is
+        // denoised: the diffuse half is demodulated into `rest` below and the
+        // specular half joins the other sharp specular sources.
         vec3 area_irr = vec3(0.0);
+        vec3 area_spec = vec3(0.0);
 
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_lights.data[pc.lights_base + i];
             if (light.flags.x == 3u) {
-                float e = velk_area_irradiance(light, world_pos, N);
-                if (e > 0.0) {
+                vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
+                vec3 radiance = light.color_intensity.rgb * light.color_intensity.a;
+                if (es.x > 0.0) {
                     // pi converts clamped-cosine units to the same scale as a
                     // delta light's N.L, so authored intensities stay comparable.
-                    area_irr += light.color_intensity.rgb * light.color_intensity.a
-                                * e * 3.14159265;
+                    area_irr += radiance * es.x * 3.14159265;
+                }
+                if (es.y > 0.0 && pc.ltc_magnitude_id != 0u) {
+                    // Split-sum: the fitted pair is (lobe energy, Fresnel
+                    // weight), applied the same way the env specular applies
+                    // its BRDF LUT, so both specular sources stay on one scale.
+                    vec2 t2 = velk_texture(pc.ltc_magnitude_id,
+                                           vec2(clamp(roughness, 0.0, 1.0),
+                                                sqrt(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0)))).xy;
+                    area_spec += radiance * es.y * (F0 * t2.x + (1.0 - F0) * t2.y)
+                                 * 3.14159265;
                 }
                 continue;
             }
@@ -1012,7 +1121,6 @@ void main()
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
         }
-        direct_diffuse += area_irr;
 
         // Env lighting: single-sample approximation. Diffuse reads
         // along N with a deep LOD so it reads roughly the irradiance
@@ -1076,6 +1184,14 @@ void main()
         irr = direct_diffuse + env_diffuse * ao;
         // Sharp, view-dependent terms (NOT denoised).
         rest = direct_specular + F_env * env_specular;
+        // Area lights are integrated in closed form, including their
+        // visibility, so their diffuse term carries no noise and must not be
+        // denoised: blurring it would throw away the sharp penumbra the
+        // analytic path exists to produce. It goes to the sharp output
+        // instead, carrying the albedo * (1 - metallic) factor that composite
+        // would otherwise have applied on its way out of the irradiance
+        // image, so the result is identical bar the blur.
+        rest += albedo.rgb * (1.0 - metallic) * area_irr + area_spec;
     }
 
     // Emissive is additive radiance; part of the sharp output.
