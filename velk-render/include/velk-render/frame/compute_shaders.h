@@ -967,6 +967,19 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 }
 )";
 
+// Stands in for the analytic area-light path in views that have no area
+// lights. The lighting main still calls velk_area_irradiance, but a constant
+// zero folds away completely, leaving none of the polygon machinery's register
+// footprint behind. Compiling the real thing everywhere cost bistro, which has
+// no area lights at all, roughly 3x on deferred.lighting: the code never ran,
+// but the registers its arrays reserve are charged to every branch.
+[[maybe_unused]] constexpr string_view deferred_area_light_stub_src = R"(
+vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float roughness)
+{
+    return vec2(0.0);
+}
+)";
+
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 void main()
 {
@@ -1017,6 +1030,7 @@ void main()
     // ratio rather than radiance. Zero for unlit pixels, which zeroes the
     // product at composite regardless of what the ratio filtered to.
     vec3 unshadowed_out = vec3(0.0);
+    float irr_valid = 1.0;
     if (lighting_mode == 0u) {
         // Unlit: emit albedo as-is (no diffuse irradiance).
         rest = albedo.rgb;
@@ -1128,8 +1142,19 @@ void main()
 
         // Shadowed diffuse IRRADIANCE estimate from the single chosen light
         // (one ray), demodulated (no albedo - reapplied at composite).
+        // EXPERIMENT (workstream I): half the shadow rays. Viable only because
+        // the denoiser now carries a bounded VISIBILITY ratio - a pixel that
+        // misses its turn keeps a valid value from history, where before it
+        // would have kept stale radiance. The analytic unshadowed term is
+        // still computed for EVERY pixel every frame, so light falloff, N.L
+        // and any moving light stay full-rate; only visibility is halved.
+        // Checkerboard by frame parity: every pixel updates every 2nd frame.
+        const bool kHalfRateShadows = true;
+        bool trace_now = !kHalfRateShadows
+                      || (((coord.x + coord.y + int(VELK_GLOBALS.present_counter)) & 1) == 0);
+
         vec3 direct_diffuse = vec3(0.0);
-        if (res_light != 0xffffffffu && res_w > 0.0) {
+        if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_lights.data[pc.lights_base + res_light];
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             float pdf = res_w / total_w;
@@ -1173,7 +1198,7 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         float ao = 1.0;
-        if (VELK_GLOBALS.bvh_node_count != 0u) {
+        if (trace_now && VELK_GLOBALS.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
             ao_r.origin = world_pos + N * 0.01;
@@ -1207,6 +1232,9 @@ void main()
         unshadowed_out = unshadowed_direct + env_diffuse;
         vec3 shadowed_total = direct_diffuse + env_diffuse * ao;
         irr = shadowed_total / max(unshadowed_out, vec3(1e-4));
+        // Alpha marks "this pixel traced a ray this frame". The temporal pass
+        // keeps history untouched where it is 0 rather than folding in a zero.
+        irr_valid = trace_now ? 1.0 : 0.0;
         // Sharp, view-dependent terms (NOT denoised).
         rest = direct_specular + F_env * env_specular;
         // Area lights are integrated in closed form, including their
@@ -1226,7 +1254,7 @@ void main()
     // irradiance on irr_image_id. The denoise/composite pass reprojects +
     // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, 1.0));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
     // The unshadowed term the composite multiplies the denoised ratio by. Kept
     // out of the denoiser deliberately: it is exact and sharp, and it carries
     // the high-frequency detail (light falloff, N.L) that must not be blurred.
@@ -1285,14 +1313,20 @@ void main()
     }
 
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-    vec3 cur_irr   = velk_texture(pc.irr_id, uv).rgb;
+    vec4 cur_s     = velk_texture(pc.irr_id, uv);
+    vec3 cur_irr   = cur_s.rgb;
+    // Alpha 0 means the lighting pass skipped this pixel's ray this frame
+    // (half-rate shadows). There is nothing to fold in, and folding in the
+    // zero would darken it, so history passes through untouched and the
+    // sample count does not advance.
+    bool has_sample = cur_s.a > 0.5;
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
     float cur_lum  = dot(cur_irr, LUMA);
 
     // Temporal reprojection: where was this world point last frame?
-    vec3 irr_acc = cur_irr;
-    float count = 1.0;
-    float m2_acc = cur_lum * cur_lum; // accumulated 2nd moment of luminance
+    vec3 irr_acc = has_sample ? cur_irr : vec3(0.0);
+    float count = has_sample ? 1.0 : 0.0;
+    float m2_acc = has_sample ? cur_lum * cur_lum : 0.0;
     if (pc.reset == 0u) {
         vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(world_pos, 1.0);
         if (prev_clip.w > 1e-6) {
@@ -1303,14 +1337,20 @@ void main()
                 vec4 hi = velk_texture(pc.hist_irr_prev_id, prev_uv);
                 // Same surface? World-space distance, tolerance scaled by depth.
                 if (hp.w > 0.5 && length(hp.xyz - world_pos) < 0.03 * max(prev_clip.w, 1.0)) {
-                    // Fixed accumulation window. Shorter = shorter dynamic-
-                    // occluder trail, slightly noisier static; the spatial pass'
-                    // variance-guided filter cleans the residual. Tunable.
-                    count = min(hi.a + 1.0, 20.0);
-                    float w = 1.0 / count;
-                    irr_acc = mix(hi.rgb, cur_irr, w);
                     float m2_prev = velk_texture(pc.hist_mom_prev_id, prev_uv).r;
-                    m2_acc = mix(m2_prev, cur_lum * cur_lum, w);
+                    if (has_sample) {
+                        // Fixed accumulation window. Shorter = shorter dynamic-
+                        // occluder trail, slightly noisier static; the spatial pass'
+                        // variance-guided filter cleans the residual. Tunable.
+                        count = min(hi.a + 1.0, 20.0);
+                        float w = 1.0 / count;
+                        irr_acc = mix(hi.rgb, cur_irr, w);
+                        m2_acc = mix(m2_prev, cur_lum * cur_lum, w);
+                    } else {
+                        irr_acc = hi.rgb;
+                        count = hi.a;
+                        m2_acc = m2_prev;
+                    }
                 }
             }
         }

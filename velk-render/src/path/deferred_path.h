@@ -158,6 +158,10 @@ public:
         /// change) or by gbuffer / output_size recreation.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
+        /// Which lighting-shader variant this view last used. The analytic
+        /// area-light path is compiled in only when the view has an area
+        /// light, so a change here swaps the pipeline.
+        bool had_area_light = false;
 
         /// Cached transparent (blended) forward pass: draws BLEND-mode batches
         /// over the lit composite, depth-testing the retained gbuffer depth
@@ -190,7 +194,7 @@ private:
     /// Resolves the deferred-lighting compute pipeline for the active
     /// snippet set, compiling on a (weak) cache miss. Returns a strong Ptr
     /// the caller must keep alive (the lighting pass holds it).
-    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx);
+    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights);
 
     /// Resolves the diffuse-irradiance temporal-accumulate pipeline
     /// (standalone compute). Strong Ptr; the temporal pass holds it.

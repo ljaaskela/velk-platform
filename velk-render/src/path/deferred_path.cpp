@@ -16,6 +16,7 @@
 #include "path/deferred_gbuffer.h"
 #include "path/ltc_table.h"
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_light.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/interface/material/intf_material.h>
@@ -246,7 +247,8 @@ VELK_GPU_STRUCT SpatialPushC {
 // (the tag keeps their weak-cache entries distinct).
 IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
-                                                    uint64_t variant_tag)
+                                                    uint64_t variant_tag,
+                                                    bool with_area_lights = false)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -268,6 +270,9 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     for (auto id : shadow_tech_ids) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
+    // Distinct variants: the two differ in source, so they must not share a
+    // cache entry.
+    key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key |= 0x4000000000000000ULL;
 
     // The weak pipeline cache is the source of truth: if the pipeline for
@@ -280,7 +285,12 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 
     string src;
     src += deferred_compute_prelude_src;
-    src += deferred_area_light_src;
+    // The analytic area-light path is compiled in only for views that have an
+    // area light. It never executes elsewhere, but its polygon arrays claim
+    // registers in every branch the compiler must allocate for, and the lost
+    // occupancy is paid by the whole pass: including it unconditionally cost
+    // bistro (which has no area lights) roughly 3x on deferred.lighting.
+    src += with_area_lights ? deferred_area_light_src : deferred_area_light_stub_src;
     src += main_src;
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
@@ -341,9 +351,10 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights)
 {
-    return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull);
+    return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
+                                             with_area_lights);
 }
 
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)
@@ -632,7 +643,21 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     vs.output_size = want;
 
-    auto lighting_pipeline = ensure_pipeline(ctx);
+    // Which shader variant this view needs. Changing it changes the pipeline,
+    // so the cached pass has to be re-recorded.
+    bool has_area_light = false;
+    for (const auto& l : render_view.lights) {
+        if (l.flags[0] == static_cast<uint32_t>(LightType::Area)) {
+            has_area_light = true;
+            break;
+        }
+    }
+    if (has_area_light != vs.had_area_light) {
+        vs.had_area_light = has_area_light;
+        vs.lighting_dirty = true;
+    }
+
+    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light);
     if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
