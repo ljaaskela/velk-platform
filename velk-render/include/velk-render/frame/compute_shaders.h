@@ -110,8 +110,12 @@ layout(push_constant, scalar) uniform PC {
     uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
     uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
     vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
-    uint irr_image_id;         // 88  demodulated diffuse irradiance out (denoised downstream)
-    uint _pad1;                // 92  pads block to 96 (CPU struct is alignas(16))
+    uint irr_image_id;         // 88  visibility RATIO out (denoised downstream)
+    uint unshadowed_image_id;  // 92  unshadowed diffuse out (sharp; composite multiplies)
+    uint _pad1;                // 96  pads block to 112 (CPU struct is alignas(16))
+    uint _pad2;                // 100
+    uint _pad3;                // 104
+    uint _pad4;                // 108
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -1009,6 +1013,10 @@ void main()
     // rest = the sharp, view-dependent remainder (specular / env spec / emissive).
     vec3 irr  = vec3(0.0);
     vec3 rest = vec3(0.0);
+    // Unshadowed diffuse, paired with `irr` which now carries the visibility
+    // ratio rather than radiance. Zero for unlit pixels, which zeroes the
+    // product at composite regardless of what the ratio filtered to.
+    vec3 unshadowed_out = vec3(0.0);
     if (lighting_mode == 0u) {
         // Unlit: emit albedo as-is (no diffuse irradiance).
         rest = albedo.rgb;
@@ -1046,6 +1054,7 @@ void main()
         // specular half joins the other sharp specular sources.
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
+        vec3 unshadowed_direct = vec3(0.0);
 
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_lights.data[pc.lights_base + i];
@@ -1097,6 +1106,11 @@ void main()
             float G = smith_g(NdotV, NdotL, roughness);
             vec3  F = fresnel_schlick(VdotH, F0);
             direct_specular += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance;
+
+            // Unshadowed diffuse, summed over ALL lights and free of noise.
+            // The ratio estimator divides the stochastic estimate by this and
+            // denoises the quotient instead of the radiance.
+            unshadowed_direct += NdotL * radiance;
 
             // Reservoir step: weight = luminance of this light's unshadowed
             // diffuse contribution.
@@ -1181,7 +1195,18 @@ void main()
         // (1-metallic) factor are reapplied at composite. (Env diffuse's
         // (1-F_env) energy factor is dropped so it shares the direct term's
         // albedo*(1-metallic) demodulation; ~minor.)
-        irr = direct_diffuse + env_diffuse * ao;
+        // Ratio estimator (Heitz et al. 2018). What gets denoised is not the
+        // radiance but the quotient of the shadowed estimate by the unshadowed
+        // one. The quotient is visibility, which is low frequency and bounded,
+        // so it survives filtering far better than radiance does: a filter
+        // that would smear a bright light's falloff barely touches a shadow
+        // ratio. The composite multiplies the sharp unshadowed term back in.
+        //
+        // The env term is folded into the same ratio rather than kept beside
+        // it, so the binary AO ray's aliasing is denoised too.
+        unshadowed_out = unshadowed_direct + env_diffuse;
+        vec3 shadowed_total = direct_diffuse + env_diffuse * ao;
+        irr = shadowed_total / max(unshadowed_out, vec3(1e-4));
         // Sharp, view-dependent terms (NOT denoised).
         rest = direct_specular + F_env * env_specular;
         // Area lights are integrated in closed form, including their
@@ -1202,6 +1227,11 @@ void main()
     // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
     imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, 1.0));
+    // The unshadowed term the composite multiplies the denoised ratio by. Kept
+    // out of the denoiser deliberately: it is exact and sharp, and it carries
+    // the high-frequency detail (light falloff, N.L) that must not be blurred.
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord,
+               vec4(unshadowed_out, 1.0));
 }
 )";
 
@@ -1320,11 +1350,13 @@ layout(push_constant, scalar) uniform PC {
     uint material_id;
     uint normal_id;
     uint worldpos_id;
-    uint hist_irr_id;          // accumulated irradiance + count (sampled, neighborhood)
+    uint hist_irr_id;          // accumulated visibility RATIO + count (sampled, neighborhood)
     uint hist_mom_id;          // accumulated luminance 2nd moment (.r)
     uint output_id;            // deferred_output: "rest" on read, final on write
     uint width;
     uint height;
+    uint unshadowed_id;        // sharp unshadowed diffuse; multiplies the filtered ratio
+    uint _pad_unshadowed;
 } pc;
 
 void main()
@@ -1389,7 +1421,11 @@ void main()
     }
     vec3 irr_out = (wsum > 1e-5) ? (sum / wsum) : center_irr;
 
-    vec3 final = albedo.rgb * (1.0 - metallic) * irr_out + rest.rgb;
+    // irr_out is the filtered VISIBILITY RATIO; the radiance it scales is read
+    // sharp and unfiltered here, so light falloff and N.L keep their detail
+    // and only the visibility carries the filter's blur.
+    vec3 unshadowed = velk_texture(pc.unshadowed_id, uv).rgb;
+    vec3 final = albedo.rgb * (1.0 - metallic) * (unshadowed * irr_out) + rest.rgb;
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
 }
 )";

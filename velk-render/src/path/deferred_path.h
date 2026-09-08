@@ -98,6 +98,13 @@ public:
         IRenderTarget::Ptr diffuse_irr;
         IGpuTexture* diffuse_irr_tex = nullptr;
 
+        /// Unshadowed diffuse (all lights, no visibility), written sharp
+        /// alongside the ratio in `diffuse_irr`. The composite multiplies the
+        /// two: filtering the ratio keeps the shadow soft while light falloff
+        /// and N.L stay crisp. Recreated on size change with `diffuse_irr`.
+        IRenderTarget::Ptr unshadowed;
+        IGpuTexture* unshadowed_tex = nullptr;
+
         /// Ping-pong temporal history for the diffuse-irradiance denoiser.
         /// hist_irr: rgb = accumulated irradiance, a = sample count.
         /// hist_pos: rgb = world position (reprojection validation), a = valid.

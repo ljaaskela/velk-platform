@@ -192,10 +192,14 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t lights_base;      // light array index (set = 1 slot 5)
     uint32_t ltc_magnitude_id; // LTC energy / Fresnel table
     float    env_params[2];    // x = intensity, y = rotation_rad (inline)
-    uint32_t irr_image_id;     // demodulated diffuse irradiance output
-    uint32_t _pad1;            // pads to 96 (VELK_GPU_STRUCT is alignas(16))
+    uint32_t irr_image_id;     // visibility RATIO output (denoised downstream)
+    uint32_t unshadowed_image_id; // unshadowed diffuse output (sharp)
+    uint32_t _pad1;            // pads to 112 (VELK_GPU_STRUCT is alignas(16))
+    uint32_t _pad2;
+    uint32_t _pad3;
+    uint32_t _pad4;
 };
-static_assert(sizeof(DeferredComputePushC) == 96, "Deferred compute PushC layout mismatch");
+static_assert(sizeof(DeferredComputePushC) == 112, "Deferred compute PushC layout mismatch");
 
 // Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
 // mirrors the PC block in deferred_denoise_compute_src).
@@ -230,6 +234,8 @@ VELK_GPU_STRUCT SpatialPushC {
     uint32_t output_id;
     uint32_t width;
     uint32_t height;
+    uint32_t unshadowed_id;
+    uint32_t _pad_unshadowed;
 };
 
 // Composes a deferred-family compute pipeline: the shared prelude
@@ -608,8 +614,10 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    // Demodulated diffuse irradiance: the lighting pass writes the noisy
-    // single-light estimate here; the denoise pass accumulates + composites it.
+    // The ratio-estimator pair. `diffuse_irr` carries the noisy VISIBILITY
+    // RATIO that the denoiser filters; `unshadowed` carries the exact radiance
+    // it scales, read sharp at composite. Split this way so the filter only
+    // ever blurs visibility, never falloff or N.L.
     if (!vs.diffuse_irr || vs.output_size != want) {
         TextureDesc td{};
         td.width = w;
@@ -618,6 +626,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         td.usage = TextureUsage::Storage;
         vs.diffuse_irr = graph.resources().create_render_texture(td);
         vs.diffuse_irr_tex = graph.resources().find_texture(vs.diffuse_irr.get());
+        vs.unshadowed = graph.resources().create_render_texture(td);
+        vs.unshadowed_tex = graph.resources().find_texture(vs.unshadowed.get());
         vs.lighting_dirty = true;
     }
     vs.output_size = want;
@@ -662,6 +672,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
     pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
+    pc.unshadowed_image_id =
+        static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
 
     // No surface blit here anymore: the lighting pass writes the "rest" image
     // (deferred_output) + diffuse irradiance; the denoise/composite pass
@@ -689,6 +701,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
             // Hold the lighting compute pipeline strong (cache is weak).
             rec.held.push_back(std::move(lighting_pipeline));
         });
@@ -836,6 +849,8 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     pc.output_id   = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
+    pc.unshadowed_id =
+        static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
 
     // The accumulated-history id alternates each frame (ping-pong) -> re-record
     // each frame (one dispatch + blit, negligible CPU).
@@ -867,6 +882,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_hist));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_mom));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
