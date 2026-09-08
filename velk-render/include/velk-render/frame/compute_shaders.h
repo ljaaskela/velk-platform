@@ -1058,6 +1058,13 @@ void main()
         float res_NdotL = 0.0;
         vec3  res_radiance = vec3(0.0);
         float total_w = 0.0;
+        // Per-pixel RIS stream. A tile-uniform stream was tried (Stage 0): it
+        // makes neighbouring pixels pick the same light, which buys ray
+        // coherence for free and did cut night from 31 to 25 ms - but it makes
+        // the noise spatially correlated, which is precisely what a spatial
+        // filter cannot remove. It showed as 8x8 blockiness while converging
+        // and blur afterwards. Coherence has to come from reordering
+        // execution, never from correlating the sampling.
         uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
                      + VELK_GLOBALS.present_counter * 26699u) | 1u;
         // Analytic area lights, accumulated outside the reservoir. Their
@@ -1153,6 +1160,8 @@ void main()
         bool trace_now = !kHalfRateShadows
                       || (((coord.x + coord.y + int(VELK_GLOBALS.present_counter)) & 1) == 0);
 
+)"
+                                                                      R"(
         vec3 direct_diffuse = vec3(0.0);
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_lights.data[pc.lights_base + res_light];
