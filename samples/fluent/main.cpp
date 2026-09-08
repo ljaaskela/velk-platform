@@ -161,13 +161,20 @@ int main(int /*argc*/, char* /*argv*/[])
 
         // Rough matte floor. Gives the mirrors something to reflect below
         // the horizon and breaks the symmetry with the sky reflection.
+        //
+        // Genuinely dielectric, so it receives diffuse light and shows cast
+        // shadows. Diffuse irradiance is scaled by (1 - metallic) at composite,
+        // so the previous 0.8 left the floor almost blind to any diffuse light
+        // and would have hidden shadows as well.
         if (auto floor_vis = velk::Visual2D(floor.find_trait<velk::IVisual>())) {
             floor_vis.set_paint(velk::material::create_standard(
-                velk::color{0.45f, 0.42f, 0.40f, 1.f}, /*metallic=*/0.8f, /*roughness=*/0.2f));
+                velk::color{0.45f, 0.42f, 0.40f, 1.f}, /*metallic=*/0.05f, /*roughness=*/0.65f));
         }
 
         build_mirror_grid(scene, grid_root);
     }
+
+    velk::Light sun_light_ref;
 
     // Sun: directional light above-and-ahead of the grid, casting
     // ray-traced shadows onto the floor + tiles. Direction is the
@@ -184,6 +191,42 @@ int main(int /*argc*/, char* /*argv*/[])
         sun.add_trait(sun_trs);
         sun.add_trait(sun_light);
         scene.add(scene.root(), sun);
+        sun_light_ref = sun_light;
+    }
+
+    // Square area light: a soft panel off to the left of the grid, aimed back
+    // into the scene. Shaded analytically (no samples, no noise), which is the
+    // case the analytic-visibility work is built for. Press K to mute the sun
+    // and see this light on its own.
+    {
+        // Penumbra width scales with the emitter's APPARENT size. An 800-unit
+        // panel ~1300 units away subtends ~35 degrees, which smears a caster
+        // 400 units above the floor over ~280 units: wider than the tiles, so
+        // its shadow washes out completely. A 240-unit panel subtends ~10
+        // degrees and gives penumbrae that read as soft rather than absent.
+        //
+        // Irradiance scales with area, so shrinking the panel ~11x in area
+        // needs a matching intensity rise to stay the key light.
+        auto area = velk::trait::render::create_area_light(
+            velk::color{0.85f, 0.90f, 1.0f, 1.f}, /*intensity=*/80.0f,
+            /*half_extent=*/120.f);
+
+        // Placed via the Trs, not Element::set_position: the Trs trait drives
+        // the world matrix and its translate defaults to zero, so an element
+        // position would be overwritten.
+        //
+        // High, in front of the grid and off to one side, so the floor in front
+        // stays lit and whatever stands on it casts a separated shadow across
+        // it. Placing the panel BEHIND the grid does not work: the tiles are
+        // 200x160 with 24-unit gaps, so the grid is effectively a solid wall
+        // and the whole front floor collapses into one merged shadow.
+        auto panel = velk::create_element();
+        auto panel_trs = velk::trait::transform::create_trs();
+        panel_trs.set_translate({1000.f, -1300.f, 800.f});
+        panel_trs.set_rotation({40.f, -35.f, 0.f});
+        panel.add_trait(panel_trs);
+        panel.add_trait(area);
+        scene.add(scene.root(), panel);
     }
 
     // Animated 3D accents in front of the mirror grid. Cube + sphere,
@@ -298,7 +341,19 @@ int main(int /*argc*/, char* /*argv*/[])
     auto image_writer =
         ::velk::instance().create<velk::IImageWriter>(velk::ui::ClassId::ImageEncoder);
     velk::ScopedHandler key_sub = window.add_on_key_event([&](const velk::ui::KeyEvent& e) {
-        if (e.action != velk::ui::KeyAction::Down || e.key != 301) return; // F12
+        if (e.action != velk::ui::KeyAction::Down) return;
+
+        // GLFW_KEY_K = 75: mute / restore the sun, to see the area light alone.
+        if (e.key == 75) {
+            if (sun_light_ref) {
+                const float cur = sun_light_ref.get_intensity();
+                sun_light_ref.set_intensity(cur > 0.f ? 0.f : 2.5f);
+                VELK_LOG(I, "fluent: sun %s", cur > 0.f ? "muted" : "restored");
+            }
+            return;
+        }
+
+        if (e.key != 301) return; // F12
         if (!image_writer) return;
         velk::IRenderContext::Ptr rctx = window.render_context();
         if (!rctx) return;

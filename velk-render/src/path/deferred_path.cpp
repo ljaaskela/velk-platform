@@ -273,6 +273,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 
     string src;
     src += deferred_compute_prelude_src;
+    src += deferred_area_light_src;
     src += main_src;
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;

@@ -21,6 +21,7 @@ IAny::Ptr LightTypeExtension::deserialize(Uid uid, const IImportData& data) cons
             if (s == "directional") return Any<LightType>(LightType::Directional);
             if (s == "point")       return Any<LightType>(LightType::Point);
             if (s == "spot")        return Any<LightType>(LightType::Spot);
+            if (s == "area")        return Any<LightType>(LightType::Area);
         }
         if (data.kind() == IImportData::Kind::Number) {
             return Any<LightType>(static_cast<LightType>(static_cast<uint8_t>(data.as_number())));

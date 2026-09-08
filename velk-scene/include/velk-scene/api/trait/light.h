@@ -111,6 +111,26 @@ inline Light create_spot_light(color c = color::white(), float intensity = 1.f,
     return l;
 }
 
+/**
+ * @brief Creates a square area light.
+ *
+ * Centred on the owning element's position and facing its forward axis.
+ * @p half_extent is the square's half-width in world units. Shaded by an
+ * analytic clamped-cosine integral over the emitter, so it needs no samples
+ * and produces no noise.
+ */
+inline Light create_area_light(color c = color::white(), float intensity = 1.f,
+                               float half_extent = 0.5f, float range = 1000.f)
+{
+    Light l = create_light();
+    l.set_type(LightType::Area);
+    l.set_color(c);
+    l.set_intensity(intensity);
+    l.set_range(range);
+    l.set_size(half_extent);
+    return l;
+}
+
 } // namespace trait::render
 
 } // namespace velk

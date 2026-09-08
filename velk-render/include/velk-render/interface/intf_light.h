@@ -14,6 +14,7 @@ enum class LightType : uint8_t
     Directional = 0, ///< Infinite source (sun). Direction from host's world-matrix forward axis; position ignored.
     Point       = 1, ///< Omnidirectional local source. Position from host's world-matrix translation.
     Spot        = 2, ///< Cone from a point along a direction. Uses both position and direction.
+    Area        = 3, ///< Square emitter. Centre from position, facing the forward axis; `size` is the half-extent.
 };
 
 /**

@@ -548,6 +548,324 @@ vec3 velk_tonemap_aces(vec3 x)
 //                    emissive (+ unlit albedo / sky). The denoise pass reads
 //                    this back, adds albedo*(1-metallic)*denoised_irradiance
 //                    in place, and produces the final HDR image.
+// Split from the main body below only because MSVC caps a single string
+// literal at 16380 bytes. Appended after the prelude, whose Light / RtShape /
+// BvhNode declarations it depends on.
+[[maybe_unused]] constexpr string_view deferred_area_light_src = R"(
+// Analytic area-light shading. The clamped-cosine integral over the emitter's
+// spherical polygon, evaluated in closed form: no samples, no noise, nothing
+// for the denoiser to resolve. Validated against Monte Carlo in
+// design-notes/spike_analytic/analytic.cpp before being written here.
+
+// Vertex capacity of every polygon handled here. The widest case is a
+// sphere's 8-gon silhouette, which each clip can grow by one vertex per
+// plane: one horizon, one light plane, and one per light-polygon edge.
+const int kOccPolyMax = 16;
+
+// One edge's contribution to the vector form factor.
+vec3 velk_ff_edge(vec3 a, vec3 b)
+{
+    float c = clamp(dot(a, b), -1.0, 1.0);
+    vec3  e = cross(a, b);
+    float el = length(e);
+    return (el > 1e-8) ? e * (acos(c) / el) : vec3(0.0);
+}
+
+// Clips a polygon against the half-space dot(nrm, p) >= 0, where the plane
+// passes through the shading point. Used for both world-relative points and
+// directions: the plane goes through the origin, so clipping the chord and
+// clipping the great-circle arc give the same direction once normalised.
+int velk_clip_half(inout vec3 p[kOccPolyMax], int n, vec3 nrm)
+{
+    vec3 o[kOccPolyMax];
+    int m = 0;
+    for (int i = 0; i < n; ++i) {
+        vec3 a = p[i];
+        vec3 b = p[i + 1 == n ? 0 : i + 1];
+        float da = dot(nrm, a);
+        float db = dot(nrm, b);
+        if (da >= 0.0 && m < kOccPolyMax) { o[m] = a; ++m; }
+        if ((da >= 0.0) != (db >= 0.0) && m < kOccPolyMax) {
+            o[m] = mix(a, b, da / (da - db));
+            ++m;
+        }
+    }
+    for (int i = 0; i < m; ++i) p[i] = o[i];
+    return m;
+}
+
+// Clips against a plane through an arbitrary point rather than the origin.
+int velk_clip_at(inout vec3 p[kOccPolyMax], int n, vec3 pt, vec3 nrm)
+{
+    vec3 o[kOccPolyMax];
+    int m = 0;
+    for (int i = 0; i < n; ++i) {
+        vec3 a = p[i];
+        vec3 b = p[i + 1 == n ? 0 : i + 1];
+        float da = dot(nrm, a - pt);
+        float db = dot(nrm, b - pt);
+        if (da >= 0.0 && m < kOccPolyMax) { o[m] = a; ++m; }
+        if ((da >= 0.0) != (db >= 0.0) && m < kOccPolyMax) {
+            o[m] = mix(a, b, da / (da - db));
+            ++m;
+        }
+    }
+    for (int i = 0; i < m; ++i) p[i] = o[i];
+    return m;
+}
+
+// Vector form factor of a spherical polygon given as directions.
+vec3 velk_form_factor(vec3 p[kOccPolyMax], int n)
+{
+    vec3 f = vec3(0.0);
+    for (int i = 0; i < n; ++i) {
+        f += velk_ff_edge(normalize(p[i]), normalize(p[i + 1 == n ? 0 : i + 1]));
+    }
+    return f;
+}
+
+// Clips a spherical polygon against another convex one, by that polygon's
+// great-circle edge planes. Normals are oriented against the clip polygon's
+// own centroid so winding does not matter.
+int velk_clip_by_poly(inout vec3 p[kOccPolyMax], int n, vec3 c[kOccPolyMax], int cn)
+{
+    vec3 centre = vec3(0.0);
+    for (int i = 0; i < cn; ++i) centre += normalize(c[i]);
+    centre = normalize(centre);
+
+    for (int i = 0; i < cn && n >= 3; ++i) {
+        vec3 nrm = cross(normalize(c[i]), normalize(c[i + 1 == cn ? 0 : i + 1]));
+        if (length(nrm) < 1e-8) continue;
+        nrm = normalize(nrm);
+        if (dot(nrm, centre) < 0.0) nrm = -nrm;
+        n = velk_clip_half(p, n, nrm);
+    }
+    return n;
+}
+
+// One occluder polygon's blocked form factor, given its corners already in the
+// shading frame. Discards anything below the shading horizon or beyond the
+// light plane, keeps what overlaps the light, and returns the magnitude of
+// what is left. The magnitude, because the clipped region carries the
+// OCCLUDER's winding, which follows an arbitrary axis order rather than the
+// light's.
+float velk_occ_form_factor(vec3 op[kOccPolyMax], int n,
+                           vec3 lc, vec3 lnf, vec3 lp[kOccPolyMax], int ln_count)
+{
+    n = velk_clip_half(op, n, vec3(0.0, 0.0, 1.0));
+    if (n < 3) return 0.0;
+    n = velk_clip_at(op, n, lc, lnf);
+    if (n < 3) return 0.0;
+    n = velk_clip_by_poly(op, n, lp, ln_count);
+    if (n < 3) return 0.0;
+    return abs(velk_form_factor(op, n).z);
+}
+
+// Irradiance from a square area light at `world_pos` with normal `N`, with
+// scene geometry subtracted analytically. Rects, boxes and spheres block;
+// triangle meshes do not, having no silhouette cheap enough to clip yet.
+//
+// C2a scope: each occluder's overlap with the light is subtracted
+// independently. That is exact for a single blocker and for blockers that do
+// not overlap ON THE LIGHT, and over-darkens where two do, since the shared
+// region is subtracted twice. Front-to-back convex subtraction (which keeps
+// the visible region as disjoint pieces and is what the Step A harness
+// validated) is C2b.
+float velk_area_irradiance(Light light, vec3 world_pos, vec3 N)
+{
+    // Shading frame with N as +Z.
+    vec3 nt = (abs(N.y) < 0.9) ? normalize(cross(vec3(0.0, 1.0, 0.0), N))
+                               : normalize(cross(vec3(1.0, 0.0, 0.0), N));
+    vec3 nb = cross(N, nt);
+
+    vec3 ln = normalize(light.direction.xyz);
+    vec3 lt = (abs(ln.y) < 0.9) ? normalize(cross(vec3(0.0, 1.0, 0.0), ln))
+                                : normalize(cross(vec3(1.0, 0.0, 0.0), ln));
+    vec3 lb = cross(ln, lt);
+    float hs = max(light.params.w, 1e-4);
+
+    // Lift the shading point off its own surface, the analytic equivalent of a
+    // shadow-ray bias. Without it a surface is exactly coplanar with its own
+    // shading plane, the horizon clip keeps all four of its vertices (da >= 0),
+    // and the resulting degenerate polygon lying on the horizon subtracts a
+    // large, meaningless form factor. Which way each pixel falls then depends
+    // on float noise in the G-buffer world position, which is generated per
+    // triangle: the surface self-shadows in a triangular pattern.
+    // Scaled by the light distance so it holds across scene scales.
+    vec3 to_light = light.position.xyz - world_pos;
+    vec3 shade_pos = world_pos + N * max(1e-3 * length(to_light), 1e-4);
+
+    vec3 ctr = light.position.xyz - shade_pos;
+    vec3 ea = lt * hs;
+    vec3 eb = lb * hs;
+
+    vec3 lw[4];
+    lw[0] = ctr - ea - eb;
+    lw[1] = ctr + ea - eb;
+    lw[2] = ctr + ea + eb;
+    lw[3] = ctr - ea + eb;
+
+    vec3 lp[kOccPolyMax];
+    for (int i = 0; i < 4; ++i) {
+        lp[i] = vec3(dot(lw[i], nt), dot(lw[i], nb), dot(lw[i], N));
+    }
+    int ln_count = velk_clip_half(lp, 4, vec3(0.0, 0.0, 1.0));
+    if (ln_count < 3) return 0.0;
+
+    vec3 f_total = velk_form_factor(lp, ln_count);
+    float f_max = abs(f_total.z);
+
+    // Light plane in the shading frame, with its normal oriented so the
+    // shading point tests positive. Occluders are then kept on that same
+    // side: anything behind the light shadows nothing.
+    vec3 lc = vec3(dot(ctr, nt), dot(ctr, nb), dot(ctr, N));
+    vec3 lnf = normalize(vec3(dot(ln, nt), dot(ln, nb), dot(ln, N)));
+    if (dot(lnf, -lc) < 0.0) lnf = -lnf;
+
+    // Shaft planes, in world space, bounding everything that could possibly
+    // block this pixel: the shading plane, the light's plane, and the four
+    // sides of the pyramid from the shading point through the light quad.
+    // Built once per pixel and tested against each BVH node's AABB, which is
+    // what keeps the walk off the shapes that cannot matter. The planes are
+    // deliberately built from the UNCLIPPED light quad, so they stay
+    // conservative. Normals are left unnormalised: the AABB test scales with
+    // them, so it does not care.
+    vec3 cull_n[6];
+    vec3 cull_p[6];
+    cull_n[0] = N;
+    cull_p[0] = shade_pos;
+    cull_n[1] = (dot(ln, shade_pos - light.position.xyz) > 0.0) ? ln : -ln;
+    cull_p[1] = light.position.xyz;
+    for (int i = 0; i < 4; ++i) {
+        vec3 nr = cross(lw[i], lw[(i + 1) & 3]);
+        if (dot(nr, ctr) < 0.0) nr = -nr;
+        cull_n[2 + i] = nr;
+        cull_p[2 + i] = shade_pos;
+    }
+
+    float f_occ = 0.0;
+    if (VELK_GLOBALS.bvh_node_count > 0u) {
+        uint stack[32];
+        int sp = 0;
+        stack[sp++] = VELK_GLOBALS.bvh_root;
+        // Stops early once the light is fully blocked: nothing further can
+        // change the result, and this is the common case deep in a shadow.
+        while (sp > 0 && f_occ < f_max) {
+            uint ni = stack[--sp];
+            BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+
+            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz);
+            vec3 be = 0.5 * (node.aabb_max.xyz - node.aabb_min.xyz);
+            bool outside = false;
+            for (int p = 0; p < 6; ++p) {
+                if (dot(cull_n[p], bc - cull_p[p]) + dot(abs(cull_n[p]), be) < 0.0) {
+                    outside = true;
+                    break;
+                }
+            }
+            if (outside) continue;
+
+            for (uint i = 0u; i < node.shape_count; ++i) {
+                RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE + node.first_shape + i];
+                if (s.shape_kind == 255u) continue;  // meshes: no silhouette yet
+
+                // Shape geometry, relative to the shading point. Origin is a
+                // corner and the axes span the shape, matching what the
+                // intersectors above assume.
+                vec3 o = s.origin.xyz - shade_pos;
+                vec3 u = s.u_axis.xyz;
+                vec3 v = s.v_axis.xyz;
+                vec3 w = s.w_axis.xyz;
+                vec3 op[kOccPolyMax];
+
+                if (s.shape_kind == 1u) {
+                    // Box. Each opposing face pair contributes the one face that
+                    // turns toward the shading point, or NEITHER when the
+                    // shading point lies between the pair's two planes: seen
+                    // edge-on, that pair is not part of the silhouette at all,
+                    // and taking one of its faces anyway subtracts a sliver
+                    // that blocks nothing. The faces that do qualify tile the
+                    // silhouette without overlapping on the sphere, so
+                    // subtracting them independently is exact and no silhouette
+                    // has to be extracted. Checked against Monte Carlo in
+                    // design-notes/spike_analytic/analytic.cpp.
+                    for (int f = 0; f < 3; ++f) {
+                        vec3 ea2 = (f == 0) ? u : ((f == 1) ? v : w);
+                        vec3 eb2 = (f == 0) ? v : ((f == 1) ? w : u);
+                        vec3 ec2 = (f == 0) ? w : ((f == 1) ? u : v);
+                        vec3 fc0 = o + 0.5 * (ea2 + eb2);
+                        vec3 base;
+                        if (dot(ec2, fc0) > 0.0)            base = o;
+                        else if (dot(ec2, fc0 + ec2) < 0.0) base = o + ec2;
+                        else                                continue;
+                        vec3 fw[4];
+                        fw[0] = base;
+                        fw[1] = base + ea2;
+                        fw[2] = base + ea2 + eb2;
+                        fw[3] = base + eb2;
+                        for (int k = 0; k < 4; ++k) {
+                            op[k] = vec3(dot(fw[k], nt), dot(fw[k], nb), dot(fw[k], N));
+                        }
+                        f_occ += velk_occ_form_factor(op, 4, lc, lnf, lp, ln_count);
+                    }
+                } else if (s.shape_kind == 2u) {
+                    // Sphere. Its silhouette is a cone, approximated by a
+                    // regular polygon about the cone axis. An inscribed polygon
+                    // would miss the slivers between chord and arc, so the
+                    // half-angle is widened by sqrt(pi / ((n/2) sin(2pi/n)))
+                    // to match the cap's area instead.
+                    vec3 sc = o + 0.5 * (u + v + w);
+                    float sd = length(sc);
+                    float sr = s.params.x;
+                    if (sd <= sr) continue;  // shading point inside the sphere
+                    float ha = min(asin(clamp(sr / sd, 0.0, 1.0)) * 1.0539, 1.5);
+                    vec3 sdir = sc / sd;
+                    vec3 st1 = (abs(sdir.y) < 0.9)
+                             ? normalize(cross(vec3(0.0, 1.0, 0.0), sdir))
+                             : normalize(cross(vec3(1.0, 0.0, 0.0), sdir));
+                    vec3 st2 = cross(sdir, st1);
+                    float ca = cos(ha);
+                    float sa = sin(ha);
+                    for (int k = 0; k < 8; ++k) {
+                        float ph = 6.28318531 * float(k) * 0.125;
+                        vec3 dv = sdir * ca + (st1 * cos(ph) + st2 * sin(ph)) * sa;
+                        // Placed at the centre's distance rather than left as a
+                        // direction: the light-plane clip tests points, so the
+                        // silhouette has to sit at the right depth.
+                        vec3 pw = dv * sd;
+                        op[k] = vec3(dot(pw, nt), dot(pw, nb), dot(pw, N));
+                    }
+                    f_occ += velk_occ_form_factor(op, 8, lc, lnf, lp, ln_count);
+                } else {
+                    // Rect. Every shape emitted from a draw entry is one,
+                    // spanned by origin + u_axis + v_axis, whether or not its
+                    // visual registered an intersect snippet: a registered kind
+                    // (3 and up) only refines coverage INSIDE that rect (rounded
+                    // corners, glyph SDF), which is treated here as fully
+                    // covering.
+                    vec3 ow[4];
+                    ow[0] = o;
+                    ow[1] = o + u;
+                    ow[2] = o + u + v;
+                    ow[3] = o + v;
+                    for (int k = 0; k < 4; ++k) {
+                        op[k] = vec3(dot(ow[k], nt), dot(ow[k], nb), dot(ow[k], N));
+                    }
+                    f_occ += velk_occ_form_factor(op, 4, lc, lnf, lp, ln_count);
+                }
+            }
+
+            for (uint c = 0u; c < node.child_count && sp < 30; ++c) {
+                stack[sp++] = node.first_child + c;
+            }
+        }
+    }
+
+    float e = (f_max - f_occ) / (2.0 * 3.14159265);
+    return max(e, 0.0);
+}
+)";
+
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 void main()
 {
@@ -623,8 +941,25 @@ void main()
         float total_w = 0.0;
         uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
                      + VELK_GLOBALS.present_counter * 26699u) | 1u;
+        // Analytic area lights, accumulated outside the reservoir. Their
+        // diffuse term is exact and noise-free, so they neither need a shadow
+        // ray nor belong in the stochastic estimator.
+        // Slice C1: unshadowed only. Occluder subtraction is C2, specular is
+        // deferred until the diffuse term is confirmed.
+        vec3 area_irr = vec3(0.0);
+
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_lights.data[pc.lights_base + i];
+            if (light.flags.x == 3u) {
+                float e = velk_area_irradiance(light, world_pos, N);
+                if (e > 0.0) {
+                    // pi converts clamped-cosine units to the same scale as a
+                    // delta light's N.L, so authored intensities stay comparable.
+                    area_irr += light.color_intensity.rgb * light.color_intensity.a
+                                * e * 3.14159265;
+                }
+                continue;
+            }
             vec3 L;
             float atten = 1.0;
             if (light.flags.x == 0u) {
@@ -677,6 +1012,7 @@ void main()
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
         }
+        direct_diffuse += area_irr;
 
         // Env lighting: single-sample approximation. Diffuse reads
         // along N with a deep LOD so it reads roughly the irradiance
