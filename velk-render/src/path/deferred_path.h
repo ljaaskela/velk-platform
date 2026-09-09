@@ -177,13 +177,22 @@ public:
         /// frames rather than being transient.
         ///
         /// `gi_probes` is the level the lighting pass reads: it owns the near
-        /// shell and folds in `gi_probes_coarse` wherever its own rays miss, so
-        /// it carries the merged result. The coarse level owns everything
-        /// beyond that shell and updates first.
+        /// shell and folds in the level above wherever its own rays miss, so it
+        /// carries the merged result. Each coarser level does the same with the
+        /// one beyond it, and they update outermost first. With the fine
+        /// spacing S the shells are [0, S), [S, 2S) and [2S, inf), so only the
+        /// outermost traces unbounded rays and it is the one with fewest
+        /// probes.
+        /// All levels update in ONE dispatch, so the coarse ones ping-pong:
+        /// each frame reads the texture the previous frame wrote. Without that
+        /// a level would read an atlas its own dispatch is concurrently
+        /// writing. The fine level needs no pair, since nothing reads it inside
+        /// the dispatch, which also keeps the handle the lighting pass bakes
+        /// into its push constants stable.
         IRenderTarget::Ptr gi_probes;
+        IRenderTarget::Ptr gi_probes_mid[2];
+        IRenderTarget::Ptr gi_probes_far[2];
         IRenderPass::Ptr cached_probe_pass;
-        IRenderTarget::Ptr gi_probes_coarse;
-        IRenderPass::Ptr cached_probe_pass_coarse;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -218,17 +227,11 @@ private:
     /// real material evaluation.
     IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx);
 
-    /// Emits one cascade level. `t_min_scale` / `t_max_scale` bound the level's
-    /// rays in units of its own probe spacing, the shader deriving the spacing
-    /// from the scene bounds; a `t_max_scale` of 0 means unbounded. An empty
-    /// `coarse_atlas` marks this the coarsest level, which falls back to the
-    /// environment on a miss instead of deferring upward.
-    void emit_probe_level(IRenderTarget::Ptr& atlas, IRenderPass::Ptr& cached_pass,
-                          const char* label, uint32_t dim_x, uint32_t dim_y,
-                          uint32_t dim_z, float t_min_scale, float t_max_scale,
-                          const IRenderTarget::Ptr& coarse_atlas, uint32_t coarse_dims,
-                          const RenderView& render_view, FrameContext& ctx,
-                          IRenderGraph& graph);
+    /// Creates one level's atlas if it does not exist yet. Sized from the
+    /// level's grid: width folds z into x, height stacks the SH coefficients.
+    IRenderTarget::Ptr& ensure_probe_atlas(IRenderTarget::Ptr& atlas, uint32_t dim_x,
+                                           uint32_t dim_y, uint32_t dim_z,
+                                           IRenderGraph& graph);
 
     void emit_probe_pass(ViewState& vs, const RenderView& render_view,
                          FrameContext& ctx, IRenderGraph& graph);

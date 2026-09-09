@@ -379,21 +379,31 @@ constexpr uint32_t kProbeDimX = 48;
 constexpr uint32_t kProbeDimY = 24;
 constexpr uint32_t kProbeDimZ = 48;
 
-// Cascade 1, at half the resolution per axis, owning everything past the fine
-// level's shell. A level alone cannot be judged: with the fine level falling
-// back to the environment wherever its short rays missed, every ray became a
-// bright/dark decision flipping over one probe spacing, which interpolation
-// drew as a grid across the floor. A miss has to mean "defer upward", and that
-// needs a level to defer TO.
-constexpr uint32_t kCoarseDimX = kProbeDimX / 2;
-constexpr uint32_t kCoarseDimY = kProbeDimY / 2;
-constexpr uint32_t kCoarseDimZ = kProbeDimZ / 2;
+// Two coarser levels, each half the resolution per axis of the one below and
+// owning the next shell out. A level alone cannot be judged: with the fine
+// level falling back to the environment wherever its short rays missed, every
+// ray became a bright/dark decision flipping over one probe spacing, which
+// interpolation drew as a grid across the floor. A miss has to mean "defer
+// upward", and that needs a level to defer TO.
+//
+// Only the outermost level traces unbounded rays, and it is the cheapest: at
+// an eighth of the probes per level, covering the whole remaining distance
+// costs a fraction of what the level below would pay for the same reach. That
+// is the entire economic argument for a cascade, and leaving the middle level
+// unbounded threw it away.
+constexpr uint32_t kMidDimX = kProbeDimX / 2;
+constexpr uint32_t kMidDimY = kProbeDimY / 2;
+constexpr uint32_t kMidDimZ = kProbeDimZ / 2;
 
-// Spacing scales inversely with resolution, so the fine shell measures exactly
-// this fraction of a coarse spacing. Halving every axis keeps one number valid
-// for all three.
-constexpr float kCoarseShellStart =
-    static_cast<float>(kCoarseDimX) / static_cast<float>(kProbeDimX);
+constexpr uint32_t kFarDimX = kMidDimX / 2;
+constexpr uint32_t kFarDimY = kMidDimY / 2;
+constexpr uint32_t kFarDimZ = kMidDimZ / 2;
+
+// Spacing scales inversely with resolution, so a level's shell starts exactly
+// half a spacing of its own in - which is where the level below ended. Halving
+// every axis keeps one number valid for all three and for both steps, and the
+// shells then partition distance with no gap and no overlap.
+constexpr float kShellStart = 0.5f;
 
 uint32_t pack_probe_dims(uint32_t x, uint32_t y, uint32_t z)
 {
@@ -447,14 +457,10 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
-void DeferredPath::emit_probe_level(IRenderTarget::Ptr& atlas,
-                                    IRenderPass::Ptr& cached_pass, const char* label,
-                                    uint32_t dim_x, uint32_t dim_y, uint32_t dim_z,
-                                    float t_min_scale, float t_max_scale,
-                                    const IRenderTarget::Ptr& coarse_atlas,
-                                    uint32_t coarse_dims,
-                                    const RenderView& render_view, FrameContext& ctx,
-                                    IRenderGraph& graph)
+IRenderTarget::Ptr& DeferredPath::ensure_probe_atlas(IRenderTarget::Ptr& atlas,
+                                                     uint32_t dim_x, uint32_t dim_y,
+                                                     uint32_t dim_z,
+                                                     IRenderGraph& graph)
 {
     if (!atlas) {
         TextureDesc td{};
@@ -475,10 +481,38 @@ void DeferredPath::emit_probe_level(IRenderTarget::Ptr& atlas,
         td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
         atlas = graph.resources().create_render_texture(td);
     }
-    if (!atlas) return;
+    return atlas;
+}
+
+void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
+                                   FrameContext& ctx, IRenderGraph& graph)
+{
+    // One dispatch for every level. Splitting them cost three launches and
+    // three graph barriers, and that fixed cost dominated: the outermost level
+    // measured 2.6 ms to trace 6912 rays, about 380 ns each against a tracer
+    // floor of 1.8. Merging is only legal because a level reads the one above
+    // from the PREVIOUS frame, so no ordering between workgroups is required.
+    // The coarse levels ping-pong to keep that read off the texture this
+    // dispatch is writing.
+    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
+    auto& mid_read  = ensure_probe_atlas(vs.gi_probes_mid[parity ^ 1u],
+                                         kMidDimX, kMidDimY, kMidDimZ, graph);
+    auto& mid_write = ensure_probe_atlas(vs.gi_probes_mid[parity],
+                                         kMidDimX, kMidDimY, kMidDimZ, graph);
+    auto& far_read  = ensure_probe_atlas(vs.gi_probes_far[parity ^ 1u],
+                                         kFarDimX, kFarDimY, kFarDimZ, graph);
+    auto& far_write = ensure_probe_atlas(vs.gi_probes_far[parity],
+                                         kFarDimX, kFarDimY, kFarDimZ, graph);
+    auto& fine = ensure_probe_atlas(vs.gi_probes, kProbeDimX, kProbeDimY,
+                                    kProbeDimZ, graph);
+    if (!fine || !mid_read || !mid_write || !far_read || !far_write) return;
 
     auto pipeline = ensure_probe_pipeline(ctx);
     if (!pipeline) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) {
+        return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default));
+    };
 
     ProbePushC pc{};
     pc.globals_base = render_view.view_globals_base;
@@ -486,25 +520,28 @@ void DeferredPath::emit_probe_level(IRenderTarget::Ptr& atlas,
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
-    pc.extras[0] =
-        coarse_atlas
-            ? static_cast<uint32_t>(coarse_atlas->get_gpu_handle(GpuResourceKey::Default))
-            : 0u;
-    pc.extras[1] = coarse_dims;
-    std::memcpy(&pc.extras[2], &t_min_scale, sizeof(float));
-    std::memcpy(&pc.extras[3], &t_max_scale, sizeof(float));
+    pc.extras[0] = handle(mid_read);
+    pc.extras[1] = handle(mid_write);
+    pc.extras[2] = handle(far_read);
+    pc.extras[3] = handle(far_write);
     pc.env[0] = render_view.env.material_id;
     pc.env[1] = render_view.env.texture_id;
-    pc.env[2] = pack_probe_dims(dim_x, dim_y, dim_z);
-    pc.env[3] = static_cast<uint32_t>(atlas->get_gpu_handle(GpuResourceKey::Default));
+    // Only the finest grid is sent; the shader halves it per level.
+    pc.env[2] = pack_probe_dims(kProbeDimX, kProbeDimY, kProbeDimZ);
+    pc.env[3] = handle(fine);
+
+    // 64-thread groups covering 8 probes x 8 directions each, across all levels.
+    const uint32_t groups =
+        (kProbeDimX * kProbeDimY * kProbeDimZ + kMidDimX * kMidDimY * kMidDimZ
+         + kFarDimX * kFarDimY * kFarDimZ) / 8u;
 
     bool dirty = true;
     emit_cached_view_pass(
-        cached_pass, dirty, label, graph, [&](CachedPassRecording& rec) {
+        vs.cached_probe_pass, dirty, "gi.probes", graph,
+        [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
-            // 64-thread groups covering 8 probes x 8 directions each.
-            dc.groups_x = (dim_x * dim_y * dim_z) / 8u;
+            dc.groups_x = groups;
             dc.groups_y = 1;
             dc.groups_z = 1;
             dc.root_constants_size = sizeof(pc);
@@ -512,40 +549,22 @@ void DeferredPath::emit_probe_level(IRenderTarget::Ptr& atlas,
 
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
-                cmd->push_label(label);
+                cmd->push_label("GI: probe update");
                 cmd->record_dispatch(dc);
                 cmd->pop_label();
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
             }
-            // Read AND written: the temporal blend samples last frame's value.
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(atlas));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(atlas));
-            // Declaring the level above as a read is what orders this level
-            // after it; the merge reads values written earlier this frame.
-            if (coarse_atlas) {
-                rec.reads.push_back(interface_pointer_cast<IGpuResource>(coarse_atlas));
-            }
+            // The fine atlas is read and written: its temporal blend samples
+            // last frame's value from the same texel.
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(mid_read));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(far_read));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(mid_write));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(far_write));
             rec.held.push_back(std::move(pipeline));
         });
-}
-
-void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
-                                   FrameContext& ctx, IRenderGraph& graph)
-{
-    // Coarse level first: the fine level reads it wherever its own rays miss,
-    // and the graph orders the barrier from that read.
-    emit_probe_level(vs.gi_probes_coarse, vs.cached_probe_pass_coarse,
-                     "gi.probes.coarse", kCoarseDimX, kCoarseDimY, kCoarseDimZ,
-                     /*t_min_scale=*/kCoarseShellStart, /*t_max_scale=*/0.0f,
-                     /*coarse_atlas=*/IRenderTarget::Ptr{}, /*coarse_dims=*/0,
-                     render_view, ctx, graph);
-
-    emit_probe_level(vs.gi_probes, vs.cached_probe_pass, "gi.probes",
-                     kProbeDimX, kProbeDimY, kProbeDimZ,
-                     /*t_min_scale=*/0.0f, /*t_max_scale=*/1.0f, vs.gi_probes_coarse,
-                     pack_probe_dims(kCoarseDimX, kCoarseDimY, kCoarseDimZ),
-                     render_view, ctx, graph);
 }
 
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)

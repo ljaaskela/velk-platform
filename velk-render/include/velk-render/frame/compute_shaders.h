@@ -2525,11 +2525,10 @@ vec3 velk_sh_radiance(vec3 sh[4], vec3 d)
 // weighting here: that term exists to keep a probe from lighting a surface
 // through its own back, and this is a free-space radiance query with no
 // surface involved.
-void velk_coarse_sh(vec3 pos, out vec3 sh[4])
+void velk_coarse_sh(uint atlas, uvec3 cd, vec3 pos, out vec3 sh[4])
 {
     for (int c = 0; c < 4; ++c) sh[c] = vec3(0.0);
-    uvec3 cd = velk_probe_dims_of(pc.extras.y);
-    if (cd.x == 0u || cd.y == 0u || cd.z == 0u) return;
+    if (atlas == 0u || cd.x == 0u || cd.y == 0u || cd.z == 0u) return;
 
     BvhNode croot = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
     vec3 gmin = croot.aabb_min.xyz;
@@ -2552,7 +2551,7 @@ void velk_coarse_sh(vec3 pos, out vec3 sh[4])
         for (int c = 0; c < 4; ++c) {
             vec2 uv = (vec2(float(pi.x + pi.z * int(cd.x)),
                             float(pi.y + c * int(cd.y))) + 0.5) * rcp;
-            sh[c] += velk_texture(pc.extras.x, uv).rgb * w;
+            sh[c] += velk_texture(atlas, uv).rgb * w;
         }
         total += w;
     }
@@ -2593,15 +2592,62 @@ void main()
     const uint kDirs = 8u;
     const uint kProbesPerGroup = 8u;
 
-    uvec3 dims = velk_probe_dims();
+    // EVERY level runs in this one dispatch, workgroups laid out finest first.
+    // Three separate dispatches cost three launches and, worse, three graph
+    // barriers, and that fixed cost dominated: the outermost level measured
+    // 2.6 ms to trace 6912 rays, which is roughly 380 ns per ray against a
+    // tracer floor of 1.8. It was not tracing, it was launching.
+    //
+    // A level reads the one above from the PREVIOUS frame rather than this
+    // one, which is what makes a single dispatch legal: workgroups have no
+    // ordering between them and no device-scope barrier, so a live dependency
+    // could only be expressed by splitting the dispatch again. Atomics would
+    // not help - they order accesses to a location, not workgroups. The coarse
+    // levels ping-pong so nothing is read and written in the same dispatch,
+    // and the staleness costs one frame in a field whose temporal window is
+    // twenty.
+    const uint kLevels = 3u;
+    uvec3 dims0 = velk_probe_dims_of(pc.env.z);
+
+    // Which level owns this workgroup. Each level halves every axis, so its
+    // probe count drops eightfold and the walk is three iterations.
+    uint level = 0u;
+    uvec3 dims = dims0;
+    uint group_base = 0u;
+    for (uint i = 0u; i < kLevels; ++i) {
+        uvec3 di = max(dims0 >> i, uvec3(1u));
+        uint groups_i = (di.x * di.y * di.z) / kProbesPerGroup;
+        if (gl_WorkGroupID.x < group_base + groups_i) {
+            level = i;
+            dims = di;
+            break;
+        }
+        group_base += groups_i;
+    }
+
     uint probe_count = dims.x * dims.y * dims.z;
     uint lane = gl_LocalInvocationIndex;
     uint probe_local = lane / kDirs;
     uint dir = lane - probe_local * kDirs;
-    uint probe = gl_WorkGroupID.x * kProbesPerGroup + probe_local;
+    uint probe = (gl_WorkGroupID.x - group_base) * kProbesPerGroup + probe_local;
     // No early return before the barriers: every thread must reach them.
     // `probe_live` rather than `active`, which GLSL reserves.
     bool probe_live = probe < probe_count && probe_count > 0u;
+
+    // Atlas handles. The fine level is single buffered because nothing reads it
+    // inside this dispatch, which also keeps the handle the lighting pass bakes
+    // into its push constants stable across frames.
+    uint atlas_write;
+    uint atlas_self;    // this level's previous value, for the temporal blend
+    uint atlas_coarse;  // the level above, previous frame; 0 at the outermost
+    if (level == 0u) {
+        atlas_write = pc.env.w;   atlas_self = pc.env.w;   atlas_coarse = pc.extras.x;
+    } else if (level == 1u) {
+        atlas_write = pc.extras.y; atlas_self = pc.extras.x; atlas_coarse = pc.extras.z;
+    } else {
+        atlas_write = pc.extras.w; atlas_self = pc.extras.z; atlas_coarse = 0u;
+    }
+    uvec3 coarse_dims = max(dims0 >> (level + 1u), uvec3(1u));
 
     // Probe positions come from the BVH root's AABB, so the grid follows
     // whatever scene is loaded with nothing plumbed from the CPU.
@@ -2632,24 +2678,24 @@ void main()
                 * 6.28318531;
     vec3 d = velk_probe_dir(dir, kDirs, phase);
 
-    // This level's distance shell, expressed in units of its own probe
-    // spacing. The fine level owns [0, spacing) and the coarse level takes
-    // everything beyond, so the two PARTITION distance rather than both
-    // integrating the same geometry.
+    // This level's distance shell. Spacing doubles with each level, so with the
+    // fine spacing S the shells are [0, S), [S, 2S) and [2S, inf): each starts
+    // half its own spacing in, which is exactly where the level below ended.
+    // They PARTITION distance rather than each integrating the whole scene, and
+    // only the outermost - the one with fewest probes - traces unbounded.
     vec3 cell = extent / vec3(dims);
     float spacing = max(cell.x, max(cell.y, cell.z));
-    float t_min = uintBitsToFloat(pc.extras.z) * spacing;
-    float t_max_scale = uintBitsToFloat(pc.extras.w);
-    float t_max = (t_max_scale <= 0.0) ? 1e30 : t_max_scale * spacing;
+    float t_min = (level == 0u) ? 0.0 : 0.5 * spacing;
+    float t_max = (level + 1u >= kLevels) ? 1e30 : spacing;
 
     // Sample the level above once per probe rather than once per ray: all eight
     // rays leave from the same point. Lane 0 of each probe's block does it, and
     // the barrier sits outside the branch so every thread reaches it.
-    bool has_coarse = pc.extras.x != 0u;
+    bool has_coarse = atlas_coarse != 0u;
     if (dir == 0u) {
         vec3 csh[4];
         if (probe_live && has_coarse) {
-            velk_coarse_sh(origin, csh);
+            velk_coarse_sh(atlas_coarse, coarse_dims, origin, csh);
         } else {
             for (int c = 0; c < 4; ++c) csh[c] = vec3(0.0);
         }
@@ -2773,14 +2819,16 @@ void main()
     for (int c = 0; c < 4; ++c) {
         ivec2 texel = ivec2(int(pc3.x + pc3.z * dims.x), int(pc3.y) + c * int(dims.y));
         vec2 uv = (vec2(texel) + 0.5) / vec2(float(atlas_w), float(atlas_h));
-        vec3 prev = velk_texture(pc.env.w, uv).rgb;
+        // The coarse levels read their previous texture and write the other, so
+        // these are the same handle only for the fine level.
+        vec3 prev = velk_texture(atlas_self, uv).rgb;
         // Fixed blend rather than a running count: probes re-converge cheaply
         // and a fixed rate stops moving lights smearing indefinitely.
         float blend = (VELK_GLOBALS.present_counter == 0u) ? 1.0 : 0.05;
         // RGBA32F, not F16: the RT prelude declares the f32 storage array, and
         // the atlas is small enough that the extra precision is free.
         // s_sh[c][lane] is this probe's block total, lane being its dir-0 slot.
-        imageStore(gStorageImagesF32[nonuniformEXT(pc.env.w)], texel,
+        imageStore(gStorageImagesF32[nonuniformEXT(atlas_write)], texel,
                    vec4(mix(prev, s_sh[c][lane], blend), 1.0));
     }
 }
