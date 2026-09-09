@@ -359,19 +359,46 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
 
 namespace {
 
-// G1 cascade 0: 6912 probes x 8 directions = 55k rays.
+// Cascade 0: 55296 probes x 8 directions = 442k rays, each bounded to about
+// one probe spacing.
 //
-// Sizing history, so the numbers are not re-derived: 256 probes x 64 dirs
+// Sizing history, so the numbers are not re-derived. 256 probes x 64 dirs
 // measured 2.8 ms (171 ns/ray), but 16k threads does not saturate the GPU, so
-// that was launch latency. 6912 x 64 = 442k rays measured 10.6 ms (24 ns/ray),
-// which is the honest per-ray cost - about 19 ns of shading on top of G0's
-// ~5 ns of tracing. 442k rays is over budget, and the fix is the cascade
-// shape rather than cheaper shading: cascade 0 wants MANY probes with FEW
-// directions, with each level above trading 4x fewer probes for 4x more
-// directions. Four such levels land around 221k rays total.
-constexpr uint32_t kProbeDimX = 24;
-constexpr uint32_t kProbeDimY = 12;
-constexpr uint32_t kProbeDimZ = 24;
+// that was launch latency. 6912 x 64 = 442k rays measured 10.6 ms (24 ns/ray).
+// At 6912 x 8 the pass measured 3.0 ms, decomposing as ~1.9 ms of launch
+// overhead plus ~20 ns per full-length ray.
+//
+// Bounding a ray to one probe spacing then dropped the pass to 2.0 ms, so a
+// short ray costs ~1.8 ns - an order of magnitude less, and the same floor the
+// coherent tracer hits. Ray length, not ray count, was the expense. That is
+// what pays for this density: a level only resolves what falls inside its own
+// shell, so a dense near level is cheap and distance is the coarse levels'
+// problem. Probe spacing is what resolves contact detail, and at 24x12x24 it
+// resolved none - the field converged flat.
+constexpr uint32_t kProbeDimX = 48;
+constexpr uint32_t kProbeDimY = 24;
+constexpr uint32_t kProbeDimZ = 48;
+
+// Cascade 1, at half the resolution per axis, owning everything past the fine
+// level's shell. A level alone cannot be judged: with the fine level falling
+// back to the environment wherever its short rays missed, every ray became a
+// bright/dark decision flipping over one probe spacing, which interpolation
+// drew as a grid across the floor. A miss has to mean "defer upward", and that
+// needs a level to defer TO.
+constexpr uint32_t kCoarseDimX = kProbeDimX / 2;
+constexpr uint32_t kCoarseDimY = kProbeDimY / 2;
+constexpr uint32_t kCoarseDimZ = kProbeDimZ / 2;
+
+// Spacing scales inversely with resolution, so the fine shell measures exactly
+// this fraction of a coarse spacing. Halving every axis keeps one number valid
+// for all three.
+constexpr float kCoarseShellStart =
+    static_cast<float>(kCoarseDimX) / static_cast<float>(kProbeDimX);
+
+uint32_t pack_probe_dims(uint32_t x, uint32_t y, uint32_t z)
+{
+    return x | (y << 10) | (z << 20);
+}
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
 VELK_GPU_STRUCT ProbePushC {
@@ -380,7 +407,12 @@ VELK_GPU_STRUCT ProbePushC {
     uint32_t light_count;
     uint32_t lights_base;
     float    env_params[2];
-    uint32_t extras[4];
+    uint32_t extras[4];        // RT main uses these for its output image; the
+                               // probe main repurposes them as x = atlas of the
+                               // level above (0 = coarsest), y = its packed
+                               // dims, z/w = this level's shell bounds as
+                               // float bits, in units of its probe spacing
+                               // (w <= 0 = unbounded)
     uint32_t env[4];           // x = env material, y = env texture,
                                // z = packed grid dims, w = probe atlas image
 };
@@ -415,25 +447,35 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
-void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
-                                   FrameContext& ctx, IRenderGraph& graph)
+void DeferredPath::emit_probe_level(IRenderTarget::Ptr& atlas,
+                                    IRenderPass::Ptr& cached_pass, const char* label,
+                                    uint32_t dim_x, uint32_t dim_y, uint32_t dim_z,
+                                    float t_min_scale, float t_max_scale,
+                                    const IRenderTarget::Ptr& coarse_atlas,
+                                    uint32_t coarse_dims,
+                                    const RenderView& render_view, FrameContext& ctx,
+                                    IRenderGraph& graph)
 {
-    const int atlas_w = static_cast<int>(kProbeDimX * kProbeDimZ);
-    const int atlas_h = static_cast<int>(kProbeDimY * 4u);  // 4 SH coefficients
-
-    if (!vs.gi_probes) {
+    if (!atlas) {
         TextureDesc td{};
-        td.width = atlas_w;
-        td.height = atlas_h;
+        td.width = static_cast<int>(dim_x * dim_z);
+        td.height = static_cast<int>(dim_y * 4u);  // 4 SH coefficients
         td.format = PixelFormat::RGBA32F;
         td.usage = TextureUsage::Storage;
-        // Clamped + linear: the lighting pass will interpolate between probes.
+        // Nearest, not the default linear: readers sample texel centres and
+        // weight the eight neighbours themselves, and RGBA32F carries no
+        // guarantee of linear filter support (it has none on much hardware),
+        // so asking for it is undefined rather than merely wasteful. Clamped
+        // because the atlas folds z into x, where a filter running off either
+        // edge would mix unrelated probes.
         td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
         td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
         td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
-        vs.gi_probes = graph.resources().create_render_texture(td);
+        atlas = graph.resources().create_render_texture(td);
     }
-    if (!vs.gi_probes) return;
+    if (!atlas) return;
 
     auto pipeline = ensure_probe_pipeline(ctx);
     if (!pipeline) return;
@@ -444,20 +486,25 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
+    pc.extras[0] =
+        coarse_atlas
+            ? static_cast<uint32_t>(coarse_atlas->get_gpu_handle(GpuResourceKey::Default))
+            : 0u;
+    pc.extras[1] = coarse_dims;
+    std::memcpy(&pc.extras[2], &t_min_scale, sizeof(float));
+    std::memcpy(&pc.extras[3], &t_max_scale, sizeof(float));
     pc.env[0] = render_view.env.material_id;
     pc.env[1] = render_view.env.texture_id;
-    pc.env[2] = kProbeDimX | (kProbeDimY << 10) | (kProbeDimZ << 20);
-    pc.env[3] =
-        static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
+    pc.env[2] = pack_probe_dims(dim_x, dim_y, dim_z);
+    pc.env[3] = static_cast<uint32_t>(atlas->get_gpu_handle(GpuResourceKey::Default));
 
     bool dirty = true;
     emit_cached_view_pass(
-        vs.cached_probe_pass, dirty, "gi.probes", graph,
-        [&](CachedPassRecording& rec) {
+        cached_pass, dirty, label, graph, [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             // 64-thread groups covering 8 probes x 8 directions each.
-            dc.groups_x = (kProbeDimX * kProbeDimY * kProbeDimZ) / 8u;
+            dc.groups_x = (dim_x * dim_y * dim_z) / 8u;
             dc.groups_y = 1;
             dc.groups_z = 1;
             dc.root_constants_size = sizeof(pc);
@@ -465,17 +512,40 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
 
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
-                cmd->push_label("GI: probe update");
+                cmd->push_label(label);
                 cmd->record_dispatch(dc);
                 cmd->pop_label();
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
             }
             // Read AND written: the temporal blend samples last frame's value.
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(atlas));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(atlas));
+            // Declaring the level above as a read is what orders this level
+            // after it; the merge reads values written earlier this frame.
+            if (coarse_atlas) {
+                rec.reads.push_back(interface_pointer_cast<IGpuResource>(coarse_atlas));
+            }
             rec.held.push_back(std::move(pipeline));
         });
+}
+
+void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
+                                   FrameContext& ctx, IRenderGraph& graph)
+{
+    // Coarse level first: the fine level reads it wherever its own rays miss,
+    // and the graph orders the barrier from that read.
+    emit_probe_level(vs.gi_probes_coarse, vs.cached_probe_pass_coarse,
+                     "gi.probes.coarse", kCoarseDimX, kCoarseDimY, kCoarseDimZ,
+                     /*t_min_scale=*/kCoarseShellStart, /*t_max_scale=*/0.0f,
+                     /*coarse_atlas=*/IRenderTarget::Ptr{}, /*coarse_dims=*/0,
+                     render_view, ctx, graph);
+
+    emit_probe_level(vs.gi_probes, vs.cached_probe_pass, "gi.probes",
+                     kProbeDimX, kProbeDimY, kProbeDimZ,
+                     /*t_min_scale=*/0.0f, /*t_max_scale=*/1.0f, vs.gi_probes_coarse,
+                     pack_probe_dims(kCoarseDimX, kCoarseDimY, kCoarseDimZ),
+                     render_view, ctx, graph);
 }
 
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)

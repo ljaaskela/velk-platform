@@ -171,12 +171,19 @@ public:
         IRenderPass::Ptr cached_transparent_pass;
         bool transparent_dirty = true;
 
-        /// G1: world-space GI probe atlas (cascade 0). SH L1 per probe, laid
+        /// World-space GI probe atlases, finest first. SH L1 per probe, laid
         /// out x = px + pz * dims.x, y = py + coefficient * dims.y. Read back
-        /// by the probe pass for its temporal blend, so it persists across
+        /// by the probe pass for its temporal blend, so they persist across
         /// frames rather than being transient.
+        ///
+        /// `gi_probes` is the level the lighting pass reads: it owns the near
+        /// shell and folds in `gi_probes_coarse` wherever its own rays miss, so
+        /// it carries the merged result. The coarse level owns everything
+        /// beyond that shell and updates first.
         IRenderTarget::Ptr gi_probes;
         IRenderPass::Ptr cached_probe_pass;
+        IRenderTarget::Ptr gi_probes_coarse;
+        IRenderPass::Ptr cached_probe_pass_coarse;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -207,9 +214,22 @@ private:
     /// (standalone compute). Strong Ptr; the temporal pass holds it.
     IGpuPipeline::Ptr ensure_denoise_pipeline(FrameContext& ctx);
 
-    /// G1: world-space GI probe pass. Composed with the RT body so probe hits
-    /// get real material evaluation.
+    /// World-space GI probe pass. Composed with the RT body so probe hits get
+    /// real material evaluation.
     IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx);
+
+    /// Emits one cascade level. `t_min_scale` / `t_max_scale` bound the level's
+    /// rays in units of its own probe spacing, the shader deriving the spacing
+    /// from the scene bounds; a `t_max_scale` of 0 means unbounded. An empty
+    /// `coarse_atlas` marks this the coarsest level, which falls back to the
+    /// environment on a miss instead of deferring upward.
+    void emit_probe_level(IRenderTarget::Ptr& atlas, IRenderPass::Ptr& cached_pass,
+                          const char* label, uint32_t dim_x, uint32_t dim_y,
+                          uint32_t dim_z, float t_min_scale, float t_max_scale,
+                          const IRenderTarget::Ptr& coarse_atlas, uint32_t coarse_dims,
+                          const RenderView& render_view, FrameContext& ctx,
+                          IRenderGraph& graph);
+
     void emit_probe_pass(ViewState& vs, const RenderView& render_view,
                          FrameContext& ctx, IRenderGraph& graph);
 
