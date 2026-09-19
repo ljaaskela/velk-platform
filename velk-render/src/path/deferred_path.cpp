@@ -198,7 +198,7 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t _pad1;            // pads to 112 (VELK_GPU_STRUCT is alignas(16))
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
     uint32_t gi_probe_dims;    // probe grid, 10 bits per axis
-    uint32_t _pad4;
+    uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
 };
 static_assert(sizeof(DeferredComputePushC) == 112, "Deferred compute PushC layout mismatch");
 
@@ -236,8 +236,40 @@ VELK_GPU_STRUCT SpatialPushC {
     uint32_t width;
     uint32_t height;
     uint32_t unshadowed_id;
-    uint32_t _pad_unshadowed;
+    uint32_t probe_grid;
 };
+
+// Diagnostic: rebuild the visibility ratio from probes on a screen grid of this
+// spacing in pixels, to ask what a screen-space probe cascade could deliver
+// before building one. Unset or 1 keeps the per-pixel path. VELK_SS_PROBE_GRID=4
+// is the spacing the sizing argument assumes (~60k probes at 1280x750).
+uint32_t env_uint(const char* name, long lo, long hi)
+{
+    const auto parse = [&](const char* v) -> uint32_t {
+        if (!v || !v[0]) return 0u;
+        long n = std::strtol(v, nullptr, 10);
+        return (n >= lo && n <= hi) ? static_cast<uint32_t>(n) : 0u;
+    };
+#ifdef _WIN32
+    // _dupenv_s rather than getenv, which MSVC deprecates.
+    char* val = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&val, &len, name) != 0 || !val) return 0u;
+    uint32_t r = parse(val);
+    std::free(val);
+    return r;
+#else
+    return parse(std::getenv(name));
+#endif
+}
+
+uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
+
+// Diagnostic: repeat each light's per-pixel ALU this many extra times, to price
+// what clustered light culling would remove. It adds work instead of removing
+// it, so the chosen light, the shadow ray and the image are unchanged and ray
+// coherence cannot drift into the measurement. 1 doubles the per-light ALU.
+uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
@@ -360,7 +392,8 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
 namespace {
 
 // Cascade 0: 55296 probes x 8 directions = 442k rays, each bounded to about
-// one probe spacing.
+// one probe spacing. Half the probes update per frame, so 221k of them are
+// traced on any given one.
 //
 // Sizing history, so the numbers are not re-derived. 256 probes x 64 dirs
 // measured 2.8 ms (171 ns/ray), but 16k threads does not saturate the GPU, so
@@ -531,9 +564,16 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.env[3] = handle(fine);
 
     // 64-thread groups covering 8 probes x 8 directions each, across all levels.
-    const uint32_t groups =
-        (kProbeDimX * kProbeDimY * kProbeDimZ + kMidDimX * kMidDimY * kMidDimZ
-         + kFarDimX * kFarDimY * kFarDimZ) / 8u;
+    //
+    // The fine level round-robins: half its groups run each frame, so the
+    // dispatch shrinks rather than launching groups that would exit on arrival.
+    // The count is the same every frame and the shader picks which half from
+    // present_counter, so the two sides need no agreement beyond the size.
+    const uint32_t fine_groups =
+        ((kProbeDimX * kProbeDimY * kProbeDimZ) / 8u + 1u) / 2u;
+    const uint32_t groups = fine_groups
+                          + (kMidDimX * kMidDimY * kMidDimZ) / 8u
+                          + (kFarDimX * kFarDimY * kFarDimZ) / 8u;
 
     bool dirty = true;
     emit_cached_view_pass(
@@ -917,6 +957,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
+    pc.light_loop_probe = light_loop_probe();
 
     // No surface blit here anymore: the lighting pass writes the "rest" image
     // (deferred_output) + diffuse irradiance; the denoise/composite pass
@@ -1094,6 +1135,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     pc.height = static_cast<uint32_t>(h);
     pc.unshadowed_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
+    pc.probe_grid = ss_probe_grid();
 
     // The accumulated-history id alternates each frame (ping-pong) -> re-record
     // each frame (one dispatch + blit, negligible CPU).

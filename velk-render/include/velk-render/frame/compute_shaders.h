@@ -115,7 +115,7 @@ layout(push_constant, scalar) uniform PC {
     uint _pad1;                // 96  pads block to 112 (CPU struct is alignas(16))
     uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
     uint gi_probe_dims;        // 104 probe grid, 10 bits per axis
-    uint _pad4;                // 108
+    uint light_loop_probe;     // 108 diagnostic: extra per-light ALU repeats
 } pc;
 
 // ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
@@ -1168,6 +1168,8 @@ void main()
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
         vec3 unshadowed_direct = vec3(0.0);
+        // Diagnostic accumulator; see the probe loop inside the light loop.
+        float loop_probe = 0.0;
 
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_lights.data[pc.lights_base + i];
@@ -1225,6 +1227,40 @@ void main()
             // denoises the quotient instead of the radiance.
             unshadowed_direct += NdotL * radiance;
 
+            // DIAGNOSTIC: repeat this light's ALU to price what clustered light
+            // culling would remove. It ADDS iterations rather than removing
+            // them, so the reservoir seed, the chosen light, the shadow ray and
+            // the final image are all untouched and ray coherence cannot drift.
+            // Capping the loop instead would change which light RIS picks, and
+            // that confound has already wrecked two measurements in this scene.
+            for (uint r = 0u; r < pc.light_loop_probe; ++r) {
+                vec3 L2;
+                float atten2 = 1.0;
+                if (light.flags.x == 0u) {
+                    L2 = -light.direction.xyz;
+                } else {
+                    vec3 tl2 = light.position.xyz - world_pos;
+                    float d2 = length(tl2);
+                    L2 = tl2 / max(d2, 1e-6);
+                    float rg2 = max(light.params.x, 1e-6);
+                    float tt2 = clamp(1.0 - d2 / rg2, 0.0, 1.0);
+                    atten2 = tt2 * tt2;
+                    if (light.flags.x == 2u) {
+                        float ca2 = dot(-L2, light.direction.xyz);
+                        atten2 *= smoothstep(light.params.z, light.params.y, ca2);
+                    }
+                }
+                float ndl2 = max(dot(N, L2), 0.0);
+                vec3 rad2 = light.color_intensity.rgb * light.color_intensity.a * atten2;
+                vec3 H2 = normalize(L2 + V);
+                float nh2 = max(dot(N, H2), 0.0);
+                float vh2 = max(dot(V, H2), 0.0);
+                vec3 sp2 = (ggx_d(nh2, a) * smith_g(NdotV, ndl2, roughness))
+                         * fresnel_schlick(vh2, F0)
+                         / max(4.0 * NdotV * ndl2, 1e-6) * ndl2 * rad2;
+                loop_probe += sp2.r + sp2.g + sp2.b + ndl2;
+            }
+
             // Reservoir step: weight = luminance of this light's unshadowed
             // diffuse contribution.
             vec3 dcontrib = albedo.rgb * NdotL * radiance;
@@ -1238,6 +1274,11 @@ void main()
                 res_radiance = radiance;
             }
         }
+
+        // Cannot fire: every term the probe loop accumulates is non-negative.
+        // It exists so the loop has an observable result and is not optimised
+        // away, without perturbing anything when the probe is off.
+        if (loop_probe < -1.0) unshadowed_direct += vec3(1.0);
 
         // Shadowed diffuse IRRADIANCE estimate from the single chosen light
         // (one ray), demodulated (no albedo - reapplied at composite).
@@ -1512,30 +1553,23 @@ layout(push_constant, scalar) uniform PC {
     uint width;
     uint height;
     uint unshadowed_id;        // sharp unshadowed diffuse; multiplies the filtered ratio
-    uint _pad_unshadowed;
+    uint probe_grid;           // diagnostic: reconstruct the ratio from an
+                               // N-pixel screen grid; 0 or 1 = per pixel
 } pc;
 
-void main()
+// One filter tap set, centred on `coord` and using THAT pixel's own geometry
+// as the edge-stop reference. Factored out of main so the screen-grid
+// diagnostic below can run it at grid points instead of only at the shading
+// pixel: a probe sitting there would see its own surface, not the caller's.
+vec3 velk_filter_at(ivec2 coord, vec2 dims)
 {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec2 dims = vec2(float(pc.width), float(pc.height));
     vec2 uv = (vec2(coord) + 0.5) / dims;
-
-    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
-    vec4 rest    = velk_texture(pc.output_id, uv);
-
-    // Sky / no coverage: pass the sharp value through unchanged.
-    if (dot(world_n, world_n) < 1e-6) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, rest);
-        return;
-    }
+    vec3 n0 = velk_texture(pc.normal_id, uv).xyz;
+    if (dot(n0, n0) < 1e-6) return vec3(0.0);
 
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-    vec3 N         = normalize(world_n);
+    vec3 N         = normalize(n0);
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
-    vec4 albedo    = velk_texture(pc.albedo_id, uv);
-    float metallic = clamp(velk_texture(pc.material_id, uv).r, 0.0, 1.0);
 
     vec4 c = velk_texture(pc.hist_irr_id, uv);
     vec3 center_irr = c.rgb;
@@ -1575,7 +1609,83 @@ void main()
             wsum += w;
         }
     }
-    vec3 irr_out = (wsum > 1e-5) ? (sum / wsum) : center_irr;
+    return (wsum > 1e-5) ? (sum / wsum) : center_irr;
+}
+)"
+                                                                      R"(
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    vec2 dims = vec2(float(pc.width), float(pc.height));
+    vec2 uv = (vec2(coord) + 0.5) / dims;
+
+    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
+    vec4 rest    = velk_texture(pc.output_id, uv);
+
+    // Sky / no coverage: pass the sharp value through unchanged.
+    if (dot(world_n, world_n) < 1e-6) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, rest);
+        return;
+    }
+
+    vec3 N         = normalize(world_n);
+    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
+    vec4 albedo    = velk_texture(pc.albedo_id, uv);
+    float metallic = clamp(velk_texture(pc.material_id, uv).r, 0.0, 1.0);
+
+    vec3 irr_out;
+    if (pc.probe_grid > 1u) {
+        // DIAGNOSTIC, not a shipping path. Asks what a screen-space probe
+        // cascade could deliver, without building one: rebuild the visibility
+        // RATIO from probes on an N-pixel grid while falloff and N.L stay per
+        // pixel, which is the same split a cascade would make and needs no new
+        // rays. If the image holds, probe density at this spacing is enough.
+        //
+        // Each grid point runs the FULL filter, which is what an earlier run of
+        // this test got wrong: it interpolated the filter's OUTPUT, so it also
+        // deleted spatial filtering and then read the resulting slow
+        // convergence as a density result.
+        //
+        // Read distant SHARP shadows (building edges, awnings, railings), not
+        // contact shadows. Near occluders are the case this handles well;
+        // bistro's 2-degree sun and 0.3-unit bulbs stay sharp at any distance
+        // and are the case that would kill it. Cost here means nothing: five
+        // filter evaluations per pixel is the diagnostic's price, not the
+        // technique's.
+        int g = int(pc.probe_grid);
+        ivec2 g0 = (coord / g) * g;
+        vec2 f = vec2(coord - g0) / float(g);
+        float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
+        vec3 acc = vec3(0.0);
+        float aw = 0.0;
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 2; ++i) {
+                ivec2 gc = min(g0 + ivec2(i, j) * g,
+                               ivec2(int(pc.width) - 1, int(pc.height) - 1));
+                vec2 guv = (vec2(gc) + 0.5) / dims;
+                vec3 gn = velk_texture(pc.normal_id, guv).xyz;
+                if (dot(gn, gn) < 1e-6) continue;
+                vec3 gp = velk_texture(pc.worldpos_id, guv).xyz;
+                // Bilinear, then gated on geometry. Without the gate a probe on
+                // the far side of a silhouette bleeds across it and the test
+                // would report edge halos that a real implementation rejects,
+                // rather than the resolution question being asked.
+                float bw = ((i == 0) ? (1.0 - f.x) : f.x)
+                         * ((j == 0) ? (1.0 - f.y) : f.y);
+                bw *= pow(max(dot(N, normalize(gn)), 0.0), 32.0);
+                bw *= exp(-abs(dot(gp - world_pos, N)) / (0.05 * depth));
+                if (bw <= 1e-6) continue;
+                acc += velk_filter_at(gc, dims) * bw;
+                aw += bw;
+            }
+        }
+        // All four rejected: fall back to this pixel, as a real implementation
+        // would have to.
+        irr_out = (aw > 1e-5) ? (acc / aw) : velk_filter_at(coord, dims);
+    } else {
+        irr_out = velk_filter_at(coord, dims);
+    }
 
     // irr_out is the filtered VISIBILITY RATIO; the radiance it scales is read
     // sharp and unfiltered here, so light falloff and N.L keep their detail
@@ -2578,7 +2688,8 @@ float velk_probe_hash(uint x)
     x ^= x >> 16;
     return float(x) * (1.0 / 4294967296.0);
 }
-
+)"
+                                                                      R"(
 void main()
 {
     // Cascade 0 shape: MANY probes with FEW directions each. The hierarchy
@@ -2609,6 +2720,29 @@ void main()
     const uint kLevels = 3u;
     uvec3 dims0 = velk_probe_dims_of(pc.env.z);
 
+    // The fine level updates half its probes per frame, alternating halves. It
+    // holds roughly eight ninths of the probes and its cost is dominated by
+    // SHADING each hit (a material evaluation plus a shadow ray), not by
+    // tracing, so halving how many probes shade halves the pass.
+    //
+    // The split is by WORKGROUP, not by probe. A group's 8 probes run
+    // concurrently across its 64 lanes, so idling half of them inside a group
+    // leaves the group running exactly as long as before and saves nothing.
+    // Whole groups drop out instead and the dispatch shrinks to match, so the
+    // skipped half never launches.
+    //
+    // Rounded up, so an odd group count leaves the last group covered on one
+    // phase and out of range on the other rather than never updating.
+    //
+    // Bit 1, not bit 0: bit 0 is what the coarse levels ping-pong on, so a
+    // phase taken from it would tie each half permanently to one of the two
+    // coarse buffers. They hold the same field but carry different noise, and
+    // level 0 takes its miss radiance from there, so the halves would inherit
+    // systematically different indirect light and print as slabs. Running each
+    // half on two consecutive frames lets both see both buffers.
+    uint rr_phase = (VELK_GLOBALS.present_counter >> 1) & 1u;
+    uint fine_groups = ((dims0.x * dims0.y * dims0.z) / kProbesPerGroup + 1u) >> 1;
+
     // Which level owns this workgroup. Each level halves every axis, so its
     // probe count drops eightfold and the walk is three iterations.
     uint level = 0u;
@@ -2616,7 +2750,8 @@ void main()
     uint group_base = 0u;
     for (uint i = 0u; i < kLevels; ++i) {
         uvec3 di = max(dims0 >> i, uvec3(1u));
-        uint groups_i = (di.x * di.y * di.z) / kProbesPerGroup;
+        uint groups_i = (i == 0u) ? fine_groups
+                                  : (di.x * di.y * di.z) / kProbesPerGroup;
         if (gl_WorkGroupID.x < group_base + groups_i) {
             level = i;
             dims = di;
@@ -2629,7 +2764,16 @@ void main()
     uint lane = gl_LocalInvocationIndex;
     uint probe_local = lane / kDirs;
     uint dir = lane - probe_local * kDirs;
-    uint probe = (gl_WorkGroupID.x - group_base) * kProbesPerGroup + probe_local;
+    // Only the fine level round-robins. The coarse levels ping-pong, so
+    // skipping one would leave the buffer it was due to write holding a value
+    // two frames old while the level below reads it as the previous frame's.
+    //
+    // Which half a probe falls in is fixed rather than shuffled, and that is
+    // enough: every probe still updates at the same rate, so the halves differ
+    // only by one frame of phase against a temporal window of twenty.
+    uint group_in_level = gl_WorkGroupID.x - group_base;
+    if (level == 0u) group_in_level = group_in_level * 2u + rr_phase;
+    uint probe = group_in_level * kProbesPerGroup + probe_local;
     // No early return before the barriers: every thread must reach them.
     // `probe_live` rather than `active`, which GLSL reserves.
     bool probe_live = probe < probe_count && probe_count > 0u;
@@ -2824,7 +2968,14 @@ void main()
         vec3 prev = velk_texture(atlas_self, uv).rgb;
         // Fixed blend rather than a running count: probes re-converge cheaply
         // and a fixed rate stops moving lights smearing indefinitely.
-        float blend = (VELK_GLOBALS.present_counter == 0u) ? 1.0 : 0.05;
+        //
+        // The first four frames overwrite instead of blending, because that is
+        // what seeds the atlas and the fine level reaches half its probes at a
+        // time, alternating every second frame. Seeding a narrower window
+        // leaves a half blending 5% at a time into whatever the texture
+        // happened to hold, which shows as slabs eight probes wide and never
+        // clears at all if any of it was NaN.
+        float blend = (VELK_GLOBALS.present_counter <= 3u) ? 1.0 : 0.05;
         // RGBA32F, not F16: the RT prelude declares the f32 storage array, and
         // the atlas is small enough that the extra precision is free.
         // s_sh[c][lane] is this probe's block total, lane being its dir-0 slot.
