@@ -17,12 +17,15 @@ namespace velk::ui {
  *
  * Inherits Resource for URI, existence, size, and persistence accessors.
  *
+ * Decoding is asynchronous: a freshly loaded image is `Loading` and becomes
+ * `Loaded` (or `Failed`) during a later `instance().update()`, when
+ * `IImage::on_loaded` fires. It can be bound to a material right away; the
+ * renderer uploads it once the pixels are in.
+ *
  * @code
  *   auto img = Image::load("image:app://images/logo.png");
- *   if (img && img.is_loaded()) {
- *       img.set_persistent(true);
- *   }
- *   mat.set_texture(img.as_texture());
+ *   img.set_persistent(true);
+ *   mat.set_texture(img.as_surface());
  * @endcode
  */
 class Image : public Resource
@@ -47,8 +50,10 @@ public:
      *
      * @return An `Image` wrapping the result. The wrapper may evaluate
      *         to false if the URI's protocol scheme is unknown or the
-     *         decoder rejected the input outright; check `is_loaded()`
-     *         to distinguish a successful load from a cached failure.
+     *         decoder rejected the input outright. A new image is still
+     *         `Loading` (decoded on a worker thread); `status()` becomes
+     *         `Loaded` or `Failed` during a later `instance().update()`,
+     *         when `IImage::on_loaded` fires.
      */
     static Image load(string_view uri)
     {

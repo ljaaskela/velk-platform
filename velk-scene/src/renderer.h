@@ -224,6 +224,10 @@ private:
     // upload in consume_scenes and the raster paths read from it, so it
     // lives here rather than inside a single sub-renderer.
     BatchBuilder batch_builder_;
+    // Set when the last upload sweep saw images still decoding (or dirty
+    // textures without pixels), so the next prepare sweeps again even if no
+    // scene changed.
+    bool uploads_pending_{false};
 
 
     // Frame data buffer (per-slot GPU staging). Slot lifecycle is on the

@@ -21,6 +21,7 @@
 #include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_draw_data.h>
+#include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-scene/interface/intf_environment.h>
 #include <velk-scene/interface/intf_visual.h>
@@ -514,14 +515,27 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
         // does not stall the GPU once per texture; the batch flushes itself
         // when its staging budget fills, and end_upload_batch blocks until
         // every upload has completed.
+        //
+        // The sweep also runs without scene changes while images are still
+        // decoding: an image that finishes loading does not change the scene
+        // (e.g. a glTF material texture), so nothing else would upload it.
         bool resources_uploaded = false;
-        if (has_changes) {
+        const bool pending_only = !has_changes && uploads_pending_;
+        if (has_changes || uploads_pending_) {
+            bool still_pending = false;
             backend_->begin_upload_batch();
             for (auto& [elem, cache] : batch_builder_.element_cache()) {
                 for (auto& weak : cache.gpu_resources) {
                     auto buf_ptr = weak.lock();
                     auto* buf = buf_ptr.get();
-                    if (!buf || !buf->is_dirty()) {
+                    if (!buf) {
+                        continue;
+                    }
+                    if (auto* img = interface_cast<IImage>(buf); img && img->status() == ImageStatus::Loading) {
+                        still_pending = true;
+                        continue;
+                    }
+                    if (!buf->is_dirty()) {
                         continue;
                     }
 
@@ -553,6 +567,9 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                                 buf->clear_dirty();
                                 resources_uploaded = true;
                             }
+                        } else {
+                            // Dirty but no pixels yet; try again next frame.
+                            still_pending = true;
                         }
                     } else {
                         size_t bsize = buf->get_data_size();
@@ -588,12 +605,15 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                 }
             }
             backend_->end_upload_batch();
+            uploads_pending_ = still_pending;
         }
 
         if (has_visual_changes || resources_uploaded) {
             for (auto& s : views_) {
                 auto sp = s.camera_element->get_scene();
-                if (interface_cast<IScene>(sp) == scene) {
+                // The sweep covers every scene's resources, so an upload made
+                // only because of pending images may belong to any view.
+                if (pending_only || interface_cast<IScene>(sp) == scene) {
                     s.entry->set_batches_dirty(true);
                 }
             }

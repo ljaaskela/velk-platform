@@ -15,8 +15,11 @@
 
 namespace velk::ui::impl {
 
-ReturnValue ImagePlugin::initialize(IVelk& velk, PluginConfig&)
+ReturnValue ImagePlugin::initialize(IVelk& velk, PluginConfig& config)
 {
+    // pre_update hands asynchronously decoded images back on the main thread.
+    config.enableUpdate = true;
+
     auto rv = register_type<Image>(velk);
     rv &= register_type<ImageDecoder>(velk);
     rv &= register_type<ImageEncoder>(velk);
@@ -53,6 +56,8 @@ ReturnValue ImagePlugin::shutdown(IVelk& velk)
     auto& store = velk.resource_store();
     if (image_decoder_) {
         store.unregister_decoder(image_decoder_);
+        // Releasing the decoder joins its decode workers and drops pending
+        // hand-backs, so no task outlives this library.
         image_decoder_ = nullptr;
     }
     if (env_decoder_) {
@@ -60,6 +65,13 @@ ReturnValue ImagePlugin::shutdown(IVelk& velk)
         env_decoder_ = nullptr;
     }
     return ReturnValue::Success;
+}
+
+void ImagePlugin::pre_update(const IPlugin::PreUpdateInfo&)
+{
+    if (image_decoder_) {
+        static_cast<ImageDecoder*>(image_decoder_.get())->drain_commits();
+    }
 }
 
 } // namespace velk::ui::impl

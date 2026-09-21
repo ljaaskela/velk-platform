@@ -2,6 +2,7 @@
 
 #include "gltf_asset.h"
 
+#include <velk/api/event.h>
 #include <velk/api/object.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
@@ -252,6 +253,41 @@ SamplerDesc sampler_desc_from(const cgltf_sampler* s)
     return d;
 }
 
+/// Fills @p mr (metallic-roughness) and @p sp (specular color) from the
+/// pixels of a KHR_materials_pbrSpecularGlossiness texture. Leaves both empty
+/// if the source has no CPU pixels (failed to load, or already uploaded).
+void split_spec_gloss(ISurface& src, IImage& mr, string_view mr_uri,
+                      IImage& sp, string_view sp_uri)
+{
+    auto* buf = interface_cast<IBuffer>(&src);
+    const uint8_t* src_pixels = buf ? buf->get_data() : nullptr;
+    size_t src_size = buf ? buf->get_data_size() : 0;
+    auto dims = src.get_dimensions();
+    size_t pixel_count = static_cast<size_t>(dims.x) * dims.y;
+    if (!src_pixels || src_size != pixel_count * 4) {
+        return;
+    }
+    vector<uint8_t> mr_pixels;
+    mr_pixels.resize(src_size);
+    vector<uint8_t> sp_pixels;
+    sp_pixels.resize(src_size);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        const uint8_t* px = src_pixels + i * 4;
+        mr_pixels[i * 4 + 0] = 255;                                 // R: occlusion (unused, default)
+        mr_pixels[i * 4 + 1] = static_cast<uint8_t>(255 - px[3]);   // G: roughness
+        mr_pixels[i * 4 + 2] = 0;                                   // B: metallic = 0
+        mr_pixels[i * 4 + 3] = 255;
+        sp_pixels[i * 4 + 0] = px[0];
+        sp_pixels[i * 4 + 1] = px[1];
+        sp_pixels[i * 4 + 2] = px[2];
+        sp_pixels[i * 4 + 3] = 255;                                 // A: specular strength = 1
+    }
+    mr.init_from_pixels(mr_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
+                        PixelFormat::RGBA8, mr_pixels.data(), mr_pixels.size());
+    sp.init_from_pixels(sp_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
+                        PixelFormat::RGBA8_SRGB, sp_pixels.data(), sp_pixels.size());
+}
+
 IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
                               const vector<ISurface::Ptr>& images)
 {
@@ -367,60 +403,54 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         // specular tint, A = linear glossiness) into two new textures:
         //   - metallicRoughness: G = 1 - alpha (roughness, linear), B = 0
         //   - specularColor: RGB copied (sRGB), A = 255 (full strength)
-        // Source pixels are still CPU-resident since the renderer hasn't
-        // uploaded yet at decode time.
+        // The source decodes asynchronously, so the two targets are created
+        // empty and bound to the material now, and filled from the source
+        // pixels once it has loaded (before the renderer uploads it).
         if (sg.specular_glossiness_texture.texture
             && sg.specular_glossiness_texture.texture->image) {
             const auto* src_img_obj = sg.specular_glossiness_texture.texture->image;
             size_t img_idx = static_cast<size_t>(src_img_obj - data->images);
             if (img_idx < images.size() && images[img_idx]) {
                 auto src_surf = images[img_idx];
-                auto* buf = interface_cast<IBuffer>(src_surf.get());
-                const uint8_t* src_pixels = buf ? buf->get_data() : nullptr;
-                size_t src_size = buf ? buf->get_data_size() : 0;
-                auto dims = src_surf->get_dimensions();
-                size_t pixel_count = static_cast<size_t>(dims.x) * dims.y;
-                if (src_pixels && src_size == pixel_count * 4) {
-                    vector<uint8_t> mr_pixels;
-                    mr_pixels.resize(src_size);
-                    vector<uint8_t> sp_pixels;
-                    sp_pixels.resize(src_size);
-                    for (size_t i = 0; i < pixel_count; ++i) {
-                        const uint8_t* sp = src_pixels + i * 4;
-                        mr_pixels[i * 4 + 0] = 255;          // R: occlusion (unused, default)
-                        mr_pixels[i * 4 + 1] = static_cast<uint8_t>(255 - sp[3]);  // G: roughness
-                        mr_pixels[i * 4 + 2] = 0;            // B: metallic = 0
-                        mr_pixels[i * 4 + 3] = 255;
-                        sp_pixels[i * 4 + 0] = sp[0];
-                        sp_pixels[i * 4 + 1] = sp[1];
-                        sp_pixels[i * 4 + 2] = sp[2];
-                        sp_pixels[i * 4 + 3] = 255;          // A: specular strength = 1
-                    }
-                    char mr_uri[80];
-                    std::snprintf(mr_uri, sizeof(mr_uri),
-                                  "gltf-mr-%p-%zu",
-                                  static_cast<const void*>(data), img_idx);
-                    auto mr_img = ::velk::ui::image::create_image_from_pixels(
-                        mr_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
-                        PixelFormat::RGBA8, mr_pixels.data(), mr_pixels.size());
-                    if (mr_img) {
-                        static_cast<IImage::Ptr>(mr_img)->set_sampler_desc(src_surf->get_sampler_desc());
-                        mat.metallic_roughness().set_texture(mr_img.as_surface());
-                        apply_tex_transform(mat.metallic_roughness(),
-                                            sg.specular_glossiness_texture);
-                    }
-                    char sp_uri[80];
-                    std::snprintf(sp_uri, sizeof(sp_uri),
-                                  "gltf-sp-%p-%zu",
-                                  static_cast<const void*>(data), img_idx);
-                    auto sp_img = ::velk::ui::image::create_image_from_pixels(
-                        sp_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
-                        PixelFormat::RGBA8_SRGB, sp_pixels.data(), sp_pixels.size());
-                    if (sp_img) {
-                        static_cast<IImage::Ptr>(sp_img)->set_sampler_desc(src_surf->get_sampler_desc());
-                        mat.specular().set_texture(sp_img.as_surface());
-                        apply_tex_transform(mat.specular(),
-                                            sg.specular_glossiness_texture);
+                char mr_uri[80];
+                std::snprintf(mr_uri, sizeof(mr_uri),
+                              "gltf-mr-%p-%zu",
+                              static_cast<const void*>(data), img_idx);
+                char sp_uri[80];
+                std::snprintf(sp_uri, sizeof(sp_uri),
+                              "gltf-sp-%p-%zu",
+                              static_cast<const void*>(data), img_idx);
+                auto mr_img = instance().create<IImage>(::velk::ui::ClassId::Image);
+                auto sp_img = instance().create<IImage>(::velk::ui::ClassId::Image);
+                if (mr_img && sp_img) {
+                    mr_img->set_sampler_desc(src_surf->get_sampler_desc());
+                    sp_img->set_sampler_desc(src_surf->get_sampler_desc());
+                    mat.metallic_roughness().set_texture(interface_pointer_cast<ISurface>(mr_img));
+                    apply_tex_transform(mat.metallic_roughness(),
+                                        sg.specular_glossiness_texture);
+                    mat.specular().set_texture(interface_pointer_cast<ISurface>(sp_img));
+                    apply_tex_transform(mat.specular(),
+                                        sg.specular_glossiness_texture);
+
+                    // Weak refs only: the handler lives on the source image's
+                    // event, so a strong ref to it would be a cycle.
+                    auto convert = [src = ISurface::WeakPtr(src_surf),
+                                    mr = IImage::WeakPtr(mr_img),
+                                    sp = IImage::WeakPtr(sp_img),
+                                    mr_uri = string(mr_uri),
+                                    sp_uri = string(sp_uri)]() {
+                        auto s = src.lock();
+                        auto m = mr.lock();
+                        auto p = sp.lock();
+                        if (s && m && p) {
+                            split_spec_gloss(*s, *m, mr_uri, *p, sp_uri);
+                        }
+                    };
+                    auto src_img = interface_pointer_cast<IImage>(src_surf);
+                    if (src_img && src_img->status() == ImageStatus::Loading) {
+                        Event(src_img->on_loaded()).add_handler(convert);
+                    } else {
+                        convert();
                     }
                 }
             }

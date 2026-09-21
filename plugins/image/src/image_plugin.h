@@ -16,6 +16,7 @@ public:
 
     ReturnValue initialize(IVelk& velk, PluginConfig& config) override;
     ReturnValue shutdown(IVelk& velk) override;
+    void pre_update(const IPlugin::PreUpdateInfo& info) override;
 
 private:
     IResourceDecoder::Ptr image_decoder_;

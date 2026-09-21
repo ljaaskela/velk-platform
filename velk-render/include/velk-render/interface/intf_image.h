@@ -1,6 +1,7 @@
 #ifndef VELK_RENDER_INTF_IMAGE_H
 #define VELK_RENDER_INTF_IMAGE_H
 
+#include <velk/interface/intf_metadata.h>
 #include <velk/interface/resource/intf_resource.h>
 #include <velk/string_view.h>
 #include <velk-render/interface/intf_render_backend.h>
@@ -14,7 +15,7 @@ namespace velk {
 enum class ImageStatus : uint8_t
 {
     Unloaded, ///< Resource exists but no decode has been attempted yet.
-    Loading,  ///< Decode is in progress (future async loading).
+    Loading,  ///< Decode is in progress on a worker thread.
     Loaded,   ///< Decoded successfully; the texture surface is valid.
     Failed,   ///< Decode was attempted and failed.
 };
@@ -32,15 +33,22 @@ enum class ImageStatus : uint8_t
  * `IImage::Ptr` can `interface_cast<ISurface>(image)` to get the binding
  * surface for materials.
  *
- * Sync v1 only ever produces `Loaded` or `Failed` status. `Unloaded` and
- * `Loading` exist in the enum so consumers can be written defensively for
- * future lazy and async loading without an interface change.
+ * Images from the resource store decode asynchronously: they start as
+ * `Loading` (0x0, no pixels) and become `Loaded` or `Failed` during a later
+ * `instance().update()`, at which point `on_loaded` fires on the main
+ * thread. Consumers that need the pixels or dimensions should check
+ * `status()` and subscribe to `on_loaded` while it is `Loading`.
  *
  * Chain: IInterface -> IResource -> IImage
  */
 class IImage : public Interface<IImage, IResource>
 {
 public:
+    // on_loaded: fired on the main thread when status leaves Loading (Loaded or Failed).
+    VELK_INTERFACE(
+        (EVT, on_loaded)
+    )
+
     /** @brief Returns the current load status. */
     virtual ImageStatus status() const = 0;
 

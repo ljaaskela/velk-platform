@@ -56,11 +56,17 @@ void ImageVisual::ensure_loaded()
     // Reload image if uri changed.
     if (string_view(loaded_uri_) != string_view(state->uri)) {
         loaded_uri_ = state->uri;
+        loaded_sub_.reset();
         if (loaded_uri_.empty()) {
             image_ = nullptr;
         } else {
             auto& store = ::velk::instance().resource_store();
             image_ = store.get_resource<IImage>(string_view(loaded_uri_));
+            // Images decode asynchronously; nothing is drawn until the image
+            // is Loaded, so redraw once it gets there.
+            if (image_ && image_->status() == ImageStatus::Loading) {
+                loaded_sub_ = ScopedHandler(image_->on_loaded(), [this]() { invoke_visual_changed(); });
+            }
         }
     }
 }

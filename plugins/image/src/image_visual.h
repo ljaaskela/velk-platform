@@ -1,6 +1,7 @@
 #ifndef VELK_UI_IMAGE_VISUAL_H
 #define VELK_UI_IMAGE_VISUAL_H
 
+#include <velk/api/event.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_surface.h>
@@ -41,6 +42,7 @@ private:
     string loaded_uri_;       ///< URI we last fetched (for change detection).
     IImage::Ptr image_;       ///< Decoded image, kept alive by us.
     IObject::Ptr material_;   ///< ImageMaterial instance bound to image_.
+    ScopedHandler loaded_sub_; ///< Redraws when image_ finishes loading.
 };
 
 } // namespace velk::ui::impl

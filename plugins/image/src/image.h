@@ -41,6 +41,16 @@ public:
     /// Constructs a failed image with no pixel data, just a uri and Failed status.
     void init_failed(string_view uri);
 
+    /// Marks the image as Loading (0x0, no pixels) while a worker decodes it.
+    void begin_loading(string_view uri);
+
+    /// Completes an asynchronous load with decoded pixels. Keeps the format
+    /// and sampler set by loaders in the meantime. Fires on_loaded.
+    void finish_loading(int width, int height, vector<uint8_t> pixels);
+
+    /// Completes an asynchronous load as Failed. Fires on_loaded.
+    void fail_loading();
+
     void set_persistent_flag(bool value) { persistent_ = value; }
 
     /// Sets the sampler desc the renderer should use when uploading this
