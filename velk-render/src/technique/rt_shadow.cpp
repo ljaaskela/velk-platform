@@ -69,8 +69,9 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     Ray r;
     r.origin = world_pos + L * 0.005;
     r.dir    = L;
-    // Trim t_max so the ray doesn't hit the light's own fixture mesh.
-    t_max = max(t_max - 0.005, 0.0);
+    // Geometry inside the emitter's radius cannot block it, which also keeps the
+    // ray off the light's own fixture mesh.
+    t_max = max(t_max - max(size, 0.005), 0.0);
 
     return trace_any_hit(r, t_max) ? 0.0 : 1.0;
 }
