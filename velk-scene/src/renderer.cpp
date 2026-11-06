@@ -668,9 +668,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // callback resolves material + texture + custom intersect via
         // the shared snippet registry so primary-buffer shapes and
         // BVH shapes carry identical ids.
-        //
-        // M2: rebuild runs every frame; M3 will skip it when nothing
-        // dirty has changed.
         std::unordered_map<IScene*, impl::SceneBvh*> scene_bvhs;
         for (auto& [scene, state] : consumed_scenes) {
             impl::SceneBvh* bvh = nullptr;
@@ -697,31 +694,10 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 scene_bvh_cache_[scene] = bvh;
             }
 
-            // Dirty if the change affects scene geometry: an element
-            // was removed, or a redrawn element carries an IVisual
-            // attachment (i.e. its geometry/shape set may have moved
-            // or changed). Pure camera / light transform updates land
-            // in redraw_list too but don't affect BVH topology, so we
-            // skip a rebuild for them. Parent transform changes are
-            // still caught because the layout solver marks every
-            // element whose world matrix it changes.
-            bool dirty = !state.removed_list.empty();
-            if (!dirty) {
-                for (auto* elem : state.redraw_list) {
-                    if (::velk::has_attachment<IVisual>(elem)) {
-                        dirty = true;
-                        break;
-                    }
-                }
-            }
-            // Force a full re-walk so the BVH cb fires for every
-            // primitive and the per-instance log block runs. Clearing
-            // the cache also bypasses the SceneBvh::rebuild AABB-hash
-            // shortcut that would otherwise downgrade dirty back to
-            // false on a static scene.
+            // Force a full re-walk so the BVH cb fires for every primitive and the
+            // per-instance log block runs.
             if (log_bvh_next_) {
-                dirty = true;
-                bvh->force_full_rebuild();
+                bvh->invalidate();
             }
             struct BvhBuildState {
                 Renderer*               self;
@@ -729,7 +705,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 bool                    log;
             };
             BvhBuildState bvh_state{this, ctx, log_bvh_next_};
-            bvh->rebuild(scene, ctx, dirty,
+            bvh->update(state, ctx,
                 +[](void* u, ShapeSite& site) {
                     auto& s = *static_cast<BvhBuildState*>(u);
                     auto& ctx = s.ctx;
@@ -840,9 +816,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 auto* b = bit->second;
                 ctx.bvh.root = b->get_root_index();
                 ctx.bvh.node_count = b->get_node_count();
-                ctx.bvh.record_count = b->get_record_count();
-                ctx.bvh.node_base = b->get_node_base();
-                ctx.bvh.record_base = b->get_record_base();
                 const ProbeVolume probes = b->get_probe_volume();
                 ctx.bvh.probe_min[0] = probes.min.x;
                 ctx.bvh.probe_min[1] = probes.min.y;

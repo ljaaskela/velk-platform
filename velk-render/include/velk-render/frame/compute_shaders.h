@@ -279,21 +279,21 @@ bool trace_any_hit(Ray ray, float t_max)
     stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+        BvhNode node = velk_bvh_nodes.data[ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
-            if (velk_intersect_record(ray, VELK_RECORD_BASE + node.first_shape + i, 0.0, t_max, true, h)) {
+            if (velk_intersect_record(ray, node.first_shape + i, 0.0, t_max, true, h)) {
                 return true;
             }
         }
 
 #ifdef VELK_TRACE_ORDERED_ANY_HIT
         if (node.child_count == 2u) {
-            BvhNode l = velk_bvh_nodes.data[VELK_NODE_BASE + node.first_child];
-            BvhNode r = velk_bvh_nodes.data[VELK_NODE_BASE + node.first_child + 1u];
+            BvhNode l = velk_bvh_nodes.data[node.first_child];
+            BvhNode r = velk_bvh_nodes.data[node.first_child + 1u];
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -340,12 +340,12 @@ bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit)
     stack[sp++] = VELK_GLOBALS.bvh_root;
     while (sp > 0) {
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+        BvhNode node = velk_bvh_nodes.data[ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
-            if (velk_intersect_record(ray, VELK_RECORD_BASE + node.first_shape + i, t_min, hit.t, false, h)) {
+            if (velk_intersect_record(ray, node.first_shape + i, t_min, hit.t, false, h)) {
                 hit = h;
             }
         }
@@ -386,16 +386,13 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF1
 
 // Scene TLAS, bound by index (set = 1) instead of chased through a
 // buffer_device_address in globals. The renderer stamps the same
-// scene-wide BVH buffers into set_global_buffer each frame; indexed by
-// first_child / first_shape are relative to this frame's ring region;
-// VELK_NODE_BASE / VELK_SHAPE_BASE add the region base (see IGpuArena).
+// scene-wide BVH buffers into set_global_buffer each frame. Node and record
+// indices are absolute in these buffers.
 layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
 layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
 // velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
 // selects this view's record.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
-#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
-#define VELK_RECORD_BASE VELK_GLOBALS.bvh_record_base
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
@@ -1043,7 +1040,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
         // see a sliver of emitter after the diffuse hemisphere is covered.
         while (sp > 0 && (f_occ < f_max || s_occ < s_max)) {
             uint ni = stack[--sp];
-            BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+            BvhNode node = velk_bvh_nodes.data[ni];
 
             vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz);
             vec3 be = 0.5 * (node.aabb_max.xyz - node.aabb_min.xyz);
@@ -1057,7 +1054,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
             if (outside) continue;
 
             for (uint ri = 0u; ri < node.shape_count; ++ri) {
-              RtRecord rec = velk_records.data[VELK_RECORD_BASE + node.first_shape + ri];
+              RtRecord rec = velk_records.data[node.first_shape + ri];
               // Records hold the inverse; silhouettes need world-space corners.
               mat3 to_world = inverse(transpose(mat3(rec.inv_row0.xyz, rec.inv_row1.xyz, rec.inv_row2.xyz)));
               vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w);
@@ -1827,11 +1824,9 @@ layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF3
 // array reads (bvh_root / bvh_node_count scalars still come from RtRoot).
 layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
 layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
-// BVH bases (and the rest of the per-view frame state: inv-VP, cam, bvh root
-// / counts, present_counter) come from the bound FrameGlobals record, indexed
-// by pc.globals_base — see VELK_GLOBALS below.
-#define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
-#define VELK_RECORD_BASE VELK_GLOBALS.bvh_record_base
+// The rest of the per-view frame state (inv-VP, cam, bvh root and count,
+// present_counter) comes from the bound FrameGlobals record, indexed by
+// pc.globals_base. See VELK_GLOBALS below.
 
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {

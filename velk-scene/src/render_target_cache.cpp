@@ -133,9 +133,6 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_globals.viewport[3] = 1.0f / static_cast<float>(rte.height);
         rt_globals.bvh_root = ctx.bvh.root;
         rt_globals.bvh_node_count = ctx.bvh.node_count;
-        rt_globals.bvh_record_count = ctx.bvh.record_count;
-        rt_globals.bvh_node_base = ctx.bvh.node_base;
-        rt_globals.bvh_record_base = ctx.bvh.record_base;
         set_probe_globals(rt_globals, ctx.bvh);
         rt_globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
         RenderView rt_view{};

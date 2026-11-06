@@ -19,17 +19,13 @@ namespace velk {
 
 /// Renderer-side description of how a view reaches the scene BVH for
 /// index-based shader reads. Carried through RenderView / FrameContext and
-/// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c record_base
-/// locate the BVH's regions in the shared node / record arenas; @c root and
-/// the counts are relative to them. Not uploaded directly; the GPU structs
-/// mirror these fields individually.
+/// stamped (flat) into FrameGlobals / RtRoot. All indices are absolute in the
+/// shared node and record arenas. Not uploaded directly; the GPU structs mirror
+/// these fields individually.
 struct BvhBinding
 {
     uint32_t root         = 0;
     uint32_t node_count   = 0;
-    uint32_t record_count = 0;
-    uint32_t node_base    = 0;
-    uint32_t record_base  = 0;
     /// GI probe lattice box and the frame it last changed. Read from globals
     /// each frame, so not part of the comparison below, which decides whether
     /// passes that bake the fields above must re-record.
@@ -39,9 +35,7 @@ struct BvhBinding
 
     bool operator==(const BvhBinding& o) const
     {
-        return root == o.root && node_count == o.node_count
-            && record_count == o.record_count && node_base == o.node_base
-            && record_base == o.record_base;
+        return root == o.root && node_count == o.node_count;
     }
     bool operator!=(const BvhBinding& o) const { return !(*this == o); }
 };
@@ -58,12 +52,10 @@ struct FrameGlobals
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
-    uint32_t bvh_root;                     ///< Index of the root BvhNode, relative to bvh_node_base; 0 if no BVH.
+    uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
-    uint32_t bvh_record_count;             ///< Total RtRecords the BVH indexes.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
-    uint32_t bvh_node_base;                ///< Element base added to BVH node indices (this BVH's region of the node arena).
-    uint32_t bvh_record_base;              ///< Element base added to BVH leaf record indices.
+    uint32_t _pad1;
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
     float    probe_min[3];                 ///< GI probe lattice box, world-space minimum.
     uint32_t probe_reset_frame;            ///< present_counter value at which the lattice last changed.
@@ -71,7 +63,7 @@ struct FrameGlobals
     uint32_t _pad0;
 };
 
-static_assert(sizeof(FrameGlobals) == 280, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 272, "FrameGlobals layout must match velk.glsl");
 
 /// Copies the probe lattice fields of @p bvh into @p globals.
 inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)

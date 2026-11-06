@@ -76,6 +76,7 @@ private:
     mutable std::shared_mutex state_mutex_;  ///< Protects the lists below.
     vector<IElement*> dirty_elements_;
     vector<IElement*> redraw_list_;
+    vector<DirtyFlags> redraw_flags_;
     vector<IElement*> dependent_elements_;
     vector<IElement::Ptr> removed_list_;
 

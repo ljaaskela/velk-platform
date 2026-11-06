@@ -12,20 +12,22 @@
 #include <velk-render/render_path/frame_context.h>
 #include <velk-scene/plugin.h>
 
+#include <unordered_map>
+
 namespace velk {
 
 /**
- * @brief IBvh implementation backed by an IScene tree walk.
+ * @brief IBvh implementation over an IScene's records.
  *
- * Attached to the scene root on first use. Owns the current BVH build
- * state (nodes + shapes byte arrays, root index, counts). The renderer
- * calls `rebuild` each frame with a per-shape callback that resolves
- * materials / textures / custom intersects; the callback still lives
- * in the renderer because it needs access to renderer-owned registries.
+ * Attached to the scene root on first use. Each group of shapes is a record, kept
+ * in a static partition or in the dynamic partition. A static partition owns its
+ * tree and its record, shape and local tree regions, and a top tree over the
+ * partitions joins them. Records that change move to the dynamic partition, which
+ * rebuilds each frame it changes, and return to a static partition once they have
+ * been still for a while. With a stable set of movers, the per-frame cost depends
+ * only on the movers.
  *
- * M2: rebuild runs every frame and uploads into a `FrameDataManager`
- * (same perf profile as before). M3 will migrate to persistent IBuffer
- * instances with dirty tracking so static frames skip the rebuild.
+ * All node, record and shape indices on the GPU are absolute in their arenas.
  */
 namespace impl {
 
@@ -37,31 +39,19 @@ public:
     SceneBvh() = default;
 
     /**
-     * @brief Rebuilds the BVH from the scene tree, staging nodes /
-     *        shapes / mesh-instance data into per-bvh persistent
-     *        IBuffers so GPU addresses are stable across frames.
-     *        write_diff gates the upload (and the implicit address
-     *        change) on real byte change. When @p dirty is false and a
-     *        cached build exists, the tree walk is skipped and the
-     *        cached arrays are reused; the per-frame work reduces to
-     *        memcmp.
+     * @brief Brings the BVH up to date with the changes in @p state.
      *
-     * The callback fires per emitted shape during a full rebuild so
-     * the caller can fill material / texture / intersect fields.
-     * Clean-frame reuse relies on those fields remaining valid across
-     * frames (materials with persistent data buffers, stable
-     * TextureIds) — scenes that invalidate those fields must force
-     * @p dirty = true.
+     * The callback fires per emitted shape of each changed element so the caller
+     * can fill material / texture / intersect fields. A shape whose texture is not
+     * resolved yet is emitted again each frame until it is.
      */
-    void rebuild(IScene* scene, FrameContext& ctx, bool dirty,
-                 ShapeCb shape_cb, void* shape_user);
+    void update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user);
 
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
     {
-        // TODO(m-later): wire CPU-side traversal over cached_nodes_ /
-        // cached_shapes_ so app-side pickers / collision consumers can
-        // query without going through GPU. Stub until then.
+        // TODO(m-later): wire CPU-side traversal so app-side pickers / collision
+        // consumers can query without going through GPU. Stub until then.
         return false;
     }
 
@@ -72,57 +62,107 @@ public:
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
-    uint32_t get_record_count() const override { return record_count_; }
-    uint32_t get_node_base() const override { return node_base_; }
-    uint32_t get_record_base() const override { return record_base_; }
     ProbeVolume get_probe_volume() const override { return probe_volume_; }
 
-    void invalidate() override { dirty_ = true; }
-
-    /// Clears the cached topology so the next `rebuild` re-walks every
-    /// shape and re-fires the shape callback, regardless of the AABB
-    /// hash check. Used by debug hooks that need to observe per-shape
-    /// emit-time state on demand.
-    void force_full_rebuild() { cached_nodes_.clear(); }
+    void invalidate() override { needs_full_build_ = true; }
 
 private:
-    /// Hash all visual-bearing elements' world matrices and sizes to
-    /// detect geometry-only changes without re-emitting shapes. Walks
-    /// the scene tree once per call; O(#elements) regardless of emitted
-    /// shape count.
-    static uint64_t hash_visual_aabbs(IScene* scene);
+    static constexpr uint32_t kUnplaced = 0xFFFFFFFFu;
+    static constexpr uint32_t kDynamic = 0xFFFFFFFEu;
 
-    /// Moves the probe volume only if the new build's bounds left it or are
-    /// much smaller, since moving it discards probe history.
-    void update_probe_volume(uint32_t frame);
+    /// One group of shapes in one local space. A slot in records_ is stable for the
+    /// record's lifetime.
+    struct Record
+    {
+        IElement* owner = nullptr;  ///< Null when the slot is free. Never dereferenced.
+        /// Its first_shape and tree_root are absolute once its partition uploads.
+        RtRecord gpu{};
+        vector<RtShape> shapes;
+        /// Local tree, when the record has many shapes. Indices relative to this
+        /// vector and to `shapes`.
+        vector<BlasNode> tree;
+        BvhItemBounds bounds{};
+        uint32_t partition = kUnplaced;  ///< Index into partitions_, or kDynamic / kUnplaced.
+        uint32_t quiet_frames = 0;       ///< Frames since it last moved, in the dynamic partition.
+    };
 
-    // Cached build output, kept across frames. Reused when the caller
-    // signals the scene is clean.
-    vector<GpuBvhNode> cached_nodes_;
-    uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
+    struct Partition
+    {
+        vector<uint32_t> members;  ///< Record slots. Can hold stale slots until `dirty` is handled.
+        ArenaRegion nodes;
+        ArenaRegion records;
+        ArenaRegion shapes;
+        ArenaRegion tree_nodes;
+        GpuBvhNode root{};  ///< Absolute indices. Copied into the tree above it.
+        uint32_t node_count = 0;
+        bool active = false;
+        bool dirty = false;
+    };
 
-    /// This BVH's regions in the Renderer-owned shared IGpuArenas (set = 1
-    /// slots 0/1/10/12). Held across frames and re-allocated (not overwritten)
-    /// on each real change, so an in-flight frame never reads a half-written
-    /// build. Freed deferred past the fence when replaced or dropped.
-    ArenaRegion nodes_region_;
-    ArenaRegion records_region_;
-    ArenaRegion shapes_region_;
-    ArenaRegion tree_nodes_region_;
+    struct EmitContext
+    {
+        FrameContext& frame;
+        ShapeCb cb;
+        void* user;
+    };
 
+    void full_build(IScene* scene, const EmitContext& emit);
+    void update_element(IElement* element, const EmitContext& emit);
+    void remove_element(IElement* element);
+    void free_record(uint32_t slot);
+    /// Moves a record to the dynamic partition, leaving its static partition if any.
+    void promote(uint32_t slot);
+    /// Sends quiet records of the dynamic partition back to static partitions.
+    void demote_quiet_records();
+    /// Rebuilds all static partitions from the static and unplaced records.
+    void recut(FrameContext& ctx);
+    /// Splits partitions grown past their limit, then uploads the changed ones.
+    void flush_partitions(FrameContext& ctx);
+    /// Uploads @p partition. With @p geometry, also its shapes and local trees.
+    void upload_partition(Partition& partition, FrameContext& ctx, bool geometry);
+    void rebuild_top_tree(FrameContext& ctx);
+    void upload_root(FrameContext& ctx);
+    uint32_t alloc_partition();
+    /// Moves the probe volume only if @p bounds left it or are much smaller, since
+    /// moving it discards probe history.
+    void update_probe_volume(const float bounds_min[3], const float bounds_max[3], uint32_t frame);
+
+    vector<Record> records_;
+    vector<uint32_t> free_records_;
+    /// Slots freed this frame. They join free_records_ once every partition has
+    /// dropped them.
+    vector<uint32_t> freed_records_;
+    std::unordered_map<IElement*, vector<uint32_t>> element_records_;
+    uint32_t live_records_ = 0;
+
+    vector<Partition> partitions_;
+    vector<uint32_t> free_partitions_;
+    Partition dynamic_;
+    bool dynamic_transforms_dirty_ = false;
+
+    ArenaRegion top_nodes_;
+    GpuBvhNode top_root_{};
+    uint32_t top_node_count_ = 0;
+    bool has_top_ = false;
+    bool top_dirty_ = false;
+    float cut_cost_ = 0.f;  ///< The top tree's SAH cost when last cut.
+
+    ArenaRegion root_nodes_;
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
-    uint32_t record_count_ = 0;
-    uint32_t node_base_ = 0;    ///< Element base of this BVH's node region.
-    uint32_t record_base_ = 0;  ///< Element base of this BVH's record region.
+    bool root_dirty_ = true;
+
+    vector<uint32_t> unplaced_;       ///< Records waiting for a partition.
+    vector<uint32_t> shape_updates_;  ///< Records whose shapes changed but not their geometry.
+    vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
+    bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
+
     ProbeVolume probe_volume_;
     bool probe_volume_placed_ = false;
-    bool dirty_ = true;
+    bool needs_full_build_ = true;
 };
 
 } // namespace impl
-
-using SceneBvh = impl::SceneBvh;
 
 } // namespace velk
 

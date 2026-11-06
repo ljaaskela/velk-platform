@@ -180,6 +180,7 @@ void Scene::update(const UpdateInfo& info)
         dirty_ |= f;
         if (f != DirtyFlags::None) {
             redraw_list_.push_back(elem);
+            redraw_flags_.push_back(f);
         }
     }
     dirty_elements_.clear();
@@ -207,6 +208,7 @@ SceneState Scene::consume_state()
 
     SceneState state;
     state.redraw_list = std::move(redraw_list_);
+    state.redraw_flags = std::move(redraw_flags_);
     state.removed_list = std::move(removed_list_);
     state.flags = dirty_;
     state.scene = this;

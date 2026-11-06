@@ -6,30 +6,6 @@
 
 namespace velk {
 
-namespace {
-
-// Pre-order DFS walk of the scene tree. `on_element` fires for each
-// IElement encountered, before descending into its children. Children
-// are visited in their natural storage order — callers that care about
-// draw z-order should sort at each level themselves.
-//
-// Kept as a local template for readability; it's only instantiated
-// inside this translation unit, so it doesn't bleed back into headers.
-template <typename F>
-void walk_scene_preorder(IScene* scene, const IObject::Ptr& obj, F&& on_element)
-{
-    if (auto* elem = interface_cast<IElement>(obj)) {
-        on_element(elem);
-        if (scene) {
-            for (auto& kid : scene->children_of(obj)) {
-                walk_scene_preorder(scene, kid, std::forward<F>(on_element));
-            }
-        }
-    }
-}
-
-} // namespace
-
 void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                              ShapeCb cb, void* user)
 {
@@ -268,21 +244,13 @@ void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
         [&](IElement* elem) { emit_shapes_for_element(elem, ctx, cb, user); });
 }
 
-namespace {
-
-/// Records with more shapes than this get a local tree instead of a linear test.
-constexpr uint32_t kMaxShapesWithoutTree = 4;
-
-/// Reorders a record's shapes into a local tree's leaf order and appends the tree
-/// to @p tree_nodes. Shapes from draw entries are flat rects, so their bounds come
-/// from origin and axes.
-void build_local_tree(vector<RtShape>& shapes, RtRecord& record, vector<BlasNode>& tree_nodes)
+void build_local_tree(vector<RtShape>& shapes, vector<BlasNode>& tree)
 {
-    const uint32_t count = record.shape_count;
+    const auto count = static_cast<uint32_t>(shapes.size());
     vector<detail::BlasTriInfo> infos;
     infos.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
-        const RtShape& shape = shapes[record.first_shape + i];
+        const RtShape& shape = shapes[i];
         auto& info = infos[i];
         info.index = i;
         for (int axis = 0; axis < 3; ++axis) {
@@ -305,128 +273,40 @@ void build_local_tree(vector<RtShape>& shapes, RtRecord& record, vector<BlasNode
     build.nodes.push_back({});
     detail::blas_fill_node(build, 0, infos, 0, infos.size());
 
-    vector<RtShape> sorted;
-    sorted.reserve(count);
+    const vector<RtShape> original = shapes;
+    shapes.clear();
     for (uint32_t index : build.triangle_indices) {
-        sorted.push_back(shapes[record.first_shape + index]);
+        shapes.push_back(original[index]);
     }
-    for (uint32_t i = 0; i < count; ++i) {
-        shapes[record.first_shape + i] = sorted[i];
-    }
-
-    const auto base = static_cast<uint32_t>(tree_nodes.size());
-    for (BlasNode node : build.nodes) {
-        if (node.shape_count > 0) {
-            node.first_shape += record.first_shape;
-        } else {
-            node.first_child += base;
-        }
-        tree_nodes.push_back(node);
-    }
-    record.tree_root = base + build.root_index;
+    tree = std::move(build.nodes);
 }
 
-} // namespace
-
-BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
-                         ShapeCb cb, void* user)
+BvhTree build_bvh_tree(array_view<const BvhItemBounds> items, uint32_t leaf_size, bool force_split)
 {
-    BvhBuild out;
-    if (!scene) return out;
-
-    auto root_obj = scene->root();
-    auto root_elem = interface_pointer_cast<IElement>(root_obj);
-    if (!root_elem) return out;
-
-    // Step 1: collect all shapes into records, with their world AABBs, via a
-    // scene tree walk. The walk order itself doesn't matter; we re-partition
-    // spatially below.
-    vector<RtRecord> records;
-    vector<float>    record_aabb_min; // 3 floats per record
-    vector<float>    record_aabb_max;
-
-    // Wrap the user cb in a local closure that also stuffs the shape into the
-    // record it belongs to. The local closure is adapted into a ShapeCb thunk
-    // for the inner emit call.
-    struct CollectState {
-        ShapeCb           user_cb;
-        void*             user_user;
-        vector<RtShape>*  shapes;
-        vector<RtRecord>* records;
-        vector<float>*    aabb_min;
-        vector<float>*    aabb_max;
-        const void*       open_group;
-    };
-    CollectState cs{cb, user, &out.shapes, &records, &record_aabb_min, &record_aabb_max, nullptr};
-    auto collect_thunk = [](void* u, ShapeSite& site) {
-        auto& s = *static_cast<CollectState*>(u);
-        s.user_cb(s.user_user, site);
-        s.shapes->push_back(site.geometry);
-        if (site.record_group && site.record_group == s.open_group) {
-            s.records->back().shape_count++;
-            float* amin = s.aabb_min->data() + s.aabb_min->size() - 3;
-            float* amax = s.aabb_max->data() + s.aabb_max->size() - 3;
-            for (int k = 0; k < 3; ++k) {
-                amin[k] = std::min(amin[k], site.aabb_min[k]);
-                amax[k] = std::max(amax[k], site.aabb_max[k]);
-            }
-            return;
-        }
-        s.open_group = site.record_group;
-        RtRecord record = make_rt_record(*site.world);
-        record.first_shape = static_cast<uint32_t>(s.shapes->size()) - 1u;
-        record.shape_count = 1;
-        s.records->push_back(record);
-        for (int k = 0; k < 3; ++k) {
-            s.aabb_min->push_back(site.aabb_min[k]);
-            s.aabb_max->push_back(site.aabb_max[k]);
-        }
-    };
-    walk_scene_preorder(scene, scene->root(), [&](IElement* elem) {
-        emit_shapes_for_element(elem, ctx, collect_thunk, &cs);
-    });
-
-    if (records.empty()) {
-        // Empty BVH: emit a single inverted-AABB root so trace_any_hit
-        // sees node_count > 0 but every ray rejects.
-        out.nodes.push_back({});
-        out.root_index = 0;
-        out.nodes[0].aabb_min[0] = 1.f; out.nodes[0].aabb_max[0] = -1.f;
+    BvhTree out;
+    if (items.empty()) {
         return out;
     }
 
-
-    // Step 2: build a spatial median-split binary BVH over the flat
-    // record list. The previous scene-graph BVH had bistro-style scenes
-    // putting thousands of shapes as direct children of one root node;
-    // any iterative BVH walker with a fixed traversal stack (32 / 128)
-    // silently dropped most of them, making large swaths of geometry
-    // invisible to RT shadows. A binary tree with leaf threshold 4
-    // bounds depth at ceil(log2(N/4)) — well under 32 for any
-    // realistic record count.
-    const uint32_t record_count = static_cast<uint32_t>(records.size());
+    const auto item_count = static_cast<uint32_t>(items.size());
     struct ShapeRef
     {
         uint32_t index;        // index into the input arrays
         float    centroid[3];
     };
     vector<ShapeRef> refs;
-    refs.resize(record_count);
-    for (uint32_t i = 0; i < record_count; ++i) {
+    refs.resize(item_count);
+    for (uint32_t i = 0; i < item_count; ++i) {
         refs[i].index = i;
         for (int k = 0; k < 3; ++k) {
-            refs[i].centroid[k] =
-                0.5f * (record_aabb_min[i * 3 + k] + record_aabb_max[i * 3 + k]);
+            refs[i].centroid[k] = 0.5f * (items[i].min[k] + items[i].max[k]);
         }
     }
 
-    // One record per leaf where it pays: a record's test has to fetch its transform
-    // and move the ray, so a node's world-space box is the cheap rejection.
-    constexpr uint32_t kLeafThreshold = 1;
-    constexpr float    kInf = 1e30f;
+    constexpr float kInf = 1e30f;
 
-    // Final record order = leaf-traversal order.
-    out.records.reserve(record_count);
+    // Final item order = leaf-traversal order.
+    out.order.reserve(item_count);
 
     struct BuildItem
     {
@@ -435,7 +315,6 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         size_t   end;
     };
     out.nodes.push_back({});
-    out.root_index = 0;
     vector<BuildItem> work;
     work.push_back({0u, 0u, refs.size()});
 
@@ -449,8 +328,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         for (size_t i = item.begin; i < item.end; ++i) {
             const uint32_t idx = refs[i].index;
             for (int k = 0; k < 3; ++k) {
-                if (record_aabb_min[idx * 3 + k] < bmin[k]) bmin[k] = record_aabb_min[idx * 3 + k];
-                if (record_aabb_max[idx * 3 + k] > bmax[k]) bmax[k] = record_aabb_max[idx * 3 + k];
+                if (items[idx].min[k] < bmin[k]) bmin[k] = items[idx].min[k];
+                if (items[idx].max[k] > bmax[k]) bmax[k] = items[idx].max[k];
             }
         }
         GpuBvhNode& node = out.nodes[item.self_index];
@@ -464,9 +343,9 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         const size_t count = item.end - item.begin;
 
         auto emit_leaf = [&]() {
-            const uint32_t first = static_cast<uint32_t>(out.records.size());
+            const uint32_t first = static_cast<uint32_t>(out.order.size());
             for (size_t i = item.begin; i < item.end; ++i) {
-                out.records.push_back(records[refs[i].index]);
+                out.order.push_back(refs[i].index);
             }
             node.first_shape = first;
             node.shape_count = static_cast<uint32_t>(count);
@@ -474,7 +353,7 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
             node.child_count = 0;
         };
 
-        if (count <= kLeafThreshold) {
+        if (count <= leaf_size) {
             emit_leaf();
             continue;
         }
@@ -495,11 +374,10 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         if (dy >= dx && dy >= dz)      axis = 1;
         else if (dz >= dx && dz >= dy) axis = 2;
 
-        if (cmax[axis] == cmin[axis]) {
-            // All centroids coincide on the chosen axis: any sort
-            // would oscillate forever. Fall back to a leaf even if
-            // count > leaf threshold; the leaf is just slower to test
-            // but still correct.
+        const size_t median = item.begin + count / 2;
+        if (cmax[axis] == cmin[axis] && !force_split) {
+            // All centroids coincide on the chosen axis, so no split can separate
+            // them. The leaf is slower to test but still correct.
             emit_leaf();
             continue;
         }
@@ -513,10 +391,9 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         // along the sorted axis, pick the one minimising the surface
         // area heuristic
         //   cost(k) = c_t + c_i * (sa(L)*|L| + sa(R)*|R|) / sa(parent)
-        // and compare against the leaf cost `c_i * count`. If the
-        // best split is more expensive than a leaf we fall back to a
-        // leaf — even if `count > kLeafThreshold` — since SAH says
-        // the descent overhead exceeds the per-shape intersection cost.
+        // and compare against the leaf cost `c_i * count`. If the best split
+        // costs more than a leaf, it stays a leaf regardless of @p leaf_size,
+        // unless @p force_split asks for a median split.
         constexpr float kCostTraversal = 1.0f;
         constexpr float kCostIntersect = 1.5f;
         auto surface_area = [](const float lo[3], const float hi[3]) {
@@ -537,8 +414,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
             for (size_t i = count; i-- > 0;) {
                 const uint32_t idx = refs[item.begin + i].index;
                 for (int k = 0; k < 3; ++k) {
-                    lo[k] = std::min(lo[k], record_aabb_min[idx * 3 + k]);
-                    hi[k] = std::max(hi[k], record_aabb_max[idx * 3 + k]);
+                    lo[k] = std::min(lo[k], items[idx].min[k]);
+                    hi[k] = std::max(hi[k], items[idx].max[k]);
                     right_lo[i * 3 + k] = lo[k];
                     right_hi[i * 3 + k] = hi[k];
                 }
@@ -556,8 +433,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         for (size_t j = 0; j + 1 < count; ++j) {
             const uint32_t idx = refs[item.begin + j].index;
             for (int k = 0; k < 3; ++k) {
-                left_lo[k] = std::min(left_lo[k], record_aabb_min[idx * 3 + k]);
-                left_hi[k] = std::max(left_hi[k], record_aabb_max[idx * 3 + k]);
+                left_lo[k] = std::min(left_lo[k], items[idx].min[k]);
+                left_hi[k] = std::max(left_hi[k], items[idx].max[k]);
             }
             const float left_sa = surface_area(left_lo, left_hi);
             const float right_sa = surface_area(
@@ -572,13 +449,13 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
             }
         }
 
-        if (best_split == 0) {
+        if (best_split == 0 && !force_split) {
             // Splitting is no better than a flat leaf at this node.
             emit_leaf();
             continue;
         }
 
-        const size_t mid = item.begin + best_split;
+        const size_t mid = best_split != 0 ? item.begin + best_split : median;
 
         const uint32_t left_idx  = static_cast<uint32_t>(out.nodes.size());
         out.nodes.push_back({});
@@ -605,25 +482,6 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         // refs array's cache locality on the next iteration).
         work.push_back({right_idx, mid,        item.end});
         work.push_back({left_idx,  item.begin, mid});
-    }
-
-    // Shapes in the same leaf order as their records, so a ray that reaches
-    // neighbouring records finds their shapes nearby in memory.
-    vector<RtShape> ordered_shapes;
-    ordered_shapes.reserve(out.shapes.size());
-    for (auto& record : out.records) {
-        const uint32_t first = static_cast<uint32_t>(ordered_shapes.size());
-        for (uint32_t i = 0; i < record.shape_count; ++i) {
-            ordered_shapes.push_back(out.shapes[record.first_shape + i]);
-        }
-        record.first_shape = first;
-    }
-    out.shapes = std::move(ordered_shapes);
-
-    for (auto& record : out.records) {
-        if (record.shape_count > kMaxShapesWithoutTree) {
-            build_local_tree(out.shapes, record, out.tree_nodes);
-        }
     }
 
     return out;

@@ -141,10 +141,8 @@ struct GlobalData {
     vec4 cam_pos;
     uint bvh_root;
     uint bvh_node_count;
-    uint bvh_record_count;
     uint present_counter;
-    uint bvh_node_base;    // element base of this BVH's region in the node arena
-    uint bvh_record_base;  // element base of this BVH's region in the record arena
+    uint _pad_globals1;
     mat4 prev_view_projection;
     vec3 probe_min;          // GI probe lattice box
     uint probe_reset_frame;  // present_counter value at which the box last changed

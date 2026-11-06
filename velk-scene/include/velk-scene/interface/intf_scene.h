@@ -38,6 +38,8 @@ struct SceneState
     /** @brief Elements whose visual state has changed since the last update.
      *         Populated on layout / draw-order changes. */
     vector<IElement*> redraw_list;
+    /** @brief What changed on each element of redraw_list, in the same order. */
+    vector<DirtyFlags> redraw_flags;
     /** @brief Elements that were detached from the scene since the last update. */
     vector<IElement::Ptr> removed_list;
     /** @brief OR of every per-element DirtyFlags merged in since the last

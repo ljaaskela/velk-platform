@@ -1,7 +1,8 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
-// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape] [unlimited] [rt] [text]
+// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape|burst|churn|recolor]
+//                      [unlimited] [rt] [text]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -14,6 +15,11 @@
 //           its child.
 // escape:   movers rise far above the scene and come back, which grows the GI
 //           probe volume and then shrinks it. The first 190 frames show both.
+// burst:    movers translate for 200 frames, then stay still for 200, and repeat.
+// churn:    movers translate, and every 20 frames one extra cube is removed and
+//           another added.
+// recolor:  movers translate, and at frame 10 the rects turn from grey to red with
+//           no change in geometry.
 // unlimited: turns vsync off, so frame times show the real cost.
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
@@ -183,6 +189,9 @@ int main(int argc, char* argv[])
     const bool rotate_only = argc > 4 && std::strcmp(argv[4], "rotate") == 0;
     const bool group_movers = argc > 4 && std::strcmp(argv[4], "group") == 0;
     const bool escape_movers = argc > 4 && std::strcmp(argv[4], "escape") == 0;
+    const bool burst_movers = argc > 4 && std::strcmp(argv[4], "burst") == 0;
+    const bool churn_elements = argc > 4 && std::strcmp(argv[4], "churn") == 0;
+    const bool recolor_rects = argc > 4 && std::strcmp(argv[4], "recolor") == 0;
     bool unlimited = false;
     bool ray_traced = false;
     bool with_text = false;
@@ -192,8 +201,7 @@ int main(int argc, char* argv[])
         with_text = with_text || std::strcmp(argv[i], "text") == 0;
     }
 
-    VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count,
-             rotate_only ? "rotate" : group_movers ? "group" : escape_movers ? "escape" : "translate");
+    VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count, argc > 4 ? argv[4] : "translate");
 
     constexpr int kWidth = 1280;
     constexpr int kHeight = 720;
@@ -306,6 +314,7 @@ int main(int argc, char* argv[])
     };
     velk::vector<Mover> movers;
     movers.reserve(static_cast<size_t>(mover_count));
+    velk::vector<velk::ui::RectVisual> rects;
 
     const auto size_px = velk::dim::px(kElementSize);
     const float grid_start = -extent * 0.5f;
@@ -339,7 +348,12 @@ int main(int argc, char* argv[])
         }
         case 1: {
             auto visual = velk::ui::trait::visual::create_rect();
-            visual.set_paint(rect_material);
+            if (recolor_rects) {
+                visual.set_color({0.5f, 0.5f, 0.5f, 1.f});
+                rects.push_back(visual);
+            } else {
+                visual.set_paint(rect_material);
+            }
             element.add_trait(velk::ui::trait::layout::create_fixed_size(size_px, size_px));
             element.add_trait(visual);
             break;
@@ -395,11 +409,17 @@ int main(int argc, char* argv[])
     auto scene_ptr = static_cast<velk::IScene::Ptr>(scene);
     uint32_t last_probe_reset = 0;
     bool probe_volume_seen = false;
+    velk::vector<velk::Element> extra_cubes;
+    long next_extra = 0;
 
     while (app.poll()) {
         // Motion follows the frame number, so runs are comparable.
         const float t = static_cast<float>(frame) / 60.f;
+        const bool movers_still = burst_movers && (frame / 200) % 2 == 1;
         for (auto& mover : movers) {
+            if (movers_still) {
+                break;
+            }
             const float a = t + mover.phase;
             if (rotate_only) {
                 mover.trs.set_rotation({a * 30.f, a * 45.f, 0.f});
@@ -410,6 +430,32 @@ int main(int argc, char* argv[])
                 mover.trs.set_translate({mover.base.x + std::sin(a) * 30.f, mover.base.y + std::sin(a * 1.7f) * 30.f,
                                          mover.base.z + std::cos(a) * 30.f});
             }
+        }
+
+        if (recolor_rects && frame == 10) {
+            for (auto& rect : rects) {
+                rect.set_color({1.f, 0.05f, 0.05f, 1.f});
+            }
+        }
+
+        if (churn_elements && frame % 20 == 0) {
+            constexpr size_t kExtraCubes = 8;
+            if (extra_cubes.size() == kExtraCubes) {
+                scene.remove(extra_cubes.front());
+                extra_cubes.erase(extra_cubes.begin());
+            }
+            auto cube = velk::create_element();
+            auto trs = velk::trait::transform::create_trs();
+            trs.set_translate({grid_start + static_cast<float>(next_extra % columns) * kElementSpacing,
+                               -kElementSize * 2.5f, grid_start + kElementSpacing * 0.5f});
+            auto visual = velk::trait::visual::create_cube();
+            visual.set_mesh(cube_mesh);
+            cube.add_trait(velk::ui::trait::layout::create_fixed_size(size_px, size_px, size_px));
+            cube.add_trait(trs);
+            cube.add_trait(visual);
+            scene.add(root, cube);
+            extra_cubes.push_back(cube);
+            ++next_extra;
         }
 
         app.update();

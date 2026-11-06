@@ -51,8 +51,7 @@ struct ShapeSite
     IMeshPrimitive* mesh_primitive = nullptr;
     bool has_mesh_data = false;
 
-    /// World-space AABB enclosing this shape. Populated by
-    /// emit_shapes_for_element so build_scene_bvh can union them into
+    /// World-space AABB enclosing this shape, which SceneBvh unions into
     /// per-node BVH AABBs (the BVH outer ray_aabb test culls against
     /// these). Independent of geometry.{origin,u_axis,...}, which are
     /// local per-kind data (basis vectors for analytic, AABB-min/max for
@@ -115,17 +114,20 @@ VELK_GPU_STRUCT GpuBvhNode
 };
 static_assert(sizeof(GpuBvhNode) == 48, "GpuBvhNode layout mismatch");
 
-/// Indices are relative to each array here. SceneBvh adds the arena bases when it
-/// uploads.
-struct BvhBuild
+/// World-space bounds of one item in a tree build.
+struct BvhItemBounds
+{
+    float min[3];
+    float max[3];
+};
+
+/// A binary tree with its root at index 0. Indices are relative: children to
+/// `nodes`, and a leaf's first_shape to `order`, which lists the item indices in
+/// leaf order.
+struct BvhTree
 {
     vector<GpuBvhNode> nodes;
-    /// Referenced by leaves of `nodes`, in leaf order.
-    vector<RtRecord> records;
-    vector<RtShape> shapes;
-    /// Local trees of records with many shapes. Leaves index `shapes`.
-    vector<BlasNode> tree_nodes;
-    uint32_t root_index = 0;
+    vector<uint32_t> order;
 };
 
 // What enumerate_scene_lights passes to its callback. `base` has every
@@ -163,9 +165,25 @@ inline IShadowTechnique::Ptr find_shadow_technique(ILight* light)
 using ShapeCb = void (*)(void* user, ShapeSite& site);
 using LightCb = void (*)(void* user, LightSite& site);
 
+// Pre-order DFS walk of the scene tree. `on_element` fires for each
+// IElement encountered, before descending into its children. Children
+// are visited in their natural storage order; callers that care about
+// draw z-order should sort at each level themselves.
+template <typename F>
+void walk_scene_preorder(IScene* scene, const IObject::Ptr& obj, F&& on_element)
+{
+    if (auto* elem = interface_cast<IElement>(obj)) {
+        on_element(elem);
+        if (scene) {
+            for (auto& kid : scene->children_of(obj)) {
+                walk_scene_preorder(scene, kid, on_element);
+            }
+        }
+    }
+}
+
 // Emits shape sites for a single element (one per analytic shape or
-// one per rect draw entry). Shared by enumerate_scene_shapes (flat
-// walk) and build_scene_bvh (tree walk, groups by element).
+// one per rect draw entry). Shared by enumerate_scene_shapes and SceneBvh.
 void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                              ShapeCb cb, void* user);
 
@@ -175,16 +193,15 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
 void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
                             ShapeCb cb, void* user);
 
-// Walks the scene tree (via IHierarchy) and builds a flat BVH: a
-// BFS-ordered node array where each node's children are contiguous,
-// over records that place local shapes in the world. The callback is
-// invoked per shape so callers can fill material/texture fields
-// before the shape lands in the output (same contract as
-// enumerate_scene_shapes). `scene` must be the scene the elements
-// belong to (e.g. looked up from the `IScene*` key the Renderer
-// already holds).
-BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
-                         ShapeCb cb, void* user);
+/// Builds an SAH tree over @p items. Subtrees of at most @p leaf_size items become
+/// leaves. @p force_split keeps splitting down to @p leaf_size even where SAH prefers
+/// a larger leaf or the items' centroids coincide.
+BvhTree build_bvh_tree(array_view<const BvhItemBounds> items, uint32_t leaf_size = 1,
+                       bool force_split = false);
+
+/// Reorders flat rect @p shapes into a tree's leaf order and returns the tree in
+/// @p tree, with its root at index 0 and indices relative to @p tree and @p shapes.
+void build_local_tree(vector<RtShape>& shapes, vector<BlasNode>& tree);
 
 // Walks all lights in scene_state and invokes the callback for each
 // ILight attachment found. `base` has every field populated except
