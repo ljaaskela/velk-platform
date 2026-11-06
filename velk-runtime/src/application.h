@@ -74,7 +74,16 @@ private:
     void tick_overlays(double cpu_time, double frame_time,
                        std::chrono::steady_clock::time_point now);
 
+    /// Saves the first window's composite to auto_capture_path_ as a PNG.
+    void capture_first_window();
+
     ApplicationConfig config_;
+    /// Development aids, from VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE: poll()
+    /// returns false after this many frames, first saving the image if a path is
+    /// set. Lets any app run unattended and exit cleanly.
+    long auto_exit_frames_ = 0;
+    long presented_frames_ = 0;
+    string auto_capture_path_;
     IRenderContext::Ptr render_ctx_;
     ::velk::IRenderer::Ptr renderer_;
     IWindowProvider* window_provider_ = nullptr;

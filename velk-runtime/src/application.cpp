@@ -4,9 +4,15 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <velk-render/api/render_context.h>
+#include <velk-render/interface/intf_image.h>
+#include <velk-ui/plugins/image/plugin.h>
 #include <velk-render/detail/intf_renderer_internal.h>
 #include <velk-runtime/interface/intf_window.h>
 #include <velk-scene/api/camera.h>
@@ -21,6 +27,34 @@
 
 namespace velk::impl {
 
+namespace {
+
+float half_to_float(uint16_t h)
+{
+    const uint32_t sign = (h & 0x8000u) << 16;
+    const uint32_t exponent = (h >> 10) & 0x1fu;
+    const uint32_t mantissa = h & 0x3ffu;
+    uint32_t bits = sign;
+    if (exponent == 0x1fu) {
+        bits |= 0x7f800000u | (mantissa << 13);
+    } else if (exponent != 0) {
+        bits |= ((exponent + 112u) << 23) | (mantissa << 13);
+    } else if (mantissa != 0) {
+        uint32_t m = mantissa;
+        uint32_t e = 113u;
+        while ((m & 0x400u) == 0) {
+            m <<= 1;
+            --e;
+        }
+        bits |= (e << 23) | ((m & 0x3ffu) << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+} // namespace
+
 Application::~Application()
 {
     overlays_.clear();
@@ -34,6 +68,13 @@ Application::~Application()
 bool Application::init(const ApplicationConfig& config)
 {
     config_ = config;
+
+    if (const char* frames = std::getenv("VELK_AUTO_EXIT_FRAMES")) {
+        auto_exit_frames_ = std::strtol(frames, nullptr, 10);
+    }
+    if (const char* path = std::getenv("VELK_AUTO_CAPTURE")) {
+        auto_capture_path_ = path;
+    }
 
     auto& v = instance();
     auto& reg = v.plugin_registry();
@@ -223,7 +264,54 @@ bool Application::poll()
     if (!window_provider_) {
         return false;
     }
+    if (auto_exit_frames_ > 0 && presented_frames_ >= auto_exit_frames_) {
+        if (!auto_capture_path_.empty()) {
+            capture_first_window();
+        }
+        return false;
+    }
     return window_provider_->poll_events();
+}
+
+void Application::capture_first_window()
+{
+    auto backend = render_ctx_ ? render_ctx_->backend() : nullptr;
+    auto* window = windows_.empty() ? nullptr : interface_cast<IWindow>(windows_[0]);
+    auto writer = instance().create<IImageWriter>(ui::ClassId::ImageEncoder);
+    if (!backend || !window || !writer) {
+        VELK_LOG(E, "auto capture: backend, window or image writer missing");
+        return;
+    }
+
+    // Already acquired by the frame just presented, so this does not clear it.
+    auto target = backend->acquire_swapchain_texture(get_render_target_id(window->surface()));
+    auto* texture = interface_cast<IGpuTexture>(target.get());
+    vector<uint8_t> pixels;
+    PixelFormat format{};
+    uvec2 dims{};
+    if (!texture || !backend->read_texture(*texture, pixels, format, dims)) {
+        VELK_LOG(E, "auto capture: could not read the composite");
+        return;
+    }
+
+    if (format == PixelFormat::RGBA16F) {
+        const size_t count = static_cast<size_t>(dims.x) * dims.y;
+        const auto* source = reinterpret_cast<const uint16_t*>(pixels.data());
+        vector<uint8_t> converted;
+        converted.resize(count * 4);
+        for (size_t i = 0; i < count * 4; ++i) {
+            const float value = (i % 4 == 3)
+                ? 1.f
+                : std::pow(std::clamp(half_to_float(source[i]), 0.f, 1.f), 1.f / 2.2f);
+            converted[i] = static_cast<uint8_t>(value * 255.f + 0.5f);
+        }
+        pixels = std::move(converted);
+        format = PixelFormat::RGBA8;
+    }
+
+    const bool saved = writer->save_png(static_cast<int>(dims.x), static_cast<int>(dims.y), format,
+                                        pixels.data(), pixels.size(), auto_capture_path_);
+    VELK_LOG(I, "auto capture: %s %s", auto_capture_path_.c_str(), saved ? "saved" : "FAILED");
 }
 
 void Application::update()
@@ -248,6 +336,7 @@ void Application::submit(::velk::Frame frame)
         return;
     }
     renderer_->present(frame);
+    ++presented_frames_;
     auto frame_end = std::chrono::steady_clock::now();
 
     // Software pacing for UpdateRate::Targeted: sleep until the next frame deadline.

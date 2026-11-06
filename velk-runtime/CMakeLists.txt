@@ -16,6 +16,7 @@ target_link_libraries(velk_runtime PRIVATE velk velk_render velk_scene velk_ui v
 target_include_directories(velk_runtime
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/plugins/image/include
 )
 
 target_compile_definitions(velk_runtime PRIVATE VELK_EXPORTS)
