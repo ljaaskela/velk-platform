@@ -180,7 +180,7 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
 // traces. Registered as the "velk_trace.glsl" include. The including shader
 // includes velk_intersect.glsl, defines VELK_TRACE_STACK_SIZE, declares velk_bvh_nodes,
 // velk_bvh_shapes, velk_records, velk_mesh_static_records, velk_blas_nodes,
-// velk_blas_tris and VELK_GLOBALS.
+// velk_cluster_words and VELK_GLOBALS.
 //
 // A record places shapes in the world: rays are moved into its local space, and
 // shapes and meshes are intersected there. Origin and direction move by the same
@@ -233,7 +233,7 @@ vec3 velk_world_normal(RtRecord rec, vec3 n)
 }
 
 // Triangle-mesh intersector (shape_kind == 255), in the mesh's local space.
-// Walks the primitive's BLAS.
+// Walks the primitive's tree down to its clusters. See BlasBuild for their layout.
 bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
 {
     {
@@ -258,10 +258,10 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
 
     uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
 
-    // This primitive's BLAS runs inside the shared node / triangle arenas;
-    // node and triangle indices below are relative to these bases.
+    // This primitive's tree and clusters run inside the shared arenas; node and word
+    // indices below are relative to these bases.
     uint blas_node_base = st.blas_node_base;
-    uint blas_tri_base  = st.blas_tri_base;
+    uint word_base      = st.cluster_word_base;
 
     Ray local_ray;
     local_ray.origin = lo;
@@ -271,9 +271,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     float best_t = 1e30;
     float best_u = 0.0;
     float best_v = 0.0;
-    uint  best_o0 = 0u;
-    uint  best_o1 = 0u;
-    uint  best_o2 = 0u;
+    uint  best_triangle = 0u;
+    uint  best_vertex_ids = 0u;
 
     // BLAS walk. Stack depth 32 fits any reasonable tree (a perfectly
     // balanced binary BVH at depth 32 holds 2^32 leaves).
@@ -287,19 +286,23 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
 
         if (node.shape_count > 0u) {
-            // Leaf: test triangles.
-            for (uint k = 0u; k < node.shape_count; ++k) {
-                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
-                uint base = tri * 3u;
-                uint i0 = velk_mesh_index(st, base + 0u);
-                uint i1 = velk_mesh_index(st, base + 1u);
-                uint i2 = velk_mesh_index(st, base + 2u);
-                uint o0 = i0 * floats_per_vert;
-                uint o1 = i1 * floats_per_vert;
-                uint o2 = i2 * floats_per_vert;
-                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
-                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
-                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
+            // Leaf: test triangles, reading the cluster's own positions.
+            uint triangle_count = node.shape_count & 0xFFFFu;
+            uint positions = word_base + node.first_child;
+            for (uint k = 0u; k < triangle_count; ++k) {
+                uint tri = velk_cluster_words.data[word_base + node.first_shape + k];
+                uint p0 = positions + (tri & 0xFFu) * 3u;
+                uint p1 = positions + ((tri >> 8u) & 0xFFu) * 3u;
+                uint p2 = positions + ((tri >> 16u) & 0xFFu) * 3u;
+                vec3 v0 = vec3(uintBitsToFloat(velk_cluster_words.data[p0]),
+                               uintBitsToFloat(velk_cluster_words.data[p0 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p0 + 2u]));
+                vec3 v1 = vec3(uintBitsToFloat(velk_cluster_words.data[p1]),
+                               uintBitsToFloat(velk_cluster_words.data[p1 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p1 + 2u]));
+                vec3 v2 = vec3(uintBitsToFloat(velk_cluster_words.data[p2]),
+                               uintBitsToFloat(velk_cluster_words.data[p2 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p2 + 2u]));
 
                 // Moller-Trumbore. The det rejection threshold scales with the
                 // actual edge magnitudes so meshes whose local-space coordinates
@@ -326,9 +329,8 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
                 best_t = tt;
                 best_u = u;
                 best_v = v;
-                best_o0 = o0;
-                best_o1 = o1;
-                best_o2 = o2;
+                best_triangle = tri;
+                best_vertex_ids = positions + (node.shape_count >> 16u) * 3u;
                 found = true;
             }
         } else if (node.child_count == 2u) {
@@ -365,6 +367,9 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     // make (1-u-v, u, v) the weights for (V0, V1, V2). Any-hit callers never read
     // these, so the compiler drops them from those traces.
     float w = 1.0 - best_u - best_v;
+    uint best_o0 = velk_cluster_words.data[best_vertex_ids + (best_triangle & 0xFFu)] * floats_per_vert;
+    uint best_o1 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 8u) & 0xFFu)] * floats_per_vert;
+    uint best_o2 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 16u) & 0xFFu)] * floats_per_vert;
     vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
     vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
     vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
@@ -610,7 +615,7 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord dat
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
-layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
+layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
 // RtShape / BvhNode come from velk.glsl.
 // View-level globals (inverse_view_projection, BVH, present_counter)
@@ -1968,7 +1973,7 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord dat
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 // Per-mesh BLAS, same buffers the deferred prelude reads.
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
-layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
+layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
 // Material records as raw words (set = 1 slot 4). The raster path binds this
 // same slot as a typed block, which one pipeline can do because it compiles

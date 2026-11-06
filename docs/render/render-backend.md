@@ -214,7 +214,7 @@ set = 1 slot   Arena                       Held by
  6             RT primary shape list       ViewPreparer
  7 / 8 / 9     glyph curves / bands / table each font (velk_text plugin)
 10             per-shape mesh instances    SceneBvh, ViewPreparer
-11 / 12 / 13   mesh static / BLAS nodes / tris   each IMeshPrimitive
+11 / 12 / 13   mesh static / BLAS nodes / cluster words   each IMeshPrimitive
 14             mesh VBO + IBO words        each IMeshBuffer
 15             per-batch DrawDataHeader    each batch
 ```

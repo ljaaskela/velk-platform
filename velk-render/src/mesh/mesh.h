@@ -92,7 +92,7 @@ private:
     /// `set_rt_blas` replaces the build or the primitive is destroyed.
     ArenaRegion rt_static_region_;
     ArenaRegion rt_blas_nodes_region_;
-    ArenaRegion rt_blas_tris_region_;
+    ArenaRegion rt_cluster_words_region_;
 
     /// Element index of `rt_static_region_`, or kInvalidMeshStaticBase
     /// while the RT data is not published.

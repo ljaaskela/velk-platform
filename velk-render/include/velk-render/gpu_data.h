@@ -142,18 +142,18 @@ inline constexpr uint32_t kRtShapeKindMesh = 255;
 /// given IMeshPrimitive. The primitive owns a persistent region of the
 /// shared mesh-static arena, so the element index is stable across frames
 /// and instances can cache it. The BLAS it describes lives in its own
-/// arenas, reached by `blas_node_base` / `blas_tri_base` rather than by
+/// arenas, reached by `blas_node_base` / `cluster_word_base` rather than by
 /// trailing this record. Mirrors GLSL `MeshStaticData`.
 VELK_GPU_STRUCT MeshStaticData
 {
     uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
-    uint32_t ibo_base;        ///< word base of this primitive's first index in the mesh-word arena.
+    uint32_t _pad0;
     uint32_t triangle_count;
     uint32_t vertex_stride;   ///< bytes per vertex, from the primitive (48 for VelkVertex3D).
     uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
     uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
     uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
-    uint32_t blas_tri_base;   ///< element base of the triangle-index run in the BLAS triangle arena.
+    uint32_t cluster_word_base; ///< element base of this primitive's clusters in the cluster word arena.
 };
 static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 

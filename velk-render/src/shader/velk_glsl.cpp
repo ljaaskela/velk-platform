@@ -67,17 +67,17 @@ struct BvhNode {
 // the shared mesh-static arena (set = 1 slot 11), so its element index is
 // stable across frames. Mirrors MeshStaticData in gpu_data.h. The BLAS it
 // describes lives in its own arenas (slots 12 / 13), reached by blas_node_base
-// / blas_tri_base rather than by trailing this record.
+// / cluster_word_base rather than by trailing this record.
 R"(
 struct MeshStaticData {
     uint     vbo_base;        // word base of this primitive's first vertex in velk_mesh_words
-    uint     ibo_base;        // word base of this primitive's first index in velk_mesh_words
+    uint     _pad0;
     uint     triangle_count;
     uint     vertex_stride;   // bytes per vertex, from the primitive (48 for VelkVertex3D)
     uint     blas_root;       // root index within this primitive's BLAS node run
     uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
     uint     blas_node_base;  // element base of the node run in velk_blas_nodes
-    uint     blas_tri_base;   // element base of the triangle-index run in velk_blas_tris
+    uint     cluster_word_base; // element base of this primitive's clusters in velk_cluster_words
 };
 
 )"
@@ -114,10 +114,6 @@ layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[
 // Mesh geometry accessors over that arena, for the RT side, which reaches a
 // primitive's runs through its MeshStaticData record.
 //
-// Indices: we always upload 32-bit indices (gltf_decoder.cpp normalises on
-// import), so an index is one word.
-//   uint i = velk_mesh_index(st, tri * 3u + 0u);
-//
 // Vertices: a flat float array reached by word. Caller indexes using
 // `vertex_stride / 4` words per vertex and reads pos[0..2], normal[3..5],
 // uv[6..7]. Those sit at the same offsets in VelkVertex3D, whose trailing
@@ -125,7 +121,6 @@ layout(set = 1, binding = 14, std430) readonly buffer VelkMeshWords { uint data[
 // float bits, and uintBitsToFloat is a reinterpret, not a conversion.
 //   float x = velk_mesh_vertex(st, o0 + 0u);
 R"(
-#define velk_mesh_index(st, i) (velk_mesh_words.data[(st).ibo_base + (i)])
 #define velk_mesh_vertex(st, i) uintBitsToFloat(velk_mesh_words.data[(st).vbo_base + (i)])
 )"
 // Framework-level bindless texture array. Every pipeline in the engine shares

@@ -367,7 +367,7 @@ public:
         /// free-list holding both would fragment.
         kGlobalMeshStatic = 11,
         kGlobalBlasNodes  = 12,
-        kGlobalBlasTris   = 13,
+        kGlobalClusterWords = 13,
         /// Mesh geometry (VBO + IBO bytes) as raw 32-bit words, one region per
         /// IMeshBuffer. Read by index for RT; the same backing buffer is bound
         /// for indexed draws, so this arena carries INDEX_BUFFER usage and is
