@@ -65,13 +65,12 @@ void hash_element(uint64_t& h, IHierarchy& hier, const IObject::Ptr& obj)
                 // world_aabb on container elements aggregates all
                 // descendant aabbs (including camera / light) so it
                 // moves with camera pan. Instead hash each visual's
-                // own world-space translation + size — per-element
-                // properties that only change when that element or an
-                // ancestor transform actually moved the visual in
-                // world space.
-                hash_float(h, es->world_matrix(0, 3));
-                hash_float(h, es->world_matrix(1, 3));
-                hash_float(h, es->world_matrix(2, 3));
+                // own world matrix and size, which only change when
+                // that element or an ancestor actually moved, rotated
+                // or scaled the visual in world space.
+                for (int i = 0; i < 16; ++i) {
+                    hash_float(h, es->world_matrix.m[i]);
+                }
                 hash_float(h, es->size.width);
                 hash_float(h, es->size.height);
                 hash_float(h, es->size.depth);
@@ -104,7 +103,7 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
     // redraw_list) over-triggers because the scene re-adds every
     // element to redraw_list on any Layout dirty flag, including
     // camera pans that don't actually move any visual. Hash each
-    // visual element's translation + size; if it matches the last
+    // visual element's world matrix + size; if it matches the last
     // full build, keep the cache.
     uint64_t current_hash = 0;
     if (dirty && !cached_nodes_.empty()) {

@@ -85,9 +85,9 @@ public:
     void force_full_rebuild() { cached_nodes_.clear(); }
 
 private:
-    /// Hash all visual-bearing elements' world_aabbs to detect
-    /// geometry-only changes without re-emitting shapes. Walks the
-    /// scene tree once per call; O(#elements) regardless of emitted
+    /// Hash all visual-bearing elements' world matrices and sizes to
+    /// detect geometry-only changes without re-emitting shapes. Walks
+    /// the scene tree once per call; O(#elements) regardless of emitted
     /// shape count.
     static uint64_t hash_visual_aabbs(IScene* scene);
 
