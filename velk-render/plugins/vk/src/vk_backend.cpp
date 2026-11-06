@@ -2797,7 +2797,15 @@ bool VkBackend::record_present_blit(FrameSync& sync)
     VkResult r = vkAcquireNextImageKHR(
         device_, sync.present_swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE,
         &sync.present_image_index);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || sync.present_image_index >= sync.present_image_count) {
+    // On any other result the image index was not written and nothing will signal
+    // the semaphore, so this frame must not wait on it or present.
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        if (r != VK_ERROR_OUT_OF_DATE_KHR) {
+            VELK_LOG(E, "VkBackend: vkAcquireNextImageKHR failed: %d", static_cast<int>(r));
+        }
+        return false;
+    }
+    if (sync.present_image_index >= sync.present_image_count) {
         return false;
     }
 
@@ -3088,7 +3096,10 @@ void VkBackend::submit_frame()
         submit_info.signalSemaphoreCount = 2;
         submit_info.pSignalSemaphores = signal_sems;
 
-        vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        const VkResult submit_result = vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        if (submit_result != VK_SUCCESS) {
+            VELK_LOG(E, "VkBackend: vkQueueSubmit failed: %d", static_cast<int>(submit_result));
+        }
 
         VkPresentInfoKHR present_info{};
         present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -3098,7 +3109,11 @@ void VkBackend::submit_frame()
         present_info.pSwapchains = &sync.present_swapchain;
         present_info.pImageIndices = &sync.present_image_index;
 
-        vkQueuePresentKHR(graphics_queue_, &present_info);
+        const VkResult present_result = vkQueuePresentKHR(graphics_queue_, &present_info);
+        if (present_result != VK_SUCCESS && present_result != VK_SUBOPTIMAL_KHR
+            && present_result != VK_ERROR_OUT_OF_DATE_KHR) {
+            VELK_LOG(E, "VkBackend: vkQueuePresentKHR failed: %d", static_cast<int>(present_result));
+        }
     } else {
         // Headless: submit without swapchain synchronization
         uint64_t signal_value = timeline_value;
@@ -3115,7 +3130,10 @@ void VkBackend::submit_frame()
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &frame_timeline_;
 
-        vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        const VkResult submit_result = vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
+        if (submit_result != VK_SUCCESS) {
+            VELK_LOG(E, "VkBackend: vkQueueSubmit failed: %d", static_cast<int>(submit_result));
+        }
     }
 
     last_frame_value_.store(timeline_value);
