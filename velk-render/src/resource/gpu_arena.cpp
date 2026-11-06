@@ -29,8 +29,11 @@ ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
 
     const uint64_t align = alignment ? alignment : element_size_;
     const uint64_t need = (size + element_size_ - 1) / element_size_ * element_size_;
+    // Spare room when the buffer is created or grows, capped so that a very large
+    // tenant does not ask for several times what it needs.
+    constexpr uint64_t kMaxSlack = uint64_t(256) << 20;  // 256 MiB
     if (!persistent_buffer_) {
-        uint64_t cap = need * 4;
+        uint64_t cap = need + std::min(need * 3, kMaxSlack);
         constexpr uint64_t kFloor = uint64_t(1) << 20;  // 1 MiB
         if (cap < kFloor) cap = kFloor;
         // A bulk tenant pre-sizes so it never pays the whole-arena recopy.
@@ -57,9 +60,19 @@ ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
         }
         // No span fits: grow (the fresh tail becomes a free span) and retry.
         const uint64_t old_cap = persistent_capacity_;
-        uint64_t want = persistent_capacity_ * 2;
+        uint64_t want = persistent_capacity_ + std::min(persistent_capacity_, kMaxSlack);
         if (want < persistent_capacity_ + need + align) want = persistent_capacity_ + need + align;
         if (!grow_persistent(want)) return {};
+        free_spans_.push_back({old_cap, persistent_capacity_ - old_cap});
+        coalesce_free();
+    }
+}
+
+void GpuArena::reserve(uint64_t size)
+{
+    if (!backend_ || size == 0) return;
+    const uint64_t old_cap = persistent_capacity_;
+    if (grow_persistent(old_cap + size)) {
         free_spans_.push_back({old_cap, persistent_capacity_ - old_cap});
         coalesce_free();
     }
@@ -133,9 +146,8 @@ bool GpuArena::grow_persistent(uint64_t want)
         backend_->retarget_buffer_writes(persistent_buffer_.get(), new_buffer);
     }
     void* new_mapped = new_buffer->map();
-    if (new_mapped && persistent_mapped_ && persistent_capacity_) {
-        std::memcpy(new_mapped, persistent_mapped_,
-                    static_cast<size_t>(persistent_capacity_));
+    if (persistent_buffer_ && persistent_capacity_) {
+        backend_->copy_gpu_buffer(persistent_buffer_.get(), new_buffer.get(), persistent_capacity_);
     }
     // Reassigning drops the old Ptr; ~VkGpuBuffer defers its own destroy past
     // in-flight frames, so we must NOT also explicit-defer it here.

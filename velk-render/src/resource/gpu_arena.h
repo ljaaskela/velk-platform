@@ -40,6 +40,7 @@ public:
               bool index_buffer = false, uint64_t reserve_bytes = 0) override;
     IGpuBuffer* buffer() const override { return persistent_buffer_.get(); }
     ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
+    void reserve(uint64_t size) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void update_at(uint64_t offset, const void* data, uint64_t size) override;
     void read_at(uint64_t offset, void* out, uint64_t size) const override;

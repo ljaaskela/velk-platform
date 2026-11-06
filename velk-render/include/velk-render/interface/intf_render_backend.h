@@ -584,6 +584,11 @@ public:
     /** @brief Points queued writes at @p to, for a buffer that was reallocated. */
     virtual void retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to) = 0;
 
+    /** @brief Copies @p size bytes from the start of @p src to the start of @p dst on the
+     *         GPU, and blocks until done. Much faster than reading @p src's mapping on
+     *         the CPU, since buffers are allocated for sequential writes. */
+    virtual void copy_gpu_buffer(IGpuBuffer* src, IGpuBuffer* dst, uint64_t size) = 0;
+
     /**
      * @brief Records the queued writes into the current frame's primary command
      *        buffer. Call once per frame, before any pass that reads them.

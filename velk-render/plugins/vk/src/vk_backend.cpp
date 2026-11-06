@@ -2934,6 +2934,25 @@ void VkBackend::retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer:
     }
 }
 
+void VkBackend::copy_gpu_buffer(IGpuBuffer* src, IGpuBuffer* dst, uint64_t size)
+{
+    auto* vk_src = interface_cast<IVkGpuBuffer>(src);
+    auto* vk_dst = interface_cast<IVkGpuBuffer>(dst);
+    if (!vk_src || !vk_dst || size == 0) return;
+
+    auto cb = begin_one_shot_commands();
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(cb, vk_src->vk_buffer(), vk_dst->vk_buffer(), 1, &region);
+    VkMemoryBarrier after{};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr,
+                         0, nullptr);
+    end_one_shot_commands(cb);
+}
+
 void VkBackend::flush_buffer_writes()
 {
     if (queued_writes_.empty() || !frame_open_) return;
@@ -2994,7 +3013,7 @@ void VkBackend::flush_buffer_writes()
         }
     }
 
-    // Host reads too: arena growth reads the old mapping back.
+    // Host reads too, for IGpuArena::read_at.
     VkMemoryBarrier after{};
     after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

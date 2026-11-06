@@ -88,6 +88,10 @@ public:
     /// data whose struct size varies by material type).
     virtual ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) = 0;
 
+    /// Grows the arena by @p size bytes at once, when many allocations are coming
+    /// that would otherwise grow it, and recopy it, several times.
+    virtual void reserve(uint64_t size) = 0;
+
     /// Writes @p size bytes straight into a region at @p offset. Only for a
     /// region no frame has read yet, which means one just returned by `alloc`:
     /// the write is immediate, so a frame on the GPU would see it mid-read. Use

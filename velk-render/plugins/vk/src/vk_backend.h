@@ -118,6 +118,7 @@ public:
     void queue_buffer_write(const IGpuBuffer::Ptr& dst, uint64_t offset,
                             const void* data, uint64_t size) override;
     void retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to) override;
+    void copy_gpu_buffer(IGpuBuffer* src, IGpuBuffer* dst, uint64_t size) override;
     void flush_buffer_writes() override;
     void close_frame() override;
     void submit_frame() override;
