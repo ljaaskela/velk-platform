@@ -9,6 +9,8 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_bvh.h>
 #include <velk-render/interface/intf_gpu_arena.h>
+#include <velk-render/interface/intf_render_graph.h>
+#include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/render_path/frame_context.h>
 #include <velk-scene/plugin.h>
 
@@ -52,6 +54,10 @@ public:
      * resolved yet is emitted again each frame until it is.
      */
     void update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user);
+
+    /// Adds the passes that run instanced visuals' motion functions to @p graph. Comes
+    /// before every pass that reads instances or records.
+    void emit_instance_motion(FrameContext& ctx, IRenderGraph& graph);
 
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
@@ -122,6 +128,19 @@ private:
             uint32_t moved_frame; ///< The update it last moved in.
         };
         std::unordered_map<uint32_t, Mover> movers;  ///< By slot.
+
+        /// With a motion function: its table, then per slot its record and partition
+        /// origin, in the culling arena. See `instance_motion_compute_src`.
+        ArenaRegion motion_region;
+        uint32_t motion_capacity = 0;  ///< Slots the region holds.
+        float max_displacement = 0.f;  ///< Bounds are grown by this.
+        bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
+        bool motion_records_dirty = false;  ///< Records were written at rest.
+        bool motion_error_logged = false;
+        IRenderPass::Ptr motion_pass;
+        bool motion_pass_dirty = true;
+        uint64_t motion_rest_offset = 0;  ///< What the recorded pass was given.
+        uint64_t motion_instances_offset = 0;
     };
 
     struct Partition
@@ -160,6 +179,11 @@ private:
     /// Sends instances that have been still for a while back where they came from.
     void demote_quiet_instances(InstanceGroup& group);
     bool is_instance_dynamic(uint32_t partition) const;
+    /// Allocates and clears @p group's motion region, if it has a motion function.
+    void alloc_instance_motion(InstanceGroup& group, FrameContext& ctx);
+    /// Tells the motion pass where @p slot's record is, or that it has none.
+    void write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32_t slot, uint32_t record,
+                           const float origin[3]);
     BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
     RtRecord instance_record(const InstanceGroup& group, uint32_t slot) const;
     void free_record(uint32_t slot);

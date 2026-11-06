@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn]
-//                      [unlimited] [rt] [text] [overlay] [near] [species]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -40,6 +40,7 @@
 // near:     a forest's trees are drawn up to a distance of 3000. Rays still see them all.
 // species:  a forest has three meshes of tree, of different heights. Its movers do not
 //           move.
+// wind:     a forest's trees sway on the GPU, with gusts crossing the forest.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -319,7 +320,9 @@ int main(int argc, char* argv[])
     bool with_overlay = false;
     bool draw_near = false;
     bool species = false;
+    bool wind = false;
     for (int i = 5; i < argc; ++i) {
+        wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
         with_overlay = with_overlay || std::strcmp(argv[i], "overlay") == 0;
@@ -491,6 +494,21 @@ int main(int argc, char* argv[])
             if (draw_near) {
                 forest_visual.set_draw_distance(3000.f);
             }
+            if (wind) {
+                // The tallest tree reaches about 1.6 tree heights, which at the largest
+                // angle bounds the displacement.
+                forest_visual.set_motion(R"(
+mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
+{
+    vec3 p = rest[3].xyz;
+    float gust = sin(params.x * 1.3 + p.x * 0.004 + p.z * 0.003);
+    float angle = 0.06 + 0.06 * gust + 0.02 * sin(params.x * 3.1 + float(slot) * 1.7);
+    float c = cos(angle);
+    float s = sin(angle);
+    return rest * mat4(c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+}
+)", kTreeHeight * 1.7f * 0.2f);
+            }
             if (species) {
                 const velk::IMaterial::Ptr pale = velk::material::create_standard(velk::color{0.45f, 0.5f, 0.12f, 1.f}, 0.f, 0.7f);
                 const velk::IMaterial::Ptr dark = velk::material::create_standard(velk::color{0.05f, 0.25f, 0.16f, 1.f}, 0.f, 0.7f);
@@ -654,6 +672,9 @@ int main(int argc, char* argv[])
             }
         }
 
+        if (forest && forest_visual && wind) {
+            forest_visual.set_motion_params({t, 0.f, 0.f, 0.f});
+        }
         if (forest_shift) {
             forest_trs.set_translate({std::sin(t) * 100.f, 0.f, 0.f});
         }

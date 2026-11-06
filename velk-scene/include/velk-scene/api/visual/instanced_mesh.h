@@ -51,6 +51,18 @@ public:
         with<IInstancedMeshVisual>([&](auto& v) { v.set_draw_distance(distance); });
     }
 
+    /** @brief Moves instances on the GPU. See IInstancedMeshVisual::set_motion. */
+    void set_motion(string_view glsl, float max_displacement)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_motion(glsl, max_displacement); });
+    }
+
+    /** @brief Sets the params passed to the motion function. */
+    void set_motion_params(const vec4& params)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_motion_params(params); });
+    }
+
     /** @brief Returns the number of live instances. */
     uint32_t get_instance_count() const
     {

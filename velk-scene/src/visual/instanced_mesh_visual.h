@@ -1,6 +1,7 @@
 #ifndef VELK_UI_INSTANCED_MESH_VISUAL_H
 #define VELK_UI_INSTANCED_MESH_VISUAL_H
 
+#include <velk/string.h>
 #include <velk/vector.h>
 
 #include <velk-render/interface/intf_gpu_arena.h>
@@ -33,6 +34,8 @@ public:
     void remove_instance(uint32_t slot) override;
     uint32_t get_instance_count() const override { return live_count_; }
     void set_draw_distance(float distance) override;
+    void set_motion(string_view glsl, float max_displacement) override;
+    void set_motion_params(const vec4& params) override;
 
     // IInstancedMeshInternal
     array_view<const InstanceTransform> get_transforms() const override
@@ -40,7 +43,7 @@ public:
         return {transforms_.data(), transforms_.size()};
     }
     bool is_live(uint32_t slot) const override { return slot < live_.size() && live_[slot] != 0; }
-    void flush_instances(IGpuArena& arena, const mat4& world) override;
+    void flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world) override;
     uint64_t instance_region_offset() const override { return region_.offset(); }
     uint64_t instance_region_size() const override { return region_.size(); }
     uint32_t get_mesh_count() const override { return static_cast<uint32_t>(added_meshes_.size()) + 1u; }
@@ -52,6 +55,12 @@ public:
     }
     void get_cull_sphere(uint32_t index, float out[4]) const override;
     float get_draw_distance() const override { return draw_distance_; }
+    string_view get_motion_source() const override { return motion_source_; }
+    float get_max_displacement() const override { return motion_source_.empty() ? 0.f : max_displacement_; }
+    uint64_t rest_region_offset() const override { return rest_region_.offset(); }
+    uint64_t rest_region_size() const override { return rest_region_.size(); }
+    bool take_motion_params(float out[4]) override;
+    bool take_rest_changed() override;
     void take_changed_slots(vector<uint32_t>& changed, bool& all) override;
 
 private:
@@ -76,6 +85,13 @@ private:
     ArenaRegion region_;
     mat4 flushed_world_{};
     float draw_distance_ = 0.f;
+
+    string motion_source_;
+    float max_displacement_ = 0.f;
+    ArenaRegion rest_region_;
+    float motion_params_[4] = {0.f, 0.f, 0.f, 0.f};
+    bool motion_params_changed_ = true;
+    bool rest_changed_ = false;
 
     /// Grows only. Instance origins, and the largest scale any transform has.
     float origin_min_[3] = {0.f, 0.f, 0.f};

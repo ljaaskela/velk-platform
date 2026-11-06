@@ -6,7 +6,9 @@
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 
+#include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_mesh.h>
+#include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/material/intf_material_options.h>
 #include <velk-render/plugin.h>
 #include <velk-scene/instance_types.h>
@@ -229,15 +231,86 @@ void InstancedMeshVisual::get_cull_sphere(uint32_t index, float out[4]) const
     out[3] = vec3::length(half);
 }
 
-void InstancedMeshVisual::flush_instances(IGpuArena& arena, const mat4& world)
+void InstancedMeshVisual::set_motion(string_view glsl, float max_displacement)
+{
+    motion_source_ = string(glsl);
+    max_displacement_ = max_displacement;
+    motion_params_changed_ = true;
+    flush_all_ = true;
+    all_changed_ = true;
+    invoke_visual_changed();
+}
+
+void InstancedMeshVisual::set_motion_params(const vec4& params)
+{
+    const float values[4] = {params.x, params.y, params.z, params.w};
+    if (std::memcmp(values, motion_params_, sizeof(values)) != 0) {
+        std::memcpy(motion_params_, values, sizeof(values));
+        motion_params_changed_ = true;
+    }
+}
+
+bool InstancedMeshVisual::take_motion_params(float out[4])
+{
+    std::memcpy(out, motion_params_, sizeof(motion_params_));
+    const bool changed = motion_params_changed_;
+    motion_params_changed_ = false;
+    return changed;
+}
+
+bool InstancedMeshVisual::take_rest_changed()
+{
+    const bool changed = rest_changed_;
+    rest_changed_ = false;
+    return changed;
+}
+
+void InstancedMeshVisual::flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world)
 {
     VELK_PERF_SCOPE("renderer.instanced_flush");
     const auto slot_count = static_cast<uint32_t>(transforms_.size());
     const uint64_t need = uint64_t(slot_count) * sizeof(ElementInstance);
     if (need == 0) {
         region_ = {};
+        rest_region_ = {};
         flush_slots_.clear();
         return;
+    }
+
+    // With a motion function, the matrices it starts from are kept beside the instances.
+    if (motion_source_.empty()) {
+        rest_region_ = {};
+    } else if (auto rest_arena = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+        const uint64_t rest_need = uint64_t(slot_count) * sizeof(InstanceTransform);
+        const auto rest_of = [&](uint32_t slot) {
+            return live_[slot] != 0 ? InstanceTransform::from(world * transforms_[slot].to_mat4()) : InstanceTransform{};
+        };
+        const bool all = flush_all_ || std::memcmp(flushed_world_.m, world.m, sizeof(world.m)) != 0;
+        if (rest_region_.size() < rest_need) {
+            constexpr uint64_t kMaxSpareRest = uint64_t(16) << 20;  // 16 MiB
+            rest_region_ = rest_arena->alloc(rest_need + std::min(rest_need / 4u, kMaxSpareRest), 16);
+            auto* out = static_cast<InstanceTransform*>(
+                rest_region_.valid() ? rest_arena->mapped_at(rest_region_.offset()) : nullptr);
+            for (uint32_t slot = 0; out && slot < slot_count; ++slot) {
+                out[slot] = rest_of(slot);
+            }
+            rest_changed_ = true;
+        } else if (all) {
+            vector<InstanceTransform> rest;
+            rest.resize(slot_count);
+            for (uint32_t slot = 0; slot < slot_count; ++slot) {
+                rest[slot] = rest_of(slot);
+            }
+            rest_arena->update_at(rest_region_.offset(), rest.data(), rest_need);
+            rest_changed_ = true;
+        } else {
+            for (uint32_t slot : flush_slots_) {
+                const InstanceTransform rest = rest_of(slot);
+                rest_arena->update_at(rest_region_.offset() + uint64_t(slot) * sizeof(InstanceTransform), &rest,
+                                      sizeof(rest));
+                rest_changed_ = true;
+            }
+        }
     }
 
     const auto write_slot = [&](uint32_t slot, ElementInstance* out) {

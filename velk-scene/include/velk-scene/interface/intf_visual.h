@@ -186,9 +186,27 @@ public:
     /// Instances further from the camera than this are not drawn, though rays still
     /// see them. 0, the default, means no limit.
     virtual void set_draw_distance(float distance) = 0;
+
+    /**
+     * @brief Moves instances on the GPU, for motion that stays near where each instance
+     *        was placed, such as wind in trees.
+     *
+     * @p glsl defines `mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)`,
+     * which returns an instance's world matrix given the one it was placed with. It runs
+     * for every instance each frame the params or placements change, with no CPU work per
+     * instance and no change to any tree, and rays and raster see the same result.
+     *
+     * No point of a mesh may move further than @p max_displacement, since the instance's
+     * bounds in the BVH are grown by that much. Going past it is logged as an error, and
+     * rays may then miss the instance. An empty @p glsl removes the motion.
+     */
+    virtual void set_motion(string_view glsl, float max_displacement) = 0;
+    /// The `params` passed to the motion function, such as the current time.
+    virtual void set_motion_params(const vec4& params) = 0;
 };
 
 class IGpuArena;
+class IGpuResourceManager;
 
 /** Internal half of an instanced mesh visual, read by the renderer and the BVH. */
 class IInstancedMeshInternal : public Interface<IInstancedMeshInternal>
@@ -200,7 +218,7 @@ public:
 
     /// Brings the raster instance data in @p arena up to date, given the element's
     /// @p world matrix.
-    virtual void flush_instances(IGpuArena& arena, const mat4& world) = 0;
+    virtual void flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world) = 0;
     virtual uint64_t instance_region_offset() const = 0;
     virtual uint64_t instance_region_size() const = 0;
 
@@ -213,6 +231,18 @@ public:
     /// Mesh @p index's bounding sphere, as center xyz and radius.
     virtual void get_cull_sphere(uint32_t index, float out[4]) const = 0;
     virtual float get_draw_distance() const = 0;
+
+    /// The motion function's source, empty when there is none.
+    virtual string_view get_motion_source() const = 0;
+    virtual float get_max_displacement() const = 0;
+    /// Byte offset in the culling arena of the slots' resting world matrices, as an
+    /// InstanceTransform each, and their size. Only with a motion function.
+    virtual uint64_t rest_region_offset() const = 0;
+    virtual uint64_t rest_region_size() const = 0;
+    /// Fills @p out with the params, and returns whether they changed since the last call.
+    virtual bool take_motion_params(float out[4]) = 0;
+    /// Whether resting matrices were written since the last call.
+    virtual bool take_rest_changed() = 0;
 
     /// Slots changed since the last call, added to @p changed. Sets @p all instead
     /// when the list would not be worth keeping.

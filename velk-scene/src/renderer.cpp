@@ -558,7 +558,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             for (auto* element : state.redraw_list) {
                 if (auto instanced = ::velk::find_attachment<IInstancedMeshInternal>(element)) {
                     if (auto element_state = read_state<IElement>(element)) {
-                        instanced->flush_instances(*arena, element_state->world_matrix);
+                        instanced->flush_instances(*arena, *resources_, element_state->world_matrix);
                     }
                 }
             }
@@ -905,6 +905,11 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // on the union of all views' render_target_passes_ now that
         // every view's batches have been rebuilt above.
         render_target_cache_.ensure(ctx, batch_builder_);
+
+        // Instance motion comes first of all, since every view and render target reads it.
+        for (auto& [scene, bvh] : scene_bvhs) {
+            bvh->emit_instance_motion(ctx, *slot.graph);
+        }
 
         // RTT subtree passes go into slot.graph first. Bindless texture
         // reads from materials are graph-invisible (Tier 1), so the

@@ -8,8 +8,12 @@
 #include <velk-scene/interface/intf_element.h>
 #include <velk-scene/interface/intf_visual.h>
 
+#include <velk-render/api/cached_view_pass.h>
+#include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_render_context.h>
 #include <velk-render/plugin.h>
+#include <velk-scene/instance_types.h>
 
 #include <algorithm>
 #include <cmath>
@@ -170,8 +174,8 @@ BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slo
             c += w(row, col) * instance_center[col];
             h += std::abs(w(row, col)) * instance_half[col];
         }
-        out.min[row] = c - h;
-        out.max[row] = c + h;
+        out.min[row] = c - h - group.max_displacement;
+        out.max[row] = c + h + group.max_displacement;
     }
     return out;
 }
@@ -197,6 +201,265 @@ void SceneBvh::free_instance_partitions(InstanceGroup& group)
     group.movers.clear();
     top_dirty_ = true;
     root_dirty_ = true;
+}
+
+namespace {
+
+/**
+ * Runs a visual's motion function over its instances, writing each one's world matrix
+ * for raster and its record for rays. The table at table_word holds params (vec4), the
+ * largest allowed displacement, how far the visual's meshes reach from their origins,
+ * and a count of instances that moved too far. After it, 4 words per slot: the index of
+ * its record, 0xFFFFFFFF for none, and its partition's origin.
+ */
+constexpr string_view instance_motion_prefix_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+struct MotionInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) buffer MotionInstances { MotionInstance data[]; } motion_instances;
+layout(set = 1, binding = 10, std430) buffer MotionRecords { RtRecord data[]; } motion_records;
+layout(set = 1, binding = 16, std430) buffer MotionWords { uint data[]; } motion_words;
+layout(set = 1, binding = 16, std430) readonly buffer MotionRows { vec4 data[]; } motion_rows;
+
+layout(push_constant) uniform PC {
+    uint instances_base;
+    uint slot_count;
+    uint table_word;
+    uint rest_row;
+} pc;
+
+)";
+
+constexpr string_view instance_motion_main_src = R"(
+
+void main()
+{
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= pc.slot_count) return;
+
+    vec4 row0 = motion_rows.data[pc.rest_row + slot * 3u];
+    vec4 row1 = motion_rows.data[pc.rest_row + slot * 3u + 1u];
+    vec4 row2 = motion_rows.data[pc.rest_row + slot * 3u + 2u];
+    if (row0.xyz == vec3(0.0) && row1.xyz == vec3(0.0) && row2.xyz == vec3(0.0)) return;
+    mat4 rest = transpose(mat4(row0, row1, row2, vec4(0.0, 0.0, 0.0, 1.0)));
+
+    uint t = pc.table_word;
+    vec4 params = vec4(uintBitsToFloat(motion_words.data[t]), uintBitsToFloat(motion_words.data[t + 1u]),
+                       uintBitsToFloat(motion_words.data[t + 2u]), uintBitsToFloat(motion_words.data[t + 3u]));
+    mat4 world = velk_instance_motion(rest, slot, params);
+
+    // How far a point of the mesh can have moved: its origin's move, plus its reach
+    // times the most the rotation and scale can have changed it.
+    mat3 change = mat3(world) - mat3(rest);
+    float change2 = dot(change[0], change[0]) + dot(change[1], change[1]) + dot(change[2], change[2]);
+    float moved = length(world[3].xyz - rest[3].xyz) + uintBitsToFloat(motion_words.data[t + 5u]) * sqrt(change2);
+    if (moved > uintBitsToFloat(motion_words.data[t + 4u])) {
+        atomicAdd(motion_words.data[t + 6u], 1u);
+    }
+
+    motion_instances.data[pc.instances_base + slot].world_matrix = world;
+
+    uint entry = t + 8u + slot * 4u;
+    uint record = motion_words.data[entry];
+    if (record == 0xFFFFFFFFu) return;
+    vec3 origin = vec3(uintBitsToFloat(motion_words.data[entry + 1u]), uintBitsToFloat(motion_words.data[entry + 2u]),
+                       uintBitsToFloat(motion_words.data[entry + 3u]));
+    mat3 inv = inverse(mat3(world));
+    motion_records.data[record].inv_row0 = vec4(inv[0][0], inv[1][0], inv[2][0], world[3][0] - origin.x);
+    motion_records.data[record].inv_row1 = vec4(inv[0][1], inv[1][1], inv[2][1], world[3][1] - origin.y);
+    motion_records.data[record].inv_row2 = vec4(inv[0][2], inv[1][2], inv[2][2], world[3][2] - origin.z);
+}
+)";
+
+constexpr uint32_t kMotionTableWords = 8;
+constexpr uint32_t kMotionSlotWords = 4;
+constexpr uint32_t kMotionMaxDisplacementWord = 4;
+constexpr uint32_t kMotionReachWord = 5;
+constexpr uint32_t kMotionOverrunWord = 6;
+constexpr uint32_t kMotionNoRecord = 0xFFFFFFFFu;
+/// How often, in updates, the count of instances that moved too far is read back.
+constexpr uint32_t kMotionCheckInterval = 120;
+
+} // namespace
+
+void SceneBvh::alloc_instance_motion(InstanceGroup& group, FrameContext& ctx)
+{
+    group.motion_region = {};
+    group.motion_capacity = 0;
+    if (group.visual->get_motion_source().empty()) {
+        return;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return;
+    }
+    const auto slot_count = static_cast<uint32_t>(group.visual->get_transforms().size());
+    const uint32_t capacity = slot_count + slot_count / 8u + 16u;
+    group.motion_region =
+        arena->alloc((uint64_t(kMotionTableWords) + uint64_t(capacity) * kMotionSlotWords) * sizeof(uint32_t), 16);
+    auto* words = static_cast<uint32_t*>(group.motion_region.valid() ? arena->mapped_at(group.motion_region.offset())
+                                                                     : nullptr);
+    if (!words) {
+        VELK_LOG(E, "SceneBvh: no room for the motion of %u instances", slot_count);
+        group.motion_region = {};
+        return;
+    }
+    group.motion_capacity = capacity;
+    group.motion_region_fresh = true;
+    group.motion_pass_dirty = true;
+    group.motion_records_dirty = true;
+
+    float reach2 = 0.f;
+    for (uint32_t m = 0; m < group.visual->get_mesh_count(); ++m) {
+        if (auto mesh = group.visual->get_mesh(m)) {
+            const aabb local = mesh->get_bounds();
+            const vec3 lo = local.min();
+            const vec3 hi = local.max();
+            for (const float x : {lo.x, hi.x}) {
+                for (const float y : {lo.y, hi.y}) {
+                    for (const float z : {lo.z, hi.z}) {
+                        reach2 = std::max(reach2, x * x + y * y + z * z);
+                    }
+                }
+            }
+        }
+    }
+    uint32_t table[kMotionTableWords] = {};
+    const float max_displacement = group.visual->get_max_displacement();
+    const float reach = std::sqrt(reach2);
+    std::memcpy(&table[kMotionMaxDisplacementWord], &max_displacement, sizeof(float));
+    std::memcpy(&table[kMotionReachWord], &reach, sizeof(float));
+    std::memcpy(words, table, sizeof(table));
+    for (uint32_t slot = 0; slot < capacity; ++slot) {
+        words[kMotionTableWords + size_t(slot) * kMotionSlotWords] = kMotionNoRecord;
+    }
+}
+
+void SceneBvh::write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32_t slot, uint32_t record,
+                                 const float origin[3])
+{
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena || !group.motion_region.valid() || slot >= group.motion_capacity) {
+        return;
+    }
+    uint32_t entry[kMotionSlotWords] = {record, 0u, 0u, 0u};
+    std::memcpy(&entry[1], origin, sizeof(float) * 3);
+    const uint64_t offset = group.motion_region.offset()
+        + (uint64_t(kMotionTableWords) + uint64_t(slot) * kMotionSlotWords) * sizeof(uint32_t);
+    if (group.motion_region_fresh) {
+        arena->write_at(offset, entry, sizeof(entry));
+    } else {
+        arena->update_at(offset, entry, sizeof(entry));
+    }
+}
+
+void SceneBvh::emit_instance_motion(FrameContext& ctx, IRenderGraph& graph)
+{
+    for (auto& [element, group] : instance_groups_) {
+        if (!group.motion_region.valid() || group.visual->rest_region_size() == 0
+            || group.visual->instance_region_size() == 0) {
+            continue;
+        }
+        auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        if (!arena) {
+            continue;
+        }
+
+        float params[4];
+        const bool params_changed = group.visual->take_motion_params(params);
+        if (params_changed) {
+            arena->update_at(group.motion_region.offset(), params, sizeof(params));
+        }
+        const bool rest_changed = group.visual->take_rest_changed();
+        const bool needed = params_changed || rest_changed || group.motion_records_dirty;
+        group.motion_records_dirty = false;
+        group.motion_region_fresh = false;
+
+        if (update_frame_ % kMotionCheckInterval == 0 && !group.motion_error_logged) {
+            uint32_t overruns = 0;
+            arena->read_at(group.motion_region.offset() + kMotionOverrunWord * sizeof(uint32_t), &overruns,
+                           sizeof(overruns));
+            if (overruns != 0) {
+                VELK_LOG(E, "SceneBvh: an instance motion moved past its maximum displacement of %f, %u times",
+                         double(group.max_displacement), overruns);
+                group.motion_error_logged = true;
+            }
+        }
+
+        if (!needed) {
+            continue;
+        }
+
+        const uint64_t rest_offset = group.visual->rest_region_offset();
+        const uint64_t instances_offset = group.visual->instance_region_offset();
+        if (rest_offset != group.motion_rest_offset || instances_offset != group.motion_instances_offset) {
+            group.motion_rest_offset = rest_offset;
+            group.motion_instances_offset = instances_offset;
+            group.motion_pass_dirty = true;
+        }
+
+        InstanceGroup* motion_group = &group;
+        emit_cached_view_pass(group.motion_pass, group.motion_pass_dirty, "instance.motion", graph,
+                              [&](CachedPassRecording& rec) {
+            string_view source = motion_group->visual->get_motion_source();
+            uint64_t key = 0xcbf29ce484222325ULL;
+            for (size_t i = 0; i < source.size(); ++i) {
+                key = (key ^ static_cast<uint8_t>(source[i])) * 0x100000001b3ULL;
+            }
+            key |= 0x4000000000000000ULL;
+            auto pipeline = ctx.render_ctx->pipelines().find(
+                PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+            if (!pipeline) {
+                string src(instance_motion_prefix_src);
+                src += source;
+                src += instance_motion_main_src;
+                pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
+            }
+            auto cmd = pipeline ? ctx.backend->create_command_buffer() : nullptr;
+            if (!cmd) {
+                return;
+            }
+            struct PushC
+            {
+                uint32_t instances_base;
+                uint32_t slot_count;
+                uint32_t table_word;
+                uint32_t rest_row;
+            };
+            const auto slot_count = static_cast<uint32_t>(motion_group->visual->get_transforms().size());
+            const PushC pc{static_cast<uint32_t>(instances_offset / sizeof(ElementInstance)), slot_count,
+                           static_cast<uint32_t>(motion_group->motion_region.offset() / sizeof(uint32_t)),
+                           static_cast<uint32_t>(rest_offset / (sizeof(float) * 4))};
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = (slot_count + 63u) / 64u;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+            cmd->begin_recording();
+            cmd->push_label("Instance motion");
+            // Earlier frames may still be reading what this writes.
+            cmd->record_global_barrier();
+            cmd->record_dispatch(dc);
+            cmd->record_global_barrier();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            rec.held.push_back(std::move(pipeline));
+        });
+    }
 }
 
 bool SceneBvh::is_instance_dynamic(uint32_t partition) const
@@ -258,6 +521,8 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
 {
     VELK_PERF_SCOPE("renderer.instance_cut");
     free_instance_partitions(group);
+
+    alloc_instance_motion(group, ctx);
 
     const auto slot_count = static_cast<uint32_t>(group.visual->get_transforms().size());
     group.slot_partition.clear();
@@ -416,8 +681,20 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     visual.take_changed_slots(changed, all_changed);
     rebuild = rebuild || all_changed;
 
+    const float max_displacement = visual.get_max_displacement();
+    if (group.max_displacement != max_displacement) {
+        group.max_displacement = max_displacement;
+        rebuild = true;
+    }
+    const bool has_motion = !visual.get_motion_source().empty();
+    if (has_motion != group.motion_region.valid()
+        || (has_motion && visual.get_transforms().size() > group.motion_capacity)) {
+        rebuild = true;
+    }
+
     // A translated element keeps every record relative to its partition's origin, so
-    // only the origins move. Anything else changes the records.
+    // only the origins move. Anything else changes the records, and a motion function's
+    // list of origins would have to be rewritten anyway.
     const mat4 old_world = group.world;
     const mat4& new_world = element_state->world_matrix;
     group.world = new_world;
@@ -428,7 +705,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                 translated_only = translated_only && old_world(row, col) == new_world(row, col);
             }
         }
-        if (!translated_only) {
+        if (!translated_only || has_motion) {
             rebuild = true;
         } else if (!rebuild) {
             float delta[3];
@@ -471,6 +748,8 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                 members.erase(std::remove(members.begin(), members.end(), slot), members.end());
                 group.slot_partition[slot] = kUnplaced;
                 group.movers.erase(slot);
+                const float no_origin[3] = {0.f, 0.f, 0.f};
+                write_motion_slot(group, emit.frame, slot, kMotionNoRecord, no_origin);
             }
         } else if (current != kUnplaced && current == group.dynamic_partition) {
             partitions_[current].dirty = true;
@@ -821,7 +1100,7 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
 
 void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool geometry)
 {
-    const InstanceGroup* group = partition.group;
+    InstanceGroup* group = partition.group;
     vector<BvhItemBounds> items;
     items.reserve(partition.members.size());
     for (uint32_t slot : partition.members) {
@@ -898,6 +1177,10 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
             RtRecord record = group ? instance_record(*group, member) : records_[member].gpu;
             for (int k = 0; k < 3; ++k) {
                 record.inv_row[k][3] -= origin[k];
+            }
+            if (group && group->motion_region.valid()) {
+                write_motion_slot(*group, ctx, member, record_base + static_cast<uint32_t>(gpu_records.size()), origin);
+                group->motion_records_dirty = true;
             }
             gpu_records.push_back(record);
         }
