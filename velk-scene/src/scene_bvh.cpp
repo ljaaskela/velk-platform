@@ -62,12 +62,9 @@ void hash_element(uint64_t& h, IHierarchy& hier, const IObject::Ptr& obj)
     if (::velk::has_attachment<IVisual>(obj)) {
         if (auto elem = interface_pointer_cast<IElement>(obj)) {
             if (auto es = read_state<IElement>(elem.get())) {
-                // world_aabb on container elements aggregates all
-                // descendant aabbs (including camera / light) so it
-                // moves with camera pan. Instead hash each visual's
-                // own world matrix and size, which only change when
-                // that element or an ancestor actually moved, rotated
-                // or scaled the visual in world space.
+                // Each visual's own world matrix and size only change
+                // when that element or an ancestor actually moved,
+                // rotated or scaled the visual in world space.
                 for (int i = 0; i < 16; ++i) {
                     hash_float(h, es->world_matrix.m[i]);
                 }
@@ -100,11 +97,9 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
 {
     VELK_PERF_SCOPE("renderer.bvh_rebuild");
     // Second-stage dirty check: the caller's heuristic (visuals in
-    // redraw_list) over-triggers because the scene re-adds every
-    // element to redraw_list on any Layout dirty flag, including
-    // camera pans that don't actually move any visual. Hash each
-    // visual element's world matrix + size; if it matches the last
-    // full build, keep the cache.
+    // redraw_list) also fires for changes that leave geometry alone,
+    // such as a material change. Hash each visual element's world
+    // matrix + size; if it matches the last full build, keep the cache.
     uint64_t current_hash = 0;
     if (dirty && !cached_nodes_.empty()) {
         VELK_PERF_SCOPE("renderer.bvh_hash");

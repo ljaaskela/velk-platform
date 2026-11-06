@@ -92,10 +92,8 @@ void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo& info)
     scene_svc->for_each_scene(+[](IScene* scene, void* user) {
         if (!scene) return;
         auto& c = *static_cast<Ctx*>(user);
-        if ((scene->pending_dirty() & DirtyFlags::Layout) != DirtyFlags::None) {
-            if (auto* h = interface_cast<IHierarchy>(scene)) {
-                c.solver->solve(*h, scene->get_geometry());
-            }
+        if (auto* h = interface_cast<IHierarchy>(scene)) {
+            c.solver->solve(*h, scene->get_geometry(), scene->pending_layout());
         }
         scene->update(c.info->info);
     }, &ctx);

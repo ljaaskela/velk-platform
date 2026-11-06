@@ -24,6 +24,8 @@ public:
 
     shared_ptr<IScene> get_scene() const override { return scene_.lock(); }
     DirtyFlags consume_dirty() override;
+    DirtyFlags pending_dirty() const override { return pending_dirty_; }
+    void mark_dirty(DirtyFlags flags) override;
     bool has_render_traits() const override { return render_trait_count != 0; }
 
     ReturnValue add_attachment(const IInterface::Ptr& attachment) override;
@@ -32,10 +34,13 @@ public:
 private:
     void subscribe_traits();
     void subscribe_trait(const IInterface::Ptr& attachment);
+    void sync_dependent_registration();
 
     IScene::WeakPtr scene_;
     vector<ScopedHandler> trait_subs_;
     uint32_t render_trait_count{};
+    uint32_t dependent_trait_count_{};
+    bool registered_dependent_{};
     DirtyFlags pending_dirty_ = DirtyFlags::None;
 };
 

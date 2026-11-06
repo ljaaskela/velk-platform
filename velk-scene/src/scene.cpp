@@ -158,6 +158,7 @@ void Scene::set_geometry(aabb geometry)
         geometry_ = geometry;
         std::unique_lock lock(state_mutex_);
         set_dirty(DirtyFlags::Layout);
+        full_layout_ = true;
         LAYOUT_LOG("Scene::set_geometry: %.0fx%.0f", geometry.extent.width, geometry.extent.height);
     }
 }
@@ -182,23 +183,18 @@ void Scene::update(const UpdateInfo& info)
         }
     }
     dirty_elements_.clear();
+    full_layout_ = false;
 
     // Layout (constraint solving + transform/AABB propagation) is run
     // by an external pre-update hook owned by whichever layer provides
-    // the constraint traits — velk-ui's plugin runs its LayoutSolver
-    // before invoking scene->update() each frame. Scene itself no
-    // longer touches layout, keeping the scene-model layer free of UI
-    // policy.
+    // the constraint traits. velk-ui's plugin runs its LayoutSolver
+    // before invoking scene->update() each frame. Scene itself does not
+    // touch layout, keeping the scene-model layer free of UI policy.
     (void)h;
 
-    // `redraw_list_` already contains every element whose own
-    // on_state_changed fired this frame (see the dirty_elements_ loop
-    // above), including elements that the layout solver touched (size
-    // / world_matrix / world_aabb writes that actually changed).
-    // We intentionally do NOT blanket-add every element in the tree
-    // here: a single camera-position change used to cascade through
-    // Layout dirty and mark every visual for redraw, forcing both the
-    // BVH and the raster batches to rebuild every pan frame.
+    // `redraw_list_` now holds every element that changed this frame,
+    // including those the solver moved, because it marks each element
+    // whose world matrix or size it changed.
 
     // `dirty_` survives until consume_state() so SceneState carries
     // the merged flags downstream (e.g., BatchBuilder uses Layout-only
@@ -223,6 +219,41 @@ void Scene::notify_dirty(IElement& element, DirtyFlags flags)
     std::unique_lock lock(state_mutex_);
     dirty_elements_.push_back(&element);
     dirty_ |= flags;
+}
+
+PendingLayout Scene::pending_layout() const
+{
+    std::shared_lock lock(state_mutex_);
+
+    PendingLayout pending;
+    pending.full = full_layout_;
+    for (auto* elem : dirty_elements_) {
+        const DirtyFlags flags = elem->pending_dirty();
+        if ((flags & DirtyFlags::Layout) != DirtyFlags::None) {
+            pending.layout.push_back(elem);
+        }
+        if ((flags & DirtyFlags::Transform) != DirtyFlags::None) {
+            pending.transform.push_back(elem);
+        }
+        if ((flags & DirtyFlags::Visual) != DirtyFlags::None) {
+            pending.visual.push_back(elem);
+        }
+    }
+    pending.dependents = dependent_elements_;
+    return pending;
+}
+
+void Scene::set_depends_on_others(IElement& element, bool depends)
+{
+    std::unique_lock lock(state_mutex_);
+
+    auto it = std::find(dependent_elements_.begin(), dependent_elements_.end(), &element);
+    const bool present = it != dependent_elements_.end();
+    if (depends && !present) {
+        dependent_elements_.push_back(&element);
+    } else if (!depends && present) {
+        dependent_elements_.erase(it);
+    }
 }
 
 vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t max_count,
@@ -423,6 +454,8 @@ ReturnValue Scene::set_root(const IObject::Ptr& root)
     auto rv = logical_.set_root(root);
     if (rv == ReturnValue::Success && root) {
         attach_element(root);
+        std::unique_lock lock(state_mutex_);
+        full_layout_ = true;
     }
     return rv;
 }

@@ -131,7 +131,11 @@ void Stack::apply(const Constraint& c, IElement& element, IHierarchy& hierarchy)
         float child_main = info.measured_main;
         float child_cross = cross_available;
 
+        // The solver reports a moved child when it recomputes the world matrix,
+        // but only this code sees a size-only change.
+        bool size_changed = false;
         write_state<IElement>(info.element, [&](IElement::State& s) {
+            const ::velk::size old_size = s.size;
             if (axis == 1) {
                 s.position.x = c.bounds.position.x;
                 s.position.y = cursor;
@@ -143,7 +147,11 @@ void Stack::apply(const Constraint& c, IElement& element, IHierarchy& hierarchy)
                 s.size.width = child_main;
                 s.size.height = child_cross;
             }
+            size_changed = s.size != old_size;
         });
+        if (size_changed) {
+            info.element->mark_dirty(DirtyFlags::Layout);
+        }
 
         // Apply constraint-phase traits on the child
         Constraint child_c;

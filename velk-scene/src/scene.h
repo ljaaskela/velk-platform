@@ -32,11 +32,8 @@ public:
     SceneState consume_state() override;
 
     void notify_dirty(IElement& element, DirtyFlags flags) override;
-    DirtyFlags pending_dirty() const override
-    {
-        std::shared_lock lock(state_mutex_);
-        return dirty_;
-    }
+    PendingLayout pending_layout() const override;
+    void set_depends_on_others(IElement& element, bool depends) override;
     vector<IElement::Ptr> ray_cast(vec3 origin, vec3 direction,
                                    size_t max_count = 0,
                                    const ElementQuery& filter = {}) const override;
@@ -79,9 +76,11 @@ private:
     mutable std::shared_mutex state_mutex_;  ///< Protects the lists below.
     vector<IElement*> dirty_elements_;
     vector<IElement*> redraw_list_;
+    vector<IElement*> dependent_elements_;
     vector<IElement::Ptr> removed_list_;
 
     DirtyFlags dirty_ = DirtyFlags::All;
+    bool full_layout_ = true;
     bool initialized_ = false;
 };
 

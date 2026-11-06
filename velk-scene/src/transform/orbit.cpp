@@ -7,16 +7,16 @@
 
 namespace velk {
 
-void Orbit::transform(IElement& element)
+mat4 Orbit::transform(IElement&, const mat4& world)
 {
     auto state = read_state<IOrbit>(this);
     if (!state) {
-        return;
+        return world;
     }
     auto target_obj = state->target.get<IElement>();
     auto target_state = read_state<IElement>(target_obj);
     if (!target_state) {
-        return;
+        return world;
     }
 
     // Target position is the world-space translation of the target
@@ -52,7 +52,7 @@ void Orbit::transform(IElement& element)
     // Forward = normalize(target - eye)
     vec3 fwd = target - eye;
     if (vec3::is_zero(fwd)) {
-        return;
+        return world;
     }
     fwd = vec3::normalize(fwd);
 
@@ -60,7 +60,7 @@ void Orbit::transform(IElement& element)
     // terms (see comment above).
     vec3 right = vec3::cross(fwd, vec3::unit_y());
     if (vec3::is_zero(right)) {
-        return;
+        return world;
     }
     right = vec3::normalize(right);
 
@@ -73,19 +73,7 @@ void Orbit::transform(IElement& element)
     new_world.set_col(1, up);
     new_world.set_col(2, -fwd);
     new_world.set_col(3, eye);
-
-    // Skip the write if the camera element already has this exact matrix.
-    // The layout solver overwrites world_matrix on every layout pass, so
-    // checking the current state is the only reliable way to detect when
-    // we need to re-apply the orbit transform.
-    auto cam_state = read_state<IElement>(&element);
-    if (cam_state && cam_state->world_matrix == new_world) {
-        return;
-    }
-
-    write_state<IElement>(&element, [&](IElement::State& es) {
-        es.world_matrix = new_world;
-    });
+    return new_world;
 }
 
 } // namespace velk

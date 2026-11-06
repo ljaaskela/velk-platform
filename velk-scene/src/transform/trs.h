@@ -12,7 +12,7 @@ class Trs : public ext::Transform<Trs, ITrs>
 public:
     VELK_CLASS_UID(ClassId::Transform::Trs, "Trs");
 
-    void transform(IElement& element) override;
+    mat4 transform(IElement& element, const mat4& world) override;
 };
 
 } // namespace velk

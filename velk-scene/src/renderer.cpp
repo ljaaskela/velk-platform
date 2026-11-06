@@ -691,8 +691,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             // or changed). Pure camera / light transform updates land
             // in redraw_list too but don't affect BVH topology, so we
             // skip a rebuild for them. Parent transform changes are
-            // still caught because the layout solver propagates the
-            // dirty flag into all descendant visuals.
+            // still caught because the layout solver marks every
+            // element whose world matrix it changes.
             bool dirty = !state.removed_list.empty();
             if (!dirty) {
                 for (auto* elem : state.redraw_list) {

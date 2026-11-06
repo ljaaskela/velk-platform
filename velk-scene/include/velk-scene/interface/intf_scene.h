@@ -52,6 +52,28 @@ struct SceneState
 };
 
 /**
+ * @brief The work pending for the layout solver. Returned by IScene::pending_layout().
+ *
+ * Lists can contain duplicates, and an element can be in several of them.
+ */
+struct PendingLayout
+{
+    /** @brief The whole tree needs solving: first load, a new root or new geometry. */
+    bool full = false;
+    /** @brief Elements whose size, position or layout traits changed. */
+    vector<IElement*> layout;
+    /** @brief Elements whose transform traits changed. */
+    vector<IElement*> transform;
+    /** @brief Elements whose visuals changed, which can change their bounds. */
+    vector<IElement*> visual;
+    /** @brief Elements with a transform trait that reads another element. Not
+     *         work by themselves; re-evaluated on any solve that does work. */
+    vector<IElement*> dependents;
+
+    bool empty() const { return !full && layout.empty() && transform.empty() && visual.empty(); }
+};
+
+/**
  * @brief Owns the element hierarchy, runs layout, and tracks visual changes.
  *
  * Presents an IHierarchy interface externally. Internally owns a logical hierarchy
@@ -105,14 +127,14 @@ public:
     virtual void notify_dirty(IElement& element, DirtyFlags flags) = 0;
 
     /**
-     * @brief Returns the dirty flags accumulated since the last update.
+     * @brief Returns what the layout solver needs to do before `update()`.
      *
-     * Pre-update consumers (the layout pass run by velk-ui's plugin)
-     * use this to skip work when nothing pending touches their concern
-     * — e.g. don't run the layout solver when no element has notified
-     * `Layout`. Cleared inside `update()`.
+     * `update()` consumes the dirty elements, so the solver reads this first.
      */
-    virtual DirtyFlags pending_dirty() const = 0;
+    virtual PendingLayout pending_layout() const = 0;
+
+    /** @brief Registers whether @p element has a trait that reads other elements. */
+    virtual void set_depends_on_others(IElement& element, bool depends) = 0;
 
     /**
      * @brief Returns elements hit by a ray, in hit order (front to back).

@@ -5,39 +5,25 @@
 
 namespace velk {
 
-void LookAt::transform(IElement& element)
+mat4 LookAt::transform(IElement&, const mat4& world)
 {
     auto state = read_state<ILookAt>(this);
     if (!state) {
-        return;
+        return world;
     }
 
     auto target_obj = state->target.get<IElement>();
     if (!target_obj) {
-        return;
+        return world;
     }
 
     auto target_state = read_state<IElement>(target_obj);
-    auto elem_state = read_state<IElement>(&element);
-    if (!target_state || !elem_state) {
-        return;
+    if (!target_state) {
+        return world;
     }
 
-    vec3 eye_in{
-        elem_state->world_matrix(0, 3),
-        elem_state->world_matrix(1, 3),
-        elem_state->world_matrix(2, 3)
-    };
-    CacheKey key{
-        target_obj.get(),
-        {target_state->world_matrix(0, 3), target_state->world_matrix(1, 3), target_state->world_matrix(2, 3)},
-        target_state->size,
-        state->target_offset,
-        eye_in
-    };
-    if (!cache_.changed(key)) {
-        return;
-    }
+    // Eye position from the incoming world matrix
+    vec3 eye{world(0, 3), world(1, 3), world(2, 3)};
 
     // Target position (center of target element + offset)
     vec3 target{
@@ -46,32 +32,29 @@ void LookAt::transform(IElement& element)
         state->target_offset.z
     };
 
-    // Eye position from current world matrix
-    const vec3& eye = eye_in;
-
     // Forward = normalize(target - eye)
     vec3 fwd = target - eye;
     if (vec3::is_zero(fwd)) {
-        return;
+        return world;
     }
     fwd = vec3::normalize(fwd);
 
     // Right = normalize(forward x up), up = (0, 1, 0)
     vec3 right = vec3::cross(fwd, vec3::unit_y());
     if (vec3::is_zero(right)) {
-        return;
+        return world;
     }
     right = vec3::normalize(right);
 
     // Recompute up = right x forward
     vec3 up = vec3::cross(right, fwd);
 
-    // Write world matrix: columns are right, up, -forward (position unchanged)
-    write_state<IElement>(&element, [&](IElement::State& es) {
-        es.world_matrix.set_col(0, right);
-        es.world_matrix.set_col(1, up);
-        es.world_matrix.set_col(2, -fwd);
-    });
+    // Columns are right, up, -forward (position unchanged)
+    mat4 result = world;
+    result.set_col(0, right);
+    result.set_col(1, up);
+    result.set_col(2, -fwd);
+    return result;
 }
 
 } // namespace velk

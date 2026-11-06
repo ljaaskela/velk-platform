@@ -1,15 +1,14 @@
 #include "trs.h"
 
 #include <velk/api/state.h>
-#include <velk-scene/interface/intf_element.h>
 
 namespace velk {
 
-void Trs::transform(IElement& element)
+mat4 Trs::transform(IElement&, const mat4& world)
 {
     auto state = read_state<ITrs>(this);
     if (!state) {
-        return;
+        return world;
     }
 
     mat4 t = mat4::translate(state->translate);
@@ -17,13 +16,7 @@ void Trs::transform(IElement& element)
     mat4 s = mat4::scale(state->scale);
     mat4 trs = t * r * s;
 
-    auto elem_state = read_state<IElement>(&element);
-    if (!elem_state) {
-        return;
-    }
-
-    mat4 world = elem_state->world_matrix * trs;
-    write_state<IElement>(&element, [&](IElement::State& es) { es.world_matrix = world; });
+    return world * trs;
 }
 
 } // namespace velk

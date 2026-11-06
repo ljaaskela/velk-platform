@@ -43,10 +43,18 @@ public:
     operator IElement::Ptr() const { return as_ptr<IElement>(); }
 
     auto get_position() const { return read_state_value<IElement>(&IElement::State::position); }
-    void set_position(const vec3& v) { write_state_value<IElement>(&IElement::State::position, v); }
+    void set_position(const vec3& v)
+    {
+        write_state_value<IElement>(&IElement::State::position, v);
+        mark_layout_dirty();
+    }
 
     auto get_size() const { return read_state_value<IElement>(&IElement::State::size); }
-    void set_size(const size& v) { write_state_value<IElement>(&IElement::State::size, v); }
+    void set_size(const size& v)
+    {
+        write_state_value<IElement>(&IElement::State::size, v);
+        mark_layout_dirty();
+    }
 
     auto get_world_matrix() const { return read_state_value<IElement>(&IElement::State::world_matrix); }
 
@@ -91,6 +99,13 @@ public:
     }
 
 private:
+    void mark_layout_dirty()
+    {
+        if (auto element = as_ptr<IElement>()) {
+            element->mark_dirty(DirtyFlags::Layout);
+        }
+    }
+
     static HierarchyNode make_node(IObject::Ptr obj)
     {
         HierarchyNode n;

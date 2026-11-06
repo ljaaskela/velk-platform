@@ -38,12 +38,13 @@ class Transform : public Trait<T, ITransformTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Transform; }
-    void transform(IElement&) override {}
+    mat4 transform(IElement&, const mat4& world) override { return world; }
+    bool depends_on_other_elements() const override { return false; }
 
 protected:
     void on_state_changed(string_view, IMetadata&, Uid) override
     {
-        this->invoke_trait_dirty(DirtyFlags::Layout);
+        this->invoke_trait_dirty(DirtyFlags::Transform);
     }
 };
 

@@ -10,9 +10,10 @@ namespace velk {
 enum class DirtyFlags : uint8_t
 {
     None = 0,
-    Layout = 1 << 0,
+    Layout = 1 << 0,    ///< Size, position or a layout trait changed.
     Visual = 1 << 1,
     DrawOrder = 1 << 2,
+    Transform = 1 << 3, ///< A transform trait changed, or the world matrix did.
     All = 0xff,
 };
 

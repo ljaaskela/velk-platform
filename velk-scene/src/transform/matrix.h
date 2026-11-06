@@ -12,7 +12,7 @@ class Matrix : public ext::Transform<Matrix, IMatrix>
 public:
     VELK_CLASS_UID(ClassId::Transform::Matrix, "Matrix");
 
-    void transform(IElement& element) override;
+    mat4 transform(IElement& element, const mat4& world) override;
 };
 
 } // namespace velk

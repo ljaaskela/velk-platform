@@ -12,7 +12,8 @@ class Orbit : public ext::Transform<Orbit, IOrbit>
 public:
     VELK_CLASS_UID(ClassId::Transform::Orbit, "Orbit");
 
-    void transform(IElement& element) override;
+    mat4 transform(IElement& element, const mat4& world) override;
+    bool depends_on_other_elements() const override { return true; }
 };
 
 } // namespace velk
