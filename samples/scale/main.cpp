@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn]
-//                      [unlimited] [rt] [text]
+//                      [unlimited] [rt] [text] [overlay]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -27,8 +27,9 @@
 // scatter:  like deform, and the vertices also fly apart, until the trees degrade
 //           enough to be built again, shown under mesh.blas_rebuild.
 // forest:   elements is the number of trees, all on one instanced visual, on a
-//           jittered grid instead of the mixed visuals. Movers are trees moved every
-//           frame. Trees have two primitives and 24 triangles.
+//           jittered grid instead of the mixed visuals. Movers are trees scattered
+//           over the forest, moved every frame, and the camera is close to the center.
+//           Trees have two primitives and 24 triangles.
 // forest_elements: the same trees as one element each, to compare against forest.
 // forest_shift: forest, with the whole element translated every frame.
 // forest_churn: forest, with one tree removed and another added every frame.
@@ -36,6 +37,8 @@
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
 //           there are any.
+// overlay:  shows the performance overlay. Off by default, since its numbers change
+//           from run to run and captures get compared.
 //
 // Prints each GI probe volume change as it happens, and GPU pass timings on
 // exit. The engine's perf log, also printed on exit,
@@ -310,7 +313,9 @@ int main(int argc, char* argv[])
     bool unlimited = false;
     bool ray_traced = false;
     bool with_text = false;
+    bool with_overlay = false;
     for (int i = 5; i < argc; ++i) {
+        with_overlay = with_overlay || std::strcmp(argv[i], "overlay") == 0;
         unlimited = unlimited || std::strcmp(argv[i], "unlimited") == 0;
         ray_traced = ray_traced || std::strcmp(argv[i], "rt") == 0;
         with_text = with_text || std::strcmp(argv[i], "text") == 0;
@@ -373,13 +378,24 @@ int main(int argc, char* argv[])
     post.add(velk::pp::create_tonemap());
     cam.add_post_process(post);
 
-    const float distance = std::max(extent * 1.3f, 800.f);
+    // A forest is viewed from close up, at its center.
+    const float distance = forest ? 420.f : std::max(extent * 1.3f, 800.f);
     auto orbit = velk::trait::transform::create_orbit();
-    orbit.set_target(root);
+    if (forest) {
+        auto focus = velk::create_element();
+        auto focus_trs = velk::trait::transform::create_trs();
+        focus_trs.set_translate({0.f, kFloorY - 30.f, 0.f});
+        focus.add_trait(focus_trs);
+        scene.add(root, focus);
+        orbit.set_target(focus);
+        orbit.set_pitch(-18.f);
+    } else {
+        orbit.set_target(root);
+        orbit.set_pitch(-30.f);
+    }
     orbit.set_distance(distance);
-    orbit.set_pitch(-30.f);
     camera.add_trait(orbit);
-    camera.find_trait<velk::ICamera>()->far_clip().set_value(distance * 10.f);
+    camera.find_trait<velk::ICamera>()->far_clip().set_value(std::max(distance, extent) * 10.f);
 
     // Floor.
     {
@@ -577,6 +593,12 @@ int main(int argc, char* argv[])
 
     app.add_view(window, camera);
 
+    if (with_overlay) {
+        velk::PerformanceOverlayConfig overlay;
+        overlay.enabled = true;
+        app.set_performance_overlay(window, overlay);
+    }
+
     using Clock = std::chrono::steady_clock;
     auto report_start = Clock::now();
     long frame = 0;
@@ -621,11 +643,12 @@ int main(int argc, char* argv[])
             }
         }
         if (forest_instances) {
+            // Scattered over the forest, the same trees in every run.
             for (long m = 0; m < mover_count; ++m) {
-                const long i = m * element_count / mover_count;
-                const float a = t + static_cast<float>(m);
+                const auto i = static_cast<long>(static_cast<uint64_t>(m) * 2654435761ull % static_cast<uint64_t>(element_count));
+                const float a = t * 2.f + static_cast<float>(m);
                 forest_visual.set_transform(static_cast<uint32_t>(i),
-                                            velk::mat4::translate(tree_position(i) + velk::vec3{std::sin(a) * 20.f, 0.f, std::cos(a) * 20.f}));
+                                            velk::mat4::translate(tree_position(i) + velk::vec3{std::sin(a) * 30.f, 0.f, std::cos(a) * 30.f}));
             }
         }
 
