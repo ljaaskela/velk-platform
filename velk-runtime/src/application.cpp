@@ -75,6 +75,7 @@ bool Application::init(const ApplicationConfig& config)
     if (const char* path = std::getenv("VELK_AUTO_CAPTURE")) {
         auto_capture_path_ = path;
     }
+    auto_gpu_stats_ = std::getenv("VELK_AUTO_GPU_STATS") != nullptr;
 
     auto& v = instance();
     auto& reg = v.plugin_registry();
@@ -268,6 +269,12 @@ bool Application::poll()
         if (!auto_capture_path_.empty()) {
             capture_first_window();
         }
+        for (auto& pass : auto_gpu_samples_) {
+            std::sort(pass.ms.begin(), pass.ms.end());
+            VELK_LOG(I, "gpu pass %-24s med=%7.3f ms  p90=%7.3f ms  n=%zu", pass.label.c_str(),
+                     static_cast<double>(pass.ms[pass.ms.size() / 2]),
+                     static_cast<double>(pass.ms[pass.ms.size() * 9 / 10]), pass.ms.size());
+        }
         return false;
     }
     return window_provider_->poll_events();
@@ -379,7 +386,30 @@ void Application::tick_overlays(double cpu_time, double frame_time,
     array_view<const GpuPassTiming> gpu_timings;
     if (render_ctx_) {
         if (auto backend = render_ctx_->backend()) {
+            if (auto_gpu_stats_) {
+                backend->set_gpu_timing_enabled(true);
+            }
             gpu_timings = backend->last_gpu_timings();
+        }
+    }
+
+    // The first frames include pipeline creation, which would skew the medians.
+    constexpr long kAutoGpuStatsSkipFrames = 60;
+    if (auto_gpu_stats_ && presented_frames_ > kAutoGpuStatsSkipFrames) {
+        for (const auto& timing : gpu_timings) {
+            const string_view label(timing.label, std::strlen(timing.label));
+            AutoGpuPass* found = nullptr;
+            for (auto& pass : auto_gpu_samples_) {
+                if (string_view(pass.label) == label) {
+                    found = &pass;
+                    break;
+                }
+            }
+            if (!found) {
+                auto_gpu_samples_.push_back({string(label), {}});
+                found = &auto_gpu_samples_.back();
+            }
+            found->ms.push_back(timing.ms);
         }
     }
 

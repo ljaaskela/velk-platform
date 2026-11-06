@@ -84,6 +84,14 @@ private:
     long auto_exit_frames_ = 0;
     long presented_frames_ = 0;
     string auto_capture_path_;
+    /// VELK_AUTO_GPU_STATS: logs GPU pass medians when VELK_AUTO_EXIT_FRAMES exits.
+    bool auto_gpu_stats_ = false;
+    struct AutoGpuPass
+    {
+        string label;
+        vector<float> ms;
+    };
+    vector<AutoGpuPass> auto_gpu_samples_;
     IRenderContext::Ptr render_ctx_;
     ::velk::IRenderer::Ptr renderer_;
     IWindowProvider* window_provider_ = nullptr;
