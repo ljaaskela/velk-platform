@@ -100,6 +100,11 @@ inline RenderView::ShapePlane world_shape_plane(const ShapeSite& site)
     return plane;
 }
 
+/// GpuBvhNode::child_count of a node that refers to a partition. Its first_child is
+/// the partition's root, and its origin is in aabb_min[3], aabb_max[3] and the bits
+/// of first_shape. Mirrors GLSL VELK_PARTITION_REF.
+inline constexpr uint32_t kBvhPartitionRef = 0xFFFFFFFFu;
+
 // Scene-wide BVH node. Matches the GLSL `BvhNode` layout (48 bytes)
 // from velk.glsl. Leaf nodes carry a contiguous record range; inner
 // nodes carry a contiguous child range.

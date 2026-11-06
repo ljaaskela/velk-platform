@@ -12,7 +12,9 @@
 #include <velk-render/plugin.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace velk::impl {
 
@@ -323,8 +325,8 @@ void SceneBvh::demote_quiet_records()
             if (!partition.active) {
                 continue;
             }
-            float lo[3] = {partition.root.aabb_min[0], partition.root.aabb_min[1], partition.root.aabb_min[2]};
-            float hi[3] = {partition.root.aabb_max[0], partition.root.aabb_max[1], partition.root.aabb_max[2]};
+            float lo[3] = {partition.ref.aabb_min[0], partition.ref.aabb_min[1], partition.ref.aabb_min[2]};
+            float hi[3] = {partition.ref.aabb_max[0], partition.ref.aabb_max[1], partition.ref.aabb_max[2]};
             const float before = surface_area(lo, hi);
             merge_bounds(lo, hi, record.bounds.min, record.bounds.max);
             const float growth = surface_area(lo, hi) - before;
@@ -495,13 +497,22 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
         }
     }
 
+    float origin[3];
+    for (int k = 0; k < 3; ++k) {
+        origin[k] = 0.5f * (tree.nodes[0].aabb_min[k] + tree.nodes[0].aabb_max[k]);
+    }
+
     uint32_t record_base = 0;
     alloc_elements(ctx.records_arena, partition.records, tree.order.size(), sizeof(RtRecord), record_base);
     if (partition.records.valid()) {
         vector<RtRecord> gpu_records;
         gpu_records.reserve(tree.order.size());
         for (uint32_t item : tree.order) {
-            gpu_records.push_back(records_[partition.members[item]].gpu);
+            RtRecord record = records_[partition.members[item]].gpu;
+            for (int k = 0; k < 3; ++k) {
+                record.inv_row[k][3] -= origin[k];
+            }
+            gpu_records.push_back(record);
         }
         ctx.records_arena->write_at(partition.records.offset(), gpu_records.data(),
                                     gpu_records.size() * sizeof(RtRecord));
@@ -513,20 +524,36 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     // cycle would hang the walk. Rays skip the partition instead.
     if (!partition.nodes.valid() || !partition.records.valid() || (geometry && !partition.shapes.valid())) {
         VELK_LOG(E, "SceneBvh: partition allocation failed");
-        set_inverted_bounds(partition.root);
+        set_inverted_bounds(partition.ref);
         partition.node_count = 0;
         return;
     }
+
+    partition.ref = {};
+    for (int k = 0; k < 3; ++k) {
+        partition.ref.aabb_min[k] = tree.nodes[0].aabb_min[k];
+        partition.ref.aabb_max[k] = tree.nodes[0].aabb_max[k];
+    }
+    partition.ref.aabb_min[3] = origin[0];
+    partition.ref.aabb_max[3] = origin[1];
+    std::memcpy(&partition.ref.first_shape, &origin[2], sizeof(float));
+    partition.ref.first_child = node_base;
+    partition.ref.child_count = kBvhPartitionRef;
+
     for (auto& node : tree.nodes) {
         if (node.child_count != 0) {
             node.first_child += node_base;
         } else {
             node.first_shape += record_base;
         }
+        // Rounds outward, so subtracting the origin never shrinks a box.
+        for (int k = 0; k < 3; ++k) {
+            node.aabb_min[k] = std::nextafter(node.aabb_min[k] - origin[k], -std::numeric_limits<float>::infinity());
+            node.aabb_max[k] = std::nextafter(node.aabb_max[k] - origin[k], std::numeric_limits<float>::infinity());
+        }
     }
     ctx.bvh_nodes_arena->write_at(partition.nodes.offset(), tree.nodes.data(),
                                   tree.nodes.size() * sizeof(GpuBvhNode));
-    partition.root = tree.nodes[0];
     partition.node_count = static_cast<uint32_t>(tree.nodes.size());
 }
 
@@ -536,11 +563,11 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
     vector<BvhItemBounds> items;
     for (uint32_t p = 0; p < partitions_.size(); ++p) {
         if (partitions_[p].active) {
-            const auto& root = partitions_[p].root;
+            const auto& ref = partitions_[p].ref;
             BvhItemBounds bounds{};
             for (int k = 0; k < 3; ++k) {
-                bounds.min[k] = root.aabb_min[k];
-                bounds.max[k] = root.aabb_max[k];
+                bounds.min[k] = ref.aabb_min[k];
+                bounds.max[k] = ref.aabb_max[k];
             }
             active.push_back(p);
             items.push_back(bounds);
@@ -564,12 +591,11 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
         return;
     }
 
-    // A leaf is a copy of its partition's root, so no node sits between them.
     for (auto& node : tree.nodes) {
         if (node.child_count != 0) {
             node.first_child += base;
         } else {
-            node = partitions_[active[tree.order[node.first_shape]]].root;
+            node = partitions_[active[tree.order[node.first_shape]]].ref;
         }
     }
     ctx.bvh_nodes_arena->write_at(top_nodes_.offset(), tree.nodes.data(),
@@ -589,7 +615,7 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
     const float root_area = std::max(surface_area(top_root_.aabb_min, top_root_.aabb_max), 1e-30f);
     for (uint32_t i = 0; i < active.size(); ++i) {
         const auto& partition = partitions_[active[i]];
-        cost += surface_area(partition.root.aabb_min, partition.root.aabb_max) * partition.members.size();
+        cost += surface_area(partition.ref.aabb_min, partition.ref.aabb_max) * partition.members.size();
     }
     cost /= root_area;
     if (cut_cost_ == 0.f) {
@@ -608,7 +634,7 @@ void SceneBvh::upload_root(FrameContext& ctx)
     // The probe volume follows the static partitions, so movers do not reset it.
     // It only follows movers in a scene with nothing else.
     if (!has_top_ && has_dynamic) {
-        update_probe_volume(dynamic_.root.aabb_min, dynamic_.root.aabb_max,
+        update_probe_volume(dynamic_.ref.aabb_min, dynamic_.ref.aabb_max,
                             static_cast<uint32_t>(ctx.present_counter));
     }
 
@@ -616,18 +642,18 @@ void SceneBvh::upload_root(FrameContext& ctx)
     size_t count = 1;
     if (has_top_ && has_dynamic) {
         nodes[1] = top_root_;
-        nodes[2] = dynamic_.root;
+        nodes[2] = dynamic_.ref;
         nodes[0] = {};
         for (int k = 0; k < 3; ++k) {
-            nodes[0].aabb_min[k] = std::min(top_root_.aabb_min[k], dynamic_.root.aabb_min[k]);
-            nodes[0].aabb_max[k] = std::max(top_root_.aabb_max[k], dynamic_.root.aabb_max[k]);
+            nodes[0].aabb_min[k] = std::min(top_root_.aabb_min[k], dynamic_.ref.aabb_min[k]);
+            nodes[0].aabb_max[k] = std::max(top_root_.aabb_max[k], dynamic_.ref.aabb_max[k]);
         }
         nodes[0].child_count = 2;
         count = 3;
     } else if (has_top_) {
         nodes[0] = top_root_;
     } else if (has_dynamic) {
-        nodes[0] = dynamic_.root;
+        nodes[0] = dynamic_.ref;
     } else {
         // Empty BVH: a single inverted-AABB root, so node_count > 0 and every ray
         // rejects.

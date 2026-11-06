@@ -56,6 +56,12 @@ struct BvhNode {
     uint child_count;
 };
 
+// child_count of a node that refers to a partition. Its first_child is the
+// partition's root, and its origin is in the fields read by velk_partition_origin.
+#define VELK_PARTITION_REF 0xFFFFFFFFu
+#define velk_partition_origin(node) \
+    vec3((node).aabb_min.w, (node).aabb_max.w, uintBitsToFloat((node).first_shape))
+
 )"
 // Mesh-static metadata, owned by the IMeshPrimitive as a persistent region of
 // the shared mesh-static arena (set = 1 slot 11), so its element index is

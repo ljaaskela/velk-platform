@@ -21,8 +21,9 @@ namespace velk {
  *
  * Attached to the scene root on first use. Each group of shapes is a record, kept
  * in a static partition or in the dynamic partition. A static partition owns its
- * tree and its record, shape and local tree regions, and a top tree over the
- * partitions joins them. Records that change move to the dynamic partition, which
+ * tree and its record, shape and local tree regions, all relative to its own origin,
+ * and a top tree over the partitions joins them in world space. Records that change
+ * move to the dynamic partition, which
  * rebuilds each frame it changes, and return to a static partition once they have
  * been still for a while. With a stable set of movers, the per-frame cost depends
  * only on the movers.
@@ -75,7 +76,8 @@ private:
     struct Record
     {
         IElement* owner = nullptr;  ///< Null when the slot is free. Never dereferenced.
-        /// Its first_shape and tree_root are absolute once its partition uploads.
+        /// Its first_shape and tree_root are absolute once its partition uploads. Its
+        /// translation is in world space; the upload makes it relative to the partition.
         RtRecord gpu{};
         vector<RtShape> shapes;
         /// Local tree, when the record has many shapes. Indices relative to this
@@ -93,7 +95,7 @@ private:
         ArenaRegion records;
         ArenaRegion shapes;
         ArenaRegion tree_nodes;
-        GpuBvhNode root{};  ///< Absolute indices. Copied into the tree above it.
+        GpuBvhNode ref{};  ///< World bounds, referring to its root. Copied into the tree above it.
         uint32_t node_count = 0;
         bool active = false;
         bool dirty = false;

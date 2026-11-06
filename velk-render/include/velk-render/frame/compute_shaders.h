@@ -26,6 +26,10 @@ namespace velk {
 // A record places shapes in the world: rays are moved into its local space, and
 // shapes and meshes are intersected there. Origin and direction move by the same
 // transform with no renormalising, so a hit's t is the same in both spaces.
+//
+// A partition's nodes and records are relative to its origin. Entering one subtracts
+// the origin from the ray, and returning to the stack depth it was entered at
+// restores it. Partitions do not nest.
 [[maybe_unused]] constexpr string_view velk_trace_src = R"(
 // Ray-vs-AABB slab test. Returns true if ray intersects the box within
 // [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
@@ -277,11 +281,25 @@ bool trace_any_hit(Ray ray, float t_max)
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
+    vec3 world_origin = ray.origin;
+    int partition_sp = -1;
     while (sp > 0) {
+        if (sp == partition_sp) {
+            ray.origin = world_origin;
+            partition_sp = -1;
+        }
         uint ni = stack[--sp];
         BvhNode node = velk_bvh_nodes.data[ni];
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
+
+        // The reference's box already covers the partition's root, so the root needs
+        // no test of its own.
+        if (node.child_count == VELK_PARTITION_REF) {
+            partition_sp = sp;
+            ray.origin -= velk_partition_origin(node);
+            node = velk_bvh_nodes.data[node.first_child];
+        }
 
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
@@ -338,11 +356,22 @@ bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit)
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
+    vec3 world_origin = ray.origin;
+    int partition_sp = -1;
     while (sp > 0) {
+        if (sp == partition_sp) {
+            ray.origin = world_origin;
+            partition_sp = -1;
+        }
         uint ni = stack[--sp];
         BvhNode node = velk_bvh_nodes.data[ni];
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
+        if (node.child_count == VELK_PARTITION_REF) {
+            partition_sp = sp;
+            ray.origin -= velk_partition_origin(node);
+            node = velk_bvh_nodes.data[node.first_child];
+        }
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
             if (velk_intersect_record(ray, node.first_shape + i, t_min, hit.t, false, h)) {
@@ -1034,15 +1063,21 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
         uint stack[32];
         int sp = 0;
         stack[sp++] = VELK_GLOBALS.bvh_root;
+        vec3 partition_origin = vec3(0.0);
+        int partition_sp = -1;
         // Stops early once the light is fully blocked: nothing further can
         // change the result, and this is the common case deep in a shadow.
         // BOTH terms have to be saturated, since the specular lobe can still
         // see a sliver of emitter after the diffuse hemisphere is covered.
         while (sp > 0 && (f_occ < f_max || s_occ < s_max)) {
+            if (sp == partition_sp) {
+                partition_origin = vec3(0.0);
+                partition_sp = -1;
+            }
             uint ni = stack[--sp];
             BvhNode node = velk_bvh_nodes.data[ni];
 
-            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz);
+            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz) + partition_origin;
             vec3 be = 0.5 * (node.aabb_max.xyz - node.aabb_min.xyz);
             bool outside = false;
             for (int p = 0; p < 6; ++p) {
@@ -1053,11 +1088,17 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
             }
             if (outside) continue;
 
+            if (node.child_count == VELK_PARTITION_REF) {
+                partition_sp = sp;
+                partition_origin = velk_partition_origin(node);
+                node = velk_bvh_nodes.data[node.first_child];
+            }
+
             for (uint ri = 0u; ri < node.shape_count; ++ri) {
               RtRecord rec = velk_records.data[node.first_shape + ri];
               // Records hold the inverse; silhouettes need world-space corners.
               mat3 to_world = inverse(transpose(mat3(rec.inv_row0.xyz, rec.inv_row1.xyz, rec.inv_row2.xyz)));
-              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w);
+              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) + partition_origin;
               for (uint i = 0u; i < rec.shape_count; ++i) {
                 RtShape s = velk_bvh_shapes.data[rec.first_shape + i];
                 if (s.shape_kind == 255u) continue;  // meshes: no silhouette yet
