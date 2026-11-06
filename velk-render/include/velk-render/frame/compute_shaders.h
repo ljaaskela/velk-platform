@@ -1649,8 +1649,9 @@ void main()
                     if (has_sample) {
                         // Fixed accumulation window. Shorter = shorter dynamic-
                         // occluder trail, slightly noisier static; the spatial pass'
-                        // variance-guided filter cleans the residual. Tunable.
-                        count = min(hi.a + 1.0, 20.0);
+                        // variance-guided filter cleans the residual. Tunable; the
+                        // spatial pass treats this count as converged.
+                        count = min(hi.a + 1.0, 8.0);
                         float w = 1.0 / count;
                         irr_acc = mix(hi.rgb, cur_irr, w);
                         m2_acc = mix(m2_prev, cur_lum * cur_lum, w);
@@ -1736,8 +1737,9 @@ vec3 velk_filter_at(ivec2 coord, vec2 dims)
     float low_count = mix(8.0, 1.0, clamp(count / 8.0, 0.0, 1.0));
     float phi_l = (4.0 * sqrt(variance) + 0.02 * center_lum + 1e-4) * low_count;
 
-    // Wider taps when unconverged; tightens to a 5x5 once converged.
-    int step = int(mix(3.0, 1.0, clamp(count / 16.0, 0.0, 1.0)) + 0.5);
+    // Wider taps when unconverged; tightens to a 5x5 once converged, which is when
+    // the count reaches the temporal pass' window.
+    int step = int(mix(3.0, 1.0, clamp(count / 8.0, 0.0, 1.0)) + 0.5);
     float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
 
     vec3 sum = vec3(0.0);
