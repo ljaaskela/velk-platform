@@ -96,7 +96,9 @@ public:
         uint32_t mat_base = 0;
     };
 
-    /// @brief Clears per-frame state; persistent maps stay.
+    /// @brief Clears the per-frame material instance cache. Registered ids and the
+    ///        `frame_*` id sets stay, so composed shaders do not depend on what a
+    ///        given frame happened to emit.
     virtual void begin_frame() = 0;
 
     /// @brief Registers a material's eval snippet on first sight;

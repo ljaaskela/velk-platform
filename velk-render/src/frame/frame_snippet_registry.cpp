@@ -25,10 +25,9 @@ namespace velk {
 
 void FrameSnippetRegistry::begin_frame()
 {
+    // The id sets stay. A frame that emits no shapes must compose the same shaders
+    // as one that does, since shapes already in the BVH still use those materials.
     frame_material_instances_.clear();
-    frame_materials_.clear();
-    frame_shadow_techs_.clear();
-    frame_intersects_.clear();
 }
 
 namespace {
