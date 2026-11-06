@@ -152,62 +152,66 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
             dirty = false;
         }
     }
-    bool rebuilt = false;
-    if (dirty || cached_nodes_.empty()) {
+    if (!dirty && !cached_nodes_.empty()) {
+        return;
+    }
+
+    BvhBuild build;
+    {
         VELK_PERF_SCOPE("renderer.bvh_build");
-        rebuilt = true;
-        auto build = build_scene_bvh(scene, ctx.render_ctx, shape_cb, shape_user);
+        build = build_scene_bvh(scene, ctx.render_ctx, shape_cb, shape_user);
         cached_nodes_ = std::move(build.nodes);
-        cached_shapes_ = std::move(build.shapes);
-        cached_mesh_instances_ = std::move(build.mesh_instances);
         root_ = build.root_index;
         node_count_ = static_cast<uint32_t>(cached_nodes_.size());
-        shape_count_ = static_cast<uint32_t>(cached_shapes_.size());
+        record_count_ = static_cast<uint32_t>(build.records.size());
         cached_aabb_hash_ = current_hash ? current_hash : hash_visual_aabbs(scene);
         dirty_ = false;
         update_probe_volume(static_cast<uint32_t>(ctx.present_counter));
     }
 
     VELK_PERF_SCOPE("renderer.bvh_upload");
-    // Nodes / shapes / mesh instances live in persistent regions of the
-    // Renderer-owned shared arenas, so every scene's BVH holds a distinct
-    // region and multiple BVHs in one frame never collide on the set = 1 slot.
-    // The region's element base is stamped into FrameGlobals / RtRoot; shaders
-    // read data[base + index]. A frame that changes nothing uploads nothing.
-    //
-    // Mesh instances go first: their base is stamped into each mesh shape, so
-    // it has to be settled before the shape array is uploaded. The array only
-    // changes when the build does (the renderer's callback fills it during a
-    // fresh walk), so a stable build keeps both the region and its bytes.
-    bool shapes_dirty = rebuilt;
-    if (rebuilt || !mesh_instances_region_.valid()) {
-        const uint32_t base = upload_region(
-            ctx.mesh_instances_arena, mesh_instances_region_,
-            cached_mesh_instances_.data(),
-            cached_mesh_instances_.size() * sizeof(MeshInstanceData),
-            sizeof(MeshInstanceData));
-        // A moved base rewrites every mesh shape's index, so the shape region
-        // has to follow it even on a frame that did not rebuild.
-        if (base != mesh_instance_base_) shapes_dirty = true;
-        mesh_instance_base_ = base;
-        for (size_t i = 0; i < cached_shapes_.size() && i < cached_mesh_instances_.size(); ++i) {
-            if (cached_shapes_[i].shape_kind != kRtShapeKindMesh) continue;
-            cached_shapes_[i].mesh_instance_base = base + static_cast<uint32_t>(i);
+    // Everything lives in regions of the Renderer-owned shared arenas, so every
+    // scene's BVH holds a distinct region and multiple BVHs in one frame never
+    // collide on the set = 1 slot. Records and local trees point at shapes and
+    // nodes by index, so those bases are added here, before each is uploaded.
+    const uint32_t shape_base = upload_region(ctx.bvh_shapes_arena, shapes_region_, build.shapes.data(),
+                                              build.shapes.size() * sizeof(RtShape), sizeof(RtShape));
+
+    uint32_t tree_base = 0;
+    tree_nodes_region_ = {};
+    if (!build.tree_nodes.empty()) {
+        auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
+        if (arena) {
+            tree_nodes_region_ = arena->alloc(build.tree_nodes.size() * sizeof(BlasNode));
+        }
+        if (tree_nodes_region_.valid()) {
+            tree_base = static_cast<uint32_t>(tree_nodes_region_.offset() / sizeof(BlasNode));
+            for (auto& node : build.tree_nodes) {
+                if (node.shape_count > 0) {
+                    node.first_shape += shape_base;
+                } else {
+                    node.first_child += tree_base;
+                }
+            }
+            arena->write_at(tree_nodes_region_.offset(), build.tree_nodes.data(),
+                            build.tree_nodes.size() * sizeof(BlasNode));
         }
     }
 
-    if (shapes_dirty || !shapes_region_.valid()) {
-        shape_base_ = upload_region(ctx.bvh_shapes_arena, shapes_region_,
-                                    cached_shapes_.data(),
-                                    cached_shapes_.size() * sizeof(RtShape),
-                                    sizeof(RtShape));
+    for (auto& record : build.records) {
+        record.first_shape += shape_base;
+        if (record.tree_root != kRtRecordNoTree) {
+            if (tree_nodes_region_.valid()) {
+                record.tree_root += tree_base;
+            } else {
+                record.tree_root = kRtRecordNoTree;
+            }
+        }
     }
-    if (rebuilt || !nodes_region_.valid()) {
-        node_base_ = upload_region(ctx.bvh_nodes_arena, nodes_region_,
-                                   cached_nodes_.data(),
-                                   cached_nodes_.size() * sizeof(GpuBvhNode),
-                                   sizeof(GpuBvhNode));
-    }
+    record_base_ = upload_region(ctx.records_arena, records_region_, build.records.data(),
+                                 build.records.size() * sizeof(RtRecord), sizeof(RtRecord));
+    node_base_ = upload_region(ctx.bvh_nodes_arena, nodes_region_, cached_nodes_.data(),
+                               cached_nodes_.size() * sizeof(GpuBvhNode), sizeof(GpuBvhNode));
 }
 
 } // namespace velk::impl

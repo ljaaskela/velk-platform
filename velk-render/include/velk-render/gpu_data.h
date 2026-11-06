@@ -19,17 +19,17 @@ namespace velk {
 
 /// Renderer-side description of how a view reaches the scene BVH for
 /// index-based shader reads. Carried through RenderView / FrameContext and
-/// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c shape_base
-/// locate the BVH's regions in the shared node / shape arenas; @c root and
+/// stamped (flat) into FrameGlobals / RtRoot. @c node_base / @c record_base
+/// locate the BVH's regions in the shared node / record arenas; @c root and
 /// the counts are relative to them. Not uploaded directly; the GPU structs
 /// mirror these fields individually.
 struct BvhBinding
 {
-    uint32_t root        = 0;
-    uint32_t node_count  = 0;
-    uint32_t shape_count = 0;
-    uint32_t node_base   = 0;
-    uint32_t shape_base  = 0;
+    uint32_t root         = 0;
+    uint32_t node_count   = 0;
+    uint32_t record_count = 0;
+    uint32_t node_base    = 0;
+    uint32_t record_base  = 0;
     /// GI probe lattice box and the frame it last changed. Read from globals
     /// each frame, so not part of the comparison below, which decides whether
     /// passes that bake the fields above must re-record.
@@ -40,8 +40,8 @@ struct BvhBinding
     bool operator==(const BvhBinding& o) const
     {
         return root == o.root && node_count == o.node_count
-            && shape_count == o.shape_count && node_base == o.node_base
-            && shape_base == o.shape_base;
+            && record_count == o.record_count && node_base == o.node_base
+            && record_base == o.record_base;
     }
     bool operator!=(const BvhBinding& o) const { return !(*this == o); }
 };
@@ -60,10 +60,10 @@ struct FrameGlobals
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
     uint32_t bvh_root;                     ///< Index of the root BvhNode, relative to bvh_node_base; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
-    uint32_t bvh_shape_count;              ///< Total RtShapes the BVH indexes.
+    uint32_t bvh_record_count;             ///< Total RtRecords the BVH indexes.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint32_t bvh_node_base;                ///< Element base added to BVH node indices (this BVH's region of the node arena).
-    uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
+    uint32_t bvh_record_base;              ///< Element base added to BVH leaf record indices.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
     float    probe_min[3];                 ///< GI probe lattice box, world-space minimum.
     uint32_t probe_reset_frame;            ///< present_counter value at which the lattice last changed.
@@ -116,18 +116,17 @@ static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
 // Plain POD, no scene deps; packed for std430 indexed reads.
 
-/// GPU-side shape record. Mirrors the RtShape struct in the RT compute
-/// prelude and the deferred lighting compute. Geometry + material +
-/// texture + shape discriminator in 128 bytes.
+/// GPU-side shape, in its record's local space. Mirrors the RtShape struct in
+/// velk.glsl. Geometry + material + texture + shape discriminator in 128 bytes.
 ///
 /// shape_kind:
 ///   0 = rect, 1 = cube, 2 = sphere — analytic primitives.
-///   255 = mesh — triangle soup; `origin/u_axis` carry the world-space
-///   AABB and `mesh_instance_base` indexes the mesh-instance arena.
+///   255 = mesh — triangle soup; `origin/u_axis` carry the local AABB and
+///   `mesh_static_base` indexes the mesh-static arena.
 ///   3..254 reserved for future analytic kinds.
 VELK_GPU_STRUCT RtShape
 {
-    float    origin[4];       ///< xyz = world origin (corner for rect/cube, AABB corner for sphere, AABB min for mesh)
+    float    origin[4];       ///< xyz = local origin (corner for rect/cube, AABB corner for sphere, AABB min for mesh)
     float    u_axis[4];       ///< xyz = local x axis scaled by width (AABB max for mesh)
     float    v_axis[4];       ///< xyz = local y axis scaled by height
     float    w_axis[4];       ///< xyz = local z axis scaled by depth (cube only; zero otherwise)
@@ -138,8 +137,8 @@ VELK_GPU_STRUCT RtShape
     uint32_t shape_param;     ///< per-shape material data (e.g. glyph index for text)
     uint32_t shape_kind;      ///< 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
     uint32_t material_base;   ///< Word index of this shape's record in the set = 1 material arena.
-    uint32_t _pad0;
-    uint32_t mesh_instance_base; ///< for shape_kind == 255: element index into the set = 1 mesh-instance arena; otherwise 0
+    uint32_t primary_record;  ///< Element index of this shape's record, for RT primary rays' flat list only.
+    uint32_t mesh_static_base;///< for shape_kind == 255: element index into the mesh-static arena, or kInvalidMeshStaticBase when unresolved.
     uint32_t _pad1;
 };
 static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
@@ -166,24 +165,27 @@ VELK_GPU_STRUCT MeshStaticData
 };
 static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 
-/// Sentinel `MeshInstanceData::mesh_static_base` for a mesh whose static
-/// record is not resolvable yet (geometry not uploaded, no BLAS built).
-/// The intersector skips the shape; the CPU retries on a later frame.
+/// Sentinel `RtShape::mesh_static_base` for a mesh whose static record is not
+/// resolvable yet (geometry not uploaded, no BLAS built). The intersector skips
+/// the shape; the CPU retries on a later frame.
 inline constexpr uint32_t kInvalidMeshStaticBase = 0xFFFFFFFFu;
 
-/// Per-shape mesh instance data. Holds the element's world matrices plus
-/// a pointer to the mesh-static buffer. Lives in the set = 1 mesh-instance
-/// arena; shapes reach their record by `mesh_instance_base`. Mirrors GLSL
-/// `MeshInstanceData`.
-VELK_GPU_STRUCT MeshInstanceData
+/// Sentinel `RtRecord::tree_root` for a record that tests each of its shapes.
+inline constexpr uint32_t kRtRecordNoTree = 0xFFFFFFFFu;
+
+/// Places shapes in the world. Lives in the set = 1 record arena; BVH leaves and
+/// RT primary shapes reach it by index. Mirrors GLSL `RtRecord`.
+VELK_GPU_STRUCT RtRecord
 {
-    float    world[16];       ///< column-major mesh-local -> world.
-    float    inv_world[16];   ///< column-major world -> mesh-local.
-    uint32_t mesh_static_base;///< element index into the mesh-static arena; kInvalidMeshStaticBase when unresolved.
+    /// By rows. Columns 0 to 2: world to local rotation and scale. Column 3: world
+    /// position of the local origin.
+    float    inv_row[3][4];
+    uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
+    uint32_t shape_count;
+    uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
     uint32_t _pad0;
-    uint32_t _pad1[2];        ///< keeps the record at 144 bytes.
 };
-static_assert(sizeof(MeshInstanceData) == 144, "MeshInstanceData layout mismatch");
+static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
 
 /// GPU-side scene light. Mirrors the `Light` struct in the compute
 /// shaders (80 bytes). `flags.y` is shadow_tech_id; callers populate

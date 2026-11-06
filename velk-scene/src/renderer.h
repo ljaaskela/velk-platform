@@ -151,9 +151,8 @@ private:
 
     /// Shared mesh-instance arena (set = 1 slot 10): every producer of
     /// mesh-kind shapes suballocates a persistent region for its
-    /// MeshInstanceData array, read at
-    /// velk_mesh_instances.data[mesh_instance_base].
-    IGpuArena::Ptr mesh_instances_arena_;
+    /// RtRecord array, read at velk_records.data[index].
+    IGpuArena::Ptr records_arena_;
 
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke

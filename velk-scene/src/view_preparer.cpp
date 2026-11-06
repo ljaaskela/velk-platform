@@ -296,9 +296,9 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.cam_pos[2] = rv.cam_pos.z;
     globals.bvh_root = rv.bvh.root;
     globals.bvh_node_count = rv.bvh.node_count;
-    globals.bvh_shape_count = rv.bvh.shape_count;
+    globals.bvh_record_count = rv.bvh.record_count;
     globals.bvh_node_base = rv.bvh.node_base;
-    globals.bvh_shape_base = rv.bvh.shape_base;
+    globals.bvh_record_base = rv.bvh.record_base;
     set_probe_globals(globals, rv.bvh);
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
@@ -386,11 +386,12 @@ void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_sta
 {
     struct ShapeCollect {
         FrameContext& ctx;
-        vector<RtShape>& shapes;
-        vector<MeshInstanceData>& mesh_instances;
+        RenderView& rv;
+        vector<RtRecord>& records;
+        const mat4* last_world;
     };
-    vector<MeshInstanceData> mesh_instances;
-    ShapeCollect sc{ctx, rv.shapes, mesh_instances};
+    vector<RtRecord> records;
+    ShapeCollect sc{ctx, rv, records, nullptr};
     enumerate_scene_shapes(scene_state, ctx.render_ctx,
         +[](void* u, ShapeSite& site) {
             auto& s = *static_cast<ShapeCollect*>(u);
@@ -423,56 +424,54 @@ void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_sta
                 if (kind != 0) site.geometry.shape_kind = kind;
             }
             if (site.has_mesh_data) {
-                site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                site.geometry.mesh_static_base = kInvalidMeshStaticBase;
                 if (auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive)) {
-                    site.mesh_instance.mesh_static_base =
-                        mpi->ensure_rt_data(*ctx.resources);
+                    site.geometry.mesh_static_base = mpi->ensure_rt_data(*ctx.resources);
                 }
-                // Index within this view's mesh-instance run; the arena base
-                // is added once the whole run is uploaded below.
-                site.geometry.mesh_instance_base =
-                    static_cast<uint32_t>(s.mesh_instances.size());
-                s.mesh_instances.push_back(site.mesh_instance);
             }
-            s.shapes.push_back(site.geometry);
+            // Shapes of one element share a transform, so they share a record.
+            if (site.world != s.last_world) {
+                s.records.push_back(make_rt_record(*site.world));
+                s.last_world = site.world;
+            }
+            // Index within this view's record run; the arena base is added once
+            // the whole run is uploaded below.
+            site.geometry.primary_record = static_cast<uint32_t>(s.records.size()) - 1u;
+            s.rv.shapes.push_back(site.geometry);
+            s.rv.shape_planes.push_back(world_shape_plane(site));
         }, &sc);
 
-    upload_mesh_instances(entry, ctx, rv,
-                          {mesh_instances.data(), mesh_instances.size()});
+    upload_records(entry, ctx, rv, {records.data(), records.size()});
 }
 
-void ViewPreparer::upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
-                                         RenderView& rv,
-                                         array_view<MeshInstanceData> instances)
+void ViewPreparer::upload_records(IViewEntry& entry, FrameContext& ctx, RenderView& rv,
+                                  array_view<RtRecord> records)
 {
     auto& cache = view_caches_[&entry];
-    if (!ctx.mesh_instances_arena) return;
+    if (!ctx.records_arena) return;
 
-    const uint64_t need = instances.size() * sizeof(MeshInstanceData);
-    if (cache.mesh_instances_region.size() != need) {
+    const uint64_t need = records.size() * sizeof(RtRecord);
+    if (cache.records_region.size() != need) {
         if (need == 0) {
-            cache.mesh_instances_region = {};  // release
+            cache.records_region = {};  // release
         } else {
-            auto region = ctx.mesh_instances_arena->alloc(need);
+            auto region = ctx.records_arena->alloc(need);
             const uint64_t off = region.offset();
             const bool ok = region.valid();
-            cache.mesh_instances_region = std::move(region);
-            if (ok) ctx.mesh_instances_arena->write_at(off, instances.begin(), need);
+            cache.records_region = std::move(region);
+            if (ok) ctx.records_arena->write_at(off, records.begin(), need);
         }
     } else if (need > 0) {
-        ctx.mesh_instances_arena->update_at(cache.mesh_instances_region.offset(),
-                                            instances.begin(), need);
+        ctx.records_arena->update_at(cache.records_region.offset(), records.begin(), need);
     }
 
-    // Shift each mesh shape's run-relative index onto the region's base. The
-    // shape array is re-uploaded every frame, so a moved base needs no
-    // invalidation of anything that caches it.
-    if (need == 0 || !cache.mesh_instances_region.valid()) return;
-    const uint32_t base = static_cast<uint32_t>(
-        cache.mesh_instances_region.offset() / sizeof(MeshInstanceData));
+    // Shift each shape's run-relative index onto the region's base. The shape
+    // array is re-uploaded every frame, so a moved base needs no invalidation of
+    // anything that caches it.
+    if (need == 0 || !cache.records_region.valid()) return;
+    const uint32_t base = static_cast<uint32_t>(cache.records_region.offset() / sizeof(RtRecord));
     for (auto& shape : rv.shapes) {
-        if (shape.shape_kind != kRtShapeKindMesh) continue;
-        shape.mesh_instance_base += base;
+        shape.primary_record += base;
     }
 }
 

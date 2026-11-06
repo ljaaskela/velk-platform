@@ -17,6 +17,353 @@ namespace velk {
 // scene-side shader bits: the velk-ui GLSL include, the deferred-lighting
 // compute shader, and the RT compute prelude/main.
 
+// Ray tracing over the scene's records, shared by every compute shader that
+// traces. Registered as the "velk_trace.glsl" include. The including shader
+// defines Ray, RayHit and VELK_TRACE_STACK_SIZE, declares velk_bvh_nodes,
+// velk_bvh_shapes, velk_records, velk_mesh_static_records, velk_blas_nodes,
+// velk_blas_tris and VELK_GLOBALS, and supplies intersect_rect / cube / sphere.
+//
+// A record places shapes in the world: rays are moved into its local space, and
+// shapes and meshes are intersected there. Origin and direction move by the same
+// transform with no renormalising, so a hit's t is the same in both spaces.
+[[maybe_unused]] constexpr string_view velk_trace_src = R"(
+// Ray-vs-AABB slab test. Returns true if ray intersects the box within
+// [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
+bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
+{
+    vec3 inv_d = 1.0 / ray.dir;
+    vec3 t0 = (bmin - ray.origin) * inv_d;
+    vec3 t1 = (bmax - ray.origin) * inv_d;
+    vec3 tmn = min(t0, t1);
+    vec3 tmx = max(t0, t1);
+    float tnear = max(max(tmn.x, tmn.y), tmn.z);
+    float tfar  = min(min(tmx.x, tmx.y), tmx.z);
+    if (tfar < max(tnear, 0.0) || tnear > t_max) return false;
+    t_hit = max(tnear, 0.0);
+    return true;
+}
+
+// The composer generates the body after intersect snippets have been included.
+// Built-in kinds forward to the functions the shader defines; visual-registered
+// kinds call their snippets.
+bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
+
+// The origin is made relative to the record before it is rotated, so its error
+// follows the size of the object and not its distance from the world origin.
+Ray velk_local_ray(Ray ray, RtRecord rec)
+{
+    vec3 rel = ray.origin - vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w);
+    Ray local;
+    local.origin = vec3(dot(rec.inv_row0.xyz, rel),
+                        dot(rec.inv_row1.xyz, rel),
+                        dot(rec.inv_row2.xyz, rel));
+    local.dir = vec3(dot(rec.inv_row0.xyz, ray.dir),
+                     dot(rec.inv_row1.xyz, ray.dir),
+                     dot(rec.inv_row2.xyz, ray.dir));
+    return local;
+}
+
+// Normals transform by the transpose of the inverse.
+vec3 velk_world_normal(RtRecord rec, vec3 n)
+{
+    return normalize(rec.inv_row0.xyz * n.x + rec.inv_row1.xyz * n.y + rec.inv_row2.xyz * n.z);
+}
+
+// Triangle-mesh intersector (shape_kind == 255), in the mesh's local space.
+// Walks the primitive's BLAS.
+bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
+{
+    {
+        float t_aabb;
+        if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
+    }
+    if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    MeshStaticData st = velk_mesh_static(shape);
+    if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
+    if (st.blas_node_count == 0u) return false;
+
+    // Normalize the local direction so MT's numerical thresholds
+    // (`abs(det) < 1e-7`, `tt < 1e-4`) stay calibrated against mesh-edge
+    // magnitudes regardless of world scale. Without this, instances scaled up by
+    // a large world matrix produce a tiny local direction, which makes every
+    // triangle's `det` collapse below the rejection threshold and silently drops
+    // the entire instance. The length converts the hit back to the ray's t.
+    vec3 lo = ray.origin;
+    float ld_scale = length(ray.dir);
+    if (ld_scale < 1e-30) return false;
+    vec3 ld = ray.dir / ld_scale;
+
+    uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
+
+    // This primitive's BLAS runs inside the shared node / triangle arenas;
+    // node and triangle indices below are relative to these bases.
+    uint blas_node_base = st.blas_node_base;
+    uint blas_tri_base  = st.blas_tri_base;
+
+    Ray local_ray;
+    local_ray.origin = lo;
+    local_ray.dir    = ld;
+
+    bool  found = false;
+    float best_t = 1e30;
+    float best_u = 0.0;
+    float best_v = 0.0;
+    uint  best_o0 = 0u;
+    uint  best_o1 = 0u;
+    uint  best_o2 = 0u;
+
+    // BLAS walk. Stack depth 32 fits any reasonable tree (a perfectly
+    // balanced binary BVH at depth 32 holds 2^32 leaves).
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = st.blas_root;
+    while (sp > 0) {
+        uint ni = uint(stack[--sp]);
+        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
+        float t_aabb;
+        if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
+
+        if (node.shape_count > 0u) {
+            // Leaf: test triangles.
+            for (uint k = 0u; k < node.shape_count; ++k) {
+                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
+                uint base = tri * 3u;
+                uint i0 = velk_mesh_index(st, base + 0u);
+                uint i1 = velk_mesh_index(st, base + 1u);
+                uint i2 = velk_mesh_index(st, base + 2u);
+                uint o0 = i0 * floats_per_vert;
+                uint o1 = i1 * floats_per_vert;
+                uint o2 = i2 * floats_per_vert;
+                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
+                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
+                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
+
+                // Moller-Trumbore. The det rejection threshold scales with the
+                // actual edge magnitudes so meshes whose local-space coordinates
+                // are tiny don't have every triangle silently filtered out as
+                // "near-parallel". The same scaling applies to the per-hit `tt`
+                // floor so it's a meaningful "ignore self-intersection" distance
+                // regardless of mesh scale.
+                vec3 e1 = v1 - v0;
+                vec3 e2 = v2 - v0;
+                vec3 p  = cross(ld, e2);
+                float det = dot(e1, p);
+                float det_scale = max(length(e1) * length(p), 1e-30);
+                if (abs(det) < 1e-7 * det_scale) continue;
+                float inv_det = 1.0 / det;
+                vec3 to_v0 = lo - v0;
+                float u = dot(to_v0, p) * inv_det;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(to_v0, e1);
+                float v = dot(ld, q) * inv_det;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float tt = dot(e2, q) * inv_det;
+                float tt_floor = 1e-4 * max(length(e1), length(e2));
+                if (tt < tt_floor || tt >= best_t) continue;
+                best_t = tt;
+                best_u = u;
+                best_v = v;
+                best_o0 = o0;
+                best_o1 = o1;
+                best_o2 = o2;
+                found = true;
+            }
+        } else if (node.child_count == 2u) {
+            // Front-to-back: push the far child first so a near hit can cull
+            // the far subtree through best_t.
+            BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
+            BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
+            float t_l, t_r;
+            bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
+            bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
+            if (h_l && h_r) {
+                if (t_l <= t_r) {
+                    if (sp < 32) stack[sp++] = node.first_child + 1u;
+                    if (sp < 32) stack[sp++] = node.first_child;
+                } else {
+                    if (sp < 32) stack[sp++] = node.first_child;
+                    if (sp < 32) stack[sp++] = node.first_child + 1u;
+                }
+            } else if (h_l) {
+                if (sp < 32) stack[sp++] = node.first_child;
+            } else if (h_r) {
+                if (sp < 32) stack[sp++] = node.first_child + 1u;
+            }
+        } else {
+            for (uint c = 0u; c < node.child_count; ++c) {
+                if (sp < 32) stack[sp++] = node.first_child + c;
+            }
+        }
+    }
+    if (!found) return false;
+
+    // Interpolate per-vertex normal and UV from the closest hit's barycentrics.
+    // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. Moller-Trumbore's (u, v)
+    // make (1-u-v, u, v) the weights for (V0, V1, V2). Any-hit callers never read
+    // these, so the compiler drops them from those traces.
+    float w = 1.0 - best_u - best_v;
+    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
+    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
+    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
+    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
+    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
+    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
+
+    hit.t      = best_t / ld_scale;
+    hit.uv     = uv0 * w + uv1 * best_u + uv2 * best_v;
+    hit.normal = normalize(n0 * w + n1 * best_u + n2 * best_v);
+    return true;
+}
+
+// Tests one shape in local space. On a nearer hit, updates @p hit, recording the
+// shape's index in velk_bvh_shapes.
+bool velk_test_shape(Ray local, uint shape_index, float t_min, inout RayHit hit)
+{
+    RayHit h;
+    if (intersect_shape(local, velk_bvh_shapes.data[shape_index], h) && h.t > t_min && h.t < hit.t) {
+        hit = h;
+        hit.shape_index = shape_index;
+        return true;
+    }
+    return false;
+}
+
+// Intersects a record's shapes, returning the nearest hit in (t_min, t_max) with
+// its normal in world space. With @p any_hit, returns at the first hit found.
+bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool any_hit, out RayHit hit)
+{
+    RtRecord rec = velk_records.data[record];
+    Ray local = velk_local_ray(ray, rec);
+    hit.t = t_max;
+    bool found = false;
+    if (rec.tree_root == VELK_NO_TREE) {
+        for (uint i = 0u; i < rec.shape_count; ++i) {
+            if (velk_test_shape(local, rec.first_shape + i, t_min, hit)) {
+                found = true;
+                if (any_hit) return true;
+            }
+        }
+    } else {
+        // Many shapes, such as a text visual's glyphs, under a small local tree.
+        uint stack[32];
+        int sp = 0;
+        stack[sp++] = rec.tree_root;
+        while (sp > 0) {
+            BvhNode node = velk_blas_nodes.data[stack[--sp]];
+            float t_enter;
+            if (!ray_aabb(local, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
+            for (uint i = 0u; i < node.shape_count; ++i) {
+                if (velk_test_shape(local, node.first_shape + i, t_min, hit)) {
+                    found = true;
+                    if (any_hit) return true;
+                }
+            }
+            for (uint c = 0u; c < node.child_count; ++c) {
+                if (sp < 32) stack[sp++] = node.first_child + c;
+            }
+        }
+    }
+    if (found) hit.normal = velk_world_normal(rec, hit.normal);
+    return found;
+}
+
+// Any-hit traversal for shadow rays: early-exit on the first confirmed blocker
+// within t_max. With VELK_TRACE_ORDERED_ANY_HIT it goes front-to-back, since the
+// near child is the likelier blocker, at the cost of testing both children before
+// descending.
+bool trace_any_hit(Ray ray, float t_max)
+{
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
+    uint stack[VELK_TRACE_STACK_SIZE];
+    int sp = 0;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+        float t_hit;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
+
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            RayHit h;
+            if (velk_intersect_record(ray, VELK_RECORD_BASE + node.first_shape + i, 0.0, t_max, true, h)) {
+                return true;
+            }
+        }
+
+#ifdef VELK_TRACE_ORDERED_ANY_HIT
+        if (node.child_count == 2u) {
+            BvhNode l = velk_bvh_nodes.data[VELK_NODE_BASE + node.first_child];
+            BvhNode r = velk_bvh_nodes.data[VELK_NODE_BASE + node.first_child + 1u];
+            float t_l, t_r;
+            bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
+            bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
+            if (h_l && h_r) {
+                if (t_l <= t_r) {
+                    if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + 1u;
+                    if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child;
+                } else {
+                    if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child;
+                    if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + 1u;
+                }
+            } else if (h_l) {
+                if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child;
+            } else if (h_r) {
+                if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + 1u;
+            }
+            continue;
+        }
+#endif
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + i;
+        }
+    }
+    return false;
+}
+
+// Closest-hit traversal bounded to the interval [t_min, t_max). A probe cascade
+// traces one distance shell per level, and that bound is what keeps a dense near
+// level affordable: the cost of a ray is dominated by how much of the tree it has
+// to walk. `hit.shape_index` indexes velk_bvh_shapes.
+//
+// Nodes are culled against the FAR bound only. `ray_aabb` reports the entry
+// distance and not the exit, so a node lying entirely nearer than `t_min` cannot
+// be rejected outright; the near bound is applied per shape instead. That costs
+// nothing for a level starting at 0 and leaves some traversal on the table for
+// levels that do not.
+bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit)
+{
+    hit.t = t_max;
+    hit.shape_index = 0xffffffffu;
+    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
+    uint stack[VELK_TRACE_STACK_SIZE];
+    int sp = 0;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE + ni];
+        float t_enter;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            RayHit h;
+            if (velk_intersect_record(ray, VELK_RECORD_BASE + node.first_shape + i, t_min, hit.t, false, h)) {
+                hit = h;
+            }
+        }
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + i;
+        }
+    }
+    return hit.shape_index != 0xffffffffu;
+}
+
+// Unbounded closest hit. On a miss `hit.t` stays at 1e30, which callers that
+// shade the miss rely on.
+bool trace_closest_hit(Ray ray, out RayHit hit)
+{
+    return trace_closest_hit(ray, 0.0, 1e30, hit);
+}
+)";
+
 // Default compute shader for the deferred lighting pass. Samples the
 // G-buffer attachments + light buffer and writes the shaded color to
 // the per-view output storage image.
@@ -48,7 +395,7 @@ layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape dat
 // selects this view's record.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
 #define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
-#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
+#define VELK_RECORD_BASE VELK_GLOBALS.bvh_record_base
 
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
@@ -69,12 +416,12 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // glyph-data bases from it) at the word base carried on the shape.
 layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
 
-// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
-// which resolves shape.mesh_instance_base. Same buffer the RT compute reads.
-layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+// Records placing shapes in the world (set = 1 slot 10). Same buffer the RT
+// compute reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord data[]; } velk_records;
 
 // Per-primitive RT geometry metadata (set = 1 slot 11), read via
-// velk_mesh_static(inst), plus the BLAS runs it points at (slots 12 / 13).
+// velk_mesh_static(shape), plus the BLAS runs it points at (slots 12 / 13).
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
@@ -197,273 +544,30 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
                 + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
     float radius = shape.params.x;
     if (radius <= 0.0) return false;
+    // Solved from the ray's closest point to the center, so a distant origin does
+    // not cost precision.
     vec3 oc = ray.origin - center;
     float a = dot(ray.dir, ray.dir);
-    float b = dot(oc, ray.dir);
-    float c = dot(oc, oc) - radius * radius;
-    float disc = b * b - a * c;
-    if (disc < 0.0) return false;
-    float sq = sqrt(disc);
-    float t1 = (-b - sq) / a;
-    float t2 = (-b + sq) / a;
+    float t_closest = -dot(oc, ray.dir) / a;
+    vec3 closest = oc + t_closest * ray.dir;
+    float h2 = (radius * radius - dot(closest, closest)) / a;
+    if (h2 < 0.0) return false;
+    float h = sqrt(h2);
+    float t1 = t_closest - h;
+    float t2 = t_closest + h;
     float t = t1 > 0.0 ? t1 : t2;
     if (t <= 0.0) return false;
     hit.t = t;
     hit.uv = vec2(0.0);
-    hit.normal = normalize((ray.origin + t * ray.dir) - center);
+    hit.normal = normalize(closest + (t - t_closest) * ray.dir);
     return true;
 }
 
-// Forward decl: ray_aabb is defined further down with the BVH walker.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit);
-
-// Triangle-mesh intersector (shape_kind == 255). Walks the per-mesh
-// BLAS that lives in the trailing region of the primitive's
-// MeshStaticData buffer. Ray is transformed into mesh-local space so
-// vertex data stays untouched and instances share buffers.
-bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
-{
-    // World-space AABB quick reject.
-    {
-        float t_aabb;
-        if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
-    }
-    MeshInstanceData inst = velk_mesh_instance(shape);
-    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
-    MeshStaticData st = velk_mesh_static(inst);
-    if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
-    if (st.blas_node_count == 0u) return false;
-
-    // Ray into mesh-local space. Normalize the local direction so MT's
-    // numerical thresholds (`abs(det) < 1e-7`, `tt < 1e-4`) stay
-    // calibrated against mesh-edge magnitudes regardless of world
-    // scale. Without this, instances scaled up by a large world
-    // matrix produce a tiny local `ld`, which makes every triangle's
-    // `det` collapse below the rejection threshold and silently drops
-    // the entire instance from shadow casting (the bistro mm-scale
-    // chairs were the original symptom). Track the original local-dir
-    // length so the returned `hit.t` can be converted back to
-    // world-space distance for the caller's `t_max` comparison.
-    vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;
-    vec3 ld_unnorm = (inst.inv_world * vec4(ray.dir, 0.0)).xyz;
-    float ld_scale = length(ld_unnorm);
-    if (ld_scale < 1e-30) return false;
-    vec3 ld = ld_unnorm / ld_scale;
-
-    uint floats_per_vert = st.vertex_stride >> 2u;  // stride is bytes; floats = bytes/4
-
-    // This primitive's BLAS runs inside the shared node / triangle arenas;
-    // node and triangle indices below are relative to these bases.
-    uint blas_node_base = st.blas_node_base;
-    uint blas_tri_base  = st.blas_tri_base;
-
-    Ray local_ray;
-    local_ray.origin = lo;
-    local_ray.dir    = ld;
-
-    bool  found = false;
-    float best_t = 1e30;
-    float best_u = 0.0;
-    float best_v = 0.0;
-    uint  best_o0 = 0u;
-    uint  best_o1 = 0u;
-    uint  best_o2 = 0u;
-
-    // BLAS walk. Stack depth 32 fits any reasonable tree (a perfectly
-    // balanced binary BVH at depth 32 holds 2^32 leaves).
-    uint stack[32];
-    int sp = 0;
-    if (st.blas_node_count == 0u) return false;
-    stack[sp++] = st.blas_root;
-    while (sp > 0) {
-        uint ni = uint(stack[--sp]);
-        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
-        float t_aabb;
-        if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
-
-        if (node.shape_count > 0u) {
-            // Leaf: test triangles.
-            for (uint k = 0u; k < node.shape_count; ++k) {
-                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
-                uint base = tri * 3u;
-                uint i0 = velk_mesh_index(st, base + 0u);
-                uint i1 = velk_mesh_index(st, base + 1u);
-                uint i2 = velk_mesh_index(st, base + 2u);
-                uint o0 = i0 * floats_per_vert;
-                uint o1 = i1 * floats_per_vert;
-                uint o2 = i2 * floats_per_vert;
-                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
-                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
-                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
-
-                // Möller-Trumbore. The det rejection threshold scales
-                // with the actual edge magnitudes so meshes whose
-                // local-space coordinates are tiny (e.g. instances
-                // with a large baked-in world scale) don't have every
-                // triangle silently filtered out as "near-parallel".
-                // The same scaling applies to the per-hit `tt` floor
-                // so it's a meaningful "ignore self-intersection"
-                // distance regardless of mesh scale.
-                vec3 e1 = v1 - v0;
-                vec3 e2 = v2 - v0;
-                vec3 p  = cross(ld, e2);
-                float det = dot(e1, p);
-                float det_scale = max(length(e1) * length(p), 1e-30);
-                if (abs(det) < 1e-7 * det_scale) continue;
-                float inv_det = 1.0 / det;
-                vec3 to_v0 = lo - v0;
-                float u = dot(to_v0, p) * inv_det;
-                if (u < 0.0 || u > 1.0) continue;
-                vec3 q = cross(to_v0, e1);
-                float v = dot(ld, q) * inv_det;
-                if (v < 0.0 || u + v > 1.0) continue;
-                float tt = dot(e2, q) * inv_det;
-                float tt_floor = 1e-4 * max(length(e1), length(e2));
-                if (tt < tt_floor || tt >= best_t) continue;
-                best_t = tt;
-                best_u = u;
-                best_v = v;
-                best_o0 = o0;
-                best_o1 = o1;
-                best_o2 = o2;
-                found = true;
-            }
-        } else {
-            // Front-to-back ordered descent for binary inner nodes.
-            // Push the far child first so the near one pops next; for
-            // closest-hit on a triangle BLAS this lets the far subtree
-            // get culled by `best_t` once a near hit lands.
-            if (node.child_count == 2u) {
-                BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
-                BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
-                float t_l, t_r;
-                bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
-                bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
-                if (h_l && h_r) {
-                    if (t_l <= t_r) {
-                        if (sp < 32) stack[sp++] = node.first_child + 1u;
-                        if (sp < 32) stack[sp++] = node.first_child;
-                    } else {
-                        if (sp < 32) stack[sp++] = node.first_child;
-                        if (sp < 32) stack[sp++] = node.first_child + 1u;
-                    }
-                } else if (h_l) {
-                    if (sp < 32) stack[sp++] = node.first_child;
-                } else if (h_r) {
-                    if (sp < 32) stack[sp++] = node.first_child + 1u;
-                }
-            } else {
-                for (uint c = 0u; c < node.child_count; ++c) {
-                    if (sp < 32) stack[sp++] = node.first_child + c;
-                }
-            }
-        }
-    }
-    if (!found) return false;
-
-    // Interpolate per-vertex normal and UV from the closest hit's
-    // barycentrics. Vertex layout (VelkVertex3D, 32 B): pos[0..2],
-    // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
-    // (1-u-v, u, v) the weights for (V0, V1, V2).
-    float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
-    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
-    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
-    vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
-    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
-    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
-    vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
-
-    // Convert local hit to world-space ray parameter.
-    vec3 hit_local = lo + ld * best_t;
-    vec3 hit_world = (inst.world * vec4(hit_local, 1.0)).xyz;
-    hit.t      = length(hit_world - ray.origin);
-    hit.uv     = best_uv;
-    hit.normal = normalize(mat3(inst.world) * best_n);
-    hit.shape_index = 0u;
-    return true;
-}
+#define VELK_TRACE_STACK_SIZE 32
+#define VELK_TRACE_ORDERED_ANY_HIT
+#include "velk_trace.glsl"
 )"
                                                                       R"(
-// Forward declaration. The DeferredLighter composer appends the
-// dispatch body (plus any visual-contributed intersect snippets) when
-// compiling the compute pipeline variant for the current scene's
-// intersect set. Built-in kinds forward to the *_d functions above;
-// visual-registered kinds call their registered snippets.
-bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
-
-// Ray-vs-AABB slab test. Returns true if ray intersects the box within
-// [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
-{
-    vec3 inv_d = 1.0 / ray.dir;
-    vec3 t0 = (bmin - ray.origin) * inv_d;
-    vec3 t1 = (bmax - ray.origin) * inv_d;
-    vec3 tmn = min(t0, t1);
-    vec3 tmx = max(t0, t1);
-    float tnear = max(max(tmn.x, tmn.y), tmn.z);
-    float tfar  = min(min(tmx.x, tmx.y), tmx.z);
-    if (tfar < max(tnear, 0.0) || tnear > t_max) return false;
-    t_hit = max(tnear, 0.0);
-    return true;
-}
-
-// Any-hit BVH traversal for shadow rays: early-exit on the first
-// confirmed blocker within t_max. Stack-depth 32 comfortably covers
-// any realistic UI scene depth.
-bool trace_any_hit(Ray ray, float t_max)
-{
-    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
-    uint stack[32];
-    int sp = 0;
-    stack[sp++] = VELK_GLOBALS.bvh_root;
-    while (sp > 0) {
-        uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
-        float t_hit;
-        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
-
-        for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
-            RayHit h;
-            if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
-        }
-
-        // Front-to-back ordered descent for binary inner nodes:
-        // visit the child whose AABB the ray hits NEAREST first, so
-        // any-hit can return early without walking the far subtree.
-        // Falls back to natural order for non-binary or single-child
-        // nodes (none today, but kept defensive).
-        if (node.child_count == 2u) {
-            BvhNode l = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child];
-            BvhNode r = velk_bvh_nodes.data[VELK_NODE_BASE +node.first_child + 1u];
-            float t_l, t_r;
-            bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
-            bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
-            // Push far child first so the near one pops next.
-            if (h_l && h_r) {
-                if (t_l <= t_r) {
-                    if (sp < 32) stack[sp++] = node.first_child + 1u;
-                    if (sp < 32) stack[sp++] = node.first_child;
-                } else {
-                    if (sp < 32) stack[sp++] = node.first_child;
-                    if (sp < 32) stack[sp++] = node.first_child + 1u;
-                }
-            } else if (h_l) {
-                if (sp < 32) stack[sp++] = node.first_child;
-            } else if (h_r) {
-                if (sp < 32) stack[sp++] = node.first_child + 1u;
-            }
-        } else {
-            for (uint i = 0u; i < node.child_count; ++i) {
-                if (sp < 32) stack[sp++] = node.first_child + i;
-            }
-        }
-    }
-    return false;
-}
-
 // Shadow dispatch is composed at pipeline-build time from the snippet
 // registry's frame_shadow_techs() set. The composer appends each
 // tech's snippet #include plus a velk_eval_shadow switch keyed by the
@@ -952,17 +1056,22 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
             }
             if (outside) continue;
 
-            for (uint i = 0u; i < node.shape_count; ++i) {
-                RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE + node.first_shape + i];
+            for (uint ri = 0u; ri < node.shape_count; ++ri) {
+              RtRecord rec = velk_records.data[VELK_RECORD_BASE + node.first_shape + ri];
+              // Records hold the inverse; silhouettes need world-space corners.
+              mat3 to_world = inverse(transpose(mat3(rec.inv_row0.xyz, rec.inv_row1.xyz, rec.inv_row2.xyz)));
+              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w);
+              for (uint i = 0u; i < rec.shape_count; ++i) {
+                RtShape s = velk_bvh_shapes.data[rec.first_shape + i];
                 if (s.shape_kind == 255u) continue;  // meshes: no silhouette yet
 
                 // Shape geometry, relative to the shading point. Origin is a
                 // corner and the axes span the shape, matching what the
                 // intersectors above assume.
-                vec3 o = s.origin.xyz - shade_pos;
-                vec3 u = s.u_axis.xyz;
-                vec3 v = s.v_axis.xyz;
-                vec3 w = s.w_axis.xyz;
+                vec3 o = to_world * s.origin.xyz + translation - shade_pos;
+                vec3 u = to_world * s.u_axis.xyz;
+                vec3 v = to_world * s.v_axis.xyz;
+                vec3 w = to_world * s.w_axis.xyz;
                 vec3 op[kOccPolyMax];
 
                 if (s.shape_kind == 1u) {
@@ -1043,6 +1152,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
                     velk_occ_accum(op, 4, lc, lnf, lp, ln_count,
                                    minv, lps, ls_count, f_occ, s_occ);
                 }
+              }
             }
 
             for (uint c = 0u; c < node.child_count && sp < 30; ++c) {
@@ -1721,7 +1831,7 @@ layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape dat
 // / counts, present_counter) come from the bound FrameGlobals record, indexed
 // by pc.globals_base — see VELK_GLOBALS below.
 #define VELK_NODE_BASE VELK_GLOBALS.bvh_node_base
-#define VELK_SHAPE_BASE VELK_GLOBALS.bvh_shape_base
+#define VELK_RECORD_BASE VELK_GLOBALS.bvh_record_base
 
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {
@@ -1742,18 +1852,15 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // this holds the back-to-front sort the primary loop composites.
 layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
 
-// Mesh-shape transforms (set = 1 slot 10); read via velk_mesh_instance(shape),
-// which resolves shape.mesh_instance_base. Same buffer the deferred pass reads.
-layout(set = 1, binding = 10, std430) readonly buffer VelkMeshInstances { MeshInstanceData data[]; } velk_mesh_instances;
+// Records placing shapes in the world (set = 1 slot 10). Same buffer the
+// deferred pass reads.
+layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord data[]; } velk_records;
 
 // Per-primitive RT geometry metadata (set = 1 slot 11), read via
-// velk_mesh_static(inst). A primitive's record is allocated once at load and
-// never moves. The BLAS arenas (slots 12 / 13) are not declared here: this
-// shader's mesh intersector is a linear triangle scan, and only the deferred
-// pass walks the acceleration structure.
+// velk_mesh_static(shape). A primitive's record is allocated once at load and
+// never moves.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-// Per-mesh BLAS, same buffers the deferred prelude reads. Their absence here
-// is why this prelude's intersect_mesh fell back to scanning every triangle.
+// Per-mesh BLAS, same buffers the deferred prelude reads.
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkBlasTris  { uint    data[]; } velk_blas_tris;
 
@@ -1965,20 +2072,21 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
     float radius = shape.params.x;
     if (radius <= 0.0) return false;
 
+    // Solved from the ray's closest point to the center, so a distant origin does
+    // not cost precision.
     vec3 oc = ray.origin - center;
     float a = dot(ray.dir, ray.dir);
-    float b = dot(oc, ray.dir);
-    float c = dot(oc, oc) - radius * radius;
-    float disc = b * b - a * c;
-    if (disc < 0.0) return false;
-    float sq = sqrt(disc);
-    float t1 = (-b - sq) / a;
-    float t2 = (-b + sq) / a;
+    float t_closest = -dot(oc, ray.dir) / a;
+    vec3 closest = oc + t_closest * ray.dir;
+    float h2 = (radius * radius - dot(closest, closest)) / a;
+    if (h2 < 0.0) return false;
+    float h = sqrt(h2);
+    float t1 = t_closest - h;
+    float t2 = t_closest + h;
     float t = t1 > 0.0 ? t1 : t2;
     if (t <= 0.0) return false;
 
-    vec3 p = ray.origin + t * ray.dir;
-    vec3 n = normalize(p - center);
+    vec3 n = normalize(closest + (t - t_closest) * ray.dir);
 
     // Spherical equirect-style UV. Good enough for texturing; for pure
     // reflection-only spheres UV won't be read anyway.
@@ -1991,155 +2099,12 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 
-// Forward decl: ray_aabb is defined further down with the BVH walker.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit);
+// Wide scene roots (a grid of 40+ tiles, a dashboard of cards) need more than the
+// deferred pass's 32, since closest-hit pushes both children unordered.
+#define VELK_TRACE_STACK_SIZE 128
+#include "velk_trace.glsl"
 
-// Triangle-mesh intersector for the RT path (shape_kind == 255). Same
-// math as the deferred_lighting compute's copy near the top of this
-// file; duplicated here because the RT prelude is a separate string
-// fed to a different compute pipeline. When a second consumer arrives
-// we'll factor the body out into a shared GLSL snippet.
-bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
-{
-    {
-        float t_aabb;
-        if (!ray_aabb(ray, shape.origin.xyz, shape.u_axis.xyz, 1e30, t_aabb)) return false;
-    }
 )" R"(
-    MeshInstanceData inst = velk_mesh_instance(shape);
-    if (inst.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
-    MeshStaticData st = velk_mesh_static(inst);
-    if (st.triangle_count == 0u || st.vertex_stride == 0u) return false;
-
-    vec3 lo = (inst.inv_world * vec4(ray.origin, 1.0)).xyz;
-    vec3 ld = (inst.inv_world * vec4(ray.dir,    0.0)).xyz;
-
-    uint floats_per_vert = st.vertex_stride >> 2u;
-
-    bool  found = false;
-    float best_t = 1e30;
-    float best_u = 0.0;
-    float best_v = 0.0;
-    uint  best_o0 = 0u;
-    uint  best_o1 = 0u;
-    uint  best_o2 = 0u;
-
-    // BLAS walk, matching the deferred prelude's copy. This used to be a
-    // LINEAR SCAN over every triangle in the mesh, which is why the RT path
-    // has always been slow on mesh-heavy scenes: in bistro it tested hundreds
-    // of thousands of triangles per ray where the deferred tracer walks a
-    // handful of nodes. Measured at ~12000x per ray before this change.
-    Ray local_ray;
-    local_ray.origin = lo;
-    local_ray.dir    = ld;
-    uint blas_node_base = st.blas_node_base;
-    uint blas_tri_base  = st.blas_tri_base;
-    if (st.blas_node_count == 0u) return false;
-
-    uint stack[32];
-    int sp = 0;
-    stack[sp++] = st.blas_root;
-    while (sp > 0) {
-        uint ni = uint(stack[--sp]);
-        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
-        float t_aabb;
-        if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
-
-        if (node.shape_count > 0u) {
-            for (uint k = 0u; k < node.shape_count; ++k) {
-                uint tri = velk_blas_tris.data[blas_tri_base + node.first_shape + k];
-                uint base = tri * 3u;
-                uint i0 = velk_mesh_index(st, base + 0u);
-                uint i1 = velk_mesh_index(st, base + 1u);
-                uint i2 = velk_mesh_index(st, base + 2u);
-                uint o0 = i0 * floats_per_vert;
-                uint o1 = i1 * floats_per_vert;
-                uint o2 = i2 * floats_per_vert;
-                vec3 v0 = vec3(velk_mesh_vertex(st, o0), velk_mesh_vertex(st, o0 + 1u), velk_mesh_vertex(st, o0 + 2u));
-                vec3 v1 = vec3(velk_mesh_vertex(st, o1), velk_mesh_vertex(st, o1 + 1u), velk_mesh_vertex(st, o1 + 2u));
-                vec3 v2 = vec3(velk_mesh_vertex(st, o2), velk_mesh_vertex(st, o2 + 1u), velk_mesh_vertex(st, o2 + 2u));
-                vec3 e1 = v1 - v0;
-                vec3 e2 = v2 - v0;
-                vec3 p  = cross(ld, e2);
-                float det = dot(e1, p);
-                float det_scale = max(length(e1) * length(p), 1e-30);
-                if (abs(det) < 1e-7 * det_scale) continue;
-                float inv_det = 1.0 / det;
-                vec3 to_v0 = lo - v0;
-                float u = dot(to_v0, p) * inv_det;
-                if (u < 0.0 || u > 1.0) continue;
-                vec3 q = cross(to_v0, e1);
-                float v = dot(ld, q) * inv_det;
-                if (v < 0.0 || u + v > 1.0) continue;
-                float tt = dot(e2, q) * inv_det;
-                float tt_floor = 1e-4 * max(length(e1), length(e2));
-                if (tt < tt_floor || tt >= best_t) continue;
-                best_t = tt;
-                best_u = u;
-                best_v = v;
-                best_o0 = o0;
-                best_o1 = o1;
-                best_o2 = o2;
-                found = true;
-            }
-        } else if (node.child_count == 2u) {
-            // Front-to-back: push the far child first so a near hit can cull
-            // the far subtree through best_t.
-            BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
-            BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
-            float t_l, t_r;
-            bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
-            bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
-            if (h_l && h_r) {
-                if (t_l <= t_r) {
-                    if (sp < 32) stack[sp++] = node.first_child + 1u;
-                    if (sp < 32) stack[sp++] = node.first_child;
-                } else {
-                    if (sp < 32) stack[sp++] = node.first_child;
-                    if (sp < 32) stack[sp++] = node.first_child + 1u;
-                }
-            } else if (h_l) {
-                if (sp < 32) stack[sp++] = node.first_child;
-            } else if (h_r) {
-                if (sp < 32) stack[sp++] = node.first_child + 1u;
-            }
-        } else {
-            for (uint c = 0u; c < node.child_count; ++c) {
-                if (sp < 32) stack[sp++] = node.first_child + c;
-            }
-        }
-    }
-    if (!found) return false;
-
-    // Interpolate per-vertex normal and UV from the closest hit's
-    // barycentrics. Vertex layout (VelkVertex3D, 32 B): pos[0..2],
-    // normal[3..5], uv[6..7]. Möller-Trumbore's (u, v) make
-    // (1-u-v, u, v) the weights for (V0, V1, V2).
-    float w = 1.0 - best_u - best_v;
-    vec3 n0 = vec3(velk_mesh_vertex(st, best_o0 + 3u), velk_mesh_vertex(st, best_o0 + 4u), velk_mesh_vertex(st, best_o0 + 5u));
-    vec3 n1 = vec3(velk_mesh_vertex(st, best_o1 + 3u), velk_mesh_vertex(st, best_o1 + 4u), velk_mesh_vertex(st, best_o1 + 5u));
-    vec3 n2 = vec3(velk_mesh_vertex(st, best_o2 + 3u), velk_mesh_vertex(st, best_o2 + 4u), velk_mesh_vertex(st, best_o2 + 5u));
-    vec3 best_n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-    vec2 uv0 = vec2(velk_mesh_vertex(st, best_o0 + 6u), velk_mesh_vertex(st, best_o0 + 7u));
-    vec2 uv1 = vec2(velk_mesh_vertex(st, best_o1 + 6u), velk_mesh_vertex(st, best_o1 + 7u));
-    vec2 uv2 = vec2(velk_mesh_vertex(st, best_o2 + 6u), velk_mesh_vertex(st, best_o2 + 7u));
-    vec2 best_uv = uv0 * w + uv1 * best_u + uv2 * best_v;
-
-    vec3 hit_local = lo + ld * best_t;
-    vec3 hit_world = (inst.world * vec4(hit_local, 1.0)).xyz;
-    hit.t      = length(hit_world - ray.origin);
-    hit.uv     = best_uv;
-    hit.normal = normalize(mat3(inst.world) * best_n);
-    return true;
-}
-)" R"(
-// Forward declaration: the RT composer generates the dispatch body
-// after material / shadow-tech / intersect snippets have been
-// included. Built-in cases (rect/cube/sphere) forward to the
-// functions above; visual-registered intersects get `case <id>:`
-// entries in the generated switch.
-bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
-
 // ===== RNG: PCG-hash seeded by (pixel, frame). =====
 uint g_rng_state;
 
@@ -2187,94 +2152,6 @@ vec3 ggx_sample_half(vec3 N, float roughness, vec2 xi) {
 vec3 ggx_sample_reflect(vec3 V, vec3 N, float roughness, vec2 xi) {
     vec3 H = ggx_sample_half(N, roughness, xi);
     return reflect(-V, H);
-}
-
-// Ray-vs-AABB slab test. Shared by the BVH walkers below.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
-{
-    vec3 inv_d = 1.0 / ray.dir;
-    vec3 t0 = (bmin - ray.origin) * inv_d;
-    vec3 t1 = (bmax - ray.origin) * inv_d;
-    vec3 tmn = min(t0, t1);
-    vec3 tmx = max(t0, t1);
-    float tnear = max(max(tmn.x, tmn.y), tmn.z);
-    float tfar  = min(min(tmx.x, tmx.y), tmx.z);
-    if (tfar < max(tnear, 0.0) || tnear > t_max) return false;
-    t_hit = max(tnear, 0.0);
-    return true;
-}
-
-// ===== Closest-hit BVH traversal. Used by bounces + shadows. The
-// resulting `hit.shape_index` indexes into `pc.bvh_shapes` (not
-// `pc.shapes`, which only primary rays consume). Stack depth bounds
-// the max fan-out per node across the UI tree walk; wide scene roots
-// (a grid of 40+ tiles, a dashboard of cards) need more than 32.
-const int kBvhStackSize = 128;
-// Closest-hit BVH traversal bounded to the interval [t_min, t_max). A probe
-// cascade traces one distance shell per level, and that bound is what keeps a
-// dense near level affordable: the cost of a ray is dominated by how much of
-// the tree it has to walk.
-//
-// Nodes are culled against the FAR bound only. `ray_aabb` reports the entry
-// distance and not the exit, so a node lying entirely nearer than `t_min`
-// cannot be rejected outright; the near bound is applied per shape instead.
-// That costs nothing for a level starting at 0 and leaves some traversal on
-// the table for levels that do not.
-bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit) {
-    hit.t = t_max;
-    hit.shape_index = 0xffffffffu;
-    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
-    uint stack[kBvhStackSize];
-    int sp = 0;
-    stack[sp++] = VELK_GLOBALS.bvh_root;
-    while (sp > 0) {
-        uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
-        float t_enter;
-        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
-        for (uint i = 0u; i < node.shape_count; ++i) {
-            uint idx = node.first_shape + i;
-            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +idx];
-            RayHit h;
-            if (intersect_shape(ray, s, h) && h.t > t_min && h.t < hit.t) {
-                hit = h;
-                hit.shape_index = idx;
-            }
-        }
-        for (uint i = 0u; i < node.child_count; ++i) {
-            if (sp < kBvhStackSize) stack[sp++] = node.first_child + i;
-        }
-    }
-    return hit.shape_index != 0xffffffffu;
-}
-
-// Unbounded closest hit. On a miss `hit.t` stays at 1e30, which callers that
-// shade the miss rely on.
-bool trace_closest_hit(Ray ray, out RayHit hit) {
-    return trace_closest_hit(ray, 0.0, 1e30, hit);
-}
-
-// Any-hit BVH traversal for shadow rays: first confirmed blocker wins.
-bool trace_any_hit(Ray ray, float t_max) {
-    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
-    uint stack[kBvhStackSize];
-    int sp = 0;
-    stack[sp++] = VELK_GLOBALS.bvh_root;
-    while (sp > 0) {
-        uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[VELK_NODE_BASE +ni];
-        float t_enter;
-        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_enter)) continue;
-        for (uint i = 0u; i < node.shape_count; ++i) {
-            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +node.first_shape + i];
-            RayHit h;
-            if (intersect_shape(ray, s, h) && h.t > 0.0 && h.t < t_max) return true;
-        }
-        for (uint i = 0u; i < node.child_count; ++i) {
-            if (sp < kBvhStackSize) stack[sp++] = node.first_child + i;
-        }
-    }
-    return false;
 }
 
 // Forward declaration. The composer emits the actual definition after
@@ -2438,8 +2315,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             acc += throughput * env_miss_color(ray.dir);
             return acc;
         }
-        // trace_closest_hit returns BVH-space indices (pc.bvh_shapes).
-        RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE +hit.shape_index];
+        RtShape s = velk_bvh_shapes.data[hit.shape_index];
         EvalContext ctx;
         ctx.material_base = s.material_base;
         ctx.texture_id = s.texture_id;
@@ -2531,8 +2407,10 @@ void main()
 
         for (uint i = 0u; i < shape_count; ++i) {
             RtShape s = velk_shapes.data[pc.shapes_base + i];
+            RtRecord rec = velk_records.data[s.primary_record];
             RayHit hit;
-            if (!intersect_shape(primary, s, hit)) continue;
+            if (!intersect_shape(velk_local_ray(primary, rec), s, hit)) continue;
+            hit.normal = velk_world_normal(rec, hit.normal);
 
             EvalContext ctx;
             ctx.material_base = s.material_base;
@@ -2850,7 +2728,7 @@ void main()
         ray.dir = d;
         RayHit hit;
         if (trace_closest_hit(ray, t_min, t_max, hit)) {
-            RtShape s = velk_bvh_shapes.data[VELK_SHAPE_BASE + hit.shape_index];
+            RtShape s = velk_bvh_shapes.data[hit.shape_index];
             EvalContext ectx;
             ectx.material_base = s.material_base;
             ectx.texture_id = s.texture_id;

@@ -1,7 +1,7 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
-// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape] [unlimited]
+// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape] [unlimited] [rt] [text]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -15,6 +15,9 @@
 // escape:   movers rise far above the scene and come back, which grows the GI
 //           probe volume and then shrinks it. The first 190 frames show both.
 // unlimited: turns vsync off, so frame times show the real cost.
+// rt:       uses the ray-traced render path instead of deferred.
+// text:     adds a text visual above the grid. It moves like the movers when
+//           there are any.
 //
 // Prints each GI probe volume change as it happens, and GPU pass timings on
 // exit. The engine's perf log, also printed on exit,
@@ -49,6 +52,7 @@
 #include <velk-scene/api/visual/sphere.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
+#include <velk-ui/plugins/text/api/text_visual.h>
 
 namespace {
 
@@ -179,7 +183,14 @@ int main(int argc, char* argv[])
     const bool rotate_only = argc > 4 && std::strcmp(argv[4], "rotate") == 0;
     const bool group_movers = argc > 4 && std::strcmp(argv[4], "group") == 0;
     const bool escape_movers = argc > 4 && std::strcmp(argv[4], "escape") == 0;
-    const bool unlimited = argc > 5 && std::strcmp(argv[5], "unlimited") == 0;
+    bool unlimited = false;
+    bool ray_traced = false;
+    bool with_text = false;
+    for (int i = 5; i < argc; ++i) {
+        unlimited = unlimited || std::strcmp(argv[i], "unlimited") == 0;
+        ray_traced = ray_traced || std::strcmp(argv[i], "rt") == 0;
+        with_text = with_text || std::strcmp(argv[i], "text") == 0;
+    }
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count,
              rotate_only ? "rotate" : group_movers ? "group" : escape_movers ? "escape" : "translate");
@@ -233,7 +244,7 @@ int main(int argc, char* argv[])
     velk::Camera cam(cam_trait);
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
-    cam.add_render_path(velk::path::create_deferred());
+    cam.add_render_path(ray_traced ? velk::path::create_rt() : velk::path::create_deferred());
 
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());
@@ -243,7 +254,7 @@ int main(int argc, char* argv[])
     auto orbit = velk::trait::transform::create_orbit();
     orbit.set_target(root);
     orbit.set_distance(distance);
-    orbit.set_pitch(30.f);
+    orbit.set_pitch(-30.f);
     camera.add_trait(orbit);
     camera.find_trait<velk::ICamera>()->far_clip().set_value(distance * 10.f);
 
@@ -353,6 +364,24 @@ int main(int argc, char* argv[])
         if (is_mover) {
             movers.push_back({trs, position, static_cast<float>(next_mover)});
             ++next_mover;
+        }
+    }
+
+    if (with_text) {
+        const velk::vec3 position{-400.f, -300.f, 0.f};
+        auto text = velk::create_element();
+        auto trs = velk::trait::transform::create_trs();
+        trs.set_translate(position);
+        auto visual = velk::ui::trait::visual::create_text();
+        visual.set_text("glyph records");
+        visual.set_font_size(110.f);
+        visual.set_color({0.95f, 0.55f, 1.f, 1.f});
+        text.add_trait(velk::ui::trait::layout::create_fixed_size(velk::dim::px(800.f), velk::dim::px(180.f)));
+        text.add_trait(trs);
+        text.add_trait(visual);
+        scene.add(root, text);
+        if (mover_count > 0) {
+            movers.push_back({trs, position, 0.f});
         }
     }
 

@@ -99,11 +99,21 @@ struct RenderView
 
     /// RT primary-buffer shapes for this view. Each entry has its
     /// `material_id` / `material_base` / `texture_id` / shape_kind
-    /// fields pre-resolved through the frame snippet registry.
-    /// Mesh-kind shapes have `mesh_instance_base` set to their record in
-    /// the shared mesh-instance arena. Order is enumeration-order (no plane
-    /// sort); RT path back-to-front-sorts a local copy.
+    /// fields pre-resolved through the frame snippet registry, and
+    /// `primary_record` set to its record in the shared record arena. Order
+    /// is enumeration-order (no plane sort); RT path back-to-front-sorts a
+    /// local copy.
     vector<RtShape> shapes;
+
+    /// World-space plane of each entry in `shapes`, for that sort: shapes are in
+    /// local space, and the sort needs to group those sharing a world plane.
+    struct ShapePlane
+    {
+        float origin[3];
+        float u_axis[3];
+        float v_axis[3];
+    };
+    vector<ShapePlane> shape_planes;
 };
 
 } // namespace velk

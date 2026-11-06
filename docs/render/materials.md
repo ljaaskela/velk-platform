@@ -77,7 +77,7 @@ Shader includes are registered via `IRenderContext::shaders().register_include()
 - `VELK_FRAG_OUT(Name)`: single-target colour output at location 0. Takes the name so the identifier a shader assigns to is one it declared.
 - `VELK_GBUFFER_OUT`: the five deferred G-buffer attachments, in render-target-group order.
 - `velk_texture(id, uv)`: bindless texture sample helper.
-- `BvhNode`, `RtShape`, `MeshInstanceData`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
+- `BvhNode`, `RtRecord`, `RtShape`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
 
 **velk-ui.glsl** (provided by velk-scene, registered on renderer init):
 - `ElementInstance`: the universal per-instance record shared by every visual, holding `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.

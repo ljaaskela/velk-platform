@@ -4,6 +4,8 @@
 #include <velk/api/state.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-render/blas.h>
+#include <velk-render/frame/render_view.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_buffer.h>
@@ -18,13 +20,13 @@
 
 namespace velk {
 
-// RtShape, MeshStaticData, MeshInstanceData, GpuLight live in
+// RtShape, RtRecord, MeshStaticData, GpuLight live in
 // velk-render/gpu_data.h alongside other GPU types they're paired with.
 
 // What enumerate_scene_shapes passes to its callback. `geometry` is
-// pre-filled with origin/axes/color/params/shape_kind/shape_param; the
-// callback mutates material_id / material_base / texture_id and
-// pushes the record into its own output vector.
+// pre-filled with origin/axes/color/params/shape_kind/shape_param, in the
+// element's local space; the callback mutates material_id / material_base /
+// texture_id and pushes the record into its own output vector.
 //
 // `draw_entry` is non-null for rect-path shapes (one call per draw
 // entry from IVisual::get_draw_entries) and null for analytic shapes
@@ -36,15 +38,16 @@ struct ShapeSite
     IProgram* paint = nullptr;
     const DrawEntry* draw_entry = nullptr;
 
-    /// Set when geometry.shape_kind == kRtShapeKindMesh. The renderer
-    /// callback fills `mesh_instance.mesh_static_base` by publishing the
-    /// primitive's RT geometry into the shared arenas; the collected record
-    /// is uploaded to the shared mesh-instance arena and its element index
-    /// stamped into geometry.mesh_instance_base.
-    MeshInstanceData mesh_instance{};
-    /// The mesh primitive backing this shape; used by the renderer
-    /// callback to publish the per-mesh static data via
-    /// IMeshPrimitiveInternal::ensure_rt_data. Null for non-mesh shapes.
+    /// The owning element's world matrix, which `geometry` is local to. Valid
+    /// for the duration of the callback.
+    const mat4* world = nullptr;
+    /// Consecutive shapes with the same non-null value share one record, like a
+    /// text visual's glyphs. Null gives the shape its own record.
+    const void* record_group = nullptr;
+
+    /// The mesh primitive backing this shape; the callback publishes the
+    /// per-mesh static data through IMeshPrimitiveInternal::ensure_rt_data and
+    /// stores its index in geometry.mesh_static_base. Null for non-mesh shapes.
     IMeshPrimitive* mesh_primitive = nullptr;
     bool has_mesh_data = false;
 
@@ -52,16 +55,55 @@ struct ShapeSite
     /// emit_shapes_for_element so build_scene_bvh can union them into
     /// per-node BVH AABBs (the BVH outer ray_aabb test culls against
     /// these). Independent of geometry.{origin,u_axis,...}, which are
-    /// per-kind data (basis vectors for analytic, AABB-min/max for mesh)
-    /// that the inner intersect functions consume.
+    /// local per-kind data (basis vectors for analytic, AABB-min/max for
+    /// mesh) that the inner intersect functions consume.
     float aabb_min[3] = { 0, 0, 0 };
     float aabb_max[3] = { 0, 0, 0 };
 };
 
+/// Builds a record for shapes local to @p world. Its shape fields are left for
+/// the caller.
+inline RtRecord make_rt_record(const mat4& world)
+{
+    const mat4 inverse = mat4::inverse(world);
+    RtRecord record{};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            record.inv_row[row][col] = inverse(row, col);
+        }
+        record.inv_row[row][3] = world(row, 3);
+    }
+    record.tree_root = kRtRecordNoTree;
+    return record;
+}
+
+/// The world-space plane of @p site's shape. A mesh has no plane, so it gets its
+/// bounds' minimum corner and zero axes.
+inline RenderView::ShapePlane world_shape_plane(const ShapeSite& site)
+{
+    RenderView::ShapePlane plane{};
+    if (site.geometry.shape_kind == kRtShapeKindMesh) {
+        for (int row = 0; row < 3; ++row) {
+            plane.origin[row] = site.aabb_min[row];
+        }
+        return plane;
+    }
+    const RtShape& shape = site.geometry;
+    const mat4& world = *site.world;
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            plane.origin[row] += world(row, col) * shape.origin[col];
+            plane.u_axis[row] += world(row, col) * shape.u_axis[col];
+            plane.v_axis[row] += world(row, col) * shape.v_axis[col];
+        }
+        plane.origin[row] += world(row, 3);
+    }
+    return plane;
+}
+
 // Scene-wide BVH node. Matches the GLSL `BvhNode` layout (48 bytes)
-// from velk.glsl. Leaf nodes carry a contiguous shape range; inner
-// nodes carry a contiguous child range. A node can be both: the
-// element itself contributes shapes AND has children.
+// from velk.glsl. Leaf nodes carry a contiguous record range; inner
+// nodes carry a contiguous child range.
 VELK_GPU_STRUCT GpuBvhNode
 {
     float    aabb_min[4];
@@ -73,16 +115,16 @@ VELK_GPU_STRUCT GpuBvhNode
 };
 static_assert(sizeof(GpuBvhNode) == 48, "GpuBvhNode layout mismatch");
 
+/// Indices are relative to each array here. SceneBvh adds the arena bases when it
+/// uploads.
 struct BvhBuild
 {
-    vector<RtShape> shapes;
     vector<GpuBvhNode> nodes;
-    /// Parallel to `shapes`. For shapes with shape_kind == kRtShapeKindMesh,
-    /// contains the populated MeshInstanceData payload (world matrices
-    /// + a stable pointer to the mesh's static-data buffer); for other
-    /// kinds the entry is zero. SceneBvh uploads these to the shared
-    /// mesh-instance arena and stamps the shapes' mesh_instance_base fields.
-    vector<MeshInstanceData> mesh_instances;
+    /// Referenced by leaves of `nodes`, in leaf order.
+    vector<RtRecord> records;
+    vector<RtShape> shapes;
+    /// Local trees of records with many shapes. Leaves index `shapes`.
+    vector<BlasNode> tree_nodes;
     uint32_t root_index = 0;
 };
 
@@ -135,7 +177,7 @@ void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
 
 // Walks the scene tree (via IHierarchy) and builds a flat BVH: a
 // BFS-ordered node array where each node's children are contiguous,
-// plus an RtShape array grouped by emitting element. The callback is
+// over records that place local shapes in the world. The callback is
 // invoked per shape so callers can fill material/texture fields
 // before the shape lands in the output (same contract as
 // enumerate_scene_shapes). `scene` must be the scene the elements

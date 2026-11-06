@@ -14,6 +14,8 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
+#include <velk-render/frame/compute_shaders.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -200,6 +202,7 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     // Register velk-ui shader include for UI instance types
 
     ctx->shaders().register_include("velk-ui.glsl", velk_ui_glsl);
+    ctx->shaders().register_include("velk_trace.glsl", velk_trace_src);
 
     // Register default shaders. Visuals and materials that do not provide
     // their own shader sources fall back to these (see compile_pipeline:
@@ -338,11 +341,10 @@ FrameContext Renderer::make_frame_context()
         primary_shapes_arena_ = resources_->create_arena(
             IRenderBackend::kGlobalPrimaryShapes, sizeof(RtShape));
     }
-    // Homogeneous MeshInstanceData records; element_size = stride so
-    // mesh_instance_base = region offset / sizeof(MeshInstanceData).
-    if (resources_ && !mesh_instances_arena_) {
-        mesh_instances_arena_ = resources_->create_arena(
-            IRenderBackend::kGlobalMeshInstances, sizeof(MeshInstanceData));
+    // Homogeneous RtRecords; element_size = stride so a record's index =
+    // region offset / sizeof(RtRecord).
+    if (resources_ && !records_arena_) {
+        records_arena_ = resources_->create_arena(IRenderBackend::kGlobalRecords, sizeof(RtRecord));
     }
 
     FrameContext ctx{};
@@ -358,7 +360,7 @@ FrameContext Renderer::make_frame_context()
     ctx.material_arena = material_arena_.get();
     ctx.lights_arena = lights_arena_.get();
     ctx.primary_shapes_arena = primary_shapes_arena_.get();
-    ctx.mesh_instances_arena = mesh_instances_arena_.get();
+    ctx.records_arena = records_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -758,15 +760,12 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                     }
 
                     // Mesh-kind shapes: resolve the per-mesh static data
-                    // address (stable across frames). The instance record
-                    // itself is collected into the build's parallel array
-                    // and uploaded by SceneBvh, which stamps the shape's
-                    // mesh_instance_base with its element index.
+                    // index (stable across frames).
                     if (site.has_mesh_data) {
-                        site.mesh_instance.mesh_static_base = kInvalidMeshStaticBase;
+                        site.geometry.mesh_static_base = kInvalidMeshStaticBase;
                         auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive);
                         if (mpi && self.resources_) {
-                            site.mesh_instance.mesh_static_base =
+                            site.geometry.mesh_static_base =
                                 mpi->ensure_rt_data(*self.resources_);
                         }
 
@@ -783,7 +782,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                                         "geometry_base=%u ibo_offset=0x%08x "
                                         "triangle_count=%u v_stride=%u",
                                      (void*)mp,
-                                     site.mesh_instance.mesh_static_base,
+                                     site.geometry.mesh_static_base,
                                      geometry_base,
                                      ibo_offset, triangle_count, v_stride);
                         }
@@ -841,9 +840,9 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 auto* b = bit->second;
                 ctx.bvh.root = b->get_root_index();
                 ctx.bvh.node_count = b->get_node_count();
-                ctx.bvh.shape_count = b->get_shape_count();
+                ctx.bvh.record_count = b->get_record_count();
                 ctx.bvh.node_base = b->get_node_base();
-                ctx.bvh.shape_base = b->get_shape_base();
+                ctx.bvh.record_base = b->get_record_base();
                 const ProbeVolume probes = b->get_probe_volume();
                 ctx.bvh.probe_min[0] = probes.min.x;
                 ctx.bvh.probe_min[1] = probes.min.y;

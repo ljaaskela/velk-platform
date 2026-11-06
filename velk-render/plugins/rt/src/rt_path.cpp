@@ -117,7 +117,8 @@ void RtPath::build_passes(IViewEntry& entry,
     // origin so stacked 3D panels composite back-to-front.
     const mat4& vp_mat = render_view.view_projection;
     if (shapes.size() > 1) {
-        auto plane_key = [](const RtShape& s) -> uint64_t {
+        const auto& planes = render_view.shape_planes;
+        auto plane_key = [](const RenderView::ShapePlane& s) -> uint64_t {
             float ux = s.u_axis[0], uy = s.u_axis[1], uz = s.u_axis[2];
             float vx = s.v_axis[0], vy = s.v_axis[1], vz = s.v_axis[2];
             float nx_r = uy * vz - uz * vy;
@@ -145,9 +146,9 @@ void RtPath::build_passes(IViewEntry& entry,
         vector<uint64_t> keys(shapes.size());
         std::unordered_map<uint64_t, float> plane_depth;
         for (size_t i = 0; i < shapes.size(); ++i) {
-            keys[i] = plane_key(shapes[i]);
+            keys[i] = plane_key(planes[i]);
             if (plane_depth.count(keys[i])) continue;
-            const auto& s = shapes[i];
+            const auto& s = planes[i];
             float x = s.origin[0], y = s.origin[1], z = s.origin[2];
             float cz = vp_mat(2, 0) * x + vp_mat(2, 1) * y + vp_mat(2, 2) * z + vp_mat(2, 3);
             float cw = vp_mat(3, 0) * x + vp_mat(3, 1) * y + vp_mat(3, 2) * z + vp_mat(3, 3);

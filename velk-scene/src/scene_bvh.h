@@ -72,9 +72,9 @@ public:
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
-    uint32_t get_shape_count() const override { return shape_count_; }
+    uint32_t get_record_count() const override { return record_count_; }
     uint32_t get_node_base() const override { return node_base_; }
-    uint32_t get_shape_base() const override { return shape_base_; }
+    uint32_t get_record_base() const override { return record_base_; }
     ProbeVolume get_probe_volume() const override { return probe_volume_; }
 
     void invalidate() override { dirty_ = true; }
@@ -99,29 +99,22 @@ private:
     // Cached build output, kept across frames. Reused when the caller
     // signals the scene is clean.
     vector<GpuBvhNode> cached_nodes_;
-    vector<RtShape>    cached_shapes_;
-    /// Parallel to cached_shapes_: per-shape MeshInstanceData payload
-    /// (zeroed for non-mesh kinds). The instance struct holds the
-    /// per-element world matrices plus a stable pointer to the mesh-owned
-    /// static buffer (resolved once by the renderer's BVH callback during
-    /// a fresh rebuild), so the array only changes when the build does.
-    vector<MeshInstanceData> cached_mesh_instances_;
     uint64_t cached_aabb_hash_ = 0;  ///< Hash of visual-aabbs at last build.
 
     /// This BVH's regions in the Renderer-owned shared IGpuArenas (set = 1
-    /// slots 0/1/10). Held across frames and re-allocated (not overwritten) on
-    /// each real change, so an in-flight frame never reads a half-written
+    /// slots 0/1/10/12). Held across frames and re-allocated (not overwritten)
+    /// on each real change, so an in-flight frame never reads a half-written
     /// build. Freed deferred past the fence when replaced or dropped.
     ArenaRegion nodes_region_;
+    ArenaRegion records_region_;
     ArenaRegion shapes_region_;
-    ArenaRegion mesh_instances_region_;
+    ArenaRegion tree_nodes_region_;
 
     uint32_t root_ = 0;
     uint32_t node_count_ = 0;
-    uint32_t shape_count_ = 0;
-    uint32_t node_base_ = 0;   ///< Element base of this BVH's node region.
-    uint32_t shape_base_ = 0;  ///< Element base of this BVH's shape region.
-    uint32_t mesh_instance_base_ = 0;  ///< Element base of this BVH's mesh-instance region.
+    uint32_t record_count_ = 0;
+    uint32_t node_base_ = 0;    ///< Element base of this BVH's node region.
+    uint32_t record_base_ = 0;  ///< Element base of this BVH's record region.
     ProbeVolume probe_volume_;
     bool probe_volume_placed_ = false;
     bool dirty_ = true;

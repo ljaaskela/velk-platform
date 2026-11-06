@@ -16,11 +16,13 @@ const string_view kVelkGlsl = R"(
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
 )"
-// Scene shape record: rect / cube / sphere / mesh with a pointer to material
-// data. Used by the BVH shape buffer and (duplicated today) by RT.
+// Scene shape, in its record's local space: rect / cube / sphere / mesh with a
+// pointer to material data. Used by the BVH shape buffer and by RT primary rays.
 // shape_kind = 255 is the "complex" sentinel: the shape is a triangle mesh,
-// `origin/u_axis` carry the world-space AABB and `mesh_instance_base` indexes
-// the mesh-instance buffer (set = 1 slot 10). The field is 0 for non-mesh kinds.
+// `origin/u_axis` carry its local AABB and `mesh_static_base` indexes the
+// mesh-static buffer (set = 1 slot 11). The field is 0 for non-mesh kinds.
+// `primary_record` is the shape's record for RT primary rays, which walk a flat
+// list and so have no record of their own to come from.
 R"(
 struct RtShape {
     vec4 origin;
@@ -34,8 +36,8 @@ struct RtShape {
     uint shape_param;
     uint shape_kind;  // 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
     uint material_base;       // word index of this shape's record in the material arena
-    uint _pad0;
-    uint mesh_instance_base;  // shape_kind == 255: index into velk_mesh_instances; otherwise 0
+    uint primary_record;      // index into velk_records; RT primary list only
+    uint mesh_static_base;    // shape_kind == 255: index into velk_mesh_static_records
     uint _pad1;
 };
 
@@ -73,19 +75,21 @@ struct MeshStaticData {
 };
 
 )"
-// Per-shape mesh instance data. Carries the per-element transforms plus the
-// element index of the mesh's static metadata. Lives in the shared
-// mesh-instance arena (set = 1 slot 10); each shape carries the element index
-// of its record in `mesh_instance_base`. The buffer itself is declared by the
-// compute preludes that trace meshes. Mirrors MeshInstanceData in gpu_data.h.
+// Places shapes in the world (set = 1 slot 10). Rays reach a shape through
+// velk_local_ray. The buffer itself is declared by the compute preludes that
+// trace. Mirrors RtRecord in gpu_data.h.
 R"(
-struct MeshInstanceData {
-    mat4     world;            // mesh-local -> world (for hit attributes)
-    mat4     inv_world;        // world -> mesh-local (for transforming the ray)
-    uint     mesh_static_base; // index into velk_mesh_static; stable across frames
-    uint     _pad0;
-    uvec2    _pad1;            // keeps the record at 144 B
+struct RtRecord {
+    vec4 inv_row0;     // xyz: world -> local rotation and scale, by rows. w: world position of local origin
+    vec4 inv_row1;
+    vec4 inv_row2;
+    uint first_shape;  // index into velk_bvh_shapes
+    uint shape_count;
+    uint tree_root;    // index into velk_blas_nodes, or VELK_NO_TREE to test each shape
+    uint _pad0;
 };
+
+#define VELK_NO_TREE 0xFFFFFFFFu
 
 )"
 // mesh_static_base value for a mesh whose static record is not resolvable yet
@@ -137,10 +141,10 @@ struct GlobalData {
     vec4 cam_pos;
     uint bvh_root;
     uint bvh_node_count;
-    uint bvh_shape_count;
+    uint bvh_record_count;
     uint present_counter;
-    uint bvh_node_base;   // element base of this BVH's region in the node arena
-    uint bvh_shape_base;  // element base of this BVH's region in the shape arena
+    uint bvh_node_base;    // element base of this BVH's region in the node arena
+    uint bvh_record_base;  // element base of this BVH's region in the record arena
     mat4 prev_view_projection;
     vec3 probe_min;          // GI probe lattice box
     uint probe_reset_frame;  // present_counter value at which the box last changed
@@ -271,14 +275,11 @@ R"(
 )"
 // Mesh intersector accessors, for the compute preludes that trace meshes.
 // Unlike materials and instances the element type never varies, so there is no
-// declaration macro; those preludes declare velk_mesh_instances and
-// velk_mesh_static_records themselves.
-//   MeshInstanceData inst = velk_mesh_instance(shape);
-//   MeshStaticData   st   = velk_mesh_static(inst);
-// Guard the second with `inst.mesh_static_base != VELK_INVALID_MESH_STATIC`.
+// declaration macro; those preludes declare velk_mesh_static_records themselves.
+//   MeshStaticData st = velk_mesh_static(shape);
+// Guard with `shape.mesh_static_base != VELK_INVALID_MESH_STATIC`.
 R"(
-#define velk_mesh_instance(shape) (velk_mesh_instances.data[(shape).mesh_instance_base])
-#define velk_mesh_static(inst) (velk_mesh_static_records.data[(inst).mesh_static_base])
+#define velk_mesh_static(shape) (velk_mesh_static_records.data[(shape).mesh_static_base])
 )"
 // Per-draw header: 32 bytes of indices and counts, one record per batch in the
 // set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.

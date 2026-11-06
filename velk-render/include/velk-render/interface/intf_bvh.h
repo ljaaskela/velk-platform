@@ -79,20 +79,20 @@ public:
     virtual uint32_t get_node_count() const = 0;
 
     /**
-     * @brief Number of shapes currently indexed by the BVH.
+     * @brief Number of records currently indexed by the BVH.
      */
-    virtual uint32_t get_shape_count() const = 0;
+    virtual uint32_t get_record_count() const = 0;
 
     /**
-     * @brief Element base to add to node / shape indices this frame.
+     * @brief Element base to add to node / leaf record indices this frame.
      *
-     * The BVH nodes / shapes live in IGpuArena ring regions; the base is
-     * the region's element offset for the current frame. Shaders read
+     * The BVH nodes / records live in IGpuArena regions; the base is the
+     * region's element offset for the current frame. Shaders read
      * `data[base + index]`; the renderer stamps these into FrameGlobals /
      * RtRoot. Valid only for the frame in which the BVH was last rebuilt.
      */
     virtual uint32_t get_node_base() const = 0;
-    virtual uint32_t get_shape_base() const = 0;
+    virtual uint32_t get_record_base() const = 0;
 
     /** @brief The box the GI probe lattice covers for this BVH's shapes. */
     virtual ProbeVolume get_probe_volume() const = 0;

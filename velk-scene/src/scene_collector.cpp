@@ -40,18 +40,7 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
     auto es = read_state<IElement>(element);
     if (!es) return;
 
-    const float ox = es->world_matrix(0, 3);
-    const float oy = es->world_matrix(1, 3);
-    const float oz = es->world_matrix(2, 3);
-    const float ux = es->world_matrix(0, 0);
-    const float uy = es->world_matrix(1, 0);
-    const float uz = es->world_matrix(2, 0);
-    const float vx = es->world_matrix(0, 1);
-    const float vy = es->world_matrix(1, 1);
-    const float vz = es->world_matrix(2, 1);
-    const float wx = es->world_matrix(0, 2);
-    const float wy = es->world_matrix(1, 2);
-    const float wz = es->world_matrix(2, 2);
+    const ::velk::mat4& world = es->world_matrix;
     const float ew = es->size.width;
     const float eh = es->size.height;
     const float ed = es->size.depth;
@@ -106,11 +95,11 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
             ShapeSite site{};
             site.visual = visual;
             site.paint = paint;
+            site.world = &world;
             auto& s = site.geometry;
-            s.origin[0] = ox; s.origin[1] = oy; s.origin[2] = oz;
-            s.u_axis[0] = ux * ew; s.u_axis[1] = uy * ew; s.u_axis[2] = uz * ew;
-            s.v_axis[0] = vx * eh; s.v_axis[1] = vy * eh; s.v_axis[2] = vz * eh;
-            s.w_axis[0] = wx * ed; s.w_axis[1] = wy * ed; s.w_axis[2] = wz * ed;
+            s.u_axis[0] = ew;
+            s.v_axis[1] = eh;
+            s.w_axis[2] = ed;
             s.color[0] = tint.r;
             s.color[1] = tint.g;
             s.color[2] = tint.b;
@@ -127,15 +116,11 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
 
         // 3D visuals that aren't analytic primitives are triangle
         // meshes (e.g. MeshVisual from a glTF import). Emit one
-        // Mesh-kind RtShape per IMeshPrimitive, with a MeshData payload
-        // pointing at the existing IMeshBuffer's VBO+IBO regions. The
-        // renderer callback resolves the mesh-static address; the uploader
-        // stamps mesh_instance_base once the records are in the arena.
+        // Mesh-kind RtShape per IMeshPrimitive. The renderer callback publishes
+        // the primitive's geometry and stores its index in mesh_static_base.
         if (auto vs3d = read_state<IVisual3D>(visual)) {
             auto mesh_obj = vs3d->mesh.template get<IMesh>();
             if (mesh_obj) {
-                const ::velk::mat4& world = es->world_matrix;
-                ::velk::mat4 inv_world = ::velk::mat4::inverse(world);
                 auto prims = mesh_obj->get_primitives();
                 for (auto& prim_ptr : prims) {
                     auto prim_state = read_state<IMeshPrimitive>(prim_ptr.get());
@@ -193,24 +178,15 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                     ShapeSite site{};
                     site.visual = visual;
                     site.paint = prim_paint;
+                    site.world = &world;
                     auto& s = site.geometry;
-                    s.origin[0] = wmin[0]; s.origin[1] = wmin[1]; s.origin[2] = wmin[2];
-                    s.u_axis[0] = wmax[0]; s.u_axis[1] = wmax[1]; s.u_axis[2] = wmax[2];
+                    s.origin[0] = lminx; s.origin[1] = lminy; s.origin[2] = lminz;
+                    s.u_axis[0] = lmaxx; s.u_axis[1] = lmaxy; s.u_axis[2] = lmaxz;
                     s.color[0] = tint.r; s.color[1] = tint.g; s.color[2] = tint.b; s.color[3] = tint.a;
                     s.shape_kind = kRtShapeKindMesh;
+                    s.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
                     site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
                     site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
-
-                    // Per-shape instance data: world matrices + an index
-                    // placeholder. The renderer callback fills
-                    // mesh_static_base by publishing the primitive's RT
-                    // data into the shared arenas (stable across frames).
-                    // Static mesh metadata (geometry bases, counts, stride)
-                    // lives in that record — not duplicated here.
-                    auto& mi = site.mesh_instance;
-                    std::memcpy(mi.world,     world.m,     sizeof(mi.world));
-                    std::memcpy(mi.inv_world, inv_world.m, sizeof(mi.inv_world));
-                    mi.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
                     site.mesh_primitive = prim_ptr.get();
                     site.has_mesh_data = true;
 
@@ -267,12 +243,13 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
             site.visual = visual;
             site.paint = paint;
             site.draw_entry = &dentry;
+            site.world = &world;
+            site.record_group = visual;
             auto& s = site.geometry;
-            s.origin[0] = ox + ux * local_px + vx * local_py;
-            s.origin[1] = oy + uy * local_px + vy * local_py;
-            s.origin[2] = oz + uz * local_px + vz * local_py;
-            s.u_axis[0] = ux * sz_w; s.u_axis[1] = uy * sz_w; s.u_axis[2] = uz * sz_w;
-            s.v_axis[0] = vx * sz_h; s.v_axis[1] = vy * sz_h; s.v_axis[2] = vz * sz_h;
+            s.origin[0] = local_px;
+            s.origin[1] = local_py;
+            s.u_axis[0] = sz_w;
+            s.v_axis[1] = sz_h;
             s.color[0] = cr; s.color[1] = cg; s.color[2] = cb_; s.color[3] = ca;
             s.params[0] = radius;
             s.shape_param = shape_param;
@@ -291,6 +268,66 @@ void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
         [&](IElement* elem) { emit_shapes_for_element(elem, ctx, cb, user); });
 }
 
+namespace {
+
+/// Records with more shapes than this get a local tree instead of a linear test.
+constexpr uint32_t kMaxShapesWithoutTree = 4;
+
+/// Reorders a record's shapes into a local tree's leaf order and appends the tree
+/// to @p tree_nodes. Shapes from draw entries are flat rects, so their bounds come
+/// from origin and axes.
+void build_local_tree(vector<RtShape>& shapes, RtRecord& record, vector<BlasNode>& tree_nodes)
+{
+    const uint32_t count = record.shape_count;
+    vector<detail::BlasTriInfo> infos;
+    infos.resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const RtShape& shape = shapes[record.first_shape + i];
+        auto& info = infos[i];
+        info.index = i;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float a = shape.origin[axis];
+            const float b = a + shape.u_axis[axis] + shape.v_axis[axis];
+            info.aabb_min[axis] = std::min(a, b);
+            info.aabb_max[axis] = std::max(a, b);
+            info.center[axis] = (a + b) * 0.5f;
+        }
+        // A flat box has no thickness for a slab test to enter.
+        const float extent = std::max(info.aabb_max[0] - info.aabb_min[0],
+                                      info.aabb_max[1] - info.aabb_min[1]);
+        for (int axis = 0; axis < 3; ++axis) {
+            info.aabb_min[axis] -= extent * 1e-3f;
+            info.aabb_max[axis] += extent * 1e-3f;
+        }
+    }
+
+    BlasBuild build;
+    build.nodes.push_back({});
+    detail::blas_fill_node(build, 0, infos, 0, infos.size());
+
+    vector<RtShape> sorted;
+    sorted.reserve(count);
+    for (uint32_t index : build.triangle_indices) {
+        sorted.push_back(shapes[record.first_shape + index]);
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        shapes[record.first_shape + i] = sorted[i];
+    }
+
+    const auto base = static_cast<uint32_t>(tree_nodes.size());
+    for (BlasNode node : build.nodes) {
+        if (node.shape_count > 0) {
+            node.first_shape += record.first_shape;
+        } else {
+            node.first_child += base;
+        }
+        tree_nodes.push_back(node);
+    }
+    record.tree_root = base + build.root_index;
+}
+
+} // namespace
+
 BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
                          ShapeCb cb, void* user)
 {
@@ -301,44 +338,55 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
     auto root_elem = interface_pointer_cast<IElement>(root_obj);
     if (!root_elem) return out;
 
-    // Step 1: collect all shapes (and their world AABBs + mesh
-    // instance data) into flat arrays via a scene tree walk. The walk
-    // order itself doesn't matter; we re-partition spatially below.
-    vector<RtShape>          shapes;
-    vector<MeshInstanceData> mesh_instances;
-    vector<float>            shape_aabb_min; // 3 floats per shape
-    vector<float>            shape_aabb_max;
+    // Step 1: collect all shapes into records, with their world AABBs, via a
+    // scene tree walk. The walk order itself doesn't matter; we re-partition
+    // spatially below.
+    vector<RtRecord> records;
+    vector<float>    record_aabb_min; // 3 floats per record
+    vector<float>    record_aabb_max;
 
-    // Wrap the user cb in a local closure that also stuffs the shape
-    // AABB + instance data into our flat arrays. The local closure is
-    // adapted into a ShapeCb thunk for the inner emit call.
+    // Wrap the user cb in a local closure that also stuffs the shape into the
+    // record it belongs to. The local closure is adapted into a ShapeCb thunk
+    // for the inner emit call.
     struct CollectState {
         ShapeCb           user_cb;
         void*             user_user;
-        vector<RtShape>*          shapes;
-        vector<MeshInstanceData>* mesh_instances;
-        vector<float>*            aabb_min;
-        vector<float>*            aabb_max;
+        vector<RtShape>*  shapes;
+        vector<RtRecord>* records;
+        vector<float>*    aabb_min;
+        vector<float>*    aabb_max;
+        const void*       open_group;
     };
-    CollectState cs{cb, user, &shapes, &mesh_instances, &shape_aabb_min, &shape_aabb_max};
+    CollectState cs{cb, user, &out.shapes, &records, &record_aabb_min, &record_aabb_max, nullptr};
     auto collect_thunk = [](void* u, ShapeSite& site) {
         auto& s = *static_cast<CollectState*>(u);
         s.user_cb(s.user_user, site);
         s.shapes->push_back(site.geometry);
-        s.mesh_instances->push_back(
-            site.has_mesh_data ? site.mesh_instance : MeshInstanceData{});
-        s.aabb_min->push_back(site.aabb_min[0]);
-        s.aabb_min->push_back(site.aabb_min[1]);
-        s.aabb_min->push_back(site.aabb_min[2]);
-        s.aabb_max->push_back(site.aabb_max[0]);
-        s.aabb_max->push_back(site.aabb_max[1]);
-        s.aabb_max->push_back(site.aabb_max[2]);
+        if (site.record_group && site.record_group == s.open_group) {
+            s.records->back().shape_count++;
+            float* amin = s.aabb_min->data() + s.aabb_min->size() - 3;
+            float* amax = s.aabb_max->data() + s.aabb_max->size() - 3;
+            for (int k = 0; k < 3; ++k) {
+                amin[k] = std::min(amin[k], site.aabb_min[k]);
+                amax[k] = std::max(amax[k], site.aabb_max[k]);
+            }
+            return;
+        }
+        s.open_group = site.record_group;
+        RtRecord record = make_rt_record(*site.world);
+        record.first_shape = static_cast<uint32_t>(s.shapes->size()) - 1u;
+        record.shape_count = 1;
+        s.records->push_back(record);
+        for (int k = 0; k < 3; ++k) {
+            s.aabb_min->push_back(site.aabb_min[k]);
+            s.aabb_max->push_back(site.aabb_max[k]);
+        }
     };
     walk_scene_preorder(scene, scene->root(), [&](IElement* elem) {
         emit_shapes_for_element(elem, ctx, collect_thunk, &cs);
     });
 
-    if (shapes.empty()) {
+    if (records.empty()) {
         // Empty BVH: emit a single inverted-AABB root so trace_any_hit
         // sees node_count > 0 but every ray rejects.
         out.nodes.push_back({});
@@ -347,38 +395,38 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         return out;
     }
 
+
     // Step 2: build a spatial median-split binary BVH over the flat
-    // shape list. The previous scene-graph BVH had bistro-style scenes
+    // record list. The previous scene-graph BVH had bistro-style scenes
     // putting thousands of shapes as direct children of one root node;
     // any iterative BVH walker with a fixed traversal stack (32 / 128)
     // silently dropped most of them, making large swaths of geometry
     // invisible to RT shadows. A binary tree with leaf threshold 4
     // bounds depth at ceil(log2(N/4)) — well under 32 for any
-    // realistic shape count.
-    const uint32_t shape_count = static_cast<uint32_t>(shapes.size());
+    // realistic record count.
+    const uint32_t record_count = static_cast<uint32_t>(records.size());
     struct ShapeRef
     {
         uint32_t index;        // index into the input arrays
         float    centroid[3];
     };
     vector<ShapeRef> refs;
-    refs.resize(shape_count);
-    for (uint32_t i = 0; i < shape_count; ++i) {
+    refs.resize(record_count);
+    for (uint32_t i = 0; i < record_count; ++i) {
         refs[i].index = i;
         for (int k = 0; k < 3; ++k) {
             refs[i].centroid[k] =
-                0.5f * (shape_aabb_min[i * 3 + k] + shape_aabb_max[i * 3 + k]);
+                0.5f * (record_aabb_min[i * 3 + k] + record_aabb_max[i * 3 + k]);
         }
     }
 
-    constexpr uint32_t kLeafThreshold = 4;
+    // One record per leaf where it pays: a record's test has to fetch its transform
+    // and move the ray, so a node's world-space box is the cheap rejection.
+    constexpr uint32_t kLeafThreshold = 1;
     constexpr float    kInf = 1e30f;
 
-    // Reorder buffers (final shape order = leaf-traversal order).
-    vector<RtShape>          out_shapes;
-    vector<MeshInstanceData> out_mesh_instances;
-    out_shapes.reserve(shape_count);
-    out_mesh_instances.reserve(shape_count);
+    // Final record order = leaf-traversal order.
+    out.records.reserve(record_count);
 
     struct BuildItem
     {
@@ -401,8 +449,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         for (size_t i = item.begin; i < item.end; ++i) {
             const uint32_t idx = refs[i].index;
             for (int k = 0; k < 3; ++k) {
-                if (shape_aabb_min[idx * 3 + k] < bmin[k]) bmin[k] = shape_aabb_min[idx * 3 + k];
-                if (shape_aabb_max[idx * 3 + k] > bmax[k]) bmax[k] = shape_aabb_max[idx * 3 + k];
+                if (record_aabb_min[idx * 3 + k] < bmin[k]) bmin[k] = record_aabb_min[idx * 3 + k];
+                if (record_aabb_max[idx * 3 + k] > bmax[k]) bmax[k] = record_aabb_max[idx * 3 + k];
             }
         }
         GpuBvhNode& node = out.nodes[item.self_index];
@@ -416,11 +464,9 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         const size_t count = item.end - item.begin;
 
         auto emit_leaf = [&]() {
-            const uint32_t first = static_cast<uint32_t>(out_shapes.size());
+            const uint32_t first = static_cast<uint32_t>(out.records.size());
             for (size_t i = item.begin; i < item.end; ++i) {
-                const uint32_t idx = refs[i].index;
-                out_shapes.push_back(shapes[idx]);
-                out_mesh_instances.push_back(mesh_instances[idx]);
+                out.records.push_back(records[refs[i].index]);
             }
             node.first_shape = first;
             node.shape_count = static_cast<uint32_t>(count);
@@ -491,8 +537,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
             for (size_t i = count; i-- > 0;) {
                 const uint32_t idx = refs[item.begin + i].index;
                 for (int k = 0; k < 3; ++k) {
-                    lo[k] = std::min(lo[k], shape_aabb_min[idx * 3 + k]);
-                    hi[k] = std::max(hi[k], shape_aabb_max[idx * 3 + k]);
+                    lo[k] = std::min(lo[k], record_aabb_min[idx * 3 + k]);
+                    hi[k] = std::max(hi[k], record_aabb_max[idx * 3 + k]);
                     right_lo[i * 3 + k] = lo[k];
                     right_hi[i * 3 + k] = hi[k];
                 }
@@ -510,8 +556,8 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         for (size_t j = 0; j + 1 < count; ++j) {
             const uint32_t idx = refs[item.begin + j].index;
             for (int k = 0; k < 3; ++k) {
-                left_lo[k] = std::min(left_lo[k], shape_aabb_min[idx * 3 + k]);
-                left_hi[k] = std::max(left_hi[k], shape_aabb_max[idx * 3 + k]);
+                left_lo[k] = std::min(left_lo[k], record_aabb_min[idx * 3 + k]);
+                left_hi[k] = std::max(left_hi[k], record_aabb_max[idx * 3 + k]);
             }
             const float left_sa = surface_area(left_lo, left_hi);
             const float right_sa = surface_area(
@@ -561,8 +607,25 @@ BvhBuild build_scene_bvh(IScene* scene, IRenderContext* ctx,
         work.push_back({left_idx,  item.begin, mid});
     }
 
-    out.shapes         = std::move(out_shapes);
-    out.mesh_instances = std::move(out_mesh_instances);
+    // Shapes in the same leaf order as their records, so a ray that reaches
+    // neighbouring records finds their shapes nearby in memory.
+    vector<RtShape> ordered_shapes;
+    ordered_shapes.reserve(out.shapes.size());
+    for (auto& record : out.records) {
+        const uint32_t first = static_cast<uint32_t>(ordered_shapes.size());
+        for (uint32_t i = 0; i < record.shape_count; ++i) {
+            ordered_shapes.push_back(out.shapes[record.first_shape + i]);
+        }
+        record.first_shape = first;
+    }
+    out.shapes = std::move(ordered_shapes);
+
+    for (auto& record : out.records) {
+        if (record.shape_count > kMaxShapesWithoutTree) {
+            build_local_tree(out.shapes, record, out.tree_nodes);
+        }
+    }
+
     return out;
 }
 

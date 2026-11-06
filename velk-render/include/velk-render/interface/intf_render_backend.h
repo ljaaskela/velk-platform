@@ -357,7 +357,7 @@ public:
         kGlobalTextCurves = 7,
         kGlobalTextBands  = 8,
         kGlobalTextGlyphs = 9,
-        kGlobalMeshInstances = 10, ///< Per-shape mesh transforms, read at velk_mesh_instances.data[mesh_instance_base].
+        kGlobalRecords = 10, ///< RtRecords placing shapes in the world, read at velk_records.data[index].
         /// Per-primitive RT geometry metadata and its BLAS. Claimed by
         /// MeshPrimitive via IGpuResourceManager::shared_arena, since primitives
         /// are built outside the render loop. The BLAS keeps its own node arena
