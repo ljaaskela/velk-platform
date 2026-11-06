@@ -17,11 +17,170 @@ namespace velk {
 // scene-side shader bits: the velk-ui GLSL include, the deferred-lighting
 // compute shader, and the RT compute prelude/main.
 
+// Rays and the built-in shape intersects, shared by every compute shader that
+// traces. Registered as the "velk_intersect.glsl" include. The including shader
+// declares RtShape through velk.glsl.
+[[maybe_unused]] constexpr string_view velk_intersect_src = R"(
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
+
+struct RayHit {
+    float t;
+    vec2 uv;
+    vec3 normal;
+    uint shape_index; // only set by trace_closest_hit
+};
+
+// Ray vs. oriented rect parameterised by (origin + s*u_axis + t*v_axis) for
+// s,t in [0,1]. |u_axis|, |v_axis| carry the extents.
+bool intersect_rect(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 u_axis = shape.u_axis.xyz;
+    vec3 v_axis = shape.v_axis.xyz;
+    vec3 origin = shape.origin.xyz;
+    float radius = shape.params.x;
+
+    vec3 normal = cross(u_axis, v_axis);
+    float nlen2 = dot(normal, normal);
+    if (nlen2 < 1e-12) return false;
+    float inv_nlen = inversesqrt(nlen2);
+    vec3 n = normal * inv_nlen;
+
+    float denom = dot(ray.dir, n);
+    if (abs(denom) < 1e-6) return false;
+    float t = dot(origin - ray.origin, n) / denom;
+    if (t <= 0.0) return false;
+
+    vec3 p = ray.origin + t * ray.dir;
+    vec3 local = p - origin;
+    float u_len2 = dot(u_axis, u_axis);
+    float v_len2 = dot(v_axis, v_axis);
+    float s = dot(local, u_axis) / u_len2;
+    float tt = dot(local, v_axis) / v_len2;
+    if (s < 0.0 || s > 1.0 || tt < 0.0 || tt > 1.0) return false;
+
+    // Corner radius test, in the same units as the axes.
+    if (radius > 0.0) {
+        float u_len = sqrt(u_len2);
+        float v_len = sqrt(v_len2);
+        vec2 size_w = vec2(u_len, v_len);
+        vec2 p_w = vec2(s * u_len, tt * v_len);
+        vec2 half_size = size_w * 0.5;
+        vec2 centered = p_w - half_size;
+        vec2 d = abs(centered) - half_size + radius;
+        float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+        if (sdf > 0.0) return false;
+    }
+
+    hit.t = t;
+    hit.uv = vec2(s, tt);
+    hit.normal = n;
+    return true;
+}
+
+// Ray vs. oriented box. Origin is one corner; u/v/w are three edges, whose length
+// carries the extent. Uses a slab test in the box's frame. Normal is the face
+// normal of whichever slab bounded the intersection. UV is the hit point projected
+// into the 2D coordinates of the hit face.
+bool intersect_cube(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 U = shape.u_axis.xyz;
+    vec3 V = shape.v_axis.xyz;
+    vec3 W = shape.w_axis.xyz;
+    float u_len2 = dot(U, U);
+    float v_len2 = dot(V, V);
+    float w_len2 = dot(W, W);
+    if (u_len2 < 1e-12 || v_len2 < 1e-12 || w_len2 < 1e-12) return false;
+
+    // The ray in the box's frame: corner at 0, axes aligned to U/V/W.
+    vec3 rel = ray.origin - shape.origin.xyz;
+    vec3 ro_l = vec3(dot(rel, U) / u_len2,
+                     dot(rel, V) / v_len2,
+                     dot(rel, W) / w_len2);
+    vec3 rd_l = vec3(dot(ray.dir, U) / u_len2,
+                     dot(ray.dir, V) / v_len2,
+                     dot(ray.dir, W) / w_len2);
+
+    // Slab test against [0, 1]^3, since U/V/W are full extents.
+    vec3 inv_d = 1.0 / rd_l;
+    vec3 t0 = (vec3(0.0) - ro_l) * inv_d;
+    vec3 t1 = (vec3(1.0) - ro_l) * inv_d;
+    vec3 tmin_v = min(t0, t1);
+    vec3 tmax_v = max(t0, t1);
+    float tmin = max(max(tmin_v.x, tmin_v.y), tmin_v.z);
+    float tmax = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
+    if (tmax < max(tmin, 0.0)) return false;
+
+    float t = tmin > 0.0 ? tmin : tmax;
+    if (t <= 0.0) return false;
+
+    // Which axis's slab bounded tmin (or tmax if we're inside).
+    vec3 chosen = tmin > 0.0 ? tmin_v : tmax_v;
+    float chosen_t = tmin > 0.0 ? tmin : tmax;
+    vec3 n_l;
+    vec2 face_uv;
+    vec3 p_l = ro_l + chosen_t * rd_l;
+    if (chosen.x == chosen_t) {
+        n_l = vec3(rd_l.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0);
+        face_uv = vec2(p_l.y, p_l.z);
+    } else if (chosen.y == chosen_t) {
+        n_l = vec3(0.0, rd_l.y > 0.0 ? -1.0 : 1.0, 0.0);
+        face_uv = vec2(p_l.x, p_l.z);
+    } else {
+        n_l = vec3(0.0, 0.0, rd_l.z > 0.0 ? -1.0 : 1.0);
+        face_uv = vec2(p_l.x, p_l.y);
+    }
+
+    vec3 n = normalize(n_l.x * U + n_l.y * V + n_l.z * W);
+
+    hit.t = t;
+    hit.uv = clamp(face_uv, 0.0, 1.0);
+    hit.normal = n;
+    return true;
+}
+
+// Ray vs. sphere, centered at origin + (u + v + w) * 0.5 with radius params.x.
+bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
+{
+    vec3 center = shape.origin.xyz
+                + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
+    float radius = shape.params.x;
+    if (radius <= 0.0) return false;
+
+    // Solved from the ray's closest point to the center, so a distant origin does
+    // not cost precision.
+    vec3 oc = ray.origin - center;
+    float a = dot(ray.dir, ray.dir);
+    float t_closest = -dot(oc, ray.dir) / a;
+    vec3 closest = oc + t_closest * ray.dir;
+    float h2 = (radius * radius - dot(closest, closest)) / a;
+    if (h2 < 0.0) return false;
+    float h = sqrt(h2);
+    float t1 = t_closest - h;
+    float t2 = t_closest + h;
+    float t = t1 > 0.0 ? t1 : t2;
+    if (t <= 0.0) return false;
+
+    vec3 n = normalize(closest + (t - t_closest) * ray.dir);
+
+    // Spherical equirect-style UV.
+    float u = atan(n.z, n.x) / (2.0 * 3.14159265) + 0.5;
+    float v = asin(clamp(n.y, -1.0, 1.0)) / 3.14159265 + 0.5;
+
+    hit.t = t;
+    hit.uv = vec2(u, v);
+    hit.normal = n;
+    return true;
+}
+)";
+
 // Ray tracing over the scene's records, shared by every compute shader that
 // traces. Registered as the "velk_trace.glsl" include. The including shader
-// defines Ray, RayHit and VELK_TRACE_STACK_SIZE, declares velk_bvh_nodes,
+// includes velk_intersect.glsl, defines VELK_TRACE_STACK_SIZE, declares velk_bvh_nodes,
 // velk_bvh_shapes, velk_records, velk_mesh_static_records, velk_blas_nodes,
-// velk_blas_tris and VELK_GLOBALS, and supplies intersect_rect / cube / sphere.
+// velk_blas_tris and VELK_GLOBALS.
 //
 // A record places shapes in the world: rays are moved into its local space, and
 // shapes and meshes are intersected there. Origin and direction move by the same
@@ -491,103 +650,7 @@ layout(push_constant, scalar) uniform PC {
     uint light_loop_probe;     // 108 diagnostic: extra per-light ALU repeats
 } pc;
 
-// ===== Shadow ray support (duplicated from rt_compute_prelude_src) =====
-// Extract to a shared include when a second shadow technique arrives
-// and deferred needs composed dispatch.
-struct Ray { vec3 origin; vec3 dir; };
-struct RayHit { float t; vec2 uv; vec3 normal; uint shape_index; };
-
-bool intersect_rect(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 u_axis = shape.u_axis.xyz;
-    vec3 v_axis = shape.v_axis.xyz;
-    vec3 origin = shape.origin.xyz;
-    float radius = shape.params.x;
-    vec3 normal = cross(u_axis, v_axis);
-    float nlen2 = dot(normal, normal);
-    if (nlen2 < 1e-12) return false;
-    float inv_nlen = inversesqrt(nlen2);
-    vec3 n = normal * inv_nlen;
-    float denom = dot(ray.dir, n);
-    if (abs(denom) < 1e-6) return false;
-    float t = dot(origin - ray.origin, n) / denom;
-    if (t <= 0.0) return false;
-    vec3 p = ray.origin + t * ray.dir;
-    vec3 local = p - origin;
-    float u_len2 = dot(u_axis, u_axis);
-    float v_len2 = dot(v_axis, v_axis);
-    float s = dot(local, u_axis) / u_len2;
-    float tt = dot(local, v_axis) / v_len2;
-    if (s < 0.0 || s > 1.0 || tt < 0.0 || tt > 1.0) return false;
-    if (radius > 0.0) {
-        float u_len = sqrt(u_len2);
-        float v_len = sqrt(v_len2);
-        vec2 size_w = vec2(u_len, v_len);
-        vec2 p_w = vec2(s * u_len, tt * v_len);
-        vec2 half_size = size_w * 0.5;
-        vec2 centered = p_w - half_size;
-        vec2 d = abs(centered) - half_size + radius;
-        float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
-        if (sdf > 0.0) return false;
-    }
-    hit.t = t;
-    hit.uv = vec2(s, tt);
-    hit.normal = n;
-    return true;
-}
-
-bool intersect_cube(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 U = shape.u_axis.xyz;
-    vec3 V = shape.v_axis.xyz;
-    vec3 W = shape.w_axis.xyz;
-    float u_len2 = dot(U, U);
-    float v_len2 = dot(V, V);
-    float w_len2 = dot(W, W);
-    if (u_len2 < 1e-12 || v_len2 < 1e-12 || w_len2 < 1e-12) return false;
-    vec3 rel = ray.origin - shape.origin.xyz;
-    vec3 ro_l = vec3(dot(rel, U) / u_len2, dot(rel, V) / v_len2, dot(rel, W) / w_len2);
-    vec3 rd_l = vec3(dot(ray.dir, U) / u_len2, dot(ray.dir, V) / v_len2, dot(ray.dir, W) / w_len2);
-    vec3 inv_d = 1.0 / rd_l;
-    vec3 t0 = (vec3(0.0) - ro_l) * inv_d;
-    vec3 t1 = (vec3(1.0) - ro_l) * inv_d;
-    vec3 tmin_v = min(t0, t1);
-    vec3 tmax_v = max(t0, t1);
-    float tmin = max(max(tmin_v.x, tmin_v.y), tmin_v.z);
-    float tmax = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
-    if (tmax < max(tmin, 0.0)) return false;
-    float t = tmin > 0.0 ? tmin : tmax;
-    if (t <= 0.0) return false;
-    hit.t = t;
-    hit.uv = vec2(0.0);
-    hit.normal = vec3(0.0, 0.0, 1.0);
-    return true;
-}
-
-bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 center = shape.origin.xyz
-                + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
-    float radius = shape.params.x;
-    if (radius <= 0.0) return false;
-    // Solved from the ray's closest point to the center, so a distant origin does
-    // not cost precision.
-    vec3 oc = ray.origin - center;
-    float a = dot(ray.dir, ray.dir);
-    float t_closest = -dot(oc, ray.dir) / a;
-    vec3 closest = oc + t_closest * ray.dir;
-    float h2 = (radius * radius - dot(closest, closest)) / a;
-    if (h2 < 0.0) return false;
-    float h = sqrt(h2);
-    float t1 = t_closest - h;
-    float t2 = t_closest + h;
-    float t = t1 > 0.0 ? t1 : t2;
-    if (t <= 0.0) return false;
-    hit.t = t;
-    hit.uv = vec2(0.0);
-    hit.normal = normalize(closest + (t - t_closest) * ray.dir);
-    return true;
-}
+#include "velk_intersect.glsl"
 
 #define VELK_TRACE_STACK_SIZE 32
 #define VELK_TRACE_ORDERED_ANY_HIT
@@ -1950,17 +2013,7 @@ layout(push_constant, scalar) uniform PC {
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
 
 // ===== Core ray / hit / fill-context types =====
-struct Ray {
-    vec3 origin;
-    vec3 dir;
-};
-
-struct RayHit {
-    float t;
-    vec2 uv;
-    vec3 normal;
-    uint shape_index; // only set by trace_closest_hit
-};
+#include "velk_intersect.glsl"
 
 // EvalContext + MaterialEval shared between raster and RT come from
 // velk-ui.glsl (included above).
@@ -1986,161 +2039,6 @@ struct BrdfSample {
     bool terminate;
     uint sample_count_hint;
 };
-
-// ===== Shape intersection =====
-// Three primitive kinds live in the prelude: rect (planar quad), cube
-// (oriented box), sphere (centered in AABB). Visuals with a non-standard
-// shape could still use IVisual::get_intersect_src() to contribute a
-// snippet, but the RT path doesn't compose those yet.
-
-// Ray vs. oriented rect parameterised by (origin + s*u_axis + t*v_axis) for
-// s,t in [0,1]. |u_axis|, |v_axis| carry the world-space extents.
-bool intersect_rect(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 u_axis = shape.u_axis.xyz;
-    vec3 v_axis = shape.v_axis.xyz;
-    vec3 origin = shape.origin.xyz;
-    float radius = shape.params.x;
-
-    vec3 normal = cross(u_axis, v_axis);
-    float nlen2 = dot(normal, normal);
-    if (nlen2 < 1e-12) return false;
-    float inv_nlen = inversesqrt(nlen2);
-    vec3 n = normal * inv_nlen;
-
-    float denom = dot(ray.dir, n);
-    if (abs(denom) < 1e-6) return false;
-    float t = dot(origin - ray.origin, n) / denom;
-    if (t <= 0.0) return false;
-
-    vec3 p = ray.origin + t * ray.dir;
-    vec3 local = p - origin;
-    float u_len2 = dot(u_axis, u_axis);
-    float v_len2 = dot(v_axis, v_axis);
-    float s = dot(local, u_axis) / u_len2;
-    float tt = dot(local, v_axis) / v_len2;
-    if (s < 0.0 || s > 1.0 || tt < 0.0 || tt > 1.0) return false;
-
-    // Corner radius test in world-space units.
-    if (radius > 0.0) {
-        float u_len = sqrt(u_len2);
-        float v_len = sqrt(v_len2);
-        vec2 size_w = vec2(u_len, v_len);
-        vec2 p_w = vec2(s * u_len, tt * v_len);
-        vec2 half_size = size_w * 0.5;
-        vec2 centered = p_w - half_size;
-        vec2 d = abs(centered) - half_size + radius;
-        float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
-        if (sdf > 0.0) return false;
-    }
-
-    hit.t = t;
-    hit.uv = vec2(s, tt);
-    hit.normal = n;
-    return true;
-}
-
-// Ray vs. oriented axis-aligned box. Origin is one corner; u/v/w are
-// three edges (not necessarily orthonormal — length carries extent).
-// Uses a slab test in the box's local frame. Normal is the face normal
-// of whichever slab bounded the intersection. UV is the hit point
-// projected into the 2D coordinates of the hit face.
-bool intersect_cube(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 U = shape.u_axis.xyz;
-    vec3 V = shape.v_axis.xyz;
-    vec3 W = shape.w_axis.xyz;
-    float u_len2 = dot(U, U);
-    float v_len2 = dot(V, V);
-    float w_len2 = dot(W, W);
-    if (u_len2 < 1e-12 || v_len2 < 1e-12 || w_len2 < 1e-12) return false;
-
-    // Transform ray into the box's local frame (corner at 0, axes aligned
-    // to U/V/W). Local coords are in world units along each axis.
-    vec3 rel = ray.origin - shape.origin.xyz;
-    vec3 ro_l = vec3(dot(rel, U) / u_len2,
-                     dot(rel, V) / v_len2,
-                     dot(rel, W) / w_len2);
-    vec3 rd_l = vec3(dot(ray.dir, U) / u_len2,
-                     dot(ray.dir, V) / v_len2,
-                     dot(ray.dir, W) / w_len2);
-
-    // Slab test against [0, 1]^3 in local frame (since U/V/W are full extents).
-    vec3 inv_d = 1.0 / rd_l;
-    vec3 t0 = (vec3(0.0) - ro_l) * inv_d;
-    vec3 t1 = (vec3(1.0) - ro_l) * inv_d;
-    vec3 tmin_v = min(t0, t1);
-    vec3 tmax_v = max(t0, t1);
-    float tmin = max(max(tmin_v.x, tmin_v.y), tmin_v.z);
-    float tmax = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
-    if (tmax < max(tmin, 0.0)) return false;
-
-    float t = tmin > 0.0 ? tmin : tmax;
-    if (t <= 0.0) return false;
-
-    // Determine which axis's slab bounded tmin (or tmax if we're inside).
-    vec3 chosen = tmin > 0.0 ? tmin_v : tmax_v;
-    float chosen_t = tmin > 0.0 ? tmin : tmax;
-    vec3 n_l;
-    vec2 face_uv;
-    vec3 p_l = ro_l + chosen_t * rd_l;
-    if (chosen.x == chosen_t) {
-        n_l = vec3(rd_l.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0);
-        face_uv = vec2(p_l.y, p_l.z);
-    } else if (chosen.y == chosen_t) {
-        n_l = vec3(0.0, rd_l.y > 0.0 ? -1.0 : 1.0, 0.0);
-        face_uv = vec2(p_l.x, p_l.z);
-    } else {
-        n_l = vec3(0.0, 0.0, rd_l.z > 0.0 ? -1.0 : 1.0);
-        face_uv = vec2(p_l.x, p_l.y);
-    }
-
-    // Convert local-frame normal to world: normalize each axis and apply.
-    vec3 n = normalize(n_l.x * U + n_l.y * V + n_l.z * W);
-
-    hit.t = t;
-    hit.uv = clamp(face_uv, 0.0, 1.0);
-    hit.normal = n;
-    return true;
-}
-
-// Ray vs. sphere. Sphere centered at the element's AABB centroid
-// (origin + (u + v + w) * 0.5), radius = params.x. The sphere is
-// inscribed in the bounding box; radius typically set to the minimum
-// half-extent by the renderer.
-bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
-{
-    vec3 center = shape.origin.xyz
-                + 0.5 * (shape.u_axis.xyz + shape.v_axis.xyz + shape.w_axis.xyz);
-    float radius = shape.params.x;
-    if (radius <= 0.0) return false;
-
-    // Solved from the ray's closest point to the center, so a distant origin does
-    // not cost precision.
-    vec3 oc = ray.origin - center;
-    float a = dot(ray.dir, ray.dir);
-    float t_closest = -dot(oc, ray.dir) / a;
-    vec3 closest = oc + t_closest * ray.dir;
-    float h2 = (radius * radius - dot(closest, closest)) / a;
-    if (h2 < 0.0) return false;
-    float h = sqrt(h2);
-    float t1 = t_closest - h;
-    float t2 = t_closest + h;
-    float t = t1 > 0.0 ? t1 : t2;
-    if (t <= 0.0) return false;
-
-    vec3 n = normalize(closest + (t - t_closest) * ray.dir);
-
-    // Spherical equirect-style UV. Good enough for texturing; for pure
-    // reflection-only spheres UV won't be read anyway.
-    float u = atan(n.z, n.x) / (2.0 * 3.14159265) + 0.5;
-    float v = asin(clamp(n.y, -1.0, 1.0)) / 3.14159265 + 0.5;
-
-    hit.t = t;
-    hit.uv = vec2(u, v);
-    hit.normal = n;
-    return true;
-}
 
 // Wide scene roots (a grid of 40+ tiles, a dashboard of cards) need more than the
 // deferred pass's 32, since closest-hit pushes both children unordered.

@@ -202,6 +202,7 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     // Register velk-ui shader include for UI instance types
 
     ctx->shaders().register_include("velk-ui.glsl", velk_ui_glsl);
+    ctx->shaders().register_include("velk_intersect.glsl", velk_intersect_src);
     ctx->shaders().register_include("velk_trace.glsl", velk_trace_src);
 
     // Register default shaders. Visuals and materials that do not provide
