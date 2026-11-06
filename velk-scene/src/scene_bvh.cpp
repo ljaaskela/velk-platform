@@ -81,6 +81,50 @@ void hash_element(uint64_t& h, IHierarchy& hier, const IObject::Ptr& obj)
 
 } // namespace
 
+void SceneBvh::update_probe_volume(uint32_t frame)
+{
+    // Growing past the volume adds this fraction of its size as margin, so an
+    // object moving outward does not reset the probes every frame.
+    constexpr float kGrowMargin = 0.125f;
+    // Bounds shrinking below this fraction of the volume on any axis re-fit it,
+    // since a loose volume spreads the probes thinly.
+    constexpr float kRefitBelow = 0.5f;
+
+    if (cached_nodes_.empty()) return;
+    const auto& root = cached_nodes_[root_];
+    const float* new_min = root.aabb_min;
+    const float* new_max = root.aabb_max;
+    if (new_min[0] > new_max[0]) return;  // Empty BVH: inverted root, nothing to cover.
+
+    const float bounds_min[3] = {new_min[0], new_min[1], new_min[2]};
+    const float bounds_max[3] = {new_max[0], new_max[1], new_max[2]};
+    float vol_min[3] = {probe_volume_.min.x, probe_volume_.min.y, probe_volume_.min.z};
+    float vol_max[3] = {probe_volume_.max.x, probe_volume_.max.y, probe_volume_.max.z};
+
+    bool refit = !probe_volume_placed_;
+    bool escaped = false;
+    for (int i = 0; i < 3; ++i) {
+        escaped = escaped || bounds_min[i] < vol_min[i] || bounds_max[i] > vol_max[i];
+        refit = refit || (bounds_max[i] - bounds_min[i]) < kRefitBelow * (vol_max[i] - vol_min[i]);
+    }
+    if (!refit && !escaped) return;
+
+    for (int i = 0; i < 3; ++i) {
+        if (refit) {
+            vol_min[i] = bounds_min[i];
+            vol_max[i] = bounds_max[i];
+        } else {
+            const float margin = kGrowMargin * (bounds_max[i] - bounds_min[i]);
+            if (bounds_min[i] < vol_min[i]) vol_min[i] = bounds_min[i] - margin;
+            if (bounds_max[i] > vol_max[i]) vol_max[i] = bounds_max[i] + margin;
+        }
+    }
+    probe_volume_.min = {vol_min[0], vol_min[1], vol_min[2]};
+    probe_volume_.max = {vol_max[0], vol_max[1], vol_max[2]};
+    probe_volume_.reset_frame = frame;
+    probe_volume_placed_ = true;
+}
+
 uint64_t SceneBvh::hash_visual_aabbs(IScene* scene)
 {
     if (!scene) return 0;
@@ -121,6 +165,7 @@ void SceneBvh::rebuild(IScene* scene, FrameContext& ctx, bool dirty,
         shape_count_ = static_cast<uint32_t>(cached_shapes_.size());
         cached_aabb_hash_ = current_hash ? current_hash : hash_visual_aabbs(scene);
         dirty_ = false;
+        update_probe_volume(static_cast<uint32_t>(ctx.present_counter));
     }
 
     VELK_PERF_SCOPE("renderer.bvh_upload");

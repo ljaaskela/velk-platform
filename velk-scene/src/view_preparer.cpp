@@ -299,6 +299,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.bvh_shape_count = rv.bvh.shape_count;
     globals.bvh_node_base = rv.bvh.node_base;
     globals.bvh_shape_base = rv.bvh.shape_base;
+    set_probe_globals(globals, rv.bvh);
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];

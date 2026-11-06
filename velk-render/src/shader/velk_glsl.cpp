@@ -142,6 +142,10 @@ struct GlobalData {
     uint bvh_node_base;   // element base of this BVH's region in the node arena
     uint bvh_shape_base;  // element base of this BVH's region in the shape arena
     mat4 prev_view_projection;
+    vec3 probe_min;          // GI probe lattice box
+    uint probe_reset_frame;  // present_counter value at which the box last changed
+    vec3 probe_max;
+    uint _pad_globals;
 };
 
 )"

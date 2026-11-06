@@ -136,6 +136,7 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_globals.bvh_shape_count = ctx.bvh.shape_count;
         rt_globals.bvh_node_base = ctx.bvh.node_base;
         rt_globals.bvh_shape_base = ctx.bvh.shape_base;
+        set_probe_globals(rt_globals, ctx.bvh);
         rt_globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
         RenderView rt_view{};
         rt_view.batches = &rtp.batches;

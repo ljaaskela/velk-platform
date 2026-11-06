@@ -557,12 +557,10 @@ vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
                        (pc.gi_probe_dims >> 20) & 1023u);
     if (dims.x == 0u || dims.y == 0u || dims.z == 0u) return vec3(0.0);
 
-    // The same lattice over the BVH root the probe pass builds. Probe i sits at
-    // the CENTRE of cell i, so lattice coordinates run half a cell behind the
-    // normalised position.
-    BvhNode groot = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
-    vec3 gmin = groot.aabb_min.xyz;
-    vec3 gext = max(groot.aabb_max.xyz - gmin, vec3(1e-6));
+    // The same lattice the probe pass builds. Probe i sits at the CENTRE of cell
+    // i, so lattice coordinates run half a cell behind the normalised position.
+    vec3 gmin = VELK_GLOBALS.probe_min;
+    vec3 gext = max(VELK_GLOBALS.probe_max - gmin, vec3(1e-6));
     vec3 cell = gext / vec3(dims);
 
     // Lifting the sample point off the surface keeps a probe sitting almost in
@@ -2640,9 +2638,8 @@ void velk_coarse_sh(uint atlas, uvec3 cd, vec3 pos, out vec3 sh[4])
     for (int c = 0; c < 4; ++c) sh[c] = vec3(0.0);
     if (atlas == 0u || cd.x == 0u || cd.y == 0u || cd.z == 0u) return;
 
-    BvhNode croot = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
-    vec3 gmin = croot.aabb_min.xyz;
-    vec3 gext = max(croot.aabb_max.xyz - gmin, vec3(1e-6));
+    vec3 gmin = VELK_GLOBALS.probe_min;
+    vec3 gext = max(VELK_GLOBALS.probe_max - gmin, vec3(1e-6));
 
     vec3 g = (pos - gmin) / gext * vec3(cd) - 0.5;
     vec3 gbase = floor(g);
@@ -2793,11 +2790,10 @@ void main()
     }
     uvec3 coarse_dims = max(dims0 >> (level + 1u), uvec3(1u));
 
-    // Probe positions come from the BVH root's AABB, so the grid follows
-    // whatever scene is loaded with nothing plumbed from the CPU.
-    BvhNode root = velk_bvh_nodes.data[VELK_NODE_BASE + VELK_GLOBALS.bvh_root];
-    vec3 bmin = root.aabb_min.xyz;
-    vec3 extent = root.aabb_max.xyz - bmin;
+    // Probe positions come from the volume the CPU places, which stays put while
+    // geometry moves inside it, so probes keep their history.
+    vec3 bmin = VELK_GLOBALS.probe_min;
+    vec3 extent = VELK_GLOBALS.probe_max - bmin;
     uvec3 pc3 = uvec3(0u);
     vec3 origin = bmin;
     if (probe_live) {
@@ -2969,13 +2965,14 @@ void main()
         // Fixed blend rather than a running count: probes re-converge cheaply
         // and a fixed rate stops moving lights smearing indefinitely.
         //
-        // The first four frames overwrite instead of blending, because that is
-        // what seeds the atlas and the fine level reaches half its probes at a
-        // time, alternating every second frame. Seeding a narrower window
-        // leaves a half blending 5% at a time into whatever the texture
-        // happened to hold, which shows as slabs eight probes wide and never
-        // clears at all if any of it was NaN.
-        float blend = (VELK_GLOBALS.present_counter <= 3u) ? 1.0 : 0.05;
+        // The first four frames after the volume changes overwrite instead of
+        // blending, because that is what seeds the atlas and the fine level
+        // reaches half its probes at a time, alternating every second frame.
+        // Seeding a narrower window leaves a half blending 5% at a time into
+        // whatever the texture happened to hold, which shows as slabs eight
+        // probes wide and never clears at all if any of it was NaN.
+        float blend = (VELK_GLOBALS.present_counter - VELK_GLOBALS.probe_reset_frame <= 3u)
+                    ? 1.0 : 0.05;
         // RGBA32F, not F16: the RT prelude declares the f32 storage array, and
         // the atlas is small enough that the extra precision is free.
         // s_sh[c][lane] is this probe's block total, lane being its dir-0 slot.

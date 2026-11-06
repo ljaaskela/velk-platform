@@ -75,6 +75,7 @@ public:
     uint32_t get_shape_count() const override { return shape_count_; }
     uint32_t get_node_base() const override { return node_base_; }
     uint32_t get_shape_base() const override { return shape_base_; }
+    ProbeVolume get_probe_volume() const override { return probe_volume_; }
 
     void invalidate() override { dirty_ = true; }
 
@@ -90,6 +91,10 @@ private:
     /// the scene tree once per call; O(#elements) regardless of emitted
     /// shape count.
     static uint64_t hash_visual_aabbs(IScene* scene);
+
+    /// Moves the probe volume only if the new build's bounds left it or are
+    /// much smaller, since moving it discards probe history.
+    void update_probe_volume(uint32_t frame);
 
     // Cached build output, kept across frames. Reused when the caller
     // signals the scene is clean.
@@ -117,6 +122,8 @@ private:
     uint32_t node_base_ = 0;   ///< Element base of this BVH's node region.
     uint32_t shape_base_ = 0;  ///< Element base of this BVH's shape region.
     uint32_t mesh_instance_base_ = 0;  ///< Element base of this BVH's mesh-instance region.
+    ProbeVolume probe_volume_;
+    bool probe_volume_placed_ = false;
     bool dirty_ = true;
 };
 

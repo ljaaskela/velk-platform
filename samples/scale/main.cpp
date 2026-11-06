@@ -1,7 +1,7 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
-// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group] [unlimited]
+// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape] [unlimited]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -12,9 +12,12 @@
 //           is translate.
 // group:    movers translate a parent that has no visual, and the visual sits on
 //           its child.
+// escape:   movers rise far above the scene and come back, which grows the GI
+//           probe volume and then shrinks it. The first 190 frames show both.
 // unlimited: turns vsync off, so frame times show the real cost.
 //
-// Prints GPU pass timings on exit. The engine's perf log, also printed on exit,
+// Prints each GI probe volume change as it happens, and GPU pass timings on
+// exit. The engine's perf log, also printed on exit,
 // has the BVH timings under renderer.bvh_*. The first frames are excluded from
 // the GPU timings because they include pipeline creation.
 
@@ -175,10 +178,11 @@ int main(int argc, char* argv[])
     const long frame_limit = argc > 3 ? std::strtol(argv[3], nullptr, 10) : 0;
     const bool rotate_only = argc > 4 && std::strcmp(argv[4], "rotate") == 0;
     const bool group_movers = argc > 4 && std::strcmp(argv[4], "group") == 0;
+    const bool escape_movers = argc > 4 && std::strcmp(argv[4], "escape") == 0;
     const bool unlimited = argc > 5 && std::strcmp(argv[5], "unlimited") == 0;
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count,
-             rotate_only ? "rotate" : group_movers ? "group" : "translate");
+             rotate_only ? "rotate" : group_movers ? "group" : escape_movers ? "escape" : "translate");
 
     constexpr int kWidth = 1280;
     constexpr int kHeight = 720;
@@ -359,6 +363,9 @@ int main(int argc, char* argv[])
     long frame = 0;
     long report_frame = 0;
     velk::vector<PassSamples> gpu_passes;
+    auto scene_ptr = static_cast<velk::IScene::Ptr>(scene);
+    uint32_t last_probe_reset = 0;
+    bool probe_volume_seen = false;
 
     while (app.poll()) {
         // Motion follows the frame number, so runs are comparable.
@@ -367,6 +374,9 @@ int main(int argc, char* argv[])
             const float a = t + mover.phase;
             if (rotate_only) {
                 mover.trs.set_rotation({a * 30.f, a * 45.f, 0.f});
+            } else if (escape_movers) {
+                mover.trs.set_translate({mover.base.x, mover.base.y - 3000.f * std::max(0.f, std::sin(t)),
+                                         mover.base.z});
             } else {
                 mover.trs.set_translate({mover.base.x + std::sin(a) * 30.f, mover.base.y + std::sin(a * 1.7f) * 30.f,
                                          mover.base.z + std::cos(a) * 30.f});
@@ -376,6 +386,16 @@ int main(int argc, char* argv[])
         app.update();
         app.present();
         ++frame;
+
+        if (auto bvh = scene_ptr ? scene_ptr->get_default_bvh() : nullptr) {
+            const velk::ProbeVolume probes = bvh->get_probe_volume();
+            if (!probe_volume_seen || probes.reset_frame != last_probe_reset) {
+                VELK_LOG(I, "scale: frame %ld, probe volume y %.0f to %.0f, reset frame %u", frame,
+                         static_cast<double>(probes.min.y), static_cast<double>(probes.max.y), probes.reset_frame);
+                probe_volume_seen = true;
+                last_probe_reset = probes.reset_frame;
+            }
+        }
 
         if (backend && frame > kWarmupFrames) {
             record_gpu_timings(gpu_passes, backend->last_gpu_timings());

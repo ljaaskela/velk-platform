@@ -844,6 +844,14 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 ctx.bvh.shape_count = b->get_shape_count();
                 ctx.bvh.node_base = b->get_node_base();
                 ctx.bvh.shape_base = b->get_shape_base();
+                const ProbeVolume probes = b->get_probe_volume();
+                ctx.bvh.probe_min[0] = probes.min.x;
+                ctx.bvh.probe_min[1] = probes.min.y;
+                ctx.bvh.probe_min[2] = probes.min.z;
+                ctx.bvh.probe_max[0] = probes.max.x;
+                ctx.bvh.probe_max[1] = probes.max.y;
+                ctx.bvh.probe_max[2] = probes.max.z;
+                ctx.bvh.probe_reset_frame = probes.reset_frame;
                 // The BVH writes its node/shape data into the shared set = 1
                 // arenas during rebuild; nothing to bind here.
             } else {

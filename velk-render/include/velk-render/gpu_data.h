@@ -30,6 +30,12 @@ struct BvhBinding
     uint32_t shape_count = 0;
     uint32_t node_base   = 0;
     uint32_t shape_base  = 0;
+    /// GI probe lattice box and the frame it last changed. Read from globals
+    /// each frame, so not part of the comparison below, which decides whether
+    /// passes that bake the fields above must re-record.
+    float    probe_min[3] = {};
+    float    probe_max[3] = {};
+    uint32_t probe_reset_frame = 0;
 
     bool operator==(const BvhBinding& o) const
     {
@@ -59,9 +65,23 @@ struct FrameGlobals
     uint32_t bvh_node_base;                ///< Element base added to BVH node indices (this BVH's region of the node arena).
     uint32_t bvh_shape_base;               ///< Element base added to BVH shape indices.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
+    float    probe_min[3];                 ///< GI probe lattice box, world-space minimum.
+    uint32_t probe_reset_frame;            ///< present_counter value at which the lattice last changed.
+    float    probe_max[3];                 ///< GI probe lattice box, world-space maximum.
+    uint32_t _pad0;
 };
 
-static_assert(sizeof(FrameGlobals) == 248, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 280, "FrameGlobals layout must match velk.glsl");
+
+/// Copies the probe lattice fields of @p bvh into @p globals.
+inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)
+{
+    for (int i = 0; i < 3; ++i) {
+        globals.probe_min[i] = bvh.probe_min[i];
+        globals.probe_max[i] = bvh.probe_max[i];
+    }
+    globals.probe_reset_frame = bvh.probe_reset_frame;
+}
 
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
