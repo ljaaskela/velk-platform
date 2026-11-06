@@ -139,8 +139,352 @@ void SceneBvh::update_probe_volume(const float bounds_min[3], const float bounds
     probe_volume_placed_ = true;
 }
 
+BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slot) const
+{
+    const InstanceTransform& t = group.visual->get_transforms()[slot];
+    const mat4& w = group.world;
+    // The instance's matrix applied to the mesh bounds' center and half extents.
+    float center[3];
+    float half[3];
+    for (int k = 0; k < 3; ++k) {
+        center[k] = 0.5f * (group.local_bounds.min[k] + group.local_bounds.max[k]);
+        half[k] = 0.5f * (group.local_bounds.max[k] - group.local_bounds.min[k]);
+    }
+    float instance_center[3];
+    float instance_half[3];
+    for (int row = 0; row < 3; ++row) {
+        instance_center[row] = t.rows[row][3];
+        instance_half[row] = 0.f;
+        for (int col = 0; col < 3; ++col) {
+            instance_center[row] += t.rows[row][col] * center[col];
+            instance_half[row] += std::abs(t.rows[row][col]) * half[col];
+        }
+    }
+    // And then the element's.
+    BvhItemBounds out{};
+    for (int row = 0; row < 3; ++row) {
+        float c = w(row, 3);
+        float h = 0.f;
+        for (int col = 0; col < 3; ++col) {
+            c += w(row, col) * instance_center[col];
+            h += std::abs(w(row, col)) * instance_half[col];
+        }
+        out.min[row] = c - h;
+        out.max[row] = c + h;
+    }
+    return out;
+}
+
+RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) const
+{
+    RtRecord record = make_rt_record(group.world * group.visual->get_transforms()[slot].to_mat4());
+    record.first_shape = group.first_shape;
+    record.shape_count = static_cast<uint32_t>(group.shapes.size());
+    return record;
+}
+
+void SceneBvh::free_instance_partitions(InstanceGroup& group)
+{
+    for (uint32_t p : group.partitions) {
+        partitions_[p] = Partition{};
+        free_partitions_.push_back(p);
+    }
+    group.partitions.clear();
+    group.open_partition = kUnplaced;
+    group.dynamic_partition = kUnplaced;
+    group.movers.clear();
+    top_dirty_ = true;
+    root_dirty_ = true;
+}
+
+bool SceneBvh::is_instance_dynamic(uint32_t partition) const
+{
+    const Partition& p = partitions_[partition];
+    return p.group && p.group->dynamic_partition == partition;
+}
+
+void SceneBvh::promote_instance(InstanceGroup& group, uint32_t slot)
+{
+    if (group.dynamic_partition == kUnplaced) {
+        group.dynamic_partition = alloc_partition();
+        partitions_[group.dynamic_partition].group = &group;
+        group.partitions.push_back(group.dynamic_partition);
+    }
+    const uint32_t home = group.slot_partition[slot];
+    auto& members = partitions_[home].members;
+    members.erase(std::remove(members.begin(), members.end(), slot), members.end());
+    partitions_[home].dirty = true;
+
+    partitions_[group.dynamic_partition].members.push_back(slot);
+    partitions_[group.dynamic_partition].dirty = true;
+    group.slot_partition[slot] = group.dynamic_partition;
+    group.movers[slot] = {home, update_frame_};
+}
+
+void SceneBvh::demote_quiet_instances(InstanceGroup& group)
+{
+    if (group.dynamic_partition == kUnplaced) {
+        return;
+    }
+    for (auto it = group.movers.begin(); it != group.movers.end();) {
+        if (update_frame_ - it->second.moved_frame < kQuietFrames) {
+            ++it;
+            continue;
+        }
+        const uint32_t slot = it->first;
+        uint32_t home = it->second.home;
+        // Its partition may have emptied and gone since.
+        if (!partitions_[home].active || partitions_[home].group != &group || home == group.dynamic_partition) {
+            if (group.open_partition == kUnplaced) {
+                group.open_partition = alloc_partition();
+                partitions_[group.open_partition].group = &group;
+                group.partitions.push_back(group.open_partition);
+            }
+            home = group.open_partition;
+        }
+        auto& members = partitions_[group.dynamic_partition].members;
+        members.erase(std::remove(members.begin(), members.end(), slot), members.end());
+        partitions_[group.dynamic_partition].dirty = true;
+        partitions_[home].members.push_back(slot);
+        partitions_[home].dirty = true;
+        group.slot_partition[slot] = home;
+        it = group.movers.erase(it);
+    }
+}
+
+void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
+{
+    VELK_PERF_SCOPE("renderer.instance_cut");
+    free_instance_partitions(group);
+
+    const auto slot_count = static_cast<uint32_t>(group.visual->get_transforms().size());
+    group.slot_partition.clear();
+    group.slot_partition.resize(slot_count, kUnplaced);
+
+    struct Keyed
+    {
+        uint64_t key;
+        uint32_t slot;
+    };
+    vector<Keyed> keyed;
+    keyed.reserve(slot_count);
+    float lo[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                   std::numeric_limits<float>::max()};
+    float hi[3] = {-lo[0], -lo[0], -lo[0]};
+    vector<float> centers;
+    centers.reserve(size_t(slot_count) * 3);
+    for (uint32_t slot = 0; slot < slot_count; ++slot) {
+        if (!group.visual->is_live(slot)) {
+            continue;
+        }
+        const BvhItemBounds bounds = instance_bounds(group, slot);
+        for (int k = 0; k < 3; ++k) {
+            const float c = 0.5f * (bounds.min[k] + bounds.max[k]);
+            lo[k] = std::min(lo[k], c);
+            hi[k] = std::max(hi[k], c);
+            centers.push_back(c);
+        }
+        keyed.push_back({0u, slot});
+    }
+    if (keyed.empty()) {
+        return;
+    }
+
+    // One grid scale on all axes, so a flat forest still gets cells that are square.
+    const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1e-20f});
+    const float scale = 2097151.f / extent;
+    const auto spread = [](uint64_t v) {
+        v &= 0x1FFFFFu;
+        v = (v | v << 32) & 0x1F00000000FFFFull;
+        v = (v | v << 16) & 0x1F0000FF0000FFull;
+        v = (v | v << 8) & 0x100F00F00F00F00Full;
+        v = (v | v << 4) & 0x10C30C30C30C30C3ull;
+        return (v | v << 2) & 0x1249249249249249ull;
+    };
+    for (size_t i = 0; i < keyed.size(); ++i) {
+        const float* c = centers.data() + i * 3;
+        keyed[i].key = spread(static_cast<uint64_t>((c[0] - lo[0]) * scale))
+            | spread(static_cast<uint64_t>((c[1] - lo[1]) * scale)) << 1
+            | spread(static_cast<uint64_t>((c[2] - lo[2]) * scale)) << 2;
+    }
+    std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) { return a.key < b.key; });
+
+    // Reserving up front avoids growing these arenas part by part. The margin is for
+    // the other partitions and the top tree.
+    const size_t reserve_count = keyed.size() + keyed.size() / kPartitionRecords + kPartitionRecords;
+    if (ctx.records_arena) {
+        ctx.records_arena->reserve(reserve_count * sizeof(RtRecord));
+    }
+    if (ctx.bvh_nodes_arena) {
+        ctx.bvh_nodes_arena->reserve(reserve_count * 2u * sizeof(GpuBvhNode));
+    }
+
+    for (size_t begin = 0; begin < keyed.size(); begin += kPartitionRecords) {
+        const size_t end = std::min(keyed.size(), begin + size_t(kPartitionRecords));
+        const uint32_t index = alloc_partition();
+        Partition& partition = partitions_[index];
+        partition.group = &group;
+        partition.members.reserve(end - begin);
+        for (size_t i = begin; i < end; ++i) {
+            partition.members.push_back(keyed[i].slot);
+            group.slot_partition[keyed[i].slot] = index;
+        }
+        group.partitions.push_back(index);
+        group.open_partition = partition.members.size() < kPartitionRecords ? index : kUnplaced;
+    }
+}
+
+void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visual, const EmitContext& emit)
+{
+    auto visual_state = read_state<IVisual3D>(&visual);
+    auto mesh = visual_state ? visual_state->mesh.get<IMesh>() : nullptr;
+    auto element_state = read_state<IElement>(element);
+    if (!mesh || !element_state) {
+        return;
+    }
+
+    // One run of shapes for all instances, local to each of them.
+    struct CollectShapes
+    {
+        const EmitContext& emit;
+        vector<RtShape> shapes;
+    };
+    CollectShapes collect{emit, {}};
+    const mat4 identity = mat4::identity();
+    emit_mesh_shapes(interface_cast<IVisual>(&visual), *mesh, identity, ::velk::color::white(), nullptr,
+                     +[](void* u, ShapeSite& site) {
+                         auto& c = *static_cast<CollectShapes*>(u);
+                         c.emit.cb(c.emit.user, site);
+                         c.shapes.push_back(site.geometry);
+                     }, &collect);
+    if (collect.shapes.empty()) {
+        if (std::find(unresolved_.begin(), unresolved_.end(), element) == unresolved_.end()) {
+            unresolved_.push_back(element);
+        }
+        return;
+    }
+
+    auto& group = instance_groups_[element];
+    const bool new_group = group.visual == nullptr;
+    group.visual = &visual;
+
+    bool rebuild = new_group;
+    const size_t shape_bytes = collect.shapes.size() * sizeof(RtShape);
+    if (group.shapes.size() != collect.shapes.size()) {
+        alloc_elements(emit.frame.bvh_shapes_arena, group.shape_region, collect.shapes.size(), sizeof(RtShape),
+                       group.first_shape);
+        if (!group.shape_region.valid()) {
+            VELK_LOG(E, "SceneBvh: instance shape allocation failed");
+            return;
+        }
+        emit.frame.bvh_shapes_arena->write_at(group.shape_region.offset(), collect.shapes.data(), shape_bytes);
+        group.shapes = std::move(collect.shapes);
+        rebuild = true;
+    } else if (std::memcmp(group.shapes.data(), collect.shapes.data(), shape_bytes) != 0) {
+        emit.frame.bvh_shapes_arena->update_at(group.shape_region.offset(), collect.shapes.data(), shape_bytes);
+        group.shapes = std::move(collect.shapes);
+    }
+
+    const aabb local = mesh->get_bounds();
+    const vec3 local_min = local.min();
+    const vec3 local_max = local.max();
+    const BvhItemBounds new_bounds{{local_min.x, local_min.y, local_min.z}, {local_max.x, local_max.y, local_max.z}};
+    if (std::memcmp(&group.local_bounds, &new_bounds, sizeof(new_bounds)) != 0) {
+        group.local_bounds = new_bounds;
+        rebuild = true;
+    }
+
+    vector<uint32_t> changed;
+    bool all_changed = false;
+    visual.take_changed_slots(changed, all_changed);
+    rebuild = rebuild || all_changed;
+
+    // A translated element keeps every record relative to its partition's origin, so
+    // only the origins move. Anything else changes the records.
+    const mat4 old_world = group.world;
+    const mat4& new_world = element_state->world_matrix;
+    group.world = new_world;
+    if (!new_group && std::memcmp(old_world.m, new_world.m, sizeof(new_world.m)) != 0) {
+        bool translated_only = true;
+        for (int row = 0; row < 3 && translated_only; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                translated_only = translated_only && old_world(row, col) == new_world(row, col);
+            }
+        }
+        if (!translated_only) {
+            rebuild = true;
+        } else if (!rebuild) {
+            float delta[3];
+            for (int k = 0; k < 3; ++k) {
+                delta[k] = new_world(k, 3) - old_world(k, 3);
+            }
+            for (uint32_t p : group.partitions) {
+                GpuBvhNode& ref = partitions_[p].ref;
+                float z = 0.f;
+                std::memcpy(&z, &ref.first_shape, sizeof(float));
+                for (int k = 0; k < 3; ++k) {
+                    ref.aabb_min[k] += delta[k];
+                    ref.aabb_max[k] += delta[k];
+                }
+                ref.aabb_min[3] += delta[0];
+                ref.aabb_max[3] += delta[1];
+                z += delta[2];
+                std::memcpy(&ref.first_shape, &z, sizeof(float));
+            }
+            top_dirty_ = true;
+        }
+    }
+
+    if (rebuild) {
+        cut_instances(group, emit.frame);
+        return;
+    }
+
+    const auto slot_count = static_cast<uint32_t>(visual.get_transforms().size());
+    if (group.slot_partition.size() < slot_count) {
+        group.slot_partition.resize(slot_count, kUnplaced);
+    }
+    for (uint32_t slot : changed) {
+        const uint32_t current = group.slot_partition[slot];
+        if (!visual.is_live(slot)) {
+            // Removed.
+            if (current != kUnplaced) {
+                partitions_[current].dirty = true;
+                auto& members = partitions_[current].members;
+                members.erase(std::remove(members.begin(), members.end(), slot), members.end());
+                group.slot_partition[slot] = kUnplaced;
+                group.movers.erase(slot);
+            }
+        } else if (current != kUnplaced && current == group.dynamic_partition) {
+            partitions_[current].dirty = true;
+            group.movers[slot].moved_frame = update_frame_;
+        } else if (current != kUnplaced) {
+            promote_instance(group, slot);
+        } else {
+            // Added.
+            if (group.open_partition == kUnplaced) {
+                group.open_partition = alloc_partition();
+                partitions_[group.open_partition].group = &group;
+                group.partitions.push_back(group.open_partition);
+            }
+            Partition& open = partitions_[group.open_partition];
+            open.members.push_back(slot);
+            open.dirty = true;
+            group.slot_partition[slot] = group.open_partition;
+            if (open.members.size() >= kPartitionRecords) {
+                group.open_partition = kUnplaced;
+            }
+        }
+    }
+}
+
 void SceneBvh::update_element(IElement* element, const EmitContext& emit)
 {
+    if (auto instanced = ::velk::find_attachment<IInstancedMeshInternal>(element)) {
+        update_instances(element, *instanced, emit);
+        return;
+    }
+
     struct CollectState
     {
         SceneBvh& self;
@@ -282,6 +626,11 @@ void SceneBvh::remove_element(IElement* element)
         }
         element_records_.erase(found);
     }
+    auto group = instance_groups_.find(element);
+    if (group != instance_groups_.end()) {
+        free_instance_partitions(group->second);
+        instance_groups_.erase(group);
+    }
     unresolved_.erase(std::remove(unresolved_.begin(), unresolved_.end(), element), unresolved_.end());
 }
 
@@ -327,7 +676,7 @@ void SceneBvh::demote_quiet_records()
         float best_growth = 0.f;
         for (uint32_t p = 0; p < partitions_.size(); ++p) {
             const Partition& partition = partitions_[p];
-            if (!partition.active) {
+            if (!partition.active || partition.group) {
                 continue;
             }
             float lo[3] = {partition.ref.aabb_min[0], partition.ref.aabb_min[1], partition.ref.aabb_min[2]};
@@ -364,7 +713,7 @@ void SceneBvh::recut(FrameContext& ctx)
     unplaced_.clear();
 
     for (uint32_t p = 0; p < partitions_.size(); ++p) {
-        if (partitions_[p].active) {
+        if (partitions_[p].active && !partitions_[p].group) {
             partitions_[p] = Partition{};
             free_partitions_.push_back(p);
         }
@@ -390,7 +739,7 @@ void SceneBvh::recut(FrameContext& ctx)
 void SceneBvh::flush_partitions(FrameContext& ctx)
 {
     for (uint32_t p = 0; p < partitions_.size(); ++p) {
-        if (!partitions_[p].active || !partitions_[p].dirty) {
+        if (!partitions_[p].active || !partitions_[p].dirty || partitions_[p].group) {
             continue;
         }
         auto& members = partitions_[p].members;
@@ -429,8 +778,22 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
             continue;
         }
         partition.dirty = false;
-        top_dirty_ = true;
+        if (is_instance_dynamic(p)) {
+            root_dirty_ = true;
+        } else {
+            top_dirty_ = true;
+        }
         if (partition.members.empty()) {
+            if (partition.group) {
+                auto& owned = partition.group->partitions;
+                owned.erase(std::remove(owned.begin(), owned.end(), p), owned.end());
+                if (partition.group->open_partition == p) {
+                    partition.group->open_partition = kUnplaced;
+                }
+                if (partition.group->dynamic_partition == p) {
+                    partition.group->dynamic_partition = kUnplaced;
+                }
+            }
             partition = Partition{};
             free_partitions_.push_back(p);
             continue;
@@ -441,14 +804,15 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
 
 void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool geometry)
 {
+    const InstanceGroup* group = partition.group;
     vector<BvhItemBounds> items;
     items.reserve(partition.members.size());
     for (uint32_t slot : partition.members) {
-        items.push_back(records_[slot].bounds);
+        items.push_back(group ? instance_bounds(*group, slot) : records_[slot].bounds);
     }
     BvhTree tree = build_bvh_tree({items.data(), items.size()});
 
-    if (geometry) {
+    if (geometry && !group) {
         // Shapes in leaf order, so a ray that reaches neighbouring records finds
         // their shapes nearby in memory.
         size_t shape_count = 0;
@@ -513,7 +877,8 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
         vector<RtRecord> gpu_records;
         gpu_records.reserve(tree.order.size());
         for (uint32_t item : tree.order) {
-            RtRecord record = records_[partition.members[item]].gpu;
+            const uint32_t member = partition.members[item];
+            RtRecord record = group ? instance_record(*group, member) : records_[member].gpu;
             for (int k = 0; k < 3; ++k) {
                 record.inv_row[k][3] -= origin[k];
             }
@@ -527,7 +892,8 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     alloc_elements(ctx.bvh_nodes_arena, partition.nodes, tree.nodes.size(), sizeof(GpuBvhNode), node_base);
     // Indices stamped onto a failed region would point into other trees, where a
     // cycle would hang the walk. Rays skip the partition instead.
-    if (!partition.nodes.valid() || !partition.records.valid() || (geometry && !partition.shapes.valid())) {
+    if (!partition.nodes.valid() || !partition.records.valid()
+        || (geometry && !group && !partition.shapes.valid())) {
         VELK_LOG(E, "SceneBvh: partition allocation failed");
         set_inverted_bounds(partition.ref);
         partition.node_count = 0;
@@ -567,7 +933,7 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
     vector<uint32_t> active;
     vector<BvhItemBounds> items;
     for (uint32_t p = 0; p < partitions_.size(); ++p) {
-        if (partitions_[p].active) {
+        if (partitions_[p].active && !is_instance_dynamic(p)) {
             const auto& ref = partitions_[p].ref;
             BvhItemBounds bounds{};
             for (int k = 0; k < 3; ++k) {
@@ -612,6 +978,7 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
         top_node_count_ += partitions_[p].node_count;
     }
 
+
     update_probe_volume(top_root_.aabb_min, top_root_.aabb_max, static_cast<uint32_t>(ctx.present_counter));
 
     // The partitions' area against the root's, weighted by records: how much a
@@ -643,42 +1010,67 @@ void SceneBvh::upload_root(FrameContext& ctx)
                             static_cast<uint32_t>(ctx.present_counter));
     }
 
-    GpuBvhNode nodes[3];
-    size_t count = 1;
-    if (has_top_ && has_dynamic) {
-        nodes[1] = top_root_;
-        nodes[2] = dynamic_.ref;
-        nodes[0] = {};
-        for (int k = 0; k < 3; ++k) {
-            nodes[0].aabb_min[k] = std::min(top_root_.aabb_min[k], dynamic_.ref.aabb_min[k]);
-            nodes[0].aabb_max[k] = std::max(top_root_.aabb_max[k], dynamic_.ref.aabb_max[k]);
+    // What the root joins: the static top tree, the dynamic partition, and each instance
+    // group's dynamic partition.
+    vector<GpuBvhNode> parts;
+    uint32_t part_node_count = 0;
+    if (has_top_) {
+        parts.push_back(top_root_);
+        part_node_count += top_node_count_;
+    }
+    if (has_dynamic) {
+        parts.push_back(dynamic_.ref);
+        part_node_count += dynamic_.node_count;
+    }
+    for (const auto& [element, group] : instance_groups_) {
+        if (group.dynamic_partition != kUnplaced && partitions_[group.dynamic_partition].node_count != 0) {
+            parts.push_back(partitions_[group.dynamic_partition].ref);
+            part_node_count += partitions_[group.dynamic_partition].node_count;
         }
-        nodes[0].child_count = 2;
-        count = 3;
-    } else if (has_top_) {
-        nodes[0] = top_root_;
-    } else if (has_dynamic) {
-        nodes[0] = dynamic_.ref;
-    } else {
-        // Empty BVH: a single inverted-AABB root, so node_count > 0 and every ray
-        // rejects.
-        set_inverted_bounds(nodes[0]);
     }
 
+    BvhTree tree;
+    if (parts.size() > 1) {
+        vector<BvhItemBounds> items;
+        for (const auto& part : parts) {
+            BvhItemBounds bounds{};
+            for (int k = 0; k < 3; ++k) {
+                bounds.min[k] = part.aabb_min[k];
+                bounds.max[k] = part.aabb_max[k];
+            }
+            items.push_back(bounds);
+        }
+        tree = build_bvh_tree({items.data(), items.size()}, 1, true);
+    }
+
+    vector<GpuBvhNode> nodes;
+    nodes.resize(parts.size() > 1 ? tree.nodes.size() : size_t(1));
     uint32_t base = 0;
-    if (!alloc_elements(ctx.bvh_nodes_arena, root_nodes_, count, sizeof(GpuBvhNode), base)) {
+    if (!alloc_elements(ctx.bvh_nodes_arena, root_nodes_, nodes.size(), sizeof(GpuBvhNode), base)) {
         VELK_LOG(E, "SceneBvh: root allocation failed");
         root_ = 0;
         node_count_ = 0;
         return;
     }
-    if (count == 3) {
-        nodes[0].first_child = base + 1u;
+    if (parts.empty()) {
+        // Empty BVH: a single inverted-AABB root, so node_count > 0 and every ray
+        // rejects.
+        set_inverted_bounds(nodes[0]);
+    } else if (parts.size() == 1) {
+        nodes[0] = parts[0];
+    } else {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            nodes[i] = tree.nodes[i];
+            if (nodes[i].child_count != 0) {
+                nodes[i].first_child += base;
+            } else {
+                nodes[i] = parts[tree.order[tree.nodes[i].first_shape]];
+            }
+        }
     }
-    ctx.bvh_nodes_arena->write_at(root_nodes_.offset(), nodes, count * sizeof(GpuBvhNode));
+    ctx.bvh_nodes_arena->write_at(root_nodes_.offset(), nodes.data(), nodes.size() * sizeof(GpuBvhNode));
     root_ = base;
-    node_count_ = static_cast<uint32_t>(count) + (has_top_ ? top_node_count_ : 0u)
-                + (has_dynamic ? dynamic_.node_count : 0u);
+    node_count_ = static_cast<uint32_t>(nodes.size()) + part_node_count;
 }
 
 void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
@@ -689,6 +1081,10 @@ void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
         }
     }
     element_records_.clear();
+    for (auto& [element, group] : instance_groups_) {
+        free_instance_partitions(group);
+    }
+    instance_groups_.clear();
     unresolved_.clear();
     dynamic_ = Partition{};
     dynamic_transforms_dirty_ = false;
@@ -756,6 +1152,10 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
     }
 
     demote_quiet_records();
+    ++update_frame_;
+    for (auto& [element, group] : instance_groups_) {
+        demote_quiet_instances(group);
+    }
 
     bool any_partition_dirty = dynamic_.dirty || dynamic_transforms_dirty_ || top_dirty_;
     for (uint32_t p = 0; !any_partition_dirty && p < partitions_.size(); ++p) {

@@ -657,7 +657,7 @@ layout(push_constant, scalar) uniform PC {
 
 #include "velk_intersect.glsl"
 
-#define VELK_TRACE_STACK_SIZE 32
+#define VELK_TRACE_STACK_SIZE 64
 #define VELK_TRACE_ORDERED_ANY_HIT
 #include "velk_trace.glsl"
 )"
@@ -2046,7 +2046,7 @@ struct BrdfSample {
 };
 
 // Wide scene roots (a grid of 40+ tiles, a dashboard of cards) need more than the
-// deferred pass's 32, since closest-hit pushes both children unordered.
+// deferred pass's 64, since closest-hit pushes both children unordered.
 #define VELK_TRACE_STACK_SIZE 128
 #include "velk_trace.glsl"
 

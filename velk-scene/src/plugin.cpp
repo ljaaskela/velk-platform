@@ -8,6 +8,7 @@
 #include "trait/light.h"
 #include "transform/look_at.h"
 #include "visual/cube_visual.h"
+#include "visual/instanced_mesh_visual.h"
 #include "visual/mesh_visual.h"
 #include "visual/sphere_visual.h"
 #include "transform/matrix.h"
@@ -36,6 +37,7 @@ namespace velk {
     rv &= register_type<impl::CubeVisual>(velk);
     rv &= register_type<impl::SphereVisual>(velk);
     rv &= register_type<impl::MeshVisual>(velk);
+    rv &= register_type<impl::InstancedMeshVisual>(velk);
     rv &= register_type<impl::DefaultBatch>(velk);
     return rv;
 }

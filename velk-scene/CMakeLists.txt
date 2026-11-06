@@ -48,6 +48,8 @@ add_library(velk_scene SHARED
     src/visual/sphere_visual.cpp
     src/visual/mesh_visual.h
     src/visual/mesh_visual.cpp
+    src/visual/instanced_mesh_visual.h
+    src/visual/instanced_mesh_visual.cpp
     src/visual/primitive_shaders.h
 
     # Render-feeding traits

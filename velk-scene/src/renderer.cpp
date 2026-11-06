@@ -552,6 +552,18 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             }
         }
 
+        // Instanced visuals keep their own raster instance data. This runs before the
+        // batches read their regions.
+        if (auto arena = instance_arena_) {
+            for (auto* element : state.redraw_list) {
+                if (auto instanced = ::velk::find_attachment<IInstancedMeshInternal>(element)) {
+                    if (auto element_state = read_state<IElement>(element)) {
+                        instanced->flush_instances(*arena, element_state->world_matrix);
+                    }
+                }
+            }
+        }
+
         // Rebuild draw commands for changed elements. Pipelines are
         // not pre-compiled here; build_draw_calls / build_gbuffer_draw_calls
         // compile lazily on cache miss against the path's target_format.

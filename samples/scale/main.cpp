@@ -2,7 +2,8 @@
 // it loads no assets.
 //
 // Usage: velk_ui_scale [elements] [movers] [frames]
-//                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter]
+//                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
+//                       |forest|forest_elements|forest_shift|forest_churn]
 //                      [unlimited] [rt] [text]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
@@ -25,6 +26,12 @@
 //           them. The perf log has the cost under renderer.deform.
 // scatter:  like deform, and the vertices also fly apart, until the trees degrade
 //           enough to be built again, shown under mesh.blas_rebuild.
+// forest:   elements is the number of trees, all on one instanced visual, on a
+//           jittered grid instead of the mixed visuals. Movers are trees moved every
+//           frame. Trees have two primitives and 24 triangles.
+// forest_elements: the same trees as one element each, to compare against forest.
+// forest_shift: forest, with the whole element translated every frame.
+// forest_churn: forest, with one tree removed and another added every frame.
 // unlimited: turns vsync off, so frame times show the real cost.
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
@@ -59,6 +66,7 @@
 #include <velk-scene/api/trait/orbit.h>
 #include <velk-scene/api/trait/trs.h>
 #include <velk-scene/api/visual/cube.h>
+#include <velk-scene/api/visual/instanced_mesh.h>
 #include <velk-scene/api/visual/mesh.h>
 #include <velk-scene/api/visual/sphere.h>
 #include <velk-scene/ext/trait.h>
@@ -180,6 +188,68 @@ velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size, uint
     return builder.build({primitives, 1});
 }
 
+/// Builds a low-poly tree standing on y = 0 and growing towards -y: a trunk and a
+/// crown, as a primitive each.
+velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const velk::IMaterial::Ptr& trunk,
+                                 const velk::IMaterial::Ptr& crown)
+{
+    constexpr uint32_t kSides = 6;
+    constexpr float kPi = 3.14159265358979323846f;
+
+    static constexpr velk::VertexAttribute kAttributes[] = {
+        {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
+        {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
+        {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
+        {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
+    };
+
+    auto& builder = ctx.get_mesh_builder();
+    const auto build_cone = [&](float bottom_y, float top_y, float bottom_radius, float top_radius,
+                                const velk::IMaterial::Ptr& material) -> velk::IMeshPrimitive::Ptr {
+        velk::vector<Vertex> vertices;
+        velk::vector<uint32_t> indices;
+        for (uint32_t s = 0; s < kSides; ++s) {
+            const float theta = static_cast<float>(s) / kSides * kPi * 2.f;
+            const float c = std::cos(theta);
+            const float z = std::sin(theta);
+            vertices.push_back({{c * bottom_radius, bottom_y, z * bottom_radius}, {c, 0.f, z}, {0.f, 0.f}, {-z, 0.f, c, 1.f}});
+            vertices.push_back({{c * top_radius, top_y, z * top_radius}, {c, -0.5f, z}, {0.f, 1.f}, {-z, 0.f, c, 1.f}});
+        }
+        for (uint32_t s = 0; s < kSides; ++s) {
+            const uint32_t a = s * 2;
+            const uint32_t b = (s + 1) % kSides * 2;
+            for (uint32_t i : {a, a + 1, b + 1, a, b + 1, b}) {
+                indices.push_back(i);
+            }
+        }
+        velk::vec3 lo{-bottom_radius, std::min(bottom_y, top_y), -bottom_radius};
+        velk::aabb bounds{};
+        bounds.position = lo;
+        bounds.extent = {bottom_radius * 2.f, std::abs(top_y - bottom_y), bottom_radius * 2.f};
+        const auto vertex_count = static_cast<uint32_t>(vertices.size());
+        const auto index_count = static_cast<uint32_t>(indices.size());
+        auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count,
+                                                 indices.data(), index_count, velk::MeshTopology::TriangleList, bounds);
+        if (primitive) {
+            primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex),
+                                                         vertex_count, indices.data(), index_count / 3));
+            velk::MeshPrimitive(primitive).set_material(material);
+        }
+        return primitive;
+    };
+
+    velk::IMeshPrimitive::Ptr primitives[] = {build_cone(0.f, -height * 0.4f, height * 0.06f, height * 0.04f, trunk),
+                                              build_cone(-height * 0.25f, -height, height * 0.25f, height * 0.01f, crown)};
+    return builder.build({primitives, 2});
+}
+
+/// A position that looks random but follows from @p i, so runs are comparable.
+float forest_jitter(long i, float seed)
+{
+    const float v = std::sin(static_cast<float>(i) * seed) * 43758.5453f;
+    return v - std::floor(v) - 0.5f;
+}
+
 /// Median and worst GPU time for one pass across the measured frames.
 struct PassSamples
 {
@@ -232,6 +302,11 @@ int main(int argc, char* argv[])
     const bool recolor_rects = argc > 4 && std::strcmp(argv[4], "recolor") == 0;
     const bool scatter_movers = argc > 4 && std::strcmp(argv[4], "scatter") == 0;
     const bool deform_movers = scatter_movers || (argc > 4 && std::strcmp(argv[4], "deform") == 0);
+    const bool forest_shift = argc > 4 && std::strcmp(argv[4], "forest_shift") == 0;
+    const bool forest_churn = argc > 4 && std::strcmp(argv[4], "forest_churn") == 0;
+    const bool forest_instances = forest_shift || forest_churn || (argc > 4 && std::strcmp(argv[4], "forest") == 0);
+    const bool forest_elements = argc > 4 && std::strcmp(argv[4], "forest_elements") == 0;
+    const bool forest = forest_instances || forest_elements;
     bool unlimited = false;
     bool ray_traced = false;
     bool with_text = false;
@@ -368,7 +443,49 @@ int main(int argc, char* argv[])
     const float grid_start = -extent * 0.5f;
     long next_mover = 0;
 
-    for (long i = 0; i < element_count; ++i) {
+    // Trees stand on the floor on a jittered grid.
+    constexpr float kTreeHeight = 60.f;
+    const auto tree_position = [&](long i) {
+        return velk::vec3{grid_start + (static_cast<float>(i % columns) + 0.8f * forest_jitter(i, 12.9898f)) * kElementSpacing,
+                          kFloorY,
+                          grid_start + (static_cast<float>(i / columns) + 0.8f * forest_jitter(i, 78.233f)) * kElementSpacing};
+    };
+    velk::InstancedMeshVisual forest_visual;
+    velk::Trs forest_trs;
+    uint32_t forest_extra_slot = 0xFFFFFFFFu;
+    if (forest) {
+        auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
+        auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
+        velk::Mesh tree_mesh(build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
+        if (forest_instances) {
+            velk::vector<velk::InstanceTransform> transforms;
+            transforms.resize(static_cast<size_t>(element_count));
+            for (long i = 0; i < element_count; ++i) {
+                transforms[static_cast<size_t>(i)] = velk::InstanceTransform::from(velk::mat4::translate(tree_position(i)));
+            }
+            forest_visual = velk::trait::visual::create_instanced_mesh();
+            forest_visual.set_mesh(tree_mesh);
+            forest_visual.add_instances({transforms.data(), transforms.size()});
+            auto forest_element = velk::create_element();
+            forest_trs = velk::trait::transform::create_trs();
+            forest_element.add_trait(forest_trs);
+            forest_element.add_trait(forest_visual);
+            scene.add(root, forest_element);
+        } else {
+            for (long i = 0; i < element_count; ++i) {
+                auto element = velk::create_element();
+                auto trs = velk::trait::transform::create_trs();
+                trs.set_translate(tree_position(i));
+                auto visual = velk::trait::visual::create_mesh();
+                visual.set_mesh(tree_mesh);
+                element.add_trait(trs);
+                element.add_trait(visual);
+                scene.add(root, element);
+            }
+        }
+    }
+
+    for (long i = 0; i < element_count && !forest; ++i) {
         auto element = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
         const velk::vec3 position{grid_start + static_cast<float>(i % columns) * kElementSpacing, -kElementSize,
@@ -488,6 +605,27 @@ int main(int argc, char* argv[])
             } else {
                 mover.trs.set_translate({mover.base.x + std::sin(a) * 30.f, mover.base.y + std::sin(a * 1.7f) * 30.f,
                                          mover.base.z + std::cos(a) * 30.f});
+            }
+        }
+
+        if (forest_shift) {
+            forest_trs.set_translate({std::sin(t) * 100.f, 0.f, 0.f});
+        }
+        if (forest_churn && element_count > 0) {
+            // The slot just freed is reused, so this keeps the same slot in use.
+            const auto removed = static_cast<uint32_t>(frame % element_count);
+            forest_visual.remove_instance(removed);
+            forest_visual.add_instance(velk::mat4::translate(tree_position(removed) + velk::vec3{0.f, 0.f, 20.f}));
+            if (forest_extra_slot == 0xFFFFFFFFu) {
+                forest_extra_slot = forest_visual.add_instance(velk::mat4::translate({grid_start, kFloorY, grid_start - kElementSpacing}));
+            }
+        }
+        if (forest_instances) {
+            for (long m = 0; m < mover_count; ++m) {
+                const long i = m * element_count / mover_count;
+                const float a = t + static_cast<float>(m);
+                forest_visual.set_transform(static_cast<uint32_t>(i),
+                                            velk::mat4::translate(tree_position(i) + velk::vec3{std::sin(a) * 20.f, 0.f, std::cos(a) * 20.f}));
             }
         }
 

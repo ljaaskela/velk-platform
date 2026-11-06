@@ -46,6 +46,9 @@ inline constexpr Uid Sphere{"18072f38-60dd-436a-80b4-942bbca36b52"};
 /** @brief Generic 3D mesh visual. Renders any IMesh assigned via IVisual3D::mesh. */
 inline constexpr Uid Mesh{"db5043f9-ed9f-4032-b7c3-60c92a75f657"};
 
+/** @brief Draws one mesh many times on one element. See IInstancedMeshVisual. */
+inline constexpr Uid InstancedMesh{"7a141324-da08-4581-b2dc-5316b0c03415"};
+
 } // namespace Visual
 
 namespace Render {

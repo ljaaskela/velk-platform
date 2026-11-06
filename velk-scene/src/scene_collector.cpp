@@ -6,6 +6,81 @@
 
 namespace velk {
 
+void emit_mesh_shapes(IVisual* visual, IMesh& mesh, const mat4& world, const color& tint, IProgram* paint,
+                      ShapeCb cb, void* user)
+{
+    for (auto& prim_ptr : mesh.get_primitives()) {
+        auto prim_state = read_state<IMeshPrimitive>(prim_ptr.get());
+        if (!prim_state) continue;
+        auto buf = prim_ptr->get_buffer();
+        if (!buf) continue;
+        // Skip until the geometry is GPU-resident. Asked as a ref
+        // rather than an address: the bytes live in the mesh-word
+        // arena, so there is a base and no address to test.
+        if (!get_gpu_ref(buf).valid()) continue;
+        uint32_t v_count = prim_ptr->get_vertex_count();
+        uint32_t i_count = prim_ptr->get_index_count();
+        uint32_t v_stride = prim_ptr->get_vertex_stride();
+        if (v_count == 0 || i_count < 3 || v_stride == 0) continue;
+        if (prim_ptr->get_topology() != MeshTopology::TriangleList) continue;
+
+        // Per-primitive material (pulled the same way as
+        // analytic CubeVisual / SphereVisual, but per
+        // primitive instead of just first).
+        IProgram* prim_paint = paint;
+        if (prim_state->material) {
+            auto prog_ptr = prim_state->material.template get<IProgram>();
+            if (prog_ptr) prim_paint = prog_ptr.get();
+        }
+
+        // World-space AABB by transforming the local AABB's
+        // 8 corners through the element world matrix.
+        aabb local_b = prim_ptr->get_bounds();
+        float lminx = local_b.position.x;
+        float lminy = local_b.position.y;
+        float lminz = local_b.position.z;
+        float lmaxx = lminx + local_b.extent.width;
+        float lmaxy = lminy + local_b.extent.height;
+        float lmaxz = lminz + local_b.extent.depth;
+        auto xf = [&](float lx, float ly, float lz) {
+            float wx_ = world(0, 0) * lx + world(0, 1) * ly + world(0, 2) * lz + world(0, 3);
+            float wy_ = world(1, 0) * lx + world(1, 1) * ly + world(1, 2) * lz + world(1, 3);
+            float wz_ = world(2, 0) * lx + world(2, 1) * ly + world(2, 2) * lz + world(2, 3);
+            return ::velk::vec3{wx_, wy_, wz_};
+        };
+        ::velk::vec3 c[8] = {
+            xf(lminx, lminy, lminz), xf(lmaxx, lminy, lminz),
+            xf(lminx, lmaxy, lminz), xf(lmaxx, lmaxy, lminz),
+            xf(lminx, lminy, lmaxz), xf(lmaxx, lminy, lmaxz),
+            xf(lminx, lmaxy, lmaxz), xf(lmaxx, lmaxy, lmaxz),
+        };
+        float wmin[3] = {c[0].x, c[0].y, c[0].z};
+        float wmax[3] = {c[0].x, c[0].y, c[0].z};
+        for (int k = 1; k < 8; ++k) {
+            wmin[0] = std::min(wmin[0], c[k].x); wmax[0] = std::max(wmax[0], c[k].x);
+            wmin[1] = std::min(wmin[1], c[k].y); wmax[1] = std::max(wmax[1], c[k].y);
+            wmin[2] = std::min(wmin[2], c[k].z); wmax[2] = std::max(wmax[2], c[k].z);
+        }
+
+        ShapeSite site{};
+        site.visual = visual;
+        site.paint = prim_paint;
+        site.world = &world;
+        auto& s = site.geometry;
+        s.origin[0] = lminx; s.origin[1] = lminy; s.origin[2] = lminz;
+        s.u_axis[0] = lmaxx; s.u_axis[1] = lmaxy; s.u_axis[2] = lmaxz;
+        s.color[0] = tint.r; s.color[1] = tint.g; s.color[2] = tint.b; s.color[3] = tint.a;
+        s.shape_kind = kRtShapeKindMesh;
+        s.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
+        site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
+        site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
+        site.mesh_primitive = prim_ptr.get();
+        site.has_mesh_data = true;
+
+        cb(user, site);
+    }
+}
+
 void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                              ShapeCb cb, void* user)
 {
@@ -90,84 +165,13 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
             continue;
         }
 
-        // 3D visuals that aren't analytic primitives are triangle
-        // meshes (e.g. MeshVisual from a glTF import). Emit one
-        // Mesh-kind RtShape per IMeshPrimitive. The renderer callback publishes
-        // the primitive's geometry and stores its index in mesh_static_base.
+        // 3D visuals that aren't analytic primitives are triangle meshes (e.g.
+        // MeshVisual from a glTF import). An instanced visual's shapes are emitted
+        // by the BVH, once for all its instances.
         if (auto vs3d = read_state<IVisual3D>(visual)) {
             auto mesh_obj = vs3d->mesh.template get<IMesh>();
-            if (mesh_obj) {
-                auto prims = mesh_obj->get_primitives();
-                for (auto& prim_ptr : prims) {
-                    auto prim_state = read_state<IMeshPrimitive>(prim_ptr.get());
-                    if (!prim_state) continue;
-                    auto buf = prim_ptr->get_buffer();
-                    if (!buf) continue;
-                    // Skip until the geometry is GPU-resident. Asked as a ref
-                    // rather than an address: the bytes live in the mesh-word
-                    // arena, so there is a base and no address to test.
-                    if (!get_gpu_ref(buf).valid()) continue;
-                    uint32_t v_count = prim_ptr->get_vertex_count();
-                    uint32_t i_count = prim_ptr->get_index_count();
-                    uint32_t v_stride = prim_ptr->get_vertex_stride();
-                    if (v_count == 0 || i_count < 3 || v_stride == 0) continue;
-                    if (prim_ptr->get_topology() != MeshTopology::TriangleList) continue;
-
-                    // Per-primitive material (pulled the same way as
-                    // analytic CubeVisual / SphereVisual, but per
-                    // primitive instead of just first).
-                    IProgram* prim_paint = paint;
-                    if (prim_state->material) {
-                        auto prog_ptr = prim_state->material.template get<IProgram>();
-                        if (prog_ptr) prim_paint = prog_ptr.get();
-                    }
-
-                    // World-space AABB by transforming the local AABB's
-                    // 8 corners through the element world matrix.
-                    aabb local_b = prim_ptr->get_bounds();
-                    float lminx = local_b.position.x;
-                    float lminy = local_b.position.y;
-                    float lminz = local_b.position.z;
-                    float lmaxx = lminx + local_b.extent.width;
-                    float lmaxy = lminy + local_b.extent.height;
-                    float lmaxz = lminz + local_b.extent.depth;
-                    auto xf = [&](float lx, float ly, float lz) {
-                        float wx_ = world(0, 0) * lx + world(0, 1) * ly + world(0, 2) * lz + world(0, 3);
-                        float wy_ = world(1, 0) * lx + world(1, 1) * ly + world(1, 2) * lz + world(1, 3);
-                        float wz_ = world(2, 0) * lx + world(2, 1) * ly + world(2, 2) * lz + world(2, 3);
-                        return ::velk::vec3{wx_, wy_, wz_};
-                    };
-                    ::velk::vec3 c[8] = {
-                        xf(lminx, lminy, lminz), xf(lmaxx, lminy, lminz),
-                        xf(lminx, lmaxy, lminz), xf(lmaxx, lmaxy, lminz),
-                        xf(lminx, lminy, lmaxz), xf(lmaxx, lminy, lmaxz),
-                        xf(lminx, lmaxy, lmaxz), xf(lmaxx, lmaxy, lmaxz),
-                    };
-                    float wmin[3] = {c[0].x, c[0].y, c[0].z};
-                    float wmax[3] = {c[0].x, c[0].y, c[0].z};
-                    for (int k = 1; k < 8; ++k) {
-                        wmin[0] = std::min(wmin[0], c[k].x); wmax[0] = std::max(wmax[0], c[k].x);
-                        wmin[1] = std::min(wmin[1], c[k].y); wmax[1] = std::max(wmax[1], c[k].y);
-                        wmin[2] = std::min(wmin[2], c[k].z); wmax[2] = std::max(wmax[2], c[k].z);
-                    }
-
-                    ShapeSite site{};
-                    site.visual = visual;
-                    site.paint = prim_paint;
-                    site.world = &world;
-                    auto& s = site.geometry;
-                    s.origin[0] = lminx; s.origin[1] = lminy; s.origin[2] = lminz;
-                    s.u_axis[0] = lmaxx; s.u_axis[1] = lmaxy; s.u_axis[2] = lmaxz;
-                    s.color[0] = tint.r; s.color[1] = tint.g; s.color[2] = tint.b; s.color[3] = tint.a;
-                    s.shape_kind = kRtShapeKindMesh;
-                    s.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
-                    site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
-                    site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
-                    site.mesh_primitive = prim_ptr.get();
-                    site.has_mesh_data = true;
-
-                    cb(user, site);
-                }
+            if (mesh_obj && !interface_cast<IInstancedMeshVisual>(visual)) {
+                emit_mesh_shapes(visual, *mesh_obj, world, tint, paint, cb, user);
             }
             continue;
         }

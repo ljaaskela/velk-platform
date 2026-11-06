@@ -171,7 +171,8 @@ struct DrawEntry
     IProgram::Ptr material{};                      ///< Material driving this entry's pipeline + data (0 = visual's own shader).
     uint64_t pipeline_override{};                  ///< Cached material pipeline handle; filled by the renderer.
     uint8_t instance_data[kMaxInstanceDataSize]{}; ///< Packed instance data for the GPU.
-    uint32_t instance_size{};                      ///< Bytes used in instance_data.
+    uint32_t instance_size{};                      ///< Bytes used in instance_data, or the size of one instance in instance_source.
+    IInterface::Ptr instance_source{};             ///< When set, supplies many instances in place of instance_data.
 
     /**
      * @brief Packs a typed instance struct into instance_data.

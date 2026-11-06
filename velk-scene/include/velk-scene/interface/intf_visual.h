@@ -3,6 +3,7 @@
 
 #include <velk/api/math_types.h>
 #include <velk/api/object_ref.h>
+#include <velk/array_view.h>
 #include <velk/interface/intf_metadata.h>
 #include <velk/vector.h>
 
@@ -125,6 +126,78 @@ public:
     VELK_INTERFACE(
         (PROP, ObjectRef, mesh, {})
     )
+};
+
+/// An instance's placement relative to its element: the first three rows of its matrix.
+struct InstanceTransform
+{
+    float rows[3][4];
+
+    static InstanceTransform from(const mat4& m)
+    {
+        InstanceTransform t;
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                t.rows[row][col] = m(row, col);
+            }
+        }
+        return t;
+    }
+
+    mat4 to_mat4() const
+    {
+        mat4 m = mat4::identity();
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                m(row, col) = rows[row][col];
+            }
+        }
+        return m;
+    }
+};
+
+/**
+ * @brief Draws one mesh many times, on one element.
+ *
+ * For counts where an element per instance is too expensive. Transform traits on the
+ * element move all instances together. Each instance has a slot, which is its stable
+ * index until it is removed, and removed slots are reused.
+ *
+ * Not drawn by the RT path's primary rays yet, which walk a flat list of shapes. Its
+ * bounces and shadows do see instances.
+ */
+class IInstancedMeshVisual : public Interface<IInstancedMeshVisual>
+{
+public:
+    /// Adds an instance and returns its slot.
+    virtual uint32_t add_instance(const mat4& transform) = 0;
+    /// Adds @p transforms. Slots are consecutive from the returned one if no slot has been removed.
+    virtual uint32_t add_instances(array_view<const InstanceTransform> transforms) = 0;
+    virtual void set_transform(uint32_t slot, const mat4& transform) = 0;
+    virtual void remove_instance(uint32_t slot) = 0;
+    /// Live instances.
+    virtual uint32_t get_instance_count() const = 0;
+};
+
+class IGpuArena;
+
+/** Internal half of an instanced mesh visual, read by the renderer and the BVH. */
+class IInstancedMeshInternal : public Interface<IInstancedMeshInternal>
+{
+public:
+    /// Transforms by slot, including the slots of removed instances.
+    virtual array_view<const InstanceTransform> get_transforms() const = 0;
+    virtual bool is_live(uint32_t slot) const = 0;
+
+    /// Brings the raster instance data in @p arena up to date, given the element's
+    /// @p world matrix.
+    virtual void flush_instances(IGpuArena& arena, const mat4& world) = 0;
+    virtual uint64_t instance_region_offset() const = 0;
+    virtual uint64_t instance_region_size() const = 0;
+
+    /// Slots changed since the last call, added to @p changed. Sets @p all instead
+    /// when the list would not be worth keeping.
+    virtual void take_changed_slots(vector<uint32_t>& changed, bool& all) = 0;
 };
 
 } // namespace velk

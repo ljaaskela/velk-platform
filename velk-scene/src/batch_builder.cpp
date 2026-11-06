@@ -238,7 +238,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                     uint64_t bkey = make_batch_key(pipeline, prim_key,
                                                    resolve_texture(de.material.get(), texture));
 
-                    if (target_batches.empty() || bkey != last_bkey) {
+                    if (target_batches.empty() || bkey != last_bkey || de.instance_source) {
                         auto batch_ptr = ::velk::instance().create<IBatch>(
                             ClassId::DefaultBatch);
                         if (!batch_ptr) continue;
@@ -274,6 +274,20 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
 
                     auto* batch = static_cast<impl::DefaultBatch*>(
                         target_batches.back().get());
+
+                    // A batch of its own, over the visual's region. An empty slot list
+                    // tells the transform path this element needs no batch rewrite.
+                    if (auto source = interface_pointer_cast<IInstancedMeshInternal>(de.instance_source)) {
+                        batch->set_instance_count(static_cast<uint32_t>(source->get_transforms().size()));
+                        batch->set_instance_source(std::move(source));
+                        batch->set_world_aabb(elem_state->world_aabb);
+                        last_bkey = 0;
+                        if (track_slots) {
+                            out_slots[elem];
+                        }
+                        continue;
+                    }
+
                     auto& instance_data = batch->mutable_instance_data();
 
                     auto data_offset = instance_data.size();
@@ -404,7 +418,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
             // Inconsistency would land bogus indirect args on GPU.
             const size_t expected = static_cast<size_t>(batch->instance_stride())
                                     * static_cast<size_t>(batch->instance_count());
-            if (batch->instance_data().size() != expected) {
+            if (!batch->has_instance_source() && batch->instance_data().size() != expected) {
                 VELK_LOG(W,
                          "DefaultBatch::finalize: SKIP inconsistent shape "
                          "stride=%u count=%u idata=%zu (expected %zu)",

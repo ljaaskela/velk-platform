@@ -7,6 +7,7 @@
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_gpu_arena.h>
+#include <velk-scene/interface/intf_visual.h>
 #include <velk-scene/plugin.h>
 
 #include <cstdint>
@@ -53,6 +54,9 @@ public:
     void set_primitive(IMeshPrimitive::Ptr v) { primitive_ = std::move(v); }
     void set_shader_source(IShaderSource::Ptr v) { shader_source_ = std::move(v); }
     void set_pipeline_options(const PipelineOptions& v) { pipeline_options_ = v; }
+    /// Instances come from @p source's region, not from this batch.
+    void set_instance_source(IInstancedMeshInternal::Ptr source) { instance_source_ = std::move(source); }
+    bool has_instance_source() const { return instance_source_ != nullptr; }
 
     /// Producer-side: pack the args + count prefix and instance bytes
     /// into the composed storage buffer's bytes. `indexed` chooses
@@ -84,8 +88,14 @@ public:
     {
         instance_region_ = std::move(region);
     }
-    uint64_t instance_region_offset() const override { return instance_region_.offset(); }
-    uint64_t instance_region_size() const override { return instance_region_.size(); }
+    uint64_t instance_region_offset() const override
+    {
+        return instance_source_ ? instance_source_->instance_region_offset() : instance_region_.offset();
+    }
+    uint64_t instance_region_size() const override
+    {
+        return instance_source_ ? instance_source_->instance_region_size() : instance_region_.size();
+    }
     bool take_instances_dirty() override
     {
         bool d = instances_dirty_;
@@ -128,6 +138,7 @@ private:
     /// frames, RAII-freed (deferred) when the batch is destroyed.
     /// offset / instance_stride is the shader instances_base.
     ArenaRegion instance_region_;
+    IInstancedMeshInternal::Ptr instance_source_;
     /// Set when instance bytes change (finalize_storage / update_instance_at);
     /// the upload sweep re-uploads the region only when this is set.
     bool instances_dirty_ = true;

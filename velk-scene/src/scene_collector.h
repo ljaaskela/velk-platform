@@ -187,6 +187,12 @@ void walk_scene_preorder(IScene* scene, const IObject::Ptr& obj, F&& on_element)
     }
 }
 
+// Emits one mesh-kind shape per primitive of @p mesh that is GPU-resident. The
+// callback publishes the primitive's geometry and stores its index in
+// geometry.mesh_static_base.
+void emit_mesh_shapes(IVisual* visual, IMesh& mesh, const mat4& world, const color& tint, IProgram* paint,
+                      ShapeCb cb, void* user);
+
 // Emits shape sites for a single element (one per analytic shape or
 // one per rect draw entry). Shared by enumerate_scene_shapes and SceneBvh.
 void emit_shapes_for_element(IElement* element, IRenderContext* ctx,

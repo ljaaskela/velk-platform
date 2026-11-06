@@ -1,0 +1,60 @@
+#ifndef VELK_UI_API_VISUAL_INSTANCED_MESH_H
+#define VELK_UI_API_VISUAL_INSTANCED_MESH_H
+
+#include <velk-scene/api/visual/visual.h>
+#include <velk-scene/plugin.h>
+
+namespace velk {
+
+/**
+ * @brief Draws one mesh many times on one element. See IInstancedMeshVisual.
+ */
+class InstancedMeshVisual : public Visual3D
+{
+public:
+    InstancedMeshVisual() = default;
+    explicit InstancedMeshVisual(IObject::Ptr obj) : Visual3D(check_object<IInstancedMeshVisual>(obj)) {}
+
+    /** @brief Adds an instance and returns its slot. */
+    uint32_t add_instance(const mat4& transform)
+    {
+        return with<IInstancedMeshVisual>([&](auto& v) { return v.add_instance(transform); });
+    }
+
+    /** @brief Adds @p transforms and returns the first slot. */
+    uint32_t add_instances(array_view<const InstanceTransform> transforms)
+    {
+        return with<IInstancedMeshVisual>([&](auto& v) { return v.add_instances(transforms); });
+    }
+
+    /** @brief Moves the instance in @p slot. */
+    void set_transform(uint32_t slot, const mat4& transform)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_transform(slot, transform); });
+    }
+
+    /** @brief Removes the instance in @p slot. */
+    void remove_instance(uint32_t slot)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.remove_instance(slot); });
+    }
+
+    /** @brief Returns the number of live instances. */
+    uint32_t get_instance_count() const
+    {
+        return with<IInstancedMeshVisual>([](auto& v) { return v.get_instance_count(); });
+    }
+};
+
+namespace trait::visual {
+
+inline InstancedMeshVisual create_instanced_mesh()
+{
+    return InstancedMeshVisual(instance().create<IObject>(ClassId::Visual::InstancedMesh));
+}
+
+} // namespace trait::visual
+
+} // namespace velk
+
+#endif // VELK_UI_API_VISUAL_INSTANCED_MESH_H

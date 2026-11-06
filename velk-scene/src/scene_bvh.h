@@ -28,6 +28,11 @@ namespace velk {
  * been still for a while. With a stable set of movers, the per-frame cost depends
  * only on the movers.
  *
+ * An instanced visual's instances skip the records and sit in partitions of their
+ * own, which join the same top tree. A moved instance goes to a dynamic partition of
+ * its element, as records do, and a translated element only moves its partitions'
+ * origins.
+ *
  * All node, record and shape indices on the GPU are absolute in their arenas.
  */
 namespace impl {
@@ -88,9 +93,38 @@ private:
         uint32_t quiet_frames = 0;       ///< Frames since it last moved, in the dynamic partition.
     };
 
+    /// An element's instances. They have no Records: their partitions hold instance
+    /// slots, and every GPU record is computed from the visual's transforms and points
+    /// at this one run of shapes.
+    struct InstanceGroup
+    {
+        IInstancedMeshInternal* visual = nullptr;
+        mat4 world{};
+        vector<RtShape> shapes;
+        ArenaRegion shape_region;
+        uint32_t first_shape = 0;
+        BvhItemBounds local_bounds{};  ///< Of the mesh.
+        vector<uint32_t> partitions;
+        vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
+        uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.
+
+        /// Holds instances that moved recently. It rebuilds each frame it changes, and
+        /// joins the root rather than the top tree, so a mover costs only itself.
+        uint32_t dynamic_partition = kUnplaced;
+        struct Mover
+        {
+            uint32_t home;        ///< The partition it left, in partitions_.
+            uint32_t moved_frame; ///< The update it last moved in.
+        };
+        std::unordered_map<uint32_t, Mover> movers;  ///< By slot.
+    };
+
     struct Partition
     {
-        vector<uint32_t> members;  ///< Record slots. Can hold stale slots until `dirty` is handled.
+        /// Record slots, or instance slots when `group` is set. Can hold stale slots
+        /// until `dirty` is handled.
+        vector<uint32_t> members;
+        InstanceGroup* group = nullptr;  ///< Set when this partition holds instances.
         ArenaRegion nodes;
         ArenaRegion records;
         ArenaRegion shapes;
@@ -111,6 +145,18 @@ private:
     void full_build(IScene* scene, const EmitContext& emit);
     void update_element(IElement* element, const EmitContext& emit);
     void remove_element(IElement* element);
+    /// Brings @p element's instance group up to date with its visual.
+    void update_instances(IElement* element, IInstancedMeshInternal& visual, const EmitContext& emit);
+    /// Cuts all of @p group's live instances into new partitions, by Morton order.
+    void cut_instances(InstanceGroup& group, FrameContext& ctx);
+    void free_instance_partitions(InstanceGroup& group);
+    /// Moves @p slot to its group's dynamic partition.
+    void promote_instance(InstanceGroup& group, uint32_t slot);
+    /// Sends instances that have been still for a while back where they came from.
+    void demote_quiet_instances(InstanceGroup& group);
+    bool is_instance_dynamic(uint32_t partition) const;
+    BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
+    RtRecord instance_record(const InstanceGroup& group, uint32_t slot) const;
     void free_record(uint32_t slot);
     /// Moves a record to the dynamic partition, leaving its static partition if any.
     void promote(uint32_t slot);
@@ -135,6 +181,8 @@ private:
     /// dropped them.
     vector<uint32_t> freed_records_;
     std::unordered_map<IElement*, vector<uint32_t>> element_records_;
+    std::unordered_map<IElement*, InstanceGroup> instance_groups_;
+    uint32_t update_frame_ = 0;
     uint32_t live_records_ = 0;
 
     vector<Partition> partitions_;
