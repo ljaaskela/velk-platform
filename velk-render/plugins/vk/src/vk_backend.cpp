@@ -1487,7 +1487,9 @@ void VkBackend::defer_destroy_gpu_buffer(IGpuBuffer* gb, uint64_t completion_mar
 {
     if (!gb) return;
     if (completion_marker == kDefaultCompletionMarker) {
-        completion_marker = frame_completion_marker();
+        // The frame being recorded may use this buffer, so the last submitted frame
+        // finishing is not enough.
+        completion_marker = pending_frame_completion_marker();
     }
     auto* vk_gb = interface_cast<IVkGpuBuffer>(gb);
     if (!vk_gb) return;

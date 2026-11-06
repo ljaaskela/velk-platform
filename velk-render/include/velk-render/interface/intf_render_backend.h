@@ -321,7 +321,8 @@ public:
      *        backend handles synchronously (the wrapper object goes
      *        away once the observer chain unwinds).
      * @note  If @p completion_marker = kDefaultCompletionMarker, implementation should use
-     *        IRenderBackend::frame_completion_marker() as the destruction frame.
+     *        IRenderBackend::pending_frame_completion_marker() as the destruction frame,
+     *        since the frame being recorded may use the buffer.
      */
     virtual void defer_destroy_gpu_buffer(IGpuBuffer* gb,
                                           uint64_t completion_marker = kDefaultCompletionMarker) = 0;
