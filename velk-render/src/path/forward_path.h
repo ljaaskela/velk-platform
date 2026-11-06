@@ -5,6 +5,7 @@
 
 #include <unordered_map>
 
+#include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/plugin.h>
@@ -68,6 +69,7 @@ private:
     {
         IRenderPass::Ptr pass;
         bool dirty = true;
+        InstanceCullPass instance_cull;
         /// Lazily-allocated depth attachment paired with the path's
         /// color_target. Allocated when color_target's
         /// `get_depth_format()` is non-None — typically when called

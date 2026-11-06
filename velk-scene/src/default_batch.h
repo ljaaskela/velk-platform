@@ -58,6 +58,19 @@ public:
     void set_instance_source(IInstancedMeshInternal::Ptr source) { instance_source_ = std::move(source); }
     bool has_instance_source() const { return instance_source_ != nullptr; }
 
+    /// Culls this batch's instances on the GPU, drawing those of @p mesh. All batches of
+    /// a visual share one dispatch: @p owner is the batch that holds its region, or null
+    /// if this batch does.
+    void enable_instance_cull(IBatch::Ptr owner, uint32_t mesh)
+    {
+        instance_cull_ = true;
+        cull_owner_ = std::move(owner);
+        cull_mesh_ = mesh;
+    }
+    /// Allocates the culling arena region, if this batch holds one and has none yet.
+    void ensure_instance_cull(IGpuResourceManager& resources);
+    bool get_instance_cull(InstanceCullInfo& out) const override;
+
     /// Producer-side: pack the args + count prefix and instance bytes
     /// into the composed storage buffer's bytes. `indexed` chooses
     /// VkDrawIndexedIndirectCommand (5×u32) vs VkDrawIndirectCommand
@@ -139,6 +152,11 @@ private:
     /// offset / instance_stride is the shader instances_base.
     ArenaRegion instance_region_;
     IInstancedMeshInternal::Ptr instance_source_;
+    bool instance_cull_ = false;
+    IBatch::Ptr cull_owner_;
+    uint32_t cull_mesh_ = 0;
+    ArenaRegion cull_region_;
+    vector<uint32_t> cull_list_words_;  ///< Per mesh, on the owner.
     /// Set when instance bytes change (finalize_storage / update_instance_at);
     /// the upload sweep re-uploads the region only when this is set.
     bool instances_dirty_ = true;

@@ -5,6 +5,7 @@
 
 #include <unordered_map>
 
+#include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/plugin.h>
@@ -147,6 +148,7 @@ public:
         /// `ensure_gbuffer` recreating the gbuffer group on resize.
         IRenderPass::Ptr cached_gbuffer_pass;
         bool gbuffer_dirty = true;
+        InstanceCullPass instance_cull;
 
         /// Cached lighting (compute + blit) pass. All PushC inputs are
         /// stable across frames now: gbuffer attachments (Step B),

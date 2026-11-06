@@ -246,14 +246,22 @@ R"(
 //   VELK_INSTANCES(ElementInstance)
 //   ElementInstance inst = velk_instance(root);
 // The buffer holds every batch's instance data; each draw reads its own run at
-// `instances_base + gl_InstanceIndex`. Different shaders bind the same slot
-// with their own element type (the buffer is raw bytes; each pipeline
-// interprets its own run). velk_instance is vertex-stage only.
+// `instances_base`, by gl_InstanceIndex or, for a culled draw, by the visible
+// list in the culling arena. Different shaders bind the same slot with their own
+// element type (the buffer is raw bytes; each pipeline interprets its own run).
+// velk_instance is vertex-stage only.
 R"(
 #define VELK_INSTANCES(InstancesType) \
     layout(set = 1, binding = 3, scalar) readonly buffer VelkInstances { InstancesType data[]; } velk_instances;
 
-#define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + gl_InstanceIndex])
+#define VELK_NO_VISIBLE_LIST 0xFFFFFFFFu
+
+#define velk_instance_slot(root)                                                     \
+    (velk_draw(root).visible_base == VELK_NO_VISIBLE_LIST                            \
+         ? uint(gl_InstanceIndex)                                                    \
+         : velk_culling.data[velk_draw(root).visible_base + uint(gl_InstanceIndex)])
+
+#define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + velk_instance_slot(root)])
 )"
 // Per-pipeline typed view of the shared material arena (set = 1 slot 4).
 // Declare once at file scope with this pipeline's material struct:
@@ -292,7 +300,7 @@ struct VelkDrawData {
     uint globals_base;
     uint instances_base;
     uint texture_id;
-    uint instance_count;
+    uint visible_base;
     uint vbo_base;
     uint uv1_base;
     uint uv1_enabled;
@@ -300,6 +308,7 @@ struct VelkDrawData {
 };
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
+layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[]; } velk_culling;
 )"
 // Declares a raster shader's push constant and names it. Put it at file scope,
 // once per shader (a shader may have only one push-constant block):

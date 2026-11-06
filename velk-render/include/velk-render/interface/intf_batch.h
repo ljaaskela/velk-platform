@@ -53,6 +53,21 @@ struct BatchBufferLayout
 };
 
 /**
+ * @brief What GPU culling needs to know about a batch. Batches with the same @c key
+ *        are filled by one dispatch. Word offsets are into the culling arena.
+ */
+struct InstanceCullInfo
+{
+    const void* key = nullptr;
+    uint32_t instances_base = 0;  ///< Element base of the instances in the instance arena.
+    uint32_t slot_count = 0;      ///< Instances to test.
+    uint32_t table_word = 0;      ///< The dispatch's table: see `instance_cull_compute_src`.
+    uint32_t visible_word = 0;    ///< This batch's list of visible instance slots.
+    uint32_t count_word = 0;      ///< How many slots the list holds, once culled.
+    float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
+};
+
+/**
  * @brief One draw-able primitive instance group.
  *
  * Built scene-side (today by `BatchBuilder` in velk-scene) and consumed
@@ -186,6 +201,11 @@ public:
     virtual IBuffer* storage_buffer() const = 0;
 
     /// @}
+
+    /// @brief Fills @p out and returns true if this batch's instances are culled on
+    ///        the GPU. Its indirect args then get their instance count from the
+    ///        culling pass.
+    virtual bool get_instance_cull(InstanceCullInfo& out) const = 0;
 };
 
 } // namespace velk

@@ -140,7 +140,8 @@ inline void emit_draw_calls(
         header.globals_base = view_globals_base;
         header.instances_base = instances_base;
         header.texture_id = texture_id;
-        header.instance_count = batch.instance_count();
+        InstanceCullInfo cull_info{};
+        header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
         // Vertex streams are word bases into the mesh-word arena, the same
         // bytes and the same model RT reads.
         const GpuRef vbo_ref = get_gpu_ref(buffer);

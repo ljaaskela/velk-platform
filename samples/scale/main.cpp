@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn]
-//                      [unlimited] [rt] [text] [overlay]
+//                      [unlimited] [rt] [text] [overlay] [near] [species]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -37,6 +37,9 @@
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
 //           there are any.
+// near:     a forest's trees are drawn up to a distance of 3000. Rays still see them all.
+// species:  a forest has three meshes of tree, of different heights. Its movers do not
+//           move.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -314,7 +317,11 @@ int main(int argc, char* argv[])
     bool ray_traced = false;
     bool with_text = false;
     bool with_overlay = false;
+    bool draw_near = false;
+    bool species = false;
     for (int i = 5; i < argc; ++i) {
+        species = species || std::strcmp(argv[i], "species") == 0;
+        draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
         with_overlay = with_overlay || std::strcmp(argv[i], "overlay") == 0;
         unlimited = unlimited || std::strcmp(argv[i], "unlimited") == 0;
         ray_traced = ray_traced || std::strcmp(argv[i], "rt") == 0;
@@ -481,7 +488,24 @@ int main(int argc, char* argv[])
             }
             forest_visual = velk::trait::visual::create_instanced_mesh();
             forest_visual.set_mesh(tree_mesh);
-            forest_visual.add_instances({transforms.data(), transforms.size()});
+            if (draw_near) {
+                forest_visual.set_draw_distance(3000.f);
+            }
+            if (species) {
+                const velk::IMaterial::Ptr pale = velk::material::create_standard(velk::color{0.45f, 0.5f, 0.12f, 1.f}, 0.f, 0.7f);
+                const velk::IMaterial::Ptr dark = velk::material::create_standard(velk::color{0.05f, 0.25f, 0.16f, 1.f}, 0.f, 0.7f);
+                const uint32_t tall = forest_visual.add_mesh(build_tree_mesh(*render_context, kTreeHeight * 1.6f, trunk_material, dark));
+                const uint32_t small = forest_visual.add_mesh(build_tree_mesh(*render_context, kTreeHeight * 0.6f, trunk_material, pale));
+                velk::vector<velk::InstanceTransform> per_mesh[3];
+                for (long i = 0; i < element_count; ++i) {
+                    per_mesh[i % 3].push_back(transforms[static_cast<size_t>(i)]);
+                }
+                forest_visual.add_instances({per_mesh[0].data(), per_mesh[0].size()});
+                forest_visual.add_instances({per_mesh[1].data(), per_mesh[1].size()}, tall);
+                forest_visual.add_instances({per_mesh[2].data(), per_mesh[2].size()}, small);
+            } else {
+                forest_visual.add_instances({transforms.data(), transforms.size()});
+            }
             auto forest_element = velk::create_element();
             forest_trs = velk::trait::transform::create_trs();
             forest_element.add_trait(forest_trs);
@@ -642,7 +666,7 @@ int main(int argc, char* argv[])
                 forest_extra_slot = forest_visual.add_instance(velk::mat4::translate({grid_start, kFloorY, grid_start - kElementSpacing}));
             }
         }
-        if (forest_instances) {
+        if (forest_instances && !species) {
             // Scattered over the forest, the same trees in every run.
             for (long m = 0; m < mover_count; ++m) {
                 const auto i = static_cast<long>(static_cast<uint64_t>(m) * 2654435761ull % static_cast<uint64_t>(element_count));

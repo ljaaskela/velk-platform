@@ -173,6 +173,7 @@ struct DrawEntry
     uint8_t instance_data[kMaxInstanceDataSize]{}; ///< Packed instance data for the GPU.
     uint32_t instance_size{};                      ///< Bytes used in instance_data, or the size of one instance in instance_source.
     IInterface::Ptr instance_source{};             ///< When set, supplies many instances in place of instance_data.
+    uint32_t instance_source_mesh{};               ///< Which of instance_source's meshes this entry draws.
 
     /**
      * @brief Packs a typed instance struct into instance_data.

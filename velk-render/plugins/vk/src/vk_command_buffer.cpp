@@ -1,6 +1,7 @@
 #include "vk_command_buffer.h"
 
 #include "vk_backend.h"
+#include "vk_gpu_buffer.h"
 #include "vk_gpu_texture.h"
 
 #include <velk-render/interface/intf_gpu_texture.h>
@@ -158,6 +159,27 @@ void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& call)
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+void VkCommandBuffer::record_global_barrier()
+{
+    if (cmd_ == VK_NULL_HANDLE) return;
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                         nullptr, 0, nullptr);
+}
+
+void VkCommandBuffer::record_copy_buffer(::velk::IGpuBuffer* src, uint64_t src_offset, ::velk::IGpuBuffer* dst,
+                                         uint64_t dst_offset, uint64_t size)
+{
+    auto* vk_src = interface_cast<IVkGpuBuffer>(src);
+    auto* vk_dst = interface_cast<IVkGpuBuffer>(dst);
+    if (cmd_ == VK_NULL_HANDLE || !vk_src || !vk_dst) return;
+    VkBufferCopy region{src_offset, dst_offset, size};
+    vkCmdCopyBuffer(cmd_, vk_src->vk_buffer(), vk_dst->vk_buffer(), 1, &region);
 }
 
 void VkCommandBuffer::record_blit_to_texture(

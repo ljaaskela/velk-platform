@@ -230,6 +230,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                 world(1, 3) -= offset_y;
 
                 auto& vc = visuals[pass];
+                IBatch::Ptr cull_owner;
                 for (auto& de : vc.entries) {
                     uint64_t pipeline = (de.pipeline_override != 0) ? de.pipeline_override : de.pipeline_key;
                     uint64_t texture = de.texture_key;
@@ -282,7 +283,13 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                         batch->set_instance_source(std::move(source));
                         batch->set_world_aabb(elem_state->world_aabb);
                         last_bkey = 0;
+                        // A render target's subtree draws all its instances, since
+                        // these lists are per view.
                         if (track_slots) {
+                            batch->enable_instance_cull(cull_owner, de.instance_source_mesh);
+                            if (!cull_owner) {
+                                cull_owner = target_batches.back();
+                            }
                             out_slots[elem];
                         }
                         continue;

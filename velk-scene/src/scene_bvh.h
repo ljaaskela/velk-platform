@@ -95,15 +95,20 @@ private:
 
     /// An element's instances. They have no Records: their partitions hold instance
     /// slots, and every GPU record is computed from the visual's transforms and points
-    /// at this one run of shapes.
+    /// at one run of shapes per mesh.
     struct InstanceGroup
     {
+        struct MeshRun
+        {
+            uint32_t first_shape = 0;
+            uint32_t shape_count = 0;
+            BvhItemBounds bounds{};
+        };
         IInstancedMeshInternal* visual = nullptr;
         mat4 world{};
-        vector<RtShape> shapes;
+        vector<RtShape> shapes;  ///< All meshes' runs.
         ArenaRegion shape_region;
-        uint32_t first_shape = 0;
-        BvhItemBounds local_bounds{};  ///< Of the mesh.
+        vector<MeshRun> meshes;
         vector<uint32_t> partitions;
         vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
         uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.

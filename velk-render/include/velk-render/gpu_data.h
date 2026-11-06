@@ -75,6 +75,9 @@ inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)
     globals.probe_reset_frame = bvh.probe_reset_frame;
 }
 
+/// DrawDataHeader::visible_base of a draw with no visible list. Mirrors GLSL VELK_NO_VISIBLE_LIST.
+inline constexpr uint32_t kNoVisibleList = 0xFFFFFFFFu;
+
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
@@ -93,9 +96,9 @@ inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)
 VELK_GPU_STRUCT DrawDataHeader
 {
     uint32_t globals_base;      ///< Index into the set = 1 globals buffer; shaders read velk_globals.data[globals_base].
-    uint32_t instances_base;    ///< Element base into the set = 1 instance arena; shader reads velk_instances.data[instances_base + gl_InstanceIndex].
+    uint32_t instances_base;    ///< Element base into the set = 1 instance arena.
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
-    uint32_t instance_count;    ///< Number of instances in this draw.
+    uint32_t visible_base;      ///< Word base of the list of visible instances in the set = 1 culling arena, or kNoVisibleList when the draw's instances are all drawn in order.
     uint32_t vbo_base;          ///< Word base of the draw's vertex stream in the set = 1 mesh-word arena.
     uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback when @c uv1_enabled is 0.
     uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_base; 0 = fallback, vertex shader reads vertex 0 only. Used as a branchless index multiplier in the vertex shader.

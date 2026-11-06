@@ -143,12 +143,13 @@ BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slo
 {
     const InstanceTransform& t = group.visual->get_transforms()[slot];
     const mat4& w = group.world;
+    const BvhItemBounds& local = group.meshes[group.visual->get_slot_mesh(slot)].bounds;
     // The instance's matrix applied to the mesh bounds' center and half extents.
     float center[3];
     float half[3];
     for (int k = 0; k < 3; ++k) {
-        center[k] = 0.5f * (group.local_bounds.min[k] + group.local_bounds.max[k]);
-        half[k] = 0.5f * (group.local_bounds.max[k] - group.local_bounds.min[k]);
+        center[k] = 0.5f * (local.min[k] + local.max[k]);
+        half[k] = 0.5f * (local.max[k] - local.min[k]);
     }
     float instance_center[3];
     float instance_half[3];
@@ -178,8 +179,9 @@ BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slo
 RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) const
 {
     RtRecord record = make_rt_record(group.world * group.visual->get_transforms()[slot].to_mat4());
-    record.first_shape = group.first_shape;
-    record.shape_count = static_cast<uint32_t>(group.shapes.size());
+    const auto& run = group.meshes[group.visual->get_slot_mesh(slot)];
+    record.first_shape = run.first_shape;
+    record.shape_count = run.shape_count;
     return record;
 }
 
@@ -336,14 +338,12 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
 
 void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visual, const EmitContext& emit)
 {
-    auto visual_state = read_state<IVisual3D>(&visual);
-    auto mesh = visual_state ? visual_state->mesh.get<IMesh>() : nullptr;
     auto element_state = read_state<IElement>(element);
-    if (!mesh || !element_state) {
+    if (!element_state) {
         return;
     }
 
-    // One run of shapes for all instances, local to each of them.
+    // One run of shapes per mesh, local to each instance.
     struct CollectShapes
     {
         const EmitContext& emit;
@@ -351,13 +351,28 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     };
     CollectShapes collect{emit, {}};
     const mat4 identity = mat4::identity();
-    emit_mesh_shapes(interface_cast<IVisual>(&visual), *mesh, identity, ::velk::color::white(), nullptr,
-                     +[](void* u, ShapeSite& site) {
-                         auto& c = *static_cast<CollectShapes*>(u);
-                         c.emit.cb(c.emit.user, site);
-                         c.shapes.push_back(site.geometry);
-                     }, &collect);
-    if (collect.shapes.empty()) {
+    vector<InstanceGroup::MeshRun> runs;
+    bool unresolved = false;
+    for (uint32_t m = 0; m < visual.get_mesh_count(); ++m) {
+        InstanceGroup::MeshRun run;
+        run.first_shape = static_cast<uint32_t>(collect.shapes.size());
+        if (auto mesh = visual.get_mesh(m)) {
+            emit_mesh_shapes(interface_cast<IVisual>(&visual), *mesh, identity, ::velk::color::white(), nullptr,
+                             +[](void* u, ShapeSite& site) {
+                                 auto& c = *static_cast<CollectShapes*>(u);
+                                 c.emit.cb(c.emit.user, site);
+                                 c.shapes.push_back(site.geometry);
+                             }, &collect);
+            const aabb local = mesh->get_bounds();
+            const vec3 lo = local.min();
+            const vec3 hi = local.max();
+            run.bounds = {{lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}};
+        }
+        run.shape_count = static_cast<uint32_t>(collect.shapes.size()) - run.first_shape;
+        unresolved = unresolved || (run.shape_count == 0 && visual.get_mesh_instance_count(m) != 0);
+        runs.push_back(run);
+    }
+    if (unresolved || collect.shapes.empty()) {
         if (std::find(unresolved_.begin(), unresolved_.end(), element) == unresolved_.end()) {
             unresolved_.push_back(element);
         }
@@ -370,9 +385,10 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
 
     bool rebuild = new_group;
     const size_t shape_bytes = collect.shapes.size() * sizeof(RtShape);
+    uint32_t first_shape = group.meshes.empty() ? 0u : group.meshes[0].first_shape;
     if (group.shapes.size() != collect.shapes.size()) {
         alloc_elements(emit.frame.bvh_shapes_arena, group.shape_region, collect.shapes.size(), sizeof(RtShape),
-                       group.first_shape);
+                       first_shape);
         if (!group.shape_region.valid()) {
             VELK_LOG(E, "SceneBvh: instance shape allocation failed");
             return;
@@ -385,12 +401,13 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         group.shapes = std::move(collect.shapes);
     }
 
-    const aabb local = mesh->get_bounds();
-    const vec3 local_min = local.min();
-    const vec3 local_max = local.max();
-    const BvhItemBounds new_bounds{{local_min.x, local_min.y, local_min.z}, {local_max.x, local_max.y, local_max.z}};
-    if (std::memcmp(&group.local_bounds, &new_bounds, sizeof(new_bounds)) != 0) {
-        group.local_bounds = new_bounds;
+    // Runs hold absolute shape indices.
+    for (auto& run : runs) {
+        run.first_shape += first_shape;
+    }
+    if (group.meshes.size() != runs.size()
+        || std::memcmp(group.meshes.data(), runs.data(), runs.size() * sizeof(InstanceGroup::MeshRun)) != 0) {
+        group.meshes = std::move(runs);
         rebuild = true;
     }
 

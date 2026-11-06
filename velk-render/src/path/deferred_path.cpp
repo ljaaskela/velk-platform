@@ -739,6 +739,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
 
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
@@ -1291,6 +1292,7 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
         it->second.gbuffer_dirty = true;
         it->second.lighting_dirty = true;
         it->second.transparent_dirty = true;
+        it->second.instance_cull.dirty = true;
     }
 }
 

@@ -224,6 +224,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             upload_instances(bp);
             upload_material(bp);
             ensure_draw_data_region(bp);
+            batch->ensure_instance_cull(*ctx.resources);
         };
         for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {

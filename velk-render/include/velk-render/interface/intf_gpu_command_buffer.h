@@ -16,6 +16,7 @@ namespace velk {
 // `IGpuCommandBuffer::Ptr` — keep the forward decls.
 struct DrawCall;
 struct DispatchCall;
+class IGpuBuffer;
 class IGpuTexture;
 class IRenderTextureGroup;
 using TextureId = uint32_t;
@@ -140,6 +141,14 @@ public:
 
     /// Record a compute dispatch.
     virtual void record_dispatch(const DispatchCall& call) = 0;
+
+    /// Make all earlier work visible to all later work, for anything the graph's
+    /// barriers do not cover, such as a compute shader writing what a draw reads.
+    virtual void record_global_barrier() = 0;
+
+    /// Copy @p size bytes between buffers.
+    virtual void record_copy_buffer(IGpuBuffer* src, uint64_t src_offset, IGpuBuffer* dst, uint64_t dst_offset,
+                                    uint64_t size) = 0;
 
     /// Record a blit from a storage / renderable texture into another
     /// renderable / sampleable texture. Source layout restored; dest

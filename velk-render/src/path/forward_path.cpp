@@ -43,6 +43,7 @@ void ForwardPath::on_render_state_changed(IRenderState* source,
     auto it = cached_passes_.find(view);
     if (it != cached_passes_.end()) {
         it->second.dirty = true;
+        it->second.instance_cull.dirty = true;
     }
 }
 
@@ -96,6 +97,8 @@ void ForwardPath::build_passes(IViewEntry& entry,
         cache.dirty = true;
         cache.last_target_texture = target_texture;
     }
+
+    emit_instance_cull_pass(cache.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
 
     emit_cached_view_pass(
         cache.pass, cache.dirty, "forward", graph,

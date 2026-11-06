@@ -9,6 +9,7 @@
 
 #include <velk/string_view.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/render_types.h>
 #include <velk-scene/interface/intf_trait.h>
 
@@ -157,26 +158,34 @@ struct InstanceTransform
 };
 
 /**
- * @brief Draws one mesh many times, on one element.
+ * @brief Draws meshes many times, on one element.
  *
- * For counts where an element per instance is too expensive. Transform traits on the
- * element move all instances together. Each instance has a slot, which is its stable
- * index until it is removed, and removed slots are reused.
+ * For counts where an element per instance is too expensive. Each instance uses one
+ * mesh: IVisual3D::mesh is mesh 0, and `add_mesh` adds more, such as species of a tree.
+ * Transform traits on the element move all instances together. Each instance has a
+ * slot, which is its stable index until it is removed, and removed slots are reused.
  *
  * Not drawn by the RT path's primary rays yet, which walk a flat list of shapes. Its
- * bounces and shadows do see instances.
+ * bounces and shadows do see instances. Under a render target, which has no GPU culling,
+ * every instance draws as mesh 0.
  */
 class IInstancedMeshVisual : public Interface<IInstancedMeshVisual>
 {
 public:
-    /// Adds an instance and returns its slot.
-    virtual uint32_t add_instance(const mat4& transform) = 0;
-    /// Adds @p transforms. Slots are consecutive from the returned one if no slot has been removed.
-    virtual uint32_t add_instances(array_view<const InstanceTransform> transforms) = 0;
+    /// Adds a mesh instances can use and returns its index.
+    virtual uint32_t add_mesh(const IMesh::Ptr& mesh) = 0;
+    /// Adds an instance of @p mesh and returns its slot.
+    virtual uint32_t add_instance(const mat4& transform, uint32_t mesh = 0) = 0;
+    /// Adds instances of @p mesh. Slots are consecutive from the returned one if no slot
+    /// has been removed.
+    virtual uint32_t add_instances(array_view<const InstanceTransform> transforms, uint32_t mesh = 0) = 0;
     virtual void set_transform(uint32_t slot, const mat4& transform) = 0;
     virtual void remove_instance(uint32_t slot) = 0;
     /// Live instances.
     virtual uint32_t get_instance_count() const = 0;
+    /// Instances further from the camera than this are not drawn, though rays still
+    /// see them. 0, the default, means no limit.
+    virtual void set_draw_distance(float distance) = 0;
 };
 
 class IGpuArena;
@@ -194,6 +203,16 @@ public:
     virtual void flush_instances(IGpuArena& arena, const mat4& world) = 0;
     virtual uint64_t instance_region_offset() const = 0;
     virtual uint64_t instance_region_size() const = 0;
+
+    virtual uint32_t get_mesh_count() const = 0;
+    virtual IMesh::Ptr get_mesh(uint32_t index) const = 0;
+    /// The mesh the instance in @p slot uses.
+    virtual uint32_t get_slot_mesh(uint32_t slot) const = 0;
+    /// Live instances of mesh @p index.
+    virtual uint32_t get_mesh_instance_count(uint32_t index) const = 0;
+    /// Mesh @p index's bounding sphere, as center xyz and radius.
+    virtual void get_cull_sphere(uint32_t index, float out[4]) const = 0;
+    virtual float get_draw_distance() const = 0;
 
     /// Slots changed since the last call, added to @p changed. Sets @p all instead
     /// when the list would not be worth keeping.

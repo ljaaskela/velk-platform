@@ -377,7 +377,10 @@ public:
         /// The draw's push constant is the element index of its record, which
         /// is the whole of what a raster pipeline is handed.
         kGlobalDrawData   = 15,
-        kGlobalBufferSlotCount = 16,
+        /// GPU culling's tables and visible lists, as raw 32-bit words. The one
+        /// slot compute shaders write.
+        kGlobalCulling    = 16,
+        kGlobalBufferSlotCount = 17,
     };
 
     /// Binds @p buffer at slot @p binding of the current frame's set = 1

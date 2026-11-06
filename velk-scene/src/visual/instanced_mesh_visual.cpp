@@ -22,12 +22,13 @@ namespace {
 /// Past this share of the slots, the changes are handled as if all had changed.
 constexpr uint32_t kChangedListDivisor = 4;
 
-ElementInstance make_instance(const mat4& world, const InstanceTransform& transform)
+ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh)
 {
     ElementInstance instance{};
     instance.world_matrix = world * transform.to_mat4();
     instance.size = {1.f, 1.f, 1.f, 0.f};
     instance.col = ::velk::color::white();
+    instance.params[1] = mesh;
     return instance;
 }
 
@@ -36,44 +37,64 @@ ElementInstance make_instance(const mat4& world, const InstanceTransform& transf
 vector<DrawEntry> InstancedMeshVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
                                                         const ::velk::size& /*bounds*/)
 {
-    auto state = read_state<IVisual3D>(this);
-    auto mesh = state ? state->mesh.get<IMesh>() : nullptr;
-    if (!mesh) {
-        return {};
-    }
-
-    ::velk::find_or_create_attachment<::velk::IMaterialOptions>(this, ::velk::ClassId::MaterialOptions);
-
     vector<DrawEntry> out;
-    for (auto& primitive : mesh->get_primitives()) {
-        if (!primitive) {
+    for (uint32_t m = 0; m < get_mesh_count(); ++m) {
+        auto mesh = get_mesh(m);
+        if (!mesh) {
             continue;
         }
-        DrawEntry entry{};
-        entry.pipeline_key = kPrimitive3DPipelineKey;
-        entry.primitive = primitive;
-        if (auto ps = read_state<IMeshPrimitive>(primitive.get()); ps && ps->material) {
-            entry.material = ps->material.get<IProgram>();
+        ::velk::find_or_create_attachment<::velk::IMaterialOptions>(this, ::velk::ClassId::MaterialOptions);
+        for (auto& primitive : mesh->get_primitives()) {
+            if (!primitive) {
+                continue;
+            }
+            DrawEntry entry{};
+            entry.pipeline_key = kPrimitive3DPipelineKey;
+            entry.primitive = primitive;
+            if (auto ps = read_state<IMeshPrimitive>(primitive.get()); ps && ps->material) {
+                entry.material = ps->material.get<IProgram>();
+            }
+            entry.instance_size = sizeof(ElementInstance);
+            entry.instance_source = get_self<IInterface>();
+            entry.instance_source_mesh = m;
+            out.push_back(std::move(entry));
         }
-        entry.instance_size = sizeof(ElementInstance);
-        entry.instance_source = get_self<IInterface>();
-        out.push_back(std::move(entry));
     }
     return out;
 }
 
+IMesh::Ptr InstancedMeshVisual::get_mesh(uint32_t index) const
+{
+    if (index == 0) {
+        auto state = read_state<IVisual3D>(this);
+        return state ? state->mesh.get<IMesh>() : nullptr;
+    }
+    return index <= added_meshes_.size() ? added_meshes_[index - 1] : nullptr;
+}
+
+uint32_t InstancedMeshVisual::add_mesh(const IMesh::Ptr& mesh)
+{
+    added_meshes_.push_back(mesh);
+    invoke_visual_changed();
+    return static_cast<uint32_t>(added_meshes_.size());
+}
+
 aabb InstancedMeshVisual::get_local_bounds(const ::velk::size& /*bounds*/) const
 {
-    auto state = read_state<IVisual3D>(this);
-    auto mesh = state ? state->mesh.get<IMesh>() : nullptr;
-    if (!mesh || !has_bounds_) {
+    if (!has_bounds_) {
         return {};
     }
-    // A sphere around the mesh's origin that holds its bounds, so any rotation fits.
-    const aabb local = mesh->get_bounds();
-    const vec3 lo = local.min();
-    const vec3 hi = local.max();
-    const float reach = max_scale_ * std::sqrt(std::max(vec3::dot(lo, lo), vec3::dot(hi, hi)));
+    // A sphere around each mesh's origin that holds its bounds, so any rotation fits.
+    float reach2 = 0.f;
+    for (uint32_t m = 0; m < get_mesh_count(); ++m) {
+        if (auto mesh = get_mesh(m)) {
+            const aabb local = mesh->get_bounds();
+            const vec3 lo = local.min();
+            const vec3 hi = local.max();
+            reach2 = std::max({reach2, vec3::dot(lo, lo), vec3::dot(hi, hi)});
+        }
+    }
+    const float reach = max_scale_ * std::sqrt(reach2);
     aabb out;
     out.position = {origin_min_[0] - reach, origin_min_[1] - reach, origin_min_[2] - reach};
     out.extent = {origin_max_[0] - origin_min_[0] + reach * 2.f, origin_max_[1] - origin_min_[1] + reach * 2.f,
@@ -97,19 +118,25 @@ void InstancedMeshVisual::grow_bounds(const InstanceTransform& transform)
     }
 }
 
-uint32_t InstancedMeshVisual::place(const InstanceTransform& transform)
+uint32_t InstancedMeshVisual::place(const InstanceTransform& transform, uint32_t mesh)
 {
     uint32_t slot;
     if (free_slots_.empty()) {
         slot = static_cast<uint32_t>(transforms_.size());
         transforms_.push_back(transform);
         live_.push_back(1);
+        slot_mesh_.push_back(static_cast<uint16_t>(mesh));
     } else {
         slot = free_slots_.back();
         free_slots_.pop_back();
         transforms_[slot] = transform;
         live_[slot] = 1;
+        slot_mesh_[slot] = static_cast<uint16_t>(mesh);
     }
+    if (mesh_counts_.size() <= mesh) {
+        mesh_counts_.resize(mesh + 1u, 0u);
+    }
+    ++mesh_counts_[mesh];
     ++live_count_;
     grow_bounds(transform);
     note_changed(slot);
@@ -135,23 +162,24 @@ void InstancedMeshVisual::note_changed(uint32_t slot)
     }
 }
 
-uint32_t InstancedMeshVisual::add_instance(const mat4& transform)
+uint32_t InstancedMeshVisual::add_instance(const mat4& transform, uint32_t mesh)
 {
-    const uint32_t slot = place(InstanceTransform::from(transform));
+    const uint32_t slot = place(InstanceTransform::from(transform), mesh);
     invoke_visual_changed();
     return slot;
 }
 
-uint32_t InstancedMeshVisual::add_instances(array_view<const InstanceTransform> transforms)
+uint32_t InstancedMeshVisual::add_instances(array_view<const InstanceTransform> transforms, uint32_t mesh)
 {
     if (transforms.empty()) {
         return 0;
     }
     transforms_.reserve(transforms_.size() + transforms.size());
     live_.reserve(live_.size() + transforms.size());
+    slot_mesh_.reserve(slot_mesh_.size() + transforms.size());
     uint32_t first = 0;
     for (size_t i = 0; i < transforms.size(); ++i) {
-        const uint32_t slot = place(transforms[i]);
+        const uint32_t slot = place(transforms[i], mesh);
         first = i == 0 ? slot : first;
     }
     invoke_visual_changed();
@@ -176,9 +204,29 @@ void InstancedMeshVisual::remove_instance(uint32_t slot)
     }
     live_[slot] = 0;
     free_slots_.push_back(slot);
+    --mesh_counts_[slot_mesh_[slot]];
     --live_count_;
     note_changed(slot);
     invoke_trait_dirty(DirtyFlags::Transform);
+}
+
+void InstancedMeshVisual::set_draw_distance(float distance)
+{
+    draw_distance_ = distance;
+    invoke_visual_changed();
+}
+
+void InstancedMeshVisual::get_cull_sphere(uint32_t index, float out[4]) const
+{
+    auto mesh = get_mesh(index);
+    const aabb local = mesh ? mesh->get_bounds() : aabb{};
+    const vec3 lo = local.min();
+    const vec3 hi = local.max();
+    const vec3 half = (hi - lo) * 0.5f;
+    out[0] = lo.x + half.x;
+    out[1] = lo.y + half.y;
+    out[2] = lo.z + half.z;
+    out[3] = vec3::length(half);
 }
 
 void InstancedMeshVisual::flush_instances(IGpuArena& arena, const mat4& world)
@@ -194,7 +242,7 @@ void InstancedMeshVisual::flush_instances(IGpuArena& arena, const mat4& world)
 
     const auto write_slot = [&](uint32_t slot, ElementInstance* out) {
         if (live_[slot] != 0) {
-            *out = make_instance(world, transforms_[slot]);
+            *out = make_instance(world, transforms_[slot], slot_mesh_[slot]);
         } else {
             *out = ElementInstance{};
         }

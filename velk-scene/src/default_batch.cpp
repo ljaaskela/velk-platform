@@ -4,6 +4,8 @@
 
 #include <velk-render/interface/intf_gpu_buffer.h>
 #include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/interface/intf_gpu_resource_manager.h>
+#include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/plugin.h>
 
 #include <cstring>
@@ -40,6 +42,75 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
     instances_dirty_ = true;
 
     notify_render_state_changed(::velk::RenderStateChange::All);
+}
+
+namespace {
+
+/// Words per mesh in the table at the start of a culling region. See instance_cull_compute_src.
+constexpr uint32_t kCullTableWords = 8;
+constexpr uint32_t kCullCountWord = 4;
+constexpr uint32_t kCullListWord = 5;
+constexpr uint32_t kCullCapacityWord = 6;
+
+} // namespace
+
+void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
+{
+    if (!instance_cull_ || cull_owner_ || cull_region_.valid() || !instance_source_) {
+        return;
+    }
+    auto arena = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return;
+    }
+    const uint32_t mesh_count = instance_source_->get_mesh_count();
+    uint64_t words = uint64_t(mesh_count) * kCullTableWords;
+    for (uint32_t m = 0; m < mesh_count; ++m) {
+        words += instance_source_->get_mesh_instance_count(m);
+    }
+    cull_region_ = arena->alloc(words * sizeof(uint32_t));
+    if (!cull_region_.valid()) {
+        VELK_LOG(E, "DefaultBatch: no room to cull %u instances", instance_count_);
+        return;
+    }
+
+    const auto table_word = static_cast<uint32_t>(cull_region_.offset() / sizeof(uint32_t));
+    vector<uint32_t> table;
+    table.resize(size_t(mesh_count) * kCullTableWords, 0u);
+    cull_list_words_.clear();
+    uint32_t next_list = table_word + mesh_count * kCullTableWords;
+    for (uint32_t m = 0; m < mesh_count; ++m) {
+        uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
+        float sphere[4];
+        instance_source_->get_cull_sphere(m, sphere);
+        std::memcpy(entry, sphere, sizeof(sphere));
+        const uint32_t capacity = instance_source_->get_mesh_instance_count(m);
+        entry[kCullListWord] = next_list;
+        entry[kCullCapacityWord] = capacity;
+        cull_list_words_.push_back(next_list);
+        next_list += capacity;
+    }
+    arena->write_at(cull_region_.offset(), table.data(), table.size() * sizeof(uint32_t));
+}
+
+bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
+{
+    if (!instance_cull_ || !instance_source_) {
+        return false;
+    }
+    const auto* owner = cull_owner_ ? static_cast<const DefaultBatch*>(cull_owner_.get()) : this;
+    if (!owner->cull_region_.valid() || instance_stride_ == 0) {
+        return false;
+    }
+    const auto table_word = static_cast<uint32_t>(owner->cull_region_.offset() / sizeof(uint32_t));
+    out.key = owner;
+    out.instances_base = static_cast<uint32_t>(instance_region_offset() / instance_stride_);
+    out.slot_count = instance_count_;
+    out.table_word = table_word;
+    out.visible_word = owner->cull_list_words_[cull_mesh_];
+    out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
+    out.max_distance = instance_source_->get_draw_distance();
+    return true;
 }
 
 void DefaultBatch::update_instance_at(uint32_t instance_index,
