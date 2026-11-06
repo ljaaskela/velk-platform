@@ -383,6 +383,8 @@ private:
     bool (*surface_create_fn_)(void*, void*, void*) = nullptr;
     // present_surface_id, present_acquire_sem_idx moved into FrameSync.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame (debug flag only).
+    bool device_fault_supported_ = false; ///< VK_EXT_device_fault is enabled.
+    bool device_lost_ = false;            ///< A lost device has already been reported.
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 
     /// Pending `vmaDestroyBuffer` calls keyed by the
@@ -499,6 +501,9 @@ private:
     /// present stay on one thread and no shared SurfaceData is touched.
     /// Returns false if the swapchain is out of date (skip present).
     bool record_present_blit(FrameSync& sync);
+    /// Logs a failed Vulkan call. A lost device is reported once, with what the
+    /// driver says about the fault when it supports that.
+    void report_failure(const char* call, VkResult result);
 
     ::VkCommandBuffer begin_one_shot_commands();
     void end_one_shot_commands(::VkCommandBuffer cb);

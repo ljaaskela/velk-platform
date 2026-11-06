@@ -556,7 +556,7 @@ bool VkBackend::create_device()
     const bool core_dynamic_rendering = instance_api_version_ >= VK_API_VERSION_1_3 &&
                                         props.apiVersion >= VK_API_VERSION_1_3;
 
-    const char* extensions[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr};
+    const char* extensions[3] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr, nullptr};
     uint32_t extension_count = 1;
     if (!core_dynamic_rendering) {
         if (!has_device_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
@@ -623,6 +623,25 @@ bool VkBackend::create_device()
     if (!check_required_features(features12, dynamic_rendering)) {
         return false;
     }
+
+    // Optional: lets a lost device report why. Queried after the required features
+    // are checked, since that check reuses the structs above.
+    VkPhysicalDeviceFaultFeaturesEXT fault_features{};
+    fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    if (has_device_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 query{};
+        query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        query.pNext = &fault_features;
+        vkGetPhysicalDeviceFeatures2(physical_device_, &query);
+        device_fault_supported_ = fault_features.deviceFault == VK_TRUE;
+    }
+    if (device_fault_supported_) {
+        extensions[extension_count++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+        fault_features.pNext = nullptr;
+        fault_features.deviceFaultVendorBinary = VK_FALSE;
+        dynamic_rendering.pNext = &fault_features;
+    }
+    VELK_LOG(I, "VkBackend: device fault reporting %s", device_fault_supported_ ? "available" : "not available");
 
     VkDeviceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2801,7 +2820,7 @@ bool VkBackend::record_present_blit(FrameSync& sync)
     // the semaphore, so this frame must not wait on it or present.
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         if (r != VK_ERROR_OUT_OF_DATE_KHR) {
-            VELK_LOG(E, "VkBackend: vkAcquireNextImageKHR failed: %d", static_cast<int>(r));
+            report_failure("vkAcquireNextImageKHR", r);
         }
         return false;
     }
@@ -3098,7 +3117,7 @@ void VkBackend::submit_frame()
 
         const VkResult submit_result = vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
         if (submit_result != VK_SUCCESS) {
-            VELK_LOG(E, "VkBackend: vkQueueSubmit failed: %d", static_cast<int>(submit_result));
+            report_failure("vkQueueSubmit", submit_result);
         }
 
         VkPresentInfoKHR present_info{};
@@ -3112,7 +3131,7 @@ void VkBackend::submit_frame()
         const VkResult present_result = vkQueuePresentKHR(graphics_queue_, &present_info);
         if (present_result != VK_SUCCESS && present_result != VK_SUBOPTIMAL_KHR
             && present_result != VK_ERROR_OUT_OF_DATE_KHR) {
-            VELK_LOG(E, "VkBackend: vkQueuePresentKHR failed: %d", static_cast<int>(present_result));
+            report_failure("vkQueuePresentKHR", present_result);
         }
     } else {
         // Headless: submit without swapchain synchronization
@@ -3132,12 +3151,69 @@ void VkBackend::submit_frame()
 
         const VkResult submit_result = vkQueueSubmit(graphics_queue_, 1, &submit_info, sync.fence);
         if (submit_result != VK_SUCCESS) {
-            VELK_LOG(E, "VkBackend: vkQueueSubmit failed: %d", static_cast<int>(submit_result));
+            report_failure("vkQueueSubmit", submit_result);
         }
     }
 
     last_frame_value_.store(timeline_value);
     // No recording_slot_ advance here; begin_frame advances on the main thread.
+}
+
+void VkBackend::report_failure(const char* call, VkResult result)
+{
+    if (result != VK_ERROR_DEVICE_LOST) {
+        VELK_LOG(E, "VkBackend: %s failed: %d", call, static_cast<int>(result));
+        return;
+    }
+    // Every call fails from here on, so only the first one is worth reporting.
+    if (device_lost_) {
+        return;
+    }
+    device_lost_ = true;
+
+    uint64_t completed = 0;
+    vkGetSemaphoreCounterValue(device_, frame_timeline_, &completed);
+    VELK_LOG(E, "VkBackend: device lost at %s. Frames: %llu submitted, %llu completed.", call,
+             static_cast<unsigned long long>(last_frame_value_.load()), static_cast<unsigned long long>(completed));
+    for (const auto& timing : last_timings_) {
+        VELK_LOG(E, "VkBackend:   last timed pass %s: %.3f ms", timing.label, static_cast<double>(timing.ms));
+    }
+
+    if (!device_fault_supported_) {
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{};
+    counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+    if (vkGetDeviceFaultInfoEXT(device_, &counts, nullptr) != VK_SUCCESS) {
+        VELK_LOG(E, "VkBackend: device fault counts unavailable");
+        return;
+    }
+    vector<VkDeviceFaultAddressInfoEXT> addresses;
+    vector<VkDeviceFaultVendorInfoEXT> vendors;
+    addresses.resize(counts.addressInfoCount);
+    vendors.resize(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;
+
+    VkDeviceFaultInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+    info.pAddressInfos = addresses.data();
+    info.pVendorInfos = vendors.data();
+    const VkResult fault_result = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+    if (fault_result != VK_SUCCESS && fault_result != VK_INCOMPLETE) {
+        VELK_LOG(E, "VkBackend: device fault info unavailable: %d", static_cast<int>(fault_result));
+        return;
+    }
+    VELK_LOG(E, "VkBackend: device fault: %s", info.description);
+    for (uint32_t i = 0; i < counts.addressInfoCount; ++i) {
+        VELK_LOG(E, "VkBackend:   fault address type %d at 0x%llx, precision %llu", static_cast<int>(addresses[i].addressType),
+                 static_cast<unsigned long long>(addresses[i].reportedAddress),
+                 static_cast<unsigned long long>(addresses[i].addressPrecision));
+    }
+    for (uint32_t i = 0; i < counts.vendorInfoCount; ++i) {
+        VELK_LOG(E, "VkBackend:   vendor fault: %s, code 0x%llx, data 0x%llx", vendors[i].description,
+                 static_cast<unsigned long long>(vendors[i].vendorFaultCode),
+                 static_cast<unsigned long long>(vendors[i].vendorFaultData));
+    }
 }
 
 uint64_t VkBackend::frame_completion_marker() const
