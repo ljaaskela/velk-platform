@@ -17,6 +17,7 @@
 #include <velk-scene/api/trait/trs.h>
 #include <velk-scene/api/visual/mesh.h>
 
+#include <algorithm>
 #include <cmath>
 
 #define CGLTF_IMPLEMENTATION
@@ -213,10 +214,19 @@ void instantiate_node(const cgltf_data* data, const cgltf_node* node,
         }
     }
 
-    char id_buf[64];
-    std::snprintf(id_buf, sizeof(id_buf), "gltf:node:%d", counter++);
+    // Named nodes can be found by name. A repeated name falls back to the node's
+    // number, like an unnamed node.
     auto elem_obj = interface_pointer_cast<IObject>(static_cast<IElement::Ptr>(elem));
-    store.add(id_buf, elem_obj);
+    char id_buf[256];
+    auto add_with_id = [&](int length) {
+        const size_t size = std::min(static_cast<size_t>(std::max(length, 0)), sizeof(id_buf) - 1);
+        return store.add(string_view(id_buf, size), elem_obj);
+    };
+    if (!node->name
+        || failed(add_with_id(std::snprintf(id_buf, sizeof(id_buf), "gltf:node:%s", node->name)))) {
+        add_with_id(std::snprintf(id_buf, sizeof(id_buf), "gltf:node:#%d", counter));
+    }
+    ++counter;
 
     if (parent_obj) {
         hier.add(parent_obj, elem_obj);

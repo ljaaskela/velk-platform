@@ -42,7 +42,9 @@ public:
      *
      * Returns null if the asset failed to load. The returned store uses
      * the `json_importer` convention ("hierarchy:scene" for the root
-     * hierarchy), so it can be passed directly to `IScene::load`.
+     * hierarchy), so it can be passed directly to `IScene::load`. A node's
+     * element is stored as "gltf:node:<name>"; only the first node with a
+     * given name is, and the rest are numbered.
      */
     virtual IStore::Ptr instantiate() const = 0;
 };
