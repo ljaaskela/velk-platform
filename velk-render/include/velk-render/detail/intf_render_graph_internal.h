@@ -17,11 +17,11 @@ class IRenderGraphInternal
     : public Interface<IRenderGraphInternal, IRenderGraph>
 {
 public:
-    /// Wires the graph to a backend. Called by Renderer right after
-    /// the graph is created. The graph propagates the backend to its
-    /// internally-owned transient `IGpuResourceManager`, which uses it
-    /// to create per-frame intermediate textures, groups, etc.
-    virtual void init(IRenderBackend* backend) = 0;
+    /// Gives the graph the transient `IGpuResourceManager` that `resources()`
+    /// returns. Called by Renderer right after the graph is created. Every
+    /// frame slot's graph shares one manager, because textures created through
+    /// it can outlive the frame and are looked up again from later slots.
+    virtual void init(const IGpuResourceManager::Ptr& resources) = 0;
 };
 
 } // namespace velk

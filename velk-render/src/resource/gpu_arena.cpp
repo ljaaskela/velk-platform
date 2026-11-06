@@ -73,6 +73,13 @@ void GpuArena::write_at(uint64_t offset, const void* data, uint64_t size)
     }
 }
 
+void GpuArena::update_at(uint64_t offset, const void* data, uint64_t size)
+{
+    if (backend_ && persistent_buffer_) {
+        backend_->queue_buffer_write(persistent_buffer_, offset, data, size);
+    }
+}
+
 void GpuArena::release_region(uint64_t offset, uint64_t size)
 {
     // Defer the reclaim past the in-flight frame: the range may still be read
@@ -112,6 +119,12 @@ bool GpuArena::grow_persistent(uint64_t want)
     auto new_buffer = resources_ ? resources_->create_gpu_buffer(desc)
                                  : backend_->create_gpu_buffer(desc);
     if (!new_buffer) return false;
+    if (persistent_buffer_) {
+        // Rebinding rewrites a descriptor that submitted frames are using, and
+        // the copy below reads what their queued writes left in the old buffer.
+        backend_->wait_for_frame_completion(backend_->frame_completion_marker());
+        backend_->retarget_buffer_writes(persistent_buffer_.get(), new_buffer);
+    }
     void* new_mapped = new_buffer->map();
     if (new_mapped && persistent_mapped_ && persistent_capacity_) {
         std::memcpy(new_mapped, persistent_mapped_,

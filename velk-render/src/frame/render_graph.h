@@ -40,7 +40,7 @@ public:
     ::velk::IGpuResourceManager& resources() override;
 
     // IRenderGraphInternal
-    void init(::velk::IRenderBackend* backend) override;
+    void init(const ::velk::IGpuResourceManager::Ptr& resources) override;
 
 private:
     /// Per-resource state classifying *what kind* of producer last

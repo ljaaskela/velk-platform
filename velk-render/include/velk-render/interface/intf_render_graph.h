@@ -81,7 +81,7 @@ public:
     virtual const vector<IRenderPass::Ptr>& passes() const = 0;
 
     /**
-     * @brief Per-frame transient resource manager owned by the graph.
+     * @brief Transient resource manager, shared by every frame slot's graph.
      *
      * Pipelines that allocate intermediate render targets / groups /
      * buffers go through this manager, distinct from the renderer's

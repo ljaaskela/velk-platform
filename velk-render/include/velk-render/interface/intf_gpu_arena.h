@@ -36,11 +36,10 @@ class ArenaRegion;
  * `write_at`, and push its element base (@c offset / element_size) so the
  * shader reads `data[base + i]`.
  *
- * A region's bytes may be rewritten in place at a stable base (globals, lights,
- * instances: small, drifting content). Data that changes wholesale (the BVH)
- * must instead `alloc` a fresh region and drop the old handle, since the free
- * is fence-deferred but an in-place write is not, and a frame still reading the
- * previous contents would otherwise see a partial update.
+ * A region's bytes may be rewritten at a stable base with `update_at` (globals,
+ * lights, instances: small, drifting content). Data that changes wholesale (the
+ * BVH) should instead `alloc` a fresh region and drop the old handle, which avoids
+ * copying it through the frame's write queue.
  *
  * The backing buffer is bound to its slot on first allocation and re-bound only
  * on growth, rare after warmup, so steady state never touches the descriptor.
@@ -89,12 +88,17 @@ public:
     /// data whose struct size varies by material type).
     virtual ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) = 0;
 
-    /// Writes @p size bytes into the arena at @p offset (a region obtained
-    /// from `alloc`). Call only when the region's contents change; unchanged
-    /// regions keep their bytes across frames (no re-upload). Not fenced: use
-    /// this for content that drifts, and allocate a fresh region instead when
-    /// the data changes wholesale.
+    /// Writes @p size bytes straight into a region at @p offset. Only for a
+    /// region no frame has read yet, which means one just returned by `alloc`:
+    /// the write is immediate, so a frame on the GPU would see it mid-read. Use
+    /// `update_at` for everything else.
     virtual void write_at(uint64_t offset, const void* data, uint64_t size) = 0;
+
+    /// Rewrites a region that frames on the GPU may still read. The new bytes
+    /// apply in GPU order, so earlier frames keep the old contents and the
+    /// current frame sees the new. Call only when the contents change; unchanged
+    /// regions keep their bytes across frames.
+    virtual void update_at(uint64_t offset, const void* data, uint64_t size) = 0;
 
     /// Internal: called by ArenaRegion on drop to free a region. The arena
     /// defers the reclaim past the in-flight frame's fence, so the range is
@@ -126,9 +130,10 @@ public:
     virtual IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) = 0;
 
     /// Writable view of @p offset within the arena's mapped storage, or null
-    /// when unmapped. Write-only memory: never read through this pointer.
-    /// Exists for arena-backed buffers to let a caller's writer fill the
-    /// region in place instead of staging and copying.
+    /// when unmapped. Write-only memory: never read through this pointer. The
+    /// same rule as `write_at` applies: only for a region no frame has read yet.
+    /// Exists for arena-backed buffers to let a caller's writer fill a new
+    /// region without an extra copy.
     virtual void* mapped_at(uint64_t offset) = 0;
 
     /// The set = 1 slot this arena's buffer is bound to.

@@ -30,8 +30,9 @@ public:
  * deal with regions, offsets or bases itself.
  *
  * Write-only from the CPU side, because arena storage is allocated for
- * sequential writes and reads from it are slow. `write` fills the region in
- * place, so the bytes are copied once. `get_data` and `write_diff` are not
+ * sequential writes and reads from it are slow. The first `write` to a region
+ * fills it directly; later ones go through `IGpuArena::update_at`, since frames
+ * may be reading it by then. `get_data` and `write_diff` are not
  * served: implementing only the half of IBuffer that the storage can actually
  * support is deliberate. Owners that need to diff their bytes should do so
  * against their own authoritative copy before writing.
@@ -68,6 +69,7 @@ private:
     IGpuArena::WeakPtr arena_;
     ArenaRegion region_;
     uint64_t alignment_ = 0;
+    bool region_written_ = false;  ///< Frames may be reading region_.
 };
 
 } // namespace velk::impl

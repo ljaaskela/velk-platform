@@ -115,6 +115,10 @@ public:
     /// commands from the last submission that referenced it.
     void defer_free_persistent_secondary(::VkCommandBuffer cb);
     void barrier(PipelineStage src, PipelineStage dst) override;
+    void queue_buffer_write(const IGpuBuffer::Ptr& dst, uint64_t offset,
+                            const void* data, uint64_t size) override;
+    void retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to) override;
+    void flush_buffer_writes() override;
     void close_frame() override;
     void submit_frame() override;
 
@@ -222,6 +226,10 @@ private:
         /// fence has fired — guarantees kFrameOverlap frames of
         /// in-flight grace before vkFreeCommandBuffers runs.
         ::velk::vector<::VkCommandBuffer> deferred_persistent_frees;
+        /// Source of this frame's queued buffer writes. Per-slot because the
+        /// GPU reads it until the slot's fence fires.
+        ::velk::IGpuBuffer::Ptr write_staging;
+        uint64_t write_staging_size = 0;
         /// Surface picked at acquire time; consumed by submit_frame. Per-slot
         /// so a second prepare() can pick a different surface without
         /// trampling the one a concurrent submit needs.
@@ -252,6 +260,17 @@ private:
         bool pending_buffer_update_barrier = false;
     };
     FrameSync frame_sync_[kFrameOverlap]{};
+
+    /// Buffer writes waiting for flush_buffer_writes. Recording thread only.
+    struct QueuedBufferWrite
+    {
+        ::velk::IGpuBuffer::Ptr dst;
+        uint64_t dst_offset = 0;
+        uint64_t src_offset = 0;  ///< Into queued_write_bytes_.
+        uint64_t size = 0;
+    };
+    ::velk::vector<QueuedBufferWrite> queued_writes_;
+    ::velk::vector<uint8_t> queued_write_bytes_;
 
     /// Slot currently being prepared/recorded on the main thread. Advances
     /// at begin_frame. Main thread only — no lock needed.

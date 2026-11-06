@@ -4,7 +4,6 @@
 #include <velk/api/velk.h>
 #include <velk/interface/intf_interface.h>
 
-#include <velk-render/detail/intf_gpu_resource_manager_internal.h>
 #include <velk-render/plugin.h>
 
 namespace velk::impl {
@@ -15,21 +14,9 @@ namespace velk::impl {
 #define RENDER_LOG(...) ((void)0)
 #endif
 
-void RenderGraph::init(::velk::IRenderBackend* backend)
+void RenderGraph::init(const ::velk::IGpuResourceManager::Ptr& resources)
 {
-    if (!resources_) {
-        resources_ = ::velk::instance().create<::velk::IGpuResourceManager>(
-            ::velk::ClassId::GpuResourceManager);
-    }
-    if (auto* internal = interface_cast<
-            ::velk::IGpuResourceManagerInternal>(resources_.get())) {
-        internal->init(backend);
-        // Per-graph transient pool: routes destroyed shells onto the
-        // pool free-list, with LRU eviction folding back into the
-        // deferred-destroy queue. The renderer's persistent manager
-        // never enables this mode.
-        internal->enable_transient_pool();
-    }
+    resources_ = resources;
 }
 
 ::velk::IGpuResourceManager& RenderGraph::resources()

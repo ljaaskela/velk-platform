@@ -159,6 +159,8 @@ private:
     // refs (views_, batch_builder_): material dtors invoke
     // on_gpu_resource_destroyed which calls into resources_.
     IGpuResourceManager::Ptr resources_;
+    /// Transient manager behind every frame slot's `IRenderGraph::resources()`.
+    IGpuResourceManager::Ptr frame_resources_;
 
     vector<ViewSlot> views_;
 
@@ -271,7 +273,9 @@ private:
     // pipeline was last used by which view.
     std::unordered_set<IViewPipeline*> seen_pipelines_;
 
-    static constexpr uint32_t kDefaultMaxFramesInFlight = 4;
+    /// Each extra slot lets the CPU queue one more frame ahead of a slower GPU,
+    /// which adds that frame to input latency. Two gives full CPU/GPU overlap.
+    static constexpr uint32_t kDefaultMaxFramesInFlight = 2;
     vector<FrameSlot> frame_slots_{kDefaultMaxFramesInFlight};
     uint64_t next_frame_id_ = 1;
     uint64_t present_counter_ = 0;

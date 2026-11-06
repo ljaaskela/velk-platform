@@ -182,6 +182,14 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     if (auto internal = interface_cast<IGpuResourceManagerInternal>(resources_)) {
         internal->init(backend_.get());
     }
+    // The transient pool routes destroyed shells onto a free-list, with LRU
+    // eviction folding back into the deferred-destroy queue. The persistent
+    // manager above never enables this mode.
+    frame_resources_ = instance().create<IGpuResourceManager>(ClassId::GpuResourceManager);
+    if (auto internal = interface_cast<IGpuResourceManagerInternal>(frame_resources_)) {
+        internal->init(backend_.get());
+        internal->enable_transient_pool();
+    }
     // Plugins reach the manager through the render context (to claim a
     // shared set = 1 arena); the renderer owns it.
     if (render_ctx_) render_ctx_->set_resource_manager(resources_.get());
@@ -399,10 +407,12 @@ Renderer::FrameSlot* Renderer::claim_frame_slot()
             }
             return false;
         });
+        // Oldest first. The newest slot's frame may only just have been
+        // submitted, so reusing it would wait for the whole frame and CPU and
+        // GPU would never overlap.
         for (auto& s : frame_slots_) {
-            if (is_slot_free(s)) {
+            if (is_slot_free(s) && (!slot || s.presented_at < slot->presented_at)) {
                 slot = &s;
-                break;
             }
         }
     }
@@ -413,6 +423,7 @@ Renderer::FrameSlot* Renderer::claim_frame_slot()
     // The wait can be substantial under vsync; time it so the perf
     // overlay can charge it as GPU wait, not CPU work.
     if (backend_ && slot->gpu_completion_marker != 0) {
+        VELK_PERF_SCOPE("renderer.wait_gpu");
         auto wait_start = std::chrono::steady_clock::now();
         backend_->wait_for_frame_completion(slot->gpu_completion_marker);
         auto wait_end = std::chrono::steady_clock::now();
@@ -425,7 +436,7 @@ Renderer::FrameSlot* Renderer::claim_frame_slot()
     if (!slot->graph) {
         slot->graph = instance().create<IRenderGraph>(ClassId::RenderGraph);
         if (auto internal = interface_cast<IRenderGraphInternal>(slot->graph)) {
-            internal->init(backend_.get());
+            internal->init(frame_resources_);
         }
     }
     slot->graph->clear();
@@ -434,6 +445,7 @@ Renderer::FrameSlot* Renderer::claim_frame_slot()
 
 std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc& desc)
 {
+    VELK_PERF_SCOPE("renderer.consume_scenes");
     std::unordered_map<IScene*, SceneState> consumed;
     for (auto& slot : views_) {
         if (!view_matches(slot, desc)) {
@@ -595,9 +607,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                         auto* be = resources_->ensure_buffer_storage(buf, bdesc);
                         if (!be) continue;
                         if (auto gb = be->buffer.lock()) {
-                            if (auto* dst = gb->map()) {
-                                std::memcpy(dst, bytes, bsize);
-                            }
+                            backend_->queue_buffer_write(gb, 0, bytes, bsize);
                         }
                         buf->clear_dirty();
                         resources_uploaded = true;
@@ -633,7 +643,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         if (!slot.graph) {
             slot.graph = instance().create<IRenderGraph>(ClassId::RenderGraph);
             if (auto internal = interface_cast<IRenderGraphInternal>(slot.graph)) {
-                internal->init(backend_.get());
+                internal->init(frame_resources_);
             }
         }
         slot.graph->clear();
@@ -955,15 +965,10 @@ Frame Renderer::prepare(const FrameDesc& desc)
     last_prepare_gpu_wait_ns_ = 0;
 
     // Drain any GPU resources whose safe window has elapsed. Both the
-    // renderer's persistent manager and each frame slot's graph-owned
-    // transient manager get a chance to release handles whose GPU
-    // completion markers have resolved.
+    // persistent and transient managers get a chance to release handles whose
+    // GPU completion markers have resolved.
     drain_deferred(resources_.get(), *backend_);
-    for (auto& slot : frame_slots_) {
-        if (slot.graph) {
-            drain_deferred(&slot.graph->resources(), *backend_);
-        }
-    }
+    drain_deferred(frame_resources_.get(), *backend_);
 
     auto* slot = claim_frame_slot();
     active_slot_ = slot;
@@ -995,7 +1000,10 @@ Frame Renderer::prepare(const FrameDesc& desc)
 
     batch_builder_.reset_frame_state();
     snippets_->begin_frame();
-    build_frame_passes(desc, consumed_scenes, *slot);
+    {
+        VELK_PERF_SCOPE("renderer.build_frame_passes");
+        build_frame_passes(desc, consumed_scenes, *slot);
+    }
 
     // Record the whole frame on this (prepare / main) thread: compile the
     // graph, execute it into the backend's primary command buffer, and close
@@ -1004,6 +1012,8 @@ Frame Renderer::prepare(const FrameDesc& desc)
     // anything — no command buffer or pool is touched by two threads.
     if (slot->graph) {
         VELK_PERF_SCOPE("renderer.record");
+        // Before any pass, since every pass may read what these write.
+        backend_->flush_buffer_writes();
         slot->graph->compile();
         slot->graph->execute(*backend_);
     }

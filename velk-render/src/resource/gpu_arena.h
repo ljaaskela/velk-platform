@@ -22,9 +22,9 @@ namespace velk::impl {
  * never reused while an earlier frame may still read it.
  *
  * Producers whose data changes wholesale (the BVH) allocate a fresh region and
- * drop the old handle rather than overwriting in place, which is what keeps a
- * mid-flight change safe; producers whose bytes drift in small ways (globals,
- * lights, instances) write in place at a stable base.
+ * drop the old handle; producers whose bytes drift in small ways (globals,
+ * lights, instances) rewrite a stable base with `update_at`, which applies in GPU
+ * order.
  *
  * Backing buffers come from the resource manager; the backend only binds them
  * to the set = 1 slot. Buffers are re-bound only on growth (rare after
@@ -41,6 +41,7 @@ public:
     IGpuBuffer* buffer() const override { return persistent_buffer_.get(); }
     ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
+    void update_at(uint64_t offset, const void* data, uint64_t size) override;
     void release_region(uint64_t offset, uint64_t size) override;
     void reclaim() override;
     IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) override;

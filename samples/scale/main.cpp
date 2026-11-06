@@ -1,7 +1,7 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
-// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group]
+// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group] [unlimited]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -12,6 +12,7 @@
 //           is translate.
 // group:    movers translate a parent that has no visual, and the visual sits on
 //           its child.
+// unlimited: turns vsync off, so frame times show the real cost.
 //
 // Prints GPU pass timings on exit. The engine's perf log, also printed on exit,
 // has the BVH timings under renderer.bvh_*. The first frames are excluded from
@@ -174,6 +175,7 @@ int main(int argc, char* argv[])
     const long frame_limit = argc > 3 ? std::strtol(argv[3], nullptr, 10) : 0;
     const bool rotate_only = argc > 4 && std::strcmp(argv[4], "rotate") == 0;
     const bool group_movers = argc > 4 && std::strcmp(argv[4], "group") == 0;
+    const bool unlimited = argc > 5 && std::strcmp(argv[5], "unlimited") == 0;
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count,
              rotate_only ? "rotate" : group_movers ? "group" : "translate");
@@ -189,6 +191,9 @@ int main(int argc, char* argv[])
     wc.title = "velk-ui scale";
     wc.depth = velk::DepthFormat::Default;
     wc.color_format = velk::SurfaceColorFormat::RGBA16F;
+    if (unlimited) {
+        wc.update_rate = velk::UpdateRate::Unlimited;
+    }
 
     auto app = velk::create_app(config);
     auto window = app.create_window(wc);

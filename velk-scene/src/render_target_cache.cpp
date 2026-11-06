@@ -157,7 +157,7 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
                     region = ctx.globals_arena->alloc(need);
                 }
                 if (region.valid()) {
-                    ctx.globals_arena->write_at(region.offset(), &rt_globals, need);
+                    ctx.globals_arena->update_at(region.offset(), &rt_globals, need);
                     rt_view.view_globals_base = static_cast<uint32_t>(
                         region.offset() / sizeof(FrameGlobals));
                 } else {

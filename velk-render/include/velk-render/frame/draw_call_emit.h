@@ -186,7 +186,7 @@ inline void emit_draw_calls(
                                                  sizeof(DrawDataHeader));
         if (!draw_arena) continue;
         const uint64_t draw_data_offset = batch.draw_data_region_offset();
-        draw_arena->write_at(draw_data_offset, &header, sizeof(header));
+        draw_arena->update_at(draw_data_offset, &header, sizeof(header));
         const uint32_t draw_base =
             static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
 

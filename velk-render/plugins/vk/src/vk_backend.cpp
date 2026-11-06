@@ -9,6 +9,7 @@
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -219,6 +220,11 @@ void VkBackend::shutdown()
     }
 
     vkDeviceWaitIdle(device_);
+
+    queued_writes_.clear();
+    for (auto& sync : frame_sync_) {
+        sync.write_staging = nullptr;
+    }
 
     // vkDeviceWaitIdle above lets pending VMA destroys run unconditionally.
     {
@@ -505,6 +511,7 @@ bool VkBackend::check_required_features(
     VELK_REQUIRE_12(descriptorBindingSampledImageUpdateAfterBind);
     VELK_REQUIRE_12(descriptorBindingStorageImageUpdateAfterBind);
     VELK_REQUIRE_12(descriptorBindingStorageBufferUpdateAfterBind);
+    VELK_REQUIRE_12(descriptorBindingUpdateUnusedWhilePending);
     VELK_REQUIRE_12(drawIndirectCount);
     VELK_REQUIRE_12(runtimeDescriptorArray);
     VELK_REQUIRE_12(shaderSampledImageArrayNonUniformIndexing);
@@ -588,6 +595,9 @@ bool VkBackend::create_device()
     // would narrow the supported device population for nothing. Re-enable only
     // alongside an actual UNIFORM_BUFFER descriptor.
     features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    // Frames overlap, so descriptors are written while earlier frames are on
+    // the GPU. Legal only for descriptors those frames do not use.
+    features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     // Required for vkCmdDrawIndexedIndirectCount / vkCmdDrawIndirectCount —
     // the always-indirect emission path lets the GPU determine the actual
     // draw count later (post-culling) without a CPU readback.
@@ -854,15 +864,12 @@ bool VkBackend::create_bindless_descriptor()
     bindings[3].descriptorCount = kMaxBindlessTextures;
     bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    constexpr VkDescriptorBindingFlags kBindlessFlags =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+        VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
     VkDescriptorBindingFlags binding_flags[4] = {
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+        kBindlessFlags, kBindlessFlags, kBindlessFlags, kBindlessFlags,
     };
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
@@ -936,7 +943,8 @@ bool VkBackend::create_bound_buffer_descriptor()
         // stage mask is simpler than per-slot flags and costs nothing.
         bindings[i].stageFlags = VK_SHADER_STAGE_ALL;
         binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
     }
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
@@ -1391,7 +1399,8 @@ IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
     buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buf_ci.size = desc.size;
     buf_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (desc.index_buffer) {
         buf_ci.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -2877,6 +2886,96 @@ bool VkBackend::record_present_blit(FrameSync& sync)
     // close_frame (main thread); the blit is layout-neutral so nothing to
     // write back here.
     return true;
+}
+
+void VkBackend::queue_buffer_write(const IGpuBuffer::Ptr& dst, uint64_t offset,
+                                   const void* data, uint64_t size)
+{
+    if (!dst || !data || size == 0) return;
+    const uint64_t src_offset = queued_write_bytes_.size();
+    queued_write_bytes_.resize(static_cast<size_t>(src_offset + size));
+    std::memcpy(queued_write_bytes_.data() + src_offset, data, static_cast<size_t>(size));
+    queued_writes_.push_back({dst, offset, src_offset, size});
+}
+
+void VkBackend::retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to)
+{
+    for (auto& write : queued_writes_) {
+        if (write.dst.get() == from) write.dst = to;
+    }
+}
+
+void VkBackend::flush_buffer_writes()
+{
+    if (queued_writes_.empty() || !frame_open_) return;
+
+    auto& sync = frame_sync_[recording_slot_];
+    const uint64_t total = queued_write_bytes_.size();
+    if (!sync.write_staging || sync.write_staging_size < total) {
+        GpuBufferDesc desc{};
+        desc.size = std::max<uint64_t>(total * 2, uint64_t(64) * 1024);
+        desc.cpu_writable = true;
+        sync.write_staging = create_gpu_buffer(desc);
+        sync.write_staging_size = sync.write_staging ? desc.size : 0;
+    }
+    auto* staging = interface_cast<IVkGpuBuffer>(sync.write_staging.get());
+    void* mapped = sync.write_staging ? sync.write_staging->map() : nullptr;
+    if (!staging || !mapped) {
+        VELK_LOG(E, "VkBackend: no staging for %llu bytes of buffer writes",
+                 static_cast<unsigned long long>(total));
+        queued_writes_.clear();
+        queued_write_bytes_.clear();
+        return;
+    }
+    std::memcpy(mapped, queued_write_bytes_.data(), static_cast<size_t>(total));
+
+    // Group by destination. Stable, so of two writes to one range the later
+    // stays last, and that is the one kept below.
+    std::stable_sort(queued_writes_.begin(), queued_writes_.end(),
+                     [](const QueuedBufferWrite& a, const QueuedBufferWrite& b) {
+                         if (a.dst.get() != b.dst.get()) return a.dst.get() < b.dst.get();
+                         return a.dst_offset < b.dst_offset;
+                     });
+
+    // Earlier frames may still read these ranges. Execution dependency only:
+    // the copies wait for those reads on the GPU, not on the CPU.
+    VkMemoryBarrier before{};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(sync.command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+
+    ::velk::vector<VkBufferCopy> regions;
+    const size_t count = queued_writes_.size();
+    for (size_t i = 0; i < count;) {
+        auto* dst = interface_cast<IVkGpuBuffer>(queued_writes_[i].dst.get());
+        const auto* dst_key = queued_writes_[i].dst.get();
+        regions.clear();
+        for (; i < count && queued_writes_[i].dst.get() == dst_key; ++i) {
+            const auto& write = queued_writes_[i];
+            const bool superseded = i + 1 < count && queued_writes_[i + 1].dst.get() == dst_key
+                                    && queued_writes_[i + 1].dst_offset == write.dst_offset;
+            if (!superseded) {
+                regions.push_back({write.src_offset, write.dst_offset, write.size});
+            }
+        }
+        if (dst && dst->vk_buffer() != VK_NULL_HANDLE) {
+            vkCmdCopyBuffer(sync.command_buffer, staging->vk_buffer(), dst->vk_buffer(),
+                            static_cast<uint32_t>(regions.size()), regions.data());
+        }
+    }
+
+    // Host reads too: arena growth reads the old mapping back.
+    VkMemoryBarrier after{};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(sync.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after,
+                         0, nullptr, 0, nullptr);
+
+    queued_writes_.clear();
+    queued_write_bytes_.clear();
 }
 
 void VkBackend::close_frame()

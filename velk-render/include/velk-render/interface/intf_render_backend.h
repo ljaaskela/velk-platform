@@ -566,6 +566,29 @@ public:
      */
     virtual void barrier(PipelineStage src, PipelineStage dst) = 0;
 
+    /**
+     * @brief Queues a write to a buffer that frames on the GPU may still read.
+     *
+     * Frames overlap, so writing mapped memory directly could change data under
+     * an earlier frame. The bytes are copied here and applied in GPU order when
+     * this frame's writes are flushed, so earlier frames see the old contents
+     * and this frame sees the new.
+     *
+     * Writing the same range twice before a flush keeps the last write. Ranges
+     * must otherwise not overlap.
+     */
+    virtual void queue_buffer_write(const IGpuBuffer::Ptr& dst, uint64_t offset,
+                                    const void* data, uint64_t size) = 0;
+
+    /** @brief Points queued writes at @p to, for a buffer that was reallocated. */
+    virtual void retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to) = 0;
+
+    /**
+     * @brief Records the queued writes into the current frame's primary command
+     *        buffer. Call once per frame, before any pass that reads them.
+     */
+    virtual void flush_buffer_writes() = 0;
+
     /** @brief Finalizes command recording for the current frame: records
      *         the composite-to-swap present blit for any surfaces used and
      *         ends the primary command buffer.

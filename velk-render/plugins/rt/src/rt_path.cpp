@@ -188,8 +188,8 @@ void RtPath::build_passes(IViewEntry& entry,
             }
             vs.rt_dirty = true;  // shape count changed -> re-record
         } else if (shapes_bytes > 0) {
-            ctx.primary_shapes_arena->write_at(vs.shapes_region.offset(),
-                                               shapes.data(), shapes_bytes);
+            ctx.primary_shapes_arena->update_at(vs.shapes_region.offset(),
+                                                shapes.data(), shapes_bytes);
         }
     }
     const uint32_t shapes_base = (shapes_bytes > 0 && vs.shapes_region.valid())

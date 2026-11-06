@@ -111,36 +111,28 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
     // Per-batch buffer upload: each batch composes an IBuffer
     // (impl::GpuBuffer) holding the [args][count][instance_data] blob.
     // ensure_buffer_storage allocates / resizes the backing
-    // GpuBufferHandle on the inner IBuffer; on a fresh allocation we map
-    // it, copy the blob, and stamp the mapped pointer on the batch so
-    // update_instance_at can write through later. Inner buffers with
-    // is_dirty (e.g. structural rebuilds reusing the same hive slot)
-    // re-upload through their existing mapping. ensure_buffer_storage's
-    // deferred-destroy on size change handles instance-count growth.
+    // GpuBufferHandle on the inner IBuffer, with deferred destroy on a size
+    // change. Dirty bytes go through the frame's write queue, since frames on
+    // the GPU may be reading the existing storage.
     if (ctx.resources && ctx.backend) {
         VELK_PERF_SCOPE("renderer.upload_sweep");
         // Generic dirty-buffer upload: ensure_buffer_storage allocates /
-        // resizes the backend buffer, map + memcpy when dirty, clear
+        // resizes the backend buffer, queue the bytes when dirty, clear
         // the flag. Used for both per-batch storage blobs and per-
         // material persistent IBuffers.
-        auto upload_buffer = [&](IBuffer* buf) -> uint8_t* {
-            if (!buf || !buf->is_dirty()) return nullptr;
+        auto upload_buffer = [&](IBuffer* buf) {
+            if (!buf || !buf->is_dirty()) return;
             size_t blob_size = buf->get_data_size();
-            if (blob_size == 0) { buf->clear_dirty(); return nullptr; }
+            if (blob_size == 0) { buf->clear_dirty(); return; }
             GpuBufferDesc desc{};
             desc.size = blob_size;
             desc.cpu_writable = true;
             auto* be = ctx.resources->ensure_buffer_storage(buf, desc);
-            if (!be) return nullptr;
-            uint8_t* mapped = nullptr;
+            if (!be) return;
             if (auto gb = be->buffer.lock()) {
-                if (auto* dst = gb->map()) {
-                    std::memcpy(dst, buf->get_data(), blob_size);
-                    mapped = static_cast<uint8_t*>(dst);
-                }
+                ctx.backend->queue_buffer_write(gb, 0, buf->get_data(), blob_size);
             }
             buf->clear_dirty();
-            return mapped;
         };
         // Material draw data lives in the shared material arena (set = 1 slot
         // 4), in an arena-backed IBuffer per material. The material serialises
@@ -205,8 +197,8 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
                 bp->set_instance_region(std::move(region));
                 if (ok) ctx.instance_arena->write_at(off, blob.begin(), need);
             } else if (dirty) {
-                ctx.instance_arena->write_at(bp->instance_region_offset(),
-                                             blob.begin(), need);
+                ctx.instance_arena->update_at(bp->instance_region_offset(),
+                                              blob.begin(), need);
             }
             // else: unchanged, keep the region and its bytes (no re-upload).
         };
@@ -225,8 +217,8 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
         auto upload_batch = [&](IBatch::Ptr& bp) {
             if (!bp) return;
             auto* batch = static_cast<impl::DefaultBatch*>(bp.get());
-            // Ensures the args + count blob is GPU-resident; nothing reads
-            // the mapping back, the indirect commands are read by the GPU.
+            // Ensures the args + count blob is GPU-resident; the indirect
+            // commands are read by the GPU.
             upload_buffer(batch->storage_buffer());
             upload_instances(bp);
             upload_material(bp);
@@ -321,9 +313,9 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
 
     // Into the shared globals arena (set = 1 slot 2); shaders read
     // velk_globals.data[base] by index. Persistent per-view region (fixed
-    // size, allocated once, written in place each frame): the base is stable
-    // across frames, so cached compute secondaries that bake it read this
-    // frame's globals rather than a rotating ring slot (which would freeze
+    // size, allocated once, updated each frame): the base is stable across
+    // frames, so cached compute secondaries that bake it read this frame's
+    // globals rather than a rotating ring slot (which would freeze
     // present_counter and flicker the RT noise).
     if (ctx.globals_arena) {
         constexpr uint64_t need = sizeof(FrameGlobals);
@@ -331,7 +323,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
             cache.globals_region = ctx.globals_arena->alloc(need);
         }
         if (cache.globals_region.valid()) {
-            ctx.globals_arena->write_at(cache.globals_region.offset(), &globals, need);
+            ctx.globals_arena->update_at(cache.globals_region.offset(), &globals, need);
             rv.view_globals_base = static_cast<uint32_t>(
                 cache.globals_region.offset() / sizeof(FrameGlobals));
         } else {
@@ -363,8 +355,8 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
     // slot 5) and write the GpuLight array. The region's offset is stable
     // across frames, so the base the compute shaders read is baked once into
     // cached passes. Re-allocate only when the light count changes (the base
-    // moves, so the cached lighting/RT passes must re-record); otherwise write
-    // in place each frame (data read fresh at the stable base, no re-record).
+    // moves, so the cached lighting/RT passes must re-record); otherwise update
+    // it each frame (data read fresh at the stable base, no re-record).
     auto& cache = view_caches_[&entry];
     if (!ctx.lights_arena) return;
     const uint64_t need = rv.lights.size() * sizeof(GpuLight);
@@ -380,8 +372,8 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
         }
         entry.notify_view_changed();  // base + light_count changed
     } else if (need > 0) {
-        ctx.lights_arena->write_at(cache.lights_region.offset(),
-                                   rv.lights.data(), need);
+        ctx.lights_arena->update_at(cache.lights_region.offset(),
+                                    rv.lights.data(), need);
     }
     rv.lights_base = (need > 0 && cache.lights_region.valid())
         ? static_cast<uint32_t>(cache.lights_region.offset() / sizeof(GpuLight))
@@ -467,8 +459,8 @@ void ViewPreparer::upload_mesh_instances(IViewEntry& entry, FrameContext& ctx,
             if (ok) ctx.mesh_instances_arena->write_at(off, instances.begin(), need);
         }
     } else if (need > 0) {
-        ctx.mesh_instances_arena->write_at(cache.mesh_instances_region.offset(),
-                                           instances.begin(), need);
+        ctx.mesh_instances_arena->update_at(cache.mesh_instances_region.offset(),
+                                            instances.begin(), need);
     }
 
     // Shift each mesh shape's run-relative index onto the region's base. The
