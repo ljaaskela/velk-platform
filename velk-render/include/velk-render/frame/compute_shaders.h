@@ -1412,7 +1412,12 @@ void main()
             vec3 dcontrib = albedo.rgb * NdotL * radiance;
             float w = dot(dcontrib, vec3(0.2126, 0.7152, 0.0722));
             total_w += w;
-            seed = seed * 1664525u + 1013904223u;
+            // A full mix, not a linear step: the seed starts linear in the pixel
+            // coordinates, so a linear step gives a value linear across the screen,
+            // and comparing that to a probability draws diagonal stripes.
+            seed ^= seed >> 16; seed *= 0x7feb352du;
+            seed ^= seed >> 15; seed *= 0x846ca68bu;
+            seed ^= seed >> 16;
             if (w > 0.0 && float(seed) * (1.0 / 4294967296.0) < w / total_w) {
                 res_light = i;
                 res_w = w;

@@ -11,12 +11,17 @@ constexpr string_view rt_shadow_snippet = R"(
 // Integer hash -> float in [0,1). Seeds a per-world-point per-frame disk
 // sample for soft-shadow jitter; the lighting path's temporal denoiser
 // integrates the resulting single sample across frames.
-float velk_shadow_hash(uint x)
+uint velk_shadow_mix(uint x)
 {
     x ^= x >> 16; x *= 0x7feb352du;
     x ^= x >> 15; x *= 0x846ca68bu;
     x ^= x >> 16;
-    return float(x) * (1.0 / 4294967296.0);
+    return x;
+}
+
+float velk_shadow_hash(uint x)
+{
+    return float(velk_shadow_mix(x)) * (1.0 / 4294967296.0);
 }
 
 float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
@@ -48,9 +53,12 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     float size = max(light.params.w, 0.0);
     if (size > 0.0) {
         float spread = (light.flags.x == 0u) ? tan(size) : (size / max(t_max, 1e-4));
+        // Mixed one component at a time. A linear sum of the position's bits gives
+        // whole lines of a flat surface the same seed in every frame, which shows as
+        // stripes the temporal filter cannot average out.
         uvec3 q = floatBitsToUint(world_pos);
-        uint seed = (q.x * 1973u + q.y * 9277u + q.z * 26699u
-                     + VELK_GLOBALS.present_counter * 53891u) | 1u;
+        uint seed = velk_shadow_mix(velk_shadow_mix(velk_shadow_mix(q.x) ^ q.y) ^ q.z)
+                    ^ velk_shadow_mix(VELK_GLOBALS.present_counter);
         vec3 up = abs(L.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
         vec3 T  = normalize(cross(up, L));
         vec3 B  = cross(L, T);
