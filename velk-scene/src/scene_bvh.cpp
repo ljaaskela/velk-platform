@@ -71,6 +71,11 @@ bool alloc_elements(IGpuArena* arena, ArenaRegion& region, size_t count, size_t 
 /// Whether two shapes describe the same geometry, ignoring color and material.
 bool same_geometry(const RtShape& a, const RtShape& b)
 {
+    // A mesh shape's other geometry fields are only its bounds, which a deforming
+    // mesh changes without becoming other geometry.
+    if (a.shape_kind == kRtShapeKindMesh && b.shape_kind == kRtShapeKindMesh) {
+        return a.mesh_static_base == b.mesh_static_base;
+    }
     return std::memcmp(a.origin, b.origin, sizeof(a.origin)) == 0
         && std::memcmp(a.u_axis, b.u_axis, sizeof(a.u_axis)) == 0
         && std::memcmp(a.v_axis, b.v_axis, sizeof(a.v_axis)) == 0

@@ -4,6 +4,7 @@
 #include <velk/ext/object.h>
 #include <velk/interface/intf_metadata_observer.h>
 
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-scene/interface/intf_trait.h>
@@ -89,6 +90,25 @@ class Render : public Trait<T, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return TraitPhase::Render; }
+};
+
+/**
+ * @brief Base for a trait that computes its element's mesh vertices.
+ *
+ * The element's visual must hold a mesh from IMeshBuilder::build_deforming. The
+ * deformer runs once when attached, and again after each `invoke_deform_changed`
+ * or property change.
+ */
+template <class T, class... Extra>
+class MeshDeformer : public Trait<T, ITrait, IMeshDeformer, Extra...>
+{
+public:
+    TraitPhase get_phase() const override { return TraitPhase::Visual; }
+
+protected:
+    void invoke_deform_changed() { this->invoke_trait_dirty(DirtyFlags::Deform); }
+
+    void on_state_changed(string_view, IMetadata&, Uid) override { invoke_deform_changed(); }
 };
 
 } // namespace velk::ext

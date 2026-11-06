@@ -80,6 +80,13 @@ void GpuArena::update_at(uint64_t offset, const void* data, uint64_t size)
     }
 }
 
+void GpuArena::read_at(uint64_t offset, void* out, uint64_t size) const
+{
+    if (persistent_mapped_ && out && size) {
+        std::memcpy(out, static_cast<const char*>(persistent_mapped_) + offset, static_cast<size_t>(size));
+    }
+}
+
 void GpuArena::release_region(uint64_t offset, uint64_t size)
 {
     // Defer the reclaim past the in-flight frame: the range may still be read

@@ -95,6 +95,16 @@ IMesh::Ptr MeshBuilder::build(array_view<VertexAttribute> attributes,
     return mesh_intf;
 }
 
+IMesh::Ptr MeshBuilder::build_deforming(const IMesh::Ptr& source)
+{
+    if (!source) return nullptr;
+
+    auto mesh_intf = ::velk::instance().create<IMesh>(::velk::ClassId::DeformingMesh);
+    auto* mesh = interface_cast<IDeformingMesh>(mesh_intf.get());
+    if (!mesh || !mesh->init(*source, *this)) return nullptr;
+    return mesh_intf;
+}
+
 IMesh::Ptr MeshBuilder::mesh_from_geometry(const CachedGeometry& g)
 {
     // Fresh primitive referencing the shared buffer. Material defaults

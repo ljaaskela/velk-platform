@@ -19,7 +19,7 @@ namespace velk::impl {
 /// layout, topology, bounds, and a material ObjectRef.
 ///
 /// Also owns this primitive's RT geometry data: persistent regions of the
-/// shared mesh-static / BLAS-node / BLAS-triangle arenas, published through
+/// shared mesh-static / BLAS-node / cluster-word arenas, published through
 /// `ensure_rt_data`. The element bases are stable for the primitive's
 /// lifetime, so mesh instances cache the mesh-static index once and only the
 /// per-shape transforms change per frame.
@@ -68,11 +68,17 @@ public:
 
     /// Stores a pre-built BLAS for this primitive and releases the current
     /// arena regions, so the next `ensure_rt_data` republishes the nodes +
-    /// triangle indices and the RT path walks the acceleration structure
-    /// instead of doing a linear triangle scan.
+    /// cluster words.
     void set_rt_blas(BlasBuild blas) override;
 
+    void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
+               IGpuResourceManager& resources) override;
+
 private:
+    /// Allocates and fills the node and cluster regions, and fills @p out with
+    /// everything that refers to them. Leaves the current regions on failure.
+    bool publish_tree(IGpuResourceManager& resources, MeshStaticData& out);
+
     IMeshBuffer::Ptr buffer_;
     uint32_t vertex_offset_ = 0;
     uint32_t vertex_count_ = 0;
@@ -102,6 +108,9 @@ private:
     /// `get_draw_data_size` and `write_draw_data` include the BLAS
     /// payload only when populated.
     BlasBuild rt_blas_;
+
+    /// Tree cost when `rt_blas_` was last built, once it has been refit.
+    float rt_built_cost_ = 0.f;
 };
 
 /// Concrete IMesh container. Stores a list of primitives and a lazily
@@ -132,6 +141,39 @@ private:
     mutable aabb bounds_{};
     mutable bool bounds_known_ = false;
     mutable std::once_flag bounds_once_;
+};
+
+/// A mesh owned by one instance, whose vertices an IMeshDeformer computes. Each
+/// source vertex buffer becomes a stream of its own, with CPU copies of the rest
+/// and current vertices.
+class DeformingMesh
+    : public ::velk::ext::Object<DeformingMesh, IMesh, IDeformingMesh>
+{
+public:
+    VELK_CLASS_UID(::velk::ClassId::DeformingMesh, "DeformingMesh");
+
+    bool init(const IMesh& source, IMeshBuilder& builder) override;
+    void deform(IMeshDeformer& deformer, IGpuResourceManager& resources) override;
+
+    array_view<IMeshPrimitive::Ptr> get_primitives() const override
+    {
+        return {primitives_.data(), primitives_.size()};
+    }
+    aabb get_bounds() const override;
+
+private:
+    struct Stream
+    {
+        IMeshBuffer::Ptr source;
+        IMeshBuffer::Ptr buffer;
+        ::velk::vector<MeshVertex> rest;
+        ::velk::vector<MeshVertex> vertices;
+        ::velk::vector<uint32_t> indices;
+    };
+
+    ::velk::vector<Stream> streams_;
+    ::velk::vector<IMeshPrimitive::Ptr> primitives_;
+    ::velk::vector<uint32_t> primitive_streams_; ///< Per primitive, its index in streams_.
 };
 
 } // namespace velk::impl

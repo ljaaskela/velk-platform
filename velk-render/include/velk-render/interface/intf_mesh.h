@@ -15,6 +15,16 @@ namespace velk {
 
 class IGpuResourceManager;
 
+/// One vertex as meshes store it.
+struct MeshVertex
+{
+    vec3 position;
+    vec3 normal;
+    vec2 uv;
+    vec4 tangent;
+};
+static_assert(sizeof(MeshVertex) == 48, "MeshVertex must match VelkVertex3D");
+
 /**
  * @brief Combined vertex + index storage for one or more IMeshPrimitives.
  *
@@ -56,8 +66,8 @@ public:
     /// Partial VBO update: overwrites `size` bytes starting at
     /// `byte_offset` within the VBO region. Ranges already referenced
     /// by IMeshPrimitives stay valid by construction: this call never
-    /// resizes. Returns Success on update, or Fail if the backend does
-    /// not support partial updates yet.
+    /// resizes. Frames on the GPU keep the old bytes. Returns Fail when
+    /// the range is outside the VBO.
     virtual ReturnValue update_vertex_range(size_t byte_offset,
                                             const void* data, size_t size) = 0;
 
@@ -205,7 +215,7 @@ public:
      *        the element index of its MeshStaticData record.
      *
      * Suballocates three persistent regions from the shared arenas (mesh
-     * static, BLAS nodes, BLAS triangle indices) on first call and keeps them
+     * static, BLAS nodes, cluster words) on first call and keeps them
      * for the primitive's lifetime, so the returned base is stable and shapes
      * can cache it. `set_rt_blas` releases them, so the next call rebuilds.
      *
@@ -214,6 +224,17 @@ public:
      * a later frame retries.
      */
     virtual uint32_t ensure_rt_data(IGpuResourceManager& resources) = 0;
+
+    /**
+     * @brief Moves the tree, clusters and bounds onto new vertices, with the
+     *        triangles unchanged. The tree is built again if refitting has made it
+     *        too costly for rays.
+     *
+     * @param vertices The whole vertex buffer.
+     * @param indices  The whole index buffer.
+     */
+    virtual void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
+                       IGpuResourceManager& resources) = 0;
 };
 
 /**
@@ -231,6 +252,11 @@ public:
     /// Both paths reach the bytes the same way afterwards, by word index off
     /// the region base (`get_gpu_ref`).
     virtual bool ensure_geometry(IGpuResourceManager& resources) = 0;
+
+    /// Copies the VBO + IBO bytes to @p out. They come from the arena once they have
+    /// left the CPU, which is slow, so this is for one-off use. False when the buffer
+    /// has no bytes.
+    virtual bool read_geometry(vector<uint8_t>& out) const = 0;
 };
 
 /**
@@ -263,6 +289,32 @@ public:
     virtual void init(array_view<IMeshPrimitive::Ptr> primitives,
                       const aabb& bounds,
                       bool has_explicit_bounds) = 0;
+};
+
+/**
+ * @brief Computes the vertices of a mesh built by IMeshBuilder::build_deforming.
+ */
+class IMeshDeformer : public Interface<IMeshDeformer>
+{
+public:
+    /// Writes positions, normals and tangents in the mesh's local space. Runs once
+    /// per vertex buffer, so a mesh's primitives usually share one call. @p vertices
+    /// has as many elements as @p rest and holds the previous result, with the same
+    /// UVs.
+    virtual void deform(array_view<const MeshVertex> rest, MeshVertex* vertices) = 0;
+};
+
+class IMeshBuilder;
+
+/** Internal half of a mesh built by IMeshBuilder::build_deforming. */
+class IDeformingMesh : public Interface<IDeformingMesh>
+{
+public:
+    /// Copies @p source's geometry and materials. False when that is not possible.
+    virtual bool init(const IMesh& source, IMeshBuilder& builder) = 0;
+
+    /// Runs @p deformer and updates the vertices, trees and bounds.
+    virtual void deform(IMeshDeformer& deformer, IGpuResourceManager& resources) = 0;
 };
 
 /**
@@ -339,6 +391,13 @@ public:
                              const uint32_t* indices, uint32_t index_count,
                              MeshTopology topology,
                              const aabb& bounds) = 0;
+
+    /// A copy of @p source for one element to deform with an IMeshDeformer. It owns
+    /// its vertices, tree and clusters, and starts with @p source's materials. Reads
+    /// @p source's geometry back if it has been uploaded, so a large mesh is better
+    /// copied before its first frame. Returns nullptr if @p source is not an indexed
+    /// triangle list of MeshVertex.
+    virtual IMesh::Ptr build_deforming(const IMesh::Ptr& source) = 0;
 
     /// Returns the shared unit-quad mesh used by every 2D visual.
     /// The same IMesh instance is returned across calls; the single

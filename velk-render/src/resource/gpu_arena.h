@@ -42,6 +42,7 @@ public:
     ArenaRegion alloc(uint64_t size, uint64_t alignment = 0) override;
     void write_at(uint64_t offset, const void* data, uint64_t size) override;
     void update_at(uint64_t offset, const void* data, uint64_t size) override;
+    void read_at(uint64_t offset, void* out, uint64_t size) const override;
     void release_region(uint64_t offset, uint64_t size) override;
     void reclaim() override;
     IBuffer::Ptr create_buffer(uint64_t size, uint64_t alignment = 0) override;

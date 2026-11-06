@@ -49,19 +49,16 @@ public:
 
     // IMeshBufferInternal
     bool ensure_geometry(IGpuResourceManager& resources) override;
+    bool read_geometry(vector<uint8_t>& out) const override;
 
     // IArenaBuffer: where both paths index this geometry (word base into
     // slot 14).
     GpuRef gpu_ref() const override;
 
-    /// Stubbed pending a real use case (glTF hot-reload, morph targets,
-    /// streaming LOD). API shape is committed so enabling later is an
-    /// implementation-only change.
-    ReturnValue update_vertex_range(size_t /*byte_offset*/,
-                                    const void* /*data*/, size_t /*size*/) override
-    {
-        return ReturnValue::Fail;
-    }
+    ReturnValue update_vertex_range(size_t byte_offset, const void* data, size_t size) override;
+
+    /// Stubbed pending a real use case. API shape is committed so enabling later is
+    /// an implementation-only change.
     ReturnValue update_index_range(size_t /*byte_offset*/,
                                    const void* /*data*/, size_t /*size*/) override
     {

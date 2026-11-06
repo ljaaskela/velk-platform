@@ -63,6 +63,8 @@ public:
                      MeshTopology topology,
                      const aabb& bounds) override;
 
+    IMesh::Ptr build_deforming(const IMesh::Ptr& source) override;
+
     IMesh::Ptr get_unit_quad() override;
     IMesh::Ptr get_cube(uint32_t subdivisions = 0) override;
     IMesh::Ptr get_sphere(uint32_t subdivisions = 0) override;

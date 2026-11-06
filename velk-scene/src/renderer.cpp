@@ -36,6 +36,28 @@
 
 namespace velk {
 
+namespace {
+
+/// Runs @p element's mesh deformer, if it has one and a mesh built for it.
+void run_deformer(IElement& element, IGpuResourceManager& resources)
+{
+    auto* storage = interface_cast<IObjectStorage>(&element);
+    if (!storage) {
+        return;
+    }
+    auto deformer = storage->template find_attachment<IMeshDeformer>();
+    if (!deformer) {
+        return;
+    }
+    auto state = read_state<IVisual3D>(storage->template find_attachment<IVisual3D>());
+    auto mesh = state ? state->mesh.get<IDeformingMesh>() : nullptr;
+    if (mesh) {
+        mesh->deform(*deformer, resources);
+    }
+}
+
+} // namespace
+
 constexpr string_view velk_ui_glsl = R"(
 // Universal per-instance record shared by every visual (rect,
 // rounded rect, text glyphs, textures, images, env, cube, sphere,
@@ -516,6 +538,17 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             for (auto& removed : state.removed_list) {
                 batch_builder_.evict(removed.get());
                 render_target_cache_.on_element_removed(removed.get(), ctx);
+            }
+        }
+
+        // Deformers run first, since the BVH and the upload pass below read what they
+        // change.
+        if ((state.flags & DirtyFlags::Deform) != DirtyFlags::None) {
+            VELK_PERF_SCOPE("renderer.deform");
+            for (size_t i = 0; i < state.redraw_list.size(); ++i) {
+                if ((state.redraw_flags[i] & DirtyFlags::Deform) != DirtyFlags::None) {
+                    run_deformer(*state.redraw_list[i], *resources_);
+                }
             }
         }
 

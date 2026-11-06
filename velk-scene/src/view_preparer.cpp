@@ -57,9 +57,10 @@ bool ViewPreparer::try_update_transforms(IViewEntry& entry,
     if (!scene_state.removed_list.empty()) return false;
     if (cache.batches.empty()) return false;
 
-    // Layout and Transform flags are the safe transform-only signal. Any
-    // Visual or DrawOrder bit reshapes the batch set.
-    constexpr DirtyFlags kTransformOnly = DirtyFlags::Layout | DirtyFlags::Transform;
+    // Layout and Transform flags are the safe transform-only signal, and a deforming
+    // mesh keeps its batches since its vertices stay at the same base. Any Visual or
+    // DrawOrder bit reshapes the batch set.
+    constexpr DirtyFlags kTransformOnly = DirtyFlags::Layout | DirtyFlags::Transform | DirtyFlags::Deform;
     if ((scene_state.flags & ~kTransformOnly) != DirtyFlags::None) return false;
 
     // Non-visual elements (cameras, lights, etc.) end up in the redraw

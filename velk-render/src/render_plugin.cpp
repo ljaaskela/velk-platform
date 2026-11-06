@@ -69,6 +69,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::ArenaBuffer>(velk);
     rv &= register_type<impl::ViewEntry>(velk);
     rv &= register_type<impl::Mesh>(velk);
+    rv &= register_type<impl::DeformingMesh>(velk);
     rv &= register_type<impl::MeshPrimitive>(velk);
     rv &= register_type<impl::MeshBuffer>(velk);
     rv &= register_type<impl::MeshBuilder>(velk);

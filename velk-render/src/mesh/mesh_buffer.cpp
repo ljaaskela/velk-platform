@@ -65,6 +65,36 @@ bool MeshBuffer::ensure_geometry(IGpuResourceManager& resources)
     return true;
 }
 
+bool MeshBuffer::read_geometry(vector<uint8_t>& out) const
+{
+    const size_t size = vbo_size_ + ibo_size_;
+    if (size == 0) return false;
+    if (const uint8_t* bytes = get_data()) {
+        out.assign(bytes, bytes + size);
+        return true;
+    }
+    auto arena = arena_.lock();
+    if (!arena || !region_.valid()) return false;
+    out.resize(size);
+    arena->read_at(region_.offset(), out.data(), size);
+    return true;
+}
+
+ReturnValue MeshBuffer::update_vertex_range(size_t byte_offset, const void* data, size_t size)
+{
+    if (byte_offset + size > vbo_size_) return ReturnValue::Fail;
+
+    // Before the first upload the bytes are still only here, and go up with the rest.
+    if (is_dirty()) {
+        std::memcpy(mutable_data().data() + byte_offset, data, size);
+        return ReturnValue::Success;
+    }
+    auto arena = arena_.lock();
+    if (!arena || !region_.valid()) return ReturnValue::Fail;
+    arena->update_at(region_.offset() + byte_offset, data, size);
+    return ReturnValue::Success;
+}
+
 GpuRef MeshBuffer::gpu_ref() const
 {
     auto arena = arena_.lock();

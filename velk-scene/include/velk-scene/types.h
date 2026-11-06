@@ -14,6 +14,7 @@ enum class DirtyFlags : uint8_t
     Visual = 1 << 1,
     DrawOrder = 1 << 2,
     Transform = 1 << 3, ///< A transform trait changed, or the world matrix did.
+    Deform = 1 << 4,    ///< A mesh deformer's output changed.
     All = 0xff,
 };
 

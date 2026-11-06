@@ -51,6 +51,9 @@ inline constexpr Uid ArenaBuffer{"2403d3dd-d9bc-4ba1-a5a4-60e8fa5c6566"};
 /** @brief Mesh container: an authored group of IMeshPrimitives plus aggregate bounds. */
 inline constexpr Uid Mesh{"d82485b9-7d93-4196-ae98-f22f6131f7c8"};
 
+/** @brief A mesh owned by one instance, whose vertices an IMeshDeformer computes. */
+inline constexpr Uid DeformingMesh{"eb20ffd0-22f0-44e8-9928-1ed06cdba05b"};
+
 /** @brief One geometry + material unit within a Mesh (glTF's "primitive"). */
 inline constexpr Uid MeshPrimitive{"a523487f-60ff-4b9a-aab1-6e91de28d02f"};
 

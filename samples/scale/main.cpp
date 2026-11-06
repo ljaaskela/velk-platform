@@ -1,7 +1,8 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
-// Usage: velk_ui_scale [elements] [movers] [frames] [translate|rotate|group|escape|burst|churn|recolor]
+// Usage: velk_ui_scale [elements] [movers] [frames]
+//                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter]
 //                      [unlimited] [rt] [text]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
@@ -20,6 +21,10 @@
 //           another added.
 // recolor:  movers translate, and at frame 10 the rects turn from grey to red with
 //           no change in geometry.
+// deform:   movers are spheres of about 65,000 triangles with a ripple running over
+//           them. The perf log has the cost under renderer.deform.
+// scatter:  like deform, and the vertices also fly apart, until the trees degrade
+//           enough to be built again, shown under mesh.blas_rebuild.
 // unlimited: turns vsync off, so frame times show the real cost.
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
@@ -56,6 +61,7 @@
 #include <velk-scene/api/visual/cube.h>
 #include <velk-scene/api/visual/mesh.h>
 #include <velk-scene/api/visual/sphere.h>
+#include <velk-scene/ext/trait.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
@@ -75,23 +81,55 @@ struct Vertex
     float tangent[4];
 };
 
+class IRipple : public velk::Interface<IRipple>
+{
+public:
+    VELK_INTERFACE(
+        (PROP, float, time, 0.f),
+        (PROP, float, scatter, 0.f)
+    )
+};
+
+inline constexpr velk::Uid kRippleClass{"d864fbf7-9279-47f3-8dda-319b1afc8f6f"};
+
+/// Runs a ripple along the normals, and moves each vertex away by its own offset.
+class Ripple : public velk::ext::MeshDeformer<Ripple, IRipple>
+{
+public:
+    VELK_CLASS_UID(kRippleClass, "ScaleRipple");
+
+    void deform(velk::array_view<const velk::MeshVertex> rest, velk::MeshVertex* vertices) override
+    {
+        constexpr float kAmount = 4.f;
+        constexpr float kWavesPerUnit = 0.25f;
+        auto state = velk::read_state<IRipple>(this);
+        for (size_t i = 0; i < rest.size(); ++i) {
+            const velk::vec3 p = rest[i].position;
+            const float wave = std::sin(p.y * kWavesPerUnit + state->time * 4.f);
+            // Three unrelated values per vertex, from -1 to 1.
+            const auto f = static_cast<float>(i);
+            const velk::vec3 away{std::sin(f * 12.9898f), std::sin(f * 78.233f), std::sin(f * 37.719f)};
+            vertices[i].position = p + rest[i].normal * (wave * kAmount) + away * state->scatter;
+        }
+    }
+};
+
 /// Builds a triangle mesh sphere with its own BLAS. The element's size does not
 /// scale a mesh visual, so its vertices are in world units.
-velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size)
+velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size, uint32_t segments = 16,
+                                     uint32_t rings = 8)
 {
-    constexpr uint32_t kSegments = 16;
-    constexpr uint32_t kRings = 8;
     constexpr float kPi = 3.14159265358979323846f;
     const float radius = size * 0.5f;
 
     velk::vector<Vertex> vertices;
     velk::vector<uint32_t> indices;
 
-    for (uint32_t r = 0; r <= kRings; ++r) {
-        const float vy = static_cast<float>(r) / kRings;
+    for (uint32_t r = 0; r <= rings; ++r) {
+        const float vy = static_cast<float>(r) / rings;
         const float phi = vy * kPi;
-        for (uint32_t s = 0; s <= kSegments; ++s) {
-            const float vx = static_cast<float>(s) / kSegments;
+        for (uint32_t s = 0; s <= segments; ++s) {
+            const float vx = static_cast<float>(s) / segments;
             const float theta = vx * kPi * 2.f;
             const float nx = std::sin(phi) * std::cos(theta);
             const float ny = std::cos(phi);
@@ -103,9 +141,9 @@ velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size)
         }
     }
 
-    const uint32_t stride = kSegments + 1;
-    for (uint32_t r = 0; r < kRings; ++r) {
-        for (uint32_t s = 0; s < kSegments; ++s) {
+    const uint32_t stride = segments + 1;
+    for (uint32_t r = 0; r < rings; ++r) {
+        for (uint32_t s = 0; s < segments; ++s) {
             const uint32_t i00 = r * stride + s;
             const uint32_t i10 = i00 + 1;
             const uint32_t i01 = i00 + stride;
@@ -192,6 +230,8 @@ int main(int argc, char* argv[])
     const bool burst_movers = argc > 4 && std::strcmp(argv[4], "burst") == 0;
     const bool churn_elements = argc > 4 && std::strcmp(argv[4], "churn") == 0;
     const bool recolor_rects = argc > 4 && std::strcmp(argv[4], "recolor") == 0;
+    const bool scatter_movers = argc > 4 && std::strcmp(argv[4], "scatter") == 0;
+    const bool deform_movers = scatter_movers || (argc > 4 && std::strcmp(argv[4], "deform") == 0);
     bool unlimited = false;
     bool ray_traced = false;
     bool with_text = false;
@@ -315,6 +355,14 @@ int main(int argc, char* argv[])
     velk::vector<Mover> movers;
     movers.reserve(static_cast<size_t>(mover_count));
     velk::vector<velk::ui::RectVisual> rects;
+    velk::vector<IRipple::Ptr> ripples;
+
+    velk::Mesh deform_source;
+    if (deform_movers) {
+        velk::instance().type_registry().register_type<Ripple>();
+        deform_source = velk::Mesh(build_triangle_mesh(*render_context, kElementSize, 256, 128));
+        deform_source.set_material(0, mesh_material);
+    }
 
     const auto size_px = velk::dim::px(kElementSize);
     const float grid_start = -extent * 0.5f;
@@ -339,7 +387,16 @@ int main(int argc, char* argv[])
             element.add_trait(trs);
         }
 
-        switch (i % 4) {
+        switch (deform_movers && is_mover ? 4 : i % 4) {
+        case 4: {
+            auto visual = velk::trait::visual::create_mesh();
+            visual.set_mesh(velk::Mesh(render_context->get_mesh_builder().build_deforming(deform_source)));
+            element.add_trait(visual);
+            auto ripple = velk::instance().create<IRipple>(Ripple::static_class_id());
+            element.add_trait(velk::Trait(interface_pointer_cast<velk::ITrait>(ripple)));
+            ripples.push_back(ripple);
+            break;
+        }
         case 0: {
             auto visual = velk::trait::visual::create_mesh();
             visual.set_mesh(triangle_mesh);
@@ -376,7 +433,9 @@ int main(int argc, char* argv[])
         scene.add(parent, element);
 
         if (is_mover) {
-            movers.push_back({trs, position, static_cast<float>(next_mover)});
+            if (!deform_movers) {
+                movers.push_back({trs, position, static_cast<float>(next_mover)});
+            }
             ++next_mover;
         }
     }
@@ -429,6 +488,13 @@ int main(int argc, char* argv[])
             } else {
                 mover.trs.set_translate({mover.base.x + std::sin(a) * 30.f, mover.base.y + std::sin(a * 1.7f) * 30.f,
                                          mover.base.z + std::cos(a) * 30.f});
+            }
+        }
+
+        for (auto& ripple : ripples) {
+            ripple->time().set_value(t);
+            if (scatter_movers) {
+                ripple->scatter().set_value(std::min(t, 1.f) * kElementSize * 0.25f);
             }
         }
 

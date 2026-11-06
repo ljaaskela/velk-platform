@@ -50,13 +50,21 @@ inline constexpr uint32_t kClusterMaxVertices = 256;
 ///   shape_count & 0xFFFF      its triangle count
 ///   shape_count >> 16         its cluster's vertex count
 ///   first_child               its cluster's first position word
-/// and `triangle_indices` is empty.
+/// and `triangle_indices` is empty. A child's index is always greater than its
+/// parent's.
 struct BlasBuild
 {
+    /// Where one cluster's positions are in `cluster_words`.
+    struct Cluster
+    {
+        uint32_t position_word;
+        uint32_t vertex_count;
+    };
+
     vector<BlasNode> nodes;
     vector<uint32_t> triangle_indices;
     vector<uint32_t> cluster_words;
-    uint32_t         cluster_count = 0;
+    vector<Cluster>  clusters;
     uint32_t         root_index = 0;
 };
 
@@ -370,7 +378,7 @@ struct ClusterBuilder
             words.push_back(id);
         }
         stamp_leaves(n, triangle_word, position_word, vertex_count);
-        ++out.cluster_count;
+        out.clusters.push_back({position_word, vertex_count});
     }
 
     /// The largest subtrees that fit in a cluster become clusters.
@@ -448,6 +456,72 @@ inline BlasBuild build_mesh_blas(const float* vertices, uint32_t vertex_stride_b
     detail::blas_fill_node(out, 0, tris, 0, tris.size());
     detail::ClusterBuilder{out, vertices, floats_per_vertex, indices}.build();
     return out;
+}
+
+/// Moves a mesh's clusters and tree onto new vertex positions, with its triangles
+/// and tree shape unchanged. @p vertices has the layout the tree was built from.
+inline void refit_mesh_blas(BlasBuild& blas, const float* vertices, uint32_t vertex_stride_bytes)
+{
+    const uint32_t floats_per_vertex = vertex_stride_bytes / sizeof(float);
+    uint32_t* words = blas.cluster_words.data();
+    for (const auto& cluster : blas.clusters) {
+        uint32_t* positions = words + cluster.position_word;
+        const uint32_t* ids = positions + size_t(cluster.vertex_count) * 3;
+        for (uint32_t v = 0; v < cluster.vertex_count; ++v) {
+            std::memcpy(positions + size_t(v) * 3, vertices + size_t(ids[v]) * floats_per_vertex, sizeof(float) * 3);
+        }
+    }
+
+    // Children come after their parent, so a reverse sweep sees them first.
+    for (size_t n = blas.nodes.size(); n-- > 0;) {
+        BlasNode& node = blas.nodes[n];
+        float lo[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                       std::numeric_limits<float>::max()};
+        float hi[3] = {-lo[0], -lo[0], -lo[0]};
+        if (node.child_count != 0) {
+            for (uint32_t c = 0; c < node.child_count; ++c) {
+                const BlasNode& child = blas.nodes[node.first_child + c];
+                for (int k = 0; k < 3; ++k) {
+                    lo[k] = std::min(lo[k], child.aabb_min[k]);
+                    hi[k] = std::max(hi[k], child.aabb_max[k]);
+                }
+            }
+        } else {
+            const uint32_t* positions = words + node.first_child;
+            const uint32_t triangle_count = node.shape_count & 0xFFFFu;
+            for (uint32_t t = 0; t < triangle_count; ++t) {
+                const uint32_t triangle = words[node.first_shape + t];
+                for (uint32_t c = 0; c < 3; ++c) {
+                    float p[3];
+                    std::memcpy(p, positions + size_t((triangle >> (c * 8)) & 0xFFu) * 3, sizeof(p));
+                    for (int k = 0; k < 3; ++k) {
+                        lo[k] = std::min(lo[k], p[k]);
+                        hi[k] = std::max(hi[k], p[k]);
+                    }
+                }
+            }
+        }
+        for (int k = 0; k < 3; ++k) {
+            node.aabb_min[k] = lo[k];
+            node.aabb_max[k] = hi[k];
+        }
+    }
+}
+
+/// The nodes' total surface area against the root's. Grows as a refit tree degrades.
+inline float blas_tree_cost(const BlasBuild& blas)
+{
+    const auto area = [](const BlasNode& node) {
+        const float x = node.aabb_max[0] - node.aabb_min[0];
+        const float y = node.aabb_max[1] - node.aabb_min[1];
+        const float z = node.aabb_max[2] - node.aabb_min[2];
+        return 2.f * (x * y + y * z + z * x);
+    };
+    float total = 0.f;
+    for (const auto& node : blas.nodes) {
+        total += area(node);
+    }
+    return blas.nodes.empty() ? 0.f : total / std::max(area(blas.nodes[blas.root_index]), 1e-30f);
 }
 
 } // namespace velk

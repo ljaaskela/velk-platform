@@ -100,6 +100,11 @@ public:
     /// regions keep their bytes across frames.
     virtual void update_at(uint64_t offset, const void* data, uint64_t size) = 0;
 
+    /// Reads @p size bytes back from a region. Arena memory is allocated for
+    /// sequential writes, so this is slow: for one-off reads of data that has left
+    /// the CPU. Writes still queued by `update_at` are not included.
+    virtual void read_at(uint64_t offset, void* out, uint64_t size) const = 0;
+
     /// Internal: called by ArenaRegion on drop to free a region. The arena
     /// defers the reclaim past the in-flight frame's fence, so the range is
     /// never reused while an earlier frame may still read it.
@@ -116,7 +121,7 @@ public:
     /// GPU resource.
     ///
     /// Arena memory is allocated for sequential writes, so reads from it are
-    /// slow: the returned buffer is **write-only from the CPU side**. It
+    /// slow (see `read_at`): the returned buffer is **write-only from the CPU side**. It
     /// serves `write`, and its `get_data` / `write_diff` report nothing:
     /// implementing only the half of IBuffer the storage supports is
     /// deliberate. Consumers get its location with `get_gpu_ref`, which
