@@ -3,7 +3,7 @@
 //
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
-//                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
+//                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster|nature]
 //                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [rocks] [across] [top] [yaw=N] [distance=N] [pitch=N] [budget=MB]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
@@ -34,6 +34,8 @@
 // forest_shift: forest, with the whole element translated every frame.
 // forest_churn: forest, with one tree removed and another added every frame.
 // forest_cluster: forest, with the movers packed in a cube in the air above the center.
+// nature:   elements is the number of trees, spread over generated mountains of a
+//           fixed size. The camera's direction is what W, A, S and D move along.
 // outlier:  forest_cluster, with one mover 2,000,000 units away, which stretches the
 //           partition's bounds until the cube is a tiny part of them.
 // mixed:    a forest's movers vary in size: one in 100 at 30 times, one in 10 at 5 times,
@@ -60,6 +62,7 @@
 // budget=MB: limits the GPU memory a forest's instances use.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
+// view=x,y,z,yaw,pitch,distance: starts the camera there. C logs the current one.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -68,17 +71,21 @@
 // has the BVH timings under renderer.bvh_*. The first frames are excluded from
 // the GPU timings because they include pipeline creation.
 
+#include <velk/api/perf.h>
 #include <velk/api/velk.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/api/shadow_technique.h>
 #include <velk-render/blas.h>
+#include <velk-render/ext/material.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-runtime/api/application.h>
@@ -147,6 +154,244 @@ public:
             vertices[i].position = p + rest[i].normal * (wave * kAmount) + away * state->scatter;
         }
     }
+};
+
+inline constexpr velk::Uid kTerrainMaterialClass{"59e864b6-ef1d-4c5d-a007-66abfabd4451"};
+
+VELK_GPU_STRUCT TerrainParams
+{
+    velk::color meadow;
+    velk::color woodland;
+    velk::color rock;
+    velk::color snow;  ///< Its alpha is the world y of the snow line.
+};
+
+constexpr velk::string_view kTerrainEvalSrc = R"(
+struct TerrainData {
+    vec4 meadow;
+    vec4 woodland;
+    vec4 rock;
+    vec4 snow;
+};
+VELK_MATERIAL(TerrainData)
+
+float terrain_hash(vec2 p)
+{
+    vec3 q = fract(vec3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+float terrain_noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(terrain_hash(i), terrain_hash(i + vec2(1.0, 0.0)), u.x),
+               mix(terrain_hash(i + vec2(0.0, 1.0)), terrain_hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+MaterialEval velk_eval_terrain(EvalContext ctx)
+{
+    TerrainData d = VELK_LOAD_MATERIAL(TerrainData, ctx);
+    vec3 n = normalize(ctx.normal);
+    vec2 p = ctx.hit_pos.xz;
+    float patches = terrain_noise(p / 900.0) * 0.6 + terrain_noise(p / 210.0) * 0.3 + terrain_noise(p / 40.0) * 0.1;
+    vec3 ground = mix(d.meadow.rgb, d.woodland.rgb, smoothstep(0.35, 0.65, patches));
+    // Up is -y.
+    float flat_amount = smoothstep(0.86, 0.95, -n.y);
+
+    MaterialEval e = velk_default_material_eval();
+    vec3 surface = mix(d.rock.rgb, ground, flat_amount);
+    // Up is -y, so higher ground has a smaller y. Snow does not hold on the steepest faces.
+    float above_line = (d.snow.a - ctx.hit_pos.y + (patches - 0.5) * 500.0) / 300.0;
+    float snow = clamp(above_line, 0.0, 1.0) * smoothstep(0.55, 0.75, -n.y);
+    e.color = vec4(mix(surface, d.snow.rgb, snow), 1.0);
+    e.normal = n;
+    e.roughness = 0.9;
+    e.lighting_mode = VELK_LIGHTING_STANDARD;
+    return e;
+}
+)";
+
+/// Ground coloured by world position and slope.
+class TerrainMaterial : public velk::ext::Material<TerrainMaterial>
+{
+public:
+    VELK_CLASS_UID(kTerrainMaterialClass, "ScaleTerrainMaterial");
+
+    size_t get_draw_data_size() const override { return sizeof(TerrainParams); }
+
+    velk::ReturnValue write_draw_data(void* out, size_t size, velk::ITextureResolver*) const override
+    {
+        return set_material<TerrainParams>(out, size, [](auto& p) {
+            p.meadow = velk::color{0.20f, 0.30f, 0.09f, 1.f};
+            p.woodland = velk::color{0.13f, 0.20f, 0.08f, 1.f};
+            p.rock = velk::color{0.30f, 0.27f, 0.24f, 1.f};
+            p.snow = velk::color{0.85f, 0.87f, 0.90f, -1500.f};
+        });
+    }
+
+    velk::string_view get_source(velk::string_view role) const override
+    {
+        if (role == velk::shader_role::kEval) return kTerrainEvalSrc;
+        return velk::ext::Material<TerrainMaterial>::get_source(role);
+    }
+
+    velk::string_view get_fn_name(velk::string_view role) const override
+    {
+        return role == velk::shader_role::kEval ? velk::string_view("velk_eval_terrain") : velk::string_view{};
+    }
+};
+
+/// Generated hills, as heights on a square grid centred on the origin.
+class Terrain
+{
+public:
+    Terrain(float half_size, uint32_t cells)
+        : half_size_(half_size), cells_(cells), cell_size_(half_size * 2.f / static_cast<float>(cells))
+    {
+        VELK_PERF_SCOPE("scale.terrain_heights");
+        heights_.resize(static_cast<size_t>(cells + 1) * (cells + 1));
+        for (uint32_t z = 0; z <= cells; ++z) {
+            for (uint32_t x = 0; x <= cells; ++x) {
+                heights_[index(x, z)] = generate(grid_coord(x), grid_coord(z));
+            }
+        }
+    }
+
+    float half_size() const { return half_size_; }
+
+    /// The ground's height above y = 0 at a point, between grid points as the mesh has it.
+    float height_at(float x, float z) const
+    {
+        const float gx = std::clamp((x + half_size_) / cell_size_, 0.f, static_cast<float>(cells_));
+        const float gz = std::clamp((z + half_size_) / cell_size_, 0.f, static_cast<float>(cells_));
+        const uint32_t ix = std::min(static_cast<uint32_t>(gx), cells_ - 1);
+        const uint32_t iz = std::min(static_cast<uint32_t>(gz), cells_ - 1);
+        const float fx = gx - static_cast<float>(ix);
+        const float fz = gz - static_cast<float>(iz);
+        const float near_row = heights_[index(ix, iz)] + (heights_[index(ix + 1, iz)] - heights_[index(ix, iz)]) * fx;
+        const float far_row = heights_[index(ix, iz + 1)] + (heights_[index(ix + 1, iz + 1)] - heights_[index(ix, iz + 1)]) * fx;
+        return near_row + (far_row - near_row) * fz;
+    }
+
+    /// A mesh of the grid at y = base minus height, since up is -y.
+    velk::IMesh::Ptr build_mesh(velk::IRenderContext& ctx, float base, const velk::IMaterial::Ptr& material) const
+    {
+        VELK_PERF_SCOPE("scale.terrain_mesh");
+        static constexpr velk::VertexAttribute kAttributes[] = {
+            {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
+            {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
+            {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
+            {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
+        };
+        velk::vector<Vertex> vertices;
+        vertices.reserve(heights_.size());
+        float lowest = heights_[0];
+        float highest = heights_[0];
+        for (uint32_t z = 0; z <= cells_; ++z) {
+            for (uint32_t x = 0; x <= cells_; ++x) {
+                const float h = heights_[index(x, z)];
+                lowest = std::min(lowest, h);
+                highest = std::max(highest, h);
+                const float dx = (heights_[index(std::min(x + 1, cells_), z)] - heights_[index(x > 0 ? x - 1 : 0, z)]) / (cell_size_ * 2.f);
+                const float dz = (heights_[index(x, std::min(z + 1, cells_))] - heights_[index(x, z > 0 ? z - 1 : 0)]) / (cell_size_ * 2.f);
+                const float length = std::sqrt(dx * dx + 1.f + dz * dz);
+                const float across = std::sqrt(1.f + dx * dx);
+                vertices.push_back({{grid_coord(x), base - h, grid_coord(z)},
+                                    {-dx / length, -1.f / length, -dz / length},
+                                    {static_cast<float>(x) / static_cast<float>(cells_), static_cast<float>(z) / static_cast<float>(cells_)},
+                                    {1.f / across, -dx / across, 0.f, 1.f}});
+            }
+        }
+        velk::vector<uint32_t> indices;
+        indices.reserve(static_cast<size_t>(cells_) * cells_ * 6);
+        for (uint32_t z = 0; z < cells_; ++z) {
+            for (uint32_t x = 0; x < cells_; ++x) {
+                const auto i00 = static_cast<uint32_t>(index(x, z));
+                const auto i10 = static_cast<uint32_t>(index(x + 1, z));
+                const auto i01 = static_cast<uint32_t>(index(x, z + 1));
+                const auto i11 = static_cast<uint32_t>(index(x + 1, z + 1));
+                // +x then +z winds towards -y, which is up.
+                for (uint32_t i : {i00, i10, i11, i00, i11, i01}) {
+                    indices.push_back(i);
+                }
+            }
+        }
+        velk::aabb bounds{};
+        bounds.position = {-half_size_, base - highest, -half_size_};
+        bounds.extent = {half_size_ * 2.f, highest - lowest, half_size_ * 2.f};
+        const auto vertex_count = static_cast<uint32_t>(vertices.size());
+        const auto index_count = static_cast<uint32_t>(indices.size());
+        auto& builder = ctx.get_mesh_builder();
+        auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count, indices.data(),
+                                                 index_count, velk::MeshTopology::TriangleList, bounds);
+        primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count,
+                                                     indices.data(), index_count / 3));
+        velk::MeshPrimitive(primitive).set_material(material);
+        velk::IMeshPrimitive::Ptr primitives[] = {primitive};
+        return builder.build({primitives, 1});
+    }
+
+private:
+    size_t index(uint32_t x, uint32_t z) const { return static_cast<size_t>(z) * (cells_ + 1) + x; }
+    float grid_coord(uint32_t i) const { return static_cast<float>(i) * cell_size_ - half_size_; }
+
+    static float lattice(int x, int z)
+    {
+        auto h = static_cast<uint32_t>(x) * 374761393u + static_cast<uint32_t>(z) * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<float>(h ^ (h >> 16)) / 4294967295.f * 2.f - 1.f;
+    }
+
+    static float noise(float x, float z)
+    {
+        const float fx = std::floor(x);
+        const float fz = std::floor(z);
+        const int ix = static_cast<int>(fx);
+        const int iz = static_cast<int>(fz);
+        const float tx = x - fx;
+        const float tz = z - fz;
+        const float ux = tx * tx * (3.f - 2.f * tx);
+        const float uz = tz * tz * (3.f - 2.f * tz);
+        const float a = lattice(ix, iz) + (lattice(ix + 1, iz) - lattice(ix, iz)) * ux;
+        const float b = lattice(ix, iz + 1) + (lattice(ix + 1, iz + 1) - lattice(ix, iz + 1)) * ux;
+        return a + (b - a) * uz;
+    }
+
+    /// Rolling ground, with ridged mountains over part of it.
+    static float generate(float x, float z)
+    {
+        struct Octave
+        {
+            float wavelength;
+            float amplitude;
+        };
+        const float rolling = noise(x / 6000.f, z / 6000.f) * 350.f + noise(x / 2400.f, z / 2400.f) * 120.f;
+
+        const float t = std::clamp((noise(x / 16000.f + 3.7f, z / 16000.f + 8.1f) + 0.25f) / 0.6f, 0.f, 1.f);
+        const float mountains = t * t * (3.f - 2.f * t);
+
+        static constexpr Octave kRidges[] = {{7000.f, 2400.f}, {3100.f, 900.f}, {1400.f, 320.f}, {700.f, 90.f}};
+        float ridges = 0.f;
+        float weight = 1.f;
+        float offset = 11.3f;
+        for (const auto& o : kRidges) {
+            float ridge = 1.f - std::abs(noise(x / o.wavelength + offset, z / o.wavelength - offset));
+            ridge *= ridge;
+            ridges += ridge * o.amplitude * weight;
+            // Detail follows the ridges, and valleys stay smooth.
+            weight = std::min(ridge * 1.2f, 1.f);
+            offset += 5.9f;
+        }
+        return rolling + mountains * ridges;
+    }
+
+    float half_size_;
+    uint32_t cells_;
+    float cell_size_;
+    velk::vector<float> heights_;
 };
 
 /// Builds a triangle mesh sphere with its own BLAS. The element's size does not
@@ -497,7 +742,8 @@ int main(int argc, char* argv[])
     const bool forest_shift = argc > 4 && std::strcmp(argv[4], "forest_shift") == 0;
     const bool forest_churn = argc > 4 && std::strcmp(argv[4], "forest_churn") == 0;
     const bool forest_cluster = argc > 4 && std::strcmp(argv[4], "forest_cluster") == 0;
-    const bool forest_instances = forest_shift || forest_churn || forest_cluster
+    const bool nature = argc > 4 && std::strcmp(argv[4], "nature") == 0;
+    const bool forest_instances = forest_shift || forest_churn || forest_cluster || nature
         || (argc > 4 && std::strcmp(argv[4], "forest") == 0);
     const bool forest_elements = argc > 4 && std::strcmp(argv[4], "forest_elements") == 0;
     const bool forest = forest_instances || forest_elements;
@@ -523,6 +769,8 @@ int main(int argc, char* argv[])
     float hold_yaw = 60.f;
     float hold_distance = 0.f;
     float hold_pitch = 0.f;
+    bool has_view = false;
+    float view[6] = {};
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
@@ -540,6 +788,9 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "distance=", 9) == 0) hold_distance = static_cast<float>(std::atof(argv[i] + 9));
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
+        if (std::strncmp(argv[i], "view=", 5) == 0) {
+            has_view = std::sscanf(argv[i] + 5, "%f,%f,%f,%f,%f,%f", &view[0], &view[1], &view[2], &view[3], &view[4], &view[5]) == 6;
+        }
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -593,8 +844,13 @@ int main(int argc, char* argv[])
     scene.add(root, camera);
 
     const long columns = std::max(1L, static_cast<long>(std::ceil(std::sqrt(static_cast<double>(element_count)))));
-    const float tree_spacing = dense ? 30.f : kElementSpacing;
+    constexpr float kTerrainExtent = 30000.f;
+    const float tree_spacing = nature ? kTerrainExtent / static_cast<float>(columns) : dense ? 30.f : kElementSpacing;
     const float extent = static_cast<float>(columns) * (forest ? tree_spacing : kElementSpacing);
+
+    constexpr uint32_t kTerrainCells = 256;
+    const Terrain terrain(nature ? extent * 0.5f + 400.f : 1.f, nature ? kTerrainCells : 1u);
+    const auto ground_y = [&](float x, float z) { return nature ? kFloorY - terrain.height_at(x, z) : kFloorY; };
 
     auto cam_trait = velk::trait::render::create_camera();
     camera.add_trait(cam_trait);
@@ -608,25 +864,41 @@ int main(int argc, char* argv[])
     cam.add_post_process(post);
 
     // A forest is viewed from close up, at its center.
-    const float distance = forest ? 420.f : std::max(extent * 1.3f, 800.f);
+    const float distance = nature ? 16000.f : forest ? 420.f : std::max(extent * 1.3f, 800.f);
     auto orbit = velk::trait::transform::create_orbit();
     auto focus_trs = velk::trait::transform::create_trs();
     if (forest) {
         auto focus = velk::create_element();
-        focus_trs.set_translate({0.f, kFloorY - 30.f, 0.f});
+        focus_trs.set_translate({0.f, ground_y(0.f, 0.f) - 30.f, 0.f});
         focus.add_trait(focus_trs);
         scene.add(root, focus);
         orbit.set_target(focus);
-        orbit.set_pitch(-18.f);
+        orbit.set_pitch(nature ? -24.f : -18.f);
     } else {
         orbit.set_target(root);
         orbit.set_pitch(-30.f);
     }
     orbit.set_distance(distance);
+    if (has_view && forest) {
+        focus_trs.set_translate({view[0], view[1], view[2]});
+        orbit.set_yaw(view[3]);
+        orbit.set_pitch(view[4]);
+        orbit.set_distance(view[5]);
+    }
     camera.add_trait(orbit);
     camera.find_trait<velk::ICamera>()->far_clip().set_value(std::max(distance, extent) * 10.f);
-    // Floor.
-    {
+    if (nature) {
+        velk::instance().type_registry().register_type<TerrainMaterial>();
+        auto ground = velk::create_element();
+        auto visual = velk::trait::visual::create_mesh();
+        velk::Material material(velk::instance().create<velk::IObject>(kTerrainMaterialClass));
+        // The options bring depth testing and opaque drawing, which lights it.
+        material.options();
+        visual.set_mesh(velk::Mesh(terrain.build_mesh(*render_context, kFloorY, material)));
+        ground.add_trait(visual);
+        scene.add(root, ground);
+    } else {
+        // Floor.
         const float half = extent * 0.5f + 400.f;
         auto floor = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
@@ -646,7 +918,7 @@ int main(int argc, char* argv[])
         light.add_technique(velk::technique::create_rt_shadow());
         auto sun = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({low_sun ? 15.f : 35.f, 25.f, 0.f});
+        trs.set_rotation({low_sun || nature ? 15.f : 35.f, 25.f, 0.f});
         sun.add_trait(trs);
         sun.add_trait(light);
         scene.add(root, sun);
@@ -688,17 +960,17 @@ int main(int argc, char* argv[])
     const float grid_start = -extent * 0.5f;
     long next_mover = 0;
 
-    // Trees stand on the floor on a jittered grid.
+    // Trees stand on the ground on a jittered grid.
     constexpr float kTreeHeight = 60.f;
     const auto tree_position = [&](long i) {
-        return velk::vec3{grid_start + (static_cast<float>(i % columns) + 0.8f * forest_jitter(i, 12.9898f)) * tree_spacing,
-                          kFloorY,
-                          grid_start + (static_cast<float>(i / columns) + 0.8f * forest_jitter(i, 78.233f)) * tree_spacing};
+        const float x = grid_start + (static_cast<float>(i % columns) + 0.8f * forest_jitter(i, 12.9898f)) * tree_spacing;
+        const float z = grid_start + (static_cast<float>(i / columns) + 0.8f * forest_jitter(i, 78.233f)) * tree_spacing;
+        return velk::vec3{x, ground_y(x, z), z};
     };
     velk::InstancedMeshVisual forest_visual;
     velk::Trs forest_trs;
     uint32_t forest_extra_slot = 0xFFFFFFFFu;
-    if (forest) {
+    if (forest && element_count > 0) {
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
         // 2 cones * 64 sides * 39 rings * 2 triangles.
@@ -917,13 +1189,23 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         if (!state || !focus_state) {
             return;
         }
+        // Key code of C.
+        if (e.key == 67) {
+            VELK_LOG(I, "scale: view=%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", focus_state->translate.x, focus_state->translate.y,
+                     focus_state->translate.z, state->yaw, state->pitch, state->distance);
+            return;
+        }
         // Key codes of W, A, S and D.
         const float step = state->distance * 0.1f;
         velk::vec3 at = focus_state->translate;
-        if (e.key == 87) at.z -= step;
-        if (e.key == 83) at.z += step;
-        if (e.key == 65) at.x -= step;
-        if (e.key == 68) at.x += step;
+        // Where the camera points, and to its right.
+        const float yaw = state->yaw * 3.14159265f / 180.f;
+        const float pitch = state->pitch * 3.14159265f / 180.f;
+        const velk::vec3 forward{-std::sin(yaw) * std::cos(pitch), -std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+        const velk::vec3 right{std::cos(yaw), 0.f, -std::sin(yaw)};
+        const float move = (e.key == 87 ? step : 0.f) - (e.key == 83 ? step : 0.f);
+        const float strafe = (e.key == 68 ? step : 0.f) - (e.key == 65 ? step : 0.f);
+        at = at + forward * move + right * strafe;
         focus_trs.set_translate(at);
     });
 
@@ -983,7 +1265,8 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             orbit.set_yaw(60.f);
             // Back and forth over a quarter of the forest, at up to 800 units a second.
             const float reach = extent * 0.25f;
-            focus_trs.set_translate({reach * std::sin(t * 800.f / reach), kFloorY - 30.f, 0.f});
+            const float focus_x = reach * std::sin(t * 800.f / reach);
+            focus_trs.set_translate({focus_x, ground_y(focus_x, 0.f) - 30.f, 0.f});
         }
 
         const bool movers_still = burst_movers && (frame / 200) % 2 == 1;
