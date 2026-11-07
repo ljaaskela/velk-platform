@@ -21,7 +21,7 @@ namespace velk::impl {
 
 namespace {
 
-/// Past this share of the slots, the changes are handled as if all had changed.
+/// Past this share of the slots, all raster instances are rewritten.
 constexpr uint32_t kChangedListDivisor = 4;
 
 ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh)
@@ -155,12 +155,9 @@ void InstancedMeshVisual::note_changed(uint32_t slot)
             flush_slots_.clear();
         }
     }
+    // The BVH wants every slot, however many, or it cuts all its partitions again.
     if (!all_changed_) {
         changed_slots_.push_back(slot);
-        if (changed_slots_.size() > limit) {
-            all_changed_ = true;
-            changed_slots_.clear();
-        }
     }
 }
 

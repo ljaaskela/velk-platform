@@ -983,6 +983,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // target reads them.
         for (auto& [scene, bvh] : scene_bvhs) {
             bvh->emit_instance_motion(ctx, *slot.graph);
+            bvh->emit_gpu_builds(ctx, *slot.graph);
         }
         emit_gpu_deforms(ctx, *slot.graph);
 
@@ -1109,6 +1110,9 @@ Frame Renderer::prepare(const FrameDesc& desc)
     {
         VELK_PERF_SCOPE("renderer.build_frame_passes");
         build_frame_passes(desc, consumed_scenes, *slot);
+        for (auto& [scene, bvh] : scene_bvh_cache_) {
+            bvh->end_frame_gpu_builds();
+        }
         // A mesh not ready to run yet stays for the next frame.
         for (const auto& mesh : gpu_deforms_recorded_) {
             gpu_deforms_.erase(std::remove(gpu_deforms_.begin(), gpu_deforms_.end(), mesh), gpu_deforms_.end());

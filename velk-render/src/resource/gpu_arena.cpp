@@ -71,8 +71,13 @@ ArenaRegion GpuArena::alloc(uint64_t size, uint64_t alignment)
 void GpuArena::reserve(uint64_t size)
 {
     if (!backend_ || size == 0) return;
+    uint64_t free_bytes = 0;
+    for (const auto& span : free_spans_) {
+        free_bytes += span.size;
+    }
+    if (free_bytes >= size) return;
     const uint64_t old_cap = persistent_capacity_;
-    if (grow_persistent(old_cap + size)) {
+    if (grow_persistent(old_cap + (size - free_bytes))) {
         free_spans_.push_back({old_cap, persistent_capacity_ - old_cap});
         coalesce_free();
     }

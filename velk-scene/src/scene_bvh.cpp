@@ -34,6 +34,8 @@ constexpr uint32_t kQuietFrames = 120;
 constexpr size_t kMaxShapesWithoutTree = 4;
 /// A full re-cut runs when the top tree's SAH cost grows past this factor.
 constexpr float kRecutDrift = 1.5f;
+/// A partition with at least this many items gets its tree built on the GPU.
+constexpr size_t kGpuBuildMinItems = 4096;
 /// New records up to this count always start in the dynamic partition.
 constexpr size_t kMaxUnplacedToDynamic = 16;
 
@@ -1106,11 +1108,36 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     for (uint32_t slot : partition.members) {
         items.push_back(group ? instance_bounds(*group, slot) : records_[slot].bounds);
     }
-    BvhTree tree = build_bvh_tree({items.data(), items.size()});
+
+    const bool gpu_build = items.size() >= kGpuBuildMinItems;
+
+    float bounds_lo[3];
+    float bounds_hi[3];
+    for (int k = 0; k < 3; ++k) {
+        bounds_lo[k] = std::numeric_limits<float>::max();
+        bounds_hi[k] = -std::numeric_limits<float>::max();
+    }
+    for (const auto& item : items) {
+        merge_bounds(bounds_lo, bounds_hi, item.min, item.max);
+    }
+
+    // A tree built on the GPU keeps the records in the order of the members.
+    BvhTree tree;
+    if (gpu_build) {
+        tree.order.resize(items.size());
+        for (size_t i = 0; i < items.size(); ++i) {
+            tree.order[i] = static_cast<uint32_t>(i);
+        }
+    } else {
+        tree = build_bvh_tree({items.data(), items.size()});
+        partition.gpu_build_items = {};
+        partition.gpu_build_scratch = {};
+        partition.gpu_build_capacity = 0;
+    }
 
     if (geometry && !group) {
-        // Shapes in leaf order, so a ray that reaches neighbouring records finds
-        // their shapes nearby in memory.
+        // Shapes in the order of the records. For a tree built here that is leaf order,
+        // so a ray that reaches neighbouring records finds their shapes nearby in memory.
         size_t shape_count = 0;
         size_t tree_node_count = 0;
         for (uint32_t slot : partition.members) {
@@ -1164,7 +1191,7 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
 
     float origin[3];
     for (int k = 0; k < 3; ++k) {
-        origin[k] = 0.5f * (tree.nodes[0].aabb_min[k] + tree.nodes[0].aabb_max[k]);
+        origin[k] = 0.5f * (bounds_lo[k] + bounds_hi[k]);
     }
 
     uint32_t record_base = 0;
@@ -1188,12 +1215,14 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
                                     gpu_records.size() * sizeof(RtRecord));
     }
 
+    const size_t node_count = gpu_build ? items.size() * 2u - 1u : tree.nodes.size();
     uint32_t node_base = 0;
-    alloc_elements(ctx.bvh_nodes_arena, partition.nodes, tree.nodes.size(), sizeof(GpuBvhNode), node_base);
+    alloc_elements(ctx.bvh_nodes_arena, partition.nodes, node_count, sizeof(GpuBvhNode), node_base);
     // Indices stamped onto a failed region would point into other trees, where a
     // cycle would hang the walk. Rays skip the partition instead.
     if (!partition.nodes.valid() || !partition.records.valid()
-        || (geometry && !group && !partition.shapes.valid())) {
+        || (geometry && !group && !partition.shapes.valid())
+        || (gpu_build && !queue_gpu_build(partition, ctx, {items.data(), items.size()}, origin, node_base, record_base))) {
         VELK_LOG(E, "SceneBvh: partition allocation failed");
         set_inverted_bounds(partition.ref);
         partition.node_count = 0;
@@ -1202,14 +1231,19 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
 
     partition.ref = {};
     for (int k = 0; k < 3; ++k) {
-        partition.ref.aabb_min[k] = tree.nodes[0].aabb_min[k];
-        partition.ref.aabb_max[k] = tree.nodes[0].aabb_max[k];
+        partition.ref.aabb_min[k] = bounds_lo[k];
+        partition.ref.aabb_max[k] = bounds_hi[k];
     }
     partition.ref.aabb_min[3] = origin[0];
     partition.ref.aabb_max[3] = origin[1];
     std::memcpy(&partition.ref.first_shape, &origin[2], sizeof(float));
     partition.ref.first_child = node_base;
     partition.ref.child_count = kBvhPartitionRef;
+
+    if (gpu_build) {
+        partition.node_count = static_cast<uint32_t>(node_count);
+        return;
+    }
 
     for (auto& node : tree.nodes) {
         if (node.child_count != 0) {
@@ -1226,6 +1260,200 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     ctx.bvh_nodes_arena->write_at(partition.nodes.offset(), tree.nodes.data(),
                                   tree.nodes.size() * sizeof(GpuBvhNode));
     partition.node_count = static_cast<uint32_t>(tree.nodes.size());
+}
+
+bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
+                               const float origin[3], uint32_t node_base, uint32_t record_base)
+{
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return false;
+    }
+    const auto count = static_cast<uint32_t>(items.size());
+
+    // Items go in a fresh region each frame, relative to the origin and rounded outward,
+    // so subtracting it never shrinks a box.
+    partition.gpu_build_items = arena->alloc(uint64_t(count) * sizeof(float) * 6);
+    auto* out = static_cast<float*>(partition.gpu_build_items.valid()
+                                        ? arena->mapped_at(partition.gpu_build_items.offset())
+                                        : nullptr);
+    if (!out) {
+        return false;
+    }
+    float lo[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                   std::numeric_limits<float>::max()};
+    float hi[3] = {-lo[0], -lo[0], -lo[0]};
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    for (uint32_t i = 0; i < count; ++i) {
+        float item[6];
+        for (int k = 0; k < 3; ++k) {
+            item[k] = std::nextafter(items[i].min[k] - origin[k], -kInf);
+            item[3 + k] = std::nextafter(items[i].max[k] - origin[k], kInf);
+            const float center = 0.5f * (item[k] + item[3 + k]);
+            lo[k] = std::min(lo[k], center);
+            hi[k] = std::max(hi[k], center);
+        }
+        std::memcpy(out + size_t(i) * 6, item, sizeof(item));
+    }
+
+    // Scratch outlives the frame, and the pass's first barrier orders its reuse.
+    if (partition.gpu_build_capacity < count) {
+        const uint32_t capacity = count + count / 4u;
+        const uint32_t capacity_blocks = (capacity + kLbvhBlockItems - 1u) / kLbvhBlockItems;
+        // Keys and values twice, histograms and digit bases, parents of all nodes, and
+        // inner nodes, counters and leaves.
+        const uint64_t words = uint64_t(capacity) * 4u + (uint64_t(capacity_blocks) + 1u) * 256u
+            + uint64_t(capacity) * 2u + uint64_t(capacity) * 3u;
+        partition.gpu_build_scratch = arena->alloc(words * sizeof(uint32_t));
+        if (!partition.gpu_build_scratch.valid()) {
+            partition.gpu_build_capacity = 0;
+            return false;
+        }
+        partition.gpu_build_capacity = capacity;
+    }
+
+    // Rays find an empty tree if the build never runs, rather than unwritten nodes.
+    GpuBvhNode empty{};
+    set_inverted_bounds(empty);
+    ctx.bvh_nodes_arena->write_at(uint64_t(node_base) * sizeof(GpuBvhNode), &empty, sizeof(empty));
+
+    const uint32_t capacity = partition.gpu_build_capacity;
+    const uint32_t capacity_blocks = (capacity + kLbvhBlockItems - 1u) / kLbvhBlockItems;
+    uint32_t next = static_cast<uint32_t>(partition.gpu_build_scratch.offset() / sizeof(uint32_t));
+    const auto take = [&next](uint32_t words) {
+        const uint32_t at = next;
+        next += words;
+        return at;
+    };
+
+    LbvhPush build{};
+    build.count = count;
+    build.items = static_cast<uint32_t>(partition.gpu_build_items.offset() / sizeof(uint32_t));
+    build.keys_in = take(capacity);
+    build.values_in = take(capacity);
+    build.keys_out = take(capacity);
+    build.values_out = take(capacity);
+    build.histograms = take(capacity_blocks * 256u);
+    build.digit_bases = take(256u);
+    build.parents = take(capacity * 2u);
+    build.inner_nodes = take(capacity);
+    build.counters = take(capacity);
+    build.leaf_nodes = take(capacity);
+    build.node_base = node_base;
+    build.record_base = record_base;
+    float extent = 0.f;
+    for (int k = 0; k < 3; ++k) {
+        build.lo[k] = lo[k];
+        extent = std::max(extent, hi[k] - lo[k]);
+    }
+    build.scale = 1023.f / std::max(extent, 1e-20f);
+    gpu_builds_.push_back(build);
+    return true;
+}
+
+void SceneBvh::emit_gpu_builds(FrameContext& ctx, IRenderGraph& graph)
+{
+    if (gpu_builds_.empty()) {
+        return;
+    }
+    VELK_PERF_SCOPE("renderer.gpu_build_record");
+
+    const auto pipeline_for = [&](string_view stage, uint64_t tag) {
+        const uint64_t key = 0x4c42'5648'0000'0000ULL | tag;
+        auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        if (!pipeline) {
+            string src(lbvh_prelude_src);
+            src += stage;
+            pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
+        }
+        return pipeline;
+    };
+
+    // The nodes' addresses change every frame, so these commands do too.
+    bool dirty = true;
+    emit_cached_view_pass(gpu_build_pass_, dirty, "bvh.gpu_build", graph, [&](CachedPassRecording& rec) {
+        auto keys = pipeline_for(lbvh_keys_src, 1);
+        auto histogram = pipeline_for(lbvh_histogram_src, 2);
+        auto offsets = pipeline_for(lbvh_offsets_src, 3);
+        auto scatter = pipeline_for(lbvh_scatter_src, 4);
+        auto structure = pipeline_for(lbvh_structure_src, 5);
+        auto bounds = pipeline_for(lbvh_bounds_src, 6);
+        auto digit_bases = pipeline_for(lbvh_digit_bases_src, 7);
+        auto cmd = keys && histogram && offsets && digit_bases && scatter && structure && bounds
+            ? ctx.backend->create_command_buffer()
+            : nullptr;
+        if (!cmd) {
+            VELK_LOG(E, "SceneBvh: cannot build trees on the GPU, rays will not see their items");
+            return;
+        }
+
+        const auto dispatch = [&](IGpuPipeline::Ptr& pipeline, const LbvhPush& pc, uint32_t groups) {
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = groups;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            cmd->record_dispatch(dc);
+        };
+
+        cmd->begin_recording();
+        cmd->push_label("BVH build");
+        // Earlier frames may still be reading what this writes.
+        cmd->record_global_barrier();
+        for (const auto& build : gpu_builds_) {
+            dispatch(keys, build, (build.count + 63u) / 64u);
+        }
+        cmd->record_global_barrier();
+
+        // Least significant digit first. An even number of passes ends in `keys_in`.
+        constexpr uint32_t kPasses = 4;
+        static_assert(kLbvhDigitBits * kPasses >= kLbvhKeyBits && kPasses % 2 == 0);
+        for (uint32_t pass = 0; pass < kPasses; ++pass) {
+            for (auto build : gpu_builds_) {
+                if (pass % 2 == 1) {
+                    std::swap(build.keys_in, build.keys_out);
+                    std::swap(build.values_in, build.values_out);
+                }
+                build.shift = pass * kLbvhDigitBits;
+                dispatch(histogram, build, (build.count + kLbvhBlockItems - 1u) / kLbvhBlockItems);
+            }
+            cmd->record_global_barrier();
+            for (const auto& build : gpu_builds_) {
+                dispatch(offsets, build, 256);
+            }
+            cmd->record_global_barrier();
+            for (const auto& build : gpu_builds_) {
+                dispatch(digit_bases, build, 1);
+            }
+            cmd->record_global_barrier();
+            for (auto build : gpu_builds_) {
+                if (pass % 2 == 1) {
+                    std::swap(build.keys_in, build.keys_out);
+                    std::swap(build.values_in, build.values_out);
+                }
+                build.shift = pass * kLbvhDigitBits;
+                dispatch(scatter, build, (build.count + kLbvhBlockItems - 1u) / kLbvhBlockItems);
+            }
+            cmd->record_global_barrier();
+        }
+
+        for (const auto& build : gpu_builds_) {
+            dispatch(structure, build, (build.count - 1u + 63u) / 64u);
+        }
+        cmd->record_global_barrier();
+        for (const auto& build : gpu_builds_) {
+            dispatch(bounds, build, (build.count + 63u) / 64u);
+        }
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        for (auto* pipeline : {&keys, &histogram, &offsets, &digit_bases, &scatter, &structure, &bounds}) {
+            rec.held.push_back(std::move(*pipeline));
+        }
+    });
 }
 
 void SceneBvh::rebuild_top_tree(FrameContext& ctx)
@@ -1479,6 +1707,9 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
                 dynamic_.records = {};
                 dynamic_.shapes = {};
                 dynamic_.tree_nodes = {};
+                dynamic_.gpu_build_items = {};
+                dynamic_.gpu_build_scratch = {};
+                dynamic_.gpu_build_capacity = 0;
                 dynamic_.node_count = 0;
             } else {
                 upload_partition(dynamic_, ctx, dynamic_.dirty);

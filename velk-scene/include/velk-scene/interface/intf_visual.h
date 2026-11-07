@@ -244,8 +244,8 @@ public:
     /// Whether resting matrices were written since the last call.
     virtual bool take_rest_changed() = 0;
 
-    /// Slots changed since the last call, added to @p changed. Sets @p all instead
-    /// when the list would not be worth keeping.
+    /// Slots changed since the last call, added to @p changed. Sets @p all instead when
+    /// everything is to be treated as changed, such as on a new motion function.
     virtual void take_changed_slots(vector<uint32_t>& changed, bool& all) = 0;
 };
 

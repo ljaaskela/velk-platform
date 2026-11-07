@@ -2,6 +2,7 @@
 #define VELK_UI_SCENE_BVH_H
 
 #include "scene_collector.h"
+#include "scene_lbvh.h"
 
 #include <velk/api/velk.h>
 #include <velk/ext/object.h>
@@ -58,6 +59,12 @@ public:
     /// Adds the passes that run instanced visuals' motion functions to @p graph. Comes
     /// before every pass that reads instances or records.
     void emit_instance_motion(FrameContext& ctx, IRenderGraph& graph);
+
+    /// Adds the pass that builds this frame's trees on the GPU to @p graph. Comes before
+    /// every pass that traces rays.
+    void emit_gpu_builds(FrameContext& ctx, IRenderGraph& graph);
+    /// Forgets the builds of the frame just recorded.
+    void end_frame_gpu_builds() { gpu_builds_.clear(); }
 
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
@@ -149,6 +156,9 @@ private:
         /// until `dirty` is handled.
         vector<uint32_t> members;
         InstanceGroup* group = nullptr;  ///< Set when this partition holds instances.
+        ArenaRegion gpu_build_items;    ///< This frame's items, when the GPU builds the tree.
+        ArenaRegion gpu_build_scratch;  ///< What the build works in. Kept while it is large enough.
+        uint32_t gpu_build_capacity = 0;
         ArenaRegion nodes;
         ArenaRegion records;
         ArenaRegion shapes;
@@ -197,6 +207,10 @@ private:
     void flush_partitions(FrameContext& ctx);
     /// Uploads @p partition. With @p geometry, also its shapes and local trees.
     void upload_partition(Partition& partition, FrameContext& ctx, bool geometry);
+    /// Queues a build of @p partition's tree on the GPU, over @p items in the order of
+    /// its records, which start at @p record_base.
+    bool queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
+                         const float origin[3], uint32_t node_base, uint32_t record_base);
     void rebuild_top_tree(FrameContext& ctx);
     void upload_root(FrameContext& ctx);
     uint32_t alloc_partition();
@@ -233,6 +247,8 @@ private:
 
     vector<uint32_t> unplaced_;       ///< Records waiting for a partition.
     vector<uint32_t> shape_updates_;  ///< Records whose shapes changed but not their geometry.
+    vector<LbvhPush> gpu_builds_;     ///< Trees to build on the GPU this frame.
+    IRenderPass::Ptr gpu_build_pass_;
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 

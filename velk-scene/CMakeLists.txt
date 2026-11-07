@@ -55,6 +55,7 @@ add_library(velk_scene SHARED
     # Render-feeding traits
     src/camera.h
     src/camera.cpp
+    src/scene_lbvh.h
     src/trait/light.h
     src/trait/compute_mesh_deformer.h
 
