@@ -64,6 +64,7 @@
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
 // grass=N:  nature has N patches of grass, 1,000,000 by default, fewer on steep or high ground.
+// nosky:    nature has no generated sky.
 // nowind:   nature's trees stand still.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
@@ -114,7 +115,10 @@
 #include <velk-scene/ext/trait.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/api/visual/rect.h>
+#include <velk-ui/plugins/image/api/environment.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
+#include <velk/interface/resource/intf_resource_protocol.h>
+#include <velk/interface/resource/intf_resource_store.h>
 
 namespace {
 
@@ -677,6 +681,51 @@ velk::IMesh::Ptr build_rock_mesh(velk::IRenderContext& ctx, float size, const ve
     return builder.build({primitives, 1});
 }
 
+/// Generates a clear sky as the bytes of a Radiance HDR file, equirectangular with up at the
+/// top of the image: pale at the horizon and deep blue overhead, with dim ground below it.
+velk::vector<uint8_t> build_sky_hdr()
+{
+    constexpr int kWidth = 256;
+    constexpr int kHeight = 128;
+    constexpr float kPi = 3.14159265358979323846f;
+    velk::vector<uint8_t> bytes;
+    char header[96];
+    const int header_size = std::snprintf(header, sizeof(header), "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y %d +X %d\n", kHeight, kWidth);
+    for (int i = 0; i < header_size; ++i) {
+        bytes.push_back(static_cast<uint8_t>(header[i]));
+    }
+    for (int y = 0; y < kHeight; ++y) {
+        const float up = std::cos((static_cast<float>(y) + 0.5f) / static_cast<float>(kHeight) * kPi);
+        float rgb[3];
+        if (up >= 0.f) {
+            const float t = std::pow(up, 0.45f);
+            const float horizon[3] = {1.05f, 1.10f, 1.15f};
+            const float zenith[3] = {0.22f, 0.42f, 0.95f};
+            for (int k = 0; k < 3; ++k) {
+                rgb[k] = horizon[k] + (zenith[k] - horizon[k]) * t;
+            }
+        } else {
+            // Haze fading down to dim ground, so the terrain's edge blends into the distance.
+            const float t = std::min(-up / 0.5f, 1.f);
+            const float horizon[3] = {1.05f, 1.10f, 1.15f};
+            const float ground[3] = {0.22f, 0.24f, 0.18f};
+            for (int k = 0; k < 3; ++k) {
+                rgb[k] = horizon[k] + (ground[k] - horizon[k]) * t;
+            }
+        }
+        int exponent = 0;
+        const float mantissa = std::frexp(std::max({rgb[0], rgb[1], rgb[2]}), &exponent);
+        const float scale = mantissa * 256.f / std::max({rgb[0], rgb[1], rgb[2]});
+        for (int x = 0; x < kWidth; ++x) {
+            bytes.push_back(static_cast<uint8_t>(rgb[0] * scale));
+            bytes.push_back(static_cast<uint8_t>(rgb[1] * scale));
+            bytes.push_back(static_cast<uint8_t>(rgb[2] * scale));
+            bytes.push_back(static_cast<uint8_t>(exponent + 128));
+        }
+    }
+    return bytes;
+}
+
 /// How a generated tree grows. Lengths are in world units.
 struct TreeShape
 {
@@ -1160,6 +1209,7 @@ int main(int argc, char* argv[])
     float leaf_density = 1.f;
     bool no_shadow = false;
     bool no_wind = false;
+    bool no_sky = false;
     long grass_count = 1000000;
     bool ray_wind = true;
     bool flat_terrain = false;
@@ -1183,6 +1233,7 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
+        no_sky = no_sky || std::strcmp(argv[i], "nosky") == 0;
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
         ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
@@ -1264,6 +1315,15 @@ int main(int argc, char* argv[])
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());
     cam.add_post_process(post);
+
+    if (nature && !no_sky) {
+        const velk::vector<uint8_t> sky = build_sky_hdr();
+        auto protocol = velk::instance().resource_store().find_protocol("memory");
+        if (auto* memory = interface_cast<velk::IMemoryProtocol>(protocol.get())) {
+            memory->add_file("scale_sky.hdr", sky.data(), sky.size());
+            cam.set_environment(velk::ui::load_environment("env:memory://scale_sky.hdr"));
+        }
+    }
 
     // A forest is viewed from close up, at its center.
     const float distance = nature ? 16000.f : forest ? 420.f : std::max(extent * 1.3f, 800.f);
