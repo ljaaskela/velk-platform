@@ -686,13 +686,25 @@ velk::IMesh::Ptr build_rock_mesh(velk::IRenderContext& ctx, float size, const ve
     return builder.build({primitives, 1});
 }
 
-/// Generates a clear sky as the bytes of a Radiance HDR file, equirectangular with up at the
-/// top of the image: pale at the horizon and deep blue overhead, with dim ground below it.
-velk::vector<uint8_t> build_sky_hdr()
+/// The direction towards a directional light with this rotation, in degrees.
+velk::vec3 towards_light(const velk::vec3& rotation)
 {
-    constexpr int kWidth = 256;
-    constexpr int kHeight = 128;
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
+    const velk::mat4 m = velk::quat::from_euler({rotation.x * kDegToRad, rotation.y * kDegToRad, rotation.z * kDegToRad}).to_mat4();
+    return {m.m[8], m.m[9], m.m[10]};
+}
+
+/// Generates a clear sky as the bytes of a Radiance HDR file, equirectangular with up at the
+/// top of the image: pale at the horizon and deep blue overhead, with dim ground below it and
+/// a sun with a glow around it towards @p sun.
+velk::vector<uint8_t> build_sky_hdr(const velk::vec3& sun)
+{
+    constexpr int kWidth = 1024;
+    constexpr int kHeight = 512;
     constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kDiscCos = 0.99978f;  // 1.2 degrees across its radius.
+    constexpr float kDiscEdgeCos = 0.99990f;
+    constexpr float kDiscRadiance = 40.f;
     velk::vector<uint8_t> bytes;
     char header[96];
     const int header_size = std::snprintf(header, sizeof(header), "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y %d +X %d\n", kHeight, kWidth);
@@ -718,13 +730,19 @@ velk::vector<uint8_t> build_sky_hdr()
                 rgb[k] = horizon[k] + (ground[k] - horizon[k]) * t;
             }
         }
-        int exponent = 0;
-        const float mantissa = std::frexp(std::max({rgb[0], rgb[1], rgb[2]}), &exponent);
-        const float scale = mantissa * 256.f / std::max({rgb[0], rgb[1], rgb[2]});
+        const float across = std::sqrt(std::max(1.f - up * up, 0.f));
         for (int x = 0; x < kWidth; ++x) {
-            bytes.push_back(static_cast<uint8_t>(rgb[0] * scale));
-            bytes.push_back(static_cast<uint8_t>(rgb[1] * scale));
-            bytes.push_back(static_cast<uint8_t>(rgb[2] * scale));
+            const float turn = ((static_cast<float>(x) + 0.5f) / static_cast<float>(kWidth) - 0.5f) * 2.f * kPi;
+            const float along = std::max(across * std::cos(turn) * sun.x - up * sun.y + across * std::sin(turn) * sun.z, 0.f);
+            const float disc = std::clamp((along - kDiscCos) / (kDiscEdgeCos - kDiscCos), 0.f, 1.f);
+            const float light = disc * kDiscRadiance + 0.8f * std::pow(along, 900.f) + 0.12f * std::pow(along, 40.f);
+            const float pixel[3] = {rgb[0] + light, rgb[1] + light * 0.96f, rgb[2] + light * 0.88f};
+            int exponent = 0;
+            const float largest = std::max({pixel[0], pixel[1], pixel[2]});
+            const float scale = std::frexp(largest, &exponent) * 256.f / largest;
+            bytes.push_back(static_cast<uint8_t>(pixel[0] * scale));
+            bytes.push_back(static_cast<uint8_t>(pixel[1] * scale));
+            bytes.push_back(static_cast<uint8_t>(pixel[2] * scale));
             bytes.push_back(static_cast<uint8_t>(exponent + 128));
         }
     }
@@ -1348,8 +1366,10 @@ int main(int argc, char* argv[])
     post.add(velk::pp::create_tonemap());
     cam.add_post_process(post);
 
+    const velk::vec3 sun_rotation{sun_angle > 0.f ? sun_angle : low_sun || nature ? 15.f : 35.f, 25.f, 0.f};
+
     if (nature && !no_sky) {
-        const velk::vector<uint8_t> sky = build_sky_hdr();
+        const velk::vector<uint8_t> sky = build_sky_hdr(towards_light(sun_rotation));
         auto protocol = velk::instance().resource_store().find_protocol("memory");
         if (auto* memory = interface_cast<velk::IMemoryProtocol>(protocol.get())) {
             memory->add_file("scale_sky.hdr", sky.data(), sky.size());
@@ -1420,7 +1440,7 @@ int main(int argc, char* argv[])
         }
         auto sun = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({sun_angle > 0.f ? sun_angle : low_sun || nature ? 15.f : 35.f, 25.f, 0.f});
+        trs.set_rotation(sun_rotation);
         sun.add_trait(trs);
         sun.add_trait(light);
         scene.add(root, sun);
@@ -1611,7 +1631,6 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
                                                            {-s, 0.f, c, z}}});
             }
             auto grass_visual = velk::trait::visual::create_instanced_mesh();
-            grass_visual.set_draw_distance(1500.f);
             grass_visual.set_mesh(velk::Mesh(build_grass_patch(*render_context, patch_size * 1.3f, foliage(velk::color{0.17f, 0.29f, 0.07f, 1.f}))));
             grass_visual.add_instances({patches.data(), patches.size()});
             auto grass_element = velk::create_element();
