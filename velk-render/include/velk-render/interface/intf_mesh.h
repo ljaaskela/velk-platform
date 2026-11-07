@@ -221,6 +221,17 @@ struct MeshRefitInfo
  * the metadata-layout position of IMeshPrimitive in the impl's interface
  * chain stays stable.
  */
+/// Where a primitive's level of detail hierarchy is. See VELK_LOD_SELECT_GLSL.
+struct MeshLodInfo
+{
+    uint32_t cluster_word = 0;     ///< Its clusters in the culling arena, by level, level 0 first.
+    uint32_t cluster_count = 0;
+    uint32_t level0_clusters = 0;  ///< How many of them are the full mesh.
+    uint32_t level_word = 0;       ///< Its levels in the culling arena.
+    uint32_t level_count = 0;
+    uint32_t index_word = 0;       ///< Its indices in the mesh-word arena, which clusters' first indices count from.
+};
+
 class IMeshPrimitiveInternal : public Interface<IMeshPrimitiveInternal>
 {
 public:
@@ -271,12 +282,7 @@ public:
 
     /// Builds this primitive's level of detail hierarchy on first call and publishes it. False
     /// when it has too few clusters for this to be worth it, or none to build from.
-    /// @param table_word Set to the first word of its clusters in the culling arena, level 0 first.
-    /// @param level0_clusters Set to how many of them are the full mesh.
-    /// @param index_word Set to the first word of its indices in the mesh-word arena, which
-    ///        the clusters' first indices count from.
-    virtual bool ensure_lod_data(IGpuResourceManager& resources, uint32_t& table_word, uint32_t& level0_clusters,
-                                 uint32_t& index_word) = 0;
+    virtual bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) = 0;
 };
 
 /**

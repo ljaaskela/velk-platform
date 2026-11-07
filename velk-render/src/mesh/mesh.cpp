@@ -72,8 +72,7 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
     lod_index_region_ = {};
 }
 
-bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, uint32_t& table_word, uint32_t& level0_clusters,
-                                    uint32_t& index_word)
+bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out)
 {
     if (!lod_table_region_.valid()) {
         // A single cluster has nothing to choose between.
@@ -86,23 +85,27 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, uint32_t& ta
             return false;
         }
         const MeshLod lod = build_mesh_lod(rt_blas_);
-        lod_table_region_ = culling->alloc(lod.clusters.size() * sizeof(MeshLodCluster));
+        const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
+        const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
+        lod_table_region_ = culling->alloc(clusters_size + levels_size);
         lod_index_region_ = mesh_words->alloc(lod.indices.size() * sizeof(uint32_t));
         if (!lod_table_region_.valid() || !lod_index_region_.valid()) {
             lod_table_region_ = {};
             lod_index_region_ = {};
             return false;
         }
-        level0_clusters_ = 0;
-        for (const auto& cluster : lod.clusters) {
-            level0_clusters_ += cluster.level == 0 ? 1u : 0u;
-        }
-        culling->write_at(lod_table_region_.offset(), lod.clusters.data(), lod.clusters.size() * sizeof(MeshLodCluster));
+        culling->write_at(lod_table_region_.offset(), lod.clusters.data(), clusters_size);
+        culling->write_at(lod_table_region_.offset() + clusters_size, lod.levels.data(), levels_size);
         mesh_words->write_at(lod_index_region_.offset(), lod.indices.data(), lod.indices.size() * sizeof(uint32_t));
+
+        lod_info_.cluster_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));
+        lod_info_.cluster_count = static_cast<uint32_t>(lod.clusters.size());
+        lod_info_.level0_clusters = lod.levels[0].cluster_count;
+        lod_info_.level_word = lod_info_.cluster_word + lod_info_.cluster_count * kLodClusterWords;
+        lod_info_.level_count = static_cast<uint32_t>(lod.levels.size());
+        lod_info_.index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
     }
-    table_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));
-    level0_clusters = level0_clusters_;
-    index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
+    out = lod_info_;
     return true;
 }
 

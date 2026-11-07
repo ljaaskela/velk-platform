@@ -219,6 +219,9 @@ float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
 // How wide the area a visibility ray stands for is, in world units, for the shader to
 // set before tracing one. 0 means a single line, which tests every instance.
 float velk_ray_footprint = 0.0;
+// How far the surface a ray starts from may be from the full mesh rays are tested against,
+// in world units, when it is drawn at a coarser level of detail. For the shader to set.
+float velk_ray_lift = 0.0;
 // What a closest-hit ray passed through in nodes too fine for it, for the shader to clear
 // before tracing and use after: optical depth, and colour times depth.
 float velk_ray_medium_depth = 0.0;
@@ -1460,7 +1463,9 @@ void main()
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
     vec4 albedo    = velk_texture(pc.albedo_tex_id, uv);
-    vec3 world_n   = velk_texture(pc.normal_tex_id, uv).xyz;
+    vec4 normal_and_error = velk_texture(pc.normal_tex_id, uv);
+    vec3 world_n   = normal_and_error.xyz;
+    float lod_error = normal_and_error.w;
     vec3 world_pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
     vec4 mat       = velk_texture(pc.material_tex_id, uv);
 
@@ -1688,8 +1693,10 @@ void main()
             float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
             velk_ray_footprint = length(world_pos - VELK_GLOBALS.cam_pos.xyz) * 2.0 / (footprint_f * float(pc.height))
                 / sqrt(max(NdotV, 0.05));
+            velk_ray_lift = lod_error;
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             velk_ray_footprint = 0.0;
+            velk_ray_lift = 0.0;
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
         }
@@ -1734,7 +1741,7 @@ void main()
         if (trace_now && VELK_GLOBALS.bvh_node_count != 0u) {
             const float ao_range = 0.3;
             Ray ao_r;
-            ao_r.origin = world_pos + N * 0.01;
+            ao_r.origin = world_pos + N * (0.01 + lod_error);
             ao_r.dir    = N;
             ao = trace_any_hit(ao_r, ao_range) ? 0.0 : 1.0;
         }

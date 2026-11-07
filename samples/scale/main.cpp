@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [across] [top] [yaw=N]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [rocks] [across] [top] [yaw=N]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -56,6 +56,7 @@
 // lowsun:   the sun is at 15 degrees instead of 35.
 // dense:    a forest's trees are 30 apart instead of 80, so the canopy nearly closes.
 // blocks:   a forest's mesh is a flat red box instead of a tree.
+// rocks:    a forest's mesh is a lumpy rock of about 25,000 triangles instead of a tree.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
@@ -208,6 +209,94 @@ velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size, uint
     }
     primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex),
                                                  vertex_count, indices.data(), index_count / 3));
+    velk::IMeshPrimitive::Ptr primitives[] = {primitive};
+    return builder.build({primitives, 1});
+}
+
+/// Builds a lumpy rock of about 25,000 triangles standing on y = 0 and growing towards -y.
+velk::IMesh::Ptr build_rock_mesh(velk::IRenderContext& ctx, float size, const velk::IMaterial::Ptr& material)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr uint32_t kSegments = 160;
+    constexpr uint32_t kRings = 80;
+    static constexpr velk::VertexAttribute kAttributes[] = {
+        {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
+        {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
+        {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
+        {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
+    };
+
+    const float radius = size * 0.5f;
+    const auto surface = [&](float theta, float phi) {
+        const velk::vec3 d{std::sin(phi) * std::cos(theta), std::cos(phi), std::sin(phi) * std::sin(theta)};
+        const float lumps = 0.22f * std::sin(d.x * 3.1f + 0.7f) * std::cos(d.z * 2.7f)
+                            + 0.11f * std::sin(d.y * 7.3f + d.x * 5.1f)
+                            + 0.05f * std::sin(d.z * 17.f + 1.3f) * std::sin(d.x * 19.f + d.y * 13.f);
+        const float r = radius * (0.8f + lumps);
+        return velk::vec3{d.x * r, -radius + d.y * r, d.z * r};
+    };
+
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    for (uint32_t r = 0; r <= kRings; ++r) {
+        const float phi = static_cast<float>(r) / kRings * kPi;
+        for (uint32_t s = 0; s <= kSegments; ++s) {
+            const float theta = static_cast<float>(s) / kSegments * kPi * 2.f;
+            const velk::vec3 p = surface(theta, phi);
+            const velk::vec3 from_center{p.x, p.y + radius, p.z};
+            constexpr float kStep = 0.002f;
+            const velk::vec3 a = surface(theta + kStep, phi);
+            const velk::vec3 b = surface(theta - kStep, phi);
+            const velk::vec3 c = surface(theta, std::min(phi + kStep, kPi - kStep));
+            const velk::vec3 d = surface(theta, std::max(phi - kStep, kStep));
+            const velk::vec3 u{a.x - b.x, a.y - b.y, a.z - b.z};
+            const velk::vec3 v{c.x - d.x, c.y - d.y, c.z - d.z};
+            velk::vec3 n{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x};
+            const float towards = n.x * from_center.x + n.y * from_center.y + n.z * from_center.z;
+            const float length = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            const float flip = (towards < 0.f ? -1.f : 1.f) / std::max(length, 1e-9f);
+            n = {n.x * flip, n.y * flip, n.z * flip};
+            vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, {0.f, 0.f}, {-std::sin(theta), 0.f, std::cos(theta), 1.f}});
+        }
+    }
+    const auto add_triangle = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+        const auto& a = vertices[i0].position;
+        const auto& b = vertices[i1].position;
+        const auto& c = vertices[i2].position;
+        const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        const float e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const float nx = e1[1] * e2[2] - e1[2] * e2[1];
+        const float ny = e1[2] * e2[0] - e1[0] * e2[2];
+        const float nz = e1[0] * e2[1] - e1[1] * e2[0];
+        if (nx == 0.f && ny == 0.f && nz == 0.f) {
+            return;
+        }
+        // Outward, seen from the winding.
+        const bool outward = nx * a[0] + ny * (a[1] + radius) + nz * a[2] > 0.f;
+        indices.push_back(i0);
+        indices.push_back(outward ? i1 : i2);
+        indices.push_back(outward ? i2 : i1);
+    };
+    const uint32_t stride = kSegments + 1;
+    for (uint32_t r = 0; r < kRings; ++r) {
+        for (uint32_t s = 0; s < kSegments; ++s) {
+            const uint32_t i00 = r * stride + s;
+            add_triangle(i00, i00 + stride, i00 + stride + 1);
+            add_triangle(i00, i00 + stride + 1, i00 + 1);
+        }
+    }
+
+    velk::aabb bounds{};
+    bounds.position = {-size * 0.7f, -size * 1.2f, -size * 0.7f};
+    bounds.extent = {size * 1.4f, size * 1.4f, size * 1.4f};
+    const auto vertex_count = static_cast<uint32_t>(vertices.size());
+    const auto index_count = static_cast<uint32_t>(indices.size());
+    auto& builder = ctx.get_mesh_builder();
+    auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count, indices.data(),
+                                             index_count, velk::MeshTopology::TriangleList, bounds);
+    primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count,
+                                                 indices.data(), index_count / 3));
+    velk::MeshPrimitive(primitive).set_material(material);
     velk::IMeshPrimitive::Ptr primitives[] = {primitive};
     return builder.build({primitives, 1});
 }
@@ -426,6 +515,7 @@ int main(int argc, char* argv[])
     bool low_sun = false;
     bool dense = false;
     bool blocks = false;
+    bool rocks = false;
     int hold_stop = -1;
     float hold_yaw = 60.f;
     for (int i = 5; i < argc; ++i) {
@@ -438,6 +528,7 @@ int main(int argc, char* argv[])
         low_sun = low_sun || std::strcmp(argv[i], "lowsun") == 0;
         dense = dense || std::strcmp(argv[i], "dense") == 0;
         blocks = blocks || std::strcmp(argv[i], "blocks") == 0;
+        rocks = rocks || std::strcmp(argv[i], "rocks") == 0;
         if (std::strcmp(argv[i], "across") == 0) hold_stop = 1;
         if (std::strcmp(argv[i], "top") == 0) hold_stop = 2;
         if (std::strncmp(argv[i], "yaw=", 4) == 0) hold_yaw = static_cast<float>(std::atof(argv[i] + 4));
@@ -603,8 +694,10 @@ int main(int argc, char* argv[])
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
         // 2 cones * 64 sides * 39 rings * 2 triangles.
-        velk::Mesh tree_mesh(blocks ? build_block_mesh(*render_context, 24.f, 12.f,
-                                                       velk::material::create_standard(velk::color{0.6f, 0.25f, 0.2f, 1.f}, 0.f, 0.6f))
+        velk::Mesh tree_mesh(rocks ? build_rock_mesh(*render_context, 40.f,
+                                                     velk::material::create_standard(velk::color{0.5f, 0.46f, 0.4f, 1.f}, 0.f, 0.8f))
+                             : blocks ? build_block_mesh(*render_context, 24.f, 12.f,
+                                                         velk::material::create_standard(velk::color{0.6f, 0.25f, 0.2f, 1.f}, 0.f, 0.6f))
                              : heavy ? build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material, 64u, 39u)
                                      : build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
         if (forest_instances) {

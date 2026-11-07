@@ -60,7 +60,7 @@ void main()
 {
     velk_visual_discard();
     g_albedo      = v_color;
-    g_normal      = vec4(normalize(v_world_normal), 0.0);
+    g_normal      = vec4(normalize(v_world_normal), v_lod_error);
     g_world_pos   = vec4(v_world_pos, 0.0);
     g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
     g_emissive    = vec4(0.0);
@@ -195,7 +195,7 @@ void main()
                                     + min(2.0 * specaa_var, 0.18 /*KAPPA*/), 0.0, 1.0));
 
     g_albedo    = e.color;
-    g_normal    = vec4(N, 0.0);
+    g_normal    = vec4(N, v_lod_error);
     g_world_pos = vec4(v_world_pos, 0.0);
     g_material  = vec4(e.metallic, aa_roughness, float(e.lighting_mode) / 255.0, 0.0);
     g_emissive  = vec4(e.emissive, 0.0);

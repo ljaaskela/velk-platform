@@ -26,14 +26,27 @@ struct MeshLodCluster
     float parent_radius = 0.f;
     float parent_error = 0.f;     ///< Largest float when nothing replaces it.
 };
-static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors instance_cull_compute_src");
+static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
+
+/// What holds for all clusters of a level, so that a level none of them would be chosen
+/// from can be skipped without testing them.
+struct MeshLodLevel
+{
+    uint32_t first_cluster = 0;
+    uint32_t cluster_count = 0;
+    float min_error = 0.f;
+    float max_parent_error = 0.f;
+    float center[3] = {};  ///< With radius, a sphere holding the spheres its clusters are tested with.
+    float radius = 0.f;
+};
+static_assert(sizeof(MeshLodLevel) == kLodLevelWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
 /// Coarse levels hold only triangles over the mesh's own vertices.
 struct MeshLod
 {
     vector<uint32_t> indices;
-    vector<MeshLodCluster> clusters;  ///< Level 0 first.
-    uint32_t level_count = 0;
+    vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
+    vector<MeshLodLevel> levels;
 };
 
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.

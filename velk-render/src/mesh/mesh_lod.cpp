@@ -154,7 +154,6 @@ MeshLod build_mesh_lod(const BlasBuild& blas)
         add_cluster(lod, lists[i], positions, 0, nullptr, 0.f);
         pending.push_back(static_cast<uint32_t>(i));
     }
-    lod.level_count = 1;
 
     vector<uint32_t> first_seen;
     vector<unsigned char> locks;
@@ -260,10 +259,35 @@ MeshLod build_mesh_lod(const BlasBuild& blas)
                 lists.push_back(std::move(indices));
             }
         }
-        if (!next.empty()) {
-            lod.level_count = level + 1;
-        }
         pending = std::move(next);
+    }
+
+    for (size_t first = 0; first < lod.clusters.size();) {
+        MeshLodLevel level;
+        level.first_cluster = static_cast<uint32_t>(first);
+        level.min_error = lod.clusters[first].error;
+        vector<float> spheres;
+        const auto add_sphere = [&spheres](const float* center, float radius) {
+            spheres.insert(spheres.end(), center, center + 3);
+            spheres.push_back(radius);
+        };
+        size_t end = first;
+        for (; end < lod.clusters.size() && lod.clusters[end].level == lod.clusters[first].level; ++end) {
+            const MeshLodCluster& cluster = lod.clusters[end];
+            level.min_error = std::min(level.min_error, cluster.error);
+            level.max_parent_error = std::max(level.max_parent_error, cluster.parent_error);
+            add_sphere(cluster.center, cluster.radius);
+            if (cluster.parent_error < std::numeric_limits<float>::max()) {
+                add_sphere(cluster.parent_center, cluster.parent_radius);
+            }
+        }
+        level.cluster_count = static_cast<uint32_t>(end - first);
+        const meshopt_Bounds bounds = meshopt_computeSphereBounds(spheres.data(), spheres.size() / 4, sizeof(float) * 4,
+                                                                  spheres.data() + 3, sizeof(float) * 4);
+        std::memcpy(level.center, bounds.center, sizeof(float) * 3);
+        level.radius = bounds.radius;
+        lod.levels.push_back(level);
+        first = end;
     }
     return lod;
 }

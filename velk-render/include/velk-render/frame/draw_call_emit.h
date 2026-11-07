@@ -142,6 +142,7 @@ inline void emit_draw_calls(
         header.texture_id = texture_id;
         InstanceCullInfo cull_info{};
         header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
+        header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
         // Vertex streams are word bases into the mesh-word arena, the same
         // bytes and the same model RT reads.
         const GpuRef vbo_ref = get_gpu_ref(buffer);

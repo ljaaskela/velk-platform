@@ -84,7 +84,7 @@ inline constexpr uint32_t kNoVisibleList = 0xFFFFFFFFu;
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * 32 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
+ * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
  * now an index or a count: the alignment pads existed only to keep the two
  * 8-byte vertex-stream addresses aligned, and went with them.
  *
@@ -106,9 +106,11 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback when @c uv1_enabled is 0.
     uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_base; 0 = fallback, vertex shader reads vertex 0 only. Used as a branchless index multiplier in the vertex shader.
     uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
+    uint32_t lod_error_base;    ///< Word base in the culling arena of how far each draw instance's surface may be from the full mesh, in world units, or kNoVisibleList when it is the full mesh.
+    uint32_t _pad[3];
 };
 
-static_assert(sizeof(DrawDataHeader) == 32, "DrawDataHeader must be 32 bytes for std430 alignment");
+static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for std430 alignment");
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.

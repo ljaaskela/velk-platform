@@ -42,6 +42,56 @@ bool velk_instance_is_far(uint slot, float area, float clip_w, mat4 vp, float he
 }
 )"
 
+/// How far a level of detail may be from the full mesh on screen, in pixels.
+inline constexpr float kLodMaxErrorPixels = 1.f;
+
+// Calls velk_lod_use, with its error in world units, for each cluster of a primitive's hierarchy that this instance draws:
+// those whose own error on screen is small enough and whose parent's is not. A parent's
+// sphere holds its children's and its error is not less than theirs, so going up from any
+// triangle the answer changes once, which is what picks one complete surface. The shader
+// declares cull_words and velk_lod_use first. `entry` is as at instance_cluster_runs_src,
+// and a level's bound skips its clusters when none could qualify.
+#define VELK_LOD_SELECT_GLSL R"(
+vec3 velk_lod_center(uint word, mat4 world)
+{
+    return (world * vec4(uintBitsToFloat(cull_words.data[word]), uintBitsToFloat(cull_words.data[word + 1u]),
+                         uintBitsToFloat(cull_words.data[word + 2u]), 1.0)).xyz;
+}
+
+// `word` holds a sphere's center and radius, then an error.
+float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels_per_unit)
+{
+    float away = length(velk_lod_center(word, world) - cam) - uintBitsToFloat(cull_words.data[word + 3u]) * scale;
+    return uintBitsToFloat(cull_words.data[word + 4u]) * scale * pixels_per_unit / max(away, 1e-3);
+}
+
+void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, mat4 vp, float height, float max_pixels)
+{
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
+    uint clusters = cull_words.data[entry + 2u];
+    uint levels = cull_words.data[entry + 12u];
+    uint level_count = cull_words.data[entry + 13u];
+    for (uint l = 0u; l < level_count; ++l) {
+        uint level = levels + l * 8u;
+        float dist = length(velk_lod_center(level + 4u, world) - cam);
+        float reach = uintBitsToFloat(cull_words.data[level + 7u]) * scale;
+        float per_error = scale * pixels_per_unit;
+        if (uintBitsToFloat(cull_words.data[level + 2u]) * per_error / (dist + reach) > max_pixels) continue;
+        if (uintBitsToFloat(cull_words.data[level + 3u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
+
+        uint first = cull_words.data[level];
+        uint count = cull_words.data[level + 1u];
+        for (uint c = first; c < first + count; ++c) {
+            uint cluster = clusters + c * 13u;
+            if (velk_lod_pixels(cluster + 3u, world, scale, cam, pixels_per_unit) <= max_pixels
+                && velk_lod_pixels(cluster + 8u, world, scale, cam, pixels_per_unit) > max_pixels) {
+                velk_lod_use(entry, c, slot, uintBitsToFloat(cull_words.data[cluster + 7u]) * scale);
+            }
+        }
+    }
+}
+)"
+
 /**
  * Tests a visual's partitions against the view and appends the chunks of those that
  * pass to a list, for instance_cull_compute_src to go through. A table entry holds the
@@ -144,8 +194,14 @@ layout(push_constant) uniform PC {
     float max_distance;
     uint chunks_word;
     uint far_form;
+    float lod_max_pixels;
 } pc;
 )" VELK_INSTANCE_FAR_GLSL R"(
+void velk_lod_use(uint entry, uint cluster, uint slot, float error)
+{
+    atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
+}
+)" VELK_LOD_SELECT_GLSL R"(
 void main()
 {
     uint slot = gl_GlobalInvocationID.x;
@@ -198,12 +254,8 @@ void main()
     uint first_entry = cull_words.data[table + 8u];
     uint entries = cull_words.data[table + 9u];
     for (uint e = 0u; e < entries; ++e) {
-        uint entry = first_entry + e * 12u;
-        uint clusters = cull_words.data[entry + 3u];
-        uint counts = cull_words.data[entry + 4u];
-        for (uint c = 0u; c < clusters; ++c) {
-            atomicAdd(cull_words.data[counts + c], 1u);
-        }
+        velk_lod_visit(first_entry + e * 14u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
+                       pc.lod_max_pixels);
     }
 }
 )";
@@ -211,12 +263,12 @@ void main()
 /**
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
  * use gets an indexed command, instanced over its own run of the list, so that instances
- * using the same cluster share a draw. An entry is 12 words: the word of the list, its
- * capacity, the word of the cluster table (kLodClusterWords words per cluster, starting
+ * using the same cluster share a draw. An entry is 14 words: the word of the list, which
+ * is followed by each position's surface error, its capacity, the word of the cluster table (kLodClusterWords words per cluster, starting
  * with the cluster's first index and triangle count), the cluster count, the words of the
  * counts, the cursors and the commands, one of each per cluster, how many commands are in use,
- * the word of its mesh in the table of instance_cull_compute_src, and the group counts of
- * the dispatch of instance_cluster_fill_src.
+ * the word of its mesh in the table of instance_cull_compute_src, the group counts of the
+ * dispatch of instance_cluster_fill_src, and the word of its levels and how many.
  */
 inline constexpr string_view instance_cluster_runs_src = R"(
 #version 450
@@ -269,7 +321,7 @@ void main()
 
 /**
  * Goes through a mesh's visible slots and writes them to the runs of the clusters they use,
- * in one primitive's list. The clusters must be the ones instance_cull_compute_src counted.
+ * in one primitive's list, choosing the same ones instance_cull_compute_src counted.
  */
 inline constexpr string_view instance_cluster_fill_src = R"(
 #version 450
@@ -277,12 +329,35 @@ inline constexpr string_view instance_cluster_fill_src = R"(
 
 layout(local_size_x = 64) in;
 
+struct CullInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
 layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
 
 layout(push_constant) uniform PC {
     uint entry;
+    uint instances_base;
+    uint globals_base;
+    float lod_max_pixels;
 } pc;
 
+void velk_lod_use(uint entry, uint cluster, uint slot, float error)
+{
+    uint at = atomicAdd(cull_words.data[cull_words.data[entry + 5u] + cluster], 1u);
+    uint capacity = cull_words.data[entry + 1u];
+    if (at < capacity) {
+        uint list = cull_words.data[entry];
+        cull_words.data[list + at] = slot;
+        cull_words.data[list + capacity + at] = floatBitsToUint(error);
+    }
+}
+)" VELK_LOD_SELECT_GLSL R"(
 void main()
 {
     uint mesh = cull_words.data[pc.entry + 8u];
@@ -290,16 +365,12 @@ void main()
     if (index >= min(cull_words.data[mesh + 4u], cull_words.data[mesh + 6u])) return;
     uint slot = cull_words.data[cull_words.data[mesh + 5u] + index];
 
-    uint list = cull_words.data[pc.entry + 0u];
-    uint capacity = cull_words.data[pc.entry + 1u];
-    uint clusters = cull_words.data[pc.entry + 3u];
-    uint cursors = cull_words.data[pc.entry + 5u];
-    for (uint c = 0u; c < clusters; ++c) {
-        uint at = atomicAdd(cull_words.data[cursors + c], 1u);
-        if (at < capacity) {
-            cull_words.data[list + at] = slot;
-        }
-    }
+    mat4 world = cull_instances.data[pc.instances_base + slot].world_matrix;
+    float scale2 = max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
+                       dot(world[2].xyz, world[2].xyz));
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    velk_lod_visit(pc.entry, slot, world, sqrt(scale2), globals.cam_pos.xyz, globals.view_projection, globals.viewport.y,
+                   pc.lod_max_pixels);
 }
 )";
 
@@ -721,12 +792,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             float max_distance;
             uint32_t chunks_word;
             uint32_t far_form;
+            float lod_max_pixels;
         };
         for (const auto& info : visuals) {
             const bool partitioned = info.partition_count != 0;
             const PushC pc{info.instances_base, info.slot_count, info.table_word, view_globals_base, info.max_distance,
                            partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
-                           far_form ? 1u : 0u};
+                           far_form ? 1u : 0u, kLodMaxErrorPixels};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (info.slot_count + 63u) / 64u;
@@ -743,36 +815,46 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         cmd->record_global_barrier();
 
         // Draws by cluster: lay out each one's runs, then fill them.
-        vector<uint32_t> cluster_entries;
+        vector<InstanceCullInfo> cluster_draws;
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
             if (batch && batch->get_instance_cull(info) && info.cluster_count != 0
-                && std::find(cluster_entries.begin(), cluster_entries.end(), info.cluster_entry_word) == cluster_entries.end()) {
-                cluster_entries.push_back(info.cluster_entry_word);
+                && std::find_if(cluster_draws.begin(), cluster_draws.end(), [&](const InstanceCullInfo& other) {
+                       return other.cluster_entry_word == info.cluster_entry_word;
+                   }) == cluster_draws.end()) {
+                cluster_draws.push_back(info);
             }
         }
-        if (!cluster_entries.empty()) {
+        if (!cluster_draws.empty()) {
             constexpr uint32_t kFillGroupsWord = 9;
-            for (uint32_t word : cluster_entries) {
+            for (const auto& info : cluster_draws) {
                 DispatchCall dc{};
                 dc.pipeline = runs_pipeline.get();
                 dc.groups_x = 1;
                 dc.groups_y = 1;
                 dc.groups_z = 1;
-                dc.root_constants_size = sizeof(word);
-                std::memcpy(dc.root_constants, &word, sizeof(word));
+                dc.root_constants_size = sizeof(uint32_t);
+                std::memcpy(dc.root_constants, &info.cluster_entry_word, sizeof(uint32_t));
                 cmd->record_dispatch(dc);
             }
             cmd->record_global_barrier();
-            for (uint32_t word : cluster_entries) {
+            struct FillPushC
+            {
+                uint32_t entry;
+                uint32_t instances_base;
+                uint32_t globals_base;
+                float lod_max_pixels;
+            };
+            for (const auto& info : cluster_draws) {
+                const FillPushC pc{info.cluster_entry_word, info.instances_base, view_globals_base, kLodMaxErrorPixels};
                 DispatchCall dc{};
                 dc.pipeline = fill_pipeline.get();
                 dc.groups_x = 1;
                 dc.groups_y = 1;
                 dc.groups_z = 1;
-                dc.root_constants_size = sizeof(word);
-                std::memcpy(dc.root_constants, &word, sizeof(word));
-                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(word + kFillGroupsWord) * sizeof(uint32_t));
+                dc.root_constants_size = sizeof(pc);
+                std::memcpy(dc.root_constants, &pc, sizeof(pc));
+                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(info.cluster_entry_word + kFillGroupsWord) * sizeof(uint32_t));
             }
             cmd->record_global_barrier();
         }

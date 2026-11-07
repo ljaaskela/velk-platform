@@ -262,6 +262,12 @@ R"(
          : velk_culling.data[velk_draw(root).visible_base + uint(gl_InstanceIndex)])
 
 #define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + velk_instance_slot(root)])
+
+// How far this draw instance's surface may be from the full mesh, in world units.
+#define velk_lod_error(root)                                                         \
+    (velk_draw(root).lod_error_base == VELK_NO_VISIBLE_LIST                          \
+         ? 0.0                                                                       \
+         : uintBitsToFloat(velk_culling.data[velk_draw(root).lod_error_base + uint(gl_InstanceIndex)]))
 )"
 // Per-pipeline typed view of the shared material arena (set = 1 slot 4).
 // Declare once at file scope with this pipeline's material struct:
@@ -288,7 +294,7 @@ R"(
 R"(
 #define velk_mesh_static(shape) (velk_mesh_static_records.data[(shape).mesh_static_base])
 )"
-// Per-draw header: 32 bytes of indices and counts, one record per batch in the
+// Per-draw header: 48 bytes of indices and counts, one record per batch in the
 // set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.
 // Shader bodies reach these through accessors that hide the layout rather than
 // naming the fields: velk_global_data(root), velk_instance(root),
@@ -305,6 +311,10 @@ struct VelkDrawData {
     uint uv1_base;
     uint uv1_enabled;
     uint material_base;
+    uint lod_error_base;
+    uint _pad_draw0;
+    uint _pad_draw1;
+    uint _pad_draw2;
 };
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
@@ -334,7 +344,7 @@ R"(
 // The varyings `element_vertex_src` writes and every composed raster fragment
 // driver reads. One declaration each side, so adding a varying is a single edit
 // here rather than one per shader. A fragment may ignore any of them; the
-// vertex stage always writes all eight.
+// vertex stage always writes all nine.
 //
 //   VELK_VARYINGS_OUT   // in a vertex shader
 //   VELK_VARYINGS_IN    // in a fragment shader
@@ -351,7 +361,8 @@ R"(
     layout(location = 4) out vec3 v_world_normal;     \
     layout(location = 5) flat out uint v_shape_param; \
     layout(location = 6) out vec2 v_uv1;              \
-    layout(location = 7) out vec4 v_world_tangent;
+    layout(location = 7) out vec4 v_world_tangent;    \
+    layout(location = 8) flat out float v_lod_error;
 
 #define VELK_VARYINGS_IN                             \
     layout(location = 0) in vec4 v_color;            \
@@ -361,7 +372,8 @@ R"(
     layout(location = 4) in vec3 v_world_normal;     \
     layout(location = 5) flat in uint v_shape_param; \
     layout(location = 6) in vec2 v_uv1;              \
-    layout(location = 7) in vec4 v_world_tangent;
+    layout(location = 7) in vec4 v_world_tangent;    \
+    layout(location = 8) flat in float v_lod_error;
 
 )"
 // VELK_FRAG_OUT is the single-target colour output, for forward and any full

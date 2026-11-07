@@ -34,8 +34,10 @@ static_assert(sizeof(BlasNode) == 48, "BlasNode layout mismatch");
 /// Most triangles and vertices in one cluster. Local vertex indices are 8 bits.
 inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
-/// Words per cluster in a level of detail hierarchy's table, read by instance_cull_compute_src.
+/// Words per cluster and per level in a level of detail hierarchy's tables, read by
+/// VELK_LOD_SELECT_GLSL.
 inline constexpr uint32_t kLodClusterWords = 13;
+inline constexpr uint32_t kLodLevelWords = 8;
 
 /// A tree over a set of primitives. `triangle_indices` is the per-leaf
 /// permutation: leaf node `n` covers items

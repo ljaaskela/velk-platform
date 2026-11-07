@@ -73,9 +73,10 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     // a normal-bias would push the origin into the back face and
     // self-shadow. L-biasing always moves into the lit half-space.
     // Magnitude tuned for meter-scale scenes; pixel-scale UIs would
-    // want a per-camera or per-light bias.
+    // want a per-camera or per-light bias. The lift clears the full mesh, so
+    // it goes along the normal, on the light's side for the same reason.
     Ray r;
-    r.origin = world_pos + L * 0.005;
+    r.origin = world_pos + L * 0.005 + (dot(world_normal, L) < 0.0 ? -world_normal : world_normal) * velk_ray_lift;
     r.dir    = L;
     // Geometry inside the emitter's radius cannot block it, which also keeps the
     // ray off the light's own fixture mesh.

@@ -51,6 +51,7 @@ void main()
     v_shape_param = 0u;
     v_uv1 = vec2(0.0);
     v_world_tangent = vec4(0.0);
+    v_lod_error = 0.0;
 }
 )";
 

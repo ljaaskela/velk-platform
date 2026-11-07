@@ -51,6 +51,7 @@ void main()
     v_uv1          = velk_uv1(root);
     // Tangent dir to world space (upper 3x3); handedness (w) passes through.
     v_world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
+    v_lod_error     = velk_lod_error(root);
 }
 )";
 

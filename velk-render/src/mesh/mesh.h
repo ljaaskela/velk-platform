@@ -78,8 +78,7 @@ public:
                IGpuResourceManager& resources) override;
     void set_gpu_displacement(float max_displacement) override;
     bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
-    bool ensure_lod_data(IGpuResourceManager& resources, uint32_t& table_word, uint32_t& level0_clusters,
-                         uint32_t& index_word) override;
+    bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
 
 private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
@@ -125,11 +124,11 @@ private:
     ArenaRegion gpu_refit_region_;
     MeshRefitInfo gpu_refit_{};
 
-    /// The level of detail hierarchy, once something draws by cluster: its table in the
+    /// The level of detail hierarchy, once something draws by cluster: its tables in the
     /// culling arena and its indices in the mesh-word arena.
     ArenaRegion lod_table_region_;
     ArenaRegion lod_index_region_;
-    uint32_t level0_clusters_ = 0;
+    MeshLodInfo lod_info_{};
 };
 
 /// Concrete IMesh container. Stores a list of primitives and a lazily

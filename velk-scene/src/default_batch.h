@@ -136,6 +136,7 @@ private:
         uint32_t list_word;
         uint32_t commands_word;
         uint32_t index_word;
+        uint32_t errors_word;
     };
     const ClusterDraw* find_cluster_draw(uint32_t mesh, const IMeshPrimitive* primitive) const;
 

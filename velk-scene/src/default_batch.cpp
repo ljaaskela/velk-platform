@@ -56,7 +56,7 @@ constexpr uint32_t kCullFirstEntryWord = 8;
 constexpr uint32_t kCullEntryCountWord = 9;
 
 /// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
-constexpr uint32_t kClusterEntryWords = 12;
+constexpr uint32_t kClusterEntryWords = 14;
 constexpr uint32_t kClusterEntryListWord = 0;
 constexpr uint32_t kClusterEntryCapacityWord = 1;
 constexpr uint32_t kClusterEntryTableWord = 2;
@@ -66,6 +66,8 @@ constexpr uint32_t kClusterEntryCursorsWord = 5;
 constexpr uint32_t kClusterEntryCommandsWord = 6;
 constexpr uint32_t kClusterEntryDrawsWord = 7;
 constexpr uint32_t kClusterEntryMeshWord = 8;
+constexpr uint32_t kClusterEntryLevelsWord = 12;
+constexpr uint32_t kClusterEntryLevelCountWord = 13;
 /// Words per cluster: its count, its cursor and its command.
 constexpr uint32_t kClusterWords = 7;
 /// Most instances of clusters in one list. At 256 triangles each this is more than a frame
@@ -101,9 +103,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     {
         uint32_t mesh;
         const IMeshPrimitive* primitive;
-        uint32_t table_word;
-        uint32_t clusters;
-        uint32_t index_word;
+        MeshLodInfo lod;
         uint32_t capacity;
     };
     vector<PendingDraw> pending;
@@ -116,13 +116,12 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         }
         for (const auto& primitive : mesh->get_primitives()) {
             auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get());
-            uint32_t table_word = 0;
-            uint32_t clusters = 0;
-            uint32_t index_word = 0;
-            if (internal && internal->ensure_lod_data(resources, table_word, clusters, index_word)) {
-                const auto capacity = static_cast<uint32_t>(std::min(uint64_t(instances) * clusters, kMaxClusterRuns));
-                pending.push_back({m, primitive.get(), table_word, clusters, index_word, capacity});
-                words += kClusterEntryWords + uint64_t(clusters) * kClusterWords + capacity;
+            MeshLodInfo lod;
+            if (internal && internal->ensure_lod_data(resources, lod)) {
+                // A coarser choice uses fewer clusters than the full mesh.
+                const auto capacity = static_cast<uint32_t>(std::min(uint64_t(instances) * lod.level0_clusters, kMaxClusterRuns));
+                pending.push_back({m, primitive.get(), lod, capacity});
+                words += kClusterEntryWords + uint64_t(lod.cluster_count) * kClusterWords + uint64_t(capacity) * 2u;
             }
         }
     }
@@ -185,26 +184,30 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         }
         ++table_entry[kCullEntryCountWord];
 
+        const uint32_t clusters = draw.lod.cluster_count;
         const uint32_t counts_word = next_list;
-        const uint32_t cursors_word = counts_word + draw.clusters;
-        const uint32_t commands_word = cursors_word + draw.clusters;
-        const uint32_t list_word = commands_word + draw.clusters * 5u;
-        next_list = list_word + draw.capacity;
+        const uint32_t cursors_word = counts_word + clusters;
+        const uint32_t commands_word = cursors_word + clusters;
+        const uint32_t list_word = commands_word + clusters * 5u;
+        const uint32_t errors_word = list_word + draw.capacity;
+        next_list = errors_word + draw.capacity;
 
         vector<uint32_t> zeros;
-        zeros.resize(draw.clusters, 0u);
+        zeros.resize(clusters, 0u);
         arena->write_at(uint64_t(counts_word) * sizeof(uint32_t), zeros.data(), zeros.size() * sizeof(uint32_t));
 
         uint32_t* entry = entries.data() + i * kClusterEntryWords;
         entry[kClusterEntryListWord] = list_word;
         entry[kClusterEntryCapacityWord] = draw.capacity;
-        entry[kClusterEntryTableWord] = draw.table_word;
-        entry[kClusterEntryClustersWord] = draw.clusters;
+        entry[kClusterEntryTableWord] = draw.lod.cluster_word;
+        entry[kClusterEntryClustersWord] = clusters;
         entry[kClusterEntryCountsWord] = counts_word;
         entry[kClusterEntryCursorsWord] = cursors_word;
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryMeshWord] = table_word + draw.mesh * kCullTableWords;
-        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, draw.clusters, entry_word, list_word, commands_word, draw.index_word});
+        entry[kClusterEntryLevelsWord] = draw.lod.level_word;
+        entry[kClusterEntryLevelCountWord] = draw.lod.level_count;
+        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word});
     }
     arena->write_at(uint64_t(entries_word) * sizeof(uint32_t), entries.data(), entries.size() * sizeof(uint32_t));
     arena->write_at(cull_region_.offset(), table.data(), table.size() * sizeof(uint32_t));
@@ -233,6 +236,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_commands_word = draw->commands_word;
         out.cluster_draws_word = draw->entry_word + kClusterEntryDrawsWord;
         out.cluster_index_word = draw->index_word;
+        out.cluster_errors_word = draw->errors_word;
     }
     out.max_distance = instance_source_->get_draw_distance();
     out.far_form = instance_source_->get_far_form();
