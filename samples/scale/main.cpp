@@ -3,8 +3,8 @@
 //
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
-//                       |forest|forest_elements|forest_shift|forest_churn]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu]
+//                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -33,6 +33,11 @@
 // forest_elements: the same trees as one element each, to compare against forest.
 // forest_shift: forest, with the whole element translated every frame.
 // forest_churn: forest, with one tree removed and another added every frame.
+// forest_cluster: forest, with the movers packed in a cube in the air above the center.
+// outlier:  forest_cluster, with one mover 2,000,000 units away, which stretches the
+//           partition's bounds until the cube is a tiny part of them.
+// mixed:    a forest's movers vary in size: one in 100 at 30 times, one in 10 at 5 times,
+//           and the rest at half size.
 // unlimited: turns vsync off, so frame times show the real cost.
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
@@ -313,7 +318,9 @@ int main(int argc, char* argv[])
     const bool deform_movers = scatter_movers || (argc > 4 && std::strcmp(argv[4], "deform") == 0);
     const bool forest_shift = argc > 4 && std::strcmp(argv[4], "forest_shift") == 0;
     const bool forest_churn = argc > 4 && std::strcmp(argv[4], "forest_churn") == 0;
-    const bool forest_instances = forest_shift || forest_churn || (argc > 4 && std::strcmp(argv[4], "forest") == 0);
+    const bool forest_cluster = argc > 4 && std::strcmp(argv[4], "forest_cluster") == 0;
+    const bool forest_instances = forest_shift || forest_churn || forest_cluster
+        || (argc > 4 && std::strcmp(argv[4], "forest") == 0);
     const bool forest_elements = argc > 4 && std::strcmp(argv[4], "forest_elements") == 0;
     const bool forest = forest_instances || forest_elements;
     bool unlimited = false;
@@ -324,8 +331,12 @@ int main(int argc, char* argv[])
     bool species = false;
     bool wind = false;
     bool gpu_deform = false;
+    bool outlier = false;
+    bool mixed = false;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
+        outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
+        mixed = mixed || std::strcmp(argv[i], "mixed") == 0;
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -712,8 +723,23 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             for (long m = 0; m < mover_count; ++m) {
                 const auto i = static_cast<long>(static_cast<uint64_t>(m) * 2654435761ull % static_cast<uint64_t>(element_count));
                 const float a = t * 2.f + static_cast<float>(m);
+                const float size = !mixed ? 1.f : m % 100 == 0 ? 30.f : m % 10 == 0 ? 5.f : 0.5f;
+                const velk::mat4 sized = velk::mat4::scale({size, size, size});
+                if (forest_cluster) {
+                    // About a tree's own size per tree, so they crowd without all overlapping.
+                    const float side = std::cbrt(static_cast<float>(mover_count)) * 32.f;
+                    velk::vec3 at{forest_jitter(m, 12.9898f) * side,
+                                  kFloorY - side * 0.5f - 100.f + forest_jitter(m, 78.233f) * side,
+                                  forest_jitter(m, 39.346f) * side};
+                    if (outlier && m == 0) {
+                        at.x += 2000000.f;
+                    }
+                    forest_visual.set_transform(static_cast<uint32_t>(i),
+                                                velk::mat4::translate(at + velk::vec3{std::sin(a) * 3.f, 0.f, std::cos(a) * 3.f}) * sized);
+                    continue;
+                }
                 forest_visual.set_transform(static_cast<uint32_t>(i),
-                                            velk::mat4::translate(tree_position(i) + velk::vec3{std::sin(a) * 30.f, 0.f, std::cos(a) * 30.f}));
+                                            velk::mat4::translate(tree_position(i) + velk::vec3{std::sin(a) * 30.f, 0.f, std::cos(a) * 30.f}) * sized);
             }
         }
 

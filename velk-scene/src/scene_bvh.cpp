@@ -1302,7 +1302,7 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
         const uint32_t capacity_blocks = (capacity + kLbvhBlockItems - 1u) / kLbvhBlockItems;
         // Keys and values twice, histograms and digit bases, parents of all nodes, and
         // inner nodes, counters and leaves.
-        const uint64_t words = uint64_t(capacity) * 4u + (uint64_t(capacity_blocks) + 1u) * 256u
+        const uint64_t words = uint64_t(capacity) * 6u + (uint64_t(capacity_blocks) + 1u) * 256u
             + uint64_t(capacity) * 2u + uint64_t(capacity) * 3u;
         partition.gpu_build_scratch = arena->alloc(words * sizeof(uint32_t));
         if (!partition.gpu_build_scratch.valid()) {
@@ -1329,9 +1329,9 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
     LbvhPush build{};
     build.count = count;
     build.items = static_cast<uint32_t>(partition.gpu_build_items.offset() / sizeof(uint32_t));
-    build.keys_in = take(capacity);
+    build.keys_in = take(capacity * 2u);
     build.values_in = take(capacity);
-    build.keys_out = take(capacity);
+    build.keys_out = take(capacity * 2u);
     build.values_out = take(capacity);
     build.histograms = take(capacity_blocks * 256u);
     build.digit_bases = take(256u);
@@ -1346,7 +1346,7 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
         build.lo[k] = lo[k];
         extent = std::max(extent, hi[k] - lo[k]);
     }
-    build.scale = 1023.f / std::max(extent, 1e-20f);
+    build.scale = (kLbvhGridCells - 1.f) / std::max(extent, 1e-20f);
     gpu_builds_.push_back(build);
     return true;
 }
@@ -1408,7 +1408,7 @@ void SceneBvh::emit_gpu_builds(FrameContext& ctx, IRenderGraph& graph)
         cmd->record_global_barrier();
 
         // Least significant digit first. An even number of passes ends in `keys_in`.
-        constexpr uint32_t kPasses = 4;
+        constexpr uint32_t kPasses = 8;
         static_assert(kLbvhDigitBits * kPasses >= kLbvhKeyBits && kPasses % 2 == 0);
         for (uint32_t pass = 0; pass < kPasses; ++pass) {
             for (auto build : gpu_builds_) {

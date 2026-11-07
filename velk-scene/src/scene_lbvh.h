@@ -18,13 +18,13 @@ struct LbvhPush
 {
     uint32_t count;
     uint32_t items;           ///< 6 floats per item: its bounds, relative to the partition's origin.
-    uint32_t keys_in;
+    uint32_t keys_in;         ///< 2 words per item, least significant first.
     uint32_t values_in;
     uint32_t keys_out;
     uint32_t values_out;
     uint32_t histograms;      ///< 256 words per block of items.
     uint32_t digit_bases;     ///< 256 words: where each digit starts in the output.
-    uint32_t shift;           ///< Of the digit being sorted on.
+    uint32_t shift;           ///< Of the digit being sorted on, within the whole key.
     uint32_t parents;         ///< Per node, the inner node it is a child of.
     uint32_t inner_nodes;     ///< Per inner node, the node it is placed at.
     uint32_t counters;        ///< Per inner node, how many children have arrived.
@@ -32,14 +32,17 @@ struct LbvhPush
     uint32_t node_base;
     uint32_t record_base;     ///< Item i's record is record_base + i.
     float lo[3];              ///< Corner of the items' centers, for the Morton grid.
-    float scale;              ///< Items' centers to the 10-bit grid.
+    float scale;              ///< Items' centers to the grid of kLbvhGridCells per axis.
 };
 
 /// Items a block of the radix sort holds. Blocks run in parallel, each in order on one
 /// thread, so a block's length sets how long a sort takes. Same as kBlockItems below.
 inline constexpr uint32_t kLbvhBlockItems = 256;
 inline constexpr uint32_t kLbvhDigitBits = 8;
-inline constexpr uint32_t kLbvhKeyBits = 30;
+/// 21 bits per axis. One far item stretches the grid, so its cells must stay small enough
+/// to tell the other items apart.
+inline constexpr uint32_t kLbvhKeyBits = 63;
+inline constexpr float kLbvhGridCells = 2097152.f;
 
 inline constexpr string_view lbvh_prelude_src = R"(
 #version 450
@@ -87,17 +90,20 @@ vec3 item_max(uint item)
 }
 )";
 
-/// Gives each item a 30-bit Morton key from its center.
+/// Gives each item a 63-bit Morton key from its center.
 inline constexpr string_view lbvh_keys_src = R"(
 layout(local_size_x = 64) in;
 
+// Puts two zero bits between the low 11 bits of v.
 uint spread(uint v)
 {
+    uint top = (v >> 10u) & 1u;
     v &= 0x3FFu;
     v = (v | (v << 16u)) & 0x30000FFu;
     v = (v | (v << 8u)) & 0x300F00Fu;
     v = (v | (v << 4u)) & 0x30C30C3u;
-    return (v | (v << 2u)) & 0x9249249u;
+    v = (v | (v << 2u)) & 0x9249249u;
+    return v | (top << 30u);
 }
 
 void main()
@@ -105,8 +111,13 @@ void main()
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
     vec3 center = (item_min(i) + item_max(i)) * 0.5;
-    uvec3 cell = uvec3(clamp((center - vec3(pc.lo_x, pc.lo_y, pc.lo_z)) * pc.scale, vec3(0.0), vec3(1023.0)));
-    WORDS[pc.keys_in + i] = spread(cell.x) | (spread(cell.y) << 1u) | (spread(cell.z) << 2u);
+    uvec3 cell = uvec3(clamp((center - vec3(pc.lo_x, pc.lo_y, pc.lo_z)) * pc.scale, vec3(0.0), vec3(2097151.0)));
+    // Bits go x, y, z from the bottom, so the first word ends on y's bit 10, and z's bit
+    // 10 is the first bit of the second.
+    WORDS[pc.keys_in + i * 2u] = spread(cell.x & 0x7FFu) | (spread(cell.y & 0x7FFu) << 1u)
+        | (spread(cell.z & 0x3FFu) << 2u);
+    WORDS[pc.keys_in + i * 2u + 1u] = spread(cell.z >> 10u) | (spread(cell.x >> 11u) << 1u)
+        | (spread(cell.y >> 11u) << 2u);
     WORDS[pc.values_in + i] = i;
 }
 )";
@@ -123,8 +134,10 @@ void main()
         WORDS[row + d] = 0u;
     }
     uint end = min(pc.count, (block + 1u) * kBlockItems);
+    uint word = pc.shift >> 5u;
+    uint shift = pc.shift & 31u;
     for (uint i = block * kBlockItems; i < end; ++i) {
-        uint digit = (WORDS[pc.keys_in + i] >> pc.shift) & 0xFFu;
+        uint digit = (WORDS[pc.keys_in + i * 2u + word] >> shift) & 0xFFu;
         WORDS[row + digit] += 1u;
     }
 }
@@ -174,13 +187,17 @@ void main()
     uint block = gl_GlobalInvocationID.x;
     uint row = pc.histograms + block * 256u;
     uint end = min(pc.count, (block + 1u) * kBlockItems);
+    uint word = pc.shift >> 5u;
+    uint shift = pc.shift & 31u;
     for (uint i = block * kBlockItems; i < end; ++i) {
-        uint key = WORDS[pc.keys_in + i];
-        uint digit = (key >> pc.shift) & 0xFFu;
+        uint low = WORDS[pc.keys_in + i * 2u];
+        uint high = WORDS[pc.keys_in + i * 2u + 1u];
+        uint digit = ((word == 0u ? low : high) >> shift) & 0xFFu;
         uint within = WORDS[row + digit];
         WORDS[row + digit] = within + 1u;
         uint to = WORDS[pc.digit_bases + digit] + within;
-        WORDS[pc.keys_out + to] = key;
+        WORDS[pc.keys_out + to * 2u] = low;
+        WORDS[pc.keys_out + to * 2u + 1u] = high;
         WORDS[pc.values_out + to] = WORDS[pc.values_in + i];
     }
 }
@@ -195,10 +212,11 @@ layout(local_size_x = 64) in;
 int common_bits(int a, int b)
 {
     if (b < 0 || b >= int(pc.count)) return -1;
-    uint ka = WORDS[pc.keys_in + uint(a)];
-    uint kb = WORDS[pc.keys_in + uint(b)];
-    if (ka != kb) return 31 - findMSB(ka ^ kb);
-    return 32 + 31 - findMSB(uint(a) ^ uint(b));
+    uint high = WORDS[pc.keys_in + uint(a) * 2u + 1u] ^ WORDS[pc.keys_in + uint(b) * 2u + 1u];
+    if (high != 0u) return 31 - findMSB(high);
+    uint low = WORDS[pc.keys_in + uint(a) * 2u] ^ WORDS[pc.keys_in + uint(b) * 2u];
+    if (low != 0u) return 32 + 31 - findMSB(low);
+    return 64 + 31 - findMSB(uint(a) ^ uint(b));
 }
 
 void place_child(uint parent, uint node, bool is_leaf, uint index)

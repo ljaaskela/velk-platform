@@ -657,7 +657,7 @@ layout(push_constant, scalar) uniform PC {
 
 #include "velk_intersect.glsl"
 
-#define VELK_TRACE_STACK_SIZE 64
+#define VELK_TRACE_STACK_SIZE 96
 #define VELK_TRACE_ORDERED_ANY_HIT
 #include "velk_trace.glsl"
 )"
