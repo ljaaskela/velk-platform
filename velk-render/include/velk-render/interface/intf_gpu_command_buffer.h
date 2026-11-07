@@ -150,6 +150,9 @@ public:
     virtual void record_copy_buffer(IGpuBuffer* src, uint64_t src_offset, IGpuBuffer* dst, uint64_t dst_offset,
                                     uint64_t size) = 0;
 
+    /// Fill @p size bytes of a buffer with zero. Both must be multiples of 4.
+    virtual void record_clear_buffer(IGpuBuffer* buffer, uint64_t offset, uint64_t size) = 0;
+
     /// Record a blit from a storage / renderable texture into another
     /// renderable / sampleable texture. Source layout restored; dest
     /// ends in SHADER_READ_ONLY.

@@ -1,9 +1,14 @@
 #include "mesh/mesh.h"
 
+#include "mesh/mesh_deform_shaders.h"
+
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_gpu_command_buffer.h>
+#include <velk-render/interface/intf_render_context.h>
+#include <velk-render/render_path/frame_context.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
 
@@ -239,6 +244,10 @@ bool DeformingMesh::init(const IMesh& source, IMeshBuilder& builder)
 void DeformingMesh::deform(IMeshDeformer& deformer, IGpuResourceManager& resources)
 {
     for (auto& stream : streams_) {
+        if (stream.gpu_rest.valid()) {
+            VELK_LOG(E, "DeformingMesh: a mesh deformed on the GPU cannot go back to the CPU");
+            return;
+        }
         deformer.deform({stream.rest.data(), stream.rest.size()}, stream.vertices.data());
         stream.buffer->update_vertex_range(0, stream.vertices.data(), stream.vertices.size() * sizeof(MeshVertex));
     }
@@ -248,6 +257,256 @@ void DeformingMesh::deform(IMeshDeformer& deformer, IGpuResourceManager& resourc
             primitive->refit({stream.vertices.data(), stream.vertices.size()},
                              {stream.indices.data(), stream.indices.size()}, resources);
         }
+    }
+}
+
+void MeshPrimitive::set_gpu_displacement(float max_displacement)
+{
+    if (!has_rest_bounds_) {
+        rest_bounds_ = bounds_;
+        has_rest_bounds_ = true;
+    }
+    bounds_.position = {rest_bounds_.position.x - max_displacement, rest_bounds_.position.y - max_displacement,
+                        rest_bounds_.position.z - max_displacement};
+    bounds_.extent = {rest_bounds_.extent.width + max_displacement * 2.f,
+                      rest_bounds_.extent.height + max_displacement * 2.f,
+                      rest_bounds_.extent.depth + max_displacement * 2.f};
+}
+
+bool MeshPrimitive::prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out)
+{
+    if (!rt_static_region_.valid()) {
+        return false;
+    }
+    if (!gpu_refit_region_.valid()) {
+        auto arena = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        if (!arena) {
+            return false;
+        }
+        const auto node_count = static_cast<uint32_t>(rt_blas_.nodes.size());
+        vector<uint32_t> leaves;
+        vector<uint32_t> parents;
+        parents.resize(node_count, 0xFFFFFFFFu);
+        for (uint32_t n = 0; n < node_count; ++n) {
+            const BlasNode& node = rt_blas_.nodes[n];
+            if (node.child_count == 0) {
+                leaves.push_back(n);
+            }
+            for (uint32_t c = 0; c < node.child_count; ++c) {
+                parents[node.first_child + c] = n;
+            }
+        }
+        const auto leaf_count = static_cast<uint32_t>(leaves.size());
+        gpu_refit_region_ = arena->alloc(
+            (uint64_t(leaf_count) + uint64_t(node_count) * 2u) * sizeof(uint32_t));
+        if (!gpu_refit_region_.valid()) {
+            VELK_LOG(E, "MeshPrimitive: no room for a refit on the GPU");
+            return false;
+        }
+        const uint64_t offset = gpu_refit_region_.offset();
+        arena->write_at(offset, leaves.data(), leaf_count * sizeof(uint32_t));
+        arena->write_at(offset + leaf_count * sizeof(uint32_t), parents.data(), node_count * sizeof(uint32_t));
+
+        const auto first_word = static_cast<uint32_t>(offset / sizeof(uint32_t));
+        gpu_refit_.node_base = static_cast<uint32_t>(rt_blas_nodes_region_.offset() / sizeof(BlasNode));
+        gpu_refit_.word_base = static_cast<uint32_t>(rt_cluster_words_region_.offset() / sizeof(uint32_t));
+        gpu_refit_.vertex_base = get_gpu_ref(buffer_).get_base();
+        gpu_refit_.leaf_word = first_word;
+        gpu_refit_.leaf_count = leaf_count;
+        gpu_refit_.parent_word = first_word + leaf_count;
+        gpu_refit_.counter_word = gpu_refit_.parent_word + node_count;
+        gpu_refit_.node_count = node_count;
+
+        // From here on the tree lives on the GPU.
+        rt_blas_ = BlasBuild{};
+    }
+    out = gpu_refit_;
+    return true;
+}
+
+void DeformingMesh::deform_on_gpu(IComputeMeshDeformer& deformer, IGpuResourceManager& resources)
+{
+    auto arena = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return;
+    }
+
+    for (auto& stream : streams_) {
+        if (stream.gpu_rest.valid()) {
+            continue;
+        }
+        const uint64_t bytes = stream.rest.size() * sizeof(MeshVertex);
+        stream.gpu_rest = arena->alloc(bytes);
+        if (!stream.gpu_rest.valid()) {
+            VELK_LOG(E, "DeformingMesh: no room for rest vertices on the GPU");
+            return;
+        }
+        arena->write_at(stream.gpu_rest.offset(), stream.rest.data(), bytes);
+        stream.vertex_count = static_cast<uint32_t>(stream.rest.size());
+        stream.rest = {};
+        stream.vertices = {};
+        stream.indices = {};
+    }
+
+    constexpr uint32_t kTableWords = 8;
+    if (!gpu_table_.valid()) {
+        gpu_table_ = arena->alloc(kTableWords * sizeof(uint32_t));
+        if (!gpu_table_.valid()) {
+            return;
+        }
+        const uint32_t zero[kTableWords] = {};
+        arena->write_at(gpu_table_.offset(), zero, sizeof(zero));
+    }
+
+    const float max_displacement = deformer.get_max_displacement();
+    if (max_displacement != gpu_max_displacement_) {
+        gpu_max_displacement_ = max_displacement;
+        for (auto& primitive : primitives_) {
+            if (auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get())) {
+                internal->set_gpu_displacement(max_displacement);
+            }
+        }
+        arena->update_at(gpu_table_.offset() + 4u * sizeof(uint32_t), &max_displacement, sizeof(float));
+    }
+
+    const string_view source = deformer.get_deform_source();
+    if (source != string_view(gpu_source_)) {
+        gpu_source_ = string(source);
+        gpu_deform_pipeline_ = nullptr;
+        gpu_commands_dirty_ = true;
+    }
+
+    const vec4 params = deformer.get_params();
+    arena->update_at(gpu_table_.offset(), &params, sizeof(params));
+}
+
+bool DeformingMesh::prepare_gpu_commands(FrameContext& ctx)
+{
+    if (!ctx.resources || !ctx.backend || !ctx.render_ctx || gpu_source_.empty() || !gpu_table_.valid()) {
+        return false;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return false;
+    }
+
+    // Everything the commands name must exist before they can run.
+    for (const auto& stream : streams_) {
+        if (!stream.gpu_rest.valid() || get_gpu_ref(stream.buffer).kind != GpuRef::Kind::Index) {
+            return false;
+        }
+    }
+    gpu_refits_.clear();
+    for (auto& primitive : primitives_) {
+        auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get());
+        MeshRefitInfo info{};
+        if (!internal || !internal->prepare_gpu_refit(*ctx.resources, info)) {
+            return false;
+        }
+        gpu_refits_.push_back(info);
+    }
+
+    constexpr uint32_t kCheckInterval = 120;
+    if (!gpu_overrun_logged_ && ++gpu_runs_ % kCheckInterval == 0) {
+        uint32_t overruns = 0;
+        arena->read_at(gpu_table_.offset() + 5u * sizeof(uint32_t), &overruns, sizeof(overruns));
+        if (overruns != 0) {
+            VELK_LOG(E, "DeformingMesh: vertices moved past the maximum displacement of %f, %u times",
+                     double(gpu_max_displacement_), overruns);
+            gpu_overrun_logged_ = true;
+        }
+    }
+
+    if (!gpu_deform_pipeline_) {
+        uint64_t key = 0xcbf29ce484222325ULL;
+        for (size_t i = 0; i < gpu_source_.size(); ++i) {
+            key = (key ^ static_cast<uint8_t>(gpu_source_[i])) * 0x100000001b3ULL;
+        }
+        key |= 0x1000000000000000ULL;
+        gpu_deform_pipeline_ = ctx.render_ctx->pipelines().find(
+            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        if (!gpu_deform_pipeline_) {
+            string src(mesh_deform_prefix_src);
+            src += string_view(gpu_source_);
+            src += mesh_deform_main_src;
+            gpu_deform_pipeline_ = ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
+        }
+    }
+    if (!gpu_refit_pipeline_) {
+        constexpr uint64_t refit_key = 0x1052'6566'6974'4d73ULL;
+        gpu_refit_pipeline_ = ctx.render_ctx->pipelines().find(
+            PipelineCacheKey{refit_key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        if (!gpu_refit_pipeline_) {
+            gpu_refit_pipeline_ = ctx.render_ctx->pipelines().compile_compute(mesh_refit_src, refit_key);
+        }
+    }
+    return gpu_deform_pipeline_ && gpu_refit_pipeline_;
+}
+
+bool DeformingMesh::take_gpu_commands_dirty()
+{
+    const bool dirty = gpu_commands_dirty_;
+    gpu_commands_dirty_ = false;
+    return dirty;
+}
+
+void DeformingMesh::record_gpu_clears(IGpuCommandBuffer& cmd, IGpuBuffer* culling_buffer)
+{
+    for (const auto& info : gpu_refits_) {
+        cmd.record_clear_buffer(culling_buffer, uint64_t(info.counter_word) * sizeof(uint32_t),
+                                uint64_t(info.node_count) * sizeof(uint32_t));
+    }
+}
+
+void DeformingMesh::record_gpu_vertices(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held)
+{
+    held.push_back(gpu_deform_pipeline_);
+    for (const auto& stream : streams_) {
+        struct DeformPush
+        {
+            uint32_t rest_word;
+            uint32_t vertex_count;
+            uint32_t vertex_word;
+            uint32_t table_word;
+        };
+        const DeformPush pc{static_cast<uint32_t>(stream.gpu_rest.offset() / sizeof(uint32_t)), stream.vertex_count,
+                            get_gpu_ref(stream.buffer).get_base(),
+                            static_cast<uint32_t>(gpu_table_.offset() / sizeof(uint32_t))};
+        DispatchCall dc{};
+        dc.pipeline = gpu_deform_pipeline_.get();
+        dc.groups_x = (stream.vertex_count + 63u) / 64u;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd.record_dispatch(dc);
+    }
+}
+
+void DeformingMesh::record_gpu_refits(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held)
+{
+    held.push_back(gpu_refit_pipeline_);
+    for (const auto& info : gpu_refits_) {
+        struct RefitPush
+        {
+            uint32_t node_base;
+            uint32_t word_base;
+            uint32_t vertex_base;
+            uint32_t leaf_word;
+            uint32_t leaf_count;
+            uint32_t parent_word;
+            uint32_t counter_word;
+        };
+        const RefitPush pc{info.node_base, info.word_base, info.vertex_base, info.leaf_word,
+                           info.leaf_count, info.parent_word, info.counter_word};
+        DispatchCall dc{};
+        dc.pipeline = gpu_refit_pipeline_.get();
+        dc.groups_x = (info.leaf_count + 15u) / 16u;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd.record_dispatch(dc);
     }
 }
 

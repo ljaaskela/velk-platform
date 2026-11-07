@@ -51,6 +51,13 @@ inline constexpr Uid InstancedMesh{"7a141324-da08-4581-b2dc-5316b0c03415"};
 
 } // namespace Visual
 
+namespace Deform {
+
+/** @brief Computes a deforming mesh's vertices on the GPU. See IComputeMeshDeformer. */
+inline constexpr Uid ComputeMesh{"32631e82-8169-44bd-b4a6-b5a53289e03a"};
+
+} // namespace Deform
+
 namespace Render {
 
 /** @brief Camera trait. Defines how the scene is observed (projection, zoom, scale). */

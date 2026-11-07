@@ -5,15 +5,20 @@
 #include <velk/array_view.h>
 #include <velk/api/math_types.h>
 #include <velk/interface/intf_metadata.h>
+#include <velk/string_view.h>
 
 #include <velk-render/blas.h>
 #include <velk-render/interface/intf_buffer.h>
+#include <velk-render/interface/intf_gpu_pipeline.h>
 
 #include <cstdint>
 
 namespace velk {
 
+class IGpuBuffer;
+class IGpuCommandBuffer;
 class IGpuResourceManager;
+struct FrameContext;
 
 /// One vertex as meshes store it.
 struct MeshVertex
@@ -189,6 +194,20 @@ public:
     virtual void set_rt_blas(BlasBuild blas) { (void)blas; }
 };
 
+/// What refitting a primitive's tree on the GPU works from. Bases are element indices:
+/// nodes in the BLAS node arena, words in their arenas.
+struct MeshRefitInfo
+{
+    uint32_t node_base = 0;     ///< The tree's nodes.
+    uint32_t word_base = 0;     ///< The primitive's cluster words.
+    uint32_t vertex_base = 0;   ///< The word of its first vertex in the mesh-word arena.
+    uint32_t leaf_word = 0;     ///< In the culling arena: its leaves' node indices.
+    uint32_t leaf_count = 0;
+    uint32_t parent_word = 0;   ///< In the culling arena: each node's parent, or 0xFFFFFFFF.
+    uint32_t counter_word = 0;  ///< In the culling arena: a counter for each node, cleared before the refit.
+    uint32_t node_count = 0;
+};
+
 /**
  * @brief Internal init seam for IMeshPrimitive impls.
  *
@@ -235,6 +254,15 @@ public:
      */
     virtual void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
                        IGpuResourceManager& resources) = 0;
+
+    /// Makes the bounds the resting bounds grown by @p max_displacement, for vertices
+    /// the CPU never sees.
+    virtual void set_gpu_displacement(float max_displacement) = 0;
+
+    /// Fills @p out for a refit on the GPU, publishing the tables it needs. False until
+    /// the RT data is published. The CPU copy of the tree is released, so `refit` does
+    /// nothing from then on.
+    virtual bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) = 0;
 };
 
 /**
@@ -304,6 +332,32 @@ public:
     virtual void deform(array_view<const MeshVertex> rest, MeshVertex* vertices) = 0;
 };
 
+/**
+ * @brief Computes the vertices of a mesh built by IMeshBuilder::build_deforming on the
+ *        GPU.
+ *
+ * For shape changes that stay near the rest shape, with no CPU work per vertex. For
+ * larger ones, which need the tree built again, use IMeshDeformer.
+ */
+class IComputeMeshDeformer : public Interface<IComputeMeshDeformer>
+{
+public:
+    /**
+     * @p glsl defines `VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)`,
+     * which returns a vertex given its rest state, in the mesh's local space. No vertex
+     * may move further than @p max_displacement, since the mesh's bounds in the BVH are
+     * grown by that much. Going past it is logged as an error, and rays may then miss
+     * the mesh.
+     */
+    virtual void set_deform(string_view glsl, float max_displacement) = 0;
+    /// The `params` passed to the function, such as the current time. It runs when these change.
+    virtual void set_params(const vec4& params) = 0;
+
+    virtual string_view get_deform_source() const = 0;
+    virtual float get_max_displacement() const = 0;
+    virtual vec4 get_params() const = 0;
+};
+
 class IMeshBuilder;
 
 /** Internal half of a mesh built by IMeshBuilder::build_deforming. */
@@ -315,6 +369,21 @@ public:
 
     /// Runs @p deformer and updates the vertices, trees and bounds.
     virtual void deform(IMeshDeformer& deformer, IGpuResourceManager& resources) = 0;
+
+    /// Prepares a run of @p deformer on the GPU, and releases the CPU copies of the
+    /// vertices, so `deform` does nothing from then on.
+    virtual void deform_on_gpu(IComputeMeshDeformer& deformer, IGpuResourceManager& resources) = 0;
+    /// Gets ready to record a prepared run. False until its geometry and RT data are ready.
+    virtual bool prepare_gpu_commands(FrameContext& ctx) = 0;
+    /// Whether commands recorded earlier are out of date, since the last call.
+    virtual bool take_gpu_commands_dirty() = 0;
+    /// Records the zeroing of the counters the refit uses, in @p culling_buffer, the
+    /// culling arena's buffer as it is once every mesh is prepared.
+    virtual void record_gpu_clears(IGpuCommandBuffer& cmd, IGpuBuffer* culling_buffer) = 0;
+    /// Records the writing of the vertices. Holds its pipeline in @p held.
+    virtual void record_gpu_vertices(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held) = 0;
+    /// Records the refit, which reads those vertices. Holds its pipeline in @p held.
+    virtual void record_gpu_refits(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held) = 0;
 };
 
 /**

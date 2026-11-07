@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -41,6 +41,7 @@
 // species:  a forest has three meshes of tree, of different heights. Its movers do not
 //           move.
 // wind:     a forest's trees sway on the GPU, with gusts crossing the forest.
+// gpu:      deform runs the same ripple on the GPU instead of the CPU.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -69,6 +70,7 @@
 #include <velk-scene/api/post_process.h>
 #include <velk-scene/api/render_path.h>
 #include <velk-scene/api/scene.h>
+#include <velk-scene/api/trait/compute_mesh_deformer.h>
 #include <velk-scene/api/trait/light.h>
 #include <velk-scene/api/trait/orbit.h>
 #include <velk-scene/api/trait/trs.h>
@@ -321,7 +323,9 @@ int main(int argc, char* argv[])
     bool draw_near = false;
     bool species = false;
     bool wind = false;
+    bool gpu_deform = false;
     for (int i = 5; i < argc; ++i) {
+        gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -457,6 +461,7 @@ int main(int argc, char* argv[])
     movers.reserve(static_cast<size_t>(mover_count));
     velk::vector<velk::ui::RectVisual> rects;
     velk::vector<IRipple::Ptr> ripples;
+    velk::vector<velk::ComputeMeshDeformer> gpu_ripples;
 
     velk::Mesh deform_source;
     if (deform_movers) {
@@ -567,9 +572,24 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
             auto visual = velk::trait::visual::create_mesh();
             visual.set_mesh(velk::Mesh(render_context->get_mesh_builder().build_deforming(deform_source)));
             element.add_trait(visual);
-            auto ripple = velk::instance().create<IRipple>(Ripple::static_class_id());
-            element.add_trait(velk::Trait(interface_pointer_cast<velk::ITrait>(ripple)));
-            ripples.push_back(ripple);
+            if (gpu_deform) {
+                auto deformer = velk::trait::deform::create_compute_mesh();
+                deformer.set_deform(R"(
+VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
+{
+    float wave = sin(rest.position.y * 0.25 + params.x * 4.0);
+    VelkVertex3D v = rest;
+    v.position = rest.position + rest.normal * (wave * 4.0);
+    return v;
+}
+)", 4.01f);
+                element.add_trait(deformer);
+                gpu_ripples.push_back(deformer);
+            } else {
+                auto ripple = velk::instance().create<IRipple>(Ripple::static_class_id());
+                element.add_trait(velk::Trait(interface_pointer_cast<velk::ITrait>(ripple)));
+                ripples.push_back(ripple);
+            }
             break;
         }
         case 0: {
@@ -697,6 +717,9 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
             }
         }
 
+        for (auto& deformer : gpu_ripples) {
+            deformer.set_params({t, 0.f, 0.f, 0.f});
+        }
         for (auto& ripple : ripples) {
             ripple->time().set_value(t);
             if (scatter_movers) {

@@ -2,6 +2,7 @@
 #define VELK_RENDER_MESH_H
 
 #include <velk/ext/object.h>
+#include <velk/string.h>
 #include <velk/vector.h>
 
 #include <velk-render/blas.h>
@@ -73,6 +74,8 @@ public:
 
     void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
                IGpuResourceManager& resources) override;
+    void set_gpu_displacement(float max_displacement) override;
+    bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
 
 private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
@@ -111,6 +114,12 @@ private:
 
     /// Tree cost when `rt_blas_` was last built, once it has been refit.
     float rt_built_cost_ = 0.f;
+
+    /// For a refit on the GPU: the bounds before any growth, and the tables, once made.
+    aabb rest_bounds_{};
+    bool has_rest_bounds_ = false;
+    ArenaRegion gpu_refit_region_;
+    MeshRefitInfo gpu_refit_{};
 };
 
 /// Concrete IMesh container. Stores a list of primitives and a lazily
@@ -143,9 +152,10 @@ private:
     mutable std::once_flag bounds_once_;
 };
 
-/// A mesh owned by one instance, whose vertices an IMeshDeformer computes. Each
-/// source vertex buffer becomes a stream of its own, with CPU copies of the rest
-/// and current vertices.
+/// A mesh owned by one instance, whose vertices an IMeshDeformer or IComputeMeshDeformer
+/// computes. Each source vertex buffer becomes a stream of its own, with CPU copies of
+/// the rest and current vertices, or for a compute deformer a GPU copy of the rest
+/// vertices.
 class DeformingMesh
     : public ::velk::ext::Object<DeformingMesh, IMesh, IDeformingMesh>
 {
@@ -154,6 +164,12 @@ public:
 
     bool init(const IMesh& source, IMeshBuilder& builder) override;
     void deform(IMeshDeformer& deformer, IGpuResourceManager& resources) override;
+    void deform_on_gpu(IComputeMeshDeformer& deformer, IGpuResourceManager& resources) override;
+    bool prepare_gpu_commands(FrameContext& ctx) override;
+    bool take_gpu_commands_dirty() override;
+    void record_gpu_clears(IGpuCommandBuffer& cmd, IGpuBuffer* culling_buffer) override;
+    void record_gpu_vertices(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held) override;
+    void record_gpu_refits(IGpuCommandBuffer& cmd, vector<IGpuPipeline::Ptr>& held) override;
 
     array_view<IMeshPrimitive::Ptr> get_primitives() const override
     {
@@ -169,11 +185,25 @@ private:
         ::velk::vector<MeshVertex> rest;
         ::velk::vector<MeshVertex> vertices;
         ::velk::vector<uint32_t> indices;
+        ArenaRegion gpu_rest;       ///< In the culling arena.
+        uint32_t vertex_count = 0;
     };
 
     ::velk::vector<Stream> streams_;
     ::velk::vector<IMeshPrimitive::Ptr> primitives_;
     ::velk::vector<uint32_t> primitive_streams_; ///< Per primitive, its index in streams_.
+
+    /// A run on the GPU: params, the largest allowed displacement and a count of
+    /// vertices past it, in the culling arena.
+    ArenaRegion gpu_table_;
+    ::velk::string gpu_source_;
+    float gpu_max_displacement_ = -1.f;
+    IGpuPipeline::Ptr gpu_deform_pipeline_;
+    IGpuPipeline::Ptr gpu_refit_pipeline_;
+    ::velk::vector<MeshRefitInfo> gpu_refits_;
+    bool gpu_commands_dirty_ = true;
+    uint32_t gpu_runs_ = 0;
+    bool gpu_overrun_logged_ = false;
 };
 
 } // namespace velk::impl

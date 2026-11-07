@@ -48,6 +48,7 @@ void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_global_barrier() override;
     void record_copy_buffer(::velk::IGpuBuffer* src, uint64_t src_offset, ::velk::IGpuBuffer* dst,
                             uint64_t dst_offset, uint64_t size) override;
+    void record_clear_buffer(::velk::IGpuBuffer* buffer, uint64_t offset, uint64_t size) override;
     void record_blit_to_texture(::velk::IGpuTexture& source,
                                 ::velk::IGpuTexture& dest,
                                 ::velk::rect dst_rect) override;

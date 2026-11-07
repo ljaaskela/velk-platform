@@ -136,6 +136,7 @@ add_library(velk_render SHARED
     include/velk-render/frame/raster_shaders.h
     include/velk-render/frame/compute_shaders.h
     include/velk-render/frame/instance_cull.h
+    src/mesh/mesh_deform_shaders.h
     include/velk-render/frame/render_view.h
 
     # Render-path interfaces (under interface/) + shared types

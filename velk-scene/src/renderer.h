@@ -134,6 +134,16 @@ private:
     /// velk_instances.data[instances_base + i].
     IGpuArena::Ptr instance_arena_;
 
+    /// Meshes with a deform to run on the GPU this frame, or waiting to be ready for one.
+    vector<IDeformingMesh::Ptr> gpu_deforms_;
+    /// Those that went into this frame's graph.
+    vector<IDeformingMesh::Ptr> gpu_deforms_recorded_;
+    /// One pass runs them all, with the meshes it was recorded for.
+    IRenderPass::Ptr gpu_deform_pass_;
+    vector<IDeformingMesh::Ptr> gpu_deform_pass_meshes_;
+    IGpuBuffer* gpu_deform_culling_buffer_ = nullptr;  ///< Compared, never used: may be gone.
+    void emit_gpu_deforms(FrameContext& ctx, IRenderGraph& graph);
+
     /// Shared material arena (set = 1 slot 4): each material suballocates a
     /// persistent region for its draw data, so fragment shaders read
     /// velk_materials.data[material_base].

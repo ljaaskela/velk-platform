@@ -3,6 +3,7 @@
 #include "scene_bvh.h"
 #include "scene_collector.h"
 
+#include <velk-render/api/cached_view_pass.h>
 #include <velk-render/frame/raster_shaders.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_render_texture_group.h>
@@ -16,6 +17,7 @@
 
 #include <velk-render/frame/compute_shaders.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -38,21 +40,31 @@ namespace velk {
 
 namespace {
 
-/// Runs @p element's mesh deformer, if it has one and a mesh built for it.
-void run_deformer(IElement& element, IGpuResourceManager& resources)
+/// Runs @p element's mesh deformer, if it has one and a mesh built for it. A run on the
+/// GPU is added to @p gpu_runs, to go in the frame's graph.
+void run_deformer(IElement& element, IGpuResourceManager& resources, vector<IDeformingMesh::Ptr>& gpu_runs)
 {
     auto* storage = interface_cast<IObjectStorage>(&element);
     if (!storage) {
         return;
     }
     auto deformer = storage->template find_attachment<IMeshDeformer>();
-    if (!deformer) {
+    auto gpu_deformer = deformer ? nullptr : storage->template find_attachment<IComputeMeshDeformer>();
+    if (!deformer && !gpu_deformer) {
         return;
     }
     auto state = read_state<IVisual3D>(storage->template find_attachment<IVisual3D>());
     auto mesh = state ? state->mesh.get<IDeformingMesh>() : nullptr;
-    if (mesh) {
+    if (!mesh) {
+        return;
+    }
+    if (deformer) {
         mesh->deform(*deformer, resources);
+        return;
+    }
+    mesh->deform_on_gpu(*gpu_deformer, resources);
+    if (std::find(gpu_runs.begin(), gpu_runs.end(), mesh) == gpu_runs.end()) {
+        gpu_runs.push_back(mesh);
     }
 }
 
@@ -547,7 +559,7 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
             VELK_PERF_SCOPE("renderer.deform");
             for (size_t i = 0; i < state.redraw_list.size(); ++i) {
                 if ((state.redraw_flags[i] & DirtyFlags::Deform) != DirtyFlags::None) {
-                    run_deformer(*state.redraw_list[i], *resources_);
+                    run_deformer(*state.redraw_list[i], *resources_, gpu_deforms_);
                 }
             }
         }
@@ -680,6 +692,67 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
         consumed[scene] = std::move(state);
     }
     return consumed;
+}
+
+void Renderer::emit_gpu_deforms(FrameContext& ctx, IRenderGraph& graph)
+{
+    vector<IDeformingMesh::Ptr> ready;
+    bool dirty = false;
+    for (auto& mesh : gpu_deforms_) {
+        if (mesh->prepare_gpu_commands(ctx)) {
+            dirty = mesh->take_gpu_commands_dirty() || dirty;
+            ready.push_back(mesh);
+        }
+    }
+    gpu_deforms_recorded_.clear();
+    if (ready.empty()) {
+        return;
+    }
+    // The commands recorded for a set of meshes stay good while the same meshes run.
+    std::sort(ready.begin(), ready.end(),
+              [](const IDeformingMesh::Ptr& a, const IDeformingMesh::Ptr& b) { return a.get() < b.get(); });
+    bool same = ready.size() == gpu_deform_pass_meshes_.size();
+    for (size_t i = 0; same && i < ready.size(); ++i) {
+        same = ready[i] == gpu_deform_pass_meshes_[i];
+    }
+    dirty = dirty || !same;
+
+    // Asked for only now, since preparing the meshes can grow the arena, which replaces
+    // its buffer. The commands name it, so a new one means recording them again.
+    auto culling_arena = resources_->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* culling_buffer = culling_arena ? culling_arena->buffer() : nullptr;
+    if (!culling_buffer) {
+        return;
+    }
+    dirty = dirty || culling_buffer != gpu_deform_culling_buffer_;
+    gpu_deform_culling_buffer_ = culling_buffer;
+
+    emit_cached_view_pass(gpu_deform_pass_, dirty, "mesh.deform", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) {
+            return;
+        }
+        cmd->begin_recording();
+        cmd->push_label("Mesh deform");
+        // Earlier frames may still be reading what this writes.
+        cmd->record_global_barrier();
+        for (auto& mesh : ready) {
+            mesh->record_gpu_clears(*cmd, culling_buffer);
+        }
+        for (auto& mesh : ready) {
+            mesh->record_gpu_vertices(*cmd, rec.held);
+        }
+        cmd->record_global_barrier();
+        for (auto& mesh : ready) {
+            mesh->record_gpu_refits(*cmd, rec.held);
+        }
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+    });
+    gpu_deform_pass_meshes_ = ready;
+    gpu_deforms_recorded_ = std::move(ready);
 }
 
 void Renderer::build_frame_passes(const FrameDesc& desc,
@@ -906,10 +979,12 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // every view's batches have been rebuilt above.
         render_target_cache_.ensure(ctx, batch_builder_);
 
-        // Instance motion comes first of all, since every view and render target reads it.
+        // Instance motion and mesh deforms come first of all, since every view and render
+        // target reads them.
         for (auto& [scene, bvh] : scene_bvhs) {
             bvh->emit_instance_motion(ctx, *slot.graph);
         }
+        emit_gpu_deforms(ctx, *slot.graph);
 
         // RTT subtree passes go into slot.graph first. Bindless texture
         // reads from materials are graph-invisible (Tier 1), so the
@@ -1034,6 +1109,10 @@ Frame Renderer::prepare(const FrameDesc& desc)
     {
         VELK_PERF_SCOPE("renderer.build_frame_passes");
         build_frame_passes(desc, consumed_scenes, *slot);
+        // A mesh not ready to run yet stays for the next frame.
+        for (const auto& mesh : gpu_deforms_recorded_) {
+            gpu_deforms_.erase(std::remove(gpu_deforms_.begin(), gpu_deforms_.end(), mesh), gpu_deforms_.end());
+        }
     }
 
     // Record the whole frame on this (prepare / main) thread: compile the
@@ -1262,6 +1341,11 @@ void Renderer::shutdown()
         // Drain the GPU before destroying anything: subsequent
         // backend->destroy_* calls assume nothing is still in use.
         backend_->wait_idle();
+
+        gpu_deforms_.clear();
+        gpu_deforms_recorded_.clear();
+        gpu_deform_pass_meshes_.clear();
+        gpu_deform_pass_ = nullptr;
 
         // Detach the resource manager from every GPU resource still
         // observing it so their dtors (which may run later, on any

@@ -182,6 +182,13 @@ void VkCommandBuffer::record_copy_buffer(::velk::IGpuBuffer* src, uint64_t src_o
     vkCmdCopyBuffer(cmd_, vk_src->vk_buffer(), vk_dst->vk_buffer(), 1, &region);
 }
 
+void VkCommandBuffer::record_clear_buffer(::velk::IGpuBuffer* buffer, uint64_t offset, uint64_t size)
+{
+    auto* vk_buffer = interface_cast<IVkGpuBuffer>(buffer);
+    if (cmd_ == VK_NULL_HANDLE || !vk_buffer) return;
+    vkCmdFillBuffer(cmd_, vk_buffer->vk_buffer(), offset, size, 0);
+}
+
 void VkCommandBuffer::record_blit_to_texture(
     ::velk::IGpuTexture& source, ::velk::IGpuTexture& dest, ::velk::rect dst_rect)
 {
