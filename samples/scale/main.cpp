@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [across] [top]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [across] [top] [yaw=N]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -56,7 +56,7 @@
 // lowsun:   the sun is at 15 degrees instead of 35.
 // dense:    a forest's trees are 30 apart instead of 80, so the canopy nearly closes.
 // blocks:   a forest's mesh is a flat red box instead of a tree.
-// across, top: the camera stays still at that stop of the flyby.
+// across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -427,6 +427,7 @@ int main(int argc, char* argv[])
     bool dense = false;
     bool blocks = false;
     int hold_stop = -1;
+    float hold_yaw = 60.f;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
@@ -439,6 +440,7 @@ int main(int argc, char* argv[])
         blocks = blocks || std::strcmp(argv[i], "blocks") == 0;
         if (std::strcmp(argv[i], "across") == 0) hold_stop = 1;
         if (std::strcmp(argv[i], "top") == 0) hold_stop = 2;
+        if (std::strncmp(argv[i], "yaw=", 4) == 0) hold_yaw = static_cast<float>(std::atof(argv[i] + 4));
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -853,7 +855,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         if (hold_stop >= 0 && forest) {
             orbit.set_distance(flyby_stops[hold_stop].distance);
             orbit.set_pitch(flyby_stops[hold_stop].pitch);
-            orbit.set_yaw(60.f);
+            orbit.set_yaw(hold_yaw);
         }
 
         long flyby_section = 0;

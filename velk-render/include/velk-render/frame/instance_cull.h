@@ -305,6 +305,8 @@ void main()
  * the viewer sees through a depth tv, the coverage. The instances seen, weighted by how
  * much of each is visible, then get tv / (tv + tl) * (1 - e^-(tv + tl)) / (1 - e^-tv) of
  * the light. Seen from a shallow angle tv is large, which leaves the sunlit top of the layer.
+ * That applies to surface among the instances, which is also hidden by them. Surface facing
+ * out of their layer, along the normal of the surface behind, gets the light unshadowed.
  */
 inline constexpr string_view instance_splat_composite_src = R"(
 #version 450
@@ -347,17 +349,24 @@ const vec3 kDirections[14] = vec3[14](
     vec3(-0.57735, -0.57735, 0.57735), vec3(0.57735, 0.57735, -0.57735), vec3(-0.57735, 0.57735, -0.57735),
     vec3(0.57735, -0.57735, -0.57735), vec3(-0.57735, -0.57735, -0.57735));
 
-// Of the surface turned to the viewer, how far it is turned to the light on average.
-float facing_light(vec3 to_light, vec3 to_viewer)
+// Of the surface turned to the viewer, how far it is turned to the light on average, as
+// the part from surface that is out in the open, and the part from surface among the other
+// instances. Surface facing `up`, out of their layer, is not hidden by the others. Surface
+// facing sideways is spread through the layer's depth, so only `seen_share` of it is seen.
+vec2 facing_light(vec3 to_light, vec3 to_viewer, vec3 up, float seen_share)
 {
-    float lit = 0.0;
+    vec2 lit = vec2(0.0);
     float seen = 0.0;
     for (int d = 0; d < 14; ++d) {
+        float open = max(dot(kDirections[d], up), 0.0);
         float towards_viewer = max(dot(kDirections[d], to_viewer), 0.0) * pc.facing[d];
-        seen += towards_viewer;
-        lit += towards_viewer * max(dot(kDirections[d], to_light), 0.0);
+        float towards_light = max(dot(kDirections[d], to_light), 0.0);
+        float seen_open = towards_viewer * open;
+        float seen_among = towards_viewer * (1.0 - open) * seen_share;
+        seen += seen_open + seen_among;
+        lit += vec2(seen_open, seen_among) * towards_light;
     }
-    return seen > 0.0 ? lit / seen : 0.0;
+    return seen > 0.0 ? lit / seen : vec2(0.0);
 }
 
 void main()
@@ -407,7 +416,10 @@ void main()
     }
     vec3 to_viewer = normalize(globals.cam_pos.xyz - towards);
 
-    vec3 direct_on_instance = vec3(0.0);
+    float to_viewer_depth = max(coverage, 1e-5);
+    float seen_share = (1.0 - exp(-to_viewer_depth)) / to_viewer_depth;
+    vec3 direct_open = vec3(0.0);
+    vec3 direct_among = vec3(0.0);
     vec3 direct_on_behind = vec3(0.0);
     for (uint i = 0u; i < pc.light_count; ++i) {
         SplatLight light = splat_lights.data[pc.lights_base + i];
@@ -428,7 +440,9 @@ void main()
             }
         }
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
-        direct_on_instance += radiance * facing_light(L, to_viewer);
+        vec2 facing = facing_light(L, to_viewer, behind_normal, seen_share);
+        direct_open += radiance * facing.x;
+        direct_among += radiance * facing.y;
         if (has_surface) {
             direct_on_behind += radiance * max(dot(behind_normal, L), 0.0);
         }
@@ -442,11 +456,10 @@ void main()
     if (direct_behind > 1e-4) {
         float shadowed = dot(behind_ratio * behind_light, kLuma) - dot(indirect, kLuma);
         float to_light = -log(clamp(shadowed / direct_behind, 1e-3, 0.999));
-        float to_viewer_depth = max(coverage, 1e-5);
         float both = to_light + to_viewer_depth;
         arriving = to_viewer_depth / both * (1.0 - exp(-both)) / (1.0 - exp(-to_viewer_depth));
     }
-    direct_on_instance *= arriving;
+    vec3 direct_on_instance = direct_open + direct_among * arriving;
 
     vec4 under = velk_texture(pc.output_id, uv);
     vec3 surface = vec3(pc.albedo_r, pc.albedo_g, pc.albedo_b) * (direct_on_instance + indirect);    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord,
