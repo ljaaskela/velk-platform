@@ -320,11 +320,12 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
     // Each piece with its nearest free neighbour. The first of a pair stays, and takes on both.
     vector<uint32_t> mate;
     mate.resize(pieces, kNone);
-    float widest = 0.f;
-    float furthest = 0.f;
+    float width_sum = 0.f;
+    float distance_sum = 0.f;
+    uint32_t pairs = 0;
     for (uint32_t a = 0; a < pieces; ++a) {
         const float* box = bounds.data() + size_t(a) * 6;
-        widest = std::max({widest, box[3] - box[0], box[4] - box[1], box[5] - box[2]});
+        width_sum += std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
         if (mate[a] != kNone) {
             continue;
         }
@@ -347,7 +348,8 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
         if (nearest != kNone) {
             mate[a] = nearest;
             mate[nearest] = a;
-            furthest = std::max(furthest, std::sqrt(nearest2));
+            distance_sum += std::sqrt(nearest2);
+            ++pairs;
         }
     }
 
@@ -407,8 +409,11 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
         }
         kept.push_back(new_id);
     }
-    // A leaf moves by up to half the way to its mate, and changes shape by about its size.
-    error = std::max(widest * 0.5f, furthest * 0.5f);
+    // A leaf moves half the way to its mate, and changes shape by about its size. The typical
+    // leaf is what makes a level look different, not one that happens to be far from the rest.
+    const float mean_width = width_sum / static_cast<float>(pieces);
+    const float mean_distance = distance_sum / static_cast<float>(std::max(pairs, 1u));
+    error = std::max(mean_width, mean_distance) * 0.5f;
     return true;
 }
 
