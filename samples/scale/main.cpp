@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -38,6 +38,9 @@
 //           partition's bounds until the cube is a tiny part of them.
 // mixed:    a forest's movers vary in size: one in 100 at 30 times, one in 10 at 5 times,
 //           and the rest at half size.
+// flyby:    the camera flies over a forest and repeats: over the crowns, then across at
+//           altitude, then straight down from where the whole forest shows, moving between
+//           them. One round is 1620 frames, and GPU timings and frame times print per section.
 // unlimited: turns vsync off, so frame times show the real cost.
 // rt:       uses the ray-traced render path instead of deferred.
 // text:     adds a text visual above the grid. It moves like the movers when
@@ -289,6 +292,18 @@ void record_gpu_timings(velk::vector<PassSamples>& passes, velk::array_view<cons
     }
 }
 
+/// Where a flyby's camera holds for a section. It then moves to the next stop over another.
+struct FlybyStop
+{
+    const char* name;
+    const char* move_name;
+    float distance;
+    float pitch;
+};
+
+constexpr long kFlybyHoldFrames = 300;
+constexpr long kFlybyMoveFrames = 240;
+
 void print_gpu_timings(velk::vector<PassSamples>& passes)
 {
     for (auto& pass : passes) {
@@ -333,10 +348,12 @@ int main(int argc, char* argv[])
     bool gpu_deform = false;
     bool outlier = false;
     bool mixed = false;
+    bool flyby = false;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
         mixed = mixed || std::strcmp(argv[i], "mixed") == 0;
+        flyby = flyby || std::strcmp(argv[i], "flyby") == 0;
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -406,9 +423,9 @@ int main(int argc, char* argv[])
     // A forest is viewed from close up, at its center.
     const float distance = forest ? 420.f : std::max(extent * 1.3f, 800.f);
     auto orbit = velk::trait::transform::create_orbit();
+    auto focus_trs = velk::trait::transform::create_trs();
     if (forest) {
         auto focus = velk::create_element();
-        auto focus_trs = velk::trait::transform::create_trs();
         focus_trs.set_translate({0.f, kFloorY - 30.f, 0.f});
         focus.add_trait(focus_trs);
         scene.add(root, focus);
@@ -683,9 +700,42 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     velk::vector<velk::Element> extra_cubes;
     long next_extra = 0;
 
+    const FlybyStop flyby_stops[] = {{"low", "climb", 200.f, -12.f},
+                                     {"across", "rise", 7000.f, -12.f},
+                                     {"top", "descend", std::max(extent, 7000.f), -89.f}};
+    constexpr long kFlybyStops = 3;
+    constexpr long kFlybySections = kFlybyStops * 2;
+    velk::vector<PassSamples> flyby_passes[kFlybySections];
+    auto last_frame_time = Clock::now();
+
     while (app.poll()) {
         // Motion follows the frame number, so runs are comparable.
         const float t = static_cast<float>(frame) / 60.f;
+
+        long flyby_section = 0;
+        if (flyby && forest) {
+            const long leg_frames = kFlybyHoldFrames + kFlybyMoveFrames;
+            const long round_frame = frame % (leg_frames * kFlybyStops);
+            const long leg = round_frame / leg_frames;
+            const long within = round_frame - leg * leg_frames;
+            const FlybyStop& from = flyby_stops[leg];
+            const FlybyStop& to = flyby_stops[(leg + 1) % kFlybyStops];
+            float blend = 0.f;
+            flyby_section = leg * 2;
+            if (within >= kFlybyHoldFrames) {
+                const float f = static_cast<float>(within - kFlybyHoldFrames) / static_cast<float>(kFlybyMoveFrames);
+                blend = f * f * (3.f - 2.f * f);
+                flyby_section = leg * 2 + 1;
+            }
+            // Evenly in ratio, so a climb feels the same speed at all heights.
+            orbit.set_distance(from.distance * std::pow(to.distance / from.distance, blend));
+            orbit.set_pitch(from.pitch + (to.pitch - from.pitch) * blend);
+            orbit.set_yaw(60.f);
+            // Back and forth over a quarter of the forest, at up to 800 units a second.
+            const float reach = extent * 0.25f;
+            focus_trs.set_translate({reach * std::sin(t * 800.f / reach), kFloorY - 30.f, 0.f});
+        }
+
         const bool movers_still = burst_movers && (frame / 200) % 2 == 1;
         for (auto& mover : movers) {
             if (movers_still) {
@@ -793,11 +843,19 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             }
         }
 
-        if (backend && frame > kWarmupFrames) {
-            record_gpu_timings(gpu_passes, backend->last_gpu_timings());
-        }
-
         const auto now = Clock::now();
+        if (backend && frame > kWarmupFrames) {
+            auto& passes = flyby && forest ? flyby_passes[flyby_section] : gpu_passes;
+            record_gpu_timings(passes, backend->last_gpu_timings());
+            if (flyby && forest) {
+                velk::GpuPassTiming frame_time{};
+                frame_time.label = "whole frame";
+                frame_time.ms = static_cast<float>(std::chrono::duration<double, std::milli>(now - last_frame_time).count());
+                record_gpu_timings(passes, {&frame_time, 1});
+            }
+        }
+        last_frame_time = now;
+
         const double elapsed = std::chrono::duration<double>(now - report_start).count();
         if (elapsed >= 1.0) {
             const long frames = frame - report_frame;
@@ -812,5 +870,12 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     }
 
     print_gpu_timings(gpu_passes);
+    for (long section = 0; section < kFlybySections; ++section) {
+        if (!flyby_passes[section].empty()) {
+            const FlybyStop& stop = flyby_stops[section / 2];
+            VELK_LOG(I, "scale: flyby section %s", section % 2 == 0 ? stop.name : stop.move_name);
+            print_gpu_timings(flyby_passes[section]);
+        }
+    }
     return 0;
 }
