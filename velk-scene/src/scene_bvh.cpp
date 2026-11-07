@@ -197,7 +197,8 @@ RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) co
     const auto& run = group.meshes[group.visual->get_slot_mesh(slot)];
     record.first_shape = run.first_shape;
     record.shape_count = run.shape_count;
-    record.ray_motion = group.visual->get_ray_motion_source().empty() ? 0u : 1u;
+    record.flags = (group.visual->get_ray_motion_source().empty() ? 0u : kRtRecordRayMotion)
+        | (run.far_area > 0.f ? kRtRecordMedium : 0u);
     return record;
 }
 

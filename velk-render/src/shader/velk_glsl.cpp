@@ -92,7 +92,7 @@ struct RtRecord {
     uint first_shape;  // index into velk_bvh_shapes
     uint shape_count;
     uint tree_root;    // index into velk_blas_nodes, or VELK_NO_TREE to test each shape
-    uint ray_motion;   // 1 if rays follow the scene's ray motion here
+    uint flags;        // 1: rays follow the scene's ray motion here. 2: wide rays count parts of its meshes as a medium
 };
 
 #define VELK_NO_TREE 0xFFFFFFFFu

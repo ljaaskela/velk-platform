@@ -420,9 +420,34 @@ struct ClusterBuilder
         }
     }
 
+    /// Each node's mean projected area over all directions, half its surface's, in aabb_max[3].
+    /// A child's index is always greater than its parent's.
+    void fill_areas()
+    {
+        for (size_t n = out.nodes.size(); n > 0; --n) {
+            BlasNode& node = out.nodes[n - 1];
+            float area = 0.f;
+            for (uint32_t t = 0; t < node.shape_count; ++t) {
+                const uint32_t triangle = out.triangle_indices[node.first_shape + t];
+                const float* a = vertices + size_t(indices[size_t(triangle) * 3]) * floats_per_vertex;
+                const float* b = vertices + size_t(indices[size_t(triangle) * 3 + 1]) * floats_per_vertex;
+                const float* c = vertices + size_t(indices[size_t(triangle) * 3 + 2]) * floats_per_vertex;
+                const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                const float v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                const float cross[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+                area += 0.25f * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+            }
+            for (uint32_t c = 0; c < node.child_count; ++c) {
+                area += out.nodes[node.first_child + c].aabb_max[3];
+            }
+            node.aabb_max[3] = area;
+        }
+    }
+
     void build()
     {
         split_oversized_leaves();
+        fill_areas();
         subtree_triangles.resize(out.nodes.size());
         count_triangles(0);
         assign(0);

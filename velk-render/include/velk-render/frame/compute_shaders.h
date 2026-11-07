@@ -509,6 +509,22 @@ bool velk_mesh_blocks(Ray ray, RtShape shape, float t_max)
     return false;
 }
 
+#ifdef VELK_RAY_MOTION
+// The motion at the point of the ray nearest the shape's middle, taken off the ray, moves
+// the shape for this ray. Rays wider than the motion would not show it.
+Ray velk_moved_ray(Ray local, RtRecord rec, uint shape_index)
+{
+    if ((rec.flags & 1u) == 0u || velk_ray_footprint >= VELK_RAY_MOTION_REACH) return local;
+    RtShape moved = velk_bvh_shapes.data[shape_index];
+    vec3 middle = (moved.origin.xyz + moved.u_axis.xyz) * 0.5;
+    vec3 nearest = local.origin + local.dir * (dot(middle - local.origin, local.dir) / dot(local.dir, local.dir));
+    Ray out_ray = local;
+    out_ray.origin -= VELK_RAY_MOTION(nearest, vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w),
+                                      float(VELK_GLOBALS.present_counter) / 60.0);
+    return out_ray;
+}
+#endif
+
 // Intersects a record's shapes, returning the nearest hit in (t_min, t_max) with
 // its normal in world space. With @p any_hit, returns at the first hit found.
 bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool any_hit, out RayHit hit)
@@ -521,15 +537,7 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
         for (uint i = 0u; i < rec.shape_count; ++i) {
             Ray shape_ray = local;
 #ifdef VELK_RAY_MOTION
-            // The motion at the point of the ray nearest the shape's middle, taken off the
-            // ray, moves the shape for this ray. Rays wider than the motion would not show it.
-            if (rec.ray_motion != 0u && velk_ray_footprint < VELK_RAY_MOTION_REACH) {
-                RtShape moved = velk_bvh_shapes.data[rec.first_shape + i];
-                vec3 middle = (moved.origin.xyz + moved.u_axis.xyz) * 0.5;
-                vec3 nearest = local.origin + local.dir * (dot(middle - local.origin, local.dir) / dot(local.dir, local.dir));
-                shape_ray.origin -= VELK_RAY_MOTION(nearest, vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w),
-                                                    float(VELK_GLOBALS.present_counter) / 60.0);
-            }
+            shape_ray = velk_moved_ray(local, rec, rec.first_shape + i);
 #endif
             if (any_hit) {
                 RtShape blocker = velk_bvh_shapes.data[rec.first_shape + i];
@@ -580,6 +588,102 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
 // in aabb_max.w, 0 for one that is not made of instances, and its average colour is in
 // the bits of aabb_min.w, as unorm RGB.
 #ifdef VELK_TRACE_MEDIUM
+// How much of a wide ray gets through a mesh, in its local space. A node much narrower than
+// the ray counts as a medium, by the area under it, so a mesh costs a wide ray what the ray
+// can resolve rather than all of its triangles.
+float velk_mesh_visibility(Ray ray, RtShape shape, float t_max)
+{
+    if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) return 1.0;
+    float ld_scale = length(ray.dir);
+    if (ld_scale < 1e-30) return 1.0;
+    vec3 ld = ray.dir / ld_scale;
+    float limit = min(t_max * ld_scale, 1e30);
+    float footprint = velk_ray_footprint * ld_scale;
+    Ray local_ray;
+    local_ray.origin = ray.origin;
+    local_ray.dir = ld;
+    float enter;
+    if (!ray_aabb(local_ray, shape.origin.xyz, shape.u_axis.xyz, limit, enter)) return 1.0;
+
+    MeshStaticData st = velk_mesh_static(shape);
+    if (st.triangle_count == 0u || st.vertex_stride == 0u || st.blas_node_count == 0u) return 1.0;
+    uint blas_node_base = st.blas_node_base;
+    uint word_base = st.cluster_word_base;
+
+    float visibility = 1.0;
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = st.blas_root;
+    while (sp > 0) {
+        uint ni = stack[--sp];
+        BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
+        if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, limit, enter)) continue;
+        vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+        float widest = max(max(extent.x, extent.y), extent.z);
+        if (widest < footprint * velk_medium_reach(blas_node_base + ni)) {
+            vec3 sides = max(extent, vec3(widest * 1e-3));
+            float len = max(min(ray_aabb_exit(local_ray, node.aabb_min.xyz, node.aabb_max.xyz), limit) - enter, 0.0);
+            visibility *= exp(-node.aabb_max.w / (sides.x * sides.y * sides.z) * len);
+            continue;
+        }
+        if (node.shape_count > 0u) {
+            uint triangle_count = node.shape_count & 0xFFFFu;
+            uint positions = word_base + node.first_child;
+            for (uint k = 0u; k < triangle_count; ++k) {
+                uint tri = velk_cluster_words.data[word_base + node.first_shape + k];
+                uint p0 = positions + (tri & 0xFFu) * 3u;
+                uint p1 = positions + ((tri >> 8u) & 0xFFu) * 3u;
+                uint p2 = positions + ((tri >> 16u) & 0xFFu) * 3u;
+                vec3 v0 = vec3(uintBitsToFloat(velk_cluster_words.data[p0]), uintBitsToFloat(velk_cluster_words.data[p0 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p0 + 2u]));
+                vec3 e1 = vec3(uintBitsToFloat(velk_cluster_words.data[p1]), uintBitsToFloat(velk_cluster_words.data[p1 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p1 + 2u])) - v0;
+                vec3 e2 = vec3(uintBitsToFloat(velk_cluster_words.data[p2]), uintBitsToFloat(velk_cluster_words.data[p2 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p2 + 2u])) - v0;
+                vec3 p = cross(ld, e2);
+                float det = dot(e1, p);
+                if (abs(det) < 1e-7 * max(length(e1) * length(p), 1e-30)) continue;
+                float inv_det = 1.0 / det;
+                vec3 to_v0 = ray.origin - v0;
+                float u = dot(to_v0, p) * inv_det;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(to_v0, e1);
+                float v = dot(ld, q) * inv_det;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float tt = dot(e2, q) * inv_det;
+                if (tt >= 1e-4 * max(length(e1), length(e2)) && tt < limit) return 0.0;
+            }
+        } else {
+            for (uint c = 0u; c < node.child_count; ++c) {
+                if (sp < 32) stack[sp++] = node.first_child + c;
+            }
+        }
+    }
+    return visibility;
+}
+
+// How much of a wide ray gets through a record's shapes.
+float velk_record_visibility(Ray ray, uint record, float t_max)
+{
+    RtRecord rec = velk_records.data[record];
+    if ((rec.flags & 2u) == 0u || rec.tree_root != VELK_NO_TREE) {
+        RayHit h;
+        return velk_intersect_record(ray, record, 0.0, t_max, true, h) ? 0.0 : 1.0;
+    }
+    Ray local = velk_local_ray(ray, rec);
+    float visibility = 1.0;
+    for (uint i = 0u; i < rec.shape_count; ++i) {
+        Ray shape_ray = local;
+#ifdef VELK_RAY_MOTION
+        shape_ray = velk_moved_ray(local, rec, rec.first_shape + i);
+#endif
+        visibility *= velk_mesh_visibility(shape_ray, velk_bvh_shapes.data[rec.first_shape + i], t_max);
+    }
+    return visibility;
+}
+
+)"
+                                                                      R"(
 float trace_visibility_medium(Ray ray, float t_max)
 {
     float visibility = 1.0;
@@ -618,8 +722,8 @@ float trace_visibility_medium(Ray ray, float t_max)
             }
         }
         for (uint i = 0u; i < node.shape_count; ++i) {
-            RayHit h;
-            if (velk_intersect_record(ray, node.first_shape + i, 0.0, t_max, true, h)) {
+            visibility *= velk_record_visibility(ray, node.first_shape + i, t_max);
+            if (visibility <= 0.0) {
                 return 0.0;
             }
         }

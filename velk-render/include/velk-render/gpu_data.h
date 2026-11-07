@@ -189,9 +189,14 @@ VELK_GPU_STRUCT RtRecord
     uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
     uint32_t shape_count;
     uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
-    uint32_t ray_motion;      ///< 1 if rays follow the scene's ray motion here. See BvhBinding::ray_motion.
+    uint32_t flags;           ///< kRtRecordRayMotion, kRtRecordMedium.
 };
 static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
+
+/// Rays follow the scene's ray motion here. See BvhBinding::ray_motion.
+inline constexpr uint32_t kRtRecordRayMotion = 1;
+/// Rays wider than parts of its meshes count those parts as a medium.
+inline constexpr uint32_t kRtRecordMedium = 2;
 
 /// GPU-side scene light. Mirrors the `Light` struct in the compute
 /// shaders (80 bytes). `flags.y` is shadow_tech_id; callers populate
