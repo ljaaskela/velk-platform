@@ -38,7 +38,14 @@ add_library(velk_render SHARED
     src/mesh/mesh_buffer.cpp
     src/mesh/mesh_builder.h
     src/mesh/mesh_builder.cpp
+    src/mesh/mesh_lod.h
+    src/mesh/mesh_lod.cpp
     src/mesh/primitive_meshes.cpp
+    third_party/meshoptimizer/meshoptimizer.h
+    third_party/meshoptimizer/clusterizer.cpp
+    third_party/meshoptimizer/meshletutils.cpp
+    third_party/meshoptimizer/partition.cpp
+    third_party/meshoptimizer/simplifier.cpp
 
     # Concrete IGpuResource implementations
     src/resource/render_texture.h
@@ -173,6 +180,7 @@ target_include_directories(velk_render PRIVATE ${Vulkan_INCLUDE_DIRS})
 target_include_directories(velk_render
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer
 )
 
 option(VELK_RENDER_DEBUG "Enable verbose render logging" OFF)

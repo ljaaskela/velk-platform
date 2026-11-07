@@ -126,6 +126,19 @@ public:
     IBuffer* storage_buffer() const override { return storage_.get(); }
 
 private:
+    /// A primitive drawn by cluster, and where its data is.
+    struct ClusterDraw
+    {
+        uint32_t mesh;
+        const IMeshPrimitive* primitive;
+        uint32_t clusters;
+        uint32_t entry_word;
+        uint32_t list_word;
+        uint32_t commands_word;
+        uint32_t index_word;
+    };
+    const ClusterDraw* find_cluster_draw(uint32_t mesh, const IMeshPrimitive* primitive) const;
+
     uint64_t pipeline_key_ = 0;
     uint64_t texture_key_ = 0;
     /// Producer-side scratch. BatchBuilder appends instance bytes
@@ -157,6 +170,7 @@ private:
     uint32_t cull_mesh_ = 0;
     ArenaRegion cull_region_;
     vector<uint32_t> cull_list_words_;  ///< Per mesh, on the owner.
+    vector<ClusterDraw> cull_cluster_draws_;  ///< On the owner.
     float cull_far_albedo_[3] = {1.f, 1.f, 1.f};  ///< On the owner.
     float cull_far_facing_[kSurfaceDirectionCount] = {};  ///< On the owner.
     /// Set when instance bytes change (finalize_storage / update_instance_at);

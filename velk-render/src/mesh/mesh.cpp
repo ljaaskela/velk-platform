@@ -1,6 +1,7 @@
 #include "mesh/mesh.h"
 
 #include "mesh/mesh_deform_shaders.h"
+#include "mesh/mesh_lod.h"
 
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
@@ -67,6 +68,42 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
     rt_blas_nodes_region_ = {};
     rt_cluster_words_region_ = {};
     rt_static_base_ = kInvalidMeshStaticBase;
+    lod_table_region_ = {};
+    lod_index_region_ = {};
+}
+
+bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, uint32_t& table_word, uint32_t& level0_clusters,
+                                    uint32_t& index_word)
+{
+    if (!lod_table_region_.valid()) {
+        // A single cluster has nothing to choose between.
+        if (rt_blas_.clusters.size() < 2) {
+            return false;
+        }
+        auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        auto mesh_words = resources.shared_arena(IRenderBackend::kGlobalMeshWords, sizeof(uint32_t), true);
+        if (!culling || !mesh_words) {
+            return false;
+        }
+        const MeshLod lod = build_mesh_lod(rt_blas_);
+        lod_table_region_ = culling->alloc(lod.clusters.size() * sizeof(MeshLodCluster));
+        lod_index_region_ = mesh_words->alloc(lod.indices.size() * sizeof(uint32_t));
+        if (!lod_table_region_.valid() || !lod_index_region_.valid()) {
+            lod_table_region_ = {};
+            lod_index_region_ = {};
+            return false;
+        }
+        level0_clusters_ = 0;
+        for (const auto& cluster : lod.clusters) {
+            level0_clusters_ += cluster.level == 0 ? 1u : 0u;
+        }
+        culling->write_at(lod_table_region_.offset(), lod.clusters.data(), lod.clusters.size() * sizeof(MeshLodCluster));
+        mesh_words->write_at(lod_index_region_.offset(), lod.indices.data(), lod.indices.size() * sizeof(uint32_t));
+    }
+    table_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));
+    level0_clusters = level0_clusters_;
+    index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
+    return true;
 }
 
 uint32_t MeshPrimitive::ensure_rt_data(IGpuResourceManager& resources)

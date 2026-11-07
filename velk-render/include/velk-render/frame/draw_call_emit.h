@@ -246,6 +246,24 @@ inline void emit_draw_calls(
         }
         call.max_draw_count = 1;
 
+        // Drawn by cluster: its commands and their count come from the culling pass.
+        if (cull_info.cluster_count != 0) {
+            auto mesh_words = resources.shared_arena(IRenderBackend::kGlobalMeshWords, sizeof(uint32_t));
+            auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+            IGpuBuffer* index_buffer = mesh_words ? mesh_words->buffer() : nullptr;
+            IGpuBuffer* commands = culling ? culling->buffer() : nullptr;
+            if (!index_buffer || !commands) continue;
+            call.indexed = true;
+            call.index_buffer = index_buffer;
+            call.index_buffer_offset = size_t(cull_info.cluster_index_word) * sizeof(uint32_t);
+            call.args_stride = sizeof(uint32_t) * 5; // VkDrawIndexedIndirectCommand
+            call.args_buffer = commands;
+            call.args_buffer_offset = size_t(cull_info.cluster_commands_word) * sizeof(uint32_t);
+            call.count_buffer = commands;
+            call.count_buffer_offset = size_t(cull_info.cluster_draws_word) * sizeof(uint32_t);
+            call.max_draw_count = cull_info.cluster_count;
+        }
+
         call.root_constants_size = sizeof(uint32_t);
         std::memcpy(call.root_constants, &draw_base, sizeof(uint32_t));
 

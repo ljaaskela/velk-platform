@@ -504,6 +504,8 @@ bool VkBackend::check_required_features(
     };
 
 #define VELK_REQUIRE_12(field) require(wanted12.field, have12.field, #field)
+    require(VK_TRUE, have.features.multiDrawIndirect, "multiDrawIndirect");
+    require(VK_TRUE, have.features.drawIndirectFirstInstance, "drawIndirectFirstInstance");
     VELK_REQUIRE_12(descriptorIndexing);
     VELK_REQUIRE_12(scalarBlockLayout);
     VELK_REQUIRE_12(descriptorBindingPartiallyBound);
@@ -614,10 +616,12 @@ bool VkBackend::create_device()
     dynamic_rendering.dynamicRendering = VK_TRUE;
     features12.pNext = &dynamic_rendering;
 
-    // No base 1.0 feature is required: the engine asks only for 1.2 features
-    // plus dynamic rendering.
+    // Meshes drawn by cluster use one indirect call with a command per cluster, each
+    // with its own run of instances.
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features.multiDrawIndirect = VK_TRUE;
+    features2.features.drawIndirectFirstInstance = VK_TRUE;
     features2.pNext = &features12;
 
     if (!check_required_features(features12, dynamic_rendering)) {

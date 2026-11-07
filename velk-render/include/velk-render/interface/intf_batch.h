@@ -62,8 +62,15 @@ struct InstanceCullInfo
     uint32_t instances_base = 0;  ///< Element base of the instances in the instance arena.
     uint32_t slot_count = 0;      ///< Instances to test.
     uint32_t table_word = 0;      ///< The dispatch's table: see `instance_cull_compute_src`.
-    uint32_t visible_word = 0;    ///< This batch's list of visible instance slots.
-    uint32_t count_word = 0;      ///< How many slots the list holds, once culled.
+    uint32_t visible_word = 0;    ///< The list of instance slots this batch's draw reads.
+    uint32_t count_word = 0;      ///< How many visible slots its mesh has, once culled.
+    /// Set when it is drawn by cluster: one indexed command per cluster in use, each instanced
+    /// over a run of its list. See `instance_cluster_runs_src`.
+    uint32_t cluster_count = 0;          ///< The most commands. 0 when it is not.
+    uint32_t cluster_entry_word = 0;     ///< Its entry, for the passes that fill its commands.
+    uint32_t cluster_commands_word = 0;  ///< Its commands in the culling arena.
+    uint32_t cluster_draws_word = 0;     ///< How many commands are in use, in the culling arena.
+    uint32_t cluster_index_word = 0;     ///< Its indices in the mesh-word arena.
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     bool far_form = false;                  ///< Whether instances too small to draw get averaged instead.
     float far_albedo[3] = {1.f, 1.f, 1.f};  ///< Colour of those instances.

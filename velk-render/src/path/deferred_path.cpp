@@ -749,7 +749,13 @@ void DeferredPath::build_passes(IViewEntry& entry,
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
 
+    // Draws by cluster name the culling arena's buffer, which growing it replaces.
+    IGpuBuffer* const culling_buffer = vs.instance_cull.arena_buffer;
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true);
+    if (vs.instance_cull.arena_buffer != culling_buffer) {
+        vs.gbuffer_dirty = true;
+        vs.transparent_dirty = true;
+    }
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;

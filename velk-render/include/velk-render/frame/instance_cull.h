@@ -111,8 +111,10 @@ void main()
  * slots to its mesh's list in the culling arena, which the vertex shader reads through
  * velk_instance. The table at table_word holds 12 words per mesh: its bounding sphere
  * (center xyz and radius, as floats), the count of visible slots, the word of the
- * list, the list's capacity, and its mean projected area at scale 1. Instances with a
- * zero matrix have been removed.
+ * list, the list's capacity, its mean projected area at scale 1, and where the mesh's
+ * primitives drawn by cluster are: the word of their entries, and how many, as described
+ * at instance_cluster_runs_src. Each cluster a visible instance uses is counted there.
+ * Instances with a zero matrix have been removed.
  *
  * With chunks_word set, each work group goes through the chunk at that index of the
  * list, as filled by instance_partition_cull_src. Without it, all slots are tested.
@@ -191,6 +193,112 @@ void main()
     uint index = atomicAdd(cull_words.data[table + 4u], 1u);
     if (index < cull_words.data[table + 6u]) {
         cull_words.data[cull_words.data[table + 5u] + index] = slot;
+    }
+
+    uint first_entry = cull_words.data[table + 8u];
+    uint entries = cull_words.data[table + 9u];
+    for (uint e = 0u; e < entries; ++e) {
+        uint entry = first_entry + e * 12u;
+        uint clusters = cull_words.data[entry + 3u];
+        uint counts = cull_words.data[entry + 4u];
+        for (uint c = 0u; c < clusters; ++c) {
+            atomicAdd(cull_words.data[counts + c], 1u);
+        }
+    }
+}
+)";
+
+/**
+ * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
+ * use gets an indexed command, instanced over its own run of the list, so that instances
+ * using the same cluster share a draw. An entry is 12 words: the word of the list, its
+ * capacity, the word of the cluster table (kLodClusterWords words per cluster, starting
+ * with the cluster's first index and triangle count), the cluster count, the words of the
+ * counts, the cursors and the commands, one of each per cluster, how many commands are in use,
+ * the word of its mesh in the table of instance_cull_compute_src, and the group counts of
+ * the dispatch of instance_cluster_fill_src.
+ */
+inline constexpr string_view instance_cluster_runs_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint entry;
+} pc;
+
+void main()
+{
+    uint capacity = cull_words.data[pc.entry + 1u];
+    uint table = cull_words.data[pc.entry + 2u];
+    uint clusters = cull_words.data[pc.entry + 3u];
+    uint counts = cull_words.data[pc.entry + 4u];
+    uint cursors = cull_words.data[pc.entry + 5u];
+    uint commands = cull_words.data[pc.entry + 6u];
+
+    uint first = 0u;
+    uint draws = 0u;
+    for (uint c = 0u; c < clusters; ++c) {
+        uint count = min(cull_words.data[counts + c], capacity - first);
+        cull_words.data[counts + c] = 0u;
+        cull_words.data[cursors + c] = first;
+        if (count != 0u) {
+            uint cluster = table + c * 13u;
+            uint command = commands + draws * 5u;
+            cull_words.data[command + 0u] = cull_words.data[cluster + 1u] * 3u;
+            cull_words.data[command + 1u] = count;
+            cull_words.data[command + 2u] = cull_words.data[cluster];
+            cull_words.data[command + 3u] = 0u;
+            cull_words.data[command + 4u] = first;
+            ++draws;
+        }
+        first += count;
+    }
+    cull_words.data[pc.entry + 7u] = draws;
+
+    uint mesh = cull_words.data[pc.entry + 8u];
+    uint slots = min(cull_words.data[mesh + 4u], cull_words.data[mesh + 6u]);
+    cull_words.data[pc.entry + 9u] = (slots + 63u) / 64u;
+    cull_words.data[pc.entry + 10u] = 1u;
+    cull_words.data[pc.entry + 11u] = 1u;
+}
+)";
+
+/**
+ * Goes through a mesh's visible slots and writes them to the runs of the clusters they use,
+ * in one primitive's list. The clusters must be the ones instance_cull_compute_src counted.
+ */
+inline constexpr string_view instance_cluster_fill_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint entry;
+} pc;
+
+void main()
+{
+    uint mesh = cull_words.data[pc.entry + 8u];
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= min(cull_words.data[mesh + 4u], cull_words.data[mesh + 6u])) return;
+    uint slot = cull_words.data[cull_words.data[mesh + 5u] + index];
+
+    uint list = cull_words.data[pc.entry + 0u];
+    uint capacity = cull_words.data[pc.entry + 1u];
+    uint clusters = cull_words.data[pc.entry + 3u];
+    uint cursors = cull_words.data[pc.entry + 5u];
+    for (uint c = 0u; c < clusters; ++c) {
+        uint at = atomicAdd(cull_words.data[cursors + c], 1u);
+        if (at < capacity) {
+            cull_words.data[list + at] = slot;
+        }
     }
 }
 )";
@@ -545,7 +653,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         };
         auto pipeline = pipeline_for(instance_cull_compute_src, 0x4375'6c6c'496e'7374ULL);
         auto partition_pipeline = pipeline_for(instance_partition_cull_src, 0x4375'6c6c'5061'7274ULL);
-        auto cmd = pipeline && partition_pipeline ? ctx.backend->create_command_buffer() : nullptr;
+        auto runs_pipeline = pipeline_for(instance_cluster_runs_src, 0x4375'6c6c'5275'6e73ULL);
+        auto fill_pipeline = pipeline_for(instance_cluster_fill_src, 0x4375'6c6c'4669'6c6cULL);
+        auto cmd = pipeline && partition_pipeline && runs_pipeline && fill_pipeline ? ctx.backend->create_command_buffer() : nullptr;
         if (!cmd) {
             return;
         }
@@ -632,11 +742,46 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         }
         cmd->record_global_barrier();
 
-        // Each batch's indirect args take the count of its list.
+        // Draws by cluster: lay out each one's runs, then fill them.
+        vector<uint32_t> cluster_entries;
+        for (const auto& batch : *batches) {
+            InstanceCullInfo info{};
+            if (batch && batch->get_instance_cull(info) && info.cluster_count != 0
+                && std::find(cluster_entries.begin(), cluster_entries.end(), info.cluster_entry_word) == cluster_entries.end()) {
+                cluster_entries.push_back(info.cluster_entry_word);
+            }
+        }
+        if (!cluster_entries.empty()) {
+            constexpr uint32_t kFillGroupsWord = 9;
+            for (uint32_t word : cluster_entries) {
+                DispatchCall dc{};
+                dc.pipeline = runs_pipeline.get();
+                dc.groups_x = 1;
+                dc.groups_y = 1;
+                dc.groups_z = 1;
+                dc.root_constants_size = sizeof(word);
+                std::memcpy(dc.root_constants, &word, sizeof(word));
+                cmd->record_dispatch(dc);
+            }
+            cmd->record_global_barrier();
+            for (uint32_t word : cluster_entries) {
+                DispatchCall dc{};
+                dc.pipeline = fill_pipeline.get();
+                dc.groups_x = 1;
+                dc.groups_y = 1;
+                dc.groups_z = 1;
+                dc.root_constants_size = sizeof(word);
+                std::memcpy(dc.root_constants, &word, sizeof(word));
+                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(word + kFillGroupsWord) * sizeof(uint32_t));
+            }
+            cmd->record_global_barrier();
+        }
+
+        // Each other batch's indirect args take the count of its list.
         constexpr uint64_t kInstanceCountOffset = BatchBufferLayout::kArgsOffset + sizeof(uint32_t);
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
-            if (!batch || !batch->get_instance_cull(info)) {
+            if (!batch || !batch->get_instance_cull(info) || info.cluster_count != 0) {
                 continue;
             }
             auto* entry = batch->storage_buffer() ? ctx.resources->find_buffer(batch->storage_buffer()) : nullptr;
@@ -653,6 +798,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.cmd = std::move(cmd);
         rec.held.push_back(std::move(pipeline));
         rec.held.push_back(std::move(partition_pipeline));
+        rec.held.push_back(std::move(runs_pipeline));
+        rec.held.push_back(std::move(fill_pipeline));
     });
 }
 

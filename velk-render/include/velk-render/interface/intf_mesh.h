@@ -268,6 +268,15 @@ public:
     /// the RT data is published. The CPU copy of the tree is released, so `refit` does
     /// nothing from then on.
     virtual bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) = 0;
+
+    /// Builds this primitive's level of detail hierarchy on first call and publishes it. False
+    /// when it has too few clusters for this to be worth it, or none to build from.
+    /// @param table_word Set to the first word of its clusters in the culling arena, level 0 first.
+    /// @param level0_clusters Set to how many of them are the full mesh.
+    /// @param index_word Set to the first word of its indices in the mesh-word arena, which
+    ///        the clusters' first indices count from.
+    virtual bool ensure_lod_data(IGpuResourceManager& resources, uint32_t& table_word, uint32_t& level0_clusters,
+                                 uint32_t& index_word) = 0;
 };
 
 /**
