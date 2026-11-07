@@ -299,6 +299,12 @@ void main()
  * surface's direct light taken out, or the nearest surface below for a pixel with only sky
  * behind it. The directions are kSurfaceDirections, and instances' own rotations are not
  * taken into account.
+ *
+ * Direct light is shadowed by what the lighting pass found for that surface: a share V of
+ * it arrives after passing through the layer of instances, an optical depth tl = -ln V, and
+ * the viewer sees through a depth tv, the coverage. The instances seen, weighted by how
+ * much of each is visible, then get tv / (tv + tl) * (1 - e^-(tv + tl)) / (1 - e^-tv) of
+ * the light. Seen from a shallow angle tv is large, which leaves the sunlit top of the layer.
  */
 inline constexpr string_view instance_splat_composite_src = R"(
 #version 450
@@ -328,6 +334,7 @@ layout(push_constant) uniform PC {
     uint globals_base;
     uint lights_base;
     uint light_count;
+    uint ratio_id;
     float albedo_r;
     float albedo_g;
     float albedo_b;
@@ -377,6 +384,7 @@ void main()
     vec3 behind_normal = vec3(0.0);
     vec3 behind_pos = vec3(0.0);
     vec3 behind_light = vec3(0.0);
+    vec3 behind_ratio = vec3(1.0);
     bool has_surface = false;
     for (int k = 0; k < 8 && !has_surface; ++k) {
         vec2 at = uv + vec2(0.0, float(k * k * 2)) / dims;
@@ -386,6 +394,7 @@ void main()
             behind_normal = normalize(n);
             behind_pos = velk_texture(pc.worldpos_id, at).xyz;
             behind_light = velk_texture(pc.unshadowed_id, at).rgb;
+            behind_ratio = velk_texture(pc.ratio_id, at).rgb;
         }
     }
 
@@ -425,6 +434,19 @@ void main()
         }
     }
     vec3 indirect = max(behind_light - direct_on_behind, vec3(0.0));
+
+    // The ratio covers direct and indirect light together, and only direct gets shadowed.
+    const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+    float direct_behind = dot(direct_on_behind, kLuma);
+    float arriving = 1.0;
+    if (direct_behind > 1e-4) {
+        float shadowed = dot(behind_ratio * behind_light, kLuma) - dot(indirect, kLuma);
+        float to_light = -log(clamp(shadowed / direct_behind, 1e-3, 0.999));
+        float to_viewer_depth = max(coverage, 1e-5);
+        float both = to_light + to_viewer_depth;
+        arriving = to_viewer_depth / both * (1.0 - exp(-both)) / (1.0 - exp(-to_viewer_depth));
+    }
+    direct_on_instance *= arriving;
 
     vec4 under = velk_texture(pc.output_id, uv);
     vec3 surface = vec3(pc.albedo_r, pc.albedo_g, pc.albedo_b) * (direct_on_instance + indirect);    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord,

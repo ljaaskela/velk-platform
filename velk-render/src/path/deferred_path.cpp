@@ -1108,6 +1108,9 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
                                           FrameContext& ctx, int w, int h, IRenderGraph& graph)
 {
     if (!vs.deferred_output || !vs.gbuffer || !vs.unshadowed || !render_view.batches) return;
+    // What the temporal pass wrote this frame.
+    IRenderTarget::Ptr ratio = vs.hist_irr[1u - static_cast<uint32_t>(ctx.present_counter & 1ull)];
+    if (!ratio) return;
     vector<const void*> done;
     vector<InstanceCullInfo> visuals;
     for (const auto& batch : *render_view.batches) {
@@ -1209,7 +1212,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         struct CompositePush
         {
             uint32_t words_word, width, height, output_id, unshadowed_id, normal_id, worldpos_id;
-            uint32_t globals_base, lights_base, light_count;
+            uint32_t globals_base, lights_base, light_count, ratio_id;
             float albedo[3];
             float facing[kSurfaceDirectionCount];
         };
@@ -1223,6 +1226,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
                              render_view.view_globals_base, render_view.lights_base,
                              static_cast<uint32_t>(render_view.lights.size()),
+                             static_cast<uint32_t>(ratio->get_gpu_handle(GpuResourceKey::Default)),
                              {info.far_albedo[0], info.far_albedo[1], info.far_albedo[2]},
                              {}};
             std::memcpy(pc.facing, info.far_facing, sizeof(pc.facing));
@@ -1244,6 +1248,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(ratio));
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
