@@ -68,6 +68,8 @@
 // notour:   nature's camera starts still, rather than following a loop until there is input.
 // tour=N:   the loop starts N units along.
 // nosky:    nature has no generated sky.
+// lodtest=N: nature is 10 trees of species N (0 oak, 1 birch, 2 conifer) at growing distances
+//           from a still camera, on flat ground, with no grass or wind.
 // nowind:   nature's trees stand still.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
@@ -1212,6 +1214,8 @@ int main(int argc, char* argv[])
     float leaf_density = 1.f;
     bool no_shadow = false;
     bool no_wind = false;
+    bool lod_test = false;
+    int lod_test_tree = 0;
     bool no_sky = false;
     int kWidth = 1280;
     int kHeight = 720;
@@ -1240,6 +1244,10 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
+        if (std::strncmp(argv[i], "lodtest=", 8) == 0) {
+            lod_test = nature;
+            lod_test_tree = std::clamp(std::atoi(argv[i] + 8), 0, 2);
+        }
         no_sky = no_sky || std::strcmp(argv[i], "nosky") == 0;
         if (std::strncmp(argv[i], "size=", 5) == 0) std::sscanf(argv[i] + 5, "%dx%d", &kWidth, &kHeight);
         no_tour = no_tour || std::strcmp(argv[i], "notour") == 0;
@@ -1261,6 +1269,20 @@ int main(int argc, char* argv[])
         with_text = with_text || std::strcmp(argv[i], "text") == 0;
     }
 
+    if (lod_test) {
+        no_wind = true;
+        no_tour = true;
+        flat_terrain = true;
+        grass_count = 0;
+        sun_angle = 40.f;
+        has_view = true;
+        view[0] = 0.f;
+        view[1] = kFloorY - 40.f;
+        view[2] = 0.f;
+        view[3] = 0.f;
+        view[4] = -1.f;
+        view[5] = 1.f;
+    }
     wind = wind || (nature && !no_wind);
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count, argc > 4 ? argv[4] : "translate");
@@ -1494,7 +1516,16 @@ int main(int argc, char* argv[])
         constexpr float kConiferLine = 500.f;
         constexpr float kMaxSlope = 0.55f;
         velk::vector<velk::InstanceTransform> per_mesh[3];
-        for (long i = 0; i < element_count; ++i) {
+        if (lod_test) {
+            // Spread across the view, each half as far again as the last.
+            float away = 100.f;
+            for (int i = 0; i < 10; ++i) {
+                const float across = (static_cast<float>(i) - 4.5f) * 0.075f * away;
+                per_mesh[lod_test_tree].push_back(velk::InstanceTransform{{{1.f, 0.f, 0.f, across}, {0.f, 1.f, 0.f, kFloorY}, {0.f, 0.f, 1.f, -away}}});
+                away *= 1.5f;
+            }
+        }
+        for (long i = 0; i < (lod_test ? 0L : element_count); ++i) {
             const velk::vec3 at = tree_position(i);
             const float height = terrain.height_at(at.x, at.z);
             const float dx = terrain.height_at(at.x + 40.f, at.z) - terrain.height_at(at.x - 40.f, at.z);

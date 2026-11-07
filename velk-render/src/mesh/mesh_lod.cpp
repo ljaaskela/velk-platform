@@ -23,6 +23,8 @@ constexpr uint32_t kNoGroup = 0xFFFFFFFFu;
 constexpr float kNormalWeights[3] = {1.f, 1.f, 1.f};
 /// The most a separate piece's area grows in one step, in case nearly all of a group goes.
 constexpr float kMaxPieceGrowth = 4.f;
+/// How many triangles a group's separate pieces can average and still count as small.
+constexpr size_t kMaxPieceTriangles = 16;
 
 /// Every vertex's lowest-numbered vertex at the same position, since vertices split for
 /// normals or uvs are one point of the surface.
@@ -140,6 +142,59 @@ void add_cluster(MeshLod& lod, const vector<uint32_t>& indices, const vector<flo
     lod.clusters.push_back(cluster);
 }
 
+/// Clusters are made for rays, and can split a small separate piece such as a leaf. That would
+/// lock its vertices as shared between groups, so each such piece moves to one cluster.
+void gather_small_pieces(vector<vector<uint32_t>>& lists, const vector<uint32_t>& remap)
+{
+    vector<uint32_t> parent;
+    parent.resize(remap.size());
+    for (size_t i = 0; i < parent.size(); ++i) {
+        parent[i] = static_cast<uint32_t>(i);
+    }
+    const auto find = [&parent](uint32_t s) {
+        while (parent[s] != s) {
+            parent[s] = parent[parent[s]];
+            s = parent[s];
+        }
+        return s;
+    };
+    for (const auto& list : lists) {
+        for (size_t i = 0; i + 2 < list.size(); i += 3) {
+            const uint32_t a = find(remap[list[i]]);
+            parent[find(remap[list[i + 1]])] = a;
+            parent[find(remap[list[i + 2]])] = a;
+        }
+    }
+    vector<uint32_t> triangles;
+    triangles.resize(remap.size(), 0u);
+    for (const auto& list : lists) {
+        for (size_t i = 0; i + 2 < list.size(); i += 3) {
+            ++triangles[find(remap[list[i]])];
+        }
+    }
+    vector<uint32_t> owner;
+    owner.resize(remap.size(), kNoGroup);
+    vector<vector<uint32_t>> gathered;
+    gathered.resize(lists.size());
+    for (size_t c = 0; c < lists.size(); ++c) {
+        const auto& list = lists[c];
+        for (size_t i = 0; i + 2 < list.size(); i += 3) {
+            const uint32_t root = find(remap[list[i]]);
+            size_t target = c;
+            if (triangles[root] <= kMaxPieceTriangles) {
+                if (owner[root] == kNoGroup) {
+                    owner[root] = static_cast<uint32_t>(c);
+                }
+                target = owner[root];
+            }
+            gathered[target].push_back(list[i]);
+            gathered[target].push_back(list[i + 1]);
+            gathered[target].push_back(list[i + 2]);
+        }
+    }
+    lists = std::move(gathered);
+}
+
 float triangle_area(const vector<float>& positions, uint32_t a, uint32_t b, uint32_t c)
 {
     const float* pa = positions.data() + size_t(a) * 3;
@@ -169,8 +224,193 @@ struct LodVertices
     vector<unsigned char> locks;
     vector<uint8_t> bytes;
     uint32_t stride = 0;
+    uint32_t normal_offset = 0;
     bool grown = false;
 };
+
+/// For a group that is only small separate pieces, such as leaves, which a surface simplifier
+/// flattens to slivers at almost no reported error: merges each piece with its nearest, into
+/// one between them with both their areas, so that a level looks like the one before it. @p kept
+/// gets the result, over new vertices, and @p error how far the surface moved. False for
+/// anything else.
+bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<uint32_t>& kept, float& error)
+{
+    vector<uint32_t> sorted;
+    sorted.reserve(merged.size());
+    for (uint32_t id : merged) {
+        sorted.push_back(v.remap[id]);
+    }
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    const auto slot = [&sorted, &v](uint32_t id) {
+        return static_cast<uint32_t>(std::lower_bound(sorted.begin(), sorted.end(), v.remap[id]) - sorted.begin());
+    };
+    vector<uint32_t> parent;
+    parent.resize(sorted.size());
+    for (size_t i = 0; i < parent.size(); ++i) {
+        parent[i] = static_cast<uint32_t>(i);
+    }
+    const auto find = [&parent](uint32_t s) {
+        while (parent[s] != s) {
+            parent[s] = parent[parent[s]];
+            s = parent[s];
+        }
+        return s;
+    };
+    for (size_t i = 0; i + 2 < merged.size(); i += 3) {
+        const uint32_t a = find(slot(merged[i]));
+        parent[find(slot(merged[i + 1]))] = a;
+        parent[find(slot(merged[i + 2]))] = a;
+    }
+    for (uint32_t point : sorted) {
+        if (v.locks[point] != 0) {
+            return false;
+        }
+    }
+
+    // Pieces numbered in the order they first appear, with their bounds.
+    constexpr uint32_t kNone = 0xFFFFFFFFu;
+    vector<uint32_t> number;
+    number.resize(sorted.size(), kNone);
+    vector<float> bounds;
+    uint32_t pieces = 0;
+    for (size_t i = 0; i < merged.size(); ++i) {
+        const uint32_t root = find(slot(merged[i]));
+        if (number[root] == kNone) {
+            number[root] = pieces++;
+            const float* p = v.positions.data() + size_t(merged[i]) * 3;
+            bounds.insert(bounds.end(), p, p + 3);
+            bounds.insert(bounds.end(), p, p + 3);
+        }
+        float* box = bounds.data() + size_t(number[root]) * 6;
+        for (int k = 0; k < 3; ++k) {
+            const float value = v.positions[size_t(merged[i]) * 3 + k];
+            box[k] = std::min(box[k], value);
+            box[k + 3] = std::max(box[k + 3], value);
+        }
+    }
+    if (pieces < 2 || merged.size() / 3 > size_t(pieces) * kMaxPieceTriangles) {
+        return false;
+    }
+
+    // Each piece's middle and area.
+    vector<float> centers;
+    centers.resize(size_t(pieces) * 3, 0.f);
+    vector<float> areas;
+    areas.resize(pieces, 0.f);
+    vector<float> normals;
+    normals.resize(size_t(pieces) * 3, 0.f);
+    for (size_t i = 0; i + 2 < merged.size(); i += 3) {
+        const uint32_t piece = number[find(slot(merged[i]))];
+        const float area = std::max(triangle_area(v.positions, merged[i], merged[i + 1], merged[i + 2]), 1e-12f);
+        areas[piece] += area;
+        for (int k = 0; k < 3; ++k) {
+            const float mid = (v.positions[size_t(merged[i]) * 3 + k] + v.positions[size_t(merged[i + 1]) * 3 + k]
+                               + v.positions[size_t(merged[i + 2]) * 3 + k]) / 3.f;
+            centers[size_t(piece) * 3 + k] += mid * area;
+            normals[size_t(piece) * 3 + k] += v.normals[size_t(merged[i]) * 3 + k] * area;
+        }
+    }
+    for (uint32_t piece = 0; piece < pieces; ++piece) {
+        for (int k = 0; k < 3; ++k) {
+            centers[size_t(piece) * 3 + k] /= areas[piece];
+        }
+    }
+
+    // Each piece with its nearest free neighbour. The first of a pair stays, and takes on both.
+    vector<uint32_t> mate;
+    mate.resize(pieces, kNone);
+    float widest = 0.f;
+    float furthest = 0.f;
+    for (uint32_t a = 0; a < pieces; ++a) {
+        const float* box = bounds.data() + size_t(a) * 6;
+        widest = std::max({widest, box[3] - box[0], box[4] - box[1], box[5] - box[2]});
+        if (mate[a] != kNone) {
+            continue;
+        }
+        uint32_t nearest = kNone;
+        float nearest2 = std::numeric_limits<float>::max();
+        for (uint32_t b = a + 1; b < pieces; ++b) {
+            if (mate[b] != kNone) {
+                continue;
+            }
+            float d2 = 0.f;
+            for (int k = 0; k < 3; ++k) {
+                const float d = centers[size_t(a) * 3 + k] - centers[size_t(b) * 3 + k];
+                d2 += d * d;
+            }
+            if (d2 < nearest2) {
+                nearest2 = d2;
+                nearest = b;
+            }
+        }
+        if (nearest != kNone) {
+            mate[a] = nearest;
+            mate[nearest] = a;
+            furthest = std::max(furthest, std::sqrt(nearest2));
+        }
+    }
+
+    kept.clear();
+    vector<uint32_t> moved_from;
+    vector<uint32_t> moved_to;
+    for (size_t i = 0; i < merged.size(); ++i) {
+        const uint32_t a = number[find(slot(merged[i / 3 * 3]))];
+        const uint32_t b = mate[a];
+        if (b != kNone && b < a) {
+            continue;  // Taken on by its pair's first.
+        }
+        const uint32_t old_id = merged[i];
+        if (b == kNone) {
+            kept.push_back(old_id);
+            continue;
+        }
+        uint32_t new_id = kNone;
+        for (size_t m = moved_from.size(); m > 0 && moved_from.size() - m < 64u; --m) {
+            if (moved_from[m - 1] == old_id) {
+                new_id = moved_to[m - 1];
+                break;
+            }
+        }
+        if (new_id == kNone) {
+            const float total = areas[a] + areas[b];
+            const float scale = std::sqrt(total / areas[a]);
+            float grown[3];
+            float normal[3];
+            for (int k = 0; k < 3; ++k) {
+                const float center = centers[size_t(a) * 3 + k];
+                const float together = (center * areas[a] + centers[size_t(b) * 3 + k] * areas[b]) / total;
+                grown[k] = together + (v.positions[size_t(old_id) * 3 + k] - center) * scale;
+                normal[k] = normals[size_t(a) * 3 + k] + normals[size_t(b) * 3 + k];
+            }
+            const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+            if (length > 1e-12f) {
+                for (float& n : normal) {
+                    n /= length;
+                }
+            } else {
+                std::memcpy(normal, v.normals.data() + size_t(old_id) * 3, sizeof(normal));
+            }
+            new_id = static_cast<uint32_t>(v.positions.size() / 3);
+            v.positions.insert(v.positions.end(), grown, grown + 3);
+            v.normals.insert(v.normals.end(), normal, normal + 3);
+            v.remap.push_back(new_id);
+            v.locks.push_back(0);
+            const size_t first_byte = v.bytes.size();
+            v.bytes.resize(first_byte + v.stride);
+            std::memcpy(v.bytes.data() + first_byte, v.bytes.data() + size_t(old_id) * v.stride, v.stride);
+            std::memcpy(v.bytes.data() + first_byte, grown, sizeof(grown));
+            std::memcpy(v.bytes.data() + first_byte + v.normal_offset, normal, sizeof(normal));
+            moved_from.push_back(old_id);
+            moved_to.push_back(new_id);
+            v.grown = true;
+        }
+        kept.push_back(new_id);
+    }
+    // A leaf moves by up to half the way to its mate, and changes shape by about its size.
+    error = std::max(widest * 0.5f, furthest * 0.5f);
+    return true;
+}
 
 /// Simplifying removes whole pieces that touch nothing else, such as leaves, which thins
 /// what they make up. This grows what is left of such pieces about their centers until the
@@ -295,6 +535,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     lod_vertices.positions = gather_positions(blas);
     lod_vertices.remap = position_remap(lod_vertices.positions);
     lod_vertices.stride = stride;
+    lod_vertices.normal_offset = normal_offset;
     vector<float>& positions = lod_vertices.positions;
     vector<float>& normals = lod_vertices.normals;
     vector<uint32_t>& remap = lod_vertices.remap;
@@ -312,6 +553,9 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
 
     // Index lists of all clusters so far, parallel to lod.clusters.
     vector<vector<uint32_t>> lists = gather_clusters(blas);
+    if (vertices) {
+        gather_small_pieces(lists, remap);
+    }
     vector<uint32_t> pending;
     for (size_t i = 0; i < lists.size(); ++i) {
         add_cluster(lod, lists[i], positions, 0, nullptr, 0.f);
@@ -379,12 +623,20 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
             simplified.resize(merged.size());
             float error = 0.f;
             const size_t target = merged.size() / 6 * 3;
-            // Clamped keeps normals' error from overstating how far the surface moved.
-            const size_t kept = meshopt_simplifyWithAttributes(
-                simplified.data(), merged.data(), merged.size(), positions.data(), vertex_count, sizeof(float) * 3,
-                normals.empty() ? nullptr : normals.data(), sizeof(float) * 3, normals.empty() ? nullptr : kNormalWeights,
-                normals.empty() ? 0 : 3, locks.data(), target, FLT_MAX,
-                meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, &error);
+            size_t kept = 0;
+            vector<uint32_t> alternate;
+            if (vertices && merge_piece_pairs(lod_vertices, merged, alternate, error)) {
+                kept = alternate.size();
+                std::copy(alternate.begin(), alternate.end(), simplified.begin());
+                vertex_count = positions.size() / 3;
+            } else {
+                // Clamped keeps normals' error from overstating how far the surface moved.
+                kept = meshopt_simplifyWithAttributes(
+                    simplified.data(), merged.data(), merged.size(), positions.data(), vertex_count, sizeof(float) * 3,
+                    normals.empty() ? nullptr : normals.data(), sizeof(float) * 3, normals.empty() ? nullptr : kNormalWeights,
+                    normals.empty() ? 0 : 3, locks.data(), target, FLT_MAX,
+                    meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, &error);
+            }
             if (kept == 0 || static_cast<float>(kept) > kStopAboveKept * static_cast<float>(merged.size())) {
                 continue;
             }
