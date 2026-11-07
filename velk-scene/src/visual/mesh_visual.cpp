@@ -11,6 +11,17 @@
 
 namespace velk::impl {
 
+aabb MeshVisual::get_local_bounds(const ::velk::size& bounds) const
+{
+    // The mesh's vertices are not scaled by the element's size, so they can reach past it.
+    if (auto vs3d = read_state<IVisual3D>(this); vs3d && vs3d->mesh) {
+        if (auto mesh = vs3d->mesh.get<IMesh>()) {
+            return mesh->get_bounds();
+        }
+    }
+    return ext::Visual3D<MeshVisual>::get_local_bounds(bounds);
+}
+
 vector<DrawEntry> MeshVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
                                                const ::velk::size& /*bounds*/)
 {

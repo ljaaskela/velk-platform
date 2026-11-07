@@ -25,6 +25,7 @@ public:
     // IVisual
     vector<DrawEntry> get_draw_entries(::velk::IRenderContext& ctx,
                                        const ::velk::size& bounds) override;
+    aabb get_local_bounds(const ::velk::size& bounds) const override;
 };
 
 } // namespace velk::impl
