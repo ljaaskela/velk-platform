@@ -64,6 +64,9 @@
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
 // grass=N:  nature has N patches of grass, 1,000,000 by default, fewer on steep or high ground.
+// size=WxH: the window's size.
+// notour:   nature's camera starts still, rather than following a loop until there is input.
+// tour=N:   the loop starts N units along.
 // nosky:    nature has no generated sky.
 // nowind:   nature's trees stand still.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
@@ -1210,6 +1213,10 @@ int main(int argc, char* argv[])
     bool no_shadow = false;
     bool no_wind = false;
     bool no_sky = false;
+    int kWidth = 1280;
+    int kHeight = 720;
+    bool no_tour = false;
+    float tour_along = 0.f;
     long grass_count = 1000000;
     bool ray_wind = true;
     bool flat_terrain = false;
@@ -1234,6 +1241,9 @@ int main(int argc, char* argv[])
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
         no_sky = no_sky || std::strcmp(argv[i], "nosky") == 0;
+        if (std::strncmp(argv[i], "size=", 5) == 0) std::sscanf(argv[i] + 5, "%dx%d", &kWidth, &kHeight);
+        no_tour = no_tour || std::strcmp(argv[i], "notour") == 0;
+        if (std::strncmp(argv[i], "tour=", 5) == 0) tour_along = static_cast<float>(std::atof(argv[i] + 5));
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
         ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
@@ -1255,8 +1265,6 @@ int main(int argc, char* argv[])
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count, argc > 4 ? argv[4] : "translate");
 
-    constexpr int kWidth = 1280;
-    constexpr int kHeight = 720;
 
     velk::ApplicationConfig config;
 
@@ -1771,6 +1779,15 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     // In nature mode the camera sits at the focus and flies: W, A, S and D held, the wheel
     // for a jump along the view. Faster the higher it is above the ground.
     bool fly_keys[4] = {false, false, false, false};
+    // Until then the camera follows a slow loop over the forest.
+    bool touring = nature && hold_stop < 0 && !has_view && !no_tour;
+    float tour_height = 0.f;
+    const auto tour_point = [](float along) {
+        constexpr float kTourRadius = 7000.f;
+        const float angle = along / kTourRadius;
+        const float radius = kTourRadius + 2200.f * std::sin(angle * 2.f + 0.7f);
+        return velk::vec3{radius * std::cos(angle), 0.f, radius * std::sin(angle)};
+    };
     const auto fly = [&](float forward_seconds, float right_seconds) {
         auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));
         auto focus_state = velk::read_state<velk::ITrs>(static_cast<velk::ITrs::Ptr>(focus_trs));
@@ -1789,6 +1806,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
 
     velk::ScopedHandler pointer_sub = window.add_on_pointer_event([&](const velk::ui::PointerEvent& e) {
         if (e.action == velk::ui::PointerAction::Down && e.button == velk::ui::PointerButton::Right) {
+            touring = false;
             orbit_dragging = true;
             orbit_last_x = e.position.x;
             orbit_last_y = e.position.y;
@@ -1808,6 +1826,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     });
     velk::ScopedHandler scroll_sub(window.input()->on_scroll_event(), [&](const velk::ui::ScrollEvent& e) {
         if (nature) {
+            touring = false;
             fly(e.delta.y > 0 ? 0.5f : -0.5f, 0.f);
             return;
         }
@@ -1821,6 +1840,9 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         if (e.key == 83) fly_keys[1] = held;
         if (e.key == 65) fly_keys[2] = held;
         if (e.key == 68) fly_keys[3] = held;
+        if (fly_keys[0] || fly_keys[1] || fly_keys[2] || fly_keys[3]) {
+            touring = false;
+        }
         if (!held) {
             return;
         }
@@ -1889,6 +1911,32 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             const float right = (fly_keys[3] ? seconds : 0.f) - (fly_keys[2] ? seconds : 0.f);
             if (forward != 0.f || right != 0.f) {
                 fly(forward, right);
+            }
+            if (touring) {
+                // Fast and high, slowing every now and then to pass low over the ground.
+                const float wave = 0.5f + 0.5f * std::sin(tour_along * 0.00045f + 1.f);
+                const float calm = wave * wave * wave;
+                const float tour_speed = 650.f + (70.f - 650.f) * calm;
+                tour_along += seconds * tour_speed;
+                const velk::vec3 at = tour_point(tour_along);
+                // Clear of the highest ground in the next few seconds, rising and sinking smoothly.
+                float clear_y = ground_y(at.x, at.z);
+                for (int ahead = 1; ahead <= 12; ++ahead) {
+                    const velk::vec3 next = tour_point(tour_along + static_cast<float>(ahead) * tour_speed * 0.4f);
+                    clear_y = std::min(clear_y, ground_y(next.x, next.z));
+                }
+                const float altitude = 450.f + (55.f - 450.f) * calm;
+                const float target_y = clear_y - altitude;
+                tour_height = frame == 0 ? target_y : tour_height + (target_y - tour_height) * std::min(seconds * 0.6f, 1.f);
+                focus_trs.set_translate({at.x, tour_height, at.z});
+
+                // Along the path, turned somewhat inward so the terrain's edge stays behind.
+                const velk::vec3 ahead_point = tour_point(tour_along + 500.f);
+                const velk::vec3 along_path = velk::vec3::normalize({ahead_point.x - at.x, 0.f, ahead_point.z - at.z});
+                const velk::vec3 inward = velk::vec3::normalize({-at.x, 0.f, -at.z});
+                const velk::vec3 facing = velk::vec3::normalize(along_path * 0.7f + inward * 0.3f);
+                orbit.set_yaw(std::atan2(-facing.x, -facing.z) * 180.f / 3.14159265f);
+                orbit.set_pitch(-12.f + (-3.f + 12.f) * calm);
             }
         }
         last_fly_time = fly_time;
