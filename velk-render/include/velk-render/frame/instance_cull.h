@@ -488,6 +488,92 @@ void main()
 )";
 
 /**
+ * Adds partitions without their instances to the same coverage as instance_splat_src. What
+ * is left of each is the top of its tree, treated as the medium rays treat it as: a pixel gets
+ * the optical depth of its view ray through those leaves with this visual's medium_id, as far
+ * as the surface behind. Going through the tree, this costs by the pixel, however many
+ * partitions there are. Such a leaf has no children or shapes, its first_shape is the id, and
+ * aabb_max.w its area.
+ */
+inline constexpr string_view instance_box_splat_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0, std430) readonly buffer SplatNodes { BvhNode data[]; } splat_nodes;
+layout(set = 1, binding = 16, std430) buffer SplatWords { uint data[]; } splat_words;
+
+layout(push_constant) uniform PC {
+    uint globals_base;
+    uint words_word;
+    uint width;
+    uint height;
+    uint worldpos_id;
+    uint normal_id;
+    uint medium_id;
+} pc;
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    if (globals.bvh_node_count == 0u) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
+    // Towards the surface behind where there is one, since a point near the camera is too
+    // close to it to give an exact direction when both are far from the origin.
+    vec3 cam = globals.cam_pos.xyz;
+    vec3 dir;
+    float t_max = 1e30;
+    vec3 n = velk_texture(pc.normal_id, uv).xyz;
+    if (dot(n, n) > 1e-6) {
+        vec3 to_surface = velk_texture(pc.worldpos_id, uv).xyz - cam;
+        t_max = length(to_surface);
+        dir = to_surface / t_max;
+    } else {
+        vec4 far_point = globals.inverse_view_projection * vec4(uv * 2.0 - 1.0, 1e-4, 1.0);
+        dir = normalize(far_point.xyz / far_point.w - cam);
+    }
+    vec3 inv = 1.0 / dir;
+
+    float depth = 0.0;
+    uint stack[64];
+    int sp = 0;
+    stack[sp++] = globals.bvh_root;
+    while (sp > 0) {
+        BvhNode node = splat_nodes.data[stack[--sp]];
+        // What is resident is drawn or averaged instance by instance.
+        if (node.child_count == VELK_PARTITION_REF) continue;
+
+        vec3 t0 = (node.aabb_min.xyz - cam) * inv;
+        vec3 t1 = (node.aabb_max.xyz - cam) * inv;
+        vec3 small_t = min(t0, t1);
+        vec3 large_t = max(t0, t1);
+        float enter = max(max(max(small_t.x, small_t.y), small_t.z), 0.0);
+        float leave = min(min(min(large_t.x, large_t.y), large_t.z), t_max);
+        if (leave <= enter) continue;
+
+        if (node.child_count != 0u) {
+            for (uint c = 0u; c < node.child_count; ++c) {
+                if (sp < 64) stack[sp++] = node.first_child + c;
+            }
+        } else if (node.shape_count == 0u && node.first_shape == pc.medium_id && node.aabb_max.w > 0.0) {
+            vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+            float widest = max(max(extent.x, extent.y), extent.z);
+            vec3 sides = max(extent, vec3(widest * 1e-3));
+            depth += node.aabb_max.w / (sides.x * sides.y * sides.z) * (leave - enter);
+        }
+    }
+    if (depth > 0.0) {
+        uint amount = uint(min(depth, 64.0) * 4096.0);
+        atomicAdd(splat_words.data[pc.words_word + uint(coord.y) * pc.width + uint(coord.x)], amount);
+    }
+}
+)";
+
+/**
  * Covers the frame by what instance_splat_src added up. Instances overlap at random, so
  * coverage saturates rather than adds.
  *

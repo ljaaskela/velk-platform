@@ -36,6 +36,7 @@ public:
     void set_draw_distance(float distance) override;
     void set_motion(string_view glsl, float max_displacement) override;
     void set_motion_params(const vec4& params) override;
+    void set_residency_budget(uint64_t bytes) override;
 
     // IInstancedMeshInternal
     array_view<const InstanceTransform> get_transforms() const override
@@ -45,6 +46,14 @@ public:
     bool is_live(uint32_t slot) const override { return slot < live_.size() && live_[slot] != 0; }
     uint32_t get_instance_index(uint32_t slot) const override { return slot_index_[slot]; }
     uint32_t get_instance_capacity() const override { return instance_capacity_; }
+    bool has_residency_budget() const override
+    {
+        return residency_bytes_ != 0 && far_form_ && motion_source_.empty();
+    }
+    bool assign_instance_index(uint32_t slot) override;
+    void release_instance_index(uint32_t slot) override;
+    void set_medium_id(uint32_t id) override { medium_id_ = id; }
+    uint32_t get_medium_id() const override { return medium_id_; }
     void flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world) override;
     uint64_t instance_region_offset() const override { return region_.offset(); }
     uint64_t instance_region_size() const override { return region_.size(); }
@@ -83,6 +92,9 @@ public:
 private:
     uint32_t place(const InstanceTransform& transform, uint32_t mesh);
     void note_changed(uint32_t slot);
+    /// Without a budget, every slot's index is the slot. With one, none has a place yet.
+    void reset_instance_indices();
+    void update_instance_capacity();
     void grow_bounds(const InstanceTransform& transform);
 
     vector<InstanceTransform> transforms_;
@@ -90,6 +102,11 @@ private:
     vector<uint16_t> slot_mesh_;
     vector<uint32_t> slot_index_;      ///< Per slot, its index in the raster region.
     uint32_t instance_capacity_ = 0;
+    uint64_t residency_bytes_ = 0;
+    uint32_t medium_id_ = 0;
+    uint32_t next_index_ = 0;          ///< Below it, indices have been handed out.
+    vector<uint32_t> free_indices_;
+    vector<uint32_t> cleared_indices_;  ///< Freed, to zero at the next flush.
     vector<IMesh::Ptr> added_meshes_;  ///< Meshes 1 and up.
     vector<uint32_t> mesh_counts_;     ///< Live instances per mesh.
     vector<uint32_t> free_slots_;

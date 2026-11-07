@@ -85,6 +85,8 @@ struct InstanceCullInfo
     bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     bool far_form = false;                  ///< Whether instances too small to draw get averaged instead.
+    bool has_unloaded = false;              ///< Whether partitions can be without their instances: see `instance_box_splat_src`.
+    uint32_t medium_id = 0;                 ///< What those partitions' BVH leaves are marked with.
     float far_albedo[3] = {1.f, 1.f, 1.f};  ///< Colour of those instances.
     float far_facing[kSurfaceDirectionCount] = {};  ///< Their surface area by which way it faces.
     /// Partitions to test before instances: see `instance_partition_cull_src`. Without

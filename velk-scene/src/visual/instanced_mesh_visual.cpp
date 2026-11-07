@@ -23,6 +23,9 @@ namespace {
 
 /// Past this share of the slots, all raster instances are rewritten.
 constexpr uint32_t kChangedListDivisor = 4;
+/// What an instance with a place uses on the GPU: its raster data, its record and two BVH
+/// nodes of 48 bytes.
+constexpr uint64_t kResidentInstanceBytes = sizeof(ElementInstance) + 64u + 96u;
 
 ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh, uint32_t slot)
 {
@@ -129,7 +132,8 @@ uint32_t InstancedMeshVisual::place(const InstanceTransform& transform, uint32_t
         transforms_.push_back(transform);
         live_.push_back(1);
         slot_mesh_.push_back(static_cast<uint16_t>(mesh));
-        slot_index_.push_back(instance_capacity_++);
+        slot_index_.push_back(has_residency_budget() ? kNoInstanceIndex : next_index_++);
+        update_instance_capacity();
     } else {
         slot = free_slots_.back();
         free_slots_.pop_back();
@@ -208,8 +212,72 @@ void InstancedMeshVisual::remove_instance(uint32_t slot)
     free_slots_.push_back(slot);
     --mesh_counts_[slot_mesh_[slot]];
     --live_count_;
+    if (has_residency_budget()) {
+        release_instance_index(slot);
+    }
     note_changed(slot);
     invoke_trait_dirty(DirtyFlags::Transform);
+}
+
+void InstancedMeshVisual::update_instance_capacity()
+{
+    const auto slots = static_cast<uint32_t>(transforms_.size());
+    instance_capacity_ = has_residency_budget()
+        ? static_cast<uint32_t>(std::min<uint64_t>(slots, residency_bytes_ / kResidentInstanceBytes))
+        : slots;
+}
+
+void InstancedMeshVisual::reset_instance_indices()
+{
+    const bool budget = has_residency_budget();
+    free_indices_.clear();
+    cleared_indices_.clear();
+    next_index_ = budget ? 0u : static_cast<uint32_t>(transforms_.size());
+    for (uint32_t slot = 0; slot < slot_index_.size(); ++slot) {
+        slot_index_[slot] = budget ? kNoInstanceIndex : slot;
+    }
+    update_instance_capacity();
+}
+
+void InstancedMeshVisual::set_residency_budget(uint64_t bytes)
+{
+    residency_bytes_ = bytes;
+    reset_instance_indices();
+    flush_all_ = true;
+    all_changed_ = true;
+    invoke_visual_changed();
+}
+
+bool InstancedMeshVisual::assign_instance_index(uint32_t slot)
+{
+    if (slot_index_[slot] != kNoInstanceIndex) {
+        return true;
+    }
+    if (!free_indices_.empty()) {
+        slot_index_[slot] = free_indices_.back();
+        free_indices_.pop_back();
+    } else if (next_index_ < instance_capacity_) {
+        slot_index_[slot] = next_index_++;
+    } else {
+        return false;
+    }
+    if (!flush_all_) {
+        flush_slots_.push_back(slot);
+    }
+    return true;
+}
+
+void InstancedMeshVisual::release_instance_index(uint32_t slot)
+{
+    const uint32_t index = slot_index_[slot];
+    if (index == kNoInstanceIndex) {
+        return;
+    }
+    slot_index_[slot] = kNoInstanceIndex;
+    free_indices_.push_back(index);
+    if (!flush_all_) {
+        cleared_indices_.push_back(index);
+    }
 }
 
 void InstancedMeshVisual::set_draw_distance(float distance)
@@ -221,6 +289,8 @@ void InstancedMeshVisual::set_draw_distance(float distance)
 void InstancedMeshVisual::set_far_form(bool enabled)
 {
     far_form_ = enabled;
+    reset_instance_indices();
+    flush_all_ = true;
     // The BVH holds what wide rays use, and it comes from a new cut.
     all_changed_ = true;
     invoke_visual_changed();
@@ -285,6 +355,7 @@ void InstancedMeshVisual::set_motion(string_view glsl, float max_displacement)
     motion_source_ = string(glsl);
     max_displacement_ = max_displacement;
     motion_params_changed_ = true;
+    reset_instance_indices();
     flush_all_ = true;
     all_changed_ = true;
     invoke_visual_changed();
@@ -323,6 +394,7 @@ void InstancedMeshVisual::flush_instances(IGpuArena& arena, IGpuResourceManager&
         region_ = {};
         rest_region_ = {};
         flush_slots_.clear();
+        cleared_indices_.clear();
         return;
     }
 
@@ -379,23 +451,37 @@ void InstancedMeshVisual::flush_instances(IGpuArena& arena, IGpuResourceManager&
             VELK_LOG(E, "InstancedMeshVisual: no room for %u instances", instance_capacity_);
             return;
         }
+        std::memset(static_cast<void*>(out), 0, need);
         for (uint32_t slot = 0; slot < slot_count; ++slot) {
-            write_slot(slot, out + slot_index_[slot]);
+            if (slot_index_[slot] != kNoInstanceIndex) {
+                write_slot(slot, out + slot_index_[slot]);
+            }
         }
     } else if (flush_all_ || std::memcmp(flushed_world_.m, world.m, sizeof(world.m)) != 0) {
         vector<ElementInstance> instances;
         instances.resize(instance_capacity_);
+        std::memset(static_cast<void*>(instances.data()), 0, need);
         for (uint32_t slot = 0; slot < slot_count; ++slot) {
-            write_slot(slot, &instances[slot_index_[slot]]);
+            if (slot_index_[slot] != kNoInstanceIndex) {
+                write_slot(slot, &instances[slot_index_[slot]]);
+            }
         }
         arena.update_at(region_.offset(), instances.data(), need);
     } else {
+        for (uint32_t index : cleared_indices_) {
+            const ElementInstance empty{};
+            arena.update_at(region_.offset() + uint64_t(index) * sizeof(ElementInstance), &empty, sizeof(empty));
+        }
         for (uint32_t slot : flush_slots_) {
+            if (slot_index_[slot] == kNoInstanceIndex) {
+                continue;
+            }
             ElementInstance instance;
             write_slot(slot, &instance);
             arena.update_at(region_.offset() + uint64_t(slot_index_[slot]) * sizeof(ElementInstance), &instance, sizeof(instance));
         }
     }
+    cleared_indices_.clear();
     flush_slots_.clear();
     flush_all_ = false;
     flushed_world_ = world;

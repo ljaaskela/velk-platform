@@ -190,6 +190,11 @@ public:
     /// wide rays average over them too, rather than each being drawn and tested. This
     /// avoids flicker and is far cheaper. On by default. Applies to the deferred path.
     virtual void set_far_form(bool enabled) = 0;
+    /// Limits the GPU memory its instances use. Those largest on screen stay as they are,
+    /// and groups of the others are drawn and traced as an average over their volume, until
+    /// the camera brings them near. 0, the default, means no limit. Applies with the far form
+    /// on and no motion function, and to the deferred path.
+    virtual void set_residency_budget(uint64_t bytes) = 0;
 
     /**
      * @brief Moves instances on the GPU, for motion that stays near where each instance
@@ -213,17 +218,30 @@ class IGpuArena;
 class IGpuResourceManager;
 
 /** Internal half of an instanced mesh visual, read by the renderer and the BVH. */
+/// A slot with no place in a visual's raster region.
+inline constexpr uint32_t kNoInstanceIndex = 0xFFFFFFFFu;
+
 class IInstancedMeshInternal : public Interface<IInstancedMeshInternal>
 {
 public:
     /// Transforms by slot, including the slots of removed instances.
     virtual array_view<const InstanceTransform> get_transforms() const = 0;
     virtual bool is_live(uint32_t slot) const = 0;
-    /// Where @p slot's instance is in the raster region. GPU lists and motion tables hold
-    /// this, since a slot does not stay in one place in the region.
+    /// Where @p slot's instance is in the raster region, or kNoInstanceIndex if it has no
+    /// place there. GPU lists and motion tables hold this, since a slot does not stay in one
+    /// place in the region.
     virtual uint32_t get_instance_index(uint32_t slot) const = 0;
     /// How many instances the raster region holds, used or not.
     virtual uint32_t get_instance_capacity() const = 0;
+    /// Whether not all instances have a place in the raster region, so the BVH chooses.
+    virtual bool has_residency_budget() const = 0;
+    /// Gives @p slot a place in the raster region, written at the next flush. False if full.
+    virtual bool assign_instance_index(uint32_t slot) = 0;
+    /// Frees @p slot's place in the raster region.
+    virtual void release_instance_index(uint32_t slot) = 0;
+    /// What the BVH marks this visual's partitions without their instances with.
+    virtual void set_medium_id(uint32_t id) = 0;
+    virtual uint32_t get_medium_id() const = 0;
 
     /// Brings the raster instance data in @p arena up to date, given the element's
     /// @p world matrix.

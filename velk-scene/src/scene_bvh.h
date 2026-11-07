@@ -56,6 +56,13 @@ public:
      */
     void update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user);
 
+    /// Where the cameras are, for what stays resident.
+    void set_view_points(array_view<const vec3> points)
+    {
+        view_points_.clear();
+        view_points_.insert(view_points_.end(), points.begin(), points.end());
+    }
+
     /// Adds the passes that run instanced visuals' motion functions to @p graph. Comes
     /// before every pass that reads instances or records.
     void emit_instance_motion(FrameContext& ctx, IRenderGraph& graph);
@@ -129,6 +136,13 @@ private:
         vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
         uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.
 
+        /// With a residency budget, by what its partitions are worth keeping. What comes in
+        /// goes last to first, and what makes room for it, last to first.
+        vector<uint32_t> pending_load;
+        vector<uint32_t> pending_unload;
+        uint32_t resident_members = 0;
+        uint32_t residency_age = 0;  ///< Updates since those were worked out.
+
         /// What culling reads, in the culling arena. See `instance_partition_cull_src`.
         ArenaRegion cull_table;
         uint32_t cull_table_capacity = 0;
@@ -183,6 +197,10 @@ private:
         uint32_t node_count = 0;
         bool active = false;
         bool dirty = false;
+        /// Whether its instances have their GPU data. Without, `nodes` is the top of its tree,
+        /// which rays and raster take as a medium.
+        bool resident = true;
+        float score = 0.f;  ///< Its worth as `pending_load` was worked out.
     };
 
     struct EmitContext
@@ -200,6 +218,7 @@ private:
     /// Cuts all of @p group's live instances into new partitions, by Morton order.
     void cut_instances(InstanceGroup& group, FrameContext& ctx);
     void free_instance_partitions(InstanceGroup& group);
+    void update_residency(InstanceGroup& group);
     /// Makes the tables culling reads for @p group, empty, and tells its visual.
     void alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity, uint32_t list_capacity);
     /// Brings culling's view of @p partition up to date with its members and cull_bounds.
@@ -249,6 +268,8 @@ private:
     vector<uint32_t> freed_records_;
     std::unordered_map<IElement*, vector<uint32_t>> element_records_;
     std::unordered_map<IElement*, InstanceGroup> instance_groups_;
+    vector<vec3> view_points_;
+    uint32_t next_medium_id_ = 1;
     uint32_t update_frame_ = 0;
     uint32_t live_records_ = 0;
 

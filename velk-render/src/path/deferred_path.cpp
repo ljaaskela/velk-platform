@@ -1161,7 +1161,8 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
     };
     auto splat = pipeline_for(instance_splat_src, 0x5350'4c41'5400'0001ULL);
     auto composite = pipeline_for(instance_splat_composite_src, 0x5350'4c41'5400'0002ULL);
-    if (!splat || !composite) return;
+    auto box_splat = pipeline_for(instance_box_splat_src, 0x5350'4c41'5400'0003ULL);
+    if (!splat || !composite || !box_splat) return;
 
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
     if (!src_tex) src_tex = vs.deferred_output_tex;
@@ -1213,6 +1214,24 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
             } else {
                 cmd->record_dispatch(dc);
             }
+
+            if (info.has_unloaded) {
+                struct BoxPush
+                {
+                    uint32_t globals_base, words_word, width, height, worldpos_id, normal_id, medium_id;
+                };
+                const BoxPush box{render_view.view_globals_base, words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                  vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
+                                  vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)), info.medium_id};
+                DispatchCall box_dc{};
+                box_dc.pipeline = box_splat.get();
+                box_dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
+                box_dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
+                box_dc.groups_z = 1;
+                box_dc.root_constants_size = sizeof(box);
+                std::memcpy(box_dc.root_constants, &box, sizeof(box));
+                cmd->record_dispatch(box_dc);
+            }
         }
         cmd->record_global_barrier();
         struct CompositePush
@@ -1261,6 +1280,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         }
         rec.held.push_back(std::move(splat));
         rec.held.push_back(std::move(composite));
+        rec.held.push_back(std::move(box_splat));
     });
 }
 

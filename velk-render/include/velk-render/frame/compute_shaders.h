@@ -503,7 +503,8 @@ float trace_visibility_medium(Ray ray, float t_max)
         if (node.aabb_max.w > 0.0) {
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
             float widest = max(max(extent.x, extent.y), extent.z);
-            if (widest < velk_ray_footprint * velk_medium_reach(ni)) {
+            // The leaf of a partition without its instances has nothing else to offer.
+            if (widest < velk_ray_footprint * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
                 float enter;
                 if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, enter)) {
                     vec3 sides = max(extent, vec3(widest * 1e-3));
@@ -551,7 +552,7 @@ bool trace_closest_hit_medium(Ray ray, float t_min, float t_max, inout RayHit hi
         if (node.aabb_max.w > 0.0) {
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
             float widest = max(max(extent.x, extent.y), extent.z);
-            if (widest < velk_ray_footprint * velk_medium_reach(ni)) {
+            if (widest < velk_ray_footprint * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
                 float enter;
                 if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, enter)) {
                     vec3 sides = max(extent, vec3(widest * 1e-3));

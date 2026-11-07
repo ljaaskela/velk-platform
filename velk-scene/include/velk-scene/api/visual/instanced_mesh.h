@@ -50,6 +50,11 @@ public:
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_far_form(enabled); });
     }
+    /** @brief Limits its instances' GPU memory. See IInstancedMeshVisual::set_residency_budget. */
+    void set_residency_budget(uint64_t bytes)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_residency_budget(bytes); });
+    }
     void set_draw_distance(float distance)
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_draw_distance(distance); });

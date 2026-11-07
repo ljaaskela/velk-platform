@@ -824,6 +824,14 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 bool                    log;
             };
             BvhBuildState bvh_state{this, ctx, log_bvh_next_};
+            vector<vec3> view_points;
+            for (const auto& view_slot : views_) {
+                if (auto camera_state = read_state<IElement>(view_slot.camera_element)) {
+                    view_points.push_back({camera_state->world_matrix(0, 3), camera_state->world_matrix(1, 3),
+                                           camera_state->world_matrix(2, 3)});
+                }
+            }
+            bvh->set_view_points({view_points.data(), view_points.size()});
             bvh->update(state, ctx,
                 +[](void* u, ShapeSite& site) {
                     auto& s = *static_cast<BvhBuildState*>(u);
