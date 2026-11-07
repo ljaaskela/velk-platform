@@ -1508,7 +1508,7 @@ void main()
         // still computed for EVERY pixel every frame, so light falloff, N.L
         // and any moving light stay full-rate; only visibility is halved.
         // Checkerboard by frame parity: every pixel updates every 2nd frame.
-        const bool kHalfRateShadows = true;
+        const bool kHalfRateShadows = false;
         bool trace_now = !kHalfRateShadows
                       || (((coord.x + coord.y + int(VELK_GLOBALS.present_counter)) & 1) == 0);
 
@@ -1703,7 +1703,8 @@ void main()
     vec3 irr_acc = has_sample ? cur_irr : vec3(0.0);
     float count = has_sample ? 1.0 : 0.0;
     float m2_acc = has_sample ? cur_lum * cur_lum : 0.0;
-    if (pc.reset == 0u) {
+    const bool kAccumulate = false;
+    if (kAccumulate && pc.reset == 0u) {
         vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(world_pos, 1.0);
         if (prev_clip.w > 1e-6) {
             vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
@@ -1793,7 +1794,9 @@ vec3 velk_filter_at(ivec2 coord, vec2 dims)
 
     vec4 c = velk_texture(pc.hist_irr_id, uv);
     vec3 center_irr = c.rgb;
-    float count = c.a;
+    // With accumulation off in the temporal pass there is no history to wait for, so
+    // every pixel counts as converged. Otherwise the filter stays at its widest.
+    float count = 8.0;
     float center_lum = dot(center_irr, LUMA);
 
     // Per-pixel temporal variance of luminance -> noise level.
