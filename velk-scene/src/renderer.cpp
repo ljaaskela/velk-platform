@@ -789,6 +789,34 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // BVH shapes carry identical ids.
         std::unordered_map<IScene*, impl::SceneBvh*> scene_bvhs;
         for (auto& [scene, state] : consumed_scenes) {
+            // Only rays read the tree, and the code of its shapes goes into the shaders that
+            // trace them, so a scene no view traces stays out of those shaders.
+            bool traced = false;
+            for (const auto& view_slot : views_) {
+                auto view_scene = view_slot.camera_element->get_scene();
+                if (interface_cast<IScene>(view_scene) != scene) {
+                    continue;
+                }
+                auto camera_trait = ::velk::find_attachment<ICamera>(view_slot.camera_element);
+                auto* camera_storage = interface_cast<IObjectStorage>(camera_trait.get());
+                if (!camera_storage) {
+                    continue;
+                }
+                AttachmentQuery pipeline_query;
+                pipeline_query.interfaceUid = IViewPipeline::UID;
+                ctx.view_camera_trait = camera_trait.get();
+                for (auto& attachment : camera_storage->find_attachments(pipeline_query)) {
+                    if (auto pipeline = interface_pointer_cast<IViewPipeline>(attachment)) {
+                        const auto pipeline_needs = pipeline->needs(ctx);
+                        traced = traced || pipeline_needs.lights || pipeline_needs.shapes;
+                    }
+                }
+                ctx.view_camera_trait = nullptr;
+            }
+            if (!traced) {
+                continue;
+            }
+
             impl::SceneBvh* bvh = nullptr;
             auto cit = scene_bvh_cache_.find(scene);
             if (cit != scene_bvh_cache_.end()) {
