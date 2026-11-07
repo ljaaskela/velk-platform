@@ -45,16 +45,19 @@ public:
         with<IInstancedMeshVisual>([&](auto& v) { v.remove_instance(slot); });
     }
 
-    /** @brief Sets how far from the camera instances are drawn. 0 means no limit. */
+    /** @brief Sets whether instances too small on screen are averaged. See IInstancedMeshVisual::set_far_form. */
     void set_far_form(bool enabled)
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_far_form(enabled); });
     }
+
     /** @brief Limits its instances' GPU memory. See IInstancedMeshVisual::set_residency_budget. */
     void set_residency_budget(uint64_t bytes)
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_residency_budget(bytes); });
     }
+
+    /** @brief Sets how far from the camera instances are drawn. 0 means no limit. */
     void set_draw_distance(float distance)
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_draw_distance(distance); });

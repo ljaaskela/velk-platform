@@ -159,6 +159,7 @@ Visuals implement `IVisual` and define how an element appears on screen. The ren
 | TextVisual | `IVisual2D`, `ITextVisual` | Shaped text rendered as glyph quads (text plugin) |
 | CubeVisual | `IVisual3D`, `IPrimitiveShape`, `IAnalyticShape` | Procedural axis-aligned cube |
 | SphereVisual | `IVisual3D`, `IPrimitiveShape`, `IAnalyticShape` | Procedural UV sphere |
+| InstancedMeshVisual | `IVisual3D`, `IInstancedMeshVisual` | Meshes drawn many times on one element. See [instancing](../render/instancing.md) |
 
 2D visuals are authored through the `color` and `paint` properties:
 
@@ -337,6 +338,7 @@ Visuals produce draw entries. The renderer queries each element's visuals during
 | `velk::ui::ClassId::Visual::Texture` | `IVisual2D`, `ITextureVisual` | Texture sampler filling the element bounds. |
 | `velk::ui::ClassId::Visual::Cube` | `IVisual3D`, `IPrimitiveShape`, `IAnalyticShape` | Procedural axis-aligned cube. |
 | `velk::ui::ClassId::Visual::Sphere` | `IVisual3D`, `IPrimitiveShape`, `IAnalyticShape` | Procedural UV sphere. |
+| `velk::ui::ClassId::Visual::InstancedMesh` | `IVisual3D`, `IInstancedMeshVisual` | Meshes drawn many times on one element. |
 
 Plugin-provided visuals: `velk::ui::ClassId::Visual::Text` (text plugin), `velk::ui::ClassId::Visual::Image` (image plugin) — see the plugin docs.
 

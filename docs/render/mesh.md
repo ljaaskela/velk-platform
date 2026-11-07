@@ -90,6 +90,43 @@ See [materials](materials.md) for how material pipelines compile and how per-pri
 
 Each primitive reports its own local-space bounds via `IMeshPrimitive::get_bounds()`. Importers should supply this from glTF's per-primitive `min`/`max` accessor fields directly.
 
+## Levels of detail
+
+An opaque mesh with more than one cluster is drawn at levels of detail, with nothing to set. On first use the primitive builds a hierarchy of clusters, each simplified from its children with shared edges kept in place. A compute pass then chooses, per instance, the clusters whose error on screen is at most one pixel and whose parent's error is more. One indirect draw is issued per cluster in use.
+
+Blended meshes and deforming meshes are drawn in full.
+
+Rays still trace the full mesh. A ray starting from a simplified surface is lifted by that surface's error, so the full mesh does not shadow it. Full detail is not lifted.
+
+## Deforming meshes
+
+`IMeshBuilder::build_deforming` copies a mesh for one element to deform. The copy owns its vertices, tree and clusters, and starts with the source's materials. It reads the source's geometry back if that has been uploaded, so a large mesh is better copied before its first frame. It returns `nullptr` if the source is not an indexed triangle list of `MeshVertex`.
+
+A deformer is a trait on the same element. There are two kinds:
+
+| Deformer | Runs on | Use for | Tree |
+|---|---|---|---|
+| `ext::MeshDeformer<T>`, implementing `IMeshDeformer::deform` | CPU, once when attached and after each `invoke_deform_changed` or property change | Any change of shape | Refit on the CPU, built again if refitting has made it too costly for rays |
+| `ComputeMeshDeformer` | GPU, when its params change | Changes that stay near the rest shape | Refit on the GPU, with bounds the rest bounds grown by the maximum displacement |
+
+```cpp
+auto mesh = ctx.get_mesh_builder().build_deforming(source);
+visual.set_mesh(velk::Mesh(mesh));
+
+auto deformer = velk::trait::deform::create_compute_mesh();
+deformer.set_deform(R"(
+    VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
+    {
+        rest.position.y += sin(params.x + rest.position.x) * 0.1;
+        return rest;
+    }
+)", /*max_displacement=*/0.1f);
+deformer.set_params({time, 0.f, 0.f, 0.f});
+element.add_trait(deformer);
+```
+
+No vertex of a compute deformer may move further than the maximum displacement. Going past it is logged as an error, and rays may then miss the mesh.
+
 ## Relationship to Visual3D
 
 3D visuals reference a mesh through `IVisual3D::mesh` (an `ObjectRef`). Procedural primitives like `CubeVisual` and `SphereVisual` lazily populate this slot on first render using the mesh builder when the caller hasn't set one explicitly. Once populated, the visual's mesh is observable via `Visual3D::get_mesh()` and its primitives' materials can be set per-instance.

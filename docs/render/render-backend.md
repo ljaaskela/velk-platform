@@ -39,7 +39,7 @@ The archicture was inspired by [No Graphics API](https://www.sebastianaaltonen.c
 "Bindless" traditionally refers to accessing GPU resources (textures, buffers) by address or index rather than binding them to fixed slots before each draw call. Velk's render backend takes this approach across the board:
 
   * **Bindless textures**: all textures live in a global array, accessed by index. One descriptor set bind per frame, zero per draw call.
-  * **Bindless buffers**: shader data is reached without per-draw descriptor binds. Every record the GPU reads (the draw header itself, frame globals, per-instance arrays, material params, scene lights, BVH nodes/shapes, RT primary shapes, mesh instances / static data / BLAS runs, mesh vertex + index words, glyph curve tables) lives in one of sixteen **`set = 1` storage buffers read by integer index**. **No shader in the engine dereferences a GPU pointer**: there is no `buffer_reference` in any shader source. See [The GPU resource model](#the-gpu-resource-model).
+  * **Bindless buffers**: shader data is reached without per-draw descriptor binds. Every record the GPU reads (the draw header itself, frame globals, per-instance arrays, material params, scene lights, BVH nodes/shapes, RT primary shapes, mesh instances / static data / BLAS runs, mesh vertex + index words, glyph curve tables, culling data) lives in one of seventeen **`set = 1` storage buffers read by integer index**. **No shader in the engine dereferences a GPU pointer**: there is no `buffer_reference` in any shader source. See [The GPU resource model](#the-gpu-resource-model).
   * **No descriptor set switching per draw**: each draw call receives one 4-byte push constant, the element index of its `DrawDataHeader` in the draw-data arena. From that record the shader reaches globals / instances / material / vertex streams, all by index.
   * **No vertex buffer binding**: there are no VAOs, vertex attribute descriptions or `vkCmdBindVertexBuffers`. Pipelines have empty vertex input state. 2D geometry is procedural (unit quads expanded in the vertex shader), 3D geometry uses vertex pulling from a shared mesh-word arena.
   * **Persistent, dirty-gated data**: per-draw data is written into persistently mapped GPU memory, so per-frame allocations, staging copies and command-buffer transfers are not needed. Each producer (batch, material, view, mesh primitive, font) owns a **stable region** of a shared arena and rewrites it only when its contents change; a steady-state frame uploads almost nothing. The one thing still written per frame is the small indirect-command blob each batch owns.
@@ -157,7 +157,7 @@ Several things a graphics API abstraction usually exposes have no entry point he
 | Concept | Where it is handled |
 |--|--|
 | Vertex input descriptions | Pipelines are created with empty vertex input state; shaders read vertices by index from the mesh-word arena. |
-| Descriptor set layouts, pipeline layout objects | One fixed layout for every pipeline: set 0 for bindless images, set 1 for the sixteen arena slots, plus a 128-byte push-constant range. |
+| Descriptor set layouts, pipeline layout objects | One fixed layout for every pipeline: set 0 for bindless images, set 1 for the seventeen arena slots, plus a 128-byte push-constant range. |
 | Per-resource layout transitions | Derived inside the backend from the pass targets and baked into the recorded secondary. |
 | Semaphores and fences | Owned by the backend. Frame completion is a timeline semaphore; see [Frame synchronization](#frame-synchronization). |
 | Uniform reflection | Not used for binding. `ShaderMaterial` reflects SPIR-V, but to discover parameter names and offsets, not to bind resources. |
@@ -217,6 +217,7 @@ set = 1 slot   Arena                       Held by
 11 / 12 / 13   mesh static / BLAS nodes / cluster words   each IMeshPrimitive
 14             mesh VBO + IBO words        each IMeshBuffer
 15             per-batch DrawDataHeader    each batch
+16             culling lists, LOD tables   each batch, each IMeshPrimitive
 ```
 
 Three properties make this work:
@@ -236,7 +237,7 @@ A shader could reach the same bytes through a 64-bit buffer device address. Velk
 - **It ports.** WebGPU has no buffer device addresses and no proposal for one. Raw addresses cannot be bounds-checked inside the web sandbox, so they are structurally excluded rather than merely missing. Indices are core there, and on Metal, and on Vulkan.
 - **It survives relocation.** An arena that grows replaces its backing allocation. Every address into the old one would be stale; an element base is unchanged, because it was never tied to where the buffer happens to live.
 
-The cost is that the shader can only reach data the CPU has bound to a slot, so anything a shader must reach has to live in one of the sixteen arenas. In exchange, every GPU reference is a small integer that means something in isolation, and out-of-range reads land inside a known buffer instead of anywhere in memory.
+The cost is that the shader can only reach data the CPU has bound to a slot, so anything a shader must reach has to live in one of the seventeen arenas. In exchange, every GPU reference is a small integer that means something in isolation, and out-of-range reads land inside a known buffer instead of anywhere in memory.
 
 Nothing in the engine can produce an address: `bufferDeviceAddress` is not enabled, buffers carry no `SHADER_DEVICE_ADDRESS` usage, and `IGpuBuffer` has no `gpu_address()`. A buffer the GPU consumes wholesale (indirect args, an index buffer) is bound by handle and has no shader-visible reference at all, so `get_gpu_ref` answers `None` for it.
 
@@ -270,13 +271,15 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t globals_base;       ///< index into velk_globals[] (set = 1 slot 2)
     uint32_t instances_base;     ///< element base into velk_instances[] (slot 3)
     uint32_t texture_id;         ///< bindless index, 0 = none
-    uint32_t instance_count;
+    uint32_t visible_base;       ///< word base of the visible instance list in velk_culling[] (slot 16), or kNoVisibleList
     uint32_t vbo_base;           ///< word base of the vertex stream in velk_mesh_words[] (slot 14)
     uint32_t uv1_base;           ///< word base of the TEXCOORD_1 stream, or of a single-vertex fallback
     uint32_t uv1_enabled;        ///< 0 = fallback (vertex 0 only), 1 = per-vertex
     uint32_t material_base;      ///< element base into velk_materials[] (slot 4)
+    uint32_t lod_error_base;     ///< word base of each draw instance's surface error in velk_culling[], or kNoVisibleList
+    uint32_t _pad[3];
 };
-static_assert(sizeof(DrawDataHeader) == 32, ...);
+static_assert(sizeof(DrawDataHeader) == 48, ...);
 ```
 
 ```glsl
@@ -291,7 +294,9 @@ VELK_DRAW_DATA(root)
 | Accessor | Reads |
 |--|--|
 | `velk_global_data(root)` | `velk_globals.data[…globals_base]` |
-| `velk_instance(root)` | `velk_instances.data[…instances_base + gl_InstanceIndex]` |
+| `velk_instance_slot(root)` | `gl_InstanceIndex`, or the entry for it in the visible list at `…visible_base` |
+| `velk_instance(root)` | `velk_instances.data[…instances_base + velk_instance_slot(root)]` |
+| `velk_lod_error(root)` | the entry for `gl_InstanceIndex` at `…lod_error_base`, or 0 |
 | `velk_material(root)` | `velk_materials.data[…material_base]` |
 | `velk_vertex3d(root)` | 12 words at `…vbo_base + gl_VertexIndex * 12` in `velk_mesh_words` |
 | `velk_uv1(root)` | 2 words at `…uv1_base`, with `uv1_enabled` as a branchless index multiplier |
@@ -460,7 +465,7 @@ The result in GPU memory for one draw:
 ```mermaid
 block-beta
     columns 5
-    A["DrawDataHeader<br/>(32 B)<br/>globals, instances<br/>material_base<br/>texture_id, vbo"]:2 B["-- index -->"]:1 C["velk_materials[material_base]<br/>(set = 1 slot 4, dirty-tracked)<br/>material fields..."]:2
+    A["DrawDataHeader<br/>(48 B)<br/>globals, instances<br/>material_base<br/>texture_id, vbo"]:2 B["-- index -->"]:1 C["velk_materials[material_base]<br/>(set = 1 slot 4, dirty-tracked)<br/>material fields..."]:2
 ```
 
 Each material defines a C++ `VELK_GPU_STRUCT` and a matching GLSL value struct, and reads it through `VELK_LOAD_MATERIAL(T, ctx)`. Both paths reach the same arena, differently:
@@ -523,7 +528,7 @@ When writing custom materials or draw data, the CPU-side struct layout must matc
 | `vec4` | 16 | 16 |
 | `uvec2` | 8 | 8 |
 
-The `DrawDataHeader` packs exactly to 32 bytes, 16-byte aligned (`VELK_GPU_STRUCT` rounds the size up to a multiple of 16). Eight `uint`s and no padding: with every field 4 bytes and the count a multiple of four, nothing needs aligning.
+The `DrawDataHeader` packs exactly to 48 bytes, 16-byte aligned (`VELK_GPU_STRUCT` rounds the size up to a multiple of 16). Nine `uint`s and three of padding, which the struct spells out so that the C++ and GLSL declarations match field for field.
 
 ```cpp
 VELK_GPU_STRUCT DrawDataHeader
@@ -531,13 +536,15 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t globals_base;       // 4 bytes, offset  0
     uint32_t instances_base;     // 4 bytes, offset  4
     uint32_t texture_id;         // 4 bytes, offset  8
-    uint32_t instance_count;     // 4 bytes, offset 12
+    uint32_t visible_base;       // 4 bytes, offset 12
     uint32_t vbo_base;           // 4 bytes, offset 16
     uint32_t uv1_base;           // 4 bytes, offset 20
     uint32_t uv1_enabled;        // 4 bytes, offset 24
     uint32_t material_base;      // 4 bytes, offset 28
+    uint32_t lod_error_base;     // 4 bytes, offset 32
+    uint32_t _pad[3];            // 12 bytes, offset 36
 };
-static_assert(sizeof(DrawDataHeader) == 32, ...);
+static_assert(sizeof(DrawDataHeader) == 48, ...);
 ```
 
 The material's data record lives in the `set = 1` material arena at `material_base`, not after the header. It is a std430 buffer whose element the material's C++ struct and the GLSL block must lay out identically; the shader array stride must equal the C++ record size, so custom material structs should use `VELK_GPU_STRUCT` (`alignas(16)`) so the compiler handles padding automatically and 16-byte-aligned GLSL fields never see an offset mismatch. See [Materials](materials.md) for the full authoring story.
@@ -579,13 +586,13 @@ Because nothing in the shader graph is a raw address, the model also maps onto A
 
 The Vulkan backend (`velk::vk`) uses:
 
-- **Vulkan 1.2** as the floor, with `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`, `scalarBlockLayout`, `drawIndirectCount`, `runtimeDescriptorArray`, `timelineSemaphore` and the update-after-bind binding flags. Dynamic rendering is the one thing beyond 1.2: a 1.3 device supplies it as core, a 1.2 device through `VK_KHR_dynamic_rendering`, and the backend resolves whichever pair of entry points loaded. Notably **not** required: `bufferDeviceAddress`, `descriptorBindingUniformBufferUpdateAfterBind`, `shaderInt64`, `synchronization2`. Every requested feature is checked against `vkGetPhysicalDeviceFeatures2` at startup and the missing one named, rather than surfacing as a bare `vkCreateDevice` failure.
+- **Vulkan 1.2** as the floor, with `descriptorIndexing`, `shaderSampledImageArrayNonUniformIndexing`, `scalarBlockLayout`, `drawIndirectCount`, `multiDrawIndirect`, `drawIndirectFirstInstance`, `runtimeDescriptorArray`, `timelineSemaphore` and the update-after-bind binding flags. Dynamic rendering is the one thing beyond 1.2: a 1.3 device supplies it as core, a 1.2 device through `VK_KHR_dynamic_rendering`, and the backend resolves whichever pair of entry points loaded. Notably **not** required: `bufferDeviceAddress`, `descriptorBindingUniformBufferUpdateAfterBind`, `shaderInt64`, `synchronization2`. Every requested feature is checked against `vkGetPhysicalDeviceFeatures2` at startup and the missing one named, rather than surfacing as a bare `vkCreateDevice` failure.
 - **`VK_EXT_debug_utils`** always enabled (free when no debugger attached) so RenderDoc / Nsight captures group events under producer-supplied labels
 - **VMA** (Vulkan Memory Allocator) for all allocations, with `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT`
 - **volk** for function loading (no link-time Vulkan dependency)
 - **Persistent mapping** via `VMA_ALLOCATION_CREATE_MAPPED_BIT` + `VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT`
 - **Push constants** (128 bytes, `VK_SHADER_STAGE_ALL`) for the draw root (a raster draw uses 4 bytes; the full 128 is there for compute dispatches that push their whole state inline)
-- **Two descriptor sets, both frame-invariant**: set 0 is the variable-length bindless `sampler2D` array (1024 max) plus the compute storage images; set 1 is the 16 shared arena slots, `UPDATE_AFTER_BIND` + `PARTIALLY_BOUND`, bound for both graphics and compute
+- **Two descriptor sets, both frame-invariant**: set 0 is the variable-length bindless `sampler2D` array (1024 max) plus the compute storage images; set 1 is the 17 shared arena slots, `UPDATE_AFTER_BIND` + `PARTIALLY_BOUND`, bound for both graphics and compute
 - **Empty vertex input** with per-pipeline topology (triangle strip for UI quads, triangle list for meshes)
 - **Single shared pipeline layout** (push constants + bindless descriptor set)
 - **Cached secondary command buffers** per producer pass; replayed via `vkCmdExecuteCommands` each frame, re-recorded only when the producer's content changes

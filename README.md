@@ -220,4 +220,5 @@ configurations against the `msvc_x64_x64` environment.
 * Vulkan SDK (shaderc for runtime GLSL to SPIR-V compilation)
 * volk, VMA (Vulkan function loader and memory allocator, header-only via Vulkan SDK)
 * FreeType 2.13, HarfBuzz 10.2 (vendored in `plugins/text/third_party/`)
+* meshoptimizer 1.3 (vendored in `velk-render/third_party/`)
 * CMake 3.14+, Ninja

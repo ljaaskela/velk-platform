@@ -190,7 +190,7 @@ public:
     /// wide rays average over them too, rather than each being drawn and tested. This
     /// avoids flicker and is far cheaper. On by default. Applies to the deferred path.
     virtual void set_far_form(bool enabled) = 0;
-    /// Limits the GPU memory its instances use. Those largest on screen stay as they are,
+    /// Limits the GPU memory its instances use. Those nearest the camera stay as they are,
     /// and groups of the others are drawn and traced as an average over their volume, until
     /// the camera brings them near. 0, the default, means no limit. Applies with the far form
     /// on and no motion function, and to the deferred path.
