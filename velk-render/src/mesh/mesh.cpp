@@ -99,10 +99,18 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
         lod_table_region_ = culling->alloc(clusters_size + levels_size);
         lod_index_region_ = mesh_words->alloc(lod.indices.size() * sizeof(uint32_t));
-        if (!lod_table_region_.valid() || !lod_index_region_.valid()) {
+        if (!lod.vertices.empty()) {
+            lod_vertex_region_ = mesh_words->alloc(lod.vertices.size());
+        }
+        if (!lod_table_region_.valid() || !lod_index_region_.valid() || (!lod.vertices.empty() && !lod_vertex_region_.valid())) {
             lod_table_region_ = {};
             lod_index_region_ = {};
+            lod_vertex_region_ = {};
             return false;
+        }
+        if (!lod.vertices.empty()) {
+            mesh_words->write_at(lod_vertex_region_.offset(), lod.vertices.data(), lod.vertices.size());
+            lod_info_.vertex_word = static_cast<uint32_t>(lod_vertex_region_.offset() / sizeof(uint32_t));
         }
         culling->write_at(lod_table_region_.offset(), lod.clusters.data(), clusters_size);
         culling->write_at(lod_table_region_.offset() + clusters_size, lod.levels.data(), levels_size);

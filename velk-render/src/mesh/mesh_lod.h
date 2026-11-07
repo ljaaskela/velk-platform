@@ -41,9 +41,11 @@ struct MeshLodLevel
 };
 static_assert(sizeof(MeshLodLevel) == kLodLevelWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
-/// Coarse levels hold only triangles over the mesh's own vertices.
+/// Coarse levels hold triangles over the mesh's own vertices, unless separate pieces were
+/// enlarged to keep their area.
 struct MeshLod
 {
+    vector<uint8_t> vertices;  ///< The mesh's vertices and the enlarged ones, or empty if there are none.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
     vector<MeshLodLevel> levels;

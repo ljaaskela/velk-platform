@@ -129,6 +129,7 @@ private:
     /// culling arena and its indices in the mesh-word arena.
     ArenaRegion lod_table_region_;
     ArenaRegion lod_index_region_;
+    ArenaRegion lod_vertex_region_;
     MeshLodInfo lod_info_{};
     bool deforming_ = false;
 };

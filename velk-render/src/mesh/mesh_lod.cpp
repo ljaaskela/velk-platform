@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -20,6 +21,8 @@ constexpr uint32_t kMaxLevels = 32;
 constexpr uint32_t kNoGroup = 0xFFFFFFFFu;
 /// A normal turning fully over a distance counts as much as moving by that distance.
 constexpr float kNormalWeights[3] = {1.f, 1.f, 1.f};
+/// The most a separate piece's area grows in one step, in case nearly all of a group goes.
+constexpr float kMaxPieceGrowth = 4.f;
 
 /// Every vertex's lowest-numbered vertex at the same position, since vertices split for
 /// normals or uvs are one point of the surface.
@@ -137,6 +140,149 @@ void add_cluster(MeshLod& lod, const vector<uint32_t>& indices, const vector<flo
     lod.clusters.push_back(cluster);
 }
 
+float triangle_area(const vector<float>& positions, uint32_t a, uint32_t b, uint32_t c)
+{
+    const float* pa = positions.data() + size_t(a) * 3;
+    const float* pb = positions.data() + size_t(b) * 3;
+    const float* pc = positions.data() + size_t(c) * 3;
+    const float u[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
+    const float v[3] = {pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]};
+    const float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+    return 0.5f * std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+}
+
+float list_area(const vector<float>& positions, const uint32_t* indices, size_t count)
+{
+    float area = 0.f;
+    for (size_t i = 0; i + 2 < count; i += 3) {
+        area += triangle_area(positions, indices[i], indices[i + 1], indices[i + 2]);
+    }
+    return area;
+}
+
+/// The mesh's vertices as a level sees them, which grows as pieces are enlarged.
+struct LodVertices
+{
+    vector<float> positions;
+    vector<float> normals;
+    vector<uint32_t> remap;
+    vector<unsigned char> locks;
+    vector<uint8_t> bytes;
+    uint32_t stride = 0;
+    bool grown = false;
+};
+
+/// Simplifying removes whole pieces that touch nothing else, such as leaves, which thins
+/// what they make up. This grows what is left of such pieces about their centers until the
+/// group has the area it had. Pieces touching a locked vertex stay, so nothing opens a crack.
+void keep_group_area(LodVertices& v, uint32_t* indices, size_t count, float area_before)
+{
+    // Pieces by point, as a union of the triangles' points.
+    vector<uint32_t> points;
+    points.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        points.push_back(v.remap[indices[i]]);
+    }
+    vector<uint32_t> sorted = points;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    const auto point_slot = [&sorted](uint32_t point) {
+        return static_cast<uint32_t>(std::lower_bound(sorted.begin(), sorted.end(), point) - sorted.begin());
+    };
+    vector<uint32_t> parent;
+    parent.resize(sorted.size());
+    for (size_t i = 0; i < parent.size(); ++i) {
+        parent[i] = static_cast<uint32_t>(i);
+    }
+    const auto find = [&parent](uint32_t s) {
+        while (parent[s] != s) {
+            parent[s] = parent[parent[s]];
+            s = parent[s];
+        }
+        return s;
+    };
+    for (size_t i = 0; i + 2 < count; i += 3) {
+        const uint32_t a = find(point_slot(points[i]));
+        parent[find(point_slot(points[i + 1]))] = a;
+        parent[find(point_slot(points[i + 2]))] = a;
+    }
+
+    struct Piece
+    {
+        float center[3] = {0.f, 0.f, 0.f};
+        float area = 0.f;
+        bool locked = false;
+    };
+    vector<Piece> pieces;
+    pieces.resize(sorted.size());
+    for (size_t s = 0; s < sorted.size(); ++s) {
+        if (v.locks[sorted[s]] != 0) {
+            pieces[find(static_cast<uint32_t>(s))].locked = true;
+        }
+    }
+    float free_area = 0.f;
+    float locked_area = 0.f;
+    for (size_t i = 0; i + 2 < count; i += 3) {
+        Piece& piece = pieces[find(point_slot(points[i]))];
+        const float area = triangle_area(v.positions, indices[i], indices[i + 1], indices[i + 2]);
+        piece.area += area;
+        (piece.locked ? locked_area : free_area) += area;
+        for (int k = 0; k < 3; ++k) {
+            const float mid = (v.positions[size_t(indices[i]) * 3 + k] + v.positions[size_t(indices[i + 1]) * 3 + k]
+                               + v.positions[size_t(indices[i + 2]) * 3 + k]) / 3.f;
+            piece.center[k] += mid * area;
+        }
+    }
+    if (free_area <= 0.f) {
+        return;
+    }
+    const float growth = (area_before - locked_area) / free_area;
+    if (growth <= 1.01f) {
+        return;
+    }
+    const float scale = std::sqrt(std::min(growth, kMaxPieceGrowth));
+
+    vector<uint32_t> moved_from;
+    vector<uint32_t> moved_to;
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t root = find(point_slot(points[i]));
+        const Piece& piece = pieces[root];
+        if (piece.locked || piece.area <= 0.f) {
+            continue;
+        }
+        const uint32_t old_id = indices[i];
+        uint32_t new_id = kNoGroup;
+        for (size_t m = moved_from.size(); m > 0 && moved_from.size() - m < kClusterMaxVertices * 4u; --m) {
+            if (moved_from[m - 1] == old_id) {
+                new_id = moved_to[m - 1];
+                break;
+            }
+        }
+        if (new_id == kNoGroup) {
+            new_id = static_cast<uint32_t>(v.positions.size() / 3);
+            float grown[3];
+            for (int k = 0; k < 3; ++k) {
+                const float center = piece.center[k] / piece.area;
+                grown[k] = center + (v.positions[size_t(old_id) * 3 + k] - center) * scale;
+            }
+            v.positions.insert(v.positions.end(), grown, grown + 3);
+            const float* normal = v.normals.data() + size_t(old_id) * 3;
+            const float normal_copy[3] = {normal[0], normal[1], normal[2]};
+            v.normals.insert(v.normals.end(), normal_copy, normal_copy + 3);
+            v.remap.push_back(new_id);
+            v.locks.push_back(0);
+            const size_t first_byte = v.bytes.size();
+            v.bytes.resize(first_byte + v.stride);
+            std::memcpy(v.bytes.data() + first_byte, v.bytes.data() + size_t(old_id) * v.stride, v.stride);
+            std::memcpy(v.bytes.data() + first_byte, grown, sizeof(grown));
+            moved_from.push_back(old_id);
+            moved_to.push_back(new_id);
+            v.grown = true;
+        }
+        indices[i] = new_id;
+    }
+}
+
 } // namespace
 
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset)
@@ -145,16 +291,23 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     if (blas.clusters.empty()) {
         return lod;
     }
-    const vector<float> positions = gather_positions(blas);
-    const vector<uint32_t> remap = position_remap(positions);
-    const size_t vertex_count = positions.size() / 3;
+    LodVertices lod_vertices;
+    lod_vertices.positions = gather_positions(blas);
+    lod_vertices.remap = position_remap(lod_vertices.positions);
+    lod_vertices.stride = stride;
+    vector<float>& positions = lod_vertices.positions;
+    vector<float>& normals = lod_vertices.normals;
+    vector<uint32_t>& remap = lod_vertices.remap;
+    vector<unsigned char>& locks = lod_vertices.locks;
+    size_t vertex_count = positions.size() / 3;
 
-    vector<float> normals;
     if (vertices) {
         normals.resize(vertex_count * 3);
         for (size_t v = 0; v < vertex_count; ++v) {
             std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
         }
+        lod_vertices.bytes.resize(vertex_count * stride);
+        std::memcpy(lod_vertices.bytes.data(), vertices, vertex_count * stride);
     }
 
     // Index lists of all clusters so far, parallel to lod.clusters.
@@ -166,11 +319,10 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     }
 
     vector<uint32_t> first_seen;
-    vector<unsigned char> locks;
-    first_seen.resize(vertex_count);
     locks.resize(vertex_count);
 
     for (uint32_t level = 1; level < kMaxLevels && pending.size() > 1; ++level) {
+        first_seen.resize(vertex_count);
         vector<uint32_t> all_indices;
         vector<uint32_t> index_counts;
         for (uint32_t c : pending) {
@@ -235,6 +387,10 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
                 meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, &error);
             if (kept == 0 || static_cast<float>(kept) > kStopAboveKept * static_cast<float>(merged.size())) {
                 continue;
+            }
+            if (vertices) {
+                keep_group_area(lod_vertices, simplified.data(), kept, list_area(positions, merged.data(), merged.size()));
+                vertex_count = positions.size() / 3;
             }
 
             const meshopt_Bounds merged_bounds = meshopt_computeSphereBounds(spheres.data(), group.size(), sizeof(float) * 4,
@@ -301,6 +457,9 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
         level.radius = bounds.radius;
         lod.levels.push_back(level);
         first = end;
+    }
+    if (lod_vertices.grown) {
+        lod.vertices = std::move(lod_vertices.bytes);
     }
     return lod;
 }

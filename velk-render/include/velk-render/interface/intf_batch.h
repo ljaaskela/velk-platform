@@ -76,6 +76,7 @@ struct InstanceCullInfo
     uint32_t cluster_entry_word = 0;     ///< Its entry, for the passes that fill its commands.
     uint32_t cluster_commands_word = 0;  ///< Its commands in the culling arena.
     uint32_t cluster_draws_word = 0;     ///< How many commands are in use, in the culling arena.
+    uint32_t cluster_vertex_word = 0xFFFFFFFFu;  ///< The hierarchy's own vertices in the mesh-word arena, if it has any.
     uint32_t cluster_index_word = 0;     ///< Its indices in the mesh-word arena.
     uint32_t cluster_errors_word = 0;    ///< Each list position's surface error in world units, in the culling arena.
     uint32_t cluster_capacity = 0;       ///< How many positions its list has.

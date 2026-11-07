@@ -243,7 +243,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryLevelsWord] = draw.lod.level_word;
         entry[kClusterEntryLevelCountWord] = draw.lod.level_count;
-        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity});
+        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});
     }
     // Batches culled together keep their records in one place, with the culling pass.
     cull_chosen_word_ = next_list;
@@ -276,6 +276,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_index_word = draw->index_word;
         out.cluster_errors_word = draw->errors_word;
         out.cluster_capacity = draw->capacity;
+        out.cluster_vertex_word = draw->vertex_word;
     }
     out.chosen_word = owner->cull_chosen_word_;
     out.chosen_capacity = owner->cull_chosen_capacity_;
