@@ -80,6 +80,7 @@ public:
     bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
     bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
     void set_deforming() override { deforming_ = true; }
+    void set_merge_pieces(bool merge) override { merge_pieces_ = merge; }
 
 private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
@@ -132,6 +133,7 @@ private:
     ArenaRegion lod_vertex_region_;
     MeshLodInfo lod_info_{};
     bool deforming_ = false;
+    bool merge_pieces_ = false;
 };
 
 /// Concrete IMesh container. Stores a list of primitives and a lazily

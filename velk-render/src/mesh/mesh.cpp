@@ -94,7 +94,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         const bool has_normals = normal && buffer && buffer->read_geometry(geometry);
         const MeshLod lod = build_mesh_lod(rt_blas_, has_normals ? geometry.data() : nullptr, vertex_stride_,
-                                           has_normals ? normal->offset : 0u);
+                                           has_normals ? normal->offset : 0u, merge_pieces_);
         const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
         const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
         lod_table_region_ = culling->alloc(clusters_size + levels_size);

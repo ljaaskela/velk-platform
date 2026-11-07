@@ -193,6 +193,12 @@ public:
     /// store the build and serialise it through its IDrawData buffer.
     virtual void set_rt_blas(BlasBuild blas) { (void)blas; }
 
+    /// Whether its separate pieces stand for a whole rather than for themselves, such as
+    /// foliage. Its levels of detail then merge nearby pieces into larger ones that keep their
+    /// area, rather than simplifying them as a surface, which would flatten them. Off by
+    /// default, and to be set before its first frame.
+    virtual void set_merge_pieces(bool merge) = 0;
+
     /// Area of its triangles, from its BLAS. 0 without one.
     virtual float get_surface_area() const = 0;
     /// That area by which of kSurfaceDirections it faces.

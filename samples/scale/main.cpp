@@ -760,8 +760,9 @@ public:
     {
         grow(0, {0.f, 0.f, 0.f}, {0.f, -1.f, 0.f}, shape_.trunk_length, shape_.trunk_radius);
         shade_leaves();
-        velk::IMeshPrimitive::Ptr primitives[] = {make_primitive(ctx, wood_, wood_indices_, bark),
-                                                  make_primitive(ctx, leaves_, leaf_indices_, foliage)};
+        velk::IMeshPrimitive::Ptr leaves = make_primitive(ctx, leaves_, leaf_indices_, foliage);
+        leaves->set_merge_pieces(true);
+        velk::IMeshPrimitive::Ptr primitives[] = {make_primitive(ctx, wood_, wood_indices_, bark), leaves};
         return ctx.get_mesh_builder().build({primitives, 2});
     }
 
@@ -985,6 +986,7 @@ velk::IMesh::Ptr build_grass_patch(velk::IRenderContext& ctx, float size, const 
         }
     }
     velk::IMeshPrimitive::Ptr primitives[] = {TreeGrower::make_primitive(ctx, vertices, indices, material)};
+    primitives[0]->set_merge_pieces(true);
     return ctx.get_mesh_builder().build({primitives, 1});
 }
 

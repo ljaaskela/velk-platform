@@ -41,11 +41,10 @@ struct MeshLodLevel
 };
 static_assert(sizeof(MeshLodLevel) == kLodLevelWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
-/// Coarse levels hold triangles over the mesh's own vertices, unless separate pieces were
-/// enlarged to keep their area.
+/// Coarse levels hold triangles over the mesh's own vertices, unless separate pieces merged.
 struct MeshLod
 {
-    vector<uint8_t> vertices;  ///< The mesh's vertices and the enlarged ones, or empty if there are none.
+    vector<uint8_t> vertices;  ///< The mesh's vertices and the merged ones, or empty if there are none.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
     vector<MeshLodLevel> levels;
@@ -56,7 +55,9 @@ struct MeshLod
 ///        positions alone.
 /// @param stride Bytes per vertex.
 /// @param normal_offset Bytes to a vertex's normal, three floats.
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset);
+/// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
+///        IMeshPrimitive::set_merge_pieces.
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset, bool merge_pieces);
 
 } // namespace velk::impl
 
