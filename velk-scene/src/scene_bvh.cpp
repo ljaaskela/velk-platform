@@ -318,7 +318,7 @@ void SceneBvh::alloc_instance_motion(InstanceGroup& group, FrameContext& ctx)
     if (!arena) {
         return;
     }
-    const auto slot_count = static_cast<uint32_t>(group.visual->get_transforms().size());
+    const uint32_t slot_count = group.visual->get_instance_capacity();
     const uint32_t capacity = slot_count + slot_count / 8u + 16u;
     group.motion_region =
         arena->alloc((uint64_t(kMotionTableWords) + uint64_t(capacity) * kMotionSlotWords) * sizeof(uint32_t), 16);
@@ -364,13 +364,14 @@ void SceneBvh::write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32
                                  const float origin[3])
 {
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena || !group.motion_region.valid() || slot >= group.motion_capacity) {
+    const uint32_t index = group.visual->get_instance_index(slot);
+    if (!arena || !group.motion_region.valid() || index >= group.motion_capacity) {
         return;
     }
     uint32_t entry[kMotionSlotWords] = {record, 0u, 0u, 0u};
     std::memcpy(&entry[1], origin, sizeof(float) * 3);
     const uint64_t offset = group.motion_region.offset()
-        + (uint64_t(kMotionTableWords) + uint64_t(slot) * kMotionSlotWords) * sizeof(uint32_t);
+        + (uint64_t(kMotionTableWords) + uint64_t(index) * kMotionSlotWords) * sizeof(uint32_t);
     if (group.motion_region_fresh) {
         arena->write_at(offset, entry, sizeof(entry));
     } else {
@@ -451,7 +452,7 @@ void SceneBvh::emit_instance_motion(FrameContext& ctx, IRenderGraph& graph)
                 uint32_t table_word;
                 uint32_t rest_row;
             };
-            const auto slot_count = static_cast<uint32_t>(motion_group->visual->get_transforms().size());
+            const uint32_t slot_count = motion_group->visual->get_instance_capacity();
             const PushC pc{static_cast<uint32_t>(instances_offset / sizeof(ElementInstance)), slot_count,
                            static_cast<uint32_t>(motion_group->motion_region.offset() / sizeof(uint32_t)),
                            static_cast<uint32_t>(rest_offset / (sizeof(float) * 4))};
@@ -600,7 +601,9 @@ void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
         partition.cull_chunks = chunks;
         vector<uint32_t> list;
         list.reserve(words);
-        list.insert(list.end(), partition.members.begin(), partition.members.end());
+        for (uint32_t slot : partition.members) {
+            list.push_back(group.visual->get_instance_index(slot));
+        }
         list.resize(words, kCullNoSlot);
         arena->write_at(partition.cull_members.offset(), list.data(), words * sizeof(uint32_t));
     } else {
@@ -840,7 +843,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     }
     const bool has_motion = !visual.get_motion_source().empty();
     if (has_motion != group.motion_region.valid()
-        || (has_motion && visual.get_transforms().size() > group.motion_capacity)) {
+        || (has_motion && visual.get_instance_capacity() > group.motion_capacity)) {
         rebuild = true;
     }
 

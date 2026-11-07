@@ -28,16 +28,17 @@ inline constexpr uint32_t kCullChunkListHeaderWords = 4;
 
 // Whether an instance is too small on screen to be worth drawing, in which case it goes
 // through instance_splat_src instead. Each one changes over at its own size, so that no
-// line shows where they do. `area` is its mean projected area, 0 if it never changes over.
+// line shows where they do, by its `id`, which stays the same wherever the instance is in
+// memory. `area` is its mean projected area, 0 if it never changes over.
 #define VELK_INSTANCE_FAR_GLSL R"(
 const float kFarInstancePixels = 2.0;
 
-bool velk_instance_is_far(uint slot, float area, float clip_w, mat4 vp, float height)
+bool velk_instance_is_far(uint id, float area, float clip_w, mat4 vp, float height)
 {
     if (area <= 0.0 || clip_w <= 0.0) return false;
     float f = length(vec3(vp[0][1], vp[1][1], vp[2][1]));
     float pixels = sqrt(area) * f * height * 0.5 / clip_w;
-    float h = float((slot * 2654435761u) >> 16u) / 65536.0;
+    float h = float((id * 2654435761u) >> 16u) / 65536.0;
     return pixels * (0.7 + 0.6 * h) < kFarInstancePixels;
 }
 )"
@@ -271,7 +272,7 @@ void main()
 
     if (pc.far_form != 0u) {
         float area = uintBitsToFloat(cull_words.data[table + 7u]) * scale2;
-        if (velk_instance_is_far(slot, area, clip.w, vp, globals.viewport.y)) return;
+        if (velk_instance_is_far(cull_instances.data[instance].params.z, area, clip.w, vp, globals.viewport.y)) return;
     }
 
     if (pc.items_word == 0xFFFFFFFFu) {
@@ -457,7 +458,7 @@ void main()
     mat4 vp = globals.view_projection;
     vec3 center = (world * vec4(local_center, 1.0)).xyz;
     vec4 clip = vp * vec4(center, 1.0);
-    if (!velk_instance_is_far(slot, area, clip.w, vp, globals.viewport.y)) return;
+    if (!velk_instance_is_far(splat_instances.data[pc.instances_base + slot].params.z, area, clip.w, vp, globals.viewport.y)) return;
 
     vec2 ndc = clip.xy / clip.w;
     if (any(greaterThan(abs(ndc), vec2(1.02)))) return;

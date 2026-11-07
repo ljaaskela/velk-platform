@@ -219,6 +219,11 @@ public:
     /// Transforms by slot, including the slots of removed instances.
     virtual array_view<const InstanceTransform> get_transforms() const = 0;
     virtual bool is_live(uint32_t slot) const = 0;
+    /// Where @p slot's instance is in the raster region. GPU lists and motion tables hold
+    /// this, since a slot does not stay in one place in the region.
+    virtual uint32_t get_instance_index(uint32_t slot) const = 0;
+    /// How many instances the raster region holds, used or not.
+    virtual uint32_t get_instance_capacity() const = 0;
 
     /// Brings the raster instance data in @p arena up to date, given the element's
     /// @p world matrix.

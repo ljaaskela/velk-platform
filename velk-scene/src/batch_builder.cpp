@@ -287,7 +287,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                     // A batch of its own, over the visual's region. An empty slot list
                     // tells the transform path this element needs no batch rewrite.
                     if (auto source = interface_pointer_cast<IInstancedMeshInternal>(de.instance_source)) {
-                        batch->set_instance_count(static_cast<uint32_t>(source->get_transforms().size()));
+                        batch->set_instance_count(source->get_instance_capacity());
                         batch->set_instance_source(std::move(source));
                         batch->set_world_aabb(elem_state->world_aabb);
                         last_bkey = 0;

@@ -14,8 +14,8 @@ namespace velk::impl {
  * @brief Draws IVisual3D::mesh and any added meshes, once per instance.
  *
  * The transform array here is the only CPU copy of the instances. Raster reads a region
- * of ElementInstance by slot, whose params[1] is the mesh, and a removed slot holds a
- * zero matrix, which draws nothing.
+ * of ElementInstance, at the index a slot has there, whose params[1] is the mesh and
+ * params[2] the slot, and a removed slot holds a zero matrix, which draws nothing.
  */
 class InstancedMeshVisual : public ext::Visual3D<InstancedMeshVisual, IInstancedMeshVisual, IInstancedMeshInternal>
 {
@@ -43,6 +43,8 @@ public:
         return {transforms_.data(), transforms_.size()};
     }
     bool is_live(uint32_t slot) const override { return slot < live_.size() && live_[slot] != 0; }
+    uint32_t get_instance_index(uint32_t slot) const override { return slot_index_[slot]; }
+    uint32_t get_instance_capacity() const override { return instance_capacity_; }
     void flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world) override;
     uint64_t instance_region_offset() const override { return region_.offset(); }
     uint64_t instance_region_size() const override { return region_.size(); }
@@ -86,6 +88,8 @@ private:
     vector<InstanceTransform> transforms_;
     vector<uint8_t> live_;
     vector<uint16_t> slot_mesh_;
+    vector<uint32_t> slot_index_;      ///< Per slot, its index in the raster region.
+    uint32_t instance_capacity_ = 0;
     vector<IMesh::Ptr> added_meshes_;  ///< Meshes 1 and up.
     vector<uint32_t> mesh_counts_;     ///< Live instances per mesh.
     vector<uint32_t> free_slots_;
