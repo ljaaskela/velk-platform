@@ -429,10 +429,15 @@ layout(push_constant) uniform PC {
     uint normal_id;
 } pc;
 )" VELK_INSTANCE_FAR_GLSL R"(
-void add(ivec2 at, float amount)
+void add(ivec2 at, float amount, vec3 albedo)
 {
     if (at.x < 0 || at.y < 0 || at.x >= int(pc.width) || at.y >= int(pc.height)) return;
-    atomicAdd(splat_words.data[pc.words_word + uint(at.y) * pc.width + uint(at.x)], uint(amount * 4096.0));
+    uint word = pc.words_word + uint(at.y) * pc.width + uint(at.x);
+    uint plane = pc.width * pc.height;
+    atomicAdd(splat_words.data[word], uint(amount * 4096.0));
+    atomicAdd(splat_words.data[word + plane], uint(amount * albedo.r * 4096.0));
+    atomicAdd(splat_words.data[word + plane * 2u], uint(amount * albedo.g * 4096.0));
+    atomicAdd(splat_words.data[word + plane * 3u], uint(amount * albedo.b * 4096.0));
 }
 
 void main()
@@ -477,13 +482,14 @@ void main()
     float pixels_per_unit = f * dims.y * 0.5 / clip.w;
     float pixels = area * pixels_per_unit * pixels_per_unit;
 
+    vec3 albedo = unpackUnorm4x8(splat_words.data[table + 10u]).rgb;
     vec2 q = px - 0.5;
     ivec2 base = ivec2(floor(q));
     vec2 t = q - vec2(base);
-    add(base, pixels * (1.0 - t.x) * (1.0 - t.y));
-    add(base + ivec2(1, 0), pixels * t.x * (1.0 - t.y));
-    add(base + ivec2(0, 1), pixels * (1.0 - t.x) * t.y);
-    add(base + ivec2(1, 1), pixels * t.x * t.y);
+    add(base, pixels * (1.0 - t.x) * (1.0 - t.y), albedo);
+    add(base + ivec2(1, 0), pixels * t.x * (1.0 - t.y), albedo);
+    add(base + ivec2(0, 1), pixels * (1.0 - t.x) * t.y, albedo);
+    add(base + ivec2(1, 1), pixels * t.x * t.y, albedo);
 }
 )";
 
@@ -539,6 +545,7 @@ void main()
     vec3 inv = 1.0 / dir;
 
     float depth = 0.0;
+    vec3 depth_color = vec3(0.0);
     uint stack[64];
     int sp = 0;
     stack[sp++] = globals.bvh_root;
@@ -563,12 +570,20 @@ void main()
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
             float widest = max(max(extent.x, extent.y), extent.z);
             vec3 sides = max(extent, vec3(widest * 1e-3));
-            depth += node.aabb_max.w / (sides.x * sides.y * sides.z) * (leave - enter);
+            float leaf_depth = node.aabb_max.w / (sides.x * sides.y * sides.z) * (leave - enter);
+            depth += leaf_depth;
+            depth_color += leaf_depth * unpackUnorm4x8(floatBitsToUint(node.aabb_min.w)).rgb;
         }
     }
     if (depth > 0.0) {
-        uint amount = uint(min(depth, 64.0) * 4096.0);
-        atomicAdd(splat_words.data[pc.words_word + uint(coord.y) * pc.width + uint(coord.x)], amount);
+        float capped = min(depth, 64.0);
+        vec3 color = depth_color / depth * capped;
+        uint word = pc.words_word + uint(coord.y) * pc.width + uint(coord.x);
+        uint plane = pc.width * pc.height;
+        atomicAdd(splat_words.data[word], uint(capped * 4096.0));
+        atomicAdd(splat_words.data[word + plane], uint(color.r * 4096.0));
+        atomicAdd(splat_words.data[word + plane * 2u], uint(color.g * 4096.0));
+        atomicAdd(splat_words.data[word + plane * 3u], uint(color.b * 4096.0));
     }
 }
 )";
@@ -621,9 +636,6 @@ layout(push_constant) uniform PC {
     uint lights_base;
     uint light_count;
     uint ratio_id;
-    float albedo_r;
-    float albedo_g;
-    float albedo_b;
     float facing[14];
 } pc;
 
@@ -661,13 +673,20 @@ void main()
     // Neighbours are averaged in, which keeps the total the same.
     const float kTent[5] = float[5](1.0, 2.0, 3.0, 2.0, 1.0);
     float coverage = 0.0;
+    vec3 coverage_color = vec3(0.0);
+    uint plane = pc.width * pc.height;
     for (int j = -2; j <= 2; ++j) {
         for (int i = -2; i <= 2; ++i) {
             ivec2 at = coord + ivec2(i, j);
             if (at.x < 0 || at.y < 0 || at.x >= int(pc.width) || at.y >= int(pc.height)) continue;
-            coverage += float(splat_words.data[pc.words_word + uint(at.y) * pc.width + uint(at.x)]) * kTent[i + 2] * kTent[j + 2];
+            uint word = pc.words_word + uint(at.y) * pc.width + uint(at.x);
+            float weight = kTent[i + 2] * kTent[j + 2];
+            coverage += float(splat_words.data[word]) * weight;
+            coverage_color += vec3(float(splat_words.data[word + plane]), float(splat_words.data[word + plane * 2u]),
+                                   float(splat_words.data[word + plane * 3u])) * weight;
         }
     }
+    vec3 albedo = coverage > 0.0 ? coverage_color / coverage : vec3(0.0);
     coverage /= 4096.0 * 81.0;
     if (coverage <= 0.0) return;
 
@@ -746,7 +765,8 @@ void main()
     vec3 direct_on_instance = direct_open + direct_among * arriving;
 
     vec4 under = velk_texture(pc.output_id, uv);
-    vec3 surface = vec3(pc.albedo_r, pc.albedo_g, pc.albedo_b) * (direct_on_instance + indirect);    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord,
+    vec3 surface = albedo * (direct_on_instance + indirect);
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord,
                vec4(mix(under.rgb, surface, 1.0 - exp(-coverage)), under.a));
 }
 )";

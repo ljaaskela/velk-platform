@@ -1158,8 +1158,8 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
 
-    // A region of the frame's size per visual, since each has its own colour.
-    const uint64_t bytes = uint64_t(w) * uint64_t(h) * sizeof(uint32_t);
+    // Per visual, frame-sized planes of coverage, then of coverage times each colour channel.
+    const uint64_t bytes = uint64_t(w) * uint64_t(h) * sizeof(uint32_t) * 4u;
     vector<ViewState::FarInstanceWords> kept;
     for (const auto& info : visuals) {
         ViewState::FarInstanceWords entry;
@@ -1264,7 +1264,6 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         {
             uint32_t words_word, width, height, output_id, unshadowed_id, normal_id, worldpos_id;
             uint32_t globals_base, lights_base, light_count, ratio_id;
-            float albedo[3];
             float facing[kSurfaceDirectionCount];
         };
         static_assert(sizeof(CompositePush) <= kMaxRootConstantsSize);
@@ -1278,7 +1277,6 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
                              render_view.view_globals_base, render_view.lights_base,
                              static_cast<uint32_t>(render_view.lights.size()),
                              static_cast<uint32_t>(ratio->get_gpu_handle(GpuResourceKey::Default)),
-                             {info.far_albedo[0], info.far_albedo[1], info.far_albedo[2]},
                              {}};
             std::memcpy(pc.facing, info.far_facing, sizeof(pc.facing));
             DispatchCall dc{};

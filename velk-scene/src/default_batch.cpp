@@ -54,6 +54,7 @@ constexpr uint32_t kCullCapacityWord = 6;
 constexpr uint32_t kCullAreaWord = 7;
 constexpr uint32_t kCullFirstEntryWord = 8;
 constexpr uint32_t kCullEntryCountWord = 9;
+constexpr uint32_t kCullFarAlbedoWord = 10;  ///< The far form's colour, as unorm RGB.
 
 /// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
 constexpr uint32_t kClusterEntryWords = 10;
@@ -193,6 +194,10 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         float facing[kSurfaceDirectionCount];
         instance_source_->get_far_look(m, area, albedo, facing);
         std::memcpy(entry + kCullAreaWord, &area, sizeof(area));
+        for (int k = 0; k < 3; ++k) {
+            const float unit = std::min(std::max(albedo[k], 0.f), 1.f);
+            entry[kCullFarAlbedoWord] |= static_cast<uint32_t>(unit * 255.f + 0.5f) << (k * 8);
+        }
         const float weight = area * static_cast<float>(capacity);
         far_weight += weight;
         for (int k = 0; k < 3; ++k) {
