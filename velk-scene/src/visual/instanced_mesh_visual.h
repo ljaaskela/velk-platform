@@ -70,7 +70,17 @@ public:
     bool get_far_form() const override { return far_form_; }
     void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const override;
     string_view get_motion_source() const override { return motion_source_; }
-    float get_max_displacement() const override { return motion_source_.empty() ? 0.f : max_displacement_; }
+    float get_max_displacement() const override
+    {
+        return (motion_source_.empty() ? 0.f : max_displacement_) + (ray_motion_source_.empty() ? 0.f : ray_motion_reach_);
+    }
+    string_view get_ray_motion_source() const override { return ray_motion_source_; }
+    float get_ray_motion_reach() const override { return ray_motion_reach_; }
+    void set_ray_motion(string_view glsl, float reach) override
+    {
+        ray_motion_source_ = string(glsl);
+        ray_motion_reach_ = reach;
+    }
     uint64_t rest_region_offset() const override { return rest_region_.offset(); }
     uint64_t rest_region_size() const override { return rest_region_.size(); }
     bool take_motion_params(float out[4]) override;
@@ -129,6 +139,8 @@ private:
 
     string motion_source_;
     float max_displacement_ = 0.f;
+    string ray_motion_source_;
+    float ray_motion_reach_ = 0.f;
     ArenaRegion rest_region_;
     float motion_params_[4] = {0.f, 0.f, 0.f, 0.f};
     bool motion_params_changed_ = true;

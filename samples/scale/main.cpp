@@ -63,6 +63,8 @@
 // budget=MB: limits the GPU memory a forest's instances use.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
+// nowind:   nature's trees stand still.
+// noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
 // flat:     nature's ground has no height.
 // sun=N:    the sun is N degrees above the horizon.
@@ -246,6 +248,127 @@ public:
     velk::string_view get_fn_name(velk::string_view role) const override
     {
         return role == velk::shader_role::kEval ? velk::string_view("velk_eval_terrain") : velk::string_view{};
+    }
+};
+
+class ITreeMaterial : public velk::Interface<ITreeMaterial>
+{
+public:
+    VELK_INTERFACE(
+        (PROP, velk::color, albedo, velk::color{}),
+        (PROP, float, roughness, 0.8f),
+        (PROP, bool, wind, true)
+    )
+};
+
+inline constexpr velk::Uid kTreeMaterialClass{"baac361e-72bd-42a6-9639-5f5b8ba5a643"};
+
+VELK_GPU_STRUCT TreeParams
+{
+    velk::color albedo;
+    float roughness;
+};
+
+constexpr velk::string_view kTreeEvalSrc = R"(
+struct TreeData {
+    vec4 albedo;
+    vec4 roughness_pad;
+};
+VELK_MATERIAL(TreeData)
+
+MaterialEval velk_eval_tree(EvalContext ctx)
+{
+    TreeData d = VELK_LOAD_MATERIAL(TreeData, ctx);
+    MaterialEval e = velk_default_material_eval();
+    e.color = d.albedo;
+    e.normal = ctx.normal;
+    e.roughness = d.roughness_pad.x;
+    e.lighting_mode = VELK_LIGHTING_STANDARD;
+    return e;
+}
+)";
+
+// The element vertex shader, with branches bending further the further out they are and
+// leaves, whose first uv is 1, moving on their own. Rays see the mesh at rest.
+constexpr velk::string_view kTreeVertexSrc = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+VELK_DRAW_DATA(root)
+
+VELK_VARYINGS_OUT
+
+void main()
+{
+    GlobalData globals = velk_global_data(root);
+    VelkVertex3D v = velk_vertex3d(root);
+    ElementInstance inst = velk_instance(root);
+
+    float t = float(globals.present_counter) / 60.0;
+    vec3 at = inst.world_matrix[3].xyz;
+    float phase = at.x * 0.013 + at.z * 0.017;
+    vec3 p = v.position;
+    float out_from_trunk = length(p.xz);
+    p.y += sin(t * 1.9 + phase + out_from_trunk * 0.15) * out_from_trunk * 0.03;
+    p.x += sin(t * 1.3 + phase + p.y * 0.05) * out_from_trunk * 0.02;
+    p += vec3(sin(t * 5.0 + p.x * 0.7 + p.y), sin(t * 6.0 + p.z * 0.9), sin(t * 5.5 + p.y * 0.8)) * 0.35 * v.uv.x;
+
+    vec4 local = vec4(inst.offset.xyz + p * inst.size.xyz, 1.0);
+    vec4 world_h = inst.world_matrix * local;
+    gl_Position = globals.view_projection * world_h;
+
+    v_color        = inst.color;
+    v_local_uv     = v.uv;
+    v_size         = inst.size.xy;
+    v_world_pos    = world_h.xyz;
+    v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
+    v_shape_param  = inst.params.x;
+    v_uv1          = velk_uv1(root);
+    v_world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
+    v_lod_error     = velk_lod_error(root);
+}
+)";
+
+/// A generated tree's wood or leaves.
+class TreeMaterial : public velk::ext::Material<TreeMaterial, ITreeMaterial>
+{
+public:
+    VELK_CLASS_UID(kTreeMaterialClass, "ScaleTreeMaterial");
+
+    size_t get_draw_data_size() const override { return sizeof(TreeParams); }
+
+    velk::ReturnValue write_draw_data(void* out, size_t size, velk::ITextureResolver*) const override
+    {
+        auto state = velk::read_state<ITreeMaterial>(this);
+        if (!state) {
+            return velk::ReturnValue::Fail;
+        }
+        return set_material<TreeParams>(out, size, [&](auto& p) {
+            p.albedo = state->albedo;
+            p.roughness = state->roughness;
+        });
+    }
+
+    velk::color get_average_albedo() const override
+    {
+        auto state = velk::read_state<ITreeMaterial>(this);
+        return state ? state->albedo : velk::color::white();
+    }
+
+    velk::string_view get_source(velk::string_view role) const override
+    {
+        if (role == velk::shader_role::kEval) return kTreeEvalSrc;
+        if (role == velk::shader_role::kVertex) {
+            auto state = velk::read_state<ITreeMaterial>(this);
+            if (state && state->wind) return kTreeVertexSrc;
+        }
+        return velk::ext::Material<TreeMaterial, ITreeMaterial>::get_source(role);
+    }
+
+    velk::string_view get_fn_name(velk::string_view role) const override
+    {
+        return role == velk::shader_role::kEval ? velk::string_view("velk_eval_tree") : velk::string_view{};
     }
 };
 
@@ -694,7 +817,7 @@ private:
         const velk::vec3 normal = velk::vec3::normalize(velk::vec3::cross(across, axis));
         const auto first = static_cast<uint32_t>(leaves_.size());
         for (const auto& c : corners) {
-            leaves_.push_back({{c.x, c.y, c.z}, {normal.x, normal.y, normal.z}, {0.f, 0.f}, {axis.x, axis.y, axis.z, 1.f}});
+            leaves_.push_back({{c.x, c.y, c.z}, {normal.x, normal.y, normal.z}, {1.f, 0.f}, {axis.x, axis.y, axis.z, 1.f}});
         }
         for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) {
             leaf_indices_.push_back(first + i);
@@ -984,6 +1107,8 @@ int main(int argc, char* argv[])
     float view[6] = {};
     float leaf_density = 1.f;
     bool no_shadow = false;
+    bool no_wind = false;
+    bool ray_wind = true;
     bool flat_terrain = false;
     float sun_angle = 0.f;
     for (int i = 5; i < argc; ++i) {
@@ -1004,6 +1129,8 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
+        no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
+        ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
         if (std::strncmp(argv[i], "sun=", 4) == 0) sun_angle = static_cast<float>(std::atof(argv[i] + 4));
         if (std::strncmp(argv[i], "leaves=", 7) == 0) leaf_density = static_cast<float>(std::atof(argv[i] + 7));
@@ -1018,6 +1145,8 @@ int main(int argc, char* argv[])
         ray_traced = ray_traced || std::strcmp(argv[i], "rt") == 0;
         with_text = with_text || std::strcmp(argv[i], "text") == 0;
     }
+
+    wind = wind || (nature && !no_wind);
 
     VELK_LOG(I, "scale: %ld elements, %ld movers (%s)", element_count, mover_count, argc > 4 ? argv[4] : "translate");
 
@@ -1198,12 +1327,18 @@ int main(int argc, char* argv[])
     velk::Trs forest_trs;
     uint32_t forest_extra_slot = 0xFFFFFFFFu;
     if (nature && element_count > 0) {
-        const auto foliage = [](const velk::color& c) {
-            auto material = velk::material::create_standard(c, 0.f, 0.75f);
-            material.options().set_double_sided(true);
-            return material;
+        velk::instance().type_registry().register_type<TreeMaterial>();
+        const auto tree_material = [&](const velk::color& c, float roughness, bool double_sided) {
+            auto material = velk::instance().create<ITreeMaterial>(TreeMaterial::static_class_id());
+            material->albedo().set_value(c);
+            material->roughness().set_value(roughness);
+            material->wind().set_value(!no_wind);
+            velk::Material options(interface_pointer_cast<velk::IObject>(material));
+            options.options().set_double_sided(double_sided);
+            return interface_pointer_cast<velk::IMaterial>(material);
         };
-        const auto bark = [](const velk::color& c) { return velk::material::create_standard(c, 0.f, 0.9f); };
+        const auto foliage = [&](const velk::color& c) { return tree_material(c, 0.75f, true); };
+        const auto bark = [&](const velk::color& c) { return tree_material(c, 0.9f, false); };
         //                         seed trunk radius lvl kids first spread ratio radius rise  taper  leaves leaf sizes
         TreeShape oak_shape{ 11u, 22.f, 2.4f,  3,  5,   0.5f, 0.85f, 0.62f, 0.62f, 0.35f, false, 26,  3.0f, 2.2f};
         TreeShape birch_shape{23u, 34.f, 1.3f, 3,  4,   0.4f, 0.55f, 0.58f, 0.60f, -0.15f, false, 22, 2.2f, 1.6f};
@@ -1214,9 +1349,22 @@ int main(int argc, char* argv[])
             shape->leaf_length /= std::sqrt(leaf_density);
             shape->leaf_width /= std::sqrt(leaf_density);
         }
-        velk::Mesh oak(TreeGrower(oak_shape).build(*render_context, bark(velk::color{0.24f, 0.17f, 0.11f, 1.f}), foliage(velk::color{0.11f, 0.26f, 0.05f, 1.f})));
-        velk::Mesh birch(TreeGrower(birch_shape).build(*render_context, bark(velk::color{0.58f, 0.55f, 0.50f, 1.f}), foliage(velk::color{0.26f, 0.38f, 0.08f, 1.f})));
-        velk::Mesh pine(TreeGrower(pine_shape).build(*render_context, bark(velk::color{0.20f, 0.14f, 0.10f, 1.f}), foliage(velk::color{0.04f, 0.15f, 0.07f, 1.f})));
+        const velk::IMesh::Ptr oak_mesh = TreeGrower(oak_shape).build(*render_context, bark(velk::color{0.24f, 0.17f, 0.11f, 1.f}), foliage(velk::color{0.11f, 0.26f, 0.05f, 1.f}));
+        const velk::IMesh::Ptr birch_mesh = TreeGrower(birch_shape).build(*render_context, bark(velk::color{0.58f, 0.55f, 0.50f, 1.f}), foliage(velk::color{0.26f, 0.38f, 0.08f, 1.f}));
+        const velk::IMesh::Ptr pine_mesh = TreeGrower(pine_shape).build(*render_context, bark(velk::color{0.20f, 0.14f, 0.10f, 1.f}), foliage(velk::color{0.04f, 0.15f, 0.07f, 1.f}));
+        velk::Mesh oak(oak_mesh);
+        velk::Mesh birch(birch_mesh);
+        velk::Mesh pine(pine_mesh);
+        float tree_reach = 0.f;
+        for (const auto& mesh : {oak_mesh, birch_mesh, pine_mesh}) {
+            const velk::aabb bounds = mesh->get_bounds();
+            const velk::vec3 lo = bounds.min();
+            const velk::vec3 hi = bounds.max();
+            // The corner of the box furthest from the origin, whichever sides make it up.
+            const velk::vec3 far_corner{std::max(std::abs(lo.x), std::abs(hi.x)), std::max(std::abs(lo.y), std::abs(hi.y)),
+                                        std::max(std::abs(lo.z), std::abs(hi.z))};
+            tree_reach = std::max(tree_reach, velk::vec3::length(far_corner));
+        }
 
         // Conifers higher up, none on steep ground or above the tree line. Each has its own
         // turn and size.
@@ -1245,6 +1393,31 @@ int main(int argc, char* argv[])
         forest_visual = velk::trait::visual::create_instanced_mesh();
         if (real_trees) {
             forest_visual.set_far_form(false);
+        }
+        if (wind) {
+            // The whole tree leans the same way in the world, whatever its turn. The bound is
+            // the largest tree's reach at its largest size, by the most the angle changes it.
+            constexpr float kMaxLeanChange = 1.41422f * 0.05f;
+            constexpr float kMaxTreeSize = 1.35f;
+            forest_visual.set_motion(R"(
+mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
+{
+    vec3 p = rest[3].xyz;
+    float gust = sin(params.x * 0.9 + p.x * 0.004 + p.z * 0.003);
+    float angle = 0.02 + 0.02 * gust + 0.008 * sin(params.x * 2.3 + float(slot) * 1.7);
+    float c = cos(angle);
+    float s = sin(angle);
+    mat3 lean = mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0);
+    return mat4(vec4(lean * rest[0].xyz, 0.0), vec4(lean * rest[1].xyz, 0.0), vec4(lean * rest[2].xyz, 0.0), rest[3]);
+}
+)", tree_reach * kMaxTreeSize * kMaxLeanChange);
+            if (ray_wind) {
+                // The bend in the trees' vertex shader, without the leaves' own motion.
+                forest_visual.set_ray_motion(
+                    "vec3(sin(t * 1.3 + dot(at.xz, vec2(0.013, 0.017)) + p.y * 0.05) * length(p.xz) * 0.02, "
+                    "sin(t * 1.9 + dot(at.xz, vec2(0.013, 0.017)) + length(p.xz) * 0.15) * length(p.xz) * 0.03, 0.0)",
+                    4.f);
+            }
         }
         forest_visual.set_mesh(oak);
         const uint32_t birch_index = forest_visual.add_mesh(birch);

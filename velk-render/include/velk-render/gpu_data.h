@@ -1,6 +1,8 @@
 #ifndef VELK_RENDER_GPU_DATA_H
 #define VELK_RENDER_GPU_DATA_H
 
+#include <velk/string_view.h>
+
 #include <cstdint>
 
 namespace velk {
@@ -35,6 +37,10 @@ struct BvhBinding
     /// Whether instances in it have a far form, so tracing shaders need the medium
     /// traversals. Paths watch this themselves, since it changes which pipeline they use.
     uint32_t has_medium = 0;
+    /// How rays follow motion of instances that the tree does not hold, if any. See
+    /// IInstancedMeshVisual::set_ray_motion. Tracing shaders are compiled with it.
+    string_view ray_motion;
+    float ray_motion_reach = 0.f;
 
     bool operator==(const BvhBinding& o) const
     {
@@ -183,7 +189,7 @@ VELK_GPU_STRUCT RtRecord
     uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
     uint32_t shape_count;
     uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
-    uint32_t _pad0;
+    uint32_t ray_motion;      ///< 1 if rays follow the scene's ray motion here. See BvhBinding::ray_motion.
 };
 static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
 

@@ -228,7 +228,8 @@ private:
     /// Resolves the deferred-lighting compute pipeline for the active
     /// snippet set, compiling on a (weak) cache miss. Returns a strong Ptr
     /// the caller must keep alive (the lighting pass holds it).
-    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium);
+    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium, string_view ray_motion,
+                                      float ray_motion_reach);
 
     /// Resolves the diffuse-irradiance temporal-accumulate pipeline
     /// (standalone compute). Strong Ptr; the temporal pass holds it.
@@ -236,7 +237,8 @@ private:
 
     /// World-space GI probe pass. Composed with the RT body so probe hits get
     /// real material evaluation.
-    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool with_medium);
+    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool with_medium, string_view ray_motion,
+                                            float ray_motion_reach);
 
     /// Creates one level's atlas if it does not exist yet. Sized from the
     /// level's grid: width folds z into x, height stacks the SH coefficients.

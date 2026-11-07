@@ -435,7 +435,19 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
     bool found = false;
     if (rec.tree_root == VELK_NO_TREE) {
         for (uint i = 0u; i < rec.shape_count; ++i) {
-            if (velk_test_shape(local, rec.first_shape + i, t_min, hit)) {
+            Ray shape_ray = local;
+#ifdef VELK_RAY_MOTION
+            // The motion at the point of the ray nearest the shape's middle, taken off the
+            // ray, moves the shape for this ray. Rays wider than the motion would not show it.
+            if (rec.ray_motion != 0u && velk_ray_footprint < VELK_RAY_MOTION_REACH) {
+                RtShape moved = velk_bvh_shapes.data[rec.first_shape + i];
+                vec3 middle = (moved.origin.xyz + moved.u_axis.xyz) * 0.5;
+                vec3 nearest = local.origin + local.dir * (dot(middle - local.origin, local.dir) / dot(local.dir, local.dir));
+                shape_ray.origin -= VELK_RAY_MOTION(nearest, vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w),
+                                                    float(VELK_GLOBALS.present_counter) / 60.0);
+            }
+#endif
+            if (velk_test_shape(shape_ray, rec.first_shape + i, t_min, hit)) {
                 found = true;
                 if (any_hit) return true;
             }
@@ -723,6 +735,22 @@ inline string velk_with_trace_medium(string_view source)
     string out;
     out += source.substr(0, after);
     out += string_view("#define VELK_TRACE_MEDIUM\n");
+    out += source.substr(after);
+    return out;
+}
+
+/// @p source with a scene's ray motion compiled in. See IInstancedMeshVisual::set_ray_motion.
+inline string velk_with_ray_motion(string_view source, string_view motion, float reach)
+{
+    const size_t version = source.find(string_view("#version"));
+    const size_t after = source.find('\n', version) + 1;
+    string out;
+    out += source.substr(0, after);
+    out += string_view("#define VELK_RAY_MOTION(p, at, t) (");
+    out += motion;
+    char buffer[64];
+    const int length = std::snprintf(buffer, sizeof(buffer), ")\n#define VELK_RAY_MOTION_REACH %f\n", double(reach));
+    out += string_view(buffer, static_cast<size_t>(length));
     out += source.substr(after);
     return out;
 }

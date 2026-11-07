@@ -75,6 +75,12 @@ public:
         with<IInstancedMeshVisual>([&](auto& v) { v.set_motion_params(params); });
     }
 
+    /** @brief Lets rays follow motion inside instances. See IInstancedMeshVisual::set_ray_motion. */
+    void set_ray_motion(string_view glsl, float reach)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_ray_motion(glsl, reach); });
+    }
+
     /** @brief Returns the number of live instances. */
     uint32_t get_instance_count() const
     {

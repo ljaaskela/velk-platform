@@ -90,6 +90,7 @@ public:
     uint32_t get_node_count() const override { return node_count_; }
     ProbeVolume get_probe_volume() const override { return probe_volume_; }
     bool has_medium() const override;
+    string_view get_ray_motion(float& reach) const override;
 
     void invalidate() override { needs_full_build_ = true; }
 

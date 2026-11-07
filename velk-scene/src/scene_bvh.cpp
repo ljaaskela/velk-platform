@@ -197,7 +197,21 @@ RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) co
     const auto& run = group.meshes[group.visual->get_slot_mesh(slot)];
     record.first_shape = run.first_shape;
     record.shape_count = run.shape_count;
+    record.ray_motion = group.visual->get_ray_motion_source().empty() ? 0u : 1u;
     return record;
+}
+
+string_view SceneBvh::get_ray_motion(float& reach) const
+{
+    for (const auto& [element, group] : instance_groups_) {
+        const string_view source = group.visual->get_ray_motion_source();
+        if (!source.empty()) {
+            reach = group.visual->get_ray_motion_reach();
+            return source;
+        }
+    }
+    reach = 0.f;
+    return {};
 }
 
 bool SceneBvh::has_medium() const

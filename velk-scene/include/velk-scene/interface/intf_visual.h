@@ -212,6 +212,17 @@ public:
     virtual void set_motion(string_view glsl, float max_displacement) = 0;
     /// The `params` passed to the motion function, such as the current time.
     virtual void set_motion_params(const vec4& params) = 0;
+    /**
+     * @brief Lets rays follow motion inside an instance that its material's vertex shader
+     *        does, such as branches in wind, without changing any tree.
+     *
+     * @p glsl is an expression, using `vec3 p`, `vec3 at` and `float t`: how far the mesh's
+     * surface has moved at `p`, in its local space, for an instance at `at` at `t` seconds.
+     * It only approximates the surface: one value holds along a ray through each primitive.
+     * Rays wider than @p reach, the furthest it goes in world units, skip it, and an
+     * instance's bounds are grown by that much. Deferred path only. One per scene.
+     */
+    virtual void set_ray_motion(string_view glsl, float reach) = 0;
 };
 
 class IGpuArena;
@@ -267,6 +278,8 @@ public:
     /// The motion function's source, empty when there is none.
     virtual string_view get_motion_source() const = 0;
     virtual float get_max_displacement() const = 0;
+    virtual string_view get_ray_motion_source() const = 0;
+    virtual float get_ray_motion_reach() const = 0;
     /// Byte offset in the culling arena of the slots' resting world matrices, as an
     /// InstanceTransform each, and their size. Only with a motion function.
     virtual uint64_t rest_region_offset() const = 0;

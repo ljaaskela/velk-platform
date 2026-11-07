@@ -281,7 +281,9 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
                                                     uint64_t variant_tag,
                                                     bool with_area_lights = false,
-                                                    bool with_medium = false)
+                                                    bool with_medium = false,
+                                                    string_view ray_motion = {},
+                                                    float ray_motion_reach = 0.f)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -307,6 +309,9 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // cache entry.
     key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
+    for (char c : ray_motion) {
+        key = (key ^ static_cast<uint8_t>(c)) * kFnvPrime;
+    }
     key |= 0x4000000000000000ULL;
 
     // The weak pipeline cache is the source of truth: if the pipeline for
@@ -380,6 +385,9 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     append_literal("    }\n");
     append_literal("}\n");
 
+    if (!ray_motion.empty()) {
+        src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
+    }
     if (with_medium) {
         const string with_define = velk_with_trace_medium(string_view(src));
         return ctx.render_ctx->pipelines().compile_compute(string_view(with_define), key);
@@ -389,10 +397,11 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium,
+                                                string_view ray_motion, float ray_motion_reach)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights, with_medium);
+                                             with_area_lights, with_medium, ray_motion, ray_motion_reach);
 }
 
 namespace {
@@ -468,7 +477,8 @@ VELK_GPU_STRUCT ProbePushC {
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool with_medium)
+IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool with_medium, string_view ray_motion,
+                                                      float ray_motion_reach)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -487,6 +497,9 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
     key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
+    for (char c : ray_motion) {
+        key = (key ^ static_cast<uint8_t>(c)) * kFnvPrime;
+    }
     key |= 0x2000000000000000ULL;
 
     if (auto p = ctx.render_ctx->pipelines().find(
@@ -494,6 +507,9 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
         return p;
     }
     string src = compose_rt_compute(*ctx.snippets, probe_gi_main_src);
+    if (!ray_motion.empty()) {
+        src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
+    }
     if (with_medium) {
         src = velk_with_trace_medium(string_view(src));
     }
@@ -550,7 +566,8 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                                     kProbeDimZ, graph);
     if (!fine || !mid_read || !mid_write || !far_read || !far_write) return;
 
-    auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u);
+    auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
+                                          render_view.bvh.ray_motion_reach);
     if (!pipeline) return;
 
     const auto handle = [](const IRenderTarget::Ptr& t) {
@@ -934,7 +951,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, has_medium);
+    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, has_medium, render_view.bvh.ray_motion,
+                                             render_view.bvh.ray_motion_reach);
     if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));

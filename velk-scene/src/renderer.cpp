@@ -972,6 +972,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 ctx.bvh.root = b->get_root_index();
                 ctx.bvh.node_count = b->get_node_count();
                 ctx.bvh.has_medium = b->has_medium() ? 1u : 0u;
+                ctx.bvh.ray_motion = b->get_ray_motion(ctx.bvh.ray_motion_reach);
                 const ProbeVolume probes = b->get_probe_volume();
                 ctx.bvh.probe_min[0] = probes.min.x;
                 ctx.bvh.probe_min[1] = probes.min.y;
