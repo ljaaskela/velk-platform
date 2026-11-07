@@ -35,7 +35,8 @@
 // forest_churn: forest, with one tree removed and another added every frame.
 // forest_cluster: forest, with the movers packed in a cube in the air above the center.
 // nature:   elements is the number of trees, spread over generated mountains of a
-//           fixed size. The camera's direction is what W, A, S and D move along.
+//           fixed size. Right drag turns the camera, W, A, S and D fly it, and the wheel
+//           jumps along the view.
 // outlier:  forest_cluster, with one mover 2,000,000 units away, which stretches the
 //           partition's bounds until the cube is a tiny part of them.
 // mixed:    a forest's movers vary in size: one in 100 at 30 times, one in 10 at 5 times,
@@ -548,6 +549,212 @@ velk::IMesh::Ptr build_rock_mesh(velk::IRenderContext& ctx, float size, const ve
     return builder.build({primitives, 1});
 }
 
+/// How a generated tree grows. Lengths are in world units.
+struct TreeShape
+{
+    uint32_t seed;
+    float trunk_length;
+    float trunk_radius;
+    int levels;             ///< Levels of branches on the trunk.
+    int children;           ///< Branches on each branch.
+    float first_child;      ///< How far along its parent the first branch starts, from 0 to 1.
+    float spread;           ///< Angle of a branch off its parent, in radians.
+    float length_ratio;     ///< A branch's length over its parent's.
+    float radius_ratio;     ///< A branch's radius over its parent's at that point.
+    float rise;             ///< How much branches turn upwards as they grow. Below 0 they droop.
+    bool taper_with_height; ///< Branches shorten towards the top of the parent, as on a conifer.
+    int leaves;             ///< Leaves on each branch of the last level.
+    float leaf_length;
+    float leaf_width;
+};
+
+/// Grows a tree on y = 0 towards -y, as tubes for its wood and separate leaves.
+class TreeGrower
+{
+public:
+    explicit TreeGrower(const TreeShape& shape) : shape_(shape), state_(shape.seed) {}
+
+    velk::IMesh::Ptr build(velk::IRenderContext& ctx, const velk::IMaterial::Ptr& bark, const velk::IMaterial::Ptr& foliage)
+    {
+        grow(0, {0.f, 0.f, 0.f}, {0.f, -1.f, 0.f}, shape_.trunk_length, shape_.trunk_radius);
+        shade_leaves();
+        velk::IMeshPrimitive::Ptr primitives[] = {make_primitive(ctx, wood_, wood_indices_, bark),
+                                                  make_primitive(ctx, leaves_, leaf_indices_, foliage)};
+        return ctx.get_mesh_builder().build({primitives, 2});
+    }
+
+private:
+    float random()
+    {
+        state_ ^= state_ << 13;
+        state_ ^= state_ >> 17;
+        state_ ^= state_ << 5;
+        return static_cast<float>(state_ % 100000u) / 100000.f;
+    }
+
+    velk::vec3 random_direction()
+    {
+        const float z = random() * 2.f - 1.f;
+        const float theta = random() * 6.2831853f;
+        const float r = std::sqrt(std::max(1.f - z * z, 0.f));
+        return {r * std::cos(theta), z, r * std::sin(theta)};
+    }
+
+    static velk::vec3 perpendicular(const velk::vec3& d)
+    {
+        const velk::vec3 axis = std::abs(d.y) < 0.9f ? velk::vec3{0.f, 1.f, 0.f} : velk::vec3{1.f, 0.f, 0.f};
+        return velk::vec3::normalize(velk::vec3::cross(d, axis));
+    }
+
+    /// One branch and those growing from it.
+    void grow(int level, const velk::vec3& base, const velk::vec3& direction, float length, float radius)
+    {
+        const int segments = level == 0 ? 6 : 3;
+        const uint32_t sides = level == 0 ? 7u : level == 1 ? 5u : 3u;
+        const velk::vec3 up{0.f, -1.f, 0.f};
+        velk::vector<velk::vec3> points;
+        velk::vector<velk::vec3> directions;
+        velk::vec3 p = base;
+        velk::vec3 d = direction;
+        for (int s = 0; s <= segments; ++s) {
+            points.push_back(p);
+            directions.push_back(d);
+            d = velk::vec3::normalize(d + up * (shape_.rise / static_cast<float>(segments)) + random_direction() * 0.12f);
+            p = p + d * (length / static_cast<float>(segments));
+        }
+
+        // Rings along the branch, narrowing towards its end.
+        const auto first_vertex = static_cast<uint32_t>(wood_.size());
+        velk::vec3 u = perpendicular(directions[0]);
+        for (int s = 0; s <= segments; ++s) {
+            const velk::vec3& dir = directions[static_cast<size_t>(s)];
+            u = velk::vec3::normalize(u - dir * velk::vec3::dot(u, dir));
+            const velk::vec3 v = velk::vec3::cross(dir, u);
+            const float along = static_cast<float>(s) / static_cast<float>(segments);
+            const float ring_radius = radius * (1.f - 0.75f * along);
+            for (uint32_t side = 0; side < sides; ++side) {
+                const float theta = static_cast<float>(side) / static_cast<float>(sides) * 6.2831853f;
+                const velk::vec3 n = u * std::cos(theta) + v * std::sin(theta);
+                const velk::vec3 at = points[static_cast<size_t>(s)] + n * ring_radius;
+                wood_.push_back({{at.x, at.y, at.z}, {n.x, n.y, n.z}, {0.f, along}, {dir.x, dir.y, dir.z, 1.f}});
+            }
+        }
+        for (int s = 0; s < segments; ++s) {
+            for (uint32_t side = 0; side < sides; ++side) {
+                const uint32_t next = (side + 1) % sides;
+                const uint32_t a = first_vertex + static_cast<uint32_t>(s) * sides + side;
+                const uint32_t b = first_vertex + static_cast<uint32_t>(s) * sides + next;
+                for (uint32_t i : {a, b + sides, a + sides, a, b, b + sides}) {
+                    wood_indices_.push_back(i);
+                }
+            }
+        }
+
+        if (level == shape_.levels) {
+            for (int leaf = 0; leaf < shape_.leaves; ++leaf) {
+                const float t = 0.25f + 0.75f * random();
+                const auto at = static_cast<size_t>(t * static_cast<float>(segments));
+                add_leaf(points[at] + random_direction() * (length * 0.3f), directions[at]);
+            }
+            return;
+        }
+
+        for (int child = 0; child < shape_.children; ++child) {
+            const float t = shape_.first_child + (1.f - shape_.first_child) * (static_cast<float>(child) + random() * 0.6f)
+                / static_cast<float>(shape_.children);
+            const float position = t * static_cast<float>(segments);
+            const auto at = std::min(static_cast<size_t>(position), static_cast<size_t>(segments - 1));
+            const float blend = position - static_cast<float>(at);
+            const velk::vec3 from = points[at] + (points[at + 1] - points[at]) * blend;
+            const velk::vec3 dir = directions[at];
+            // Around the parent by the golden angle, so branches do not line up.
+            const float around = static_cast<float>(child) * 2.39996f + random() * 0.5f;
+            const velk::vec3 side_u = perpendicular(dir);
+            const velk::vec3 side_v = velk::vec3::cross(dir, side_u);
+            const velk::vec3 out = side_u * std::cos(around) + side_v * std::sin(around);
+            const float angle = shape_.spread * (0.8f + 0.4f * random());
+            const velk::vec3 child_direction = velk::vec3::normalize(dir * std::cos(angle) + out * std::sin(angle));
+            const float scale = shape_.taper_with_height ? (1.05f - t) : (0.8f + 0.4f * random());
+            grow(level + 1, from, child_direction, length * shape_.length_ratio * scale,
+                 radius * (1.f - 0.75f * t) * shape_.radius_ratio);
+        }
+    }
+
+    void add_leaf(const velk::vec3& at, const velk::vec3& direction)
+    {
+        const velk::vec3 axis = velk::vec3::normalize(direction + random_direction());
+        const velk::vec3 across = velk::vec3::normalize(velk::vec3::cross(axis, random_direction())) * (shape_.leaf_width * 0.5f);
+        const velk::vec3 mid = at + axis * (shape_.leaf_length * 0.5f);
+        const velk::vec3 tip = at + axis * shape_.leaf_length;
+        const velk::vec3 corners[] = {at, mid + across, tip, mid - across};
+        const velk::vec3 normal = velk::vec3::normalize(velk::vec3::cross(across, axis));
+        const auto first = static_cast<uint32_t>(leaves_.size());
+        for (const auto& c : corners) {
+            leaves_.push_back({{c.x, c.y, c.z}, {normal.x, normal.y, normal.z}, {0.f, 0.f}, {axis.x, axis.y, axis.z, 1.f}});
+        }
+        for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            leaf_indices_.push_back(first + i);
+        }
+    }
+
+    /// Normals lean away from the crown's middle, so it shades as one soft shape.
+    void shade_leaves()
+    {
+        velk::vec3 center{0.f, 0.f, 0.f};
+        for (const auto& leaf : leaves_) {
+            center = center + velk::vec3{leaf.position[0], leaf.position[1], leaf.position[2]};
+        }
+        center = center * (1.f / static_cast<float>(std::max<size_t>(leaves_.size(), 1)));
+        for (auto& leaf : leaves_) {
+            const velk::vec3 out = velk::vec3::normalize(velk::vec3{leaf.position[0], leaf.position[1], leaf.position[2]} - center);
+            const velk::vec3 own{leaf.normal[0], leaf.normal[1], leaf.normal[2]};
+            const velk::vec3 n = velk::vec3::normalize(own * 0.35f + out * 0.65f);
+            leaf.normal[0] = n.x;
+            leaf.normal[1] = n.y;
+            leaf.normal[2] = n.z;
+        }
+    }
+
+    static velk::IMeshPrimitive::Ptr make_primitive(velk::IRenderContext& ctx, const velk::vector<Vertex>& vertices,
+                                                    const velk::vector<uint32_t>& indices, const velk::IMaterial::Ptr& material)
+    {
+        static constexpr velk::VertexAttribute kAttributes[] = {
+            {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
+            {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
+            {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
+            {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
+        };
+        velk::vec3 lo{vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]};
+        velk::vec3 hi = lo;
+        for (const auto& vertex : vertices) {
+            lo.x = std::min(lo.x, vertex.position[0]);
+            lo.y = std::min(lo.y, vertex.position[1]);
+            lo.z = std::min(lo.z, vertex.position[2]);
+            hi.x = std::max(hi.x, vertex.position[0]);
+            hi.y = std::max(hi.y, vertex.position[1]);
+            hi.z = std::max(hi.z, vertex.position[2]);
+        }
+        velk::aabb bounds{};
+        bounds.position = lo;
+        bounds.extent = {hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+        const auto vertex_count = static_cast<uint32_t>(vertices.size());
+        const auto index_count = static_cast<uint32_t>(indices.size());
+        auto primitive = ctx.get_mesh_builder().build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count,
+                                                                indices.data(), index_count, velk::MeshTopology::TriangleList, bounds);
+        primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count,
+                                                     indices.data(), index_count / 3));
+        velk::MeshPrimitive(primitive).set_material(material);
+        return primitive;
+    }
+
+    TreeShape shape_;
+    uint32_t state_;
+    velk::vector<Vertex> wood_;
+    velk::vector<uint32_t> wood_indices_;
+    velk::vector<Vertex> leaves_;
+    velk::vector<uint32_t> leaf_indices_;
+};
+
 /// Builds a low-poly tree standing on y = 0 and growing towards -y: a trunk and a
 /// crown, as a primitive each.
 velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const velk::IMaterial::Ptr& trunk,
@@ -879,6 +1086,12 @@ int main(int argc, char* argv[])
         orbit.set_pitch(-30.f);
     }
     orbit.set_distance(distance);
+    if (nature && hold_stop < 0) {
+        // Where the same orbit would put the camera, with the focus there instead.
+        constexpr float kStartPitch = -24.f * 3.14159265f / 180.f;
+        focus_trs.set_translate({0.f, ground_y(0.f, 0.f) - 30.f + distance * std::sin(kStartPitch), distance * std::cos(kStartPitch)});
+        orbit.set_distance(1.f);
+    }
     if (has_view && forest) {
         focus_trs.set_translate({view[0], view[1], view[2]});
         orbit.set_yaw(view[3]);
@@ -970,7 +1183,58 @@ int main(int argc, char* argv[])
     velk::InstancedMeshVisual forest_visual;
     velk::Trs forest_trs;
     uint32_t forest_extra_slot = 0xFFFFFFFFu;
-    if (forest && element_count > 0) {
+    if (nature && element_count > 0) {
+        const auto foliage = [](const velk::color& c) {
+            auto material = velk::material::create_standard(c, 0.f, 0.75f);
+            material.options().set_double_sided(true);
+            return material;
+        };
+        const auto bark = [](const velk::color& c) { return velk::material::create_standard(c, 0.f, 0.9f); };
+        //                         seed trunk radius lvl kids first spread ratio radius rise  taper  leaves leaf sizes
+        const TreeShape oak_shape{ 11u, 22.f, 2.4f,  3,  5,   0.5f, 0.85f, 0.62f, 0.62f, 0.35f, false, 26,  3.0f, 2.2f};
+        const TreeShape birch_shape{23u, 34.f, 1.3f, 3,  4,   0.4f, 0.55f, 0.58f, 0.60f, -0.15f, false, 22, 2.2f, 1.6f};
+        const TreeShape pine_shape{37u, 78.f, 1.9f,  2,  9,   0.18f, 1.25f, 0.34f, 0.5f, 0.05f, true,  20,  3.4f, 0.8f};
+        velk::Mesh oak(TreeGrower(oak_shape).build(*render_context, bark(velk::color{0.24f, 0.17f, 0.11f, 1.f}), foliage(velk::color{0.11f, 0.26f, 0.05f, 1.f})));
+        velk::Mesh birch(TreeGrower(birch_shape).build(*render_context, bark(velk::color{0.58f, 0.55f, 0.50f, 1.f}), foliage(velk::color{0.26f, 0.38f, 0.08f, 1.f})));
+        velk::Mesh pine(TreeGrower(pine_shape).build(*render_context, bark(velk::color{0.20f, 0.14f, 0.10f, 1.f}), foliage(velk::color{0.04f, 0.15f, 0.07f, 1.f})));
+
+        // Conifers higher up, none on steep ground or above the tree line. Each has its own
+        // turn and size.
+        constexpr float kTreeLine = 1300.f;
+        constexpr float kConiferLine = 500.f;
+        constexpr float kMaxSlope = 0.55f;
+        velk::vector<velk::InstanceTransform> per_mesh[3];
+        for (long i = 0; i < element_count; ++i) {
+            const velk::vec3 at = tree_position(i);
+            const float height = terrain.height_at(at.x, at.z);
+            const float dx = terrain.height_at(at.x + 40.f, at.z) - terrain.height_at(at.x - 40.f, at.z);
+            const float dz = terrain.height_at(at.x, at.z + 40.f) - terrain.height_at(at.x, at.z - 40.f);
+            if (height > kTreeLine || std::sqrt(dx * dx + dz * dz) / 80.f > kMaxSlope) {
+                continue;
+            }
+            const float pick = forest_jitter(i, 41.17f) + 0.5f;
+            const float conifer_chance = std::clamp((height - kConiferLine + 300.f) / 600.f, 0.f, 1.f);
+            const int species = pick < conifer_chance ? 2 : (forest_jitter(i, 7.31f) > 0.f ? 0 : 1);
+            const float yaw = (forest_jitter(i, 91.7f) + 0.5f) * 6.2831853f;
+            const float size = 0.75f + (forest_jitter(i, 57.3f) + 0.5f) * 0.6f;
+            const float c = std::cos(yaw) * size;
+            const float s = std::sin(yaw) * size;
+            // Sunk a little, so a trunk on a slope has no gap under it.
+            per_mesh[species].push_back(velk::InstanceTransform{{{c, 0.f, s, at.x}, {0.f, size, 0.f, at.y + 1.5f}, {-s, 0.f, c, at.z}}});
+        }
+        forest_visual = velk::trait::visual::create_instanced_mesh();
+        forest_visual.set_mesh(oak);
+        const uint32_t birch_index = forest_visual.add_mesh(birch);
+        const uint32_t pine_index = forest_visual.add_mesh(pine);
+        forest_visual.add_instances({per_mesh[0].data(), per_mesh[0].size()});
+        forest_visual.add_instances({per_mesh[1].data(), per_mesh[1].size()}, birch_index);
+        forest_visual.add_instances({per_mesh[2].data(), per_mesh[2].size()}, pine_index);
+        auto forest_element = velk::create_element();
+        forest_trs = velk::trait::transform::create_trs();
+        forest_element.add_trait(forest_trs);
+        forest_element.add_trait(forest_visual);
+        scene.add(root, forest_element);
+    } else if (forest && !nature) {
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
         // 2 cones * 64 sides * 39 rings * 2 triangles.
@@ -1159,6 +1423,26 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     bool orbit_dragging = false;
     float orbit_last_x = 0.f;
     float orbit_last_y = 0.f;
+
+    // In nature mode the camera sits at the focus and flies: W, A, S and D held, the wheel
+    // for a jump along the view. Faster the higher it is above the ground.
+    bool fly_keys[4] = {false, false, false, false};
+    const auto fly = [&](float forward_seconds, float right_seconds) {
+        auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));
+        auto focus_state = velk::read_state<velk::ITrs>(static_cast<velk::ITrs::Ptr>(focus_trs));
+        if (!state || !focus_state) {
+            return;
+        }
+        velk::vec3 at = focus_state->translate;
+        const float speed = std::max(150.f, std::abs(ground_y(at.x, at.z) - at.y));
+        const float yaw = state->yaw * 3.14159265f / 180.f;
+        const float pitch = state->pitch * 3.14159265f / 180.f;
+        const velk::vec3 forward{-std::sin(yaw) * std::cos(pitch), -std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+        const velk::vec3 right{std::cos(yaw), 0.f, -std::sin(yaw)};
+        at = at + forward * (forward_seconds * speed) + right * (right_seconds * speed);
+        focus_trs.set_translate(at);
+    };
+
     velk::ScopedHandler pointer_sub = window.add_on_pointer_event([&](const velk::ui::PointerEvent& e) {
         if (e.action == velk::ui::PointerAction::Down && e.button == velk::ui::PointerButton::Right) {
             orbit_dragging = true;
@@ -1168,20 +1452,32 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             orbit_dragging = false;
         } else if (e.action == velk::ui::PointerAction::Move && orbit_dragging) {
             if (auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit))) {
-                orbit.set_yaw(state->yaw + (e.position.x - orbit_last_x) * 0.3f);
-                orbit.set_pitch(state->pitch + (e.position.y - orbit_last_y) * 0.3f);
+                // Flying, the view turns the way the mouse moves.
+                const float turn = nature ? -0.2f : 0.3f;
+                orbit.set_yaw(state->yaw + (e.position.x - orbit_last_x) * turn);
+                const float pitch = state->pitch + (e.position.y - orbit_last_y) * turn;
+                orbit.set_pitch(nature ? std::clamp(pitch, -89.f, 89.f) : pitch);
             }
             orbit_last_x = e.position.x;
             orbit_last_y = e.position.y;
         }
     });
     velk::ScopedHandler scroll_sub(window.input()->on_scroll_event(), [&](const velk::ui::ScrollEvent& e) {
+        if (nature) {
+            fly(e.delta.y > 0 ? 0.5f : -0.5f, 0.f);
+            return;
+        }
         if (auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit))) {
             orbit.set_distance(state->distance * (e.delta.y > 0 ? 0.9f : 1.1f));
         }
     });
     velk::ScopedHandler key_sub = window.add_on_key_event([&](const velk::ui::KeyEvent& e) {
-        if (e.action == velk::ui::KeyAction::Up) {
+        const bool held = e.action != velk::ui::KeyAction::Up;
+        if (e.key == 87) fly_keys[0] = held;
+        if (e.key == 83) fly_keys[1] = held;
+        if (e.key == 65) fly_keys[2] = held;
+        if (e.key == 68) fly_keys[3] = held;
+        if (!held) {
             return;
         }
         auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));
@@ -1193,6 +1489,9 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         if (e.key == 67) {
             VELK_LOG(I, "scale: view=%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", focus_state->translate.x, focus_state->translate.y,
                      focus_state->translate.z, state->yaw, state->pitch, state->distance);
+            return;
+        }
+        if (nature) {
             return;
         }
         // Key codes of W, A, S and D.
@@ -1233,10 +1532,22 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     constexpr long kFlybySections = kFlybyStops * 2;
     velk::vector<PassSamples> flyby_passes[kFlybySections];
     auto last_frame_time = Clock::now();
+    auto last_fly_time = Clock::now();
 
     while (app.poll()) {
         // Motion follows the frame number, so runs are comparable.
         const float t = static_cast<float>(frame) / 60.f;
+
+        const auto fly_time = Clock::now();
+        if (nature && hold_stop < 0) {
+            const float seconds = std::chrono::duration<float>(fly_time - last_fly_time).count();
+            const float forward = (fly_keys[0] ? seconds : 0.f) - (fly_keys[1] ? seconds : 0.f);
+            const float right = (fly_keys[3] ? seconds : 0.f) - (fly_keys[2] ? seconds : 0.f);
+            if (forward != 0.f || right != 0.f) {
+                fly(forward, right);
+            }
+        }
+        last_fly_time = fly_time;
 
         if (hold_stop >= 0 && forest) {
             orbit.set_distance(hold_distance > 0.f ? hold_distance : flyby_stops[hold_stop].distance);
