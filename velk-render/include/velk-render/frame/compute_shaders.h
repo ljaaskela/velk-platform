@@ -1686,14 +1686,16 @@ void main()
 
 )"
                                                                       R"(
+        // A pixel's width on the surface, wider when seen at a shallow angle.
+        mat4 footprint_vp = VELK_GLOBALS.view_projection;
+        float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
+        float pixel_width = length(world_pos - VELK_GLOBALS.cam_pos.xyz) * 2.0 / (footprint_f * float(pc.height))
+            / sqrt(max(NdotV, 0.05));
+
         vec3 direct_diffuse = vec3(0.0);
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_lights.data[pc.lights_base + res_light];
-            // A pixel's width on the surface, wider when seen at a shallow angle.
-            mat4 footprint_vp = VELK_GLOBALS.view_projection;
-            float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
-            velk_ray_footprint = length(world_pos - VELK_GLOBALS.cam_pos.xyz) * 2.0 / (footprint_f * float(pc.height))
-                / sqrt(max(NdotV, 0.05));
+            velk_ray_footprint = pixel_width;
             velk_ray_lift = lod_error;
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             velk_ray_footprint = 0.0;
@@ -1738,9 +1740,10 @@ void main()
         // long-range contact shadow we'd want stochastic hemisphere
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
+        // Occlusion over less than a pixel's width cannot be resolved, so it is not traced.
         float ao = 1.0;
-        if (trace_now && VELK_GLOBALS.bvh_node_count != 0u) {
-            const float ao_range = 0.3;
+        const float ao_range = 0.3;
+        if (trace_now && VELK_GLOBALS.bvh_node_count != 0u && ao_range > pixel_width) {
             Ray ao_r;
             ao_r.origin = world_pos + N * (0.01 + lod_error);
             ao_r.dir    = N;
