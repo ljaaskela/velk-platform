@@ -63,6 +63,10 @@
 // budget=MB: limits the GPU memory a forest's instances use.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
+// noshadow: the sun casts no ray-traced shadows.
+// flat:     nature's ground has no height.
+// sun=N:    the sun is N degrees above the horizon.
+// leaves=N: nature's trees have N times as many leaves, larger or smaller to keep their area.
 // view=x,y,z,yaw,pitch,distance: starts the camera there. C logs the current one.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
@@ -249,14 +253,14 @@ public:
 class Terrain
 {
 public:
-    Terrain(float half_size, uint32_t cells)
+    Terrain(float half_size, uint32_t cells, float height_scale)
         : half_size_(half_size), cells_(cells), cell_size_(half_size * 2.f / static_cast<float>(cells))
     {
         VELK_PERF_SCOPE("scale.terrain_heights");
         heights_.resize(static_cast<size_t>(cells + 1) * (cells + 1));
         for (uint32_t z = 0; z <= cells; ++z) {
             for (uint32_t x = 0; x <= cells; ++x) {
-                heights_[index(x, z)] = generate(grid_coord(x), grid_coord(z));
+                heights_[index(x, z)] = generate(grid_coord(x), grid_coord(z)) * height_scale;
             }
         }
     }
@@ -978,6 +982,10 @@ int main(int argc, char* argv[])
     float hold_pitch = 0.f;
     bool has_view = false;
     float view[6] = {};
+    float leaf_density = 1.f;
+    bool no_shadow = false;
+    bool flat_terrain = false;
+    float sun_angle = 0.f;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
@@ -995,6 +1003,10 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "distance=", 9) == 0) hold_distance = static_cast<float>(std::atof(argv[i] + 9));
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
+        no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
+        flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
+        if (std::strncmp(argv[i], "sun=", 4) == 0) sun_angle = static_cast<float>(std::atof(argv[i] + 4));
+        if (std::strncmp(argv[i], "leaves=", 7) == 0) leaf_density = static_cast<float>(std::atof(argv[i] + 7));
         if (std::strncmp(argv[i], "view=", 5) == 0) {
             has_view = std::sscanf(argv[i] + 5, "%f,%f,%f,%f,%f,%f", &view[0], &view[1], &view[2], &view[3], &view[4], &view[5]) == 6;
         }
@@ -1056,7 +1068,7 @@ int main(int argc, char* argv[])
     const float extent = static_cast<float>(columns) * (forest ? tree_spacing : kElementSpacing);
 
     constexpr uint32_t kTerrainCells = 256;
-    const Terrain terrain(nature ? extent * 0.5f + 400.f : 1.f, nature ? kTerrainCells : 1u);
+    const Terrain terrain(nature ? extent * 0.5f + 400.f : 1.f, nature ? kTerrainCells : 1u, flat_terrain ? 0.f : 1.f);
     const auto ground_y = [&](float x, float z) { return nature ? kFloorY - terrain.height_at(x, z) : kFloorY; };
 
     auto cam_trait = velk::trait::render::create_camera();
@@ -1128,10 +1140,12 @@ int main(int argc, char* argv[])
     // Sun.
     {
         auto light = velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, 2.5f);
-        light.add_technique(velk::technique::create_rt_shadow());
+        if (!no_shadow) {
+            light.add_technique(velk::technique::create_rt_shadow());
+        }
         auto sun = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({low_sun || nature ? 15.f : 35.f, 25.f, 0.f});
+        trs.set_rotation({sun_angle > 0.f ? sun_angle : low_sun || nature ? 15.f : 35.f, 25.f, 0.f});
         sun.add_trait(trs);
         sun.add_trait(light);
         scene.add(root, sun);
@@ -1191,9 +1205,15 @@ int main(int argc, char* argv[])
         };
         const auto bark = [](const velk::color& c) { return velk::material::create_standard(c, 0.f, 0.9f); };
         //                         seed trunk radius lvl kids first spread ratio radius rise  taper  leaves leaf sizes
-        const TreeShape oak_shape{ 11u, 22.f, 2.4f,  3,  5,   0.5f, 0.85f, 0.62f, 0.62f, 0.35f, false, 26,  3.0f, 2.2f};
-        const TreeShape birch_shape{23u, 34.f, 1.3f, 3,  4,   0.4f, 0.55f, 0.58f, 0.60f, -0.15f, false, 22, 2.2f, 1.6f};
-        const TreeShape pine_shape{37u, 78.f, 1.9f,  2,  9,   0.18f, 1.25f, 0.34f, 0.5f, 0.05f, true,  20,  3.4f, 0.8f};
+        TreeShape oak_shape{ 11u, 22.f, 2.4f,  3,  5,   0.5f, 0.85f, 0.62f, 0.62f, 0.35f, false, 26,  3.0f, 2.2f};
+        TreeShape birch_shape{23u, 34.f, 1.3f, 3,  4,   0.4f, 0.55f, 0.58f, 0.60f, -0.15f, false, 22, 2.2f, 1.6f};
+        TreeShape pine_shape{37u, 78.f, 1.9f,  2,  9,   0.18f, 1.25f, 0.34f, 0.5f, 0.05f, true,  20,  3.4f, 0.8f};
+        // Fewer, larger leaves keep a crown's area.
+        for (TreeShape* shape : {&oak_shape, &birch_shape, &pine_shape}) {
+            shape->leaves = std::max(1, static_cast<int>(static_cast<float>(shape->leaves) * leaf_density + 0.5f));
+            shape->leaf_length /= std::sqrt(leaf_density);
+            shape->leaf_width /= std::sqrt(leaf_density);
+        }
         velk::Mesh oak(TreeGrower(oak_shape).build(*render_context, bark(velk::color{0.24f, 0.17f, 0.11f, 1.f}), foliage(velk::color{0.11f, 0.26f, 0.05f, 1.f})));
         velk::Mesh birch(TreeGrower(birch_shape).build(*render_context, bark(velk::color{0.58f, 0.55f, 0.50f, 1.f}), foliage(velk::color{0.26f, 0.38f, 0.08f, 1.f})));
         velk::Mesh pine(TreeGrower(pine_shape).build(*render_context, bark(velk::color{0.20f, 0.14f, 0.10f, 1.f}), foliage(velk::color{0.04f, 0.15f, 0.07f, 1.f})));
