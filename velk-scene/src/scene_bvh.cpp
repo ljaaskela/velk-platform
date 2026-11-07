@@ -9,6 +9,7 @@
 #include <velk-scene/interface/intf_visual.h>
 
 #include <velk-render/api/cached_view_pass.h>
+#include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -519,6 +520,138 @@ void SceneBvh::demote_quiet_instances(InstanceGroup& group)
     }
 }
 
+void SceneBvh::alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity,
+                                   uint32_t list_capacity)
+{
+    group.cull_table = {};
+    group.cull_list = {};
+    group.cull_table_capacity = 0;
+    group.cull_list_capacity = 0;
+    group.cull_next_entry = 0;
+    group.cull_free_entries.clear();
+    group.cull_chunks = 0;
+    group.visual->set_partition_cull(0, 0, 0);
+
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return;
+    }
+    group.cull_table = arena->alloc(uint64_t(table_capacity) * kCullEntryWords * sizeof(uint32_t));
+    group.cull_list = arena->alloc((uint64_t(list_capacity) + kCullChunkListHeaderWords) * sizeof(uint32_t));
+    if (!group.cull_table.valid() || !group.cull_list.valid()) {
+        group.cull_table = {};
+        group.cull_list = {};
+        return;
+    }
+    group.cull_table_capacity = table_capacity;
+    group.cull_list_capacity = list_capacity;
+
+    vector<uint32_t> empty;
+    empty.resize(size_t(table_capacity) * kCullEntryWords, 0u);
+    arena->write_at(group.cull_table.offset(), empty.data(), empty.size() * sizeof(uint32_t));
+    const uint32_t header[kCullChunkListHeaderWords] = {0u, 1u, 1u, 0u};
+    arena->write_at(group.cull_list.offset(), header, sizeof(header));
+
+    group.visual->set_partition_cull(static_cast<uint32_t>(group.cull_table.offset() / sizeof(uint32_t)), table_capacity,
+                                     static_cast<uint32_t>(group.cull_list.offset() / sizeof(uint32_t)));
+}
+
+void SceneBvh::write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh_table)
+{
+    uint32_t entry[kCullEntryWords];
+    std::memcpy(entry, partition.cull_bounds.min, sizeof(float) * 3);
+    std::memcpy(entry + 3, partition.cull_bounds.max, sizeof(float) * 3);
+    entry[6] = static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t));
+    entry[7] = partition.cull_chunks;
+    const uint64_t at = partition.group->cull_table.offset() + uint64_t(partition.cull_entry) * sizeof(entry);
+    if (fresh_table) {
+        arena.write_at(at, entry, sizeof(entry));
+    } else {
+        arena.update_at(at, entry, sizeof(entry));
+    }
+}
+
+void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
+{
+    InstanceGroup& group = *partition.group;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena || !group.cull_table.valid()) {
+        return;
+    }
+
+    const auto chunks = static_cast<uint32_t>((partition.members.size() + kCullChunkSlots - 1u) / kCullChunkSlots);
+    const uint32_t chunks_elsewhere = group.cull_chunks - partition.cull_chunks;
+    partition.cull_chunks = 0;
+    const size_t words = size_t(chunks) * kCullChunkSlots;
+    partition.cull_members = arena->alloc(uint64_t(words) * sizeof(uint32_t));
+    if (partition.cull_members.valid()) {
+        partition.cull_chunks = chunks;
+        vector<uint32_t> list;
+        list.reserve(words);
+        list.insert(list.end(), partition.members.begin(), partition.members.end());
+        list.resize(words, kCullNoSlot);
+        arena->write_at(partition.cull_members.offset(), list.data(), words * sizeof(uint32_t));
+    } else {
+        VELK_LOG(E, "SceneBvh: no room for a partition's culling list");
+    }
+    group.cull_chunks = chunks_elsewhere + partition.cull_chunks;
+
+    // Replaced lists and tables are fresh, so nothing has read them. The pass that reads
+    // them records again, since the visual reports new words.
+    bool grew = false;
+    uint32_t list_capacity = group.cull_list_capacity;
+    if (group.cull_chunks > list_capacity) {
+        list_capacity = group.cull_chunks + group.cull_chunks / 4u + 16u;
+        grew = true;
+    }
+    uint32_t table_capacity = group.cull_table_capacity;
+    if (partition.cull_entry == kUnplaced && group.cull_free_entries.empty() && group.cull_next_entry == table_capacity) {
+        table_capacity = table_capacity * 2u + 16u;
+        grew = true;
+    }
+    if (grew) {
+        const uint32_t chunks_now = group.cull_chunks;
+        const uint32_t next_entry = group.cull_next_entry;
+        vector<uint32_t> free_entries = std::move(group.cull_free_entries);
+        alloc_instance_cull(group, ctx, table_capacity, list_capacity);
+        group.cull_chunks = chunks_now;
+        group.cull_next_entry = next_entry;
+        group.cull_free_entries = std::move(free_entries);
+        if (!group.cull_table.valid()) {
+            return;
+        }
+        for (uint32_t p : group.partitions) {
+            if (partitions_[p].cull_entry != kUnplaced && &partitions_[p] != &partition) {
+                write_cull_entry(partitions_[p], *arena, true);
+            }
+        }
+    }
+
+    if (partition.cull_entry == kUnplaced) {
+        if (!group.cull_free_entries.empty()) {
+            partition.cull_entry = group.cull_free_entries.back();
+            group.cull_free_entries.pop_back();
+        } else {
+            partition.cull_entry = group.cull_next_entry++;
+        }
+    }
+    write_cull_entry(partition, *arena, grew);
+}
+
+void SceneBvh::release_partition_cull(Partition& partition, FrameContext& ctx)
+{
+    InstanceGroup& group = *partition.group;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena || !group.cull_table.valid() || partition.cull_entry == kUnplaced) {
+        return;
+    }
+    group.cull_chunks -= partition.cull_chunks;
+    partition.cull_chunks = 0;
+    write_cull_entry(partition, *arena, false);
+    group.cull_free_entries.push_back(partition.cull_entry);
+    partition.cull_entry = kUnplaced;
+}
+
 void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
 {
     VELK_PERF_SCOPE("renderer.instance_cut");
@@ -527,6 +660,10 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
     alloc_instance_motion(group, ctx);
 
     const auto slot_count = static_cast<uint32_t>(group.visual->get_transforms().size());
+    // Room for movers to leave their partitions and for a few new ones, before growing.
+    const uint32_t table_capacity = slot_count / kPartitionRecords + slot_count / (kPartitionRecords * 8u) + 16u;
+    alloc_instance_cull(group, ctx, table_capacity, slot_count / kCullChunkSlots + table_capacity);
+
     group.slot_partition.clear();
     group.slot_partition.resize(slot_count, kUnplaced);
 
@@ -726,6 +863,16 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                 ref.aabb_max[3] += delta[1];
                 z += delta[2];
                 std::memcpy(&ref.first_shape, &z, sizeof(float));
+
+                Partition& partition = partitions_[p];
+                for (int k = 0; k < 3; ++k) {
+                    partition.cull_bounds.min[k] += delta[k];
+                    partition.cull_bounds.max[k] += delta[k];
+                }
+                auto cull_arena = emit.frame.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+                if (cull_arena && group.cull_table.valid() && partition.cull_entry != kUnplaced) {
+                    write_cull_entry(partition, *cull_arena, false);
+                }
             }
             top_dirty_ = true;
         }
@@ -1091,6 +1238,7 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
                 if (partition.group->dynamic_partition == p) {
                     partition.group->dynamic_partition = kUnplaced;
                 }
+                release_partition_cull(partition, ctx);
             }
             partition = Partition{};
             free_partitions_.push_back(p);
@@ -1119,6 +1267,13 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     }
     for (const auto& item : items) {
         merge_bounds(bounds_lo, bounds_hi, item.min, item.max);
+    }
+    if (group) {
+        for (int k = 0; k < 3; ++k) {
+            partition.cull_bounds.min[k] = bounds_lo[k];
+            partition.cull_bounds.max[k] = bounds_hi[k];
+        }
+        write_partition_cull(partition, ctx);
     }
 
     // A tree built on the GPU keeps the records in the order of the members.

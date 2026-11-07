@@ -2516,9 +2516,16 @@ void VkBackend::defer_free_persistent_secondary(::VkCommandBuffer cb)
 
 void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call)
 {
+    if (bind_dispatch(cb, call)) {
+        vkCmdDispatch(cb, call.groups_x, call.groups_y, call.groups_z);
+    }
+}
+
+bool VkBackend::bind_dispatch(::VkCommandBuffer cb, const DispatchCall& call)
+{
     auto* pipe = interface_cast<IVkGpuPipeline>(call.pipeline);
-    if (!pipe) return;
-    if (pipe->vk_bind_point() != VK_PIPELINE_BIND_POINT_COMPUTE) return;
+    if (!pipe) return false;
+    if (pipe->vk_bind_point() != VK_PIPELINE_BIND_POINT_COMPUTE) return false;
 
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->vk_pipeline());
 
@@ -2530,8 +2537,7 @@ void VkBackend::record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& c
                            call.root_constants_size,
                            call.root_constants);
     }
-
-    vkCmdDispatch(cb, call.groups_x, call.groups_y, call.groups_z);
+    return true;
 }
 
 void VkBackend::record_blit_to_texture(::VkCommandBuffer cb, IGpuTexture& source,

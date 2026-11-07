@@ -62,6 +62,18 @@ public:
     bool take_motion_params(float out[4]) override;
     bool take_rest_changed() override;
     void take_changed_slots(vector<uint32_t>& changed, bool& all) override;
+    void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) override
+    {
+        cull_table_word_ = table_word;
+        cull_count_ = count;
+        cull_list_word_ = list_word;
+    }
+    void get_partition_cull(uint32_t& table_word, uint32_t& count, uint32_t& list_word) const override
+    {
+        table_word = cull_table_word_;
+        count = cull_count_;
+        list_word = cull_list_word_;
+    }
 
 private:
     uint32_t place(const InstanceTransform& transform, uint32_t mesh);
@@ -81,6 +93,10 @@ private:
     vector<uint32_t> changed_slots_;
     bool flush_all_ = true;
     bool all_changed_ = true;
+
+    uint32_t cull_table_word_ = 0;
+    uint32_t cull_count_ = 0;
+    uint32_t cull_list_word_ = 0;
 
     ArenaRegion region_;
     mat4 flushed_world_{};

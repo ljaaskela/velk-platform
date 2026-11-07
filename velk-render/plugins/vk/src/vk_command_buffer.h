@@ -45,6 +45,7 @@ public:
     void set_viewport(::velk::rect viewport) override;
 void record_draws(::velk::array_view<const ::velk::DrawCall> calls) override;
     void record_dispatch(const ::velk::DispatchCall& call) override;
+    void record_dispatch_indirect(const ::velk::DispatchCall& call, ::velk::IGpuBuffer* args, uint64_t offset) override;
     void record_global_barrier() override;
     void record_copy_buffer(::velk::IGpuBuffer* src, uint64_t src_offset, ::velk::IGpuBuffer* dst,
                             uint64_t dst_offset, uint64_t size) override;

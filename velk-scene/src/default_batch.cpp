@@ -110,6 +110,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     out.visible_word = owner->cull_list_words_[cull_mesh_];
     out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
     out.max_distance = instance_source_->get_draw_distance();
+    instance_source_->get_partition_cull(out.partition_table_word, out.partition_count, out.chunk_list_word);
     return true;
 }
 

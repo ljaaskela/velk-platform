@@ -65,6 +65,11 @@ struct InstanceCullInfo
     uint32_t visible_word = 0;    ///< This batch's list of visible instance slots.
     uint32_t count_word = 0;      ///< How many slots the list holds, once culled.
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
+    /// Partitions to test before instances: see `instance_partition_cull_src`. Without
+    /// them, every slot is tested.
+    uint32_t partition_table_word = 0;
+    uint32_t partition_count = 0;
+    uint32_t chunk_list_word = 0;
 };
 
 /**

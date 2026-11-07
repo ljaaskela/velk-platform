@@ -93,6 +93,8 @@ public:
     /// for one compute call. Shared by `VkCommandBuffer::record_dispatch`
     /// (producer-recorded path) and the legacy `dispatch`.
     void record_dispatch_call(::VkCommandBuffer cb, const DispatchCall& call);
+    /// Binds a compute call's pipeline and push constants. Returns whether it could.
+    bool bind_dispatch(::VkCommandBuffer cb, const DispatchCall& call);
 
     /// Records the layout-transition + vkCmdBlitImage + final-layout
     /// transition sequence for blitting a texture into a destination

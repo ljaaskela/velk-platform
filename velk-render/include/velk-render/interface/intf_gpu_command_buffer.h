@@ -142,6 +142,10 @@ public:
     /// Record a compute dispatch.
     virtual void record_dispatch(const DispatchCall& call) = 0;
 
+    /// Record a compute dispatch whose group counts are three words at @p offset in
+    /// @p args. The call's own group counts are ignored. Barriers are up to the caller.
+    virtual void record_dispatch_indirect(const DispatchCall& call, IGpuBuffer* args, uint64_t offset) = 0;
+
     /// Make all earlier work visible to all later work, for anything the graph's
     /// barriers do not cover, such as a compute shader writing what a draw reads.
     virtual void record_global_barrier() = 0;

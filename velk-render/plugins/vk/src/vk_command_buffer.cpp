@@ -161,6 +161,15 @@ void VkCommandBuffer::record_dispatch(const ::velk::DispatchCall& call)
                          0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
+void VkCommandBuffer::record_dispatch_indirect(const ::velk::DispatchCall& call, ::velk::IGpuBuffer* args, uint64_t offset)
+{
+    auto* vk_args = interface_cast<IVkGpuBuffer>(args);
+    if (cmd_ == VK_NULL_HANDLE || !backend_ || !vk_args) return;
+    if (backend_->bind_dispatch(cmd_, call)) {
+        vkCmdDispatchIndirect(cmd_, vk_args->vk_buffer(), offset);
+    }
+}
+
 void VkCommandBuffer::record_global_barrier()
 {
     if (cmd_ == VK_NULL_HANDLE) return;

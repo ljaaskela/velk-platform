@@ -247,6 +247,11 @@ public:
     /// Slots changed since the last call, added to @p changed. Sets @p all instead when
     /// everything is to be treated as changed, such as on a new motion function.
     virtual void take_changed_slots(vector<uint32_t>& changed, bool& all) = 0;
+
+    /// Where culling finds this visual's partitions in the culling arena, set by the BVH
+    /// that holds them. See `instance_partition_cull_src`. A count of 0 means none.
+    virtual void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) = 0;
+    virtual void get_partition_cull(uint32_t& table_word, uint32_t& count, uint32_t& list_word) const = 0;
 };
 
 } // namespace velk

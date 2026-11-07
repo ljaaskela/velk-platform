@@ -126,6 +126,15 @@ private:
         vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
         uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.
 
+        /// What culling reads, in the culling arena. See `instance_partition_cull_src`.
+        ArenaRegion cull_table;
+        uint32_t cull_table_capacity = 0;
+        uint32_t cull_next_entry = 0;
+        vector<uint32_t> cull_free_entries;
+        ArenaRegion cull_list;
+        uint32_t cull_list_capacity = 0;
+        uint32_t cull_chunks = 0;  ///< In all its partitions, which the list has to hold.
+
         /// Holds instances that moved recently. It rebuilds each frame it changes, and
         /// joins the root rather than the top tree, so a mover costs only itself.
         uint32_t dynamic_partition = kUnplaced;
@@ -156,6 +165,10 @@ private:
         /// until `dirty` is handled.
         vector<uint32_t> members;
         InstanceGroup* group = nullptr;  ///< Set when this partition holds instances.
+        ArenaRegion cull_members;           ///< Its slots, in chunks.
+        uint32_t cull_entry = kUnplaced;    ///< Its entry in the group's table.
+        uint32_t cull_chunks = 0;
+        BvhItemBounds cull_bounds{};
         ArenaRegion gpu_build_items;    ///< This frame's items, when the GPU builds the tree.
         ArenaRegion gpu_build_scratch;  ///< What the build works in. Kept while it is large enough.
         uint32_t gpu_build_capacity = 0;
@@ -184,6 +197,13 @@ private:
     /// Cuts all of @p group's live instances into new partitions, by Morton order.
     void cut_instances(InstanceGroup& group, FrameContext& ctx);
     void free_instance_partitions(InstanceGroup& group);
+    /// Makes the tables culling reads for @p group, empty, and tells its visual.
+    void alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity, uint32_t list_capacity);
+    /// Brings culling's view of @p partition up to date with its members and cull_bounds.
+    void write_partition_cull(Partition& partition, FrameContext& ctx);
+    /// Takes @p partition out of what culling reads. For one about to be freed.
+    void release_partition_cull(Partition& partition, FrameContext& ctx);
+    void write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh_table);
     /// Moves @p slot to its group's dynamic partition.
     void promote_instance(InstanceGroup& group, uint32_t slot);
     /// Sends instances that have been still for a while back where they came from.

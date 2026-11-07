@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -50,6 +50,8 @@
 //           move.
 // wind:     a forest's trees sway on the GPU, with gusts crossing the forest.
 // gpu:      deform runs the same ripple on the GPU instead of the CPU.
+// heavy:    a forest's tree has about 10,000 triangles instead of 24. All of them are drawn
+//           if in view, so start with few trees, or `near`.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -208,9 +210,8 @@ velk::IMesh::Ptr build_triangle_mesh(velk::IRenderContext& ctx, float size, uint
 /// Builds a low-poly tree standing on y = 0 and growing towards -y: a trunk and a
 /// crown, as a primitive each.
 velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const velk::IMaterial::Ptr& trunk,
-                                 const velk::IMaterial::Ptr& crown)
+                                 const velk::IMaterial::Ptr& crown, uint32_t sides = 6, uint32_t rings = 1)
 {
-    constexpr uint32_t kSides = 6;
     constexpr float kPi = 3.14159265358979323846f;
 
     static constexpr velk::VertexAttribute kAttributes[] = {
@@ -225,18 +226,27 @@ velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const 
                                 const velk::IMaterial::Ptr& material) -> velk::IMeshPrimitive::Ptr {
         velk::vector<Vertex> vertices;
         velk::vector<uint32_t> indices;
-        for (uint32_t s = 0; s < kSides; ++s) {
-            const float theta = static_cast<float>(s) / kSides * kPi * 2.f;
+        for (uint32_t s = 0; s < sides; ++s) {
+            const float theta = static_cast<float>(s) / static_cast<float>(sides) * kPi * 2.f;
             const float c = std::cos(theta);
             const float z = std::sin(theta);
-            vertices.push_back({{c * bottom_radius, bottom_y, z * bottom_radius}, {c, 0.f, z}, {0.f, 0.f}, {-z, 0.f, c, 1.f}});
-            vertices.push_back({{c * top_radius, top_y, z * top_radius}, {c, -0.5f, z}, {0.f, 1.f}, {-z, 0.f, c, 1.f}});
+            for (uint32_t r = 0; r <= rings; ++r) {
+                const float f = static_cast<float>(r) / static_cast<float>(rings);
+                const float radius = bottom_radius + (top_radius - bottom_radius) * f;
+                vertices.push_back({{c * radius, bottom_y + (top_y - bottom_y) * f, z * radius},
+                                    {c, -0.5f * f, z},
+                                    {0.f, f},
+                                    {-z, 0.f, c, 1.f}});
+            }
         }
-        for (uint32_t s = 0; s < kSides; ++s) {
-            const uint32_t a = s * 2;
-            const uint32_t b = (s + 1) % kSides * 2;
-            for (uint32_t i : {a, a + 1, b + 1, a, b + 1, b}) {
-                indices.push_back(i);
+        for (uint32_t s = 0; s < sides; ++s) {
+            const uint32_t next = (s + 1) % sides;
+            for (uint32_t r = 0; r < rings; ++r) {
+                const uint32_t a = s * (rings + 1) + r;
+                const uint32_t b = next * (rings + 1) + r;
+                for (uint32_t i : {a, a + 1, b + 1, a, b + 1, b}) {
+                    indices.push_back(i);
+                }
             }
         }
         velk::vec3 lo{-bottom_radius, std::min(bottom_y, top_y), -bottom_radius};
@@ -349,11 +359,13 @@ int main(int argc, char* argv[])
     bool outlier = false;
     bool mixed = false;
     bool flyby = false;
+    bool heavy = false;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
         mixed = mixed || std::strcmp(argv[i], "mixed") == 0;
         flyby = flyby || std::strcmp(argv[i], "flyby") == 0;
+        heavy = heavy || std::strcmp(argv[i], "heavy") == 0;
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -515,7 +527,9 @@ int main(int argc, char* argv[])
     if (forest) {
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
-        velk::Mesh tree_mesh(build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
+        // 2 cones * 64 sides * 39 rings * 2 triangles.
+        velk::Mesh tree_mesh(heavy ? build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material, 64u, 39u)
+                                   : build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
         if (forest_instances) {
             velk::vector<velk::InstanceTransform> transforms;
             transforms.resize(static_cast<size_t>(element_count));
