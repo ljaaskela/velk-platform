@@ -425,6 +425,90 @@ bool velk_test_shape(Ray local, uint shape_index, float t_min, inout RayHit hit)
     return false;
 }
 
+)"
+                                                                      R"(
+// Whether a mesh blocks a ray within t_max, in the ray's t. Apart from intersect_mesh so that
+// it stops at the first blocker, within the ray's length, with nothing else to keep.
+bool velk_mesh_blocks(Ray ray, RtShape shape, float t_max)
+{
+    if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    float ld_scale = length(ray.dir);
+    if (ld_scale < 1e-30) return false;
+    vec3 ld = ray.dir / ld_scale;
+    float limit = min(t_max * ld_scale, 1e30);
+    Ray local_ray;
+    local_ray.origin = ray.origin;
+    local_ray.dir = ld;
+    float t_aabb;
+    if (!ray_aabb(local_ray, shape.origin.xyz, shape.u_axis.xyz, limit, t_aabb)) return false;
+
+    MeshStaticData st = velk_mesh_static(shape);
+    if (st.triangle_count == 0u || st.vertex_stride == 0u || st.blas_node_count == 0u) return false;
+    uint blas_node_base = st.blas_node_base;
+    uint word_base = st.cluster_word_base;
+
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = st.blas_root;
+    while (sp > 0) {
+        BvhNode node = velk_blas_nodes.data[blas_node_base + stack[--sp]];
+        if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, limit, t_aabb)) continue;
+        if (node.shape_count > 0u) {
+            uint triangle_count = node.shape_count & 0xFFFFu;
+            uint positions = word_base + node.first_child;
+            for (uint k = 0u; k < triangle_count; ++k) {
+                uint tri = velk_cluster_words.data[word_base + node.first_shape + k];
+                uint p0 = positions + (tri & 0xFFu) * 3u;
+                uint p1 = positions + ((tri >> 8u) & 0xFFu) * 3u;
+                uint p2 = positions + ((tri >> 16u) & 0xFFu) * 3u;
+                vec3 v0 = vec3(uintBitsToFloat(velk_cluster_words.data[p0]), uintBitsToFloat(velk_cluster_words.data[p0 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p0 + 2u]));
+                vec3 e1 = vec3(uintBitsToFloat(velk_cluster_words.data[p1]), uintBitsToFloat(velk_cluster_words.data[p1 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p1 + 2u])) - v0;
+                vec3 e2 = vec3(uintBitsToFloat(velk_cluster_words.data[p2]), uintBitsToFloat(velk_cluster_words.data[p2 + 1u]),
+                               uintBitsToFloat(velk_cluster_words.data[p2 + 2u])) - v0;
+                vec3 p = cross(ld, e2);
+                float det = dot(e1, p);
+                if (abs(det) < 1e-7 * max(length(e1) * length(p), 1e-30)) continue;
+                float inv_det = 1.0 / det;
+                vec3 to_v0 = ray.origin - v0;
+                float u = dot(to_v0, p) * inv_det;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(to_v0, e1);
+                float v = dot(ld, q) * inv_det;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float tt = dot(e2, q) * inv_det;
+                if (tt >= 1e-4 * max(length(e1), length(e2)) && tt < limit) return true;
+            }
+        } else if (node.child_count == 2u) {
+            // The nearer child first, as the likelier blocker.
+            BvhNode l = velk_blas_nodes.data[blas_node_base + node.first_child];
+            BvhNode r = velk_blas_nodes.data[blas_node_base + node.first_child + 1u];
+            float t_l, t_r;
+            bool h_l = ray_aabb(local_ray, l.aabb_min.xyz, l.aabb_max.xyz, limit, t_l);
+            bool h_r = ray_aabb(local_ray, r.aabb_min.xyz, r.aabb_max.xyz, limit, t_r);
+            if (h_l && h_r) {
+                if (t_l <= t_r) {
+                    if (sp < 32) stack[sp++] = node.first_child + 1u;
+                    if (sp < 32) stack[sp++] = node.first_child;
+                } else {
+                    if (sp < 32) stack[sp++] = node.first_child;
+                    if (sp < 32) stack[sp++] = node.first_child + 1u;
+                }
+            } else if (h_l) {
+                if (sp < 32) stack[sp++] = node.first_child;
+            } else if (h_r) {
+                if (sp < 32) stack[sp++] = node.first_child + 1u;
+            }
+        } else {
+            for (uint c = 0u; c < node.child_count; ++c) {
+                if (sp < 32) stack[sp++] = node.first_child + c;
+            }
+        }
+    }
+    return false;
+}
+
 // Intersects a record's shapes, returning the nearest hit in (t_min, t_max) with
 // its normal in world space. With @p any_hit, returns at the first hit found.
 bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool any_hit, out RayHit hit)
@@ -447,6 +531,13 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
                                                     float(VELK_GLOBALS.present_counter) / 60.0);
             }
 #endif
+            if (any_hit) {
+                RtShape blocker = velk_bvh_shapes.data[rec.first_shape + i];
+                if (blocker.shape_kind == 255u) {
+                    if (velk_mesh_blocks(shape_ray, blocker, hit.t)) return true;
+                    continue;
+                }
+            }
             if (velk_test_shape(shape_ray, rec.first_shape + i, t_min, hit)) {
                 found = true;
                 if (any_hit) return true;
