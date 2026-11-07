@@ -79,6 +79,7 @@ public:
     void set_gpu_displacement(float max_displacement) override;
     bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
     bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
+    void set_deforming() override { deforming_ = true; }
 
 private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
@@ -129,6 +130,7 @@ private:
     ArenaRegion lod_table_region_;
     ArenaRegion lod_index_region_;
     MeshLodInfo lod_info_{};
+    bool deforming_ = false;
 };
 
 /// Concrete IMesh container. Stores a list of primitives and a lazily

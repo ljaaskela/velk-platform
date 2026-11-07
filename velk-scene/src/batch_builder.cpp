@@ -9,6 +9,8 @@
 #include <velk/interface/intf_object_storage.h>
 #include <velk/string.h>
 
+#include <velk-scene/instance_types.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -268,6 +270,12 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                             po.topology = to_backend_topology(de.primitive->get_topology());
                         }
                         batch->set_pipeline_options(po);
+                        // Lists are per view, so a render target's subtree stays out, and
+                        // the order of blended triangles matters.
+                        if (track_slots && de.primitive && !de.instance_source && po.blend_mode != BlendMode::Alpha
+                            && de.instance_size == sizeof(ElementInstance)) {
+                            batch->enable_lod_cull();
+                        }
 
                         target_batches.push_back(std::move(batch_ptr));
                         last_bkey = bkey;

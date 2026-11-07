@@ -281,8 +281,12 @@ public:
     virtual bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) = 0;
 
     /// Builds this primitive's level of detail hierarchy on first call and publishes it. False
-    /// when it has too few clusters for this to be worth it, or none to build from.
+    /// when it has too few clusters for this to be worth it, none to build from, or deforms,
+    /// since a hierarchy's bounds and errors hold for one shape.
     virtual bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) = 0;
+
+    /// Marks this primitive as one whose vertices will move.
+    virtual void set_deforming() = 0;
 };
 
 /**

@@ -18,6 +18,8 @@ constexpr size_t kGroupClusters = 16;
 constexpr float kStopAboveKept = 0.85f;
 constexpr uint32_t kMaxLevels = 32;
 constexpr uint32_t kNoGroup = 0xFFFFFFFFu;
+/// A normal turning fully over a distance counts as much as moving by that distance.
+constexpr float kNormalWeights[3] = {1.f, 1.f, 1.f};
 
 /// Every vertex's lowest-numbered vertex at the same position, since vertices split for
 /// normals or uvs are one point of the surface.
@@ -137,7 +139,7 @@ void add_cluster(MeshLod& lod, const vector<uint32_t>& indices, const vector<flo
 
 } // namespace
 
-MeshLod build_mesh_lod(const BlasBuild& blas)
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset)
 {
     MeshLod lod;
     if (blas.clusters.empty()) {
@@ -146,6 +148,14 @@ MeshLod build_mesh_lod(const BlasBuild& blas)
     const vector<float> positions = gather_positions(blas);
     const vector<uint32_t> remap = position_remap(positions);
     const size_t vertex_count = positions.size() / 3;
+
+    vector<float> normals;
+    if (vertices) {
+        normals.resize(vertex_count * 3);
+        for (size_t v = 0; v < vertex_count; ++v) {
+            std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
+        }
+    }
 
     // Index lists of all clusters so far, parallel to lod.clusters.
     vector<vector<uint32_t>> lists = gather_clusters(blas);
@@ -217,9 +227,12 @@ MeshLod build_mesh_lod(const BlasBuild& blas)
             simplified.resize(merged.size());
             float error = 0.f;
             const size_t target = merged.size() / 6 * 3;
+            // Clamped keeps normals' error from overstating how far the surface moved.
             const size_t kept = meshopt_simplifyWithAttributes(
-                simplified.data(), merged.data(), merged.size(), positions.data(), vertex_count, sizeof(float) * 3, nullptr, 0,
-                nullptr, 0, locks.data(), target, FLT_MAX, meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute, &error);
+                simplified.data(), merged.data(), merged.size(), positions.data(), vertex_count, sizeof(float) * 3,
+                normals.empty() ? nullptr : normals.data(), sizeof(float) * 3, normals.empty() ? nullptr : kNormalWeights,
+                normals.empty() ? 0 : 3, locks.data(), target, FLT_MAX,
+                meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, &error);
             if (kept == 0 || static_cast<float>(kept) > kStopAboveKept * static_cast<float>(merged.size())) {
                 continue;
             }

@@ -50,7 +50,11 @@ struct MeshLod
 };
 
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.
-MeshLod build_mesh_lod(const BlasBuild& blas);
+/// @param vertices The vertices @p blas indexes, so that normals are kept too. Null to go by
+///        positions alone.
+/// @param stride Bytes per vertex.
+/// @param normal_offset Bytes to a vertex's normal, three floats.
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset);
 
 } // namespace velk::impl
 

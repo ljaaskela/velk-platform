@@ -76,7 +76,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
 {
     if (!lod_table_region_.valid()) {
         // A single cluster has nothing to choose between.
-        if (rt_blas_.clusters.size() < 2) {
+        if (deforming_ || rt_blas_.clusters.size() < 2) {
             return false;
         }
         auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
@@ -84,7 +84,17 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         if (!culling || !mesh_words) {
             return false;
         }
-        const MeshLod lod = build_mesh_lod(rt_blas_);
+        vector<uint8_t> geometry;
+        auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
+        const VertexAttribute* normal = nullptr;
+        for (const auto& attribute : attributes_) {
+            if (attribute.semantic == VertexAttributeSemantic::Normal && attribute.format == VertexAttributeFormat::Float3) {
+                normal = &attribute;
+            }
+        }
+        const bool has_normals = normal && buffer && buffer->read_geometry(geometry);
+        const MeshLod lod = build_mesh_lod(rt_blas_, has_normals ? geometry.data() : nullptr, vertex_stride_,
+                                           has_normals ? normal->offset : 0u);
         const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
         const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
         lod_table_region_ = culling->alloc(clusters_size + levels_size);
@@ -270,6 +280,9 @@ bool DeformingMesh::init(const IMesh& source, IMeshBuilder& builder)
         }
         if (auto from = read_state<IMeshPrimitive>(primitive.get())) {
             write_state<IMeshPrimitive>(copy.get(), [&](IMeshPrimitive::State& s) { s.material = from->material; });
+        }
+        if (auto* copy_internal = interface_cast<IMeshPrimitiveInternal>(copy.get())) {
+            copy_internal->set_deforming();
         }
         copy->set_rt_blas(build_mesh_blas(reinterpret_cast<const float*>(stream.rest.data()), sizeof(MeshVertex),
                                           static_cast<uint32_t>(stream.rest.size()),

@@ -52,6 +52,12 @@ struct BatchBufferLayout
     static constexpr size_t kBufferSize        = kCountOffset + kCountSize; // 48
 };
 
+/// The clusters chosen in a cull start with this many words: how many records follow, and the
+/// group counts of the dispatch that sorts them. A record is an entry, a cluster, a slot and
+/// an error. See `instance_cluster_fill_src`.
+inline constexpr uint32_t kCullChosenHeaderWords = 4;
+inline constexpr uint32_t kCullChosenRecordWords = 4;
+
 /**
  * @brief What GPU culling needs to know about a batch. Batches with the same @c key
  *        are filled by one dispatch. Word offsets are into the culling arena.
@@ -72,6 +78,11 @@ struct InstanceCullInfo
     uint32_t cluster_draws_word = 0;     ///< How many commands are in use, in the culling arena.
     uint32_t cluster_index_word = 0;     ///< Its indices in the mesh-word arena.
     uint32_t cluster_errors_word = 0;    ///< Each list position's surface error in world units, in the culling arena.
+    uint32_t cluster_capacity = 0;       ///< How many positions its list has.
+    uint32_t chosen_word = 0;            ///< The clusters chosen for its visual. Unused when culled together.
+    uint32_t chosen_capacity = 0;        ///< How many records fit there.
+    /// Culled in one dispatch with the other batches that set this, instead of on its own.
+    bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     bool far_form = false;                  ///< Whether instances too small to draw get averaged instead.
     float far_albedo[3] = {1.f, 1.f, 1.f};  ///< Colour of those instances.
