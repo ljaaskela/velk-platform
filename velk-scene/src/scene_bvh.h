@@ -201,6 +201,10 @@ private:
         /// which rays and raster take as a medium.
         bool resident = true;
         float score = 0.f;  ///< Its worth as `pending_load` was worked out.
+        /// Only whether it is resident changed, which leaves its bounds, so the top tree can
+        /// keep its shape, and only its node there is rewritten.
+        bool residency_changed = false;
+        uint32_t top_index = kUnplaced;  ///< Its node in the top tree.
     };
 
     struct EmitContext

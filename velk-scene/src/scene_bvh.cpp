@@ -623,6 +623,7 @@ void SceneBvh::update_residency(InstanceGroup& group)
                 Partition& leaving = partitions_[out];
                 leaving.resident = false;
                 leaving.dirty = true;
+                leaving.residency_changed = true;
                 for (uint32_t slot : leaving.members) {
                     group.visual->release_instance_index(slot);
                 }
@@ -635,6 +636,7 @@ void SceneBvh::update_residency(InstanceGroup& group)
         }
         partition.resident = true;
         partition.dirty = true;
+        partition.residency_changed = true;
         group.resident_members += need;
         group.pending_load.pop_back();
     }
@@ -1370,10 +1372,30 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
             continue;
         }
         partition.dirty = false;
+        const bool residency_only = partition.residency_changed && partition.top_index != kUnplaced
+            && !top_dirty_ && !partition.members.empty() && top_nodes_.valid();
+        partition.residency_changed = false;
         if (is_instance_dynamic(p)) {
             root_dirty_ = true;
-        } else {
+        } else if (!residency_only) {
             top_dirty_ = true;
+        }
+        if (residency_only) {
+            const GpuBvhNode before = partition.ref;
+            upload_partition(partition, ctx, true);
+            // The tree over it still fits as long as the bounds are the same.
+            if (std::memcmp(before.aabb_min, partition.ref.aabb_min, sizeof(float) * 3) != 0
+                || std::memcmp(before.aabb_max, partition.ref.aabb_max, sizeof(float) * 3) != 0) {
+                top_dirty_ = true;
+            } else {
+                ctx.bvh_nodes_arena->update_at(top_nodes_.offset() + uint64_t(partition.top_index) * sizeof(GpuBvhNode),
+                                               &partition.ref, sizeof(GpuBvhNode));
+                if (partition.top_index == 0) {
+                    top_root_ = partition.ref;
+                    root_dirty_ = true;
+                }
+            }
+            continue;
         }
         if (partition.members.empty()) {
             if (partition.group) {
@@ -1921,11 +1943,14 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
         return;
     }
 
-    for (auto& node : tree.nodes) {
+    for (size_t i = 0; i < tree.nodes.size(); ++i) {
+        GpuBvhNode& node = tree.nodes[i];
         if (node.child_count != 0) {
             node.first_child += base;
         } else {
-            node = partitions_[active[tree.order[node.first_shape]]].ref;
+            Partition& partition = partitions_[active[tree.order[node.first_shape]]];
+            partition.top_index = static_cast<uint32_t>(i);
+            node = partition.ref;
         }
     }
     ctx.bvh_nodes_arena->write_at(top_nodes_.offset(), tree.nodes.data(),
