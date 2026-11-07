@@ -82,6 +82,7 @@ public:
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
     ProbeVolume get_probe_volume() const override { return probe_volume_; }
+    bool has_medium() const override;
 
     void invalidate() override { needs_full_build_ = true; }
 
@@ -116,6 +117,8 @@ private:
             uint32_t first_shape = 0;
             uint32_t shape_count = 0;
             BvhItemBounds bounds{};
+            float far_area = 0.f;      ///< Mean projected area at scale 1. 0 without a far form.
+            float far_albedo[3] = {1.f, 1.f, 1.f};
         };
         IInstancedMeshInternal* visual = nullptr;
         mat4 world{};
@@ -230,7 +233,8 @@ private:
     /// Queues a build of @p partition's tree on the GPU, over @p items in the order of
     /// its records, which start at @p record_base.
     bool queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
-                         const float origin[3], uint32_t node_base, uint32_t record_base);
+                         array_view<const float> areas, array_view<const float> albedos, const float origin[3],
+                         uint32_t node_base, uint32_t record_base);
     void rebuild_top_tree(FrameContext& ctx);
     void upload_root(FrameContext& ctx);
     uint32_t alloc_partition();

@@ -26,6 +26,22 @@ inline constexpr uint32_t kCullEntryWords = 8;
 /// Words before the chunks in a chunk list. See instance_partition_cull_src.
 inline constexpr uint32_t kCullChunkListHeaderWords = 4;
 
+// Whether an instance is too small on screen to be worth drawing, in which case it goes
+// through instance_splat_src instead. Each one changes over at its own size, so that no
+// line shows where they do. `area` is its mean projected area, 0 if it never changes over.
+#define VELK_INSTANCE_FAR_GLSL R"(
+const float kFarInstancePixels = 2.0;
+
+bool velk_instance_is_far(uint slot, float area, float clip_w, mat4 vp, float height)
+{
+    if (area <= 0.0 || clip_w <= 0.0) return false;
+    float f = length(vec3(vp[0][1], vp[1][1], vp[2][1]));
+    float pixels = sqrt(area) * f * height * 0.5 / clip_w;
+    float h = float((slot * 2654435761u) >> 16u) / 65536.0;
+    return pixels * (0.7 + 0.6 * h) < kFarInstancePixels;
+}
+)"
+
 /**
  * Tests a visual's partitions against the view and appends the chunks of those that
  * pass to a list, for instance_cull_compute_src to go through. A table entry holds the
@@ -93,9 +109,10 @@ void main()
 /**
  * Tests each instance's bounding sphere against the view and appends the visible
  * slots to its mesh's list in the culling arena, which the vertex shader reads through
- * velk_instance. The table at table_word holds 8 words per mesh: its bounding sphere
+ * velk_instance. The table at table_word holds 12 words per mesh: its bounding sphere
  * (center xyz and radius, as floats), the count of visible slots, the word of the
- * list, and the list's capacity. Instances with a zero matrix have been removed.
+ * list, the list's capacity, and its mean projected area at scale 1. Instances with a
+ * zero matrix have been removed.
  *
  * With chunks_word set, each work group goes through the chunk at that index of the
  * list, as filled by instance_partition_cull_src. Without it, all slots are tested.
@@ -124,8 +141,9 @@ layout(push_constant) uniform PC {
     uint globals_base;
     float max_distance;
     uint chunks_word;
+    uint far_form;
 } pc;
-
+)" VELK_INSTANCE_FAR_GLSL R"(
 void main()
 {
     uint slot = gl_GlobalInvocationID.x;
@@ -137,7 +155,7 @@ void main()
     mat4 world = cull_instances.data[pc.instances_base + slot].world_matrix;
     if (world[3][3] == 0.0) return;
 
-    uint table = pc.table_word + cull_instances.data[pc.instances_base + slot].params.y * 8u;
+    uint table = pc.table_word + cull_instances.data[pc.instances_base + slot].params.y * 12u;
     vec4 sphere = vec4(uintBitsToFloat(cull_words.data[table + 0u]),
                        uintBitsToFloat(cull_words.data[table + 1u]),
                        uintBitsToFloat(cull_words.data[table + 2u]),
@@ -165,10 +183,252 @@ void main()
     if (abs(clip.y) > clip.w + w_reach + radius * length(r1)) return;
     if (abs(clip.z) > clip.w + w_reach + radius * length(r2)) return;
 
+    if (pc.far_form != 0u) {
+        float area = uintBitsToFloat(cull_words.data[table + 7u]) * scale2;
+        if (velk_instance_is_far(slot, area, clip.w, vp, globals.viewport.y)) return;
+    }
+
     uint index = atomicAdd(cull_words.data[table + 4u], 1u);
     if (index < cull_words.data[table + 6u]) {
         cull_words.data[cull_words.data[table + 5u] + index] = slot;
     }
+}
+)";
+
+/**
+ * Adds each instance too small to draw to the pixels it falls on, as its area in pixels,
+ * shared over the 4 nearest so it moves smoothly. Goes through the chunks of the
+ * partitions culling kept, or all slots without a chunk list. Instances behind something
+ * nearer in the g-buffer are left out.
+ */
+inline constexpr string_view instance_splat_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+struct SplatInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer SplatInstances { SplatInstance data[]; } splat_instances;
+layout(set = 1, binding = 16, std430) buffer SplatWords { uint data[]; } splat_words;
+
+layout(push_constant) uniform PC {
+    uint instances_base;
+    uint slot_count;
+    uint table_word;
+    uint globals_base;
+    uint chunks_word;
+    uint words_word;
+    uint width;
+    uint height;
+    uint worldpos_id;
+    uint normal_id;
+} pc;
+)" VELK_INSTANCE_FAR_GLSL R"(
+void add(ivec2 at, float amount)
+{
+    if (at.x < 0 || at.y < 0 || at.x >= int(pc.width) || at.y >= int(pc.height)) return;
+    atomicAdd(splat_words.data[pc.words_word + uint(at.y) * pc.width + uint(at.x)], uint(amount * 4096.0));
+}
+
+void main()
+{
+    uint slot = gl_GlobalInvocationID.x;
+    if (pc.chunks_word != 0xFFFFFFFFu) {
+        slot = splat_words.data[splat_words.data[pc.chunks_word + gl_WorkGroupID.x] + gl_LocalInvocationIndex];
+    }
+    if (slot >= pc.slot_count) return;
+    mat4 world = splat_instances.data[pc.instances_base + slot].world_matrix;
+    if (world[3][3] == 0.0) return;
+
+    uint table = pc.table_word + splat_instances.data[pc.instances_base + slot].params.y * 12u;
+    float mesh_area = uintBitsToFloat(splat_words.data[table + 7u]);
+    if (mesh_area <= 0.0) return;
+    vec3 local_center = vec3(uintBitsToFloat(splat_words.data[table + 0u]), uintBitsToFloat(splat_words.data[table + 1u]),
+                             uintBitsToFloat(splat_words.data[table + 2u]));
+    float scale2 = max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
+                       dot(world[2].xyz, world[2].xyz));
+    float area = mesh_area * scale2;
+
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    mat4 vp = globals.view_projection;
+    vec3 center = (world * vec4(local_center, 1.0)).xyz;
+    vec4 clip = vp * vec4(center, 1.0);
+    if (!velk_instance_is_far(slot, area, clip.w, vp, globals.viewport.y)) return;
+
+    vec2 ndc = clip.xy / clip.w;
+    if (any(greaterThan(abs(ndc), vec2(1.02)))) return;
+    vec2 dims = vec2(float(pc.width), float(pc.height));
+    vec2 px = (ndc * 0.5 + 0.5) * dims;
+
+    vec2 uv = px / dims;
+    vec3 n = velk_texture(pc.normal_id, uv).xyz;
+    if (dot(n, n) > 1e-6) {
+        float reach = uintBitsToFloat(splat_words.data[table + 3u]) * sqrt(scale2);
+        vec3 p = velk_texture(pc.worldpos_id, uv).xyz;
+        if (length(p - globals.cam_pos.xyz) < length(center - globals.cam_pos.xyz) - reach) return;
+    }
+
+    float f = length(vec3(vp[0][1], vp[1][1], vp[2][1]));
+    float pixels_per_unit = f * dims.y * 0.5 / clip.w;
+    float pixels = area * pixels_per_unit * pixels_per_unit;
+
+    vec2 q = px - 0.5;
+    ivec2 base = ivec2(floor(q));
+    vec2 t = q - vec2(base);
+    add(base, pixels * (1.0 - t.x) * (1.0 - t.y));
+    add(base + ivec2(1, 0), pixels * t.x * (1.0 - t.y));
+    add(base + ivec2(0, 1), pixels * (1.0 - t.x) * t.y);
+    add(base + ivec2(1, 1), pixels * t.x * t.y);
+}
+)";
+
+/**
+ * Covers the frame by what instance_splat_src added up. Instances overlap at random, so
+ * coverage saturates rather than adds.
+ *
+ * An instance is lit from which way its mesh's surface faces: of the surface turned to the
+ * viewer, how much is turned to the light, and how far. Indirect light comes from what
+ * reaches the surface behind it, from the lighting pass's unshadowed image with that
+ * surface's direct light taken out, or the nearest surface below for a pixel with only sky
+ * behind it. The directions are kSurfaceDirections, and instances' own rotations are not
+ * taken into account.
+ */
+inline constexpr string_view instance_splat_composite_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+layout(set = 1, binding = 16, std430) readonly buffer SplatWords { uint data[]; } splat_words;
+
+struct SplatLight {
+    uvec4 flags;
+    vec4 position;
+    vec4 direction;
+    vec4 color_intensity;
+    vec4 params;
+};
+layout(set = 1, binding = 5, std430) readonly buffer SplatLights { SplatLight data[]; } splat_lights;
+
+layout(push_constant) uniform PC {
+    uint words_word;
+    uint width;
+    uint height;
+    uint output_id;
+    uint unshadowed_id;
+    uint normal_id;
+    uint worldpos_id;
+    uint globals_base;
+    uint lights_base;
+    uint light_count;
+    float albedo_r;
+    float albedo_g;
+    float albedo_b;
+    float facing[14];
+} pc;
+
+const vec3 kDirections[14] = vec3[14](
+    vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0),
+    vec3(0.57735, 0.57735, 0.57735), vec3(-0.57735, 0.57735, 0.57735), vec3(0.57735, -0.57735, 0.57735),
+    vec3(-0.57735, -0.57735, 0.57735), vec3(0.57735, 0.57735, -0.57735), vec3(-0.57735, 0.57735, -0.57735),
+    vec3(0.57735, -0.57735, -0.57735), vec3(-0.57735, -0.57735, -0.57735));
+
+// Of the surface turned to the viewer, how far it is turned to the light on average.
+float facing_light(vec3 to_light, vec3 to_viewer)
+{
+    float lit = 0.0;
+    float seen = 0.0;
+    for (int d = 0; d < 14; ++d) {
+        float towards_viewer = max(dot(kDirections[d], to_viewer), 0.0) * pc.facing[d];
+        seen += towards_viewer;
+        lit += towards_viewer * max(dot(kDirections[d], to_light), 0.0);
+    }
+    return seen > 0.0 ? lit / seen : 0.0;
+}
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    // A pixel holds few instances, so its own count jumps as they cross its edges.
+    // Neighbours are averaged in, which keeps the total the same.
+    const float kTent[5] = float[5](1.0, 2.0, 3.0, 2.0, 1.0);
+    float coverage = 0.0;
+    for (int j = -2; j <= 2; ++j) {
+        for (int i = -2; i <= 2; ++i) {
+            ivec2 at = coord + ivec2(i, j);
+            if (at.x < 0 || at.y < 0 || at.x >= int(pc.width) || at.y >= int(pc.height)) continue;
+            coverage += float(splat_words.data[pc.words_word + uint(at.y) * pc.width + uint(at.x)]) * kTent[i + 2] * kTent[j + 2];
+        }
+    }
+    coverage /= 4096.0 * 81.0;
+    if (coverage <= 0.0) return;
+
+    vec2 dims = vec2(float(pc.width), float(pc.height));
+    vec2 uv = (vec2(coord) + 0.5) / dims;
+
+    vec3 behind_normal = vec3(0.0);
+    vec3 behind_pos = vec3(0.0);
+    vec3 behind_light = vec3(0.0);
+    bool has_surface = false;
+    for (int k = 0; k < 8 && !has_surface; ++k) {
+        vec2 at = uv + vec2(0.0, float(k * k * 2)) / dims;
+        vec3 n = velk_texture(pc.normal_id, at).xyz;
+        if (dot(n, n) > 1e-6) {
+            has_surface = true;
+            behind_normal = normalize(n);
+            behind_pos = velk_texture(pc.worldpos_id, at).xyz;
+            behind_light = velk_texture(pc.unshadowed_id, at).rgb;
+        }
+    }
+
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    // Through the near plane when there is no surface, where the matrix is most precise.
+    vec3 towards = behind_pos;
+    if (!has_surface) {
+        vec4 near_point = globals.inverse_view_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+        towards = near_point.xyz / near_point.w;
+    }
+    vec3 to_viewer = normalize(globals.cam_pos.xyz - towards);
+
+    vec3 direct_on_instance = vec3(0.0);
+    vec3 direct_on_behind = vec3(0.0);
+    for (uint i = 0u; i < pc.light_count; ++i) {
+        SplatLight light = splat_lights.data[pc.lights_base + i];
+        if (light.flags.x == 3u) continue;
+        vec3 L;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            if (!has_surface) continue;
+            vec3 to_light = light.position.xyz - behind_pos;
+            float dist = length(to_light);
+            L = to_light / max(dist, 1e-6);
+            float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                atten *= smoothstep(light.params.z, light.params.y, dot(-L, light.direction.xyz));
+            }
+        }
+        vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
+        direct_on_instance += radiance * facing_light(L, to_viewer);
+        if (has_surface) {
+            direct_on_behind += radiance * max(dot(behind_normal, L), 0.0);
+        }
+    }
+    vec3 indirect = max(behind_light - direct_on_behind, vec3(0.0));
+
+    vec4 under = velk_texture(pc.output_id, uv);
+    vec3 surface = vec3(pc.albedo_r, pc.albedo_g, pc.albedo_b) * (direct_on_instance + indirect);    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord,
+               vec4(mix(under.rgb, surface, 1.0 - exp(-coverage)), under.a));
 }
 )";
 
@@ -187,10 +447,12 @@ struct InstanceCullPass
 
 /**
  * @brief Adds @p batches' GPU culling to @p graph, if any of them are culled. Runs
- *        before the passes that draw them.
+ *        before the passes that draw them. With @p far_form, instances too small to draw
+ *        are left out, for the path to add with instance_splat_src.
  */
 inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
-                                    uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph)
+                                    uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph,
+                                    bool far_form = false)
 {
     if (!batches || !ctx.resources || !ctx.backend || !ctx.render_ctx) {
         return;
@@ -313,11 +575,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t globals_base;
             float max_distance;
             uint32_t chunks_word;
+            uint32_t far_form;
         };
         for (const auto& info : visuals) {
             const bool partitioned = info.partition_count != 0;
             const PushC pc{info.instances_base, info.slot_count, info.table_word, view_globals_base, info.max_distance,
-                           partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot};
+                           partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
+                           far_form ? 1u : 0u};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (info.slot_count + 63u) / 64u;

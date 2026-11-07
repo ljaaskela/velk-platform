@@ -71,6 +71,8 @@ public:
     /// arena regions, so the next `ensure_rt_data` republishes the nodes +
     /// cluster words.
     void set_rt_blas(BlasBuild blas) override;
+    float get_surface_area() const override { return rt_blas_.surface_area; }
+    const float* get_direction_area() const override { return rt_blas_.direction_area; }
 
     void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
                IGpuResourceManager& resources) override;

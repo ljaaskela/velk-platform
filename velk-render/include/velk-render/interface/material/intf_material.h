@@ -1,6 +1,7 @@
 #ifndef VELK_RENDER_INTF_MATERIAL_H
 #define VELK_RENDER_INTF_MATERIAL_H
 
+#include <velk/api/math_types.h>
 #include <velk/string_view.h>
 #include <velk/vector.h>
 
@@ -45,6 +46,9 @@ public:
     /// into DrawDataHeader::texture_ids[] in the same order, so shader code
     /// can index them by fixed position. Default: no textures.
     virtual vector<ISurface*> get_textures() const = 0;
+
+    /// Roughly what colour its surface reflects, for when it covers less than a pixel.
+    virtual color get_average_albedo() const = 0;
 };
 
 } // namespace velk

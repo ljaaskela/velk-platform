@@ -81,6 +81,9 @@ public:
     /** @brief The box the GI probe lattice covers for this BVH's shapes. */
     virtual ProbeVolume get_probe_volume() const = 0;
 
+    /** @brief Whether any instances in it have a far form, for rays too wide to resolve them. */
+    virtual bool has_medium() const = 0;
+
     /**
      * @brief Marks the BVH as stale so the next access rebuilds.
      *

@@ -81,7 +81,7 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     // ray off the light's own fixture mesh.
     t_max = max(t_max - max(size, 0.005), 0.0);
 
-    return trace_any_hit(r, t_max) ? 0.0 : 1.0;
+    return trace_visibility(r, t_max);
 }
 )";
 } // namespace

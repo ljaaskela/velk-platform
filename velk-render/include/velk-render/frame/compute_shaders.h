@@ -206,6 +206,32 @@ bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
     return true;
 }
 
+// Where a ray that enters the box leaves it.
+float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
+{
+    vec3 inv_d = 1.0 / ray.dir;
+    vec3 t0 = (bmin - ray.origin) * inv_d;
+    vec3 t1 = (bmax - ray.origin) * inv_d;
+    vec3 tmx = max(t0, t1);
+    return min(min(tmx.x, tmx.y), tmx.z);
+}
+
+// How wide the area a visibility ray stands for is, in world units, for the shader to
+// set before tracing one. 0 means a single line, which tests every instance.
+float velk_ray_footprint = 0.0;
+// What a closest-hit ray passed through in nodes too fine for it, for the shader to clear
+// before tracing and use after: optical depth, and colour times depth.
+float velk_ray_medium_depth = 0.0;
+vec3 velk_ray_medium_color = vec3(0.0);
+
+// How many footprints wide a node can be and still count as a medium. It varies per node
+// so that same-sized nodes do not all change over at one distance, which shows as a ring,
+// and it stays the same while the camera moves, so nothing crawls.
+float velk_medium_reach(uint node_index)
+{
+    return 4.0 * (0.5 + float((node_index * 2654435761u) >> 16u) / 65536.0);
+}
+
 // The composer generates the body after intersect snippets have been included.
 // Built-in kinds forward to the functions the shader defines; visual-registered
 // kinds call their snippets.
@@ -435,13 +461,130 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
     return found;
 }
 
-// Any-hit traversal for shadow rays: early-exit on the first confirmed blocker
-// within t_max. With VELK_TRACE_ORDERED_ANY_HIT it goes front-to-back, since the
-// near child is the likelier blocker, at the cost of testing both children before
-// descending.
-bool trace_any_hit(Ray ray, float t_max)
+)"
+                                                                      R"(
+// The traversals for scenes with instances that have a far form, with VELK_TRACE_MEDIUM
+// defined: see velk_with_trace_medium. Apart and compiled out otherwise, since their
+// registers are paid for by the whole pass: in the ordinary loops this doubled what every
+// ray cost, and beside them it still cost 25%, in scenes where it never runs.
+//
+// A node of instances not much wider than the ray's footprint counts as a medium, since
+// one line through it would hit or miss one instance at random: light falls off with
+// distance through it, by its density of instances' area per volume. A node's area is
+// in aabb_max.w, 0 for one that is not made of instances, and its average colour is in
+// the bits of aabb_min.w, as unorm RGB.
+#ifdef VELK_TRACE_MEDIUM
+float trace_visibility_medium(Ray ray, float t_max)
 {
-    if (VELK_GLOBALS.bvh_node_count == 0u) return false;
+    float visibility = 1.0;
+    uint stack[VELK_TRACE_STACK_SIZE];
+    int sp = 0;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
+    vec3 world_origin = ray.origin;
+    int partition_sp = -1;
+    while (sp > 0) {
+        if (sp == partition_sp) {
+            ray.origin = world_origin;
+            partition_sp = -1;
+        }
+        uint ni = stack[--sp];
+        BvhNode node = velk_bvh_nodes.data[ni];
+        float t_hit;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
+        if (node.child_count == VELK_PARTITION_REF) {
+            partition_sp = sp;
+            ray.origin -= velk_partition_origin(node);
+            ni = node.first_child;
+            node = velk_bvh_nodes.data[ni];
+        }
+        if (node.aabb_max.w > 0.0) {
+            vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+            float widest = max(max(extent.x, extent.y), extent.z);
+            if (widest < velk_ray_footprint * velk_medium_reach(ni)) {
+                float enter;
+                if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, enter)) {
+                    vec3 sides = max(extent, vec3(widest * 1e-3));
+                    float len = max(min(ray_aabb_exit(ray, node.aabb_min.xyz, node.aabb_max.xyz), t_max) - enter, 0.0);
+                    visibility *= exp(-node.aabb_max.w / (sides.x * sides.y * sides.z) * len);
+                }
+                continue;
+            }
+        }
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            RayHit h;
+            if (velk_intersect_record(ray, node.first_shape + i, 0.0, t_max, true, h)) {
+                return 0.0;
+            }
+        }
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + i;
+        }
+    }
+    return visibility;
+}
+
+bool trace_closest_hit_medium(Ray ray, float t_min, float t_max, inout RayHit hit)
+{
+    uint stack[VELK_TRACE_STACK_SIZE];
+    int sp = 0;
+    stack[sp++] = VELK_GLOBALS.bvh_root;
+    vec3 world_origin = ray.origin;
+    int partition_sp = -1;
+    while (sp > 0) {
+        if (sp == partition_sp) {
+            ray.origin = world_origin;
+            partition_sp = -1;
+        }
+        uint ni = stack[--sp];
+        BvhNode node = velk_bvh_nodes.data[ni];
+        float t_enter;
+        if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
+        if (node.child_count == VELK_PARTITION_REF) {
+            partition_sp = sp;
+            ray.origin -= velk_partition_origin(node);
+            ni = node.first_child;
+            node = velk_bvh_nodes.data[ni];
+        }
+        if (node.aabb_max.w > 0.0) {
+            vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+            float widest = max(max(extent.x, extent.y), extent.z);
+            if (widest < velk_ray_footprint * velk_medium_reach(ni)) {
+                float enter;
+                if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, enter)) {
+                    vec3 sides = max(extent, vec3(widest * 1e-3));
+                    float leave = min(ray_aabb_exit(ray, node.aabb_min.xyz, node.aabb_max.xyz), hit.t);
+                    float depth = node.aabb_max.w / (sides.x * sides.y * sides.z) * max(leave - max(enter, t_min), 0.0);
+                    velk_ray_medium_depth += depth;
+                    velk_ray_medium_color += depth * unpackUnorm4x8(floatBitsToUint(node.aabb_min.w)).rgb;
+                }
+                continue;
+            }
+        }
+        for (uint i = 0u; i < node.shape_count; ++i) {
+            RayHit h;
+            if (velk_intersect_record(ray, node.first_shape + i, t_min, hit.t, false, h)) {
+                hit = h;
+            }
+        }
+        for (uint i = 0u; i < node.child_count; ++i) {
+            if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + i;
+        }
+    }
+    return hit.shape_index != 0xffffffffu;
+}
+#endif
+)"
+                                                                      R"(
+// Visibility traversal for shadow rays: 0 on the first confirmed blocker within t_max,
+// otherwise how much light gets through what is too fine for the ray to resolve. With
+// VELK_TRACE_ORDERED_ANY_HIT it goes front-to-back, since the near child is the likelier
+// blocker, at the cost of testing both children before descending.
+float trace_visibility(Ray ray, float t_max)
+{
+    if (VELK_GLOBALS.bvh_node_count == 0u) return 1.0;
+#ifdef VELK_TRACE_MEDIUM
+    if (velk_ray_footprint > 0.0) return trace_visibility_medium(ray, t_max);
+#endif
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
@@ -465,10 +608,11 @@ bool trace_any_hit(Ray ray, float t_max)
             node = velk_bvh_nodes.data[node.first_child];
         }
 
+
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
             if (velk_intersect_record(ray, node.first_shape + i, 0.0, t_max, true, h)) {
-                return true;
+                return 0.0;
             }
         }
 
@@ -499,7 +643,13 @@ bool trace_any_hit(Ray ray, float t_max)
             if (sp < VELK_TRACE_STACK_SIZE) stack[sp++] = node.first_child + i;
         }
     }
-    return false;
+    return 1.0;
+}
+
+// Whether anything blocks the ray within t_max.
+bool trace_any_hit(Ray ray, float t_max)
+{
+    return trace_visibility(ray, t_max) <= 0.0;
 }
 
 // Closest-hit traversal bounded to the interval [t_min, t_max). A probe cascade
@@ -517,6 +667,9 @@ bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit)
     hit.t = t_max;
     hit.shape_index = 0xffffffffu;
     if (VELK_GLOBALS.bvh_node_count == 0u) return false;
+#ifdef VELK_TRACE_MEDIUM
+    if (velk_ray_footprint > 0.0) return trace_closest_hit_medium(ray, t_min, t_max, hit);
+#endif
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
@@ -556,6 +709,19 @@ bool trace_closest_hit(Ray ray, out RayHit hit)
     return trace_closest_hit(ray, 0.0, 1e30, hit);
 }
 )";
+
+/// @p source with the medium traversals of velk_trace_src compiled in, for a scene with
+/// instances that have a far form.
+inline string velk_with_trace_medium(string_view source)
+{
+    const size_t version = source.find(string_view("#version"));
+    const size_t after = source.find('\n', version) + 1;
+    string out;
+    out += source.substr(0, after);
+    out += string_view("#define VELK_TRACE_MEDIUM\n");
+    out += source.substr(after);
+    return out;
+}
 
 // Default compute shader for the deferred lighting pass. Samples the
 // G-buffer attachments + light buffer and writes the shaded color to
@@ -1517,7 +1683,13 @@ void main()
         vec3 direct_diffuse = vec3(0.0);
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_lights.data[pc.lights_base + res_light];
+            // A pixel's width on the surface, wider when seen at a shallow angle.
+            mat4 footprint_vp = VELK_GLOBALS.view_projection;
+            float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
+            velk_ray_footprint = length(world_pos - VELK_GLOBALS.cam_pos.xyz) * 2.0 / (footprint_f * float(pc.height))
+                / sqrt(max(NdotV, 0.05));
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
+            velk_ray_footprint = 0.0;
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
         }
@@ -2676,6 +2848,11 @@ void main()
         ray.origin = origin;
         ray.dir = d;
         RayHit hit;
+        // A probe's rays stand for everything around it, out to the next probes, so
+        // instances smaller than that are not hit or missed one by one.
+        velk_ray_footprint = spacing * 0.25;
+        velk_ray_medium_depth = 0.0;
+        velk_ray_medium_color = vec3(0.0);
         if (trace_closest_hit(ray, t_min, t_max, hit)) {
             RtShape s = velk_bvh_shapes.data[hit.shape_index];
             EvalContext ectx;
@@ -2755,6 +2932,36 @@ void main()
             } else {
                 radiance = env_miss_color(d);
             }
+        }
+        velk_ray_footprint = 0.0;
+)"
+                                                                      R"(
+        // The ray lost light in what it passed through, and gained what that reflects,
+        // lit as rounded objects seen along the ray. What reaches them from elsewhere
+        // is what the level above sees that way, or the environment.
+        if (velk_ray_medium_depth > 0.0) {
+            vec3 direct = vec3(0.0);
+            for (uint li = 0u; li < pc.light_count; ++li) {
+                Light light = velk_lights.data[pc.lights_base + li];
+                vec3 L;
+                float atten;
+                velk_light_sample(light, origin, L, atten);
+                float cos_g = clamp(dot(L, -d), -1.0, 1.0);
+                float g = acos(cos_g);
+                direct += light.color_intensity.rgb * light.color_intensity.a * atten * (2.0 / 3.0)
+                          * (sin(g) + (3.14159265 - g) * cos_g) / 3.14159265;
+            }
+            vec3 elsewhere;
+            if (has_coarse) {
+                vec3 csh[4];
+                for (int c = 0; c < 4; ++c) csh[c] = s_coarse[probe_local][c];
+                elsewhere = max(velk_sh_radiance(csh, d), vec3(0.0));
+            } else {
+                elsewhere = env_miss_color(d);
+            }
+            float through = exp(-velk_ray_medium_depth);
+            radiance = radiance * through
+                + (velk_ray_medium_color / velk_ray_medium_depth) * (direct + elsewhere) * (1.0 - through);
         }
     }
 

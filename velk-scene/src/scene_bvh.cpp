@@ -192,6 +192,18 @@ RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) co
     return record;
 }
 
+bool SceneBvh::has_medium() const
+{
+    for (const auto& [element, group] : instance_groups_) {
+        for (const auto& run : group.meshes) {
+            if (run.far_area > 0.f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void SceneBvh::free_instance_partitions(InstanceGroup& group)
 {
     for (uint32_t p : group.partitions) {
@@ -771,6 +783,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
             const vec3 lo = local.min();
             const vec3 hi = local.max();
             run.bounds = {{lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}};
+            visual.get_far_look(m, run.far_area, run.far_albedo, nullptr);
         }
         run.shape_count = static_cast<uint32_t>(collect.shapes.size()) - run.first_shape;
         unresolved = unresolved || (run.shape_count == 0 && visual.get_mesh_instance_count(m) != 0);
@@ -1248,6 +1261,22 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
     }
 }
 
+namespace {
+
+/// A node's colour as the bits of a float. The top byte stays fixed, so these bits are
+/// always an ordinary float. Mirrors the GPU build in `lbvh_bounds_src`.
+uint32_t pack_node_color(const float rgb[3])
+{
+    uint32_t bits = 0x3F000000u;
+    for (int k = 0; k < 3; ++k) {
+        const float c = std::min(std::max(rgb[k], 0.f), 1.f);
+        bits |= static_cast<uint32_t>(c * 255.f + 0.5f) << (8 * k);
+    }
+    return bits;
+}
+
+} // namespace
+
 void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool geometry)
 {
     InstanceGroup* group = partition.group;
@@ -1268,12 +1297,37 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     for (const auto& item : items) {
         merge_bounds(bounds_lo, bounds_hi, item.min, item.max);
     }
+    vector<float> item_areas;
+    vector<float> item_albedos;  ///< 3 per item.
     if (group) {
         for (int k = 0; k < 3; ++k) {
             partition.cull_bounds.min[k] = bounds_lo[k];
             partition.cull_bounds.max[k] = bounds_hi[k];
         }
         write_partition_cull(partition, ctx);
+
+        // A closed shape's area seen from a random direction, averaged, is a quarter of
+        // its surface. Instances scale that by their average scale squared.
+        const auto det3 = [](const float (*r)[4]) {
+            return r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+                + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+        };
+        float world_rows[3][4];
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                world_rows[row][col] = group->world(row, col);
+            }
+        }
+        const float world_det = det3(world_rows);
+        const auto transforms = group->visual->get_transforms();
+        item_areas.reserve(partition.members.size());
+        item_albedos.reserve(partition.members.size() * 3);
+        for (uint32_t slot : partition.members) {
+            const auto& run = group->meshes[group->visual->get_slot_mesh(slot)];
+            const float scale2 = std::pow(std::abs(det3(transforms[slot].rows) * world_det), 2.f / 3.f);
+            item_areas.push_back(run.far_area * scale2);
+            item_albedos.insert(item_albedos.end(), run.far_albedo, run.far_albedo + 3);
+        }
     }
 
     // A tree built on the GPU keeps the records in the order of the members.
@@ -1377,7 +1431,8 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     // cycle would hang the walk. Rays skip the partition instead.
     if (!partition.nodes.valid() || !partition.records.valid()
         || (geometry && !group && !partition.shapes.valid())
-        || (gpu_build && !queue_gpu_build(partition, ctx, {items.data(), items.size()}, origin, node_base, record_base))) {
+        || (gpu_build && !queue_gpu_build(partition, ctx, {items.data(), items.size()}, {item_areas.data(), item_areas.size()},
+                                          {item_albedos.data(), item_albedos.size()}, origin, node_base, record_base))) {
         VELK_LOG(E, "SceneBvh: partition allocation failed");
         set_inverted_bounds(partition.ref);
         partition.node_count = 0;
@@ -1399,6 +1454,41 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
         partition.node_count = static_cast<uint32_t>(node_count);
         return;
     }
+    // Each node's area and colour, for rays too wide to resolve its instances. A child's
+    // index is always greater than its parent's, so this goes from the leaves up.
+    if (!item_areas.empty()) {
+        vector<float> node_colors;
+        node_colors.resize(tree.nodes.size() * 3, 0.f);
+        for (size_t i = tree.nodes.size(); i-- > 0;) {
+            GpuBvhNode& node = tree.nodes[i];
+            float area = 0.f;
+            float sum[3] = {0.f, 0.f, 0.f};
+            if (node.child_count != 0) {
+                for (uint32_t c = 0; c < node.child_count; ++c) {
+                    const uint32_t child = node.first_child + c;
+                    const float child_area = tree.nodes[child].aabb_max[3];
+                    area += child_area;
+                    for (int k = 0; k < 3; ++k) {
+                        sum[k] += node_colors[size_t(child) * 3 + k] * child_area;
+                    }
+                }
+            } else {
+                for (uint32_t s = 0; s < node.shape_count; ++s) {
+                    const uint32_t item = tree.order[node.first_shape + s];
+                    area += item_areas[item];
+                    for (int k = 0; k < 3; ++k) {
+                        sum[k] += item_albedos[size_t(item) * 3 + k] * item_areas[item];
+                    }
+                }
+            }
+            for (int k = 0; k < 3; ++k) {
+                node_colors[i * 3 + k] = area > 0.f ? sum[k] / area : 0.f;
+            }
+            const uint32_t bits = pack_node_color(node_colors.data() + i * 3);
+            std::memcpy(&node.aabb_min[3], &bits, sizeof(bits));
+            node.aabb_max[3] = area;
+        }
+    }
 
     for (auto& node : tree.nodes) {
         if (node.child_count != 0) {
@@ -1418,7 +1508,8 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
 }
 
 bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
-                               const float origin[3], uint32_t node_base, uint32_t record_base)
+                               array_view<const float> areas, array_view<const float> albedos, const float origin[3],
+                               uint32_t node_base, uint32_t record_base)
 {
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) {
@@ -1428,7 +1519,7 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
 
     // Items go in a fresh region each frame, relative to the origin and rounded outward,
     // so subtracting it never shrinks a box.
-    partition.gpu_build_items = arena->alloc(uint64_t(count) * sizeof(float) * 6);
+    partition.gpu_build_items = arena->alloc(uint64_t(count) * sizeof(float) * 8);
     auto* out = static_cast<float*>(partition.gpu_build_items.valid()
                                         ? arena->mapped_at(partition.gpu_build_items.offset())
                                         : nullptr);
@@ -1440,7 +1531,11 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
     float hi[3] = {-lo[0], -lo[0], -lo[0]};
     constexpr float kInf = std::numeric_limits<float>::infinity();
     for (uint32_t i = 0; i < count; ++i) {
-        float item[6];
+        float item[8];
+        item[6] = areas.empty() ? 0.f : areas[i];
+        const float no_color[3] = {0.f, 0.f, 0.f};
+        const uint32_t color = pack_node_color(albedos.empty() ? no_color : &albedos[size_t(i) * 3]);
+        std::memcpy(&item[7], &color, sizeof(color));
         for (int k = 0; k < 3; ++k) {
             item[k] = std::nextafter(items[i].min[k] - origin[k], -kInf);
             item[3 + k] = std::nextafter(items[i].max[k] - origin[k], kInf);
@@ -1448,7 +1543,7 @@ bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_vi
             lo[k] = std::min(lo[k], center);
             hi[k] = std::max(hi[k], center);
         }
-        std::memcpy(out + size_t(i) * 6, item, sizeof(item));
+        std::memcpy(out + size_t(i) * 8, item, sizeof(item));
     }
 
     // Scratch outlives the frame, and the pass's first barrier orders its reuse.

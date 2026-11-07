@@ -74,6 +74,8 @@ public:
         this->set_gpu_handle(GpuResourceKey::Default, handle);
     }
 
+    color get_average_albedo() const override { return color::white(); }
+
     /// Subscribe / unsubscribe to IMaterialOptions attachments so option
     /// writes propagate into pipeline invalidation without polling.
     ReturnValue add_attachment(const IInterface::Ptr& attachment) override

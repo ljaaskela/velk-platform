@@ -4,7 +4,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [across] [top]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -52,6 +52,11 @@
 // gpu:      deform runs the same ripple on the GPU instead of the CPU.
 // heavy:    a forest's tree has about 10,000 triangles instead of 24. All of them are drawn
 //           if in view, so start with few trees, or `near`.
+// real:     a forest draws and traces every tree however small, to compare against.
+// lowsun:   the sun is at 15 degrees instead of 35.
+// dense:    a forest's trees are 30 apart instead of 80, so the canopy nearly closes.
+// blocks:   a forest's mesh is a flat red box instead of a tree.
+// across, top: the camera stays still at that stop of the flyby.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
@@ -244,7 +249,7 @@ velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const 
             for (uint32_t r = 0; r < rings; ++r) {
                 const uint32_t a = s * (rings + 1) + r;
                 const uint32_t b = next * (rings + 1) + r;
-                for (uint32_t i : {a, a + 1, b + 1, a, b + 1, b}) {
+                for (uint32_t i : {a, b + 1, a + 1, a, b, b + 1}) {
                     indices.push_back(i);
                 }
             }
@@ -268,6 +273,63 @@ velk::IMesh::Ptr build_tree_mesh(velk::IRenderContext& ctx, float height, const 
     velk::IMeshPrimitive::Ptr primitives[] = {build_cone(0.f, -height * 0.4f, height * 0.06f, height * 0.04f, trunk),
                                               build_cone(-height * 0.25f, -height, height * 0.25f, height * 0.01f, crown)};
     return builder.build({primitives, 2});
+}
+
+/// Builds a box standing on y = 0 and growing towards -y, as one primitive.
+velk::IMesh::Ptr build_block_mesh(velk::IRenderContext& ctx, float width, float height, const velk::IMaterial::Ptr& material)
+{
+    static constexpr velk::VertexAttribute kAttributes[] = {
+        {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
+        {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
+        {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
+        {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
+    };
+    struct Face
+    {
+        velk::vec3 normal;
+        velk::vec3 u;
+        velk::vec3 v;
+    };
+    // u x v = normal, so each face winds outward.
+    const Face faces[] = {
+        {{1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}},  {{-1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 1.f, 0.f}},
+        {{0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 0.f, 0.f}},  {{0.f, -1.f, 0.f}, {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}},
+        {{0.f, 0.f, 1.f}, {1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}},  {{0.f, 0.f, -1.f}, {0.f, 1.f, 0.f}, {1.f, 0.f, 0.f}},
+    };
+    const velk::vec3 half{width * 0.5f, height * 0.5f, width * 0.5f};
+    const velk::vec3 center{0.f, -height * 0.5f, 0.f};
+    const auto scaled = [&](const velk::vec3& d) { return velk::vec3{d.x * half.x, d.y * half.y, d.z * half.z}; };
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    for (const auto& face : faces) {
+        const auto base = static_cast<uint32_t>(vertices.size());
+        const velk::vec3 c = center + scaled(face.normal);
+        const velk::vec3 u = scaled(face.u);
+        const velk::vec3 v = scaled(face.v);
+        const velk::vec3 corners[] = {c - u - v, c + u - v, c + u + v, c - u + v};
+        for (const auto& corner : corners) {
+            vertices.push_back({{corner.x, corner.y, corner.z},
+                                {face.normal.x, face.normal.y, face.normal.z},
+                                {0.f, 0.f},
+                                {face.u.x, face.u.y, face.u.z, 1.f}});
+        }
+        for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            indices.push_back(base + i);
+        }
+    }
+    velk::aabb bounds{};
+    bounds.position = {-half.x, -height, -half.z};
+    bounds.extent = {width, height, width};
+    const auto vertex_count = static_cast<uint32_t>(vertices.size());
+    const auto index_count = static_cast<uint32_t>(indices.size());
+    auto& builder = ctx.get_mesh_builder();
+    auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count, indices.data(),
+                                             index_count, velk::MeshTopology::TriangleList, bounds);
+    primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count,
+                                                 indices.data(), index_count / 3));
+    velk::MeshPrimitive(primitive).set_material(material);
+    velk::IMeshPrimitive::Ptr primitives[] = {primitive};
+    return builder.build({primitives, 1});
 }
 
 /// A position that looks random but follows from @p i, so runs are comparable.
@@ -360,12 +422,23 @@ int main(int argc, char* argv[])
     bool mixed = false;
     bool flyby = false;
     bool heavy = false;
+    bool real_trees = false;
+    bool low_sun = false;
+    bool dense = false;
+    bool blocks = false;
+    int hold_stop = -1;
     for (int i = 5; i < argc; ++i) {
         gpu_deform = gpu_deform || std::strcmp(argv[i], "gpu") == 0;
         outlier = outlier || std::strcmp(argv[i], "outlier") == 0;
         mixed = mixed || std::strcmp(argv[i], "mixed") == 0;
         flyby = flyby || std::strcmp(argv[i], "flyby") == 0;
         heavy = heavy || std::strcmp(argv[i], "heavy") == 0;
+        real_trees = real_trees || std::strcmp(argv[i], "real") == 0;
+        low_sun = low_sun || std::strcmp(argv[i], "lowsun") == 0;
+        dense = dense || std::strcmp(argv[i], "dense") == 0;
+        blocks = blocks || std::strcmp(argv[i], "blocks") == 0;
+        if (std::strcmp(argv[i], "across") == 0) hold_stop = 1;
+        if (std::strcmp(argv[i], "top") == 0) hold_stop = 2;
         wind = wind || std::strcmp(argv[i], "wind") == 0;
         species = species || std::strcmp(argv[i], "species") == 0;
         draw_near = draw_near || std::strcmp(argv[i], "near") == 0;
@@ -419,7 +492,8 @@ int main(int argc, char* argv[])
     scene.add(root, camera);
 
     const long columns = std::max(1L, static_cast<long>(std::ceil(std::sqrt(static_cast<double>(element_count)))));
-    const float extent = static_cast<float>(columns) * kElementSpacing;
+    const float tree_spacing = dense ? 30.f : kElementSpacing;
+    const float extent = static_cast<float>(columns) * (forest ? tree_spacing : kElementSpacing);
 
     auto cam_trait = velk::trait::render::create_camera();
     camera.add_trait(cam_trait);
@@ -450,7 +524,6 @@ int main(int argc, char* argv[])
     orbit.set_distance(distance);
     camera.add_trait(orbit);
     camera.find_trait<velk::ICamera>()->far_clip().set_value(std::max(distance, extent) * 10.f);
-
     // Floor.
     {
         const float half = extent * 0.5f + 400.f;
@@ -472,7 +545,7 @@ int main(int argc, char* argv[])
         light.add_technique(velk::technique::create_rt_shadow());
         auto sun = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({35.f, 25.f, 0.f});
+        trs.set_rotation({low_sun ? 15.f : 35.f, 25.f, 0.f});
         sun.add_trait(trs);
         sun.add_trait(light);
         scene.add(root, sun);
@@ -517,9 +590,9 @@ int main(int argc, char* argv[])
     // Trees stand on the floor on a jittered grid.
     constexpr float kTreeHeight = 60.f;
     const auto tree_position = [&](long i) {
-        return velk::vec3{grid_start + (static_cast<float>(i % columns) + 0.8f * forest_jitter(i, 12.9898f)) * kElementSpacing,
+        return velk::vec3{grid_start + (static_cast<float>(i % columns) + 0.8f * forest_jitter(i, 12.9898f)) * tree_spacing,
                           kFloorY,
-                          grid_start + (static_cast<float>(i / columns) + 0.8f * forest_jitter(i, 78.233f)) * kElementSpacing};
+                          grid_start + (static_cast<float>(i / columns) + 0.8f * forest_jitter(i, 78.233f)) * tree_spacing};
     };
     velk::InstancedMeshVisual forest_visual;
     velk::Trs forest_trs;
@@ -528,8 +601,10 @@ int main(int argc, char* argv[])
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
         // 2 cones * 64 sides * 39 rings * 2 triangles.
-        velk::Mesh tree_mesh(heavy ? build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material, 64u, 39u)
-                                   : build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
+        velk::Mesh tree_mesh(blocks ? build_block_mesh(*render_context, 24.f, 12.f,
+                                                       velk::material::create_standard(velk::color{0.6f, 0.25f, 0.2f, 1.f}, 0.f, 0.6f))
+                             : heavy ? build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material, 64u, 39u)
+                                     : build_tree_mesh(*render_context, kTreeHeight, trunk_material, crown_material));
         if (forest_instances) {
             velk::vector<velk::InstanceTransform> transforms;
             transforms.resize(static_cast<size_t>(element_count));
@@ -576,6 +651,10 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
             forest_element.add_trait(forest_trs);
             forest_element.add_trait(forest_visual);
             scene.add(root, forest_element);
+
+            if (real_trees) {
+                forest_visual.set_far_form(false);
+            }
         } else {
             for (long i = 0; i < element_count; ++i) {
                 auto element = velk::create_element();
@@ -697,6 +776,51 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
 
     app.add_view(window, camera);
 
+    // Right drag orbits, the wheel zooms, and WASD moves over the ground. A flyby or a
+    // held stop takes the camera back each frame.
+    bool orbit_dragging = false;
+    float orbit_last_x = 0.f;
+    float orbit_last_y = 0.f;
+    velk::ScopedHandler pointer_sub = window.add_on_pointer_event([&](const velk::ui::PointerEvent& e) {
+        if (e.action == velk::ui::PointerAction::Down && e.button == velk::ui::PointerButton::Right) {
+            orbit_dragging = true;
+            orbit_last_x = e.position.x;
+            orbit_last_y = e.position.y;
+        } else if (e.action == velk::ui::PointerAction::Up && e.button == velk::ui::PointerButton::Right) {
+            orbit_dragging = false;
+        } else if (e.action == velk::ui::PointerAction::Move && orbit_dragging) {
+            if (auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit))) {
+                orbit.set_yaw(state->yaw + (e.position.x - orbit_last_x) * 0.3f);
+                orbit.set_pitch(state->pitch + (e.position.y - orbit_last_y) * 0.3f);
+            }
+            orbit_last_x = e.position.x;
+            orbit_last_y = e.position.y;
+        }
+    });
+    velk::ScopedHandler scroll_sub(window.input()->on_scroll_event(), [&](const velk::ui::ScrollEvent& e) {
+        if (auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit))) {
+            orbit.set_distance(state->distance * (e.delta.y > 0 ? 0.9f : 1.1f));
+        }
+    });
+    velk::ScopedHandler key_sub = window.add_on_key_event([&](const velk::ui::KeyEvent& e) {
+        if (e.action == velk::ui::KeyAction::Up) {
+            return;
+        }
+        auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));
+        auto focus_state = velk::read_state<velk::ITrs>(static_cast<velk::ITrs::Ptr>(focus_trs));
+        if (!state || !focus_state) {
+            return;
+        }
+        // Key codes of W, A, S and D.
+        const float step = state->distance * 0.1f;
+        velk::vec3 at = focus_state->translate;
+        if (e.key == 87) at.z -= step;
+        if (e.key == 83) at.z += step;
+        if (e.key == 65) at.x -= step;
+        if (e.key == 68) at.x += step;
+        focus_trs.set_translate(at);
+    });
+
     if (with_overlay) {
         velk::PerformanceOverlayConfig overlay;
         overlay.enabled = true;
@@ -725,6 +849,12 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     while (app.poll()) {
         // Motion follows the frame number, so runs are comparable.
         const float t = static_cast<float>(frame) / 60.f;
+
+        if (hold_stop >= 0 && forest) {
+            orbit.set_distance(flyby_stops[hold_stop].distance);
+            orbit.set_pitch(flyby_stops[hold_stop].pitch);
+            orbit.set_yaw(60.f);
+        }
 
         long flyby_section = 0;
         if (flyby && forest) {

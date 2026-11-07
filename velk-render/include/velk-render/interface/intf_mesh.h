@@ -192,6 +192,11 @@ public:
     /// trivially compliant. Concrete `MeshPrimitive` overrides to
     /// store the build and serialise it through its IDrawData buffer.
     virtual void set_rt_blas(BlasBuild blas) { (void)blas; }
+
+    /// Area of its triangles, from its BLAS. 0 without one.
+    virtual float get_surface_area() const = 0;
+    /// That area by which of kSurfaceDirections it faces.
+    virtual const float* get_direction_area() const = 0;
 };
 
 /// What refitting a primitive's tree on the GPU works from. Bases are element indices:

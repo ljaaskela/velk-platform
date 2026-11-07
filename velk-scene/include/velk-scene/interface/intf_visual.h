@@ -186,6 +186,10 @@ public:
     /// Instances further from the camera than this are not drawn, though rays still
     /// see them. 0, the default, means no limit.
     virtual void set_draw_distance(float distance) = 0;
+    /// Whether instances too small on screen are averaged into the pixels they cover, and
+    /// wide rays average over them too, rather than each being drawn and tested. This
+    /// avoids flicker and is far cheaper. On by default. Applies to the deferred path.
+    virtual void set_far_form(bool enabled) = 0;
 
     /**
      * @brief Moves instances on the GPU, for motion that stays near where each instance
@@ -231,6 +235,11 @@ public:
     /// Mesh @p index's bounding sphere, as center xyz and radius.
     virtual void get_cull_sphere(uint32_t index, float out[4]) const = 0;
     virtual float get_draw_distance() const = 0;
+    virtual bool get_far_form() const = 0;
+    /// Mesh @p index's mean projected area at scale 1, the area-weighted colour of its
+    /// materials, and its surface area by which of kSurfaceDirections it faces. An area of
+    /// 0 means its instances have no far form.
+    virtual void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const = 0;
 
     /// The motion function's source, empty when there is none.
     virtual string_view get_motion_source() const = 0;

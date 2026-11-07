@@ -379,6 +379,19 @@ string_view StandardMaterial::get_fn_name(string_view role) const
     return {};
 }
 
+color StandardMaterial::get_average_albedo() const
+{
+    color albedo = color::white();
+    for (const auto& prop : properties_) {
+        if (prop && property_class_id(prop) == ClassId::BaseColorProperty) {
+            if (auto r = read_state<IBaseColorProperty>(prop)) {
+                albedo = r->factor;
+            }
+        }
+    }
+    return albedo;
+}
+
 vector<ISurface*> StandardMaterial::get_textures() const
 {
     // Used by batch_builder's upload path to surface material-owned

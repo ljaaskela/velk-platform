@@ -157,6 +157,8 @@ private:
     uint32_t cull_mesh_ = 0;
     ArenaRegion cull_region_;
     vector<uint32_t> cull_list_words_;  ///< Per mesh, on the owner.
+    float cull_far_albedo_[3] = {1.f, 1.f, 1.f};  ///< On the owner.
+    float cull_far_facing_[kSurfaceDirectionCount] = {};  ///< On the owner.
     /// Set when instance bytes change (finalize_storage / update_instance_at);
     /// the upload sweep re-uploads the region only when this is set.
     bool instances_dirty_ = true;

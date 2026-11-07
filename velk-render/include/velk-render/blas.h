@@ -52,6 +52,18 @@ inline constexpr uint32_t kClusterMaxVertices = 256;
 ///   first_child               its cluster's first position word
 /// and `triangle_indices` is empty. A child's index is always greater than its
 /// parent's.
+/// How many directions a mesh's surface is sorted into: see kSurfaceDirections.
+inline constexpr int kSurfaceDirectionCount = 14;
+
+/// The axes and the cube's corners, which cover all directions about evenly. Instances too
+/// small to draw are lit from how much of their surface faces which way.
+inline constexpr float kSurfaceDirections[kSurfaceDirectionCount][3] = {
+    {1.f, 0.f, 0.f}, {-1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f, -1.f},
+    {0.57735f, 0.57735f, 0.57735f}, {-0.57735f, 0.57735f, 0.57735f}, {0.57735f, -0.57735f, 0.57735f},
+    {-0.57735f, -0.57735f, 0.57735f}, {0.57735f, 0.57735f, -0.57735f}, {-0.57735f, 0.57735f, -0.57735f},
+    {0.57735f, -0.57735f, -0.57735f}, {-0.57735f, -0.57735f, -0.57735f},
+};
+
 struct BlasBuild
 {
     /// Where one cluster's positions are in `cluster_words`.
@@ -66,6 +78,10 @@ struct BlasBuild
     vector<uint32_t> cluster_words;
     vector<Cluster>  clusters;
     uint32_t         root_index = 0;
+    float            surface_area = 0.f;  ///< Of all triangles, in the mesh's units.
+    /// That area by which of kSurfaceDirections it faces, taking outward as away from the
+    /// mesh's center, since winding is not reliable for this.
+    float            direction_area[kSurfaceDirectionCount] = {};
 };
 
 namespace detail {
@@ -427,6 +443,16 @@ inline BlasBuild build_mesh_blas(const float* vertices, uint32_t vertex_stride_b
     }
     const uint32_t floats_per_vertex = vertex_stride_bytes / sizeof(float);
 
+    float mesh_min[3] = {vertices[0], vertices[1], vertices[2]};
+    float mesh_max[3] = {vertices[0], vertices[1], vertices[2]};
+    for (uint32_t v = 1; v < vertex_count; ++v) {
+        const float* p = vertices + static_cast<size_t>(v) * floats_per_vertex;
+        for (int j = 0; j < 3; ++j) {
+            mesh_min[j] = std::min(mesh_min[j], p[j]);
+            mesh_max[j] = std::max(mesh_max[j], p[j]);
+        }
+    }
+
     vector<detail::BlasTriInfo> tris;
     tris.resize(triangle_count);
     for (uint32_t t = 0; t < triangle_count; ++t) {
@@ -449,6 +475,30 @@ inline BlasBuild build_mesh_blas(const float* vertices, uint32_t vertex_stride_b
             ti.aabb_max[j] = std::max({a, b, c});
             ti.center[j]   = (ti.aabb_min[j] + ti.aabb_max[j]) * 0.5f;
         }
+        const float e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
+        const float e2[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
+        const float nx = e1[1] * e2[2] - e1[2] * e2[1];
+        const float ny = e1[2] * e2[0] - e1[0] * e2[2];
+        const float nz = e1[0] * e2[1] - e1[1] * e2[0];
+        const float area = 0.5f * std::sqrt(nx * nx + ny * ny + nz * nz);
+        out.surface_area += area;
+
+        float outward = 0.f;
+        for (int j = 0; j < 3; ++j) {
+            const float n = j == 0 ? nx : (j == 1 ? ny : nz);
+            outward += n * ((v0[j] + v1[j] + v2[j]) / 3.f - 0.5f * (mesh_min[j] + mesh_max[j]));
+        }
+        const float sign = outward < 0.f ? -1.f : 1.f;
+        int nearest = 0;
+        float nearest_dot = -2.f * (area + 1.f);
+        for (int d = 0; d < kSurfaceDirectionCount; ++d) {
+            const float along = sign * (nx * kSurfaceDirections[d][0] + ny * kSurfaceDirections[d][1] + nz * kSurfaceDirections[d][2]);
+            if (along > nearest_dot) {
+                nearest_dot = along;
+                nearest = d;
+            }
+        }
+        out.direction_area[nearest] += area;
     }
 
     out.nodes.push_back({});

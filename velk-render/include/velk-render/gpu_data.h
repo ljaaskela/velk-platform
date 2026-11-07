@@ -32,6 +32,9 @@ struct BvhBinding
     float    probe_min[3] = {};
     float    probe_max[3] = {};
     uint32_t probe_reset_frame = 0;
+    /// Whether instances in it have a far form, so tracing shaders need the medium
+    /// traversals. Paths watch this themselves, since it changes which pipeline they use.
+    uint32_t has_medium = 0;
 
     bool operator==(const BvhBinding& o) const
     {

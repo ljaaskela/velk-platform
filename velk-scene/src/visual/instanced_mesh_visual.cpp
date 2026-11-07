@@ -215,6 +215,55 @@ void InstancedMeshVisual::set_draw_distance(float distance)
     invoke_visual_changed();
 }
 
+void InstancedMeshVisual::set_far_form(bool enabled)
+{
+    far_form_ = enabled;
+    // The BVH holds what wide rays use, and it comes from a new cut.
+    all_changed_ = true;
+    invoke_visual_changed();
+}
+
+void InstancedMeshVisual::get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const
+{
+    area = 0.f;
+    albedo[0] = albedo[1] = albedo[2] = 1.f;
+    if (direction_area) {
+        std::fill(direction_area, direction_area + kSurfaceDirectionCount, 0.f);
+    }
+    auto mesh = get_mesh(index);
+    if (!mesh || !far_form_) {
+        return;
+    }
+    float total = 0.f;
+    float sum[3] = {0.f, 0.f, 0.f};
+    for (const auto& primitive : mesh->get_primitives()) {
+        const float primitive_area = primitive->get_surface_area();
+        color tint = color::white();
+        if (auto state = read_state<IMeshPrimitive>(primitive.get()); state && state->material) {
+            if (auto material = state->material.template get<IMaterial>()) {
+                tint = material->get_average_albedo();
+            }
+        }
+        if (direction_area) {
+            const float* facing = primitive->get_direction_area();
+            for (int d = 0; d < kSurfaceDirectionCount; ++d) {
+                direction_area[d] += facing[d];
+            }
+        }
+        total += primitive_area;
+        sum[0] += tint.r * primitive_area;
+        sum[1] += tint.g * primitive_area;
+        sum[2] += tint.b * primitive_area;
+    }
+    if (total > 0.f) {
+        // A closed shape's mean projected area is a quarter of its surface.
+        area = total * 0.25f;
+        for (int k = 0; k < 3; ++k) {
+            albedo[k] = sum[k] / total;
+        }
+    }
+}
+
 void InstancedMeshVisual::get_cull_sphere(uint32_t index, float out[4]) const
 {
     auto mesh = get_mesh(index);

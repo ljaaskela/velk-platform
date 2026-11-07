@@ -280,7 +280,8 @@ uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
                                                     uint64_t variant_tag,
-                                                    bool with_area_lights = false)
+                                                    bool with_area_lights = false,
+                                                    bool with_medium = false)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -305,6 +306,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // Distinct variants: the two differ in source, so they must not share a
     // cache entry.
     key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
+    key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key |= 0x4000000000000000ULL;
 
     // The weak pipeline cache is the source of truth: if the pipeline for
@@ -378,15 +380,19 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     append_literal("    }\n");
     append_literal("}\n");
 
+    if (with_medium) {
+        const string with_define = velk_with_trace_medium(string_view(src));
+        return ctx.render_ctx->pipelines().compile_compute(string_view(with_define), key);
+    }
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights);
+                                             with_area_lights, with_medium);
 }
 
 namespace {
@@ -462,7 +468,7 @@ VELK_GPU_STRUCT ProbePushC {
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
+IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool with_medium)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
@@ -480,6 +486,7 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
     for (auto id : ctx.snippets->frame_intersects()) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     }
+    key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key |= 0x2000000000000000ULL;
 
     if (auto p = ctx.render_ctx->pipelines().find(
@@ -487,6 +494,9 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx)
         return p;
     }
     string src = compose_rt_compute(*ctx.snippets, probe_gi_main_src);
+    if (with_medium) {
+        src = velk_with_trace_medium(string_view(src));
+    }
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
@@ -540,7 +550,7 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                                     kProbeDimZ, graph);
     if (!fine || !mid_read || !mid_write || !far_read || !far_write) return;
 
-    auto pipeline = ensure_probe_pipeline(ctx);
+    auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u);
     if (!pipeline) return;
 
     const auto handle = [](const IRenderTarget::Ptr& t) {
@@ -739,7 +749,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
 
-    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true);
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
@@ -757,6 +767,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_spatial_composite_pass(entry, vs, render_view, color_target, ctx,
                                 static_cast<int>(vs.gbuffer_size.x),
                                 static_cast<int>(vs.gbuffer_size.y), graph);
+    emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
+                           static_cast<int>(vs.gbuffer_size.y), graph);
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
     emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
@@ -910,7 +922,13 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light);
+    const bool has_medium = render_view.bvh.has_medium != 0u;
+    if (has_medium != vs.had_medium) {
+        vs.had_medium = has_medium;
+        vs.lighting_dirty = true;
+    }
+
+    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, has_medium);
     if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
@@ -1084,6 +1102,155 @@ void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_mom));
             rec.held.push_back(std::move(temporal_pipeline));
         });
+}
+
+void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                          FrameContext& ctx, int w, int h, IRenderGraph& graph)
+{
+    if (!vs.deferred_output || !vs.gbuffer || !vs.unshadowed || !render_view.batches) return;
+    vector<const void*> done;
+    vector<InstanceCullInfo> visuals;
+    for (const auto& batch : *render_view.batches) {
+        InstanceCullInfo info{};
+        if (batch && batch->get_instance_cull(info) && info.far_form
+            && std::find(done.begin(), done.end(), info.key) == done.end()) {
+            done.push_back(info.key);
+            visuals.push_back(info);
+        }
+    }
+    if (visuals.empty()) return;
+
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+
+    // A region of the frame's size per visual, since each has its own colour.
+    const uint64_t bytes = uint64_t(w) * uint64_t(h) * sizeof(uint32_t);
+    vector<ViewState::FarInstanceWords> kept;
+    for (const auto& info : visuals) {
+        ViewState::FarInstanceWords entry;
+        entry.key = info.key;
+        for (auto& existing : vs.far_instance_words) {
+            if (existing.key == info.key && existing.words.size() == bytes) {
+                entry.words = std::move(existing.words);
+            }
+        }
+        if (!entry.words.valid()) {
+            entry.words = arena->alloc(bytes);
+        }
+        if (!entry.words.valid()) return;
+        kept.push_back(std::move(entry));
+    }
+    vs.far_instance_words = std::move(kept);
+
+    // The arena's buffer can only have changed above, and is named below.
+    IGpuBuffer* arena_buffer = arena->buffer();
+    if (!arena_buffer) return;
+
+    const auto pipeline_for = [&](string_view src, uint64_t key) {
+        auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
+    };
+    auto splat = pipeline_for(instance_splat_src, 0x5350'4c41'5400'0001ULL);
+    auto composite = pipeline_for(instance_splat_composite_src, 0x5350'4c41'5400'0002ULL);
+    if (!splat || !composite) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    const auto words_word = [&](size_t i) {
+        return static_cast<uint32_t>(vs.far_instance_words[i].words.offset() / sizeof(uint32_t));
+    };
+    // Re-recorded each frame, as the spatial pass is: one dispatch per visual and a blit.
+    bool dirty = true;
+    emit_cached_view_pass(vs.far_instance_pass, dirty, "instance.splat", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        cmd->begin_recording();
+        cmd->push_label("Far instances");
+        cmd->record_global_barrier();
+        for (const auto& region : vs.far_instance_words) {
+            cmd->record_clear_buffer(arena_buffer, region.words.offset(), bytes);
+        }
+        cmd->record_global_barrier();
+        struct SplatPush
+        {
+            uint32_t instances_base, slot_count, table_word, globals_base, chunks_word, words_word;
+            uint32_t width, height, worldpos_id, normal_id;
+        };
+        for (size_t i = 0; i < visuals.size(); ++i) {
+            const auto& info = visuals[i];
+            const bool partitioned = info.partition_count != 0;
+            const SplatPush pc{info.instances_base, info.slot_count, info.table_word, render_view.view_globals_base,
+                               partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
+                               words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                               vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
+                               vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal))};
+            DispatchCall dc{};
+            dc.pipeline = splat.get();
+            dc.groups_x = (info.slot_count + 63u) / 64u;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            // The cull pass left the count of partitions' chunks in view.
+            if (partitioned) {
+                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(info.chunk_list_word) * sizeof(uint32_t));
+            } else {
+                cmd->record_dispatch(dc);
+            }
+        }
+        cmd->record_global_barrier();
+        struct CompositePush
+        {
+            uint32_t words_word, width, height, output_id, unshadowed_id, normal_id, worldpos_id;
+            uint32_t globals_base, lights_base, light_count;
+            float albedo[3];
+            float facing[kSurfaceDirectionCount];
+        };
+        static_assert(sizeof(CompositePush) <= kMaxRootConstantsSize);
+        for (size_t i = 0; i < visuals.size(); ++i) {
+            const auto& info = visuals[i];
+            CompositePush pc{words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                             static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
+                             static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default)),
+                             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)),
+                             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
+                             render_view.view_globals_base, render_view.lights_base,
+                             static_cast<uint32_t>(render_view.lights.size()),
+                             {info.far_albedo[0], info.far_albedo[1], info.far_albedo[2]},
+                             {}};
+            std::memcpy(pc.facing, info.far_facing, sizeof(pc.facing));
+            DispatchCall dc{};
+            dc.pipeline = composite.get();
+            dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
+            dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            cmd->record_dispatch(dc);
+            cmd->record_global_barrier();
+        }
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(std::move(splat));
+        rec.held.push_back(std::move(composite));
+    });
 }
 
 void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState& vs,

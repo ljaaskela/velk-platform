@@ -47,10 +47,11 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
 namespace {
 
 /// Words per mesh in the table at the start of a culling region. See instance_cull_compute_src.
-constexpr uint32_t kCullTableWords = 8;
+constexpr uint32_t kCullTableWords = 12;
 constexpr uint32_t kCullCountWord = 4;
 constexpr uint32_t kCullListWord = 5;
 constexpr uint32_t kCullCapacityWord = 6;
+constexpr uint32_t kCullAreaWord = 7;
 
 } // namespace
 
@@ -79,6 +80,9 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     table.resize(size_t(mesh_count) * kCullTableWords, 0u);
     cull_list_words_.clear();
     uint32_t next_list = table_word + mesh_count * kCullTableWords;
+    float far_weight = 0.f;
+    float far_sum[3] = {0.f, 0.f, 0.f};
+    std::fill(std::begin(cull_far_facing_), std::end(cull_far_facing_), 0.f);
     for (uint32_t m = 0; m < mesh_count; ++m) {
         uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
         float sphere[4];
@@ -89,6 +93,23 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kCullCapacityWord] = capacity;
         cull_list_words_.push_back(next_list);
         next_list += capacity;
+
+        float area = 0.f;
+        float albedo[3];
+        float facing[kSurfaceDirectionCount];
+        instance_source_->get_far_look(m, area, albedo, facing);
+        std::memcpy(entry + kCullAreaWord, &area, sizeof(area));
+        const float weight = area * static_cast<float>(capacity);
+        far_weight += weight;
+        for (int k = 0; k < 3; ++k) {
+            far_sum[k] += albedo[k] * weight;
+        }
+        for (int d = 0; d < kSurfaceDirectionCount; ++d) {
+            cull_far_facing_[d] += facing[d] * static_cast<float>(capacity);
+        }
+    }
+    for (int k = 0; k < 3; ++k) {
+        cull_far_albedo_[k] = far_weight > 0.f ? far_sum[k] / far_weight : 1.f;
     }
     arena->write_at(cull_region_.offset(), table.data(), table.size() * sizeof(uint32_t));
 }
@@ -110,6 +131,13 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     out.visible_word = owner->cull_list_words_[cull_mesh_];
     out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
     out.max_distance = instance_source_->get_draw_distance();
+    out.far_form = instance_source_->get_far_form();
+    for (int k = 0; k < 3; ++k) {
+        out.far_albedo[k] = owner->cull_far_albedo_[k];
+    }
+    for (int d = 0; d < kSurfaceDirectionCount; ++d) {
+        out.far_facing[d] = owner->cull_far_facing_[d];
+    }
     instance_source_->get_partition_cull(out.partition_table_word, out.partition_count, out.chunk_list_word);
     return true;
 }

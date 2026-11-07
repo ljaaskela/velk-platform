@@ -55,6 +55,9 @@ public:
     }
     void get_cull_sphere(uint32_t index, float out[4]) const override;
     float get_draw_distance() const override { return draw_distance_; }
+    void set_far_form(bool enabled) override;
+    bool get_far_form() const override { return far_form_; }
+    void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const override;
     string_view get_motion_source() const override { return motion_source_; }
     float get_max_displacement() const override { return motion_source_.empty() ? 0.f : max_displacement_; }
     uint64_t rest_region_offset() const override { return rest_region_.offset(); }
@@ -101,6 +104,7 @@ private:
     ArenaRegion region_;
     mat4 flushed_world_{};
     float draw_distance_ = 0.f;
+    bool far_form_ = true;
 
     string motion_source_;
     float max_displacement_ = 0.f;

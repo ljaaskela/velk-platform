@@ -43,6 +43,8 @@ public:
     string_view get_fn_name(string_view role) const override;
 
     vector<ISurface*> get_textures() const override;
+    /// Its base colour factor. A texture's own colours are not included.
+    color get_average_albedo() const override;
 
     /// Fixed slot indices into DrawDataHeader::texture_ids[] used by the
     /// standard material eval shader. Must match the order returned by

@@ -149,6 +149,14 @@ public:
         IRenderPass::Ptr cached_gbuffer_pass;
         bool gbuffer_dirty = true;
         InstanceCullPass instance_cull;
+        /// Instances too small to draw. A region of the frame's size per visual.
+        IRenderPass::Ptr far_instance_pass;
+        struct FarInstanceWords
+        {
+            const void* key = nullptr;
+            ArenaRegion words;
+        };
+        vector<FarInstanceWords> far_instance_words;
 
         /// Cached lighting (compute + blit) pass. All PushC inputs are
         /// stable across frames now: gbuffer attachments (Step B),
@@ -164,6 +172,7 @@ public:
         /// area-light path is compiled in only when the view has an area
         /// light, so a change here swaps the pipeline.
         bool had_area_light = false;
+        bool had_medium = false;
 
         /// Cached transparent (blended) forward pass: draws BLEND-mode batches
         /// over the lit composite, depth-testing the retained gbuffer depth
@@ -219,7 +228,7 @@ private:
     /// Resolves the deferred-lighting compute pipeline for the active
     /// snippet set, compiling on a (weak) cache miss. Returns a strong Ptr
     /// the caller must keep alive (the lighting pass holds it).
-    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights);
+    IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium);
 
     /// Resolves the diffuse-irradiance temporal-accumulate pipeline
     /// (standalone compute). Strong Ptr; the temporal pass holds it.
@@ -227,7 +236,7 @@ private:
 
     /// World-space GI probe pass. Composed with the RT body so probe hits get
     /// real material evaluation.
-    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx);
+    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool with_medium);
 
     /// Creates one level's atlas if it does not exist yet. Sized from the
     /// level's grid: width folds z into x, height stacks the SH coefficients.
@@ -267,6 +276,8 @@ private:
     /// Count-driven spatial filter over the accumulated irradiance history,
     /// then composites the final HDR image (albedo*irr + sharp rest) into
     /// deferred_output and blits it to @p color_target.
+    void emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                FrameContext& ctx, int w, int h, IRenderGraph& graph);
     void emit_spatial_composite_pass(IViewEntry& view, ViewState& vs,
                                      const RenderView& render_view,
                                      IRenderTarget::Ptr color_target,

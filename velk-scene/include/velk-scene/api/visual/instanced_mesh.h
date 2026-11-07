@@ -46,6 +46,10 @@ public:
     }
 
     /** @brief Sets how far from the camera instances are drawn. 0 means no limit. */
+    void set_far_form(bool enabled)
+    {
+        with<IInstancedMeshVisual>([&](auto& v) { v.set_far_form(enabled); });
+    }
     void set_draw_distance(float distance)
     {
         with<IInstancedMeshVisual>([&](auto& v) { v.set_draw_distance(distance); });

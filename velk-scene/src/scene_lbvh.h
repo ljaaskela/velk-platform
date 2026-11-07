@@ -17,7 +17,7 @@ namespace velk::impl {
 struct LbvhPush
 {
     uint32_t count;
-    uint32_t items;           ///< 6 floats per item: its bounds, relative to the partition's origin.
+    uint32_t items;           ///< 8 words per item: its bounds, relative to the partition's origin, its area, and its colour.
     uint32_t keys_in;         ///< 2 words per item, least significant first.
     uint32_t values_in;
     uint32_t keys_out;
@@ -79,14 +79,24 @@ const uint kNoParent = 0xFFFFFFFFu;
 
 vec3 item_min(uint item)
 {
-    uint base = pc.items + item * 6u;
+    uint base = pc.items + item * 8u;
     return vec3(uintBitsToFloat(WORDS[base]), uintBitsToFloat(WORDS[base + 1u]), uintBitsToFloat(WORDS[base + 2u]));
 }
 
 vec3 item_max(uint item)
 {
-    uint base = pc.items + item * 6u + 3u;
+    uint base = pc.items + item * 8u + 3u;
     return vec3(uintBitsToFloat(WORDS[base]), uintBitsToFloat(WORDS[base + 1u]), uintBitsToFloat(WORDS[base + 2u]));
+}
+
+float item_area(uint item)
+{
+    return uintBitsToFloat(WORDS[pc.items + item * 8u + 6u]);
+}
+
+uint item_color(uint item)
+{
+    return WORDS[pc.items + item * 8u + 7u];
 }
 )";
 
@@ -302,8 +312,8 @@ void main()
 
     uint item = WORDS[pc.values_in + sorted];
     uint node = WORDS[pc.leaf_nodes + sorted];
-    lbvh_nodes.data[pc.node_base + node].aabb_min = vec4(item_min(item), 0.0);
-    lbvh_nodes.data[pc.node_base + node].aabb_max = vec4(item_max(item), 0.0);
+    lbvh_nodes.data[pc.node_base + node].aabb_min = vec4(item_min(item), uintBitsToFloat(item_color(item)));
+    lbvh_nodes.data[pc.node_base + node].aabb_max = vec4(item_max(item), item_area(item));
     memoryBarrierBuffer();
 
     uint inner = WORDS[pc.parents + node];
@@ -314,8 +324,13 @@ void main()
         BvhNode a = lbvh_nodes.data[pc.node_base + 1u + 2u * inner];
         BvhNode b = lbvh_nodes.data[pc.node_base + 2u + 2u * inner];
         uint at = WORDS[pc.inner_nodes + inner];
-        lbvh_nodes.data[pc.node_base + at].aabb_min = vec4(min(a.aabb_min.xyz, b.aabb_min.xyz), 0.0);
-        lbvh_nodes.data[pc.node_base + at].aabb_max = vec4(max(a.aabb_max.xyz, b.aabb_max.xyz), 0.0);
+        float area = a.aabb_max.w + b.aabb_max.w;
+        vec3 color = mix(unpackUnorm4x8(floatBitsToUint(a.aabb_min.w)).rgb, unpackUnorm4x8(floatBitsToUint(b.aabb_min.w)).rgb,
+                         area > 0.0 ? b.aabb_max.w / area : 0.5);
+        // The top byte stays fixed, so these bits are always an ordinary float.
+        uint color_bits = (packUnorm4x8(vec4(color, 0.0)) & 0xFFFFFFu) | 0x3F000000u;
+        lbvh_nodes.data[pc.node_base + at].aabb_min = vec4(min(a.aabb_min.xyz, b.aabb_min.xyz), uintBitsToFloat(color_bits));
+        lbvh_nodes.data[pc.node_base + at].aabb_max = vec4(max(a.aabb_max.xyz, b.aabb_max.xyz), area);
         memoryBarrierBuffer();
 
         inner = WORDS[pc.parents + at];
