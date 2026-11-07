@@ -219,6 +219,8 @@ float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
 // How wide the area a visibility ray stands for is, in world units, for the shader to
 // set before tracing one. 0 means a single line, which tests every instance.
 float velk_ray_footprint = 0.0;
+// How much wider that gets per unit along the ray, for a light that is not a point.
+float velk_ray_spread = 0.0;
 // How far the surface a ray starts from may be from the full mesh rays are tested against,
 // in world units, when it is drawn at a coarser level of detail. For the shader to set.
 float velk_ray_lift = 0.0;
@@ -598,7 +600,6 @@ float velk_mesh_visibility(Ray ray, RtShape shape, float t_max)
     if (ld_scale < 1e-30) return 1.0;
     vec3 ld = ray.dir / ld_scale;
     float limit = min(t_max * ld_scale, 1e30);
-    float footprint = velk_ray_footprint * ld_scale;
     Ray local_ray;
     local_ray.origin = ray.origin;
     local_ray.dir = ld;
@@ -620,6 +621,8 @@ float velk_mesh_visibility(Ray ray, RtShape shape, float t_max)
         if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, limit, enter)) continue;
         vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
         float widest = max(max(extent.x, extent.y), extent.z);
+        // In the mesh's units, where its t is the world's times ld_scale.
+        float footprint = velk_ray_footprint * ld_scale + velk_ray_spread * max(enter, 0.0);
         if (widest < footprint * velk_medium_reach(blas_node_base + ni)) {
             vec3 sides = max(extent, vec3(widest * 1e-3));
             float len = max(min(ray_aabb_exit(local_ray, node.aabb_min.xyz, node.aabb_max.xyz), limit) - enter, 0.0);
@@ -711,7 +714,8 @@ float trace_visibility_medium(Ray ray, float t_max)
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
             float widest = max(max(extent.x, extent.y), extent.z);
             // The leaf of a partition without its instances has nothing else to offer.
-            if (widest < velk_ray_footprint * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
+            float width = velk_ray_footprint + velk_ray_spread * max(t_hit, 0.0);
+            if (widest < width * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
                 float enter;
                 if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, enter)) {
                     vec3 sides = max(extent, vec3(widest * 1e-3));
@@ -1042,7 +1046,7 @@ layout(push_constant, scalar) uniform PC {
     vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
     uint irr_image_id;         // 88  visibility RATIO out (denoised downstream)
     uint unshadowed_image_id;  // 92  unshadowed diffuse out (sharp; composite multiplies)
-    uint _pad1;                // 96  pads block to 112 (CPU struct is alignas(16))
+    uint ray_pass;             // 96  1: traces at half size, writing visibility only. 0: shades every pixel
     uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
     uint gi_probe_dims;        // 104 probe grid, 10 bits per axis
     uint light_loop_probe;     // 108 diagnostic: extra per-light ALU repeats
@@ -1682,7 +1686,10 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 void main()
 {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    // Rays run as a dispatch of their own over one pixel in each 2x2 block, since a thread
+    // group lasts as long as its longest ray: sparse rays among all pixels would hold up
+    // every group.
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy) * (pc.ray_pass != 0u ? 2 : 1);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
@@ -1708,8 +1715,11 @@ void main()
         // Sky is sharp (no diffuse irradiance): write it to the "rest" image
         // and zero irradiance. The denoise/composite pass passes it through
         // (albedo == 0 for sky pixels, so it adds nothing).
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
+        if (pc.ray_pass != 0u) {
+            imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
+        } else {
+            imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
+        }
         return;
     }
 
@@ -1896,16 +1906,10 @@ void main()
 
         // Shadowed diffuse IRRADIANCE estimate from the single chosen light
         // (one ray), demodulated (no albedo - reapplied at composite).
-        // EXPERIMENT (workstream I): half the shadow rays. Viable only because
-        // the denoiser now carries a bounded VISIBILITY ratio - a pixel that
-        // misses its turn keeps a valid value from history, where before it
-        // would have kept stale radiance. The analytic unshadowed term is
-        // still computed for EVERY pixel every frame, so light falloff, N.L
-        // and any moving light stay full-rate; only visibility is halved.
-        // Checkerboard by frame parity: every pixel updates every 2nd frame.
-        const bool kHalfRateShadows = false;
-        bool trace_now = !kHalfRateShadows
-                      || (((coord.x + coord.y + int(VELK_GLOBALS.present_counter)) & 1) == 0);
+        // One pixel in each 2x2 block traces, always the same one, and the spatial pass fills
+        // in the rest from its neighbours by geometry. The unshadowed term is still computed
+        // for every pixel, so light falloff and N.L stay sharp; only visibility is sparse.
+        bool trace_now = pc.ray_pass != 0u;
 
 )"
                                                                       R"(
@@ -1918,10 +1922,13 @@ void main()
         vec3 direct_diffuse = vec3(0.0);
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_lights.data[pc.lights_base + res_light];
-            velk_ray_footprint = pixel_width;
+            // It stands for its whole 2x2 block.
+            velk_ray_footprint = pixel_width * 2.0;
+            velk_ray_spread = chosen.flags.x == 0u ? 0.01 : 0.0;
             velk_ray_lift = lod_error;
             float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
             velk_ray_footprint = 0.0;
+            velk_ray_spread = 0.0;
             velk_ray_lift = 0.0;
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
@@ -2035,8 +2042,11 @@ void main()
     // Two outputs (raw HDR linear): "rest" (sharp) on output_image_id, diffuse
     // irradiance on irr_image_id. The denoise/composite pass reprojects +
     // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
+    if (pc.ray_pass != 0u) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
+        return;
+    }
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
     // The unshadowed term the composite multiplies the denoised ratio by. Kept
     // out of the denoiser deliberately: it is exact and sharp, and it carries
     // the high-frequency detail (light falloff, N.L) that must not be blurred.
@@ -2146,17 +2156,10 @@ void main()
 }
 )";
 
-// Variance-guided spatial (a-trous-style) filter + composite. Reads the
-// accumulated irradiance history (NOT modifying it - the unfiltered mean stays
-// the temporal history) over a normal + plane-distance + LUMINANCE weighted
-// neighborhood. The luminance edge-stop tolerance scales with the per-pixel
-// temporal VARIANCE (variance = 2nd moment - mean^2, both luminance): noisy /
-// just-changed pixels (high variance) blur freely, converged pixels (low
-// variance) keep their detail, and a real shadow edge (large luminance jump)
-// is preserved at any variance. Low sample counts widen the support + loosen
-// the luminance gate (the variance estimate is unreliable there). Then
-// composites the final image (albedo*(1-metallic)*filtered + sharp rest, read
-// back in place from the output) for the surface blit.
+// Spatial filter + composite. Fills every pixel's visibility from the pixels that traced a
+// ray, one in each 2x2 block, over a normal + plane-distance weighted neighbourhood. Then
+// composites the final image (albedo*(1-metallic)*filtered + sharp rest, read back in place
+// from the output) for the surface blit.
 [[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -2194,37 +2197,22 @@ vec3 velk_filter_at(ivec2 coord, vec2 dims)
     vec3 n0 = velk_texture(pc.normal_id, uv).xyz;
     if (dot(n0, n0) < 1e-6) return vec3(0.0);
 
-    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     vec3 N         = normalize(n0);
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
 
-    vec4 c = velk_texture(pc.hist_irr_id, uv);
-    vec3 center_irr = c.rgb;
-    // With accumulation off in the temporal pass there is no history to wait for, so
-    // every pixel counts as converged. Otherwise the filter stays at its widest.
-    float count = 8.0;
-    float center_lum = dot(center_irr, LUMA);
-
-    // Per-pixel temporal variance of luminance -> noise level.
-    float m2 = velk_texture(pc.hist_mom_id, uv).r;
-    float variance = max(m2 - center_lum * center_lum, 0.0);
-    // Luminance edge-stop tolerance: scene-scaled by sigma, with a small
-    // relative floor so converged-flat areas don't divide by ~0. Loosened a lot
-    // while the count is low (variance estimate unreliable -> trust neighbours).
-    float low_count = mix(8.0, 1.0, clamp(count / 8.0, 0.0, 1.0));
-    float phi_l = (4.0 * sqrt(variance) + 0.02 * center_lum + 1e-4) * low_count;
-
-    // Wider taps when unconverged; tightens to a 5x5 once converged, which is when
-    // the count reaches the temporal pass' window.
-    int step = int(mix(3.0, 1.0, clamp(count / 8.0, 0.0, 1.0)) + 0.5);
     float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
 
+    // Only pixels that traced a ray count, which are one in each 2x2 block, by geometry.
+    // A surface unlike all of them nearby, such as a leaf, takes their plain mean.
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
+    vec3 any_sum = vec3(0.0);
+    float any_wsum = 0.0;
     for (int j = -2; j <= 2; ++j) {
         for (int i = -2; i <= 2; ++i) {
-            ivec2 c2 = coord + ivec2(i, j) * step;
+            ivec2 c2 = coord + ivec2(i, j);
             if (c2.x < 0 || c2.y < 0 || c2.x >= int(pc.width) || c2.y >= int(pc.height)) continue;
+            if (((c2.x | c2.y) & 1) != 0) continue;
             vec2 uv2 = (vec2(c2) + 0.5) / dims;
             vec3 n2 = velk_texture(pc.normal_id, uv2).xyz;
             if (dot(n2, n2) < 1e-6) continue; // sky neighbour
@@ -2232,14 +2220,16 @@ vec3 velk_filter_at(ivec2 coord, vec2 dims)
             vec3 ir2 = velk_texture(pc.hist_irr_id, uv2).rgb;
             float wn = pow(max(dot(N, normalize(n2)), 0.0), 32.0);
             float wp = exp(-abs(dot(p2 - world_pos, N)) / (0.05 * depth));
-            float wl = exp(-abs(center_lum - dot(ir2, LUMA)) / phi_l); // variance-guided
             float wk = exp(-float(i * i + j * j) * 0.25);
-            float w = wn * wp * wl * wk;
+            float w = wn * wp * wk;
             sum += ir2 * w;
             wsum += w;
+            any_sum += ir2 * wk;
+            any_wsum += wk;
         }
     }
-    return (wsum > 1e-5) ? (sum / wsum) : center_irr;
+    if (wsum > 1e-5) return sum / wsum;
+    return any_wsum > 0.0 ? any_sum / any_wsum : vec3(1.0);
 }
 )"
                                                                       R"(

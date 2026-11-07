@@ -195,7 +195,7 @@ VELK_GPU_STRUCT DeferredComputePushC {
     float    env_params[2];    // x = intensity, y = rotation_rad (inline)
     uint32_t irr_image_id;     // visibility RATIO output (denoised downstream)
     uint32_t unshadowed_image_id; // unshadowed diffuse output (sharp)
-    uint32_t _pad1;            // pads to 112 (VELK_GPU_STRUCT is alignas(16))
+    uint32_t ray_pass;         // 1: traces at half size, writing visibility only. 0: shades every pixel
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
     uint32_t gi_probe_dims;    // probe grid, 10 bits per axis
     uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
@@ -1016,9 +1016,17 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             dc.root_constants_size = sizeof(pc);
             std::memcpy(dc.root_constants, &pc, sizeof(pc));
 
+            DeferredComputePushC ray_pc = pc;
+            ray_pc.ray_pass = 1;
+            DispatchCall ray_dc = dc;
+            ray_dc.groups_x = ((w + 1) / 2 + 7) / 8;
+            ray_dc.groups_y = ((h + 1) / 2 + 7) / 8;
+            std::memcpy(ray_dc.root_constants, &ray_pc, sizeof(ray_pc));
+
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->push_label("DeferredPath: lighting");
+                cmd->record_dispatch(ray_dc);
                 cmd->record_dispatch(dc);
                 cmd->pop_label();
                 cmd->end_recording();
