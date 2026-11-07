@@ -63,6 +63,7 @@
 // budget=MB: limits the GPU memory a forest's instances use.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
+// grass=N:  nature has N patches of grass, 1,000,000 by default, fewer on steep or high ground.
 // nowind:   nature's trees stand still.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
@@ -842,6 +843,7 @@ private:
         }
     }
 
+public:
     static velk::IMeshPrimitive::Ptr make_primitive(velk::IRenderContext& ctx, const velk::vector<Vertex>& vertices,
                                                     const velk::vector<uint32_t>& indices, const velk::IMaterial::Ptr& material)
     {
@@ -874,6 +876,7 @@ private:
         return primitive;
     }
 
+private:
     TreeShape shape_;
     uint32_t state_;
     velk::vector<Vertex> wood_;
@@ -881,6 +884,55 @@ private:
     velk::vector<Vertex> leaves_;
     velk::vector<uint32_t> leaf_indices_;
 };
+
+/// Builds a square of grass blades @p size across on y = 0, growing towards -y. A blade's
+/// first uv is its height, from 0 to 1, for the vertex shader to move its tip the most.
+velk::IMesh::Ptr build_grass_patch(velk::IRenderContext& ctx, float size, const velk::IMaterial::Ptr& material)
+{
+    constexpr int kBlades = 200;
+    constexpr int kSegments = 2;
+    uint32_t state = 2166136261u;
+    const auto random = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return static_cast<float>(state % 100000u) / 100000.f;
+    };
+    const velk::vec3 up{0.f, -1.f, 0.f};
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    for (int blade = 0; blade < kBlades; ++blade) {
+        const velk::vec3 base{(random() - 0.5f) * size, 0.f, (random() - 0.5f) * size};
+        const float height = 3.f + random() * 2.f;
+        const float turn = random() * 6.2831853f;
+        const velk::vec3 lean{std::cos(turn), 0.f, std::sin(turn)};
+        const velk::vec3 side{-lean.z * 0.28f, 0.f, lean.x * 0.28f};
+        const velk::vec3 normal = velk::vec3::normalize(up * 0.8f + lean * 0.6f);
+        const auto first = static_cast<uint32_t>(vertices.size());
+        for (int s = 0; s <= kSegments; ++s) {
+            const float f = static_cast<float>(s) / static_cast<float>(kSegments + 1);
+            const velk::vec3 at = base + up * (f * height) + lean * (f * f * height * 0.5f);
+            const velk::vec3 half = side * (1.f - f);
+            for (const velk::vec3& p : {at - half, at + half}) {
+                vertices.push_back({{p.x, p.y, p.z}, {normal.x, normal.y, normal.z}, {f, 0.f}, {side.x, side.y, side.z, 1.f}});
+            }
+        }
+        const velk::vec3 tip = base + up * height + lean * (height * 0.5f);
+        vertices.push_back({{tip.x, tip.y, tip.z}, {normal.x, normal.y, normal.z}, {1.f, 0.f}, {side.x, side.y, side.z, 1.f}});
+        for (uint32_t s = 0; s < kSegments; ++s) {
+            const uint32_t a = first + s * 2u;
+            for (uint32_t i : {a, a + 1u, a + 3u, a, a + 3u, a + 2u}) {
+                indices.push_back(i);
+            }
+        }
+        const uint32_t top = first + kSegments * 2u;
+        for (uint32_t i : {top, top + 1u, top + 2u}) {
+            indices.push_back(i);
+        }
+    }
+    velk::IMeshPrimitive::Ptr primitives[] = {TreeGrower::make_primitive(ctx, vertices, indices, material)};
+    return ctx.get_mesh_builder().build({primitives, 1});
+}
 
 /// Builds a low-poly tree standing on y = 0 and growing towards -y: a trunk and a
 /// crown, as a primitive each.
@@ -1108,6 +1160,7 @@ int main(int argc, char* argv[])
     float leaf_density = 1.f;
     bool no_shadow = false;
     bool no_wind = false;
+    long grass_count = 1000000;
     bool ray_wind = true;
     bool flat_terrain = false;
     float sun_angle = 0.f;
@@ -1130,6 +1183,7 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
+        if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
         ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
         if (std::strncmp(argv[i], "sun=", 4) == 0) sun_angle = static_cast<float>(std::atof(argv[i] + 4));
@@ -1430,6 +1484,40 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
         forest_element.add_trait(forest_trs);
         forest_element.add_trait(forest_visual);
         scene.add(root, forest_element);
+
+        if (grass_count > 0) {
+            const long grass_columns = std::max(1L, static_cast<long>(std::sqrt(static_cast<double>(grass_count))));
+            const float patch_size = kTerrainExtent / static_cast<float>(grass_columns);
+            constexpr float kGrassLine = 1100.f;
+            constexpr float kMaxGrassSlope = 0.5f;
+            velk::vector<velk::InstanceTransform> patches;
+            patches.reserve(static_cast<size_t>(grass_columns * grass_columns));
+            for (long i = 0; i < grass_columns * grass_columns; ++i) {
+                const float x = (static_cast<float>(i % grass_columns) + 0.5f + 0.5f * forest_jitter(i, 3.7f)) * patch_size - kTerrainExtent * 0.5f;
+                const float z = (static_cast<float>(i / grass_columns) + 0.5f + 0.5f * forest_jitter(i, 5.3f)) * patch_size - kTerrainExtent * 0.5f;
+                const float height = terrain.height_at(x, z);
+                const float dx = (terrain.height_at(x + 15.f, z) - terrain.height_at(x - 15.f, z)) / 30.f;
+                const float dz = (terrain.height_at(x, z + 15.f) - terrain.height_at(x, z - 15.f)) / 30.f;
+                if (height > kGrassLine || std::sqrt(dx * dx + dz * dz) > kMaxGrassSlope) {
+                    continue;
+                }
+                // Turned and sheared to lie along the slope. Up is -y.
+                const float turn = (forest_jitter(i, 17.9f) + 0.5f) * 6.2831853f;
+                const float c = std::cos(turn);
+                const float s = std::sin(turn);
+                patches.push_back(velk::InstanceTransform{{{c, 0.f, s, x},
+                                                           {-(dx * c - dz * s), 1.f, -(dx * s + dz * c), kFloorY - height},
+                                                           {-s, 0.f, c, z}}});
+            }
+            auto grass_visual = velk::trait::visual::create_instanced_mesh();
+            grass_visual.set_draw_distance(1500.f);
+            grass_visual.set_mesh(velk::Mesh(build_grass_patch(*render_context, patch_size * 1.3f, foliage(velk::color{0.17f, 0.29f, 0.07f, 1.f}))));
+            grass_visual.add_instances({patches.data(), patches.size()});
+            auto grass_element = velk::create_element();
+            grass_element.add_trait(grass_visual);
+            scene.add(root, grass_element);
+            VELK_LOG(I, "scale: %zu grass patches", patches.size());
+        }
     } else if (forest && !nature) {
         auto trunk_material = velk::material::create_standard(velk::color{0.3f, 0.2f, 0.12f, 1.f}, 0.f, 0.8f);
         auto crown_material = velk::material::create_standard(velk::color{0.15f, 0.42f, 0.14f, 1.f}, 0.f, 0.7f);
