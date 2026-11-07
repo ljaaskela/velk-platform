@@ -67,6 +67,15 @@ public:
     void remove_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface) override;
     Frame prepare(const FrameDesc& desc) override;
     void present(Frame frame) override;
+    void log_gpu_memory() const override
+    {
+        if (resources_) {
+            resources_->log_arena_memory();
+        }
+        if (frame_resources_) {
+            frame_resources_->log_arena_memory();
+        }
+    }
     void render() override;
     void set_max_frames_in_flight(uint32_t count) override;
     void add_debug_overlay(const IWindowSurface::Ptr& surface,

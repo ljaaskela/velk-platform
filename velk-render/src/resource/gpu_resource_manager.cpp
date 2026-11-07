@@ -359,6 +359,30 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
     (void)completion_marker;
 }
 
+void GpuResourceManager::log_arena_memory() const
+{
+    static constexpr const char* kNames[IRenderBackend::kGlobalBufferSlotCount] = {
+        "bvh nodes",     "bvh shapes",  "globals",      "instances",  "materials",  "lights",
+        "primary shapes", "text curves", "text bands",   "text glyphs", "records",   "mesh static",
+        "blas nodes",    "cluster words", "mesh words", "draw data",  "culling"};
+    uint64_t total_used = 0;
+    uint64_t total_capacity = 0;
+    for (const auto& weak : arenas_) {
+        auto arena = weak.lock();
+        if (!arena || arena->slot() >= IRenderBackend::kGlobalBufferSlotCount) {
+            continue;
+        }
+        const uint64_t capacity = arena->capacity();
+        const uint64_t used = capacity - arena->free_bytes();
+        total_used += used;
+        total_capacity += capacity;
+        VELK_LOG(I, "gpu arena %-16s used=%9.1f MB  capacity=%9.1f MB", kNames[arena->slot()],
+                 static_cast<double>(used) / 1e6, static_cast<double>(capacity) / 1e6);
+    }
+    VELK_LOG(I, "gpu arena %-16s used=%9.1f MB  capacity=%9.1f MB", "total", static_cast<double>(total_used) / 1e6,
+             static_cast<double>(total_capacity) / 1e6);
+}
+
 void GpuResourceManager::shutdown()
 {
     if (!backend_) return;

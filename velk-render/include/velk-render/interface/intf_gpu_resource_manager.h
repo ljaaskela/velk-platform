@@ -74,6 +74,9 @@ public:
                                         bool index_buffer = false,
                                         uint64_t reserve_bytes = 0) = 0;
 
+    /// Logs how much of each shared arena is in use.
+    virtual void log_arena_memory() const = 0;
+
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last
     /// reference drops, the backend handle is auto-deferred for destroy

@@ -151,6 +151,12 @@ public:
     /// Record stride. A region's shader base is its byte offset divided by
     /// this, which is why offsets are kept a whole multiple of it.
     virtual uint32_t element_size() const = 0;
+
+    /// Bytes in the backing buffer.
+    virtual uint64_t capacity() const = 0;
+
+    /// Bytes of it in no region, not counting regions freed but still awaiting their fence.
+    virtual uint64_t free_bytes() const = 0;
 };
 
 

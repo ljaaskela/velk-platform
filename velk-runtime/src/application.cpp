@@ -275,6 +275,9 @@ bool Application::poll()
                      static_cast<double>(pass.ms[pass.ms.size() / 2]),
                      static_cast<double>(pass.ms[pass.ms.size() * 9 / 10]), pass.ms.size());
         }
+        if (auto_gpu_stats_ && renderer_) {
+            renderer_->log_gpu_memory();
+        }
         return false;
     }
     return window_provider_->poll_events();

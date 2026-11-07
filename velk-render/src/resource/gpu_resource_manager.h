@@ -51,6 +51,7 @@ public:
     IGpuArena::Ptr create_arena(uint32_t slot, uint32_t element_size,
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;
+    void log_arena_memory() const override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;

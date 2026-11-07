@@ -50,6 +50,15 @@ public:
     void* mapped_at(uint64_t offset) override;
     uint32_t slot() const override { return slot_; }
     uint32_t element_size() const override { return element_size_; }
+    uint64_t capacity() const override { return persistent_capacity_; }
+    uint64_t free_bytes() const override
+    {
+        uint64_t bytes = 0;
+        for (const auto& span : free_spans_) {
+            bytes += span.size;
+        }
+        return bytes;
+    }
 
 private:
     bool grow_persistent(uint64_t want);

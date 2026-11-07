@@ -95,6 +95,9 @@ public:
      */
     virtual void present(Frame frame) = 0;
 
+    /** @brief Logs how much of each of its GPU arenas is in use. */
+    virtual void log_gpu_memory() const = 0;
+
     /**
      * @brief Synchronous render of all registered surfaces and cameras.
      *
