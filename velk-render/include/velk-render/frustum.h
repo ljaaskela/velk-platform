@@ -56,8 +56,8 @@ inline Frustum extract_frustum(const mat4& vp)
     f.planes[1] = sub(r3, r0); // right  (x <=  w)
     f.planes[2] = add(r3, r1); // bottom (y >= -w)
     f.planes[3] = sub(r3, r1); // top    (y <=  w)
-    f.planes[4] = r2;          // near   (z >=  0)  Vulkan / D3D depth range
-    f.planes[5] = sub(r3, r2); // far    (z <=  w)
+    f.planes[4] = r2;          // far    (z >=  0)  Vulkan / D3D depth range, reversed
+    f.planes[5] = sub(r3, r2); // near   (z <=  w)
     return f;
 }
 

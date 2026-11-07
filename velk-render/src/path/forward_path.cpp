@@ -183,7 +183,6 @@ void ForwardPath::build_passes(IViewEntry& entry,
                 if (depth_texture) {
                     depth_att.texture = depth_texture;
                     depth_att.clear = true;
-                    depth_att.clear_depth = 1.0f;
                     depth_att.clear_stencil = 0;
                 }
 

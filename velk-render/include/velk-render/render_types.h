@@ -26,7 +26,8 @@ enum class BlendMode : uint8_t
     Opaque,  ///< No blending; fragment overwrites destination.
 };
 
-/// Depth compare op. `Disabled` turns depth testing off entirely.
+/// Depth compare op, by distance from the camera: `Less` passes what is nearer than what
+/// is already drawn. `Disabled` turns depth testing off entirely.
 enum class CompareOp : uint8_t
 {
     Disabled,

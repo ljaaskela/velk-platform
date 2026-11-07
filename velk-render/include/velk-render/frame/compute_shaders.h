@@ -1304,8 +1304,8 @@ void main()
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
         mat4 inv_vp = VELK_GLOBALS.inverse_view_projection;
-        vec4 near_h = inv_vp * vec4(ndc, 0.0, 1.0);
-        vec4 far_h  = inv_vp * vec4(ndc, 1.0, 1.0);
+        vec4 near_h = inv_vp * vec4(ndc, 1.0, 1.0);
+        vec4 far_h  = inv_vp * vec4(ndc, 0.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
         vec3 far_w  = far_h.xyz  / far_h.w;
         vec3 rd = normalize(far_w - near_w);
@@ -2327,8 +2327,8 @@ void main()
         // different between frames.
         vec2 jitter = vec2(rng_next_float(), rng_next_float());
         vec2 ndc = (vec2(coord) + jitter) / vec2(float(w), float(h)) * 2.0 - 1.0;
-        vec4 near_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 0.0, 1.0);
-        vec4 far_h  = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+        vec4 near_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+        vec4 far_h  = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 0.0, 1.0);
         vec3 near_w = near_h.xyz / near_h.w;
         vec3 far_w  = far_h.xyz  / far_h.w;
 

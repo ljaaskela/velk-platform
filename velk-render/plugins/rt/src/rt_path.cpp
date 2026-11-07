@@ -162,7 +162,8 @@ void RtPath::build_passes(IViewEntry& entry,
                 uint64_t ka = keys[a];
                 uint64_t kb = keys[b];
                 if (ka == kb) return false;
-                return plane_depth[ka] > plane_depth[kb];
+                // Depth is reversed, so further is smaller.
+                return plane_depth[ka] < plane_depth[kb];
             });
 
         vector<RtShape> sorted_shapes(shapes.size());

@@ -35,13 +35,13 @@ void main()
     // Env draws as a fullscreen quad in clip space — read xy from
     // the 3D unit-quad VBO (z = 0).
     vec2 q = velk_vertex3d(root).position.xy;
-    // Fullscreen clip-space quad at z=1 (far plane).
-    gl_Position = vec4(q * 2.0 - 1.0, 1.0, 1.0);
+    // Fullscreen clip-space quad at z=0 (far plane).
+    gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);
 
     // Reconstruct the corresponding world-space point on the far plane.
     // Y is flipped to match the rest of the pipeline's viewport.
     vec2 ndc = vec2(q.x * 2.0 - 1.0, (1.0 - q.y) * 2.0 - 1.0);
-    vec4 far_pt = globals.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec4 far_pt = globals.inverse_view_projection * vec4(ndc, 0.0, 1.0);
     v_world_pos = far_pt.xyz / far_pt.w;
 
     v_color = vec4(0.0);

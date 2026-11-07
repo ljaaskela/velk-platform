@@ -2066,12 +2066,13 @@ IGpuPipeline::Ptr VkBackend::create_pipeline_dynamic(
         depth_stencil.depthWriteEnable = desc.options.depth_write ? VK_TRUE : VK_FALSE;
         switch (desc.options.depth_test) {
         case CompareOp::Never:        depth_stencil.depthCompareOp = VK_COMPARE_OP_NEVER;            break;
-        case CompareOp::Less:         depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;             break;
+        // Depth is reversed, so nearer is a larger value.
+        case CompareOp::Less:         depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER;          break;
         case CompareOp::Equal:        depth_stencil.depthCompareOp = VK_COMPARE_OP_EQUAL;            break;
-        case CompareOp::LessEqual:    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;    break;
-        case CompareOp::Greater:      depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER;          break;
+        case CompareOp::LessEqual:    depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+        case CompareOp::Greater:      depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;             break;
         case CompareOp::NotEqual:     depth_stencil.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;        break;
-        case CompareOp::GreaterEqual: depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+        case CompareOp::GreaterEqual: depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;    break;
         case CompareOp::Always:       depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
         case CompareOp::Disabled:     depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;           break;
         }

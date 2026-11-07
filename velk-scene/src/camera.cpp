@@ -48,7 +48,8 @@ mat4 Camera::get_view_projection(const mat4& world_matrix,
         float hh = height / z;
         proj(0, 0) = 2.f / hw;
         proj(1, 1) = 2.f / hh;
-        proj(2, 2) = -1.f;
+        proj(2, 2) = 1.f;
+        proj(2, 3) = 1.f;
         proj(0, 3) = -1.f;
         proj(1, 3) = -1.f;
         proj(3, 3) = 1.f;
@@ -58,7 +59,8 @@ mat4 Camera::get_view_projection(const mat4& world_matrix,
         float aspect = width / height;
         float n = state->near_clip;
         float fa = state->far_clip;
-        // Vulkan clip-space: Z in [0, 1]. Y is left un-flipped because
+        // Vulkan clip-space: Z in [0, 1], reversed so that near is 1 and far is 0, which
+        // keeps depth about equally precise at all distances. Y is left un-flipped because
         // velk's world Y points down (matching Vulkan's framebuffer Y
         // and the 2D UI convention). The world->framebuffer chain
         // produces a winding inversion for CCW-from-outside meshes,
@@ -66,9 +68,9 @@ mat4 Camera::get_view_projection(const mat4& world_matrix,
         // FrontFace::Clockwise. See design-notes/coordinate_conventions.md.
         proj(0, 0) = f / aspect;
         proj(1, 1) = f;
-        proj(2, 2) = -fa / (fa - n);
+        proj(2, 2) = n / (fa - n);
         proj(3, 2) = -1.f;
-        proj(2, 3) = -(n * fa) / (fa - n);
+        proj(2, 3) = (n * fa) / (fa - n);
     }
 
     return proj * view;

@@ -34,7 +34,7 @@ struct DepthAttachment
 {
     IGpuTexture* texture = nullptr;       ///< Depth (or depth-stencil) texture.
     bool clear = true;
-    float clear_depth = 1.0f;
+    float clear_depth = 0.0f;             ///< The far plane, since depth is reversed.
     uint32_t clear_stencil = 0;
 };
 

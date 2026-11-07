@@ -821,7 +821,6 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                 DepthAttachment depth_att{};
                 depth_att.texture = group->depth_attachment();
                 depth_att.clear = true;
-                depth_att.clear_depth = 1.0f;
                 depth_att.clear_stencil = 0;
 
                 cmd->begin_recording();
