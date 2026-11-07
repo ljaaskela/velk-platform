@@ -1243,6 +1243,9 @@ int main(int argc, char* argv[])
             per_mesh[species].push_back(velk::InstanceTransform{{{c, 0.f, s, at.x}, {0.f, size, 0.f, at.y + 1.5f}, {-s, 0.f, c, at.z}}});
         }
         forest_visual = velk::trait::visual::create_instanced_mesh();
+        if (real_trees) {
+            forest_visual.set_far_form(false);
+        }
         forest_visual.set_mesh(oak);
         const uint32_t birch_index = forest_visual.add_mesh(birch);
         const uint32_t pine_index = forest_visual.add_mesh(pine);
