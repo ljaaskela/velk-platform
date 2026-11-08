@@ -182,28 +182,17 @@ public:
         IRenderPass::Ptr cached_transparent_pass;
         bool transparent_dirty = true;
 
-        /// World-space GI probe atlases, finest first. SH L1 per probe, laid
-        /// out x = px + pz * dims.x, y = py + coefficient * dims.y. Read back
-        /// by the probe pass for its temporal blend, so they persist across
-        /// frames rather than being transient.
-        ///
-        /// `gi_probes` is the level the lighting pass reads: it owns the near
-        /// shell and folds in the level above wherever its own rays miss, so it
-        /// carries the merged result. Each coarser level does the same with the
-        /// one beyond it, and they update outermost first. With the fine
-        /// spacing S the shells are [0, S), [S, 2S) and [2S, inf), so only the
-        /// outermost traces unbounded rays and it is the one with fewest
-        /// probes.
-        /// All levels update in ONE dispatch, so the coarse ones ping-pong:
-        /// each frame reads the texture the previous frame wrote. Without that
-        /// a level would read an atlas its own dispatch is concurrently
-        /// writing. The fine level needs no pair, since nothing reads it inside
-        /// the dispatch, which also keeps the handle the lighting pass bakes
-        /// into its push constants stable.
+        /// The GI probe field, all its levels in one atlas. See VELK_GI_FIELD_GLSL.
+        /// Read back by the probe pass for its temporal blend, so it persists
+        /// across frames rather than being transient.
         IRenderTarget::Ptr gi_probes;
-        IRenderTarget::Ptr gi_probes_mid[2];
-        IRenderTarget::Ptr gi_probes_far[2];
         IRenderPass::Ptr cached_probe_pass;
+        /// Exponent of the finest probe cell's width. Chosen once distances arrive.
+        int32_t gi_finest = 0;
+        bool gi_finest_known = false;
+        /// Distances to what the camera sees, sampled from the G-buffer each frame.
+        ArenaRegion gi_distances;
+        IRenderPass::Ptr cached_measure_pass;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -240,11 +229,12 @@ private:
     IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool with_medium, string_view ray_motion,
                                             float ray_motion_reach);
 
-    /// Creates one level's atlas if it does not exist yet. Sized from the
-    /// level's grid: width folds z into x, height stacks the SH coefficients.
-    IRenderTarget::Ptr& ensure_probe_atlas(IRenderTarget::Ptr& atlas, uint32_t dim_x,
-                                           uint32_t dim_y, uint32_t dim_z,
-                                           IRenderGraph& graph);
+    /// Samples distances to what the camera sees, for choosing the probe field's finest level.
+    void emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
+
+    /// Chooses the probe field's finest level from the camera's setting, or else from the
+    /// distances sampled on earlier frames. Returns whether one is chosen yet.
+    bool update_gi_finest(ViewState& vs, FrameContext& ctx);
 
     void emit_probe_pass(ViewState& vs, const RenderView& render_view,
                          FrameContext& ctx, IRenderGraph& graph);

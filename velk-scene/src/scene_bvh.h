@@ -88,7 +88,6 @@ public:
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
-    ProbeVolume get_probe_volume() const override { return probe_volume_; }
     bool has_medium() const override;
     string_view get_ray_motion(float& reach) const override;
 
@@ -264,8 +263,6 @@ private:
     uint32_t alloc_partition();
     /// Moves the probe volume only if @p bounds left it or are much smaller, since
     /// moving it discards probe history.
-    void update_probe_volume(const float bounds_min[3], const float bounds_max[3], uint32_t frame);
-
     vector<Record> records_;
     vector<uint32_t> free_records_;
     /// Slots freed this frame. They join free_records_ once every partition has
@@ -302,8 +299,6 @@ private:
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
-    ProbeVolume probe_volume_;
-    bool probe_volume_placed_ = false;
     bool needs_full_build_ = true;
 };
 

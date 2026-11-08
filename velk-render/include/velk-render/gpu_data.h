@@ -28,12 +28,6 @@ struct BvhBinding
 {
     uint32_t root         = 0;
     uint32_t node_count   = 0;
-    /// GI probe lattice box and the frame it last changed. Read from globals
-    /// each frame, so not part of the comparison below, which decides whether
-    /// passes that bake the fields above must re-record.
-    float    probe_min[3] = {};
-    float    probe_max[3] = {};
-    uint32_t probe_reset_frame = 0;
     /// Whether instances in it have a far form, so tracing shaders need the medium
     /// traversals. Paths watch this themselves, since it changes which pipeline they use.
     uint32_t has_medium = 0;
@@ -66,25 +60,11 @@ struct FrameGlobals
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint32_t _pad1;
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
-    float    probe_min[3];                 ///< GI probe lattice box minimum, relative to the camera.
-    uint32_t probe_reset_frame;            ///< present_counter value at which the lattice last changed.
-    float    probe_max[3];                 ///< GI probe lattice box maximum, relative to the camera.
-    uint32_t _pad0;
     float    cam_moved[3];                 ///< How far the camera moved since the previous frame.
     uint32_t _pad2;
 };
 
-static_assert(sizeof(FrameGlobals) == 288, "FrameGlobals layout must match velk.glsl");
-
-/// Copies the probe lattice fields of @p bvh into @p globals. Needs cam_pos set.
-inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)
-{
-    for (int i = 0; i < 3; ++i) {
-        globals.probe_min[i] = bvh.probe_min[i] - globals.cam_pos[i];
-        globals.probe_max[i] = bvh.probe_max[i] - globals.cam_pos[i];
-    }
-    globals.probe_reset_frame = bvh.probe_reset_frame;
-}
+static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
 
 /// DrawDataHeader::visible_base of a draw with no visible list. Mirrors GLSL VELK_NO_VISIBLE_LIST.
 inline constexpr uint32_t kNoVisibleList = 0xFFFFFFFFu;

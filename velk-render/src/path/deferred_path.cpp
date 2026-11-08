@@ -16,13 +16,17 @@
 #include "path/deferred_gbuffer.h"
 #include "path/ltc_table.h"
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_camera.h>
 #include <velk-render/interface/intf_light.h>
 #include <velk-render/interface/intf_render_target.h>
 #include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/interface/material/intf_material.h>
 
+#include <velk/api/state.h>
 #include <velk/interface/intf_object.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -197,7 +201,7 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t unshadowed_image_id; // unshadowed diffuse output (sharp)
     uint32_t ray_pass;         // 1: traces at half size, writing visibility only. 0: shades every pixel
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
-    uint32_t gi_probe_dims;    // probe grid, 10 bits per axis
+    int32_t  gi_finest;        // ladder index of the probe field's finest level
     uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
 };
 static_assert(sizeof(DeferredComputePushC) == 112, "Deferred compute PushC layout mismatch");
@@ -406,57 +410,14 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
 
 namespace {
 
-// Cascade 0: 55296 probes x 8 directions = 442k rays, each bounded to about
-// one probe spacing. Half the probes update per frame, so 221k of them are
-// traced on any given one.
-//
-// Sizing history, so the numbers are not re-derived. 256 probes x 64 dirs
-// measured 2.8 ms (171 ns/ray), but 16k threads does not saturate the GPU, so
-// that was launch latency. 6912 x 64 = 442k rays measured 10.6 ms (24 ns/ray).
-// At 6912 x 8 the pass measured 3.0 ms, decomposing as ~1.9 ms of launch
-// overhead plus ~20 ns per full-length ray.
-//
-// Bounding a ray to one probe spacing then dropped the pass to 2.0 ms, so a
-// short ray costs ~1.8 ns - an order of magnitude less, and the same floor the
-// coherent tracer hits. Ray length, not ray count, was the expense. That is
-// what pays for this density: a level only resolves what falls inside its own
-// shell, so a dense near level is cheap and distance is the coarse levels'
-// problem. Probe spacing is what resolves contact detail, and at 24x12x24 it
-// resolved none - the field converged flat.
-constexpr uint32_t kProbeDimX = 48;
-constexpr uint32_t kProbeDimY = 24;
-constexpr uint32_t kProbeDimZ = 48;
-
-// Two coarser levels, each half the resolution per axis of the one below and
-// owning the next shell out. A level alone cannot be judged: with the fine
-// level falling back to the environment wherever its short rays missed, every
-// ray became a bright/dark decision flipping over one probe spacing, which
-// interpolation drew as a grid across the floor. A miss has to mean "defer
-// upward", and that needs a level to defer TO.
-//
-// Only the outermost level traces unbounded rays, and it is the cheapest: at
-// an eighth of the probes per level, covering the whole remaining distance
-// costs a fraction of what the level below would pay for the same reach. That
-// is the entire economic argument for a cascade, and leaving the middle level
-// unbounded threw it away.
-constexpr uint32_t kMidDimX = kProbeDimX / 2;
-constexpr uint32_t kMidDimY = kProbeDimY / 2;
-constexpr uint32_t kMidDimZ = kProbeDimZ / 2;
-
-constexpr uint32_t kFarDimX = kMidDimX / 2;
-constexpr uint32_t kFarDimY = kMidDimY / 2;
-constexpr uint32_t kFarDimZ = kMidDimZ / 2;
-
-// Spacing scales inversely with resolution, so a level's shell starts exactly
-// half a spacing of its own in - which is where the level below ended. Halving
-// every axis keeps one number valid for all three and for both steps, and the
-// shells then partition distance with no gap and no overlap.
-constexpr float kShellStart = 0.5f;
-
-uint32_t pack_probe_dims(uint32_t x, uint32_t y, uint32_t z)
-{
-    return x | (y << 10) | (z << 20);
-}
+// Rays the probe field traces per frame, whatever the scene.
+constexpr uint32_t kProbeRaysPerFrame = 283000;
+// Rays per probe update. A power of two, 64 at most.
+constexpr uint32_t kProbeDirs = 8;
+// Mirrors kGiDim and the atlas layout in VELK_GI_FIELD_GLSL.
+constexpr uint32_t kGiDim = 32;
+constexpr int kGiAtlasSize = kGiDim * kGiDim;
+constexpr uint32_t kGiDistanceSamples = 64;
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
 VELK_GPU_STRUCT ProbePushC {
@@ -466,13 +427,15 @@ VELK_GPU_STRUCT ProbePushC {
     uint32_t lights_base;
     float    env_params[2];
     uint32_t extras[4];        // RT main uses these for its output image; the
-                               // probe main repurposes them as x = atlas of the
-                               // level above (0 = coarsest), y = its packed
-                               // dims, z/w = this level's shell bounds as
-                               // float bits, in units of its probe spacing
-                               // (w <= 0 = unbounded)
+                               // probe main uses x = workgroups in the dispatch.
     uint32_t env[4];           // x = env material, y = env texture,
-                               // z = packed grid dims, w = probe atlas image
+                               // z = finest level's ladder index, w = probe atlas image
+};
+
+VELK_GPU_STRUCT GiMeasurePushC {
+    uint32_t word;
+    uint32_t worldpos_id;
+    uint32_t normal_id;
 };
 
 } // namespace
@@ -506,7 +469,7 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
-    string src = compose_rt_compute(*ctx.snippets, probe_gi_main_src);
+    string src = velk_with_probe_dirs(string_view(compose_rt_compute(*ctx.snippets, probe_gi_main_src)), kProbeDirs);
     if (!ray_motion.empty()) {
         src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
     }
@@ -516,55 +479,110 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
-IRenderTarget::Ptr& DeferredPath::ensure_probe_atlas(IRenderTarget::Ptr& atlas,
-                                                     uint32_t dim_x, uint32_t dim_y,
-                                                     uint32_t dim_z,
-                                                     IRenderGraph& graph)
+void DeferredPath::emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph)
 {
-    if (!atlas) {
-        TextureDesc td{};
-        td.width = static_cast<int>(dim_x * dim_z);
-        td.height = static_cast<int>(dim_y * 4u);  // 4 SH coefficients
-        td.format = PixelFormat::RGBA32F;
-        td.usage = TextureUsage::Storage;
-        // Nearest, not the default linear: readers sample texel centres and
-        // weight the eight neighbours themselves, and RGBA32F carries no
-        // guarantee of linear filter support (it has none on much hardware),
-        // so asking for it is undefined rather than merely wasteful. Clamped
-        // because the atlas folds z into x, where a filter running off either
-        // edge would mix unrelated probes.
-        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
-        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
-        td.sampler.mag_filter = SamplerFilter::Nearest;
-        td.sampler.min_filter = SamplerFilter::Nearest;
-        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
-        atlas = graph.resources().create_render_texture(td);
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena || !vs.gbuffer) return;
+    if (!vs.gi_distances.valid()) {
+        vs.gi_distances = arena->alloc(kGiDistanceSamples * sizeof(float));
+        if (!vs.gi_distances.valid()) return;
+        float none[kGiDistanceSamples];
+        std::fill(std::begin(none), std::end(none), -1.f);
+        arena->write_at(vs.gi_distances.offset(), none, sizeof(none));
     }
-    return atlas;
+
+    constexpr uint64_t kMeasureKey = 0x4749'4d65'6173'7572ULL;
+    auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{kMeasureKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    if (!pipeline) pipeline = ctx.render_ctx->pipelines().compile_compute(gi_measure_compute_src, kMeasureKey);
+    if (!pipeline) return;
+
+    GiMeasurePushC pc{};
+    pc.word = static_cast<uint32_t>(vs.gi_distances.offset() / sizeof(uint32_t));
+    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.cached_measure_pass, dirty, "gi.measure", graph, [&](CachedPassRecording& rec) {
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = 1;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        if (auto cmd = ctx.backend->create_command_buffer()) {
+            cmd->begin_recording();
+            cmd->record_dispatch(dc);
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+        }
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.held.push_back(std::move(pipeline));
+    });
+}
+
+bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
+{
+    float exact = 0.f;
+    bool have_target = false;
+
+    auto* camera = interface_cast<ICamera>(ctx.view_camera_trait);
+    auto state = camera ? read_state<ICamera>(camera) : decltype(read_state<ICamera>(camera)){};
+    if (state && state->gi_cell_size > 0.f) {
+        exact = std::log2(state->gi_cell_size);
+        have_target = true;
+    } else if (vs.gi_distances.valid()) {
+        auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        if (arena) {
+            float samples[kGiDistanceSamples];
+            arena->read_at(vs.gi_distances.offset(), samples, sizeof(samples));
+            float* const end = std::remove_if(std::begin(samples), std::end(samples), [](float d) { return !(d > 0.f); });
+            const auto count = static_cast<size_t>(end - samples);
+            if (count > 0) {
+                // A quarter of what is seen lies nearer than this. The finest level's box
+                // reaches it, so a cell seen at the box's edge has the same size on screen
+                // as on every other level.
+                std::sort(samples, end);
+                exact = std::log2(samples[count / 4] / (static_cast<float>(kGiDim) * 0.5f));
+                have_target = true;
+            }
+        }
+    }
+
+    // Only when it is well off, so a level is not given up on small changes of view.
+    constexpr float kHysteresis = 0.75f;
+    if (have_target && (!vs.gi_finest_known || std::abs(exact - static_cast<float>(vs.gi_finest)) > kHysteresis)) {
+        vs.gi_finest = static_cast<int32_t>(std::lround(exact));
+        vs.gi_finest_known = true;
+        vs.lighting_dirty = true;
+    }
+    return vs.gi_finest_known;
 }
 
 void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                                    FrameContext& ctx, IRenderGraph& graph)
 {
-    // One dispatch for every level. Splitting them cost three launches and
-    // three graph barriers, and that fixed cost dominated: the outermost level
-    // measured 2.6 ms to trace 6912 rays, about 380 ns each against a tracer
-    // floor of 1.8. Merging is only legal because a level reads the one above
-    // from the PREVIOUS frame, so no ordering between workgroups is required.
-    // The coarse levels ping-pong to keep that read off the texture this
-    // dispatch is writing.
-    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
-    auto& mid_read  = ensure_probe_atlas(vs.gi_probes_mid[parity ^ 1u],
-                                         kMidDimX, kMidDimY, kMidDimZ, graph);
-    auto& mid_write = ensure_probe_atlas(vs.gi_probes_mid[parity],
-                                         kMidDimX, kMidDimY, kMidDimZ, graph);
-    auto& far_read  = ensure_probe_atlas(vs.gi_probes_far[parity ^ 1u],
-                                         kFarDimX, kFarDimY, kFarDimZ, graph);
-    auto& far_write = ensure_probe_atlas(vs.gi_probes_far[parity],
-                                         kFarDimX, kFarDimY, kFarDimZ, graph);
-    auto& fine = ensure_probe_atlas(vs.gi_probes, kProbeDimX, kProbeDimY,
-                                    kProbeDimZ, graph);
-    if (!fine || !mid_read || !mid_write || !far_read || !far_write) return;
+    if (!update_gi_finest(vs, ctx)) return;
+
+    if (!vs.gi_probes) {
+        TextureDesc td{};
+        td.width = kGiAtlasSize;
+        td.height = kGiAtlasSize;
+        td.format = PixelFormat::RGBA32F;
+        td.usage = TextureUsage::Storage;
+        // Nearest, not the default linear: readers sample texel centres and weight
+        // the eight neighbours themselves, and RGBA32F carries no guarantee of
+        // linear filter support.
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        vs.gi_probes = graph.resources().create_render_texture(td);
+        vs.lighting_dirty = true;
+    }
+    if (!vs.gi_probes) return;
+    auto& fine = vs.gi_probes;
 
     auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
                                           render_view.bvh.ray_motion_reach);
@@ -580,27 +598,12 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
-    pc.extras[0] = handle(mid_read);
-    pc.extras[1] = handle(mid_write);
-    pc.extras[2] = handle(far_read);
-    pc.extras[3] = handle(far_write);
+    const uint32_t groups = kProbeRaysPerFrame / 64u;
+    pc.extras[0] = groups;
     pc.env[0] = render_view.env.material_id;
     pc.env[1] = render_view.env.texture_id;
-    // Only the finest grid is sent; the shader halves it per level.
-    pc.env[2] = pack_probe_dims(kProbeDimX, kProbeDimY, kProbeDimZ);
+    pc.env[2] = static_cast<uint32_t>(vs.gi_finest);
     pc.env[3] = handle(fine);
-
-    // 64-thread groups covering 8 probes x 8 directions each, across all levels.
-    //
-    // The fine level round-robins: half its groups run each frame, so the
-    // dispatch shrinks rather than launching groups that would exit on arrival.
-    // The count is the same every frame and the shader picks which half from
-    // present_counter, so the two sides need no agreement beyond the size.
-    const uint32_t fine_groups =
-        ((kProbeDimX * kProbeDimY * kProbeDimZ) / 8u + 1u) / 2u;
-    const uint32_t groups = fine_groups
-                          + (kMidDimX * kMidDimY * kMidDimZ) / 8u
-                          + (kFarDimX * kFarDimY * kFarDimZ) / 8u;
 
     bool dirty = true;
     emit_cached_view_pass(
@@ -622,14 +625,10 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
             }
-            // The fine atlas is read and written: its temporal blend samples
-            // last frame's value from the same texel.
+            // The atlas is read and written: its temporal blend samples last
+            // frame's value from the same texel.
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(mid_read));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(far_read));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(mid_write));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(far_write));
             rec.held.push_back(std::move(pipeline));
         });
 }
@@ -776,6 +775,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    emit_gi_measure_pass(vs, ctx, graph);
     // GI probes update before lighting, so lighting reads a field built from
     // this frame's geometry.
     emit_probe_pass(vs, render_view, ctx, graph);
@@ -995,7 +995,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     if (vs.gi_probes) {
         pc.gi_probe_id =
             static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
-        pc.gi_probe_dims = kProbeDimX | (kProbeDimY << 10) | (kProbeDimZ << 20);
+        pc.gi_finest = vs.gi_finest;
     }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));

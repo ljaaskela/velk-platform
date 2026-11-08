@@ -146,17 +146,13 @@ struct GlobalData {
     uint present_counter;
     uint _pad_globals1;
     mat4 prev_view_projection;
-    vec3 probe_min;          // GI probe lattice box
-    uint probe_reset_frame;  // present_counter value at which the box last changed
-    vec3 probe_max;
-    uint _pad_globals;
     vec3 cam_moved;          // how far the camera moved since the previous frame
     uint _pad_globals2;
 };
 
 // Shaders position things relative to the camera, so that large world coordinates
-// cancel before they lose precision. view_projection, the probe box and G-buffer
-// positions are all in that space; cam_pos is the camera's world position.
+// cancel before they lose precision. view_projection and G-buffer positions are in
+// that space; cam_pos is the camera's world position.
 vec3 velk_rel_position(mat4 world, vec3 local, GlobalData globals)
 {
     return mat3(world) * local + (world[3].xyz - globals.cam_pos.xyz);

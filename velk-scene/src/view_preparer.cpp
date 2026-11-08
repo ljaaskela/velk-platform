@@ -303,7 +303,6 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.cam_pos[2] = rv.cam_pos.z;
     globals.bvh_root = rv.bvh.root;
     globals.bvh_node_count = rv.bvh.node_count;
-    set_probe_globals(globals, rv.bvh);
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
 
     auto& cache = view_caches_[&entry];

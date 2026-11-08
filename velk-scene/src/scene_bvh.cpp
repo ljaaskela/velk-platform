@@ -118,42 +118,6 @@ void set_inverted_bounds(GpuBvhNode& node)
 
 } // namespace
 
-void SceneBvh::update_probe_volume(const float bounds_min[3], const float bounds_max[3], uint32_t frame)
-{
-    // Growing past the volume adds this fraction of its size as margin, so an
-    // object moving outward does not reset the probes every frame.
-    constexpr float kGrowMargin = 0.125f;
-    // Bounds shrinking below this fraction of the volume on any axis re-fit it,
-    // since a loose volume spreads the probes thinly.
-    constexpr float kRefitBelow = 0.5f;
-
-    float vol_min[3] = {probe_volume_.min.x, probe_volume_.min.y, probe_volume_.min.z};
-    float vol_max[3] = {probe_volume_.max.x, probe_volume_.max.y, probe_volume_.max.z};
-
-    bool refit = !probe_volume_placed_;
-    bool escaped = false;
-    for (int i = 0; i < 3; ++i) {
-        escaped = escaped || bounds_min[i] < vol_min[i] || bounds_max[i] > vol_max[i];
-        refit = refit || (bounds_max[i] - bounds_min[i]) < kRefitBelow * (vol_max[i] - vol_min[i]);
-    }
-    if (!refit && !escaped) return;
-
-    for (int i = 0; i < 3; ++i) {
-        if (refit) {
-            vol_min[i] = bounds_min[i];
-            vol_max[i] = bounds_max[i];
-        } else {
-            const float margin = kGrowMargin * (bounds_max[i] - bounds_min[i]);
-            if (bounds_min[i] < vol_min[i]) vol_min[i] = bounds_min[i] - margin;
-            if (bounds_max[i] > vol_max[i]) vol_max[i] = bounds_max[i] + margin;
-        }
-    }
-    probe_volume_.min = {vol_min[0], vol_min[1], vol_min[2]};
-    probe_volume_.max = {vol_max[0], vol_max[1], vol_max[2]};
-    probe_volume_.reset_frame = frame;
-    probe_volume_placed_ = true;
-}
-
 BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slot) const
 {
     const InstanceTransform& t = group.visual->get_transforms()[slot];
@@ -1978,8 +1942,6 @@ void SceneBvh::rebuild_top_tree(FrameContext& ctx)
     }
 
 
-    update_probe_volume(top_root_.aabb_min, top_root_.aabb_max, static_cast<uint32_t>(ctx.present_counter));
-
     // The partitions' area against the root's, weighted by records: how much a
     // ray pays. It grows as partitions change without a new cut.
     float cost = 0.f;
@@ -2001,13 +1963,6 @@ void SceneBvh::upload_root(FrameContext& ctx)
 {
     root_dirty_ = false;
     const bool has_dynamic = !dynamic_.members.empty();
-
-    // The probe volume follows the static partitions, so movers do not reset it.
-    // It only follows movers in a scene with nothing else.
-    if (!has_top_ && has_dynamic) {
-        update_probe_volume(dynamic_.ref.aabb_min, dynamic_.ref.aabb_max,
-                            static_cast<uint32_t>(ctx.present_counter));
-    }
 
     // What the root joins: the static top tree, the dynamic partition, and each instance
     // group's dynamic partition.

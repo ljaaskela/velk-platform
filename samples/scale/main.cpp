@@ -82,8 +82,9 @@
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
 //
-// Prints each GI probe volume change as it happens, and GPU pass timings on
-// exit. The engine's perf log, also printed on exit,
+// gicell=N: the finest GI probe cells are N wide, instead of being chosen from the view.
+//
+// Prints GPU pass timings on exit. The engine's perf log, also printed on exit,
 // has the BVH timings under renderer.bvh_*. The first frames are excluded from
 // the GPU timings because they include pipeline creation.
 
@@ -1248,6 +1249,7 @@ int main(int argc, char* argv[])
     int kHeight = 720;
     bool no_tour = false;
     float tour_along = 0.f;
+    float gi_cell = 0.f;
     long grass_count = 1000000;
     bool ray_wind = true;
     bool flat_terrain = false;
@@ -1279,6 +1281,7 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "size=", 5) == 0) std::sscanf(argv[i] + 5, "%dx%d", &kWidth, &kHeight);
         no_tour = no_tour || std::strcmp(argv[i], "notour") == 0;
         if (std::strncmp(argv[i], "tour=", 5) == 0) tour_along = static_cast<float>(std::atof(argv[i] + 5));
+        if (std::strncmp(argv[i], "gicell=", 7) == 0) gi_cell = static_cast<float>(std::atof(argv[i] + 7));
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
         ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
@@ -1367,6 +1370,7 @@ int main(int argc, char* argv[])
     velk::Camera cam(cam_trait);
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
+    cam.set_gi_cell_size(gi_cell);
     cam.add_render_path(ray_traced ? velk::path::create_rt() : velk::path::create_deferred());
 
     auto post = velk::pp::create_post_process();
@@ -1944,9 +1948,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     long frame = 0;
     long report_frame = 0;
     velk::vector<PassSamples> gpu_passes;
-    auto scene_ptr = static_cast<velk::IScene::Ptr>(scene);
-    uint32_t last_probe_reset = 0;
-    bool probe_volume_seen = false;
     velk::vector<velk::Element> extra_cubes;
     long next_extra = 0;
 
@@ -2128,15 +2129,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         app.present();
         ++frame;
 
-        if (auto bvh = scene_ptr ? scene_ptr->get_default_bvh() : nullptr) {
-            const velk::ProbeVolume probes = bvh->get_probe_volume();
-            if (!probe_volume_seen || probes.reset_frame != last_probe_reset) {
-                VELK_LOG(I, "scale: frame %ld, probe volume y %.0f to %.0f, reset frame %u", frame,
-                         static_cast<double>(probes.min.y), static_cast<double>(probes.max.y), probes.reset_frame);
-                probe_volume_seen = true;
-                last_probe_reset = probes.reset_frame;
-            }
-        }
 
         const auto now = Clock::now();
         if (backend && frame > kWarmupFrames) {

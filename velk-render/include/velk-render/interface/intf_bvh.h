@@ -24,19 +24,6 @@ struct BvhHit
 };
 
 /**
- * @brief World-space box the GI probe lattice covers.
- *
- * Stays put while geometry moves inside it, so probes keep their history.
- * `reset_frame` is the frame it last changed, from which probes start over.
- */
-struct ProbeVolume
-{
-    vec3     min{};
-    vec3     max{};
-    uint32_t reset_frame = 0;
-};
-
-/**
  * @brief Generic spatial index over a set of shapes.
  *
  * Implementations build and maintain a bounding-volume hierarchy over
@@ -77,9 +64,6 @@ public:
      * @brief Number of nodes currently live in the BVH.
      */
     virtual uint32_t get_node_count() const = 0;
-
-    /** @brief The box the GI probe lattice covers for this BVH's shapes. */
-    virtual ProbeVolume get_probe_volume() const = 0;
 
     /** @brief Whether any instances in it have a far form, for rays too wide to resolve them. */
     virtual bool has_medium() const = 0;
