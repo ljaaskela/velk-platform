@@ -32,16 +32,30 @@
 // Instances much wider than the spacing between GI probes, with triangles much smaller:
 //   dense:     the instances, far form on, so wide rays may stop inside their meshes.
 //   dense_ref: far form off, so rays test every triangle.
+//
+// A plain floor with an answer that can be calculated, read with VELK_GI_PRINT:
+//   sky_only: an even sky, no sun. Irradiance over pi on the floor equals the sky's radiance.
+//   bounce:   no sky, and a wall lit head-on by a sun parallel to the floor, which it does not
+//             light. At distance d from a wall of height H and radiance L, irradiance over pi
+//             is L * (1 - d / sqrt(d * d + H * H)) / 2.
+//   albedo_tex: the floor textured with sRGB 128 throughout, read back as linear albedo 0.216.
+//   canyon_sky: a street 400 wide between walls 400 high, under an even sky. On the middle of
+//             the floor, what comes straight from the sky is 0.447 of its radiance.
+//   canyon_sun: the same street with no sky, and a sun at 40 degrees across it, which leaves
+//             the floor in shade and lights the far wall from 64 units up. On the middle of
+//             the floor, what comes straight from that wall is 0.2525 of its radiance.
 
 #include <velk/api/velk.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/api/shadow_technique.h>
+#include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-runtime/api/application.h>
 #include <velk-scene/api/camera.h>
@@ -105,7 +119,9 @@ int run_gi_test(const char* test, long frames)
     const bool light_cluster = is("lights_1") || is("lights_64");
     const bool dense_instances = is("dense") || is("dense_ref");
     const float world_shift = is("origin_1e5") ? 1e5f : is("origin_1e6") ? 1e6f : is("origin_1e7") ? 1e7f : 0.f;
-    if (!leak_room && !moving && !deforming && !light_cluster && !dense_instances && world_shift == 0.f && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
+    const bool canyon = is("canyon_sky") || is("canyon_sun");
+    const bool analytic = is("sky_only") || is("bounce") || is("albedo_tex") || canyon;
+    if (!leak_room && !moving && !deforming && !light_cluster && !dense_instances && !analytic && world_shift == 0.f && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
         && !is("shapes_mesh")) {
         VELK_LOG(E, "gitest: unknown test %s", test);
         return 1;
@@ -142,13 +158,17 @@ int run_gi_test(const char* test, long frames)
 
     const bool as_mesh = is("shapes_mesh");
 
-    const auto add_box = [&](velk::vec3 min, velk::vec3 size, velk::color c) {
+    const auto add_box = [&](velk::vec3 min, velk::vec3 size, velk::color c, const velk::ISurface::Ptr& texture = nullptr) {
         auto element = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
         trs.set_translate({min.x + world_shift, min.y, min.z});
         element.add_trait(trs);
         velk::Mesh mesh(ctx.build_cube());
-        mesh.set_material(0, velk::material::create_standard(c, 0.f, 0.9f));
+        auto box_material = velk::material::create_standard(c, 0.f, 0.9f);
+        if (texture) {
+            box_material.base_color().set_texture(texture);
+        }
+        mesh.set_material(0, box_material);
         if (as_mesh) {
             trs.set_scale(size);
             auto visual = velk::trait::visual::create_mesh();
@@ -233,7 +253,23 @@ int run_gi_test(const char* test, long frames)
     } else {
         const float half = dense_instances ? 16000.f : kCourtHalf * (is("size_10") ? 10.f : is("size_100") ? 100.f : 1.f);
         far_clip = std::max(far_clip, half * 4.f);
-        add_box({-half, 0.f, -half}, {half * 2.f, 4.f, half * 2.f}, grey);
+        velk::ISurface::Ptr ground_texture;
+        if (is("albedo_tex")) {
+            // Loaded the way glTF images are, from sRGB bytes: a uniform 128 is 0.216 in linear.
+            velk::vector<uint8_t> tga = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 8};
+            for (int i = 0; i < 4; ++i) {
+                for (uint8_t v : {uint8_t{128}, uint8_t{128}, uint8_t{128}, uint8_t{255}}) {
+                    tga.push_back(v);
+                }
+            }
+            auto memory_protocol = velk::instance().resource_store().find_protocol("memory");
+            if (auto* memory = interface_cast<velk::IMemoryProtocol>(memory_protocol.get())) {
+                memory->add_file("gitest_albedo.tga", tga.data(), tga.size());
+            }
+            ground_texture = interface_pointer_cast<velk::ISurface>(
+                velk::instance().resource_store().get_resource<velk::IImage>("image:memory://gitest_albedo.tga"));
+        }
+        add_box({-half, 0.f, -half}, {half * 2.f, 4.f, half * 2.f}, ground_texture ? velk::color::white() : grey, ground_texture);
         if (dense_instances) {
             constexpr float kSize = 2400.f;
             constexpr float kStep = 4000.f;
@@ -259,6 +295,14 @@ int run_gi_test(const char* test, long frames)
             focus_at = {0.f, -800.f, 0.f};
             pitch = -35.f;
             distance = 11000.f;
+        } else if (analytic) {
+            if (is("bounce")) {
+                add_box({-kCourtHalf, -300.f, -220.f}, {kCourtHalf * 2.f, 300.f, 20.f}, white);
+            }
+            if (canyon) {
+                add_box({-kCourtHalf, -400.f, -220.f}, {kCourtHalf * 2.f, 400.f, 20.f}, white);
+                add_box({-kCourtHalf, -400.f, 200.f}, {kCourtHalf * 2.f, 400.f, 20.f}, white);
+            }
         } else {
             add_box({-200.f, -300.f, -200.f}, {20.f, 300.f, 400.f}, velk::color{0.8f, 0.1f, 0.1f, 1.f});
             add_box({20.f, -140.f, -60.f}, {120.f, 140.f, 120.f}, white);
@@ -317,12 +361,12 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         scene.add(root, element);
     }
 
-    if (sky_and_sun) {
+    if (sky_and_sun && !is("sky_only") && !is("canyon_sky") && !is("albedo_tex")) {
         auto light = velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, 0.8f);
         light.add_technique(velk::technique::create_rt_shadow());
         auto sun = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({50.f, 30.f, 0.f});
+        trs.set_rotation(is("bounce") ? velk::vec3{0.f, 0.f, 0.f} : is("canyon_sun") ? velk::vec3{40.f, 0.f, 0.f} : velk::vec3{50.f, 30.f, 0.f});
         sun.add_trait(trs);
         sun.add_trait(light);
         scene.add(root, sun);
@@ -333,17 +377,22 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     velk::Camera cam(cam_trait);
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
+    if (const char* cell = std::getenv("VELK_GITEST_CELL")) {
+        cam.set_gi_cell_size(static_cast<float>(std::atof(cell)));
+    }
     cam.add_render_path(velk::path::create_deferred());
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());
     cam.add_post_process(post);
 
+    velk::ui::Environment environment;
     // Always an explicit environment, so a test never depends on what none means.
-    const velk::vector<uint8_t> sky = sky_and_sun ? build_flat_hdr(0.2f, 0.25f, 0.33f) : build_flat_hdr(0.f, 0.f, 0.f);
+    const velk::vector<uint8_t> sky = sky_and_sun && !is("bounce") && !is("canyon_sun") ? build_flat_hdr(0.2f, 0.25f, 0.33f) : build_flat_hdr(0.f, 0.f, 0.f);
     auto protocol = velk::instance().resource_store().find_protocol("memory");
     if (auto* memory = interface_cast<velk::IMemoryProtocol>(protocol.get())) {
         memory->add_file("gitest_sky.hdr", sky.data(), sky.size());
-        cam.set_environment(velk::ui::load_environment("env:memory://gitest_sky.hdr"));
+        environment = velk::ui::load_environment("env:memory://gitest_sky.hdr");
+        cam.set_environment(environment);
     }
 
     auto focus = velk::create_element();
@@ -363,6 +412,9 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
 
     long frame = 0;
     while (app.poll()) {
+        if (frame == 100 && std::getenv("VELK_GITEST_SKY_OFF") && environment) {
+            environment.set_intensity(0.f);
+        }
         // Motion follows the frame number, so runs are comparable.
         const float progress = is("move") || is("deform") ? std::min(static_cast<float>(frame) / static_cast<float>(motion_frames), 1.f) : 1.f;
         if (moving) {

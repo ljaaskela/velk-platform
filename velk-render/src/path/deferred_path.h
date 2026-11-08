@@ -190,6 +190,12 @@ public:
         IRenderTarget::Ptr gi_probes;
         /// Each probe's map of distances to surfaces. See VELK_GI_FIELD_GLSL.
         IRenderTarget::Ptr gi_probe_maps;
+        /// The field being rebuilt from the top. See emit_probe_pass.
+        uint32_t gi_sweep_left = 0;
+        uint64_t gi_sweep_frame = 0;
+        uint64_t gi_lighting = 0;
+        bool gi_swept = false;
+        bool gi_field_ready = false;
         IRenderPass::Ptr cached_probe_pass;
         /// Exponent of the finest probe cell's width. Chosen once distances arrive.
         int32_t gi_finest = 0;
@@ -197,6 +203,10 @@ public:
         /// Distances to what the camera sees, sampled from the G-buffer each frame.
         ArenaRegion gi_distances;
         IRenderPass::Ptr cached_measure_pass;
+        ArenaRegion gi_print;
+        IRenderPass::Ptr gi_print_pass;
+        ArenaRegion gi_pixels;
+        IRenderPass::Ptr gi_pixels_pass;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -284,6 +294,10 @@ private:
                               bool second_phase);
     void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
+    /// Diagnostic: with VELK_GI_PRINT="x,y,z,nx,ny,nz", logs the GI field at that point.
+    void emit_gi_print_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Diagnostic: with VELK_GI_PIXELS="x,y;x,y", logs what lights those pixels.
+    void emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);

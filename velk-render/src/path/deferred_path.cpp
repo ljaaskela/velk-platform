@@ -537,6 +537,52 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     const uint32_t groups = kProbeRaysPerFrame / 64u;
     pc.extras[0] = groups;
     pc.extras[1] = handle(vs.gi_probe_maps);
+
+    // At the start and whenever the light changes, the field is rebuilt from the top, one
+    // level a frame, rather than left to catch up. Bounded, so that light changing all the
+    // time still gets ordinary updates between rebuilds. Moving point lights do not count,
+    // which a swaying lamp would otherwise trigger constantly.
+    uint64_t lighting = 0xcbf29ce484222325ULL ^ static_cast<uint32_t>(vs.gi_finest);
+    const auto mix_lighting = [&](uint32_t bits) { lighting = (lighting ^ bits) * 0x100000001b3ULL; };
+    const auto mix_float = [&](float v) {
+        uint32_t bits;
+        std::memcpy(&bits, &v, sizeof(bits));
+        mix_lighting(bits);
+    };
+    mix_lighting(render_view.env.texture_id);
+    mix_float(render_view.env.intensity);
+    mix_float(render_view.env.rotation_rad);
+    for (const GpuLight& light : render_view.lights) {
+        for (float v : light.color_intensity) {
+            mix_float(v);
+        }
+        if (light.flags[0] == 0u) {
+            for (int axis = 0; axis < 3; ++axis) {
+                mix_float(light.direction[axis]);
+            }
+        }
+    }
+    // Three passes: direct light and sky, then what bounces from that, then once more.
+    constexpr uint32_t kSweepFrames = kGiLevels * 3u;
+    constexpr uint64_t kSweepRestartFrames = 60;
+    if (lighting != vs.gi_lighting && vs.gi_sweep_left == 0u
+        && (!vs.gi_swept || ctx.present_counter >= vs.gi_sweep_frame + kSweepRestartFrames)) {
+        vs.gi_lighting = lighting;
+        vs.gi_sweep_frame = ctx.present_counter;
+        vs.gi_sweep_left = kSweepFrames;
+        vs.gi_swept = true;
+    }
+    pc.extras[3] = 0xFFFFFFFFu;
+    if (vs.gi_sweep_left > 0u) {
+        const uint32_t done = kSweepFrames - vs.gi_sweep_left;
+        pc.extras[3] = kGiLevels - 1u - done % kGiLevels;
+        --vs.gi_sweep_left;
+        // Lighting uses the field once every level has been filled.
+        if (done + 1u >= kGiLevels && !vs.gi_field_ready) {
+            vs.gi_field_ready = true;
+            vs.lighting_dirty = true;
+        }
+    }
     pc.env[0] = render_view.env.material_id;
     pc.env[1] = render_view.env.texture_id;
     pc.env[2] = static_cast<uint32_t>(vs.gi_finest);
@@ -738,6 +784,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // GI probes update before lighting, so lighting reads a field built from
     // this frame's geometry.
     emit_probe_pass(vs, render_view, ctx, graph);
+    emit_gi_print_pass(vs, render_view, ctx, graph);
+    emit_gi_pixels_pass(vs, render_view, ctx, graph);
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
@@ -826,6 +874,157 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             rec.cmd = std::move(cmd);
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
         });
+}
+
+void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    const char* request = std::getenv("VELK_GI_PIXELS");
+    if (!request || !vs.gi_probes || !vs.gi_probe_maps || !vs.gi_finest_known || !vs.deferred_output || !vs.unshadowed || !vs.gbuffer) return;
+    int32_t pixels[12]{};
+    uint32_t count = 0;
+    for (const char* at = request; at && *at && count < 6;) {
+        if (std::sscanf(at, "%d,%d", &pixels[count * 2], &pixels[count * 2 + 1]) != 2) break;
+        ++count;
+        at = std::strchr(at, ';');
+        if (at) ++at;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena || count == 0) return;
+
+    constexpr uint32_t kWordsPerPixel = 18;
+    if (!vs.gi_pixels.valid()) {
+        vs.gi_pixels = arena->alloc(uint64_t(kWordsPerPixel * 6) * sizeof(uint32_t));
+        if (!vs.gi_pixels.valid()) return;
+    } else if ((ctx.present_counter % 60ull) == 0ull) {
+        float out[kWordsPerPixel * 6];
+        arena->read_at(vs.gi_pixels.offset(), out, sizeof(out));
+        for (uint32_t i = 0; i < count; ++i) {
+            const float* s = out + i * kWordsPerPixel;
+            VELK_LOG(I, "gi_px frame=%llu at=%d,%d field=%.3f,%.3f,%.3f sky=%.3f,%.3f,%.3f albedo=%.3f,%.3f,%.3f hdr=%.3f,%.3f,%.3f unshadowed=%.3f,%.3f,%.3f n=%.2f,%.2f,%.2f",
+                     static_cast<unsigned long long>(ctx.present_counter), pixels[i * 2], pixels[i * 2 + 1], s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
+                     s[12], s[13], s[14], s[15], s[16], s[17]);
+        }
+    }
+
+    constexpr uint64_t kKey = 0x4749'5058'4c53'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(gi_pixels_compute_src, kKey);
+    if (!pipeline) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    bool dirty = true;
+    emit_cached_view_pass(vs.gi_pixels_pass, dirty, "gi.pixels", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            uint32_t word, atlas, maps, globals_base;
+            int32_t finest;
+            uint32_t albedo_id, normal_id, pos_id, hdr_id, unshadowed_id, env_id;
+            float intensity, rotation;
+            uint32_t count;
+            int32_t pixels[12];
+        };
+        PushC pc{};
+        pc.word = static_cast<uint32_t>(vs.gi_pixels.offset() / sizeof(uint32_t));
+        pc.atlas = handle(vs.gi_probes);
+        pc.maps = handle(vs.gi_probe_maps);
+        pc.globals_base = render_view.view_globals_base;
+        pc.finest = vs.gi_finest;
+        pc.albedo_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
+        pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+        pc.pos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+        pc.hdr_id = handle(vs.deferred_output);
+        pc.unshadowed_id = handle(vs.unshadowed);
+        pc.env_id = render_view.env.texture_id;
+        pc.intensity = render_view.env.intensity;
+        pc.rotation = render_view.env.rotation_rad;
+        pc.count = count;
+        std::memcpy(pc.pixels, pixels, sizeof(pixels));
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = count;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->record_dispatch(dc);
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
+        rec.held.push_back(std::move(pipeline));
+    });
+}
+
+void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    const char* request = std::getenv("VELK_GI_PRINT");
+    float v[6];
+    if (!request || std::sscanf(request, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
+    if (!vs.gi_probes || !vs.gi_probe_maps || !vs.gi_finest_known) return;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+
+    constexpr uint32_t kWords = 3 + 4 * kGiLevels;
+    if (!vs.gi_print.valid()) {
+        vs.gi_print = arena->alloc(kWords * sizeof(uint32_t));
+        if (!vs.gi_print.valid()) return;
+    } else if ((ctx.present_counter % 60ull) == 0ull) {
+        float out[kWords];
+        arena->read_at(vs.gi_print.offset(), out, sizeof(out));
+        char line[640];
+        int at = std::snprintf(line, sizeof(line), "gi_print frame=%llu cell=2^%d total=%.4f,%.4f,%.4f",
+                               static_cast<unsigned long long>(ctx.present_counter), vs.gi_finest, out[0], out[1], out[2]);
+        for (uint32_t level = 0; level < kGiLevels && at > 0 && at < static_cast<int>(sizeof(line)); ++level) {
+            const float* s = out + 3 + level * 4;
+            at += std::snprintf(line + at, sizeof(line) - at, " L%u[w=%.2f %.3f]", level, s[0], s[1]);
+        }
+        VELK_LOG(I, "%s", line);
+    }
+
+    constexpr uint64_t kKey = 0x4749'5052'494e'5401ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(gi_print_compute_src, kKey);
+    if (!pipeline) return;
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.gi_print_pass, dirty, "gi.print", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            float point[4];
+            float normal[4];
+            uint32_t word, atlas, maps, globals_base;
+            int32_t finest;
+        };
+        const PushC pc{{v[0], v[1], v[2], 0.f},
+                       {v[3], v[4], v[5], 0.f},
+                       static_cast<uint32_t>(vs.gi_print.offset() / sizeof(uint32_t)),
+                       static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default)),
+                       static_cast<uint32_t>(vs.gi_probe_maps->get_gpu_handle(GpuResourceKey::Default)),
+                       render_view.view_globals_base,
+                       vs.gi_finest};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = 1;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->record_dispatch(dc);
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
+        rec.held.push_back(std::move(pipeline));
+    });
 }
 
 void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph)
@@ -1159,7 +1358,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
     pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
-    if (vs.gi_probes) {
+    if (vs.gi_probes && vs.gi_field_ready) {
         pc.gi_probe_id =
             static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
         pc.gi_finest = vs.gi_finest;
