@@ -420,12 +420,17 @@ struct ClusterBuilder
         }
     }
 
-    /// Each node's mean projected area over all directions, half its surface's, in aabb_max[3].
+    /// Each node's mean projected area over all directions, half its surface's, in aabb_max[3],
+    /// and its mean vertex normal weighted by area in the bits of aabb_min[3], as signed 8-bit
+    /// xyz. The normal is shorter the less the surface agrees on a direction.
     /// A child's index is always greater than its parent's.
-    void fill_areas()
+    void fill_surfaces()
     {
+        vector<float> normals;
+        normals.resize(out.nodes.size() * 3, 0.f);
         for (size_t n = out.nodes.size(); n > 0; --n) {
             BlasNode& node = out.nodes[n - 1];
+            float* normal = normals.data() + (n - 1) * 3;
             float area = 0.f;
             for (uint32_t t = 0; t < node.shape_count; ++t) {
                 const uint32_t triangle = out.triangle_indices[node.first_shape + t];
@@ -435,19 +440,35 @@ struct ClusterBuilder
                 const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
                 const float v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
                 const float cross[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
-                area += 0.25f * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                const float triangle_area = 0.25f * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                area += triangle_area;
+                if (floats_per_vertex >= 6) {
+                    for (int k = 0; k < 3; ++k) {
+                        normal[k] += triangle_area * (a[3 + k] + b[3 + k] + c[3 + k]) / 3.f;
+                    }
+                }
             }
             for (uint32_t c = 0; c < node.child_count; ++c) {
-                area += out.nodes[node.first_child + c].aabb_max[3];
+                const uint32_t child = node.first_child + c;
+                area += out.nodes[child].aabb_max[3];
+                for (int k = 0; k < 3; ++k) {
+                    normal[k] += normals[size_t(child) * 3 + k];
+                }
             }
             node.aabb_max[3] = area;
+            uint32_t bits = 0;
+            for (int k = 0; k < 3; ++k) {
+                const float unit = area > 0.f ? std::min(std::max(normal[k] / area, -1.f), 1.f) : 0.f;
+                bits |= static_cast<uint32_t>(static_cast<uint8_t>(static_cast<int8_t>(std::lround(unit * 127.f)))) << (k * 8);
+            }
+            std::memcpy(&node.aabb_min[3], &bits, sizeof(bits));
         }
     }
 
     void build()
     {
         split_oversized_leaves();
-        fill_areas();
+        fill_surfaces();
         subtree_triangles.resize(out.nodes.size());
         count_triangles(0);
         assign(0);

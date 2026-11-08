@@ -204,7 +204,7 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     // global vertex indices in our gltf-imported meshes, so the vertex run starts
     // at the region base itself.
     out.vbo_base = get_gpu_ref(buffer_).get_base();
-    out.flags = merge_pieces_ ? kMeshStaticScattered : 0u;
+    out.flags = (merge_pieces_ ? kMeshStaticScattered : 0u) | (deforming_ ? kMeshStaticDeforming : 0u);
     if (auto state = read_state<IMeshPrimitive>(this); state && state->material) {
         Material material(state->material.get<IObject>());
         if (material && material.has_options() && material.options().get_double_sided()) {

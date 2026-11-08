@@ -223,6 +223,10 @@ float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
 float velk_ray_footprint = 0.0;
 // How much wider that gets per unit along the ray, for a light that is not a point.
 float velk_ray_spread = 0.0;
+// For a closest-hit ray that stands for a cone: the tangent of its half angle, for the
+// shader to set. A part of a solid mesh narrower than the cone where the ray reaches it
+// counts as the surface there. 0 for an exact ray.
+float velk_ray_cone = 0.0;
 // How far the surface a ray starts from may be from the full mesh rays are tested against,
 // in world units, when it is drawn at a coarser level of detail. For the shader to set.
 float velk_ray_lift = 0.0;
@@ -312,6 +316,9 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     local_ray.dir    = ld;
 
     bool  found = false;
+    bool  stopped = false;
+    vec3  stop_normal = vec3(0.0);
+    float cone = (st.flags & (VELK_MESH_SCATTERED | VELK_MESH_DEFORMING)) == 0u ? velk_ray_cone : 0.0;
     float best_t = 1e30;
     float best_u = 0.0;
     float best_v = 0.0;
@@ -344,6 +351,29 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
             }
         }
 #endif
+
+        // Narrower than the cone: this node is the surface. A real triangle inside it gives
+        // the material something to read.
+        if (cone > 0.0) {
+            vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+            if (max(max(extent.x, extent.y), extent.z) < cone * t_aabb) {
+                BvhNode leaf = node;
+                while (leaf.shape_count == 0u && leaf.child_count != 0u) {
+                    leaf = velk_blas_nodes.data[blas_node_base + leaf.first_child];
+                }
+                if (leaf.shape_count != 0u) {
+                    best_t = t_aabb;
+                    best_u = 1.0 / 3.0;
+                    best_v = best_u;
+                    best_triangle = velk_cluster_words.data[word_base + leaf.first_shape];
+                    best_vertex_ids = word_base + leaf.first_child + (leaf.shape_count >> 16u) * 3u;
+                    found = true;
+                    stopped = true;
+                    stop_normal = unpackSnorm4x8(floatBitsToUint(node.aabb_min.w)).xyz;
+                    continue;
+                }
+            }
+        }
 
         if (node.shape_count > 0u) {
             // Leaf: test triangles, reading the cluster's own positions.
@@ -392,6 +422,7 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
                 best_triangle = tri;
                 best_vertex_ids = positions + (node.shape_count >> 16u) * 3u;
                 found = true;
+                stopped = false;
             }
         } else if (node.child_count == 2u) {
             // Front-to-back: push the far child first so a near hit can cull
@@ -440,6 +471,12 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
     hit.t      = best_t / ld_scale;
     hit.uv     = uv0 * w + uv1 * best_u + uv2 * best_v;
     hit.normal = normalize(n0 * w + n1 * best_u + n2 * best_v);
+    if (stopped) {
+        // The less the node's surface agrees on a direction, the more it faces the ray.
+        vec3 n = stop_normal - ld * (1.0 - min(length(stop_normal), 1.0));
+        float n_length = length(n);
+        hit.normal = n_length > 1e-4 ? n / n_length : -ld;
+    }
     return true;
 }
 
@@ -4054,7 +4091,11 @@ void main()
         velk_ray_medium_depth = 0.0;
         velk_ray_medium_color = vec3(0.0);
 
+        // The probe's rays share the sphere around it, each a cone of its share.
+        float cone_cos = 1.0 - 2.0 / float(kDirs);
+        velk_ray_cone = sqrt(1.0 - cone_cos * cone_cos) / cone_cos;
         bool found = trace_closest_hit(ray, 0.0, 1e30, hit);
+        velk_ray_cone = 0.0;
         if (found) {
             near_t = hit.t;
             near_back = velk_gi_inside_solid(hit, d);
