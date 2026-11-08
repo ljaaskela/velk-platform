@@ -186,6 +186,8 @@ public:
         /// Read back by the probe pass for its temporal blend, so it persists
         /// across frames rather than being transient.
         IRenderTarget::Ptr gi_probes;
+        /// Each probe's map of distances to surfaces. See VELK_GI_FIELD_GLSL.
+        IRenderTarget::Ptr gi_probe_maps;
         IRenderPass::Ptr cached_probe_pass;
         /// Exponent of the finest probe cell's width. Chosen once distances arrive.
         int32_t gi_finest = 0;

@@ -104,6 +104,7 @@ struct RtRecord {
 R"(
 #define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
 #define VELK_MESH_SCATTERED 1u
+#define VELK_MESH_DOUBLE_SIDED 2u
 )"
 // Every mesh's VBO + IBO bytes as raw 32-bit words (set = 1 slot 14). Both
 // paths read geometry from here: RT walks it by triangle, raster fetches the

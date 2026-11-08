@@ -6,6 +6,7 @@
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk-render/api/material/material.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_gpu_command_buffer.h>
 #include <velk-render/interface/intf_render_context.h>
@@ -204,6 +205,12 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     // at the region base itself.
     out.vbo_base = get_gpu_ref(buffer_).get_base();
     out.flags = merge_pieces_ ? kMeshStaticScattered : 0u;
+    if (auto state = read_state<IMeshPrimitive>(this); state && state->material) {
+        Material material(state->material.get<IObject>());
+        if (material && material.has_options() && material.options().get_double_sided()) {
+            out.flags |= kMeshStaticDoubleSided;
+        }
+    }
     out.triangle_count = index_count_ / 3;
     out.vertex_stride = vertex_stride_;
     out.blas_root = rt_blas_.root_index;

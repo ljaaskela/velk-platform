@@ -143,7 +143,7 @@ inline constexpr uint32_t kRtShapeKindMesh = 255;
 VELK_GPU_STRUCT MeshStaticData
 {
     uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
-    uint32_t flags;           ///< kMeshStaticScattered: wide rays may count parts of it as a medium.
+    uint32_t flags;           ///< kMeshStaticScattered: wide rays may count parts of it as a medium. kMeshStaticDoubleSided: it is not a closed solid.
     uint32_t triangle_count;
     uint32_t vertex_stride;   ///< bytes per vertex, from the primitive (48 for VelkVertex3D).
     uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
@@ -155,6 +155,8 @@ static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
 
 /// `MeshStaticData::flags` bit for a primitive of separate pieces. Mirrors GLSL `VELK_MESH_SCATTERED`.
 inline constexpr uint32_t kMeshStaticScattered = 1u;
+/// `MeshStaticData::flags` bit for a primitive seen from both sides. Mirrors GLSL `VELK_MESH_DOUBLE_SIDED`.
+inline constexpr uint32_t kMeshStaticDoubleSided = 2u;
 
 /// Sentinel `RtShape::mesh_static_base` for a mesh whose static record is not
 /// resolvable yet (geometry not uploaded, no BLAS built). The intersector skips

@@ -203,8 +203,9 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
     int32_t  gi_finest;        // ladder index of the probe field's finest level
     uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
+    uint32_t gi_maps_id;       // GI probe distance maps
 };
-static_assert(sizeof(DeferredComputePushC) == 112, "Deferred compute PushC layout mismatch");
+static_assert(sizeof(DeferredComputePushC) == 128, "Deferred compute PushC layout mismatch");
 
 // Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
 // mirrors the PC block in deferred_denoise_compute_src).
@@ -414,9 +415,11 @@ namespace {
 constexpr uint32_t kProbeRaysPerFrame = 283000;
 // Rays per probe update. A power of two, 64 at most.
 constexpr uint32_t kProbeDirs = 8;
-// Mirrors kGiDim and the atlas layout in VELK_GI_FIELD_GLSL.
+// Mirrors the constants and atlas layouts in VELK_GI_FIELD_GLSL.
 constexpr uint32_t kGiDim = 32;
-constexpr int kGiAtlasSize = kGiDim * kGiDim;
+constexpr int kGiLevels = 8;
+constexpr int kGiRows = 5;
+constexpr int kGiMapSize = 6;
 constexpr uint32_t kGiDistanceSamples = 64;
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
@@ -426,8 +429,8 @@ VELK_GPU_STRUCT ProbePushC {
     uint32_t light_count;
     uint32_t lights_base;
     float    env_params[2];
-    uint32_t extras[4];        // RT main uses these for its output image; the
-                               // probe main uses x = workgroups in the dispatch.
+    uint32_t extras[4];        // RT main uses these for its output image; the probe main
+                               // uses x = workgroups in the dispatch, y = distance maps.
     uint32_t env[4];           // x = env material, y = env texture,
                                // z = finest level's ladder index, w = probe atlas image
 };
@@ -566,8 +569,8 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
 
     if (!vs.gi_probes) {
         TextureDesc td{};
-        td.width = kGiAtlasSize;
-        td.height = kGiAtlasSize;
+        td.width = static_cast<int>(kGiDim * kGiDim);
+        td.height = static_cast<int>(kGiDim) * kGiRows * kGiLevels;
         td.format = PixelFormat::RGBA32F;
         td.usage = TextureUsage::Storage;
         // Nearest, not the default linear: readers sample texel centres and weight
@@ -579,9 +582,14 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         td.sampler.min_filter = SamplerFilter::Nearest;
         td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
         vs.gi_probes = graph.resources().create_render_texture(td);
+
+        td.width = static_cast<int>(kGiDim * kGiDim) * (kGiMapSize / 2);
+        td.height = static_cast<int>(kGiDim) * kGiLevels * kGiMapSize;
+        td.format = PixelFormat::RGBA16F;
+        vs.gi_probe_maps = graph.resources().create_render_texture(td);
         vs.lighting_dirty = true;
     }
-    if (!vs.gi_probes) return;
+    if (!vs.gi_probes || !vs.gi_probe_maps) return;
     auto& fine = vs.gi_probes;
 
     auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
@@ -600,6 +608,7 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.env_params[1] = render_view.env.rotation_rad;
     const uint32_t groups = kProbeRaysPerFrame / 64u;
     pc.extras[0] = groups;
+    pc.extras[1] = handle(vs.gi_probe_maps);
     pc.env[0] = render_view.env.material_id;
     pc.env[1] = render_view.env.texture_id;
     pc.env[2] = static_cast<uint32_t>(vs.gi_finest);
@@ -629,6 +638,8 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
             // frame's value from the same texel.
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
             rec.held.push_back(std::move(pipeline));
         });
 }
@@ -996,6 +1007,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         pc.gi_probe_id =
             static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
         pc.gi_finest = vs.gi_finest;
+        pc.gi_maps_id = static_cast<uint32_t>(vs.gi_probe_maps->get_gpu_handle(GpuResourceKey::Default));
     }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));

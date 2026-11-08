@@ -43,6 +43,20 @@ public static class GiScore {
         }
         return sum / (w * h);
     }
+    // Mean difference from the surrounding 11x11 average, inside a disc. Smooth shading
+    // scores low, blotches high.
+    public static double Unevenness(string path, int cx, int cy, int radius) {
+        int w, h, s; var p = Load(path, out w, out h, out s);
+        Func<int, int, double> lum = (x, y) => { int i = y * s + x * 3; return 0.0722 * p[i] + 0.7152 * p[i + 1] + 0.2126 * p[i + 2]; };
+        double sum = 0; int count = 0;
+        for (int y = cy - radius; y <= cy + radius; ++y) for (int x = cx - radius; x <= cx + radius; ++x) {
+            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > radius * radius) continue;
+            double avg = 0;
+            for (int j = -5; j <= 5; ++j) for (int k = -5; k <= 5; ++k) avg += lum(x + k, y + j);
+            sum += Math.Abs(lum(x, y) - avg / 121.0); ++count;
+        }
+        return sum / count;
+    }
     public static double[] Diff(string a, string b) {
         int w, h, s, w2, h2, s2;
         var p = Load(a, out w, out h, out s);
@@ -95,6 +109,7 @@ foreach ($pair in @(@("leak_light", "leak_lit"), @("leak_sky", "open_sky"))) {
     $ratio = [GiScore]::Mean((Png $pair[0])) / [Math]::Max([GiScore]::Mean((Png $pair[1])), 0.001)
     "{0,-14} {1,-34} {2}" -f $pair[0], ("leak {0:F4}" -f $ratio), (Time $pair[0])
 }
+"{0,-14} {1,-34} {2}" -f "blotch", ("unevenness {0:F2}" -f [GiScore]::Unevenness((Png "size_1"), 545, 357, 70)), (Time "size_1")
 $pairs = @(@("noise", "size_1"), @("size_10", "size_1"), @("size_100", "size_1"), @("outlier", "size_1"),
            @("shapes_mesh", "size_1"), @("move", "move_ref"), @("deform", "deform_ref"), @("lights_64", "lights_1"),
            @("dense", "dense_ref"), @("origin_1e5", "size_1"), @("origin_1e6", "size_1"), @("origin_1e7", "size_1"))
