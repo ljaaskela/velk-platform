@@ -20,6 +20,7 @@ namespace velk {
 /// collide even with identical inputs.
 constexpr uint64_t kForwardEvalContentTag = 0x46776452'4576616cULL; // "FwdREval"
 constexpr uint64_t kGbufferEvalContentTag = 0x47427546'4576616cULL; // "GBufEval"
+constexpr uint64_t kVisibilityContentTag = 0x56697342'75666572ULL; // "VisBufer"
 constexpr uint64_t kTransparentEvalContentTag = 0x54726e73'4576616cULL; // "TrnsEval"
 
 /**

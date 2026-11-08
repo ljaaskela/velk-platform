@@ -46,6 +46,7 @@ VkFormat vk_format_for(PixelFormat f)
         case PixelFormat::RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
         case PixelFormat::RGBA16F:    return VK_FORMAT_R16G16B16A16_SFLOAT;
         case PixelFormat::RGBA32F:    return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case PixelFormat::RG32UI:     return VK_FORMAT_R32G32_UINT;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -622,6 +623,10 @@ bool VkBackend::create_device()
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.multiDrawIndirect = VK_TRUE;
     features2.features.drawIndirectFirstInstance = VK_TRUE;
+    // Lets fragment shaders read gl_PrimitiveID, for the visibility buffer.
+    VkPhysicalDeviceFeatures available{};
+    vkGetPhysicalDeviceFeatures(physical_device_, &available);
+    features2.features.geometryShader = available.geometryShader;
     features2.pNext = &features12;
 
     if (!check_required_features(features12, dynamic_rendering)) {
@@ -1676,7 +1681,7 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
     PixelFormat fmt = texture.format();
     size_t bpp = 4;
     if (fmt == PixelFormat::R8) bpp = 1;
-    else if (fmt == PixelFormat::RGBA16F) bpp = 8;
+    else if (fmt == PixelFormat::RGBA16F || fmt == PixelFormat::RG32UI) bpp = 8;
     else if (fmt == PixelFormat::RGBA32F) bpp = 16;
     size_t data_size = static_cast<size_t>(width) * height * bpp;
 
@@ -1861,7 +1866,7 @@ bool VkBackend::read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,
     const uvec2 dims = texture.get_dimensions();
     size_t bpp = 4;
     if (fmt == PixelFormat::R8) bpp = 1;
-    else if (fmt == PixelFormat::RGBA16F) bpp = 8;
+    else if (fmt == PixelFormat::RGBA16F || fmt == PixelFormat::RG32UI) bpp = 8;
     else if (fmt == PixelFormat::RGBA32F) bpp = 16;
     const size_t data_size = static_cast<size_t>(dims.x) * dims.y * bpp;
 
@@ -3381,6 +3386,11 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
         td.height = height;
         td.format = f;
         td.usage = TextureUsage::ColorAttachment;
+        // Integer formats cannot be filtered.
+        if (f == PixelFormat::RG32UI) {
+            td.sampler.mag_filter = SamplerFilter::Nearest;
+            td.sampler.min_filter = SamplerFilter::Nearest;
+        }
         auto t = create_texture(td);
         if (!t) {
             VELK_LOG(E, "VkBackend: create_render_target_group: attachment create failed");

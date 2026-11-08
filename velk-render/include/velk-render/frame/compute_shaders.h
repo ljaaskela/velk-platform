@@ -987,6 +987,52 @@ inline string velk_with_trace_medium(string_view source)
     return out;
 }
 
+/// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance, 3 per
+/// triangle.
+inline constexpr string_view visibility_debug_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+layout(push_constant) uniform PC {
+    uint ids_id;
+    uint output_id;
+    uint width;
+    uint height;
+    uint mode;
+} pc;
+
+vec3 id_color(uint id)
+{
+    uint h = (id + 1u) * 2654435761u;
+    h ^= h >> 15u;
+    h *= 2246822519u;
+    h ^= h >> 13u;
+    return vec3(float(h & 255u), float((h >> 8u) & 255u), float((h >> 16u) & 255u)) / 255.0;
+}
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
+    vec3 color = vec3(0.0);
+    if (ids.x != 0u) {
+        uint draw = ids.x - 1u;
+        uint bits = velk_draw_data.data[draw].triangle_bits;
+        uint id = draw * 16381u;
+        if (pc.mode >= 2u) id += (ids.y >> bits) * 8191u;
+        if (pc.mode >= 3u) id += (ids.y & ((1u << bits) - 1u)) * 131u;
+        color = id_color(id);
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(color, 1.0));
+}
+)";
+
 /// @p source as the GI probe pass, with the number of rays each probe traces per update
 /// compiled in. A power of two, 64 at most.
 inline string velk_with_probe_dirs(string_view source, uint32_t dirs)

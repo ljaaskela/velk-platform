@@ -172,6 +172,35 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
         po);
 }
 
+/// The pipeline writing a batch's pixels to the visibility buffer. Only a material with an
+/// eval has a vertex shader that writes the varyings the fragment reads.
+IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatch& batch)
+{
+    auto material_ptr = batch.material();
+    auto* src = material_ptr ? interface_cast<IShaderSource>(material_ptr.get()) : nullptr;
+    string_view vsrc;
+    if (src && !src->get_source(shader_role::kEval).empty()) {
+        vsrc = src->get_source(shader_role::kVertex);
+    }
+    if (vsrc.empty()) {
+        vsrc = default_gbuffer_vertex_src;
+    }
+
+    PipelineOptions po = batch.pipeline_options();
+    po.blend_mode = BlendMode::Opaque;
+    PipelineContentHasher hasher(kVisibilityContentTag);
+    hasher.str(vsrc);
+    hasher.options(po);
+    const uint64_t key = hasher.key();
+
+    const auto formats = array_view<const PixelFormat>(kVisibilityFormats, 1);
+    PipelineCacheKey cache_key{key, kVisibilityFormats[0], DepthFormat::Default, pipeline_target_layout(formats)};
+    if (auto pipeline = ctx.pipelines().find(cache_key)) {
+        return pipeline;
+    }
+    return ctx.pipelines().compile_dynamic(visibility_fragment_src, vsrc, key, formats, DepthFormat::Default, po);
+}
+
 } // namespace
 
 namespace {
@@ -275,6 +304,9 @@ uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
 // it, so the chosen light, the shadow ray and the image are unchanged and ray
 // coherence cannot drift into the measurement. 1 doubles the per-light ALU.
 uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
+
+// Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 3); }
 
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
@@ -781,9 +813,14 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true);
     if (vs.instance_cull.arena_buffer != culling_buffer) {
         vs.gbuffer_dirty = true;
+        vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
     emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
+    const uint32_t visibility_mode = visibility_debug_mode();
+    if (visibility_mode != 0) {
+        emit_visibility_pass(vs, render_view, ctx, graph);
+    }
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
     emit_gi_measure_pass(vs, ctx, graph);
@@ -803,6 +840,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
                                 static_cast<int>(vs.gbuffer_size.y), graph);
     emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
+    if (visibility_mode != 0) {
+        emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
+    }
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
     emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
@@ -884,6 +924,122 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
             // Self-contained cmd buffer; no target_* seam.
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         });
+}
+
+void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
+                                        IRenderGraph& graph)
+{
+    if (!render_view.batches || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+
+    if (!vs.visibility || vs.visibility_size != vs.gbuffer_size) {
+        TextureGroupDesc desc{};
+        desc.formats = array_view<const PixelFormat>(kVisibilityFormats, 1);
+        desc.width = static_cast<int>(vs.gbuffer_size.x);
+        desc.height = static_cast<int>(vs.gbuffer_size.y);
+        desc.depth = DepthFormat::Default;
+        vs.visibility = graph.resources().create_render_texture_group(desc);
+        if (!vs.visibility) return;
+        vs.visibility_size = vs.gbuffer_size;
+        vs.visibility_dirty = true;
+    }
+
+    emit_cached_view_pass(
+        vs.cached_visibility_pass, vs.visibility_dirty, "deferred.visibility", graph, [&](CachedPassRecording& rec) {
+            auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+                if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
+                    return nullptr;
+                }
+                auto p = resolve_or_compile_visibility(*ctx.render_ctx, b);
+                if (!p) return nullptr;
+                IGpuPipeline* raw = p.get();
+                rec.held.push_back(std::move(p));
+                return raw;
+            };
+            vector<DrawCall> draw_calls;
+            emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_uv1,
+                            render_view.view_globals_base, resolve,
+                            render_view.has_frustum ? &render_view.frustum : nullptr);
+
+            auto cmd = ctx.backend->create_command_buffer();
+            if (!cmd) return;
+            ColorAttachment color{};
+            color.texture = vs.visibility->attachment_texture(0);
+            color.clear = true;
+            DepthAttachment depth{};
+            depth.texture = vs.visibility->depth_attachment();
+            depth.clear = true;
+            depth.clear_stencil = 0;
+
+            cmd->begin_recording();
+            cmd->push_label("DeferredPath: visibility");
+            cmd->record_begin_rendering(array_view<const ColorAttachment>(&color, 1), depth.texture ? &depth : nullptr);
+            cmd->set_viewport(rect{0, 0, static_cast<float>(vs.gbuffer_size.x), static_cast<float>(vs.gbuffer_size.y)});
+            cmd->record_draws({draw_calls.data(), draw_calls.size()});
+            cmd->record_end_rendering();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        });
+}
+
+void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                              FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
+{
+    if (!vs.visibility || !vs.deferred_output) return;
+
+    constexpr uint64_t kKey = 0x5649'5344'4247'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(visibility_debug_compute_src, kKey);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.visibility_debug_pass, dirty, "deferred.visibility_debug", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        struct PushC
+        {
+            uint32_t ids_id, output_id, width, height, mode;
+        };
+        const PushC pc{vs.visibility->attachment(0),
+                       static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
+                       vs.visibility_size.x, vs.visibility_size.y, mode};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
+        dc.groups_y = (vs.visibility_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: visibility debug");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
 }
 
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -1523,6 +1679,7 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
     auto it = view_states_.find(view);
     if (it != view_states_.end()) {
         it->second.gbuffer_dirty = true;
+        it->second.visibility_dirty = true;
         it->second.lighting_dirty = true;
         it->second.transparent_dirty = true;
         it->second.instance_cull.dirty = true;

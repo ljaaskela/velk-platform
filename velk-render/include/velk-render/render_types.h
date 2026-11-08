@@ -56,6 +56,7 @@ enum class PixelFormat : uint8_t
     R8,         ///< 1 byte per pixel, glyph atlases.
     RGBA16F,    ///< 8 bytes per pixel, 16-bit float per channel (HDR).
     RGBA32F,    ///< 16 bytes per pixel, 32-bit float per channel (precision-critical, e.g. world position).
+    RG32UI,     ///< 8 bytes per pixel, two 32-bit unsigned integers (IDs). Read with texelFetch.
 };
 
 /// Format of a surface's per-frame composite intermediate. Whitelisted

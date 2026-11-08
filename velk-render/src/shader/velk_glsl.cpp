@@ -320,7 +320,7 @@ struct VelkDrawData {
     uint uv1_enabled;
     uint material_base;
     uint lod_error_base;
-    uint _pad_draw0;
+    uint triangle_bits;
     uint _pad_draw1;
     uint _pad_draw2;
 };
@@ -352,7 +352,7 @@ R"(
 // The varyings `element_vertex_src` writes and every composed raster fragment
 // driver reads. One declaration each side, so adding a varying is a single edit
 // here rather than one per shader. A fragment may ignore any of them; the
-// vertex stage always writes all nine.
+// vertex stage always writes all ten.
 //
 //   VELK_VARYINGS_OUT   // in a vertex shader
 //   VELK_VARYINGS_IN    // in a fragment shader
@@ -370,7 +370,8 @@ R"(
     layout(location = 5) flat out uint v_shape_param; \
     layout(location = 6) out vec2 v_uv1;              \
     layout(location = 7) out vec4 v_world_tangent;    \
-    layout(location = 8) flat out float v_lod_error;
+    layout(location = 8) flat out float v_lod_error;  \
+    layout(location = 9) flat out uint v_instance;
 
 #define VELK_VARYINGS_IN                             \
     layout(location = 0) in vec4 v_color;            \
@@ -381,7 +382,8 @@ R"(
     layout(location = 5) flat in uint v_shape_param; \
     layout(location = 6) in vec2 v_uv1;              \
     layout(location = 7) in vec4 v_world_tangent;    \
-    layout(location = 8) flat in float v_lod_error;
+    layout(location = 8) flat in float v_lod_error;  \
+    layout(location = 9) flat in uint v_instance;
 
 )"
 // VELK_FRAG_OUT is the single-target colour output, for forward and any full

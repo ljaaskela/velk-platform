@@ -148,6 +148,12 @@ public:
         /// `ensure_gbuffer` recreating the gbuffer group on resize.
         IRenderPass::Ptr cached_gbuffer_pass;
         bool gbuffer_dirty = true;
+        /// Which triangle each pixel shows, with its own depth.
+        IRenderTextureGroup::Ptr visibility;
+        uvec2 visibility_size{0, 0};
+        IRenderPass::Ptr cached_visibility_pass;
+        bool visibility_dirty = true;
+        IRenderPass::Ptr visibility_debug_pass;
         InstanceCullPass instance_cull;
         /// Instances too small to draw. A region of the frame's size per visual.
         IRenderPass::Ptr far_instance_pass;
@@ -278,6 +284,11 @@ private:
                                      FrameContext& ctx,
                                      int w, int h,
                                      IRenderGraph& graph);
+
+    void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Replaces the final image with the visibility buffer as flat colours.
+    void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                    FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
 
     /// Forward pass for BLEND-mode batches, drawn over the lit composite in
     /// @p color_target with the gbuffer depth bound read-only. No-op when the

@@ -67,6 +67,24 @@ void main()
 }
 )";
 
+// Writes which triangle a pixel shows: the draw record's index plus one, 0 where nothing
+// was drawn, then the draw instance and the triangle, split at the record's triangle_bits.
+[[maybe_unused]] constexpr string_view visibility_fragment_src = R"(
+#version 450
+#include "velk.glsl"
+
+VELK_DRAW_DATA(root)
+
+VELK_VARYINGS_IN
+
+layout(location = 0) out uvec2 g_visibility;
+
+void main()
+{
+    g_visibility = uvec2(root.draw_base + 1u, (v_instance << velk_draw(root).triangle_bits) | uint(gl_PrimitiveID));
+}
+)";
+
 // ===== Material eval-driver fragment templates =====
 // Forward and deferred fragment shaders that materials with a
 // `velk_eval_<name>` body share. The raster-pipeline composer

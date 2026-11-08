@@ -143,6 +143,13 @@ inline void emit_draw_calls(
         InstanceCullInfo cull_info{};
         header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
         header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
+        // A draw by cluster numbers triangles within its cluster, of up to 256.
+        const uint32_t triangles = cull_info.cluster_count != 0 ? 256u
+            : primitive->get_index_count() != 0                 ? primitive->get_index_count() / 3u
+                                                                : primitive->get_vertex_count();
+        while (header.triangle_bits < 31u && (uint64_t(1) << header.triangle_bits) < triangles) {
+            ++header.triangle_bits;
+        }
         // Vertex streams are word bases into the mesh-word arena, the same
         // bytes and the same model RT reads.
         const GpuRef vbo_ref = get_gpu_ref(buffer);

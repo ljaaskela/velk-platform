@@ -339,6 +339,7 @@ void main()
     v_uv1          = velk_uv1(root);
     v_world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
     v_lod_error     = velk_lod_error(root);
+    v_instance      = uint(gl_InstanceIndex);
 }
 )";
 
