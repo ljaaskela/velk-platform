@@ -188,10 +188,8 @@ public:
         /// Read back by the probe pass for its temporal blend, so it persists
         /// across frames rather than being transient.
         IRenderTarget::Ptr gi_probes;
-        /// Each probe's map of distances to surfaces. See VELK_GI_FIELD_GLSL.
-        IRenderTarget::Ptr gi_probe_maps;
-        /// Each probe's map of the light in each direction. See VELK_GI_FIELD_GLSL.
-        IRenderTarget::Ptr gi_probe_light;
+        /// Each probe's map of irradiance against each direction. See VELK_GI_FIELD_GLSL.
+        IRenderTarget::Ptr gi_probe_irradiance;
         /// The field being rebuilt from the top. See emit_probe_pass.
         uint32_t gi_sweep_left = 0;
         uint64_t gi_sweep_frame = 0;
@@ -211,8 +209,6 @@ public:
         IRenderPass::Ptr gi_pixels_pass;
         ArenaRegion gi_reference;
         IRenderPass::Ptr gi_reference_pass;
-        ArenaRegion gi_rays;
-        IRenderPass::Ptr gi_rays_pass;
         ArenaRegion gi_truth;
         IRenderPass::Ptr gi_truth_pass;
         IGpuTexture* last_transparent_target = nullptr;
@@ -308,8 +304,6 @@ private:
     void emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Diagnostic: with VELK_GI_PIXELS and VELK_GI_REFERENCE=1, logs the true irradiance there.
     void emit_gi_reference_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Diagnostic: with VELK_GI_PIXELS and VELK_GI_RAYS=1, logs what a probe's rays see.
-    void emit_gi_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Diagnostic: with VELK_GI_PIXELS and VELK_GI_TRUTH=1, logs each level's probe against
     /// true paths from its own position.
     void emit_gi_truth_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);

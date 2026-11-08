@@ -125,7 +125,7 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
     int32_t  gi_finest;        // ladder index of the probe field's finest level
     uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
-    uint32_t gi_maps_id;       // GI probe distance maps
+    uint32_t gi_maps_id;       // GI probe irradiance maps
 };
 static_assert(sizeof(DeferredComputePushC) == 128, "Deferred compute PushC layout mismatch");
 
@@ -342,12 +342,12 @@ namespace {
 // Rays the probe field traces per frame, whatever the scene.
 constexpr uint32_t kProbeRaysPerFrame = 283000;
 // Rays per probe update. A power of two, 64 at most.
-constexpr uint32_t kProbeDirs = 8;
+constexpr uint32_t kProbeDirs = 64;
 // Mirrors the constants and atlas layouts in VELK_GI_FIELD_GLSL.
-constexpr uint32_t kGiDim = 32;
+constexpr uint32_t kGiDim = 16;
 constexpr int kGiLevels = 8;
 constexpr int kGiRows = 5;
-constexpr int kGiMapSize = 6;
+constexpr int kGiMapSize = 8;
 constexpr uint32_t kGiDistanceSamples = 64;
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
@@ -358,8 +358,8 @@ VELK_GPU_STRUCT ProbePushC {
     uint32_t lights_base;
     float    env_params[2];
     uint32_t extras[4];        // RT main uses these for its output image; the probe main
-                               // uses x = workgroups in the dispatch, y = distance maps,
-                               // z = light maps, w = the level being rebuilt, or all ones.
+                               // uses x = workgroups in the dispatch, y = irradiance maps,
+                               // w = the level being rebuilt, or all ones.
     uint32_t env[4];           // x = env material, y = env texture,
                                // z = finest level's ladder index, w = probe atlas image
 };
@@ -512,16 +512,13 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
         vs.gi_probes = graph.resources().create_render_texture(td);
 
-        td.width = static_cast<int>(kGiDim * kGiDim) * (kGiMapSize / 2);
+        td.width = static_cast<int>(kGiDim * kGiDim) * kGiMapSize * 2;
         td.height = static_cast<int>(kGiDim) * kGiLevels * kGiMapSize;
         td.format = PixelFormat::RGBA16F;
-        vs.gi_probe_maps = graph.resources().create_render_texture(td);
-
-        td.width = static_cast<int>(kGiDim * kGiDim) * kGiMapSize;
-        vs.gi_probe_light = graph.resources().create_render_texture(td);
+        vs.gi_probe_irradiance = graph.resources().create_render_texture(td);
         vs.lighting_dirty = true;
     }
-    if (!vs.gi_probes || !vs.gi_probe_maps || !vs.gi_probe_light) return;
+    if (!vs.gi_probes || !vs.gi_probe_irradiance) return;
     auto& fine = vs.gi_probes;
 
     auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
@@ -540,7 +537,7 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.env_params[1] = render_view.env.rotation_rad;
     const uint32_t groups = kProbeRaysPerFrame / 64u;
     pc.extras[0] = groups;
-    pc.extras[1] = handle(vs.gi_probe_maps);
+    pc.extras[1] = handle(vs.gi_probe_irradiance);
 
     // At the start and whenever the light changes, the field is rebuilt from the top, one
     // level a frame, rather than left to catch up. Bounded, so that light changing all the
@@ -576,7 +573,6 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         vs.gi_sweep_left = kSweepFrames;
         vs.gi_swept = true;
     }
-    pc.extras[2] = handle(vs.gi_probe_light);
     pc.extras[3] = 0xFFFFFFFFu;
     if (vs.gi_sweep_left > 0u) {
         const uint32_t done = kSweepFrames - vs.gi_sweep_left;
@@ -618,10 +614,8 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
             // frame's value from the same texel.
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_light));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_light));
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
             rec.held.push_back(std::move(pipeline));
         });
 }
@@ -795,7 +789,6 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_gi_print_pass(vs, render_view, ctx, graph);
     emit_gi_pixels_pass(vs, render_view, ctx, graph);
     emit_gi_reference_pass(vs, render_view, ctx, graph);
-    emit_gi_rays_pass(vs, render_view, ctx, graph);
     emit_gi_truth_pass(vs, render_view, ctx, graph);
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
@@ -983,107 +976,6 @@ void DeferredPath::emit_gi_truth_pass(ViewState& vs, const RenderView& render_vi
     });
 }
 
-void DeferredPath::emit_gi_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
-{
-    const char* request = std::getenv("VELK_GI_PIXELS");
-    if (!request || !std::getenv("VELK_GI_RAYS") || !vs.gbuffer || !vs.gi_probes || !vs.gi_probe_maps || !vs.gi_probe_light || !vs.gi_finest_known || !ctx.snippets) return;
-    uint32_t pixels[14]{};
-    uint32_t count = 0;
-    for (const char* at = request; at && *at && count < 6;) {
-        int x = 0;
-        int y = 0;
-        if (std::sscanf(at, "%d,%d", &x, &y) != 2) break;
-        pixels[count * 2] = static_cast<uint32_t>(x);
-        pixels[count * 2 + 1] = static_cast<uint32_t>(y);
-        ++count;
-        at = std::strchr(at, ';');
-        if (at) ++at;
-    }
-    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena || count == 0) return;
-
-    constexpr uint32_t kWords = 14 + 48 * 6;
-    if (!vs.gi_rays.valid()) {
-        vs.gi_rays = arena->alloc(kWords * sizeof(uint32_t));
-        if (!vs.gi_rays.valid()) return;
-    } else if ((ctx.present_counter % 60ull) == 0ull) {
-        float out[48 * 6];
-        arena->read_at(vs.gi_rays.offset() + 14 * sizeof(uint32_t), out, sizeof(out));
-        for (uint32_t i = 0; i < count; ++i) {
-            for (int level = 0; level < kGiLevels; ++level) {
-                const float* s = out + i * 48 + level * 6;
-                VELK_LOG(I, "gi_rays frame=%llu at=%u,%u level=%d weight=%.2f hit_share=%.2f hit_light=%.3f open_light=%.3f mean=%.3f medium=%.2f",
-                         static_cast<unsigned long long>(ctx.present_counter), pixels[i * 2], pixels[i * 2 + 1], level, s[0], s[1], s[2], s[3], s[4], s[5]);
-            }
-        }
-    }
-    pixels[12] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
-    pixels[13] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
-    arena->write_at(vs.gi_rays.offset(), pixels, sizeof(pixels));
-
-    uint64_t key = 0xcbf29ce484222325ULL ^ 0x4749'52415953ULL;
-    for (auto id : ctx.snippets->frame_materials()) {
-        key = (key ^ static_cast<uint64_t>(id)) * 0x100000001b3ULL;
-    }
-    for (auto id : ctx.snippets->frame_shadow_techs()) {
-        key = (key ^ static_cast<uint64_t>(id)) * 0x100000001b3ULL;
-    }
-    for (auto id : ctx.snippets->frame_intersects()) {
-        key = (key ^ static_cast<uint64_t>(id)) * 0x100000001b3ULL;
-    }
-    key = (key ^ (render_view.bvh.has_medium != 0u ? 1ull : 2ull)) * 0x100000001b3ULL;
-    key |= 0x0400000000000000ULL;
-    auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
-    if (!pipeline) {
-        string src = velk_with_probe_dirs(string_view(compose_rt_compute(*ctx.snippets, probe_gi_rays_main_src)), kProbeDirs);
-        if (!render_view.bvh.ray_motion.empty()) {
-            src = velk_with_ray_motion(string_view(src), render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach);
-        }
-        if (render_view.bvh.has_medium != 0u) {
-            src = velk_with_trace_medium(string_view(src));
-        }
-        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
-    }
-    if (!pipeline) return;
-
-    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
-    bool dirty = true;
-    emit_cached_view_pass(vs.gi_rays_pass, dirty, "gi.rays", graph, [&](CachedPassRecording& rec) {
-        auto cmd = ctx.backend->create_command_buffer();
-        if (!cmd) return;
-        ProbePushC pc{};
-        pc.globals_base = render_view.view_globals_base;
-        pc.light_count = static_cast<uint32_t>(render_view.lights.size());
-        pc.lights_base = render_view.lights_base;
-        pc.env_params[0] = render_view.env.intensity;
-        pc.env_params[1] = render_view.env.rotation_rad;
-        pc.extras[0] = static_cast<uint32_t>(vs.gi_rays.offset() / sizeof(uint32_t));
-        pc.extras[1] = handle(vs.gi_probe_maps);
-        pc.extras[2] = handle(vs.gi_probe_light);
-        pc.extras[3] = count;
-        pc.env[0] = render_view.env.material_id;
-        pc.env[1] = render_view.env.texture_id;
-        pc.env[2] = static_cast<uint32_t>(vs.gi_finest);
-        pc.env[3] = handle(vs.gi_probes);
-        DispatchCall dc{};
-        dc.pipeline = pipeline.get();
-        dc.groups_x = count;
-        dc.groups_y = 1;
-        dc.groups_z = 1;
-        dc.root_constants_size = sizeof(pc);
-        std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        cmd->begin_recording();
-        cmd->record_dispatch(dc);
-        cmd->end_recording();
-        rec.cmd = std::move(cmd);
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_light));
-        rec.held.push_back(std::move(pipeline));
-    });
-}
-
 void DeferredPath::emit_gi_reference_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const char* request = std::getenv("VELK_GI_PIXELS");
@@ -1173,7 +1065,7 @@ void DeferredPath::emit_gi_reference_pass(ViewState& vs, const RenderView& rende
 void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const char* request = std::getenv("VELK_GI_PIXELS");
-    if (!request || !vs.gi_probes || !vs.gi_probe_maps || !vs.gi_finest_known || !vs.deferred_output || !vs.unshadowed || !vs.gbuffer) return;
+    if (!request || !vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known || !vs.deferred_output || !vs.unshadowed || !vs.gbuffer) return;
     int32_t pixels[12]{};
     uint32_t count = 0;
     for (const char* at = request; at && *at && count < 6;) {
@@ -1228,7 +1120,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         PushC pc{};
         pc.word = static_cast<uint32_t>(vs.gi_pixels.offset() / sizeof(uint32_t));
         pc.atlas = handle(vs.gi_probes);
-        pc.maps = handle(vs.gi_probe_maps);
+        pc.maps = handle(vs.gi_probe_irradiance);
         pc.globals_base = render_view.view_globals_base;
         pc.finest = vs.gi_finest;
         pc.albedo_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
@@ -1253,7 +1145,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
@@ -1266,7 +1158,7 @@ void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_vi
     const char* request = std::getenv("VELK_GI_PRINT");
     float v[6];
     if (!request || std::sscanf(request, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
-    if (!vs.gi_probes || !vs.gi_probe_maps || !vs.gi_finest_known) return;
+    if (!vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
 
@@ -1307,7 +1199,7 @@ void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_vi
                        {v[3], v[4], v[5], 0.f},
                        static_cast<uint32_t>(vs.gi_print.offset() / sizeof(uint32_t)),
                        static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default)),
-                       static_cast<uint32_t>(vs.gi_probe_maps->get_gpu_handle(GpuResourceKey::Default)),
+                       static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default)),
                        render_view.view_globals_base,
                        vs.gi_finest};
         DispatchCall dc{};
@@ -1322,7 +1214,7 @@ void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_vi
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_maps));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
         rec.held.push_back(std::move(pipeline));
     });
 }
@@ -1662,7 +1554,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         pc.gi_probe_id =
             static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
         pc.gi_finest = vs.gi_finest;
-        pc.gi_maps_id = static_cast<uint32_t>(vs.gi_probe_maps->get_gpu_handle(GpuResourceKey::Default));
+        pc.gi_maps_id = static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default));
     }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
