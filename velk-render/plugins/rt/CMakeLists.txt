@@ -3,6 +3,8 @@ add_library(velk_rt SHARED
     src/rt_plugin.cpp
     src/rt_path.h
     src/rt_path.cpp
+    src/reference_path.h
+    src/reference_path.cpp
     include/velk-render/plugins/rt/plugin.h
 )
 

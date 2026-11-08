@@ -1205,6 +1205,7 @@ int main(int argc, char* argv[])
     const bool forest = forest_instances || forest_elements;
     bool unlimited = false;
     bool ray_traced = false;
+    bool reference = false;
     bool with_text = false;
     bool with_overlay = false;
     bool draw_near = false;
@@ -1284,6 +1285,7 @@ int main(int argc, char* argv[])
         with_overlay = with_overlay || std::strcmp(argv[i], "overlay") == 0;
         unlimited = unlimited || std::strcmp(argv[i], "unlimited") == 0;
         ray_traced = ray_traced || std::strcmp(argv[i], "rt") == 0;
+        reference = reference || std::strcmp(argv[i], "reference") == 0;
         with_text = with_text || std::strcmp(argv[i], "text") == 0;
     }
 
@@ -1359,7 +1361,7 @@ int main(int argc, char* argv[])
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
     cam.set_gi_cell_size(gi_cell);
-    cam.add_render_path(ray_traced ? velk::path::create_rt() : velk::path::create_deferred());
+    cam.add_render_path(reference ? velk::path::create_reference() : ray_traced ? velk::path::create_rt() : velk::path::create_deferred());
 
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());

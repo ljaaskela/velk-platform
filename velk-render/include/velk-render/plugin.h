@@ -92,6 +92,9 @@ inline constexpr Uid Deferred{"2c7dfc96-724a-4eea-b10c-b9b99a131041"};
 /** @brief Compute-shader path tracer. */
 inline constexpr Uid Rt{"c5a2f31b-ca23-43c0-a19a-471c3c962942"};
 
+/** @brief Path tracing accumulated over frames, for reference images. */
+inline constexpr Uid Reference{"73a42ec7-32ed-4a1b-aad2-c0e2ba84eb5c"};
+
 } // namespace Path
 
 namespace Pipeline {

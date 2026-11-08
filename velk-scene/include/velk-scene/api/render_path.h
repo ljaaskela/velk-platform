@@ -51,6 +51,12 @@ inline RenderPath create_rt()
     return RenderPath(instance().create<IObject>(ClassId::Path::Rt));
 }
 
+/** @brief Path tracing accumulated over frames, for reference images. */
+inline RenderPath create_reference()
+{
+    return RenderPath(instance().create<IObject>(ClassId::Path::Reference));
+}
+
 } // namespace path
 
 } // namespace velk
