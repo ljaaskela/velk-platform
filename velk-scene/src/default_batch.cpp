@@ -57,7 +57,7 @@ constexpr uint32_t kCullEntryCountWord = 9;
 constexpr uint32_t kCullFarAlbedoWord = 10;  ///< The far form's colour, as unorm RGB.
 
 /// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
-constexpr uint32_t kClusterEntryWords = 10;
+constexpr uint32_t kClusterEntryWords = 13;
 constexpr uint32_t kClusterEntryListWord = 0;
 constexpr uint32_t kClusterEntryCapacityWord = 1;
 constexpr uint32_t kClusterEntryTableWord = 2;
@@ -68,8 +68,10 @@ constexpr uint32_t kClusterEntryCommandsWord = 6;
 constexpr uint32_t kClusterEntryDrawsWord = 7;
 constexpr uint32_t kClusterEntryLevelsWord = 8;
 constexpr uint32_t kClusterEntryLevelCountWord = 9;
-/// Words per cluster: its count, its cursor and its command.
-constexpr uint32_t kClusterWords = 7;
+constexpr uint32_t kClusterEntrySecondCommandsWord = 11;
+constexpr uint32_t kClusterEntrySecondDrawsWord = 12;
+/// Words per cluster: its count, its cursor and a command for each occlusion phase.
+constexpr uint32_t kClusterWords = 12;
 /// Most instances of clusters in one list. At 256 triangles each this is about a billion
 /// triangles, more than a frame could draw.
 constexpr uint64_t kMaxClusterRuns = 1ull << 22;
@@ -88,6 +90,16 @@ const DefaultBatch::ClusterDraw* DefaultBatch::find_cluster_draw(uint32_t mesh, 
 
 void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
 {
+    if (instance_cull_ && instance_source_ && primitive_ && !cull_second_args_.valid()) {
+        if (auto arena = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+            cull_second_args_ = arena->alloc(5u * sizeof(uint32_t));
+            if (cull_second_args_.valid()) {
+                const uint32_t index_count = primitive_->get_index_count();
+                const uint32_t args[5] = {index_count != 0 ? index_count : primitive_->get_vertex_count(), 0u, 0u, 0u, 0u};
+                arena->write_at(cull_second_args_.offset(), args, sizeof(args));
+            }
+        }
+    }
     if (!instance_cull_ || cull_owner_ || cull_region_.valid()) {
         return;
     }
@@ -230,7 +242,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         const uint32_t counts_word = next_list;
         const uint32_t cursors_word = counts_word + clusters;
         const uint32_t commands_word = cursors_word + clusters;
-        const uint32_t list_word = commands_word + clusters * 5u;
+        const uint32_t second_commands_word = commands_word + clusters * 5u;
+        const uint32_t list_word = second_commands_word + clusters * 5u;
         const uint32_t errors_word = list_word + draw.capacity;
         // Each position has its surface error, then its cluster's first index.
         next_list = errors_word + draw.capacity * 2u;
@@ -249,6 +262,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryLevelsWord] = draw.lod.level_word;
         entry[kClusterEntryLevelCountWord] = draw.lod.level_count;
+        entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});
     }
     // Batches culled together keep their records in one place, with the culling pass.
@@ -279,10 +293,16 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_entry_word = draw->entry_word;
         out.cluster_commands_word = draw->commands_word;
         out.cluster_draws_word = draw->entry_word + kClusterEntryDrawsWord;
+        out.cluster_second_commands_word = draw->commands_word + draw->clusters * 5u;
+        out.cluster_second_draws_word = draw->entry_word + kClusterEntrySecondDrawsWord;
         out.cluster_index_word = draw->index_word;
         out.cluster_errors_word = draw->errors_word;
         out.cluster_capacity = draw->capacity;
         out.cluster_vertex_word = draw->vertex_word;
+    }
+    if (cull_second_args_.valid()) {
+        out.second_args_word = static_cast<uint32_t>(cull_second_args_.offset() / sizeof(uint32_t));
+        out.second_args_first_word = out.second_args_word + (primitive_->get_index_count() != 0 ? 4u : 3u);
     }
     out.chosen_word = owner->cull_chosen_word_;
     out.chosen_capacity = owner->cull_chosen_capacity_;

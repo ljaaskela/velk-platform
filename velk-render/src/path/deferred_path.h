@@ -141,6 +141,8 @@ public:
         uvec2 visibility_size{0, 0};
         IRenderPass::Ptr cached_visibility_pass;
         bool visibility_dirty = true;
+        IRenderPass::Ptr cached_visibility_second_pass;
+        bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr visibility_resolve_pass;
         /// The depth of what is drawn at decreasing sizes, in the culling arena.
@@ -277,7 +279,9 @@ private:
                                      int w, int h,
                                      IRenderGraph& graph);
 
-    void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Draws what GPU culling kept. @p second_phase draws what its second test added, over the first.
+    void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph,
+                              bool second_phase);
     void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.

@@ -170,6 +170,8 @@ private:
     /// frames, RAII-freed (deferred) when the batch is destroyed.
     /// offset / instance_stride is the shader instances_base.
     ArenaRegion instance_region_;
+    /// A plain instanced draw's arguments for the second occlusion phase, in the culling arena.
+    ArenaRegion cull_second_args_;
     IInstancedMeshInternal::Ptr instance_source_;
     bool instance_cull_ = false;
     IBatch::Ptr cull_owner_;

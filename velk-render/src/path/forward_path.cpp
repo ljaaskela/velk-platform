@@ -99,9 +99,9 @@ void ForwardPath::build_passes(IViewEntry& entry,
     }
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
-    IGpuBuffer* const culling_buffer = cache.instance_cull.arena_buffer;
+    const uint32_t culling_generation = cache.instance_cull.arena_generation;
     emit_instance_cull_pass(cache.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
-    if (cache.instance_cull.arena_buffer != culling_buffer) {
+    if (cache.instance_cull.arena_generation != culling_generation) {
         cache.dirty = true;
     }
 

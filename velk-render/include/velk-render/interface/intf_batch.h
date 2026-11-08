@@ -80,6 +80,10 @@ struct InstanceCullInfo
     uint32_t cluster_index_word = 0;     ///< Its indices in the mesh-word arena.
     uint32_t cluster_errors_word = 0;    ///< Each list position's surface error in world units, in the culling arena.
     uint32_t cluster_capacity = 0;       ///< How many positions its list has.
+    uint32_t cluster_second_commands_word = 0;  ///< The commands of the second occlusion phase.
+    uint32_t cluster_second_draws_word = 0;     ///< How many of those are in use.
+    uint32_t second_args_word = 0xFFFFFFFFu;    ///< A plain instanced draw's arguments for that phase, in the culling arena.
+    uint32_t second_args_first_word = 0;        ///< Where in those its first instance is.
     uint32_t chosen_word = 0;            ///< The clusters chosen for its visual. Unused when culled together.
     uint32_t chosen_capacity = 0;        ///< How many records fit there.
     /// Culled in one dispatch with the other batches that set this, instead of on its own.

@@ -201,6 +201,9 @@ uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
 uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4); }
 
+// Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
+bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
+
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
 // and velk_eval_shadow switches built from the frame's snippet set. The
@@ -711,14 +714,22 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (!gbuffer_handle) return;
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
-    IGpuBuffer* const culling_buffer = vs.instance_cull.arena_buffer;
-    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true);
-    if (vs.instance_cull.arena_buffer != culling_buffer) {
+    const uint32_t culling_generation = vs.instance_cull.arena_generation;
+    auto* camera = interface_cast<ICamera>(ctx.view_camera_trait);
+    auto camera_state = camera ? read_state<ICamera>(camera) : decltype(read_state<ICamera>(camera)){};
+    const bool occlusion = (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid() && !no_occlusion_culling();
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true,
+                            occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot);
+    if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
-    emit_visibility_pass(vs, render_view, ctx, graph);
+    emit_visibility_pass(vs, render_view, ctx, graph, false);
     emit_depth_pyramid_pass(vs, ctx, graph);
+    if (occlusion && vs.instance_cull.pyramid_word != kCullNoSlot) {
+        emit_instance_retest_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
+        emit_visibility_pass(vs, render_view, ctx, graph, true);
+    }
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode();
 
@@ -751,7 +762,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
 }
 
 void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
-                                        IRenderGraph& graph)
+                                        IRenderGraph& graph, bool second_phase)
 {
     if (!render_view.batches || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
 
@@ -767,8 +778,13 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         vs.visibility_dirty = true;
     }
 
+    if (!second_phase && vs.visibility_dirty) {
+        vs.visibility_second_dirty = true;
+    }
     emit_cached_view_pass(
-        vs.cached_visibility_pass, vs.visibility_dirty, "deferred.visibility", graph, [&](CachedPassRecording& rec) {
+        second_phase ? vs.cached_visibility_second_pass : vs.cached_visibility_pass,
+        second_phase ? vs.visibility_second_dirty : vs.visibility_dirty,
+        second_phase ? "deferred.visibility2" : "deferred.visibility", graph, [&](CachedPassRecording& rec) {
             auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
                 if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
@@ -784,22 +800,22 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
             emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_uv1,
                             render_view.view_globals_base, resolve,
-                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx);
+                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase);
 
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;
             ColorAttachment colors[kVisibilityAttachments]{};
             for (uint32_t i = 0; i < kVisibilityAttachments; ++i) {
                 colors[i].texture = vs.visibility->attachment_texture(i);
-                colors[i].clear = true;
+                colors[i].clear = !second_phase;
             }
             DepthAttachment depth{};
             depth.texture = vs.visibility->depth_attachment();
-            depth.clear = true;
+            depth.clear = !second_phase;
             depth.clear_stencil = 0;
 
             cmd->begin_recording();
-            cmd->push_label("DeferredPath: visibility");
+            cmd->push_label(second_phase ? "DeferredPath: visibility, second phase" : "DeferredPath: visibility");
             cmd->record_begin_rendering(array_view<const ColorAttachment>(colors, kVisibilityAttachments),
                                         depth.texture ? &depth : nullptr);
             cmd->set_viewport(rect{0, 0, static_cast<float>(vs.gbuffer_size.x), static_cast<float>(vs.gbuffer_size.y)});

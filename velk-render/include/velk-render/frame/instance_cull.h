@@ -99,6 +99,58 @@ void main()
 }
 )";
 
+/// The list of what failed the first occlusion test starts with its count. A record is an
+/// instance's index in the instance arena, its slot, its table, then an entry and cluster, the
+/// entry kCullNoSlot for the whole instance, the cluster's error, and where the visual's chosen
+/// clusters go and how many fit. What does not fit is drawn.
+inline constexpr uint32_t kCullRetestHeaderWords = 1;
+inline constexpr uint32_t kCullRetestRecordWords = 8;
+inline constexpr uint32_t kCullRetestMaxRecords = 1u << 20;
+
+// Whether a sphere around a point relative to the camera, as seen through vp, lies behind all
+// that a depth pyramid holds there. A larger depth is nearer. Declares nothing the shader must
+// provide but cull_words.
+#define VELK_OCCLUSION_GLSL R"(
+bool velk_behind_pyramid(uint pyramid, mat4 vp, vec3 center, float radius)
+{
+    uint levels = cull_words.data[pyramid];
+    if (levels == 0u) return false;
+
+    vec2 lo = vec2(1e30);
+    vec2 hi = vec2(-1e30);
+    float nearest = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        vec3 corner = center + vec3((i & 1) != 0 ? radius : -radius, (i & 2) != 0 ? radius : -radius,
+                                    (i & 4) != 0 ? radius : -radius);
+        vec4 clip = vp * vec4(corner, 1.0);
+        if (clip.w <= 1e-5) return false;
+        vec3 ndc = clip.xyz / clip.w;
+        lo = min(lo, ndc.xy);
+        hi = max(hi, ndc.xy);
+        nearest = max(nearest, ndc.z);
+    }
+
+    uvec2 first_size = uvec2(cull_words.data[pyramid + 1u], cull_words.data[pyramid + 2u]);
+    vec2 a = clamp(lo * 0.5 + 0.5, vec2(0.0), vec2(1.0)) * vec2(first_size);
+    vec2 b = clamp(hi * 0.5 + 0.5, vec2(0.0), vec2(1.0)) * vec2(first_size);
+
+    // The level at which the rectangle spans at most two texels each way.
+    float extent = max(max(b.x - a.x, b.y - a.y), 1.0);
+    uint level = min(uint(ceil(log2(extent))), levels - 1u);
+    uvec2 size = max(first_size >> level, uvec2(1u));
+    uvec2 from = min(uvec2(a) >> level, size - 1u);
+    uvec2 to = min(uvec2(b) >> level, size - 1u);
+    uint words = cull_words.data[pyramid + 3u + level];
+    float farthest = 1e30;
+    for (uint y = from.y; y <= to.y; ++y) {
+        for (uint x = from.x; x <= to.x; ++x) {
+            farthest = min(farthest, uintBitsToFloat(cull_words.data[words + y * size.x + x]));
+        }
+    }
+    return nearest < farthest;
+}
+)"
+
 /// How far a level of detail may be from the full mesh on screen, in pixels.
 inline constexpr float kLodMaxErrorPixels = 1.f;
 
@@ -106,8 +158,9 @@ inline constexpr float kLodMaxErrorPixels = 1.f;
 // those whose own error on screen is small enough and whose parent's is not. A parent's
 // sphere holds its children's and its error is not less than theirs, so going up from any
 // triangle the answer changes once, which is what picks one complete surface. The shader
-// declares cull_words and velk_lod_use first. `entry` is as at instance_cluster_runs_src,
-// and a level's bound skips its clusters when none could qualify.
+// declares cull_words, velk_lod_use and velk_lod_occluded first; a cluster that is occluded
+// is left out. `entry` is as at instance_cluster_runs_src, and a level's bound skips its
+// clusters when none could qualify.
 #define VELK_LOD_SELECT_GLSL R"(
 vec3 velk_lod_center(uint word, mat4 world, vec3 cam)
 {
@@ -143,7 +196,10 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
             uint cluster = clusters + c * 13u;
             if (velk_lod_pixels(cluster + 3u, world, scale, cam, pixels_per_unit) <= max_pixels
                 && velk_lod_pixels(cluster + 8u, world, scale, cam, pixels_per_unit) > max_pixels) {
-                velk_lod_use(entry, c, slot, uintBitsToFloat(cull_words.data[cluster + 7u]) * scale);
+                float error = uintBitsToFloat(cull_words.data[cluster + 7u]) * scale;
+                if (!velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot, error)) {
+                    velk_lod_use(entry, c, slot, error);
+                }
             }
         }
     }
@@ -266,8 +322,14 @@ layout(push_constant) uniform PC {
     uint items_word;
     uint chosen_word;
     uint chosen_capacity;
+    uint pyramid_word;     // the previous frame's depth pyramid, or 0xFFFFFFFF for none
+    uint retest_word;
+    uint retest_capacity;
 } pc;
-)" VELK_INSTANCE_FAR_GLSL R"(
+)" VELK_INSTANCE_FAR_GLSL VELK_OCCLUSION_GLSL R"(
+uint g_instance;
+uint g_table;
+
 void velk_lod_use(uint entry, uint cluster, uint slot, float error)
 {
     uint at = atomicAdd(cull_words.data[pc.chosen_word], 1u);
@@ -279,7 +341,36 @@ void velk_lod_use(uint entry, uint cluster, uint slot, float error)
     cull_words.data[record + 3u] = floatBitsToUint(error);
     atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
 }
+
+// Lists something for the second test, false when there is no room for it.
+bool velk_retest(uint entry, uint cluster, uint slot, float error)
+{
+    uint at = atomicAdd(cull_words.data[pc.retest_word], 1u);
+    if (at >= pc.retest_capacity) return false;
+    uint record = pc.retest_word + 1u + at * 8u;
+    cull_words.data[record] = g_instance;
+    cull_words.data[record + 1u] = slot;
+    cull_words.data[record + 2u] = g_table;
+    cull_words.data[record + 3u] = entry;
+    cull_words.data[record + 4u] = cluster;
+    cull_words.data[record + 5u] = floatBitsToUint(error);
+    cull_words.data[record + 6u] = pc.chosen_word;
+    cull_words.data[record + 7u] = pc.chosen_capacity;
+    return true;
+}
+
+bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry, uint cluster, uint slot, float error);
 )" VELK_LOD_SELECT_GLSL R"(
+// Tested where it was last frame, against what was drawn then.
+bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry, uint cluster, uint slot, float error)
+{
+    if (pc.pyramid_word == 0xFFFFFFFFu) return false;
+    GlobalData g = velk_globals.data[pc.globals_base];
+    float radius = uintBitsToFloat(cull_words.data[word + 3u]) * scale;
+    return velk_behind_pyramid(pc.pyramid_word, g.prev_view_projection, velk_lod_center(word, world, cam) + g.cam_moved, radius)
+        && velk_retest(entry, cluster, slot, error);
+}
+
 void main()
 {
     uint slot = gl_GlobalInvocationID.x;
@@ -334,6 +425,14 @@ void main()
         if (velk_instance_is_far(cull_instances.data[instance].params.z, area, clip.w, vp, globals.viewport.y)) return;
     }
 
+    g_instance = instance;
+    g_table = table_word;
+    if (pc.pyramid_word != 0xFFFFFFFFu
+        && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection, center + globals.cam_moved, radius)
+        && velk_retest(0xFFFFFFFFu, 0u, slot, 0.0)) {
+        return;
+    }
+
     if (pc.items_word == 0xFFFFFFFFu) {
         uint index = atomicAdd(cull_words.data[table + 4u], 1u);
         if (index < cull_words.data[table + 6u]) {
@@ -344,7 +443,112 @@ void main()
     uint first_entry = cull_words.data[table + 8u];
     uint entries = cull_words.data[table + 9u];
     for (uint e = 0u; e < entries; ++e) {
-        velk_lod_visit(first_entry + e * 10u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
+        velk_lod_visit(first_entry + e * 13u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
+                       pc.lod_max_pixels);
+    }
+}
+)";
+
+/**
+ * Tests what failed instance_cull_compute_src's occlusion test again, against the pyramid of
+ * what this frame has drawn so far, and adds what is visible after what that test passed.
+ */
+inline constexpr string_view instance_retest_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+struct CullInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint retest_word;
+    uint retest_capacity;
+    uint globals_base;
+    uint pyramid_word;
+    float lod_max_pixels;
+} pc;
+)" VELK_OCCLUSION_GLSL R"(
+uint g_chosen_word;
+uint g_chosen_capacity;
+
+void velk_lod_use(uint entry, uint cluster, uint slot, float error)
+{
+    uint at = atomicAdd(cull_words.data[g_chosen_word], 1u);
+    if (at >= g_chosen_capacity) return;
+    uint record = g_chosen_word + 4u + at * 4u;
+    cull_words.data[record] = entry;
+    cull_words.data[record + 1u] = cluster;
+    cull_words.data[record + 2u] = slot;
+    cull_words.data[record + 3u] = floatBitsToUint(error);
+    atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
+}
+
+bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry, uint cluster, uint slot, float error);
+)" VELK_LOD_SELECT_GLSL R"(
+bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry, uint cluster, uint slot, float error)
+{
+    GlobalData g = velk_globals.data[pc.globals_base];
+    float radius = uintBitsToFloat(cull_words.data[word + 3u]) * scale;
+    return velk_behind_pyramid(pc.pyramid_word, g.view_projection, velk_lod_center(word, world, cam), radius);
+}
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= min(cull_words.data[pc.retest_word], pc.retest_capacity)) return;
+
+    uint record = pc.retest_word + 1u + index * 8u;
+    uint instance = cull_words.data[record];
+    uint slot = cull_words.data[record + 1u];
+    uint table_word = cull_words.data[record + 2u];
+    uint entry = cull_words.data[record + 3u];
+    g_chosen_word = cull_words.data[record + 6u];
+    g_chosen_capacity = cull_words.data[record + 7u];
+
+    mat4 world = cull_instances.data[instance].world_matrix;
+    float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
+                           dot(world[2].xyz, world[2].xyz)));
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    vec3 cam = globals.cam_pos.xyz;
+
+    if (entry != 0xFFFFFFFFu) {
+        uint cluster = cull_words.data[record + 4u];
+        uint sphere = cull_words.data[entry + 2u] + cluster * 13u + 3u;
+        float error = uintBitsToFloat(cull_words.data[record + 5u]);
+        if (!velk_lod_occluded(sphere, world, scale, cam, entry, cluster, slot, error)) {
+            velk_lod_use(entry, cluster, slot, error);
+        }
+        return;
+    }
+
+    uint table = table_word + cull_instances.data[instance].params.y * 12u;
+    vec3 local_center = vec3(uintBitsToFloat(cull_words.data[table + 0u]), uintBitsToFloat(cull_words.data[table + 1u]),
+                             uintBitsToFloat(cull_words.data[table + 2u]));
+    float radius = uintBitsToFloat(cull_words.data[table + 3u]) * scale;
+    if (velk_behind_pyramid(pc.pyramid_word, globals.view_projection, velk_rel_position(world, local_center, globals), radius)) {
+        return;
+    }
+
+    // After the positions the first test filled. A table without a list has no capacity.
+    uint position = cull_words.data[table + 4u] + atomicAdd(cull_words.data[table + 11u], 1u);
+    if (position < cull_words.data[table + 6u]) {
+        cull_words.data[cull_words.data[table + 5u] + position] = slot;
+    }
+
+    uint first_entry = cull_words.data[table + 8u];
+    uint entries = cull_words.data[table + 9u];
+    for (uint e = 0u; e < entries; ++e) {
+        velk_lod_visit(first_entry + e * 13u, slot, world, scale, cam, globals.view_projection, globals.viewport.y,
                        pc.lod_max_pixels);
     }
 }
@@ -353,14 +557,16 @@ void main()
 /**
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
  * use gets an indexed command, instanced over its own run of the list, so that instances
- * using the same cluster share a draw. An entry is 10 words: the word of the list, which
+ * using the same cluster share a draw. An entry is 13 words: the word of the list, which
  * is followed by each position's surface error and its cluster's first index, its capacity, the word of the cluster table
  * (kLodClusterWords words per cluster, starting with the cluster's first index and triangle
  * count), the cluster count, the words of the counts, the cursors and the commands, one of
- * each per cluster, how many commands are in use, and the word of its levels and how many.
+ * each per cluster, how many commands are in use, the word of its levels and how many, how
+ * many positions the first phase used, and the second phase's commands and how many are in use.
  *
  * With entries_word set, one dispatch goes through the entries listed there. The first
  * invocation writes the group counts of the dispatch that sorts the records at chosen_word.
+ * With second_phase, the runs follow the positions the first phase used.
  */
 inline constexpr string_view instance_cluster_runs_src = R"(
 #version 450
@@ -375,6 +581,7 @@ layout(push_constant) uniform PC {
     uint entries_word;
     uint entry_count;
     uint chosen_word;
+    uint second_phase;
 } pc;
 
 void main()
@@ -396,9 +603,9 @@ void main()
     uint clusters = cull_words.data[entry + 3u];
     uint counts = cull_words.data[entry + 4u];
     uint cursors = cull_words.data[entry + 5u];
-    uint commands = cull_words.data[entry + 6u];
+    uint commands = cull_words.data[entry + (pc.second_phase != 0u ? 11u : 6u)];
 
-    uint first = 0u;
+    uint first = pc.second_phase != 0u ? cull_words.data[entry + 10u] : 0u;
     uint draws = 0u;
     for (uint c = 0u; c < clusters; ++c) {
         uint count = min(cull_words.data[counts + c], capacity - first);
@@ -416,7 +623,12 @@ void main()
         }
         first += count;
     }
-    cull_words.data[entry + 7u] = draws;
+    if (pc.second_phase != 0u) {
+        cull_words.data[entry + 12u] = draws;
+    } else {
+        cull_words.data[entry + 7u] = draws;
+        cull_words.data[entry + 10u] = first;
+    }
 }
 )";
 
@@ -839,6 +1051,8 @@ struct InstanceCullPass
     bool dirty = true;
     vector<uint32_t> count_words;  ///< Reset before every cull.
     IGpuBuffer* arena_buffer = nullptr;
+    size_t arena_size = 0;
+    uint32_t arena_generation = 0;  ///< Changes when the arena's buffer is replaced, which draws naming it must follow.
     uint64_t partition_tables = 0;  ///< Which tables the recording uses.
     /// The batches culled together: see instance_cull_compute_src. Holds the clusters chosen,
     /// then the entries, then the items.
@@ -846,7 +1060,88 @@ struct InstanceCullPass
     uint32_t together_items = 0;
     uint32_t together_entries = 0;
     uint32_t together_chosen = 0;  ///< How many records fit.
+    ArenaRegion retest;            ///< What failed the first occlusion test.
+    uint32_t retest_capacity = 0;
+    uint32_t pyramid_word = kCullNoSlot;  ///< Which pyramid the recording reads.
+    IRenderPass::Ptr retest_pass;
+    bool retest_dirty = true;
 };
+
+/**
+ * Lays out the runs of draws by cluster and fills them, after a phase of culling.
+ */
+template <class Command>
+inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, const vector<IBatch::Ptr>& batches,
+                                  const vector<InstanceCullInfo>& visuals, IGpuPipeline* runs_pipeline,
+                                  IGpuPipeline* fill_pipeline, IGpuBuffer* arena_buffer, uint32_t together_word,
+                                  uint32_t together_entries_word, bool second_phase)
+{
+    const bool together = state.together_items != 0;
+    vector<InstanceCullInfo> cluster_draws;
+    for (const auto& batch : batches) {
+        InstanceCullInfo info{};
+        if (batch && batch->get_instance_cull(info) && info.cluster_count != 0 && !info.cull_together
+            && std::find_if(cluster_draws.begin(), cluster_draws.end(), [&](const InstanceCullInfo& other) {
+                   return other.cluster_entry_word == info.cluster_entry_word;
+               }) == cluster_draws.end()) {
+            cluster_draws.push_back(info);
+        }
+    }
+    if (cluster_draws.empty() && !together) {
+        return;
+    }
+    struct RunsPushC
+    {
+        uint32_t entry;
+        uint32_t entries_word;
+        uint32_t entry_count;
+        uint32_t chosen_word;
+        uint32_t second_phase;
+    };
+    const auto record_runs = [&](const RunsPushC& pc, uint32_t groups) {
+        DispatchCall dc{};
+        dc.pipeline = runs_pipeline;
+        dc.groups_x = groups;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd.record_dispatch(dc);
+    };
+    const uint32_t phase = second_phase ? 1u : 0u;
+    if (together) {
+        record_runs({0u, together_entries_word, state.together_entries, together_word, phase},
+                    (state.together_entries + 63u) / 64u);
+    }
+    for (const auto& info : cluster_draws) {
+        record_runs({info.cluster_entry_word, kCullNoSlot, 1u, info.chosen_word, phase}, 1u);
+    }
+    cmd.record_global_barrier();
+    struct FillPushC
+    {
+        uint32_t chosen_word;
+        uint32_t chosen_capacity;
+    };
+    const auto record_fill = [&](const FillPushC& pc) {
+        DispatchCall dc{};
+        dc.pipeline = fill_pipeline;
+        dc.groups_x = 1;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd.record_dispatch_indirect(dc, arena_buffer, uint64_t(pc.chosen_word + 1u) * sizeof(uint32_t));
+    };
+    if (together) {
+        record_fill({together_word, state.together_chosen});
+    }
+    for (const auto& info : visuals) {
+        if (info.chosen_capacity != 0) {
+            record_fill({info.chosen_word, info.chosen_capacity});
+        }
+    }
+    cmd.record_global_barrier();
+}
 
 /**
  * @brief Adds @p batches' GPU culling to @p graph, if any of them are culled. Runs
@@ -855,7 +1150,7 @@ struct InstanceCullPass
  */
 inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
                                     uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph,
-                                    bool far_form = false)
+                                    bool far_form = false, uint32_t pyramid_word = kCullNoSlot)
 {
     if (!batches || !ctx.resources || !ctx.backend || !ctx.render_ctx) {
         return;
@@ -874,10 +1169,16 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         vector<uint32_t> items;
         vector<uint32_t> entries;
         uint64_t chosen = 0;
+        uint64_t retest_records = 0;
+        vector<const void*> counted;
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
             if (!batch || !batch->get_instance_cull(info)) {
                 continue;
+            }
+            if (std::find(counted.begin(), counted.end(), info.key) == counted.end()) {
+                counted.push_back(info.key);
+                retest_records += uint64_t(info.slot_count) + info.chosen_capacity + info.cluster_capacity;
             }
             if (info.cull_together) {
                 chosen += info.cluster_capacity;
@@ -909,6 +1210,12 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 state.together_entries = 0;
             }
         }
+        state.retest_capacity = static_cast<uint32_t>(std::min<uint64_t>(retest_records, kCullRetestMaxRecords));
+        state.retest = arena->alloc((uint64_t(kCullRetestHeaderWords) + uint64_t(state.retest_capacity) * kCullRetestRecordWords)
+                                    * sizeof(uint32_t));
+        if (!state.retest.valid()) {
+            state.retest_capacity = 0;
+        }
     }
     if (state.count_words.empty() && state.together_items == 0) {
         return;
@@ -919,8 +1226,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         return;
     }
     // The copies below name the arena's buffer, which growing it replaces.
-    record = record || arena_buffer != state.arena_buffer;
+    // A grown arena's new buffer can have the old one's address, so its size counts too.
+    if (arena_buffer != state.arena_buffer || arena_buffer->size_bytes() != state.arena_size) {
+        record = true;
+        ++state.arena_generation;
+    }
     state.arena_buffer = arena_buffer;
+    state.arena_size = arena_buffer->size_bytes();
 
     // The BVH replaces a visual's tables when they fill up.
     uint64_t partition_tables = 0;
@@ -934,10 +1246,18 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
     }
     record = record || partition_tables != state.partition_tables;
     state.partition_tables = partition_tables;
+    if (state.retest_capacity == 0) {
+        pyramid_word = kCullNoSlot;
+    }
+    record = record || pyramid_word != state.pyramid_word;
+    state.pyramid_word = pyramid_word;
+    state.retest_dirty = state.retest_dirty || record;
 
+    // A mesh's count of visible slots, and at 7 words on, those the second phase added.
     const uint32_t zero = 0;
     for (uint32_t word : state.count_words) {
         arena->update_at(uint64_t(word) * sizeof(uint32_t), &zero, sizeof(zero));
+        arena->update_at(uint64_t(word + 7u) * sizeof(uint32_t), &zero, sizeof(zero));
     }
 
     emit_cached_view_pass(state.pass, record, "instance.cull", graph, [&](CachedPassRecording& rec) {
@@ -977,6 +1297,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         const uint32_t together_items_word = together_entries_word + state.together_entries;
         if (together) {
             cmd->record_clear_buffer(arena_buffer, uint64_t(together_word) * sizeof(uint32_t), sizeof(uint32_t));
+        }
+        if (state.retest.valid()) {
+            cmd->record_clear_buffer(arena_buffer, state.retest.offset(), sizeof(uint32_t));
         }
         for (const auto& info : visuals) {
             if (info.chosen_capacity != 0) {
@@ -1034,10 +1357,15 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t items_word;
             uint32_t chosen_word;
             uint32_t chosen_capacity;
+            uint32_t pyramid_word;
+            uint32_t retest_word;
+            uint32_t retest_capacity;
         };
+        const auto retest_word = static_cast<uint32_t>(state.retest.offset() / sizeof(uint32_t));
         if (together) {
             const PushC pc{0u, state.together_items, 0u, view_globals_base, 0.f, kCullNoSlot, 0u, kLodMaxErrorPixels,
-                           together_items_word, together_word, state.together_chosen};
+                           together_items_word, together_word, state.together_chosen,
+                           pyramid_word, retest_word, state.retest_capacity};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (state.together_items + 63u) / 64u;
@@ -1051,7 +1379,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const bool partitioned = info.partition_count != 0;
             const PushC pc{info.instances_base, info.slot_count, info.table_word, view_globals_base, info.max_distance,
                            partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
-                           far_form ? 1u : 0u, kLodMaxErrorPixels, kCullNoSlot, info.chosen_word, info.chosen_capacity};
+                           far_form ? 1u : 0u, kLodMaxErrorPixels, kCullNoSlot, info.chosen_word, info.chosen_capacity,
+                           pyramid_word, retest_word, state.retest_capacity};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (info.slot_count + 63u) / 64u;
@@ -1068,67 +1397,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         cmd->record_global_barrier();
 
         // Draws by cluster: lay out each one's runs, then fill them.
-        vector<InstanceCullInfo> cluster_draws;
-        for (const auto& batch : *batches) {
-            InstanceCullInfo info{};
-            if (batch && batch->get_instance_cull(info) && info.cluster_count != 0 && !info.cull_together
-                && std::find_if(cluster_draws.begin(), cluster_draws.end(), [&](const InstanceCullInfo& other) {
-                       return other.cluster_entry_word == info.cluster_entry_word;
-                   }) == cluster_draws.end()) {
-                cluster_draws.push_back(info);
-            }
-        }
-        if (!cluster_draws.empty() || together) {
-            struct RunsPushC
-            {
-                uint32_t entry;
-                uint32_t entries_word;
-                uint32_t entry_count;
-                uint32_t chosen_word;
-            };
-            const auto record_runs = [&](const RunsPushC& pc, uint32_t groups) {
-                DispatchCall dc{};
-                dc.pipeline = runs_pipeline.get();
-                dc.groups_x = groups;
-                dc.groups_y = 1;
-                dc.groups_z = 1;
-                dc.root_constants_size = sizeof(pc);
-                std::memcpy(dc.root_constants, &pc, sizeof(pc));
-                cmd->record_dispatch(dc);
-            };
-            if (together) {
-                record_runs({0u, together_entries_word, state.together_entries, together_word},
-                            (state.together_entries + 63u) / 64u);
-            }
-            for (const auto& info : cluster_draws) {
-                record_runs({info.cluster_entry_word, kCullNoSlot, 1u, info.chosen_word}, 1u);
-            }
-            cmd->record_global_barrier();
-            struct FillPushC
-            {
-                uint32_t chosen_word;
-                uint32_t chosen_capacity;
-            };
-            const auto record_fill = [&](const FillPushC& pc) {
-                DispatchCall dc{};
-                dc.pipeline = fill_pipeline.get();
-                dc.groups_x = 1;
-                dc.groups_y = 1;
-                dc.groups_z = 1;
-                dc.root_constants_size = sizeof(pc);
-                std::memcpy(dc.root_constants, &pc, sizeof(pc));
-                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(pc.chosen_word + 1u) * sizeof(uint32_t));
-            };
-            if (together) {
-                record_fill({together_word, state.together_chosen});
-            }
-            for (const auto& info : visuals) {
-                if (info.chosen_capacity != 0) {
-                    record_fill({info.chosen_word, info.chosen_capacity});
-                }
-            }
-            cmd->record_global_barrier();
-        }
+        record_cluster_layout(*cmd, state, *batches, visuals, runs_pipeline.get(), fill_pipeline.get(), arena_buffer,
+                              together_word, together_entries_word, false);
 
         // Each other batch's indirect args take the count of its list.
         constexpr uint64_t kInstanceCountOffset = BatchBufferLayout::kArgsOffset + sizeof(uint32_t);
@@ -1151,6 +1421,110 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.cmd = std::move(cmd);
         rec.held.push_back(std::move(pipeline));
         rec.held.push_back(std::move(partition_pipeline));
+        rec.held.push_back(std::move(runs_pipeline));
+        rec.held.push_back(std::move(fill_pipeline));
+    });
+}
+
+/**
+ * @brief Adds the second phase of culling to @p graph, after what passed the first has been
+ *        drawn and @p state's pyramid built from it. Only meaningful after
+ *        emit_instance_cull_pass was given a pyramid.
+ */
+inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
+                                      uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph)
+{
+    if (!batches || state.pyramid_word == kCullNoSlot || !state.retest.valid() || !ctx.backend || !ctx.render_ctx) {
+        return;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
+    if (!arena_buffer) {
+        return;
+    }
+
+    emit_cached_view_pass(state.retest_pass, state.retest_dirty, "instance.retest", graph, [&](CachedPassRecording& rec) {
+        const auto pipeline_for = [&](string_view src, uint64_t key) {
+            auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+            return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
+        };
+        auto pipeline = pipeline_for(instance_retest_compute_src, 0x4375'6c6c'5265'7473ULL);
+        auto runs_pipeline = pipeline_for(instance_cluster_runs_src, 0x4375'6c6c'5275'6e73ULL);
+        auto fill_pipeline = pipeline_for(instance_cluster_fill_src, 0x4375'6c6c'4669'6c6cULL);
+        auto cmd = pipeline && runs_pipeline && fill_pipeline ? ctx.backend->create_command_buffer() : nullptr;
+        if (!cmd) {
+            return;
+        }
+
+        vector<const void*> done;
+        vector<InstanceCullInfo> visuals;
+        for (const auto& batch : *batches) {
+            InstanceCullInfo info{};
+            if (batch && batch->get_instance_cull(info) && !info.cull_together
+                && std::find(done.begin(), done.end(), info.key) == done.end()) {
+                done.push_back(info.key);
+                visuals.push_back(info);
+            }
+        }
+        const bool together = state.together_items != 0;
+        const auto together_word = together ? static_cast<uint32_t>(state.together.offset() / sizeof(uint32_t)) : 0u;
+        const uint32_t together_entries_word =
+            together_word + kCullChosenHeaderWords + state.together_chosen * kCullChosenRecordWords;
+
+        cmd->begin_recording();
+        cmd->push_label("Instance retest");
+        cmd->record_global_barrier();
+        if (together) {
+            cmd->record_clear_buffer(arena_buffer, uint64_t(together_word) * sizeof(uint32_t), sizeof(uint32_t));
+        }
+        for (const auto& info : visuals) {
+            if (info.chosen_capacity != 0) {
+                cmd->record_clear_buffer(arena_buffer, uint64_t(info.chosen_word) * sizeof(uint32_t), sizeof(uint32_t));
+            }
+        }
+        cmd->record_global_barrier();
+
+        struct PushC
+        {
+            uint32_t retest_word;
+            uint32_t retest_capacity;
+            uint32_t globals_base;
+            uint32_t pyramid_word;
+            float lod_max_pixels;
+        };
+        const PushC pc{static_cast<uint32_t>(state.retest.offset() / sizeof(uint32_t)), state.retest_capacity, view_globals_base,
+                       state.pyramid_word, kLodMaxErrorPixels};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (state.retest_capacity + 63u) / 64u;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+
+        record_cluster_layout(*cmd, state, *batches, visuals, runs_pipeline.get(), fill_pipeline.get(), arena_buffer,
+                              together_word, together_entries_word, true);
+
+        // A plain instanced draw continues its list where the first phase stopped.
+        for (const auto& batch : *batches) {
+            InstanceCullInfo info{};
+            if (!batch || !batch->get_instance_cull(info) || info.cluster_count != 0 || info.second_args_word == kCullNoSlot) {
+                continue;
+            }
+            const uint64_t word = sizeof(uint32_t);
+            cmd->record_copy_buffer(arena_buffer, uint64_t(info.count_word + 7u) * word, arena_buffer,
+                                    uint64_t(info.second_args_word + 1u) * word, sizeof(uint32_t));
+            cmd->record_copy_buffer(arena_buffer, uint64_t(info.count_word) * word, arena_buffer,
+                                    uint64_t(info.second_args_first_word) * word, sizeof(uint32_t));
+        }
+        cmd->record_global_barrier();
+
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.held.push_back(std::move(pipeline));
         rec.held.push_back(std::move(runs_pipeline));
         rec.held.push_back(std::move(fill_pipeline));
     });

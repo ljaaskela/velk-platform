@@ -60,7 +60,8 @@ inline void emit_draw_calls(
     ResolvePipelineFn resolve_pipeline,
     const ::velk::render::Frustum* frustum = nullptr,
     IFrameSnippetRegistry* snippets = nullptr,
-    const FrameResolveContext* resolve_ctx = nullptr)
+    const FrameResolveContext* resolve_ctx = nullptr,
+    bool second_phase = false)
 {
     VELK_PERF_SCOPE("renderer.emit_draw_calls");
 
@@ -70,6 +71,14 @@ inline void emit_draw_calls(
 
         if (frustum && !::velk::render::aabb_in_frustum(*frustum, batch.world_aabb())) {
             continue;
+        }
+
+        // The second occlusion phase only draws what GPU culling can have held back.
+        if (second_phase) {
+            InstanceCullInfo info{};
+            if (!batch.get_instance_cull(info) || (info.cluster_count == 0 && info.second_args_word == 0xFFFFFFFFu)) {
+                continue;
+            }
         }
 
         IGpuPipeline* pipeline = resolve_pipeline(batch);
@@ -282,10 +291,18 @@ inline void emit_draw_calls(
             call.index_buffer_offset = size_t(cull_info.cluster_index_word) * sizeof(uint32_t);
             call.args_stride = sizeof(uint32_t) * 5; // VkDrawIndexedIndirectCommand
             call.args_buffer = commands;
-            call.args_buffer_offset = size_t(cull_info.cluster_commands_word) * sizeof(uint32_t);
+            call.args_buffer_offset =
+                size_t(second_phase ? cull_info.cluster_second_commands_word : cull_info.cluster_commands_word) * sizeof(uint32_t);
             call.count_buffer = commands;
-            call.count_buffer_offset = size_t(cull_info.cluster_draws_word) * sizeof(uint32_t);
+            call.count_buffer_offset =
+                size_t(second_phase ? cull_info.cluster_second_draws_word : cull_info.cluster_draws_word) * sizeof(uint32_t);
             call.max_draw_count = cull_info.cluster_count;
+        } else if (second_phase) {
+            auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+            IGpuBuffer* args = culling ? culling->buffer() : nullptr;
+            if (!args) continue;
+            call.args_buffer = args;
+            call.args_buffer_offset = size_t(cull_info.second_args_word) * sizeof(uint32_t);
         }
 
         call.root_constants_size = sizeof(uint32_t);

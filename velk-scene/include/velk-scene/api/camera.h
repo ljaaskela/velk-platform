@@ -82,6 +82,9 @@ public:
     /// Sets the width of the finest GI probe cells. 0, the default, chooses it from what the camera sees.
     void set_gi_cell_size(float v) { write_state_value<ICamera>(&ICamera::State::gi_cell_size, v); }
 
+    /// Sets whether the deferred path skips drawing what is hidden behind other geometry. On by default.
+    void set_occlusion_culling(bool v) { write_state_value<ICamera>(&ICamera::State::occlusion_culling, v); }
+
     /// Attaches an environment (equirect HDR) to this camera. The deferred
     /// and RT paths sample it as the ambient / IBL term and draw it as the
     /// background sky. Pass a null Ptr to clear the environment.
