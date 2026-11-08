@@ -301,23 +301,11 @@ MaterialEval velk_eval_tree(EvalContext ctx)
 }
 )";
 
-// The element vertex shader, with branches bending further the further out they are and
-// leaves, whose first uv is 1, moving on their own. Rays see the mesh at rest.
-constexpr velk::string_view kTreeVertexSrc = R"(
-#version 450
-#include "velk.glsl"
-#include "velk-ui.glsl"
-
-VELK_DRAW_DATA(root)
-
-VELK_VARYINGS_OUT
-
-void main()
+// Branches bend further the further out they are, and leaves, whose first uv is 1, move on
+// their own. Rays see the mesh at rest.
+constexpr velk::string_view kTreeVertexFn = R"(
+VelkVaryings velk_vertex_tree(VelkVertex3D v, ElementInstance inst, GlobalData globals)
 {
-    GlobalData globals = velk_global_data(root);
-    VelkVertex3D v = velk_vertex3d(root);
-    ElementInstance inst = velk_instance(root);
-
     float t = float(globals.present_counter) / 60.0;
     vec3 at = inst.world_matrix[3].xyz;
     float phase = at.x * 0.013 + at.z * 0.017;
@@ -327,19 +315,8 @@ void main()
     p.x += sin(t * 1.3 + phase + p.y * 0.05) * out_from_trunk * 0.02;
     p += vec3(sin(t * 5.0 + p.x * 0.7 + p.y), sin(t * 6.0 + p.z * 0.9), sin(t * 5.5 + p.y * 0.8)) * 0.35 * v.uv.x;
 
-    vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + p * inst.size.xyz, globals);
-    gl_Position = globals.view_projection * vec4(rel, 1.0);
-
-    v_color        = inst.color;
-    v_local_uv     = v.uv;
-    v_size         = inst.size.xy;
-    v_rel_pos      = rel;
-    v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
-    v_shape_param  = inst.params.x;
-    v_uv1          = velk_uv1(root);
-    v_world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
-    v_lod_error     = velk_lod_error(root);
-    v_instance      = uint(gl_InstanceIndex);
+    v.position = p;
+    return velk_default_varyings(v, inst, globals);
 }
 )";
 
@@ -372,17 +349,27 @@ public:
     velk::string_view get_source(velk::string_view role) const override
     {
         if (role == velk::shader_role::kEval) return kTreeEvalSrc;
-        if (role == velk::shader_role::kVertex) {
-            auto state = velk::read_state<ITreeMaterial>(this);
-            if (state && state->wind) return kTreeVertexSrc;
+        auto state = velk::read_state<ITreeMaterial>(this);
+        if (state && state->wind) {
+            if (role == velk::shader_role::kVertexFunction) return kTreeVertexFn;
+            if (role == velk::shader_role::kVertex) {
+                if (vertex_src_.empty()) {
+                    vertex_src_ = velk::ext::velk_vertex_shader_with(kTreeVertexFn, "velk_vertex_tree");
+                }
+                return vertex_src_;
+            }
         }
         return velk::ext::Material<TreeMaterial, ITreeMaterial>::get_source(role);
     }
 
     velk::string_view get_fn_name(velk::string_view role) const override
     {
+        if (role == velk::shader_role::kVertexFunction) return "velk_vertex_tree";
         return role == velk::shader_role::kEval ? velk::string_view("velk_eval_tree") : velk::string_view{};
     }
+
+private:
+    mutable velk::string vertex_src_;
 };
 
 /// Generated hills, as heights on a square grid centred on the origin.

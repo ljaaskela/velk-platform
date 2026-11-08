@@ -23,6 +23,7 @@ inline constexpr string_view kVertex    = "vertex";    ///< Full vertex shader (
 inline constexpr string_view kFragment  = "fragment";  ///< Full fragment shader (visuals + ShaderMaterial-style materials).
 inline constexpr string_view kDiscard   = "discard";   ///< `void velk_visual_discard()` snippet (visuals).
 inline constexpr string_view kEval      = "eval";      ///< `MaterialEval velk_eval_<name>(EvalContext)` snippet (materials).
+inline constexpr string_view kVertexFunction = "vertex_function"; ///< `VelkVaryings velk_vertex_<name>(VelkVertex3D, ElementInstance, GlobalData)` snippet (materials). Called wherever the deferred path needs a vertex; one per material class.
 inline constexpr string_view kShadow    = "shadow";    ///< `float velk_shadow_<name>(uint, vec3, vec3)` snippet (shadow techniques).
 inline constexpr string_view kIntersect = "intersect"; ///< `bool velk_intersect_<name>(Ray, RtShape, out RayHit)` snippet (analytic shapes).
 

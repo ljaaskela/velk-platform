@@ -74,6 +74,8 @@ public:
         /// instead of chasing a device address. Producers filling RtShape use
         /// it to decide whether to stamp a word base or an address.
         bool        indexed = false;
+        string_view vertex_fn;      ///< The material's vertex function, empty for none.
+        string      vertex_include; ///< Owned include filename of that function.
     };
 
     struct ShadowTechInfo

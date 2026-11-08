@@ -1010,18 +1010,23 @@ struct ResolveVertex {
     vec2 uv;
     vec2 uv1;
     vec4 tangent;
+    vec4 color;
+    uint shape_param;
 };
 
 ResolveVertex resolve_vertex(VelkDrawData d, ElementInstance inst, GlobalData g, uint index)
 {
     VelkVertex3D v = velk_unpack_vertex3d(d.vbo_base + index * VELK_VERTEX3D_WORDS);
+    VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
     ResolveVertex r;
-    r.rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, g);
-    r.normal = normalize(mat3(inst.world_matrix) * v.normal);
-    r.uv = v.uv;
+    r.rel = s.rel_pos;
+    r.normal = s.world_normal;
+    r.uv = s.local_uv;
     r.uv1 = vec2(velk_vertex_word(d.uv1_base, d.uv1_enabled * index * 2u),
                  velk_vertex_word(d.uv1_base, d.uv1_enabled * index * 2u + 1u));
-    r.tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
+    r.tangent = s.world_tangent;
+    r.color = s.color;
+    r.shape_param = s.shape_param;
     return r;
 }
 
@@ -1057,10 +1062,10 @@ EvalContext resolve_context(VelkDrawData d, ElementInstance inst, GlobalData g, 
     EvalContext ctx;
     ctx.material_base = d.material_words;
     ctx.texture_id = d.texture_id;
-    ctx.shape_param = inst.params.x;
+    ctx.shape_param = v0.shape_param;
     ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
     ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
-    ctx.base = inst.color;
+    ctx.base = v0.color * weights.x + v1.color * weights.y + v2.color * weights.z;
     ctx.ray_dir = normalize(rel);
     ctx.normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
     ctx.hit_pos = rel + g.cam_pos.xyz;
@@ -3740,6 +3745,28 @@ inline string compose_rt_compute(const IFrameSnippetRegistry& snippets,
     // it calls) and before velk_resolve_fill (which calls it for Lit
     // materials).
     src += rt_pbr_shade_src;
+
+    // velk_material_varyings: dispatch by material id to its vertex function.
+    for (auto id : material_ids) {
+        if (id == 0 || id > material_info.size() || material_info[id - 1].vertex_fn.empty()) continue;
+        append_literal("#include \"");
+        src += material_info[id - 1].vertex_include;
+        append_literal("\"\n");
+    }
+    append_literal("VelkVaryings velk_material_varyings(uint mid, VelkVertex3D v, ElementInstance inst, GlobalData g) {\n");
+    append_literal("    switch (mid) {\n");
+    for (auto id : material_ids) {
+        if (id == 0 || id > material_info.size() || material_info[id - 1].vertex_fn.empty()) continue;
+        int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
+        if (n > 0) {
+            src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
+        }
+        src += material_info[id - 1].vertex_fn;
+        append_literal("(v, inst, g);\n");
+    }
+    append_literal("        default: return velk_default_varyings(v, inst, g);\n");
+    append_literal("    }\n");
+    append_literal("}\n");
 
     // velk_eval_material: dispatch by material id, without shading.
     append_literal("MaterialEval velk_eval_material(uint mid, EvalContext ctx) {\n");

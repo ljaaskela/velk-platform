@@ -98,6 +98,32 @@ struct ElementInstance {
 // instances simply never reference it.
 VELK_INSTANCES(ElementInstance)
 
+// What a vertex gives the surface. A material moving its vertices supplies a function
+// returning this, usually velk_default_varyings of a changed vertex.
+struct VelkVaryings {
+    vec4 color;
+    vec2 local_uv;
+    vec2 size;
+    vec3 rel_pos;
+    vec3 world_normal;
+    uint shape_param;
+    vec4 world_tangent;
+};
+
+VelkVaryings velk_default_varyings(VelkVertex3D v, ElementInstance inst, GlobalData globals)
+{
+    VelkVaryings s;
+    s.color = inst.color;
+    s.local_uv = v.uv;
+    s.size = inst.size.xy;
+    s.rel_pos = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, globals);
+    s.world_normal = normalize(mat3(inst.world_matrix) * v.normal);
+    s.shape_param = inst.params.x;
+    // Tangent dir to world space (upper 3x3); handedness (w) passes through.
+    s.world_tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
+    return s;
+}
+
 // ===== Material evaluation types =====
 // Shared across raster (forward / deferred fragment drivers) and RT
 // (compute shader `velk_resolve_fill` dispatch). Every material

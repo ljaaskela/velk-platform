@@ -138,6 +138,14 @@ uint32_t FrameSnippetRegistry::register_material(IProgram* prog, IRenderContext&
         if (auto* src = interface_cast<IShaderSource>(prog)) {
             info.indexed = install_indexed_material_include(
                 info.include_name, src->get_source(shader_role::kEval), ctx);
+            const string_view vertex_fn = src->get_fn_name(shader_role::kVertexFunction);
+            const string_view vertex_body = src->get_source(shader_role::kVertexFunction);
+            if (!vertex_fn.empty() && !vertex_body.empty()) {
+                info.vertex_fn = vertex_fn;
+                info.vertex_include.append(vertex_fn);
+                info.vertex_include.append(string_view(".glsl", 5));
+                ctx.shaders().register_include(info.vertex_include, vertex_body);
+            }
         }
     }
     return id;
