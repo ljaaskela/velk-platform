@@ -394,6 +394,10 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
         environment = velk::ui::load_environment("env:memory://gitest_sky.hdr");
         cam.set_environment(environment);
     }
+    if (const char* sky_url = std::getenv("VELK_GITEST_SKY")) {
+        environment = velk::ui::load_environment(velk::string_view(sky_url, std::strlen(sky_url)));
+        cam.set_environment(environment);
+    }
 
     auto focus = velk::create_element();
     auto focus_trs = velk::trait::transform::create_trs();
