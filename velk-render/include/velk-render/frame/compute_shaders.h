@@ -1128,27 +1128,33 @@ float velk_gi_visible(uint maps, ivec3 texel, int slot, vec3 to_point, float cel
     vec2 at = (velk_gi_oct(to_point / d) * 0.5 + 0.5) * float(kGiMapSize) - 0.5;
     vec2 at_floor = floor(at);
     vec2 f = at - at_floor;
-    vec2 moments = vec2(0.0);
+    float away = d / cell;
+    float visible = 0.0;
     float filled = 0.0;
     for (int k = 0; k < 4; ++k) {
         ivec2 corner = ivec2(k & 1, k >> 1);
         ivec2 entry = clamp(ivec2(at_floor) + corner, ivec2(0), ivec2(kGiMapSize - 1));
         vec4 m = velk_texture(maps, velk_gi_map_uv(velk_gi_map_texel(texel, slot, entry.x / 2, entry.y)));
         vec2 weights = mix(vec2(1.0) - f, f, vec2(corner));
-        vec2 entry_moments = (entry.x & 1) == 1 ? m.ba : m.rg;
+        vec2 moments = (entry.x & 1) == 1 ? m.ba : m.rg;
         // Negative until a ray has reached it.
-        if (entry_moments.x < 0.0) continue;
-        moments += entry_moments * weights.x * weights.y;
-        filled += weights.x * weights.y;
+        if (moments.x < 0.0) continue;
+        float weight = weights.x * weights.y;
+        filled += weight;
+        // Each entry is tested alone. Blending their moments first would count the
+        // differences between entries as variance.
+        float chance = 1.0;
+        if (away > moments.x) {
+            float variance = max(moments.y - moments.x * moments.x, 1e-4);
+            float past = away - moments.x;
+            // Chebyshev's bound is generous far past the mean, so its tail is cut off, or
+            // light bleeds through walls.
+            chance = clamp((variance / (variance + past * past) - 0.3) / 0.7, 0.0, 1.0);
+            chance = chance * chance * chance;
+        }
+        visible += chance * weight;
     }
-    if (filled <= 0.0) return 1.0;
-    moments /= filled;
-    float away = d / cell;
-    if (away <= moments.x) return 1.0;
-    float variance = max(moments.y - moments.x * moments.x, 1e-4);
-    float past = away - moments.x;
-    float chance = variance / (variance + past * past);
-    return chance * chance * chance;
+    return filled > 0.0 ? visible / filled : 1.0;
 }
 
 // Where a point relative to the camera is on a level's lattice of probes, 0 to 31 inside.
