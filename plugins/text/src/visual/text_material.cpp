@@ -24,12 +24,11 @@ VELK_GPU_STRUCT TextMaterialData
 static_assert(sizeof(TextMaterialData) == 16, "TextMaterialData must be 16 bytes");
 
 // Eval body: glyph coverage from the slug buffers. Compute shaders
-// have no fragment-quad derivatives; override fwidth there with a
-// fixed per-pixel estimate so velk_text.glsl compiles cleanly. Raster
-// keeps the native fwidth for proper AA at varied scales.
+// have no fragment-quad derivatives, so fwidth comes from the pixel's
+// footprint where known, and a fixed estimate elsewhere.
 constexpr string_view text_eval_src = R"(
 #ifdef VELK_COMPUTE
-#define fwidth(x) vec2(1.0 / 32.0)
+#define fwidth(x) velk_uv_fwidth()
 #endif
 #include "velk_text.glsl"
 

@@ -110,7 +110,16 @@ struct StandardMaterialData {
 VELK_MATERIAL(StandardMaterialData)
 
 // Per-property tex_coord selects TEXCOORD_0 (ctx.uv) or TEXCOORD_1 (ctx.uv1).
+#ifdef VELK_COMPUTE
+vec2 velk_std_uv(EvalContext ctx, uint tc)
+{
+    velk_uv_set = tc == 0u ? 0u : 1u;
+    return tc == 0u ? ctx.uv : ctx.uv1;
+}
+#define VELK_STD_UV(ctx, tc) velk_std_uv(ctx, tc)
+#else
 #define VELK_STD_UV(ctx, tc) ((tc) == 0u ? (ctx).uv : (ctx).uv1)
+#endif
 
 MaterialEval velk_eval_standard(EvalContext ctx)
 {

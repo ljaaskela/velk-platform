@@ -189,10 +189,14 @@ namespace {
 // Shape-intersect snippet: rect hit + slug coverage threshold. Runs
 // inside BVH traversal (shadow / bounce rays), so shadows cast by text
 // track the glyph silhouette instead of the quad. `fwidth` isn't
-// available in compute, so it's stubbed the same way text_material's
-// fill snippet does.
+// available in compute, so it's replaced the same way text_material's
+// fill snippet does, or stubbed in passes without a footprint.
 constexpr string_view text_intersect_src = R"(
+#ifdef VELK_COMPUTE
+#define fwidth(x) velk_uv_fwidth()
+#else
 #define fwidth(x) vec2(1.0 / 32.0)
+#endif
 #include "velk_text.glsl"
 
 bool velk_intersect_text_glyph(Ray ray, RtShape shape, out RayHit hit)

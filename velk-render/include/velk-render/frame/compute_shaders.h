@@ -1025,6 +1025,55 @@ ResolveVertex resolve_vertex(VelkDrawData d, ElementInstance inst, GlobalData g,
     return r;
 }
 
+// Where the view ray through a point of the screen, in pixels, meets a triangle's plane. A
+// ray rather than dividing by each corner's w, which fails for corners behind the camera. It
+// starts on the near plane so that it also suits orthographic views. Leaves the results
+// alone for a ray along the plane.
+void resolve_hit(GlobalData g, vec2 pixel, vec3 p0, vec3 e1, vec3 e2, inout vec3 weights, inout vec3 point)
+{
+    vec2 ndc = pixel / vec2(float(RESOLVE_WIDTH), float(RESOLVE_HEIGHT)) * 2.0 - 1.0;
+    vec4 near_point = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec4 far_point = g.inverse_view_projection * vec4(ndc, 1e-4, 1.0);
+    vec3 origin = near_point.xyz / near_point.w;
+    vec3 dir = normalize(far_point.xyz / far_point.w - origin);
+
+    vec3 h = cross(dir, e2);
+    float det = dot(e1, h);
+    if (abs(det) > 0.0) {
+        vec3 s = origin - p0;
+        vec3 q = cross(s, e1);
+        float b1 = dot(s, h) / det;
+        float b2 = dot(dir, q) / det;
+        weights = vec3(1.0 - b1 - b2, b1, b2);
+        // Along the ray, so that imprecision in a large triangle's weights only moves
+        // the point towards or away from the camera.
+        point = origin + dir * (dot(e2, q) / det);
+    }
+}
+
+EvalContext resolve_context(VelkDrawData d, ElementInstance inst, GlobalData g, ResolveVertex v0, ResolveVertex v1,
+                            ResolveVertex v2, vec3 weights, vec3 rel)
+{
+    EvalContext ctx;
+    ctx.material_base = d.material_words;
+    ctx.texture_id = d.texture_id;
+    ctx.shape_param = inst.params.x;
+    ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
+    ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
+    ctx.base = inst.color;
+    ctx.ray_dir = normalize(rel);
+    ctx.normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
+    ctx.hit_pos = rel + g.cam_pos.xyz;
+    ctx.rel_pos = rel;
+    ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
+    return ctx;
+}
+
+vec3 resolve_shading_normal(MaterialEval e, EvalContext ctx)
+{
+    return normalize(length(e.normal) > 0.0 ? e.normal : ctx.normal);
+}
+
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -1058,48 +1107,44 @@ void main()
     ResolveVertex v1 = resolve_vertex(d, inst, g, corners.y);
     ResolveVertex v2 = resolve_vertex(d, inst, g, corners.z);
 
-    // A ray rather than dividing by each corner's w, which fails for corners behind the
-    // camera. It starts on the near plane so that it also suits orthographic views.
-    vec2 ndc = (vec2(coord) + 0.5) / vec2(float(RESOLVE_WIDTH), float(RESOLVE_HEIGHT)) * 2.0 - 1.0;
-    vec4 near_point = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
-    vec4 far_point = g.inverse_view_projection * vec4(ndc, 1e-4, 1.0);
-    vec3 origin = near_point.xyz / near_point.w;
-    vec3 dir = normalize(far_point.xyz / far_point.w - origin);
-
     vec3 e1 = v1.rel - v0.rel;
     vec3 e2 = v2.rel - v0.rel;
-    vec3 h = cross(dir, e2);
-    float det = dot(e1, h);
+    vec2 pixel = vec2(coord) + 0.5;
     vec3 weights = vec3(1.0 / 3.0);
-    vec3 rel = v0.rel * weights.x + v1.rel * weights.y + v2.rel * weights.z;
-    if (abs(det) > 0.0) {
-        vec3 s = origin - v0.rel;
-        vec3 q = cross(s, e1);
-        float b1 = dot(s, h) / det;
-        float b2 = dot(dir, q) / det;
-        weights = vec3(1.0 - b1 - b2, b1, b2);
-        // Along the ray, so that imprecision in a large triangle's weights only moves
-        // the point towards or away from the camera.
-        rel = origin + dir * (dot(e2, q) / det);
-    }
+    vec3 rel = (v0.rel + v1.rel + v2.rel) / 3.0;
+    resolve_hit(g, pixel, v0.rel, e1, e2, weights, rel);
 
-    vec3 normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
+    // The next pixels along, on this triangle's plane even where another covers them.
+    vec3 weights_x = weights;
+    vec3 weights_y = weights;
+    vec3 rel_x = rel;
+    vec3 rel_y = rel;
+    resolve_hit(g, pixel + vec2(1.0, 0.0), v0.rel, e1, e2, weights_x, rel_x);
+    resolve_hit(g, pixel + vec2(0.0, 1.0), v0.rel, e1, e2, weights_y, rel_y);
+    mat3x2 uvs = mat3x2(v0.uv, v1.uv, v2.uv);
+    mat3x2 uv1s = mat3x2(v0.uv1, v1.uv1, v2.uv1);
+    velk_uv_dx[0] = uvs * (weights_x - weights);
+    velk_uv_dy[0] = uvs * (weights_y - weights);
+    velk_uv_dx[1] = uv1s * (weights_x - weights);
+    velk_uv_dy[1] = uv1s * (weights_y - weights);
 
-    EvalContext ctx;
-    ctx.material_base = d.material_words;
-    ctx.texture_id = d.texture_id;
-    ctx.shape_param = inst.params.x;
-    ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
-    ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
-    ctx.base = inst.color;
-    ctx.ray_dir = normalize(rel);
-    ctx.normal = normal;
-    ctx.hit_pos = rel + g.cam_pos.xyz;
-    ctx.rel_pos = rel;
-    ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
-
+    EvalContext ctx = resolve_context(d, inst, g, v0, v1, v2, weights, rel);
+    velk_uv_set = 0u;
     MaterialEval e = velk_eval_material(d.material_id, ctx);
-    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : normal);
+    vec3 N = resolve_shading_normal(e, ctx);
+
+    // Widens roughness where the shading normal changes quickly between pixels, so that a
+    // tight highlight does not alias (Tokuyoshi 2019). The next pixels are taken on this
+    // triangle, so an edge between surfaces does not count.
+    EvalContext ctx_x = resolve_context(d, inst, g, v0, v1, v2, weights_x, rel_x);
+    velk_uv_set = 0u;
+    vec3 dndx = resolve_shading_normal(velk_eval_material(d.material_id, ctx_x), ctx_x) - N;
+    EvalContext ctx_y = resolve_context(d, inst, g, v0, v1, v2, weights_y, rel_y);
+    velk_uv_set = 0u;
+    vec3 dndy = resolve_shading_normal(velk_eval_material(d.material_id, ctx_y), ctx_y) - N;
+    float variance = 0.25 * (dot(dndx, dndx) + dot(dndy, dndy));
+    float roughness = sqrt(clamp(e.roughness * e.roughness + min(2.0 * variance, 0.18), 0.0, 1.0));
+
     float lod_error = d.lod_error_base == VELK_NO_VISIBLE_LIST
         ? 0.0
         : uintBitsToFloat(velk_culling.data[d.lod_error_base + position]);
@@ -1108,7 +1153,7 @@ void main()
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(N, lod_error));
     imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, 0.0));
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
-               vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0));
+               vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, 0.0));
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
 }
 )";

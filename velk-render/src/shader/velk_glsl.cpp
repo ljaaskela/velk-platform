@@ -178,10 +178,30 @@ layout(set = 1, binding = 2, scalar) readonly buffer VelkGlobals { GlobalData da
 // Sample the bindless texture array by id. nonuniformEXT is always required
 // because texture ids vary per draw / per shape.
 R"(
+#ifdef VELK_COMPUTE
+// Compute has no implicit derivatives. A pass that knows a pixel's footprint sets how each
+// uv set changes per pixel; otherwise, as for rays, textures are read at their finest level.
+vec2 velk_uv_dx[2] = vec2[2](vec2(0.0), vec2(0.0));
+vec2 velk_uv_dy[2] = vec2[2](vec2(0.0), vec2(0.0));
+uint velk_uv_set = 0u;
+
+vec4 velk_texture(uint id, vec2 uv)
+{
+    return textureGrad(velk_textures[nonuniformEXT(id)], uv, velk_uv_dx[velk_uv_set], velk_uv_dy[velk_uv_set]);
+}
+
+// Stands in for fwidth of the first uv set, with a fixed estimate where the footprint is unknown.
+vec2 velk_uv_fwidth()
+{
+    vec2 width = abs(velk_uv_dx[0]) + abs(velk_uv_dy[0]);
+    return width.x + width.y > 0.0 ? width : vec2(1.0 / 32.0);
+}
+#else
 vec4 velk_texture(uint id, vec2 uv)
 {
     return texture(velk_textures[nonuniformEXT(id)], uv);
 }
+#endif
 )"
 // Standard vertex layout used by every visual (2D and 3D). 48-byte tight
 // C-style packing (vec3 pos + vec3 normal + vec2 uv + vec4 tangent) via scalar
