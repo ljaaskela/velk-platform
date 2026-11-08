@@ -30,7 +30,7 @@ IResource::Ptr EnvDecoder::decode(const IResource::Ptr& inner) const
     vector<uint8_t> bytes;
     if (!(env && succeeded(file->read(bytes)) && !bytes.empty())) {
         VELK_LOG(E, "EnvDecoder: Failed to read '%s'", file->uri());
-        return env;
+        return interface_pointer_cast<IResource>(env);
     }
 
     int w = 0, h = 0, channels = 0;
@@ -67,7 +67,7 @@ IResource::Ptr EnvDecoder::decode(const IResource::Ptr& inner) const
         stbi_image_free(decoded);
     }
 
-    return env;
+    return interface_pointer_cast<IResource>(env);
 }
 
 } // namespace velk::ui::impl

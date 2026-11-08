@@ -10,14 +10,15 @@ namespace velk::ui::impl {
 void Environment::init_material()
 {
     material_ = ::velk::instance().create<IMaterial>(ClassId::Material::Environment);
+    sync_material();
+}
+
+void Environment::sync_material()
+{
     if (auto m = interface_cast<IEnvMaterialInternal>(material_)) {
-        float intensity = 1.f;
-        float rotation = 0.f;
         if (auto state = read_state<IEnvironment>(this)) {
-            intensity = state->intensity;
-            rotation = state->rotation;
+            m->set_params(state->intensity, state->rotation);
         }
-        m->set_params(intensity, rotation);
     }
 }
 

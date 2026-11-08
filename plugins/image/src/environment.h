@@ -14,7 +14,7 @@
 
 namespace velk::ui::impl {
 
-class IEnvironmentInternal : public Interface<IEnvironmentInternal, IEnvironment>
+class IEnvironmentInternal : public Interface<IEnvironmentInternal>
 {
 public:
     virtual void init(string_view uri, int width, int height, vector<uint8_t> pixels) = 0;
@@ -27,7 +27,7 @@ public:
  * and `ISurface` + `IBuffer` (the GPU-uploadable HDR image). Pixel data is stored
  * as RGBA16F (half-float) for GPU efficiency.
  */
-class Environment final : public ::velk::ext::GpuResource<Environment, IEnvironmentInternal, ISurface, IBuffer>
+class Environment final : public ::velk::ext::GpuResource<Environment, IEnvironment, IEnvironmentInternal, ISurface, IBuffer>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Environment, "Environment");
@@ -62,10 +62,16 @@ public:
     PixelFormat format() const override { return PixelFormat::RGBA16F; }
 
     // IEnvironment
-    IMaterial::Ptr get_material() const override { return material_; }
+    /// Brings the material up to date first, as this class hears of no property changes.
+    IMaterial::Ptr get_material() const override
+    {
+        const_cast<Environment*>(this)->sync_material();
+        return material_;
+    }
 
 private:
     void init_material();
+    void sync_material();
     string uri_;
     int width_{};
     int height_{};
