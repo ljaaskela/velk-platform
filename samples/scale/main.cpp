@@ -1,6 +1,8 @@
 // Scale test for moving and deforming content. Builds its scene in code, so
 // it loads no assets.
 //
+// GI test scenes: velk_ui_scale gitest <test> [frames]. See gi_test.cpp.
+//
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster|nature]
@@ -1186,8 +1188,14 @@ void print_gpu_timings(velk::vector<PassSamples>& passes)
 
 } // namespace
 
+int run_gi_test(const char* test, long frames);
+
 int main(int argc, char* argv[])
 {
+    if (argc > 2 && std::strcmp(argv[1], "gitest") == 0) {
+        return run_gi_test(argv[2], argc > 3 ? std::strtol(argv[3], nullptr, 10) : 240);
+    }
+
     const long element_count = argc > 1 ? std::max(0L, std::strtol(argv[1], nullptr, 10)) : 1000;
     const long mover_count = std::min(element_count, argc > 2 ? std::max(0L, std::strtol(argv[2], nullptr, 10)) : 10L);
     const long frame_limit = argc > 3 ? std::strtol(argv[3], nullptr, 10) : 0;
