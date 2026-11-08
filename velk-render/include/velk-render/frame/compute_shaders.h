@@ -1971,9 +1971,11 @@ void main()
         // sampling + temporal accumulation; binary single-ray
         // visibility just covers the obvious crevice case.
         // Occlusion over less than a pixel's width cannot be resolved, so it is not traced.
+        // The probe field replaces this term, so with probes bound no ray is traced.
+        bool has_gi = pc.gi_probe_id != 0u;
         float ao = 1.0;
         const float ao_range = 0.3;
-        if (trace_now && VELK_GLOBALS.bvh_node_count != 0u && ao_range > pixel_width) {
+        if (trace_now && !has_gi && VELK_GLOBALS.bvh_node_count != 0u && ao_range > pixel_width) {
             Ray ao_r;
             ao_r.origin = world_pos + N * (0.01 + lod_error);
             ao_r.dir    = N;
@@ -2015,7 +2017,6 @@ void main()
         // both counts the sky twice, which in a daylit scene washes everything
         // flat - and the probe field supersedes the AO term too, since its
         // occlusion is real rather than a single 0.3-unit ray.
-        bool has_gi = pc.gi_probe_id != 0u;
         vec3 ambient_unshadowed = has_gi ? gi : env_diffuse;
         vec3 ambient_shadowed   = has_gi ? gi : env_diffuse * ao;
         unshadowed_out = unshadowed_direct + ambient_unshadowed;
