@@ -214,7 +214,7 @@ void main()
     vec2 q = velk_vertex3d(root).position.xy;
     ElementInstance inst = velk_instance(root);
     vec4 local_pos = vec4(inst.offset.xy + q * inst.size.xy, 0.0, 1.0);
-    gl_Position = globals.view_projection * inst.world_matrix * local_pos;
+    gl_Position = globals.view_projection * vec4(velk_rel_position(inst.world_matrix, local_pos.xyz, globals), 1.0);
     v_quad_uv = q;
 }
 )";

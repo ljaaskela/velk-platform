@@ -45,7 +45,9 @@ struct RenderView
 {
     // Camera (resolved from ICamera + IElement world transform)
     mat4 view_projection = mat4::identity();
-    mat4 inverse_view_projection = mat4::identity();
+    /// For positions relative to the camera, which is what shaders use.
+    mat4 relative_view_projection = mat4::identity();
+    mat4 inverse_relative_view_projection = mat4::identity();
     vec3 cam_pos = {};
     /// Optional view-space frustum for batch-level culling. Empty when
     /// no camera is attached (ortho fallback, no culling).

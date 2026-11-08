@@ -150,7 +150,17 @@ struct GlobalData {
     uint probe_reset_frame;  // present_counter value at which the box last changed
     vec3 probe_max;
     uint _pad_globals;
+    vec3 cam_moved;          // how far the camera moved since the previous frame
+    uint _pad_globals2;
 };
+
+// Shaders position things relative to the camera, so that large world coordinates
+// cancel before they lose precision. view_projection, the probe box and G-buffer
+// positions are all in that space; cam_pos is the camera's world position.
+vec3 velk_rel_position(mat4 world, vec3 local, GlobalData globals)
+{
+    return mat3(world) * local + (world[3].xyz - globals.cam_pos.xyz);
+}
 
 )"
 // Frame-invariant per-view globals, bound at set = 1 slot 2 and read by index
@@ -358,7 +368,7 @@ R"(
     layout(location = 0) out vec4 v_color;            \
     layout(location = 1) out vec2 v_local_uv;         \
     layout(location = 2) flat out vec2 v_size;        \
-    layout(location = 3) out vec3 v_world_pos;        \
+    layout(location = 3) out vec3 v_rel_pos;          \
     layout(location = 4) out vec3 v_world_normal;     \
     layout(location = 5) flat out uint v_shape_param; \
     layout(location = 6) out vec2 v_uv1;              \
@@ -369,7 +379,7 @@ R"(
     layout(location = 0) in vec4 v_color;            \
     layout(location = 1) in vec2 v_local_uv;         \
     layout(location = 2) flat in vec2 v_size;        \
-    layout(location = 3) in vec3 v_world_pos;        \
+    layout(location = 3) in vec3 v_rel_pos;          \
     layout(location = 4) in vec3 v_world_normal;     \
     layout(location = 5) flat in uint v_shape_param; \
     layout(location = 6) in vec2 v_uv1;              \

@@ -83,7 +83,7 @@ function Run-Test([string]$test, [string]$file, [int]$frames) {
 }
 
 $tests = "leak_light", "leak_lit", "leak_sky", "open_sky", "size_1", "size_10", "size_100", "outlier",
-         "shapes_mesh", "move", "move_ref", "deform", "deform_ref", "lights_1", "lights_64", "dense", "dense_ref"
+         "shapes_mesh", "move", "move_ref", "deform", "deform_ref", "lights_1", "lights_64", "dense", "dense_ref", "origin_1e5", "origin_1e6", "origin_1e7"
 foreach ($t in $tests) { Run-Test $t $t $Frames }
 Run-Test "size_1" "noise" ($Frames + 7)
 
@@ -97,7 +97,7 @@ foreach ($pair in @(@("leak_light", "leak_lit"), @("leak_sky", "open_sky"))) {
 }
 $pairs = @(@("noise", "size_1"), @("size_10", "size_1"), @("size_100", "size_1"), @("outlier", "size_1"),
            @("shapes_mesh", "size_1"), @("move", "move_ref"), @("deform", "deform_ref"), @("lights_64", "lights_1"),
-           @("dense", "dense_ref"))
+           @("dense", "dense_ref"), @("origin_1e5", "size_1"), @("origin_1e6", "size_1"), @("origin_1e7", "size_1"))
 foreach ($pair in $pairs) {
     $d = [GiScore]::Diff((Png $pair[0]), (Png $pair[1]))
     "{0,-14} {1,-34} {2}" -f $pair[0], ("mean {0:F2}  p99 {1,3}  over8 {2:F2}%" -f $d[0], $d[1], $d[2]), (Time $pair[0])

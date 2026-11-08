@@ -19,6 +19,7 @@
 //   size_100:    the ground is 100 times wider, out of view.
 //   outlier:     one small box very far away.
 //   shapes_mesh: boxes and spheres are triangle meshes instead of analytic shapes.
+//   origin_1e5, origin_1e6, origin_1e7: the whole court that far from the world origin.
 //
 // The court with something changing until just before the capture:
 //   move, move_ref:     a box moving past the others, or standing at its final position.
@@ -103,7 +104,8 @@ int run_gi_test(const char* test, long frames)
     const bool deforming = is("deform") || is("deform_ref");
     const bool light_cluster = is("lights_1") || is("lights_64");
     const bool dense_instances = is("dense") || is("dense_ref");
-    if (!leak_room && !moving && !deforming && !light_cluster && !dense_instances && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
+    const float world_shift = is("origin_1e5") ? 1e5f : is("origin_1e6") ? 1e6f : is("origin_1e7") ? 1e7f : 0.f;
+    if (!leak_room && !moving && !deforming && !light_cluster && !dense_instances && world_shift == 0.f && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
         && !is("shapes_mesh")) {
         VELK_LOG(E, "gitest: unknown test %s", test);
         return 1;
@@ -143,7 +145,7 @@ int run_gi_test(const char* test, long frames)
     const auto add_box = [&](velk::vec3 min, velk::vec3 size, velk::color c) {
         auto element = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_translate(min);
+        trs.set_translate({min.x + world_shift, min.y, min.z});
         element.add_trait(trs);
         velk::Mesh mesh(ctx.build_cube());
         mesh.set_material(0, velk::material::create_standard(c, 0.f, 0.9f));
@@ -165,7 +167,7 @@ int run_gi_test(const char* test, long frames)
     const auto add_sphere = [&](velk::vec3 center, float radius, velk::color c) {
         auto element = velk::create_element();
         auto trs = velk::trait::transform::create_trs();
-        trs.set_translate({center.x - radius, center.y - radius, center.z - radius});
+        trs.set_translate({center.x - radius + world_shift, center.y - radius, center.z - radius});
         element.add_trait(trs);
         velk::Mesh mesh(ctx.build_sphere(32));
         mesh.set_material(0, velk::material::create_standard(c, 0.f, 0.9f));
@@ -346,7 +348,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
 
     auto focus = velk::create_element();
     auto focus_trs = velk::trait::transform::create_trs();
-    focus_trs.set_translate(focus_at);
+    focus_trs.set_translate({focus_at.x + world_shift, focus_at.y, focus_at.z});
     focus.add_trait(focus_trs);
     scene.add(root, focus);
     auto orbit = velk::trait::transform::create_orbit();

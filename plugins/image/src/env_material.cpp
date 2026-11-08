@@ -16,10 +16,10 @@ VELK_GPU_STRUCT EnvGpuData
 };
 
 // Env vertex: fullscreen quad with gl_Position already in clip space.
-// v_world_pos is a far-plane world point reconstructed via
+// v_rel_pos is a far-plane point relative to the camera, reconstructed via
 // inverse_view_projection so the forward driver's ray_dir computation
-// (normalize(v_world_pos - cam_pos)) yields the correct skybox
-// direction. Other canonical varyings are set to defaults.
+// (normalize(v_rel_pos)) yields the correct skybox direction. Other
+// canonical varyings are set to defaults.
 constexpr string_view env_vertex_src = R"(
 #version 450
 #include "velk.glsl"
@@ -38,11 +38,11 @@ void main()
     // Fullscreen clip-space quad at z=0 (far plane).
     gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);
 
-    // Reconstruct the corresponding world-space point on the far plane.
+    // Reconstruct the corresponding point on the far plane.
     // Y is flipped to match the rest of the pipeline's viewport.
     vec2 ndc = vec2(q.x * 2.0 - 1.0, (1.0 - q.y) * 2.0 - 1.0);
     vec4 far_pt = globals.inverse_view_projection * vec4(ndc, 0.0, 1.0);
-    v_world_pos = far_pt.xyz / far_pt.w;
+    v_rel_pos = far_pt.xyz / far_pt.w;
 
     v_color = vec4(0.0);
     v_local_uv = q;

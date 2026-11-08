@@ -57,7 +57,7 @@ struct BvhBinding
 /// (set = 1 slot 2); shaders read it as `velk_globals.data[base]`.
 struct FrameGlobals
 {
-    float    view_projection[16];          ///< Combined view-projection matrix from the camera.
+    float    view_projection[16];          ///< View-projection for positions relative to the camera.
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
@@ -66,20 +66,22 @@ struct FrameGlobals
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     uint32_t _pad1;
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
-    float    probe_min[3];                 ///< GI probe lattice box, world-space minimum.
+    float    probe_min[3];                 ///< GI probe lattice box minimum, relative to the camera.
     uint32_t probe_reset_frame;            ///< present_counter value at which the lattice last changed.
-    float    probe_max[3];                 ///< GI probe lattice box, world-space maximum.
+    float    probe_max[3];                 ///< GI probe lattice box maximum, relative to the camera.
     uint32_t _pad0;
+    float    cam_moved[3];                 ///< How far the camera moved since the previous frame.
+    uint32_t _pad2;
 };
 
-static_assert(sizeof(FrameGlobals) == 272, "FrameGlobals layout must match velk.glsl");
+static_assert(sizeof(FrameGlobals) == 288, "FrameGlobals layout must match velk.glsl");
 
-/// Copies the probe lattice fields of @p bvh into @p globals.
+/// Copies the probe lattice fields of @p bvh into @p globals. Needs cam_pos set.
 inline void set_probe_globals(FrameGlobals& globals, const BvhBinding& bvh)
 {
     for (int i = 0; i < 3; ++i) {
-        globals.probe_min[i] = bvh.probe_min[i];
-        globals.probe_max[i] = bvh.probe_max[i];
+        globals.probe_min[i] = bvh.probe_min[i] - globals.cam_pos[i];
+        globals.probe_max[i] = bvh.probe_max[i] - globals.cam_pos[i];
     }
     globals.probe_reset_frame = bvh.probe_reset_frame;
 }

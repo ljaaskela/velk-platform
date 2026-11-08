@@ -228,6 +228,9 @@ float velk_ray_lift = 0.0;
 // before tracing and use after: optical depth, and colour times depth.
 float velk_ray_medium_depth = 0.0;
 vec3 velk_ray_medium_color = vec3(0.0);
+// What the coordinates of the tree being walked are relative to, from where rays are: the
+// camera, or inside a partition, the camera taken from the partition's origin.
+vec3 velk_ray_frame = vec3(0.0);
 #ifdef VELK_TRACE_MEDIUM
 // For a closest-hit ray entering a record whose meshes count as a medium where the ray is
 // wider than them: whether this one does, the part of the ray in view, and the colour.
@@ -254,7 +257,7 @@ bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
 // follows the size of the object and not its distance from the world origin.
 Ray velk_local_ray(Ray ray, RtRecord rec)
 {
-    vec3 rel = ray.origin - vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w);
+    vec3 rel = ray.origin - (vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) - velk_ray_frame);
     Ray local;
     local.origin = vec3(dot(rec.inv_row0.xyz, rel),
                         dot(rec.inv_row1.xyz, rel),
@@ -606,6 +609,15 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
 
 )"
                                                                       R"(
+// A node of the top tree, moved to where rays are.
+BvhNode velk_top_node(uint index)
+{
+    BvhNode node = velk_bvh_nodes.data[index];
+    node.aabb_min.xyz -= velk_ray_frame;
+    node.aabb_max.xyz -= velk_ray_frame;
+    return node;
+}
+
 // The traversals for scenes with instances that have a far form, with VELK_TRACE_MEDIUM
 // defined: see velk_with_trace_medium. Apart and compiled out otherwise, since their
 // registers are paid for by the whole pass: in the ordinary loops this doubled what every
@@ -721,22 +733,23 @@ float trace_visibility_medium(Ray ray, float t_max)
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
-    vec3 world_origin = ray.origin;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    velk_ray_frame = cam;
     int partition_sp = -1;
     while (sp > 0) {
         if (sp == partition_sp) {
-            ray.origin = world_origin;
+            velk_ray_frame = cam;
             partition_sp = -1;
         }
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[ni];
+        BvhNode node = velk_top_node(ni);
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
         if (node.child_count == VELK_PARTITION_REF) {
             partition_sp = sp;
-            ray.origin -= velk_partition_origin(node);
+            velk_ray_frame = cam - velk_partition_origin(node);
             ni = node.first_child;
-            node = velk_bvh_nodes.data[ni];
+            node = velk_top_node(ni);
         }
         if (node.aabb_max.w > 0.0) {
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
@@ -771,22 +784,23 @@ bool trace_closest_hit_medium(Ray ray, float t_min, float t_max, inout RayHit hi
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
-    vec3 world_origin = ray.origin;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    velk_ray_frame = cam;
     int partition_sp = -1;
     while (sp > 0) {
         if (sp == partition_sp) {
-            ray.origin = world_origin;
+            velk_ray_frame = cam;
             partition_sp = -1;
         }
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[ni];
+        BvhNode node = velk_top_node(ni);
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
         if (node.child_count == VELK_PARTITION_REF) {
             partition_sp = sp;
-            ray.origin -= velk_partition_origin(node);
+            velk_ray_frame = cam - velk_partition_origin(node);
             ni = node.first_child;
-            node = velk_bvh_nodes.data[ni];
+            node = velk_top_node(ni);
         }
         if (node.aabb_max.w > 0.0) {
             vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
@@ -834,15 +848,16 @@ float trace_visibility(Ray ray, float t_max)
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
-    vec3 world_origin = ray.origin;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    velk_ray_frame = cam;
     int partition_sp = -1;
     while (sp > 0) {
         if (sp == partition_sp) {
-            ray.origin = world_origin;
+            velk_ray_frame = cam;
             partition_sp = -1;
         }
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[ni];
+        BvhNode node = velk_top_node(ni);
         float t_hit;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, t_max, t_hit)) continue;
 
@@ -850,8 +865,8 @@ float trace_visibility(Ray ray, float t_max)
         // no test of its own.
         if (node.child_count == VELK_PARTITION_REF) {
             partition_sp = sp;
-            ray.origin -= velk_partition_origin(node);
-            node = velk_bvh_nodes.data[node.first_child];
+            velk_ray_frame = cam - velk_partition_origin(node);
+            node = velk_top_node(node.first_child);
         }
 
 
@@ -864,8 +879,8 @@ float trace_visibility(Ray ray, float t_max)
 
 #ifdef VELK_TRACE_ORDERED_ANY_HIT
         if (node.child_count == 2u) {
-            BvhNode l = velk_bvh_nodes.data[node.first_child];
-            BvhNode r = velk_bvh_nodes.data[node.first_child + 1u];
+            BvhNode l = velk_top_node(node.first_child);
+            BvhNode r = velk_top_node(node.first_child + 1u);
             float t_l, t_r;
             bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, t_max, t_l);
             bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, t_max, t_r);
@@ -919,21 +934,22 @@ bool trace_closest_hit(Ray ray, float t_min, float t_max, out RayHit hit)
     uint stack[VELK_TRACE_STACK_SIZE];
     int sp = 0;
     stack[sp++] = VELK_GLOBALS.bvh_root;
-    vec3 world_origin = ray.origin;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    velk_ray_frame = cam;
     int partition_sp = -1;
     while (sp > 0) {
         if (sp == partition_sp) {
-            ray.origin = world_origin;
+            velk_ray_frame = cam;
             partition_sp = -1;
         }
         uint ni = stack[--sp];
-        BvhNode node = velk_bvh_nodes.data[ni];
+        BvhNode node = velk_top_node(ni);
         float t_enter;
         if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, hit.t, t_enter)) continue;
         if (node.child_count == VELK_PARTITION_REF) {
             partition_sp = sp;
-            ray.origin -= velk_partition_origin(node);
-            node = velk_bvh_nodes.data[node.first_child];
+            velk_ray_frame = cam - velk_partition_origin(node);
+            node = velk_top_node(node.first_child);
         }
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
@@ -1082,6 +1098,14 @@ layout(push_constant, scalar) uniform PC {
     uint gi_probe_dims;        // 104 probe grid, 10 bits per axis
     uint light_loop_probe;     // 108 diagnostic: extra per-light ALU repeats
 } pc;
+
+// A scene light, with its position relative to the camera.
+Light velk_light_at(uint index)
+{
+    Light light = velk_lights.data[index];
+    light.position.xyz -= VELK_GLOBALS.cam_pos.xyz;
+    return light;
+}
 
 #include "velk_intersect.glsl"
 
@@ -1573,7 +1597,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
             uint ni = stack[--sp];
             BvhNode node = velk_bvh_nodes.data[ni];
 
-            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz) + partition_origin;
+            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz) + partition_origin - VELK_GLOBALS.cam_pos.xyz;
             vec3 be = 0.5 * (node.aabb_max.xyz - node.aabb_min.xyz);
             bool outside = false;
             for (int p = 0; p < 6; ++p) {
@@ -1594,7 +1618,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
               RtRecord rec = velk_records.data[node.first_shape + ri];
               // Records hold the inverse; silhouettes need world-space corners.
               mat3 to_world = inverse(transpose(mat3(rec.inv_row0.xyz, rec.inv_row1.xyz, rec.inv_row2.xyz)));
-              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) + partition_origin;
+              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) + partition_origin - VELK_GLOBALS.cam_pos.xyz;
               for (uint i = 0u; i < rec.shape_count; ++i) {
                 RtShape s = velk_bvh_shapes.data[rec.first_shape + i];
                 if (s.shape_kind == 255u) continue;  // meshes: no silhouette yet
@@ -1778,7 +1802,7 @@ void main()
         rest = albedo.rgb;
     } else {
         vec3 N = normalize(world_n);
-        vec3 V = normalize(pc.cam_pos.xyz - world_pos);
+        vec3 V = normalize(-world_pos);
         float NdotV = max(dot(N, V), 0.0);
 
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
@@ -1822,7 +1846,7 @@ void main()
         float loop_probe = 0.0;
 
         for (uint i = 0u; i < pc.light_count; ++i) {
-            Light light = velk_lights.data[pc.lights_base + i];
+            Light light = velk_light_at(pc.lights_base + i);
             if (light.flags.x == 3u) {
                 vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
                 vec3 radiance = light.color_intensity.rgb * light.color_intensity.a;
@@ -1947,12 +1971,12 @@ void main()
         // A pixel's width on the surface, wider when seen at a shallow angle.
         mat4 footprint_vp = VELK_GLOBALS.view_projection;
         float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
-        float pixel_width = length(world_pos - VELK_GLOBALS.cam_pos.xyz) * 2.0 / (footprint_f * float(pc.height))
+        float pixel_width = length(world_pos) * 2.0 / (footprint_f * float(pc.height))
             / sqrt(max(NdotV, 0.05));
 
         vec3 direct_diffuse = vec3(0.0);
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
-            Light chosen = velk_lights.data[pc.lights_base + res_light];
+            Light chosen = velk_light_at(pc.lights_base + res_light);
             // It stands for its whole 2x2 block.
             velk_ray_footprint = pixel_width * 2.0;
             velk_ray_spread = chosen.flags.x == 0u ? 0.01 : 0.0;
@@ -2153,7 +2177,9 @@ void main()
     float m2_acc = has_sample ? cur_lum * cur_lum : 0.0;
     const bool kAccumulate = false;
     if (kAccumulate && pc.reset == 0u) {
-        vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(world_pos, 1.0);
+        // Positions are relative to the camera, which was elsewhere then.
+        vec3 prev_pos = world_pos + VELK_GLOBALS.cam_moved;
+        vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(prev_pos, 1.0);
         if (prev_clip.w > 1e-6) {
             vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
             if (all(greaterThanEqual(prev_uv, vec2(0.0))) &&
@@ -2161,7 +2187,7 @@ void main()
                 vec4 hp = velk_texture(pc.hist_pos_prev_id, prev_uv);
                 vec4 hi = velk_texture(pc.hist_irr_prev_id, prev_uv);
                 // Same surface? World-space distance, tolerance scaled by depth.
-                if (hp.w > 0.5 && length(hp.xyz - world_pos) < 0.03 * max(prev_clip.w, 1.0)) {
+                if (hp.w > 0.5 && length(hp.xyz - prev_pos) < 0.03 * max(prev_clip.w, 1.0)) {
                     float m2_prev = velk_texture(pc.hist_mom_prev_id, prev_uv).r;
                     if (has_sample) {
                         // Fixed accumulation window. Shorter = shorter dynamic-
@@ -2232,7 +2258,7 @@ vec3 velk_filter_at(ivec2 coord, vec2 dims)
     vec3 N         = normalize(n0);
     vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
 
-    float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
+    float depth = max(length(world_pos), 1e-3);
 
     // Only pixels that traced a ray count, which are one in each 2x2 block, by geometry.
     // A surface unlike all of them nearby, such as a leaf, takes their plain mean.
@@ -2308,7 +2334,7 @@ void main()
         int g = int(pc.probe_grid);
         ivec2 g0 = (coord / g) * g;
         vec2 f = vec2(coord - g0) / float(g);
-        float depth = max(length(VELK_GLOBALS.cam_pos.xyz - world_pos), 1e-3);
+        float depth = max(length(world_pos), 1e-3);
         vec3 acc = vec3(0.0);
         float aw = 0.0;
         for (int j = 0; j < 2; ++j) {
@@ -2447,6 +2473,14 @@ layout(push_constant, scalar) uniform PC {
 // This view's FrameGlobals, read by index from the bound globals buffer
 // (set = 1 slot 2, declared in velk.glsl) instead of a device address.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
+// A scene light, with its position relative to the camera.
+Light velk_light_at(uint index)
+{
+    Light light = velk_lights.data[index];
+    light.position.xyz -= VELK_GLOBALS.cam_pos.xyz;
+    return light;
+}
 
 // ===== Core ray / hit / fill-context types =====
 #include "velk_intersect.glsl"
@@ -2636,13 +2670,13 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     uint li_end   = (velk_single_light >= 0) ? uint(velk_single_light) + 1u : pc.light_count;
     float li_weight = (velk_single_light >= 0) ? velk_single_light_weight : 1.0;
     for (uint li = li_begin; li < li_end; ++li) {
-        Light light = velk_lights.data[pc.lights_base + li];
+        Light light = velk_light_at(pc.lights_base + li);
         vec3 L;
         float atten;
-        velk_light_sample(light, ctx.hit_pos, L, atten);
+        velk_light_sample(light, ctx.rel_pos, L, atten);
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL <= 0.0 || atten <= 0.0) continue;
-        float shadow = velk_eval_shadow(light.flags.y, li, ctx.hit_pos, N);
+        float shadow = velk_eval_shadow(light.flags.y, li, ctx.rel_pos, N);
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
         direct += base * (1.0 - metallic) * NdotL * radiance * li_weight;
     }
@@ -2704,7 +2738,8 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
         ctx.base = s.color;
         ctx.ray_dir = ray.dir;
         ctx.normal = hit.normal;
-        ctx.hit_pos = ray.origin + hit.t * ray.dir;
+        ctx.rel_pos = ray.origin + hit.t * ray.dir;
+        ctx.hit_pos = ctx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
         ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
         BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
 
@@ -2714,11 +2749,11 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             if (a >= 0.999) return acc;
             // Transparent: continue straight through, reduced throughput.
             throughput *= (1.0 - a);
-            ray.origin = ctx.hit_pos + ray.dir * 1e-3;
+            ray.origin = ctx.rel_pos +ray.dir * 1e-3;
             continue;
         }
         throughput *= bs.throughput;
-        ray.origin = ctx.hit_pos + hit.normal * 1e-3;
+        ray.origin = ctx.rel_pos +hit.normal * 1e-3;
         ray.dir = bs.next_dir;
     }
     // Bounce budget exhausted. The remaining throughput is illuminated by
@@ -2781,6 +2816,7 @@ void main()
         // primary cost is still O(shapes) * cheap-intersect; revisit
         // if profiling shows the primary pass is hot.
         vec3 accum = env_miss_color(primary.dir);
+        velk_ray_frame = VELK_GLOBALS.cam_pos.xyz;
 
         for (uint i = 0u; i < shape_count; ++i) {
             RtShape s = velk_shapes.data[pc.shapes_base + i];
@@ -2800,7 +2836,8 @@ void main()
             ctx.base = s.color;
             ctx.ray_dir = primary.dir;
             ctx.normal = hit.normal;
-            ctx.hit_pos = primary.origin + hit.t * primary.dir;
+            ctx.rel_pos = primary.origin + hit.t * primary.dir;
+            ctx.hit_pos = ctx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
             ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
             BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
 
@@ -2815,12 +2852,12 @@ void main()
                 uint spp = clamp(bs.sample_count_hint, 1u, kSppCap);
                 vec3 bounce = vec3(0.0);
                 Ray refl;
-                refl.origin = ctx.hit_pos + hit.normal * 1e-3;
+                refl.origin = ctx.rel_pos +hit.normal * 1e-3;
                 refl.dir = bs.next_dir;
                 bounce += trace_bounce(refl, bs.throughput);
                 for (uint sp = 1u; sp < spp; ++sp) {
                     BrdfSample bs2 = velk_resolve_fill(s.material_id, ctx);
-                    refl.origin = ctx.hit_pos + hit.normal * 1e-3;
+                    refl.origin = ctx.rel_pos +hit.normal * 1e-3;
                     refl.dir = bs2.next_dir;
                     bounce += trace_bounce(refl, bs2.throughput);
                 }
@@ -3120,7 +3157,8 @@ void main()
             ectx.base = s.color;
             ectx.ray_dir = ray.dir;
             ectx.normal = hit.normal;
-            ectx.hit_pos = ray.origin + hit.t * ray.dir;
+            ectx.rel_pos = ray.origin + hit.t * ray.dir;
+            ectx.hit_pos = ectx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
             ectx.tangent = vec4(0.0);
 
             // Full material evaluation. Measured FASTER than hand-rolled
@@ -3145,10 +3183,10 @@ void main()
             float w_sum = 0.0;
             float w_chosen = 0.0;
             for (uint li = 0u; li < pc.light_count; ++li) {
-                Light light = velk_lights.data[pc.lights_base + li];
+                Light light = velk_light_at(pc.lights_base + li);
                 vec3 L;
                 float atten;
-                velk_light_sample(light, ectx.hit_pos, L, atten);
+                velk_light_sample(light, ectx.rel_pos, L, atten);
                 // Floored, not clamped to zero: this weights against the
                 // GEOMETRIC normal while shading uses the normal-mapped one, so
                 // a light this test rejects can still light the surface. A
@@ -3198,7 +3236,7 @@ void main()
         if (velk_ray_medium_depth > 0.0) {
             vec3 direct = vec3(0.0);
             for (uint li = 0u; li < pc.light_count; ++li) {
-                Light light = velk_lights.data[pc.lights_base + li];
+                Light light = velk_light_at(pc.lights_base + li);
                 vec3 L;
                 float atten;
                 velk_light_sample(light, origin, L, atten);

@@ -38,14 +38,13 @@ void main()
     VelkVertex3D v = velk_vertex3d(root);
     ElementInstance inst = velk_instance(root);
 
-    vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
-    vec4 world_h = inst.world_matrix * local;
-    gl_Position = globals.view_projection * world_h;
+    vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, globals);
+    gl_Position = globals.view_projection * vec4(rel, 1.0);
 
     v_color        = inst.color;
     v_local_uv     = v.uv;
     v_size         = inst.size.xy;
-    v_world_pos    = world_h.xyz;
+    v_rel_pos      = rel;
     v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
     v_shape_param  = inst.params.x;
     v_uv1          = velk_uv1(root);

@@ -53,16 +53,17 @@ inline constexpr float kLodMaxErrorPixels = 1.f;
 // declares cull_words and velk_lod_use first. `entry` is as at instance_cluster_runs_src,
 // and a level's bound skips its clusters when none could qualify.
 #define VELK_LOD_SELECT_GLSL R"(
-vec3 velk_lod_center(uint word, mat4 world)
+vec3 velk_lod_center(uint word, mat4 world, vec3 cam)
 {
-    return (world * vec4(uintBitsToFloat(cull_words.data[word]), uintBitsToFloat(cull_words.data[word + 1u]),
-                         uintBitsToFloat(cull_words.data[word + 2u]), 1.0)).xyz;
+    return mat3(world) * vec3(uintBitsToFloat(cull_words.data[word]), uintBitsToFloat(cull_words.data[word + 1u]),
+                              uintBitsToFloat(cull_words.data[word + 2u]))
+        + (world[3].xyz - cam);
 }
 
 // `word` holds a sphere's center and radius, then an error.
 float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels_per_unit)
 {
-    float away = length(velk_lod_center(word, world) - cam) - uintBitsToFloat(cull_words.data[word + 3u]) * scale;
+    float away = length(velk_lod_center(word, world, cam)) - uintBitsToFloat(cull_words.data[word + 3u]) * scale;
     return uintBitsToFloat(cull_words.data[word + 4u]) * scale * pixels_per_unit / max(away, 1e-3);
 }
 
@@ -74,7 +75,7 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
     uint level_count = cull_words.data[entry + 9u];
     for (uint l = 0u; l < level_count; ++l) {
         uint level = levels + l * 8u;
-        float dist = length(velk_lod_center(level + 4u, world) - cam);
+        float dist = length(velk_lod_center(level + 4u, world, cam));
         float reach = uintBitsToFloat(cull_words.data[level + 7u]) * scale;
         float per_error = scale * pixels_per_unit;
         if (uintBitsToFloat(cull_words.data[level + 2u]) * per_error / (dist + reach) > max_pixels) continue;
@@ -131,8 +132,10 @@ void main()
                    uintBitsToFloat(cull_words.data[entry + 5u]));
 
     GlobalData globals = velk_globals.data[pc.globals_base];
+    lo -= globals.cam_pos.xyz;
+    hi -= globals.cam_pos.xyz;
     if (pc.max_distance > 0.0) {
-        vec3 away = max(max(lo - globals.cam_pos.xyz, globals.cam_pos.xyz - hi), vec3(0.0));
+        vec3 away = max(max(lo, -hi), vec3(0.0));
         if (length(away) > pc.max_distance) return;
     }
 
@@ -247,13 +250,13 @@ void main()
                        uintBitsToFloat(cull_words.data[table + 1u]),
                        uintBitsToFloat(cull_words.data[table + 2u]),
                        uintBitsToFloat(cull_words.data[table + 3u]));
-    vec3 center = (world * vec4(sphere.xyz, 1.0)).xyz;
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    vec3 center = velk_rel_position(world, sphere.xyz, globals);
     float scale2 = max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                        dot(world[2].xyz, world[2].xyz));
     float radius = sphere.w * sqrt(scale2);
 
-    GlobalData globals = velk_globals.data[pc.globals_base];
-    if (pc.max_distance > 0.0 && length(center - globals.cam_pos.xyz) - radius > pc.max_distance) return;
+    if (pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
 
     // The sphere against each clip plane. Planes are rows of the matrix added to or
     // taken from its last row, so their normals' lengths are at most the sum of the
@@ -461,7 +464,7 @@ void main()
 
     GlobalData globals = velk_globals.data[pc.globals_base];
     mat4 vp = globals.view_projection;
-    vec3 center = (world * vec4(local_center, 1.0)).xyz;
+    vec3 center = velk_rel_position(world, local_center, globals);
     vec4 clip = vp * vec4(center, 1.0);
     if (!velk_instance_is_far(splat_instances.data[pc.instances_base + slot].params.z, area, clip.w, vp, globals.viewport.y)) return;
 
@@ -475,7 +478,7 @@ void main()
     if (dot(n, n) > 1e-6) {
         float reach = uintBitsToFloat(splat_words.data[table + 3u]) * sqrt(scale2);
         vec3 p = velk_texture(pc.worldpos_id, uv).xyz;
-        if (length(p - globals.cam_pos.xyz) < length(center - globals.cam_pos.xyz) - reach) return;
+        if (length(p) < length(center) - reach) return;
     }
 
     float f = length(vec3(vp[0][1], vp[1][1], vp[2][1]));
@@ -528,19 +531,17 @@ void main()
     if (globals.bvh_node_count == 0u) return;
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-    // Towards the surface behind where there is one, since a point near the camera is too
-    // close to it to give an exact direction when both are far from the origin.
     vec3 cam = globals.cam_pos.xyz;
     vec3 dir;
     float t_max = 1e30;
     vec3 n = velk_texture(pc.normal_id, uv).xyz;
     if (dot(n, n) > 1e-6) {
-        vec3 to_surface = velk_texture(pc.worldpos_id, uv).xyz - cam;
+        vec3 to_surface = velk_texture(pc.worldpos_id, uv).xyz;
         t_max = length(to_surface);
         dir = to_surface / t_max;
     } else {
         vec4 far_point = globals.inverse_view_projection * vec4(uv * 2.0 - 1.0, 1e-4, 1.0);
-        dir = normalize(far_point.xyz / far_point.w - cam);
+        dir = normalize(far_point.xyz / far_point.w);
     }
     vec3 inv = 1.0 / dir;
 
@@ -717,7 +718,7 @@ void main()
         vec4 near_point = globals.inverse_view_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
         towards = near_point.xyz / near_point.w;
     }
-    vec3 to_viewer = normalize(globals.cam_pos.xyz - towards);
+    vec3 to_viewer = normalize(-towards);
 
     float to_viewer_depth = max(coverage, 1e-5);
     float seen_share = (1.0 - exp(-to_viewer_depth)) / to_viewer_depth;
@@ -733,7 +734,7 @@ void main()
             L = -light.direction.xyz;
         } else {
             if (!has_surface) continue;
-            vec3 to_light = light.position.xyz - behind_pos;
+            vec3 to_light = (light.position.xyz - globals.cam_pos.xyz) - behind_pos;
             float dist = length(to_light);
             L = to_light / max(dist, 1e-6);
             float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);

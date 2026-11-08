@@ -19,7 +19,7 @@ enum class GBufferAttachment : uint32_t
 {
     Albedo         = 0, ///< RGBA8      rgb = surface albedo, a = alpha.
     Normal         = 1, ///< RGBA16F    xyz = world-space normal, w = how far the surface may be from the full mesh, in world units.
-    WorldPos       = 2, ///< RGBA32F    xyz = world position, w = unused. Full float because
+    WorldPos       = 2, ///< RGBA32F    xyz = position relative to the camera, w = unused. Full float because
                         ///  RGBA16F's ~3 decimal digits of precision quantizes a typical
                         ///  100 m scene to ~0.1 m steps, which collapses entire raster
                         ///  triangles into a single shader-visible position and breaks

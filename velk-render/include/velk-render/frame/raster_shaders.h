@@ -61,7 +61,7 @@ void main()
     velk_visual_discard();
     g_albedo      = v_color;
     g_normal      = vec4(normalize(v_world_normal), v_lod_error);
-    g_world_pos   = vec4(v_world_pos, 0.0);
+    g_world_pos   = vec4(v_rel_pos, 0.0);
     g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
     g_emissive    = vec4(0.0);
 }
@@ -98,9 +98,10 @@ void main()
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_rel_pos);
     ctx.normal      = v_world_normal;
-    ctx.hit_pos     = v_world_pos;
+    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
+    ctx.rel_pos     = v_rel_pos;
     ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
@@ -133,16 +134,17 @@ void main()
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_rel_pos);
     ctx.normal      = v_world_normal;
-    ctx.hit_pos     = v_world_pos;
+    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
+    ctx.rel_pos     = v_rel_pos;
     ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;
 
     vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
-    vec3 V = normalize(globals.cam_pos.xyz - v_world_pos);
+    vec3 V = normalize(-v_rel_pos);
     float ndv = clamp(dot(N, V), 0.0, 1.0);
     float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
     float opacity = e.color.a + fresnel * (1.0 - e.color.a);
@@ -172,9 +174,10 @@ void main()
     ctx.uv          = v_local_uv;
     ctx.uv1         = v_uv1;
     ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_world_pos - globals.cam_pos.xyz);
+    ctx.ray_dir     = normalize(v_rel_pos);
     ctx.normal      = v_world_normal;
-    ctx.hit_pos     = v_world_pos;
+    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
+    ctx.rel_pos     = v_rel_pos;
     ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
@@ -196,7 +199,7 @@ void main()
 
     g_albedo    = e.color;
     g_normal    = vec4(N, v_lod_error);
-    g_world_pos = vec4(v_world_pos, 0.0);
+    g_world_pos = vec4(v_rel_pos, 0.0);
     g_material  = vec4(e.metallic, aa_roughness, float(e.lighting_mode) / 255.0, 0.0);
     g_emissive  = vec4(e.emissive, 0.0);
 }

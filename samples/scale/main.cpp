@@ -326,14 +326,13 @@ void main()
     p.x += sin(t * 1.3 + phase + p.y * 0.05) * out_from_trunk * 0.02;
     p += vec3(sin(t * 5.0 + p.x * 0.7 + p.y), sin(t * 6.0 + p.z * 0.9), sin(t * 5.5 + p.y * 0.8)) * 0.35 * v.uv.x;
 
-    vec4 local = vec4(inst.offset.xyz + p * inst.size.xyz, 1.0);
-    vec4 world_h = inst.world_matrix * local;
-    gl_Position = globals.view_projection * world_h;
+    vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + p * inst.size.xyz, globals);
+    gl_Position = globals.view_projection * vec4(rel, 1.0);
 
     v_color        = inst.color;
     v_local_uv     = v.uv;
     v_size         = inst.size.xy;
-    v_world_pos    = world_h.xyz;
+    v_rel_pos      = rel;
     v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
     v_shape_param  = inst.params.x;
     v_uv1          = velk_uv1(root);

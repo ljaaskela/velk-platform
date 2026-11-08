@@ -132,6 +132,7 @@ private:
         /// reprojection (sun-shadow accumulation). Identity until the first
         /// frame has been seen.
         mat4 prev_view_projection = mat4::identity();
+        vec3 prev_cam_pos = {};
         bool has_prev_view_projection = false;
 
         /// Env fingerprint (texture id + material id + inline params).

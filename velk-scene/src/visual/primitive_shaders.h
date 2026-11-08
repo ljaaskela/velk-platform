@@ -30,7 +30,7 @@ VELK_DRAW_DATA(root)
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_local_uv;
 layout(location = 2) flat out vec2 v_size;
-layout(location = 3) out vec3 v_world_pos;
+layout(location = 3) out vec3 v_rel_pos;
 layout(location = 4) out vec3 v_world_normal;
 
 void main()
@@ -39,14 +39,13 @@ void main()
     VelkVertex3D v = velk_vertex3d(root);
     ElementInstance inst = velk_instance(root);
 
-    vec4 local = vec4(inst.offset.xyz + v.position * inst.size.xyz, 1.0);
-    vec4 world_pos_h = inst.world_matrix * local;
-    gl_Position = globals.view_projection * world_pos_h;
+    vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, globals);
+    gl_Position = globals.view_projection * vec4(rel, 1.0);
 
     v_color = inst.color;
     v_local_uv = v.uv;
     v_size = inst.size.xy;
-    v_world_pos = world_pos_h.xyz;
+    v_rel_pos = rel;
     v_world_normal = normalize(mat3(inst.world_matrix) * v.normal);
 }
 )";
@@ -61,7 +60,7 @@ inline constexpr string_view primitive3d_fragment_src = R"(
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_local_uv;
 layout(location = 2) flat in vec2 v_size;
-layout(location = 3) in vec3 v_world_pos;
+layout(location = 3) in vec3 v_rel_pos;
 layout(location = 4) in vec3 v_world_normal;
 
 layout(location = 0) out vec4 frag_color;

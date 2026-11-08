@@ -262,6 +262,9 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
         auto cam_es = read_state<IElement>(camera_element);
         mat4 cam_world = cam_es ? cam_es->world_matrix : mat4::identity();
         rv.view_projection = camera->get_view_projection(cam_world, vp_w, vp_h);
+        mat4 cam_at_origin = cam_world;
+        cam_at_origin.m[12] = cam_at_origin.m[13] = cam_at_origin.m[14] = 0.f;
+        rv.relative_view_projection = camera->get_view_projection(cam_at_origin, vp_w, vp_h);
         if (cam_es) {
             rv.cam_pos.x = cam_es->world_matrix(0, 3);
             rv.cam_pos.y = cam_es->world_matrix(1, 3);
@@ -273,8 +276,9 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
         float ortho[16];
         build_ortho_projection(ortho, vp_w, vp_h);
         std::memcpy(rv.view_projection.m, ortho, sizeof(ortho));
+        rv.relative_view_projection = rv.view_projection;
     }
-    rv.inverse_view_projection = mat4::inverse(rv.view_projection);
+    rv.inverse_relative_view_projection = mat4::inverse(rv.relative_view_projection);
 
     auto& cache = view_caches_[&entry];
     if (cache.camera_change.changed({rv.view_projection, rv.cam_pos})) {
@@ -287,9 +291,9 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     if (rv.width <= 0 || rv.height <= 0 || !ctx.backend || !ctx.resources) return;
 
     FrameGlobals globals{};
-    std::memcpy(globals.view_projection, rv.view_projection.m, sizeof(rv.view_projection.m));
-    std::memcpy(globals.inverse_view_projection, rv.inverse_view_projection.m,
-                sizeof(rv.inverse_view_projection.m));
+    std::memcpy(globals.view_projection, rv.relative_view_projection.m, sizeof(rv.relative_view_projection.m));
+    std::memcpy(globals.inverse_view_projection, rv.inverse_relative_view_projection.m,
+                sizeof(rv.inverse_relative_view_projection.m));
     globals.viewport[0] = static_cast<float>(rv.width);
     globals.viewport[1] = static_cast<float>(rv.height);
     globals.viewport[2] = 1.0f / globals.viewport[0];
@@ -307,9 +311,15 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     // the current VP (reprojection is a no-op identity that frame; the sun
     // pass also resets its history then).
     const mat4& prev_vp = cache.has_prev_view_projection ? cache.prev_view_projection
-                                                         : rv.view_projection;
+                                                         : rv.relative_view_projection;
     std::memcpy(globals.prev_view_projection, prev_vp.m, sizeof(prev_vp.m));
-    cache.prev_view_projection = rv.view_projection;
+    if (cache.has_prev_view_projection) {
+        globals.cam_moved[0] = rv.cam_pos.x - cache.prev_cam_pos.x;
+        globals.cam_moved[1] = rv.cam_pos.y - cache.prev_cam_pos.y;
+        globals.cam_moved[2] = rv.cam_pos.z - cache.prev_cam_pos.z;
+    }
+    cache.prev_view_projection = rv.relative_view_projection;
+    cache.prev_cam_pos = rv.cam_pos;
     cache.has_prev_view_projection = true;
 
     // Into the shared globals arena (set = 1 slot 2); shaders read
