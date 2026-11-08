@@ -144,37 +144,15 @@ public:
 
     void mark_material_dirty() override { material_dirty_ = true; }
 
-    /// Framework-level discard thresholds derived from the attached
-    /// IMaterialOptions (if any). Mask mode → opts.alpha_cutoff; Blend
-    /// mode → 0 (no discard, blending handles alpha); Opaque → a tiny
-    /// epsilon to drop fully-transparent fragments.
-    float get_forward_discard_threshold() const override
-    {
-        return discard_threshold_from_options(0.001f);
-    }
-    float get_deferred_discard_threshold() const override
-    {
-        return discard_threshold_from_options(0.5f);
-    }
-    vector<ISurface*> get_textures() const override { return {}; }
-
-protected:
-    float discard_threshold_from_options(float opaque_default) const
+    /// The attached IMaterialOptions' alpha_cutoff in Mask mode, otherwise 0.
+    float get_discard_threshold() const override
     {
         constexpr AttachmentQuery q{IMaterialOptions::UID, {}};
         auto att = const_cast<Material*>(this)->find_attachment(q, Resolve::Existing);
-        if (auto r = ::velk::read_state<::velk::IMaterialOptions>(att)) {
-            switch (r->alpha_mode) {
-            case ::velk::AlphaMode::Mask:  return r->alpha_cutoff;
-            case ::velk::AlphaMode::Blend: return 0.0f;
-            case ::velk::AlphaMode::Opaque:
-            default:                       break;
-            }
-        }
-        return opaque_default;
+        auto r = ::velk::read_state<::velk::IMaterialOptions>(att);
+        return r && r->alpha_mode == ::velk::AlphaMode::Mask ? r->alpha_cutoff : 0.f;
     }
-
-public:
+    vector<ISurface*> get_textures() const override { return {}; }
 
     /**
      * @brief Default persistent-buffer implementation.

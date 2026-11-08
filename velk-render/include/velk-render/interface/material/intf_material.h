@@ -33,13 +33,9 @@ class ISurface;
 class IMaterial : public Interface<IMaterial, IProgram>
 {
 public:
-    /// Alpha-discard threshold for the forward fragment driver. Fragments
-    /// with `color.a` below the threshold are discarded.
-    virtual float get_forward_discard_threshold() const = 0;
-
-    /// Alpha-discard threshold for the deferred fragment driver. Deferred
-    /// has no alpha blending, so a higher threshold is the default.
-    virtual float get_deferred_discard_threshold() const = 0;
+    /// Fragments with `color.a` below this are discarded. 0 for none: a blended
+    /// material's alpha is its opacity, and an opaque material's alpha is ignored.
+    virtual float get_discard_threshold() const = 0;
 
     /// Returns the bindable textures this material samples, in slot order.
     /// The renderer resolves each to a bindless TextureId and writes them

@@ -85,6 +85,62 @@ void main()
 }
 )";
 
+// The same, for a visual that cuts out its own shape. The composer appends its discard snippet.
+[[maybe_unused]] constexpr string_view visibility_discard_fragment_src = R"(
+#version 450
+#include "velk.glsl"
+
+VELK_DRAW_DATA(root)
+
+VELK_VARYINGS_IN
+
+layout(location = 0) out uvec2 g_visibility;
+
+void velk_visual_discard();
+
+void main()
+{
+    velk_visual_discard();
+    g_visibility = uvec2(root.draw_base + 1u, (v_instance << velk_draw(root).triangle_bits) | uint(gl_PrimitiveID));
+}
+)";
+
+// The same, for a material cut out by its alpha, composed with its eval. The composer appends
+// the visual's discard snippet or an empty stub.
+[[maybe_unused]] constexpr string_view visibility_masked_fragment_template = R"(
+VELK_DRAW_DATA(root)
+
+VELK_VARYINGS_IN
+
+layout(location = 0) out uvec2 g_visibility;
+
+void velk_visual_discard();
+
+void main()
+{
+    GlobalData globals = velk_global_data(root);
+    velk_visual_discard();
+
+    EvalContext ctx;
+    ctx.material_base = velk_draw(root).material_base;
+    ctx.texture_id  = velk_draw(root).texture_id;
+    ctx.shape_param = v_shape_param;
+    ctx.uv          = v_local_uv;
+    ctx.uv1         = v_uv1;
+    ctx.base        = v_color;
+    ctx.ray_dir     = normalize(v_rel_pos);
+    ctx.normal      = v_world_normal;
+    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
+    ctx.rel_pos     = v_rel_pos;
+    ctx.tangent     = v_world_tangent;
+
+    MaterialEval e = <%EVAL_FN%>(ctx);
+    if (e.color.a < <%DISCARD%>) discard;
+
+    g_visibility = uvec2(root.draw_base + 1u, (v_instance << velk_draw(root).triangle_bits) | uint(gl_PrimitiveID));
+}
+)";
+
 // ===== Material eval-driver fragment templates =====
 // Forward and deferred fragment shaders that materials with a
 // `velk_eval_<name>` body share. The raster-pipeline composer
@@ -161,11 +217,15 @@ void main()
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;
 
-    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
-    vec3 V = normalize(-v_rel_pos);
-    float ndv = clamp(dot(N, V), 0.0, 1.0);
-    float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-    float opacity = e.color.a + fresnel * (1.0 - e.color.a);
+    // An unlit material's alpha is its opacity as it stands.
+    float opacity = e.color.a;
+    if (e.lighting_mode == VELK_LIGHTING_STANDARD) {
+        vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
+        vec3 V = normalize(-v_rel_pos);
+        float ndv = clamp(dot(N, V), 0.0, 1.0);
+        float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+        opacity = e.color.a + fresnel * (1.0 - e.color.a);
+    }
     frag_color = vec4(e.color.rgb, opacity);
 }
 )";

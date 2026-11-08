@@ -102,7 +102,7 @@ inline IGpuPipeline::Ptr compile_material_forward_pipeline_dynamic(
     src->register_includes(ctx);
     string frag = compose_eval_fragment(
         driver_template, eval_src, eval_fn,
-        mat->get_forward_discard_threshold());
+        mat->get_discard_threshold());
     PixelFormat formats[1] = {color_format};
     return ctx.pipelines().compile_dynamic(
         string_view(frag), vertex_src,
@@ -145,7 +145,7 @@ inline uint64_t forward_material_content_key(IRenderContext& ctx, const IBatch& 
     hasher.str(eval_src);
     hasher.str(vertex_src);
     hasher.str(eval_fn);
-    hasher.f32(mat->get_forward_discard_threshold());
+    hasher.f32(mat->get_discard_threshold());
     hasher.options(batch.pipeline_options());
     return hasher.key();
 }

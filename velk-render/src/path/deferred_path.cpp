@@ -90,7 +90,7 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
         PipelineContentHasher hasher(kGbufferEvalContentTag);
         hasher.str(eval_src);
         hasher.str(eval_fn);
-        hasher.f32(mat->get_deferred_discard_threshold());
+        hasher.f32(mat->get_discard_threshold());
         hasher.str(discard_def);
         hasher.str(vertex_src);
         hasher.options(po);
@@ -124,7 +124,7 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
         composed_fsrc = compose_eval_fragment(
             deferred_fragment_driver_template,
             eval_src, eval_fn,
-            mat->get_deferred_discard_threshold());
+            mat->get_discard_threshold());
         vsrc = vertex_src;
         base_fsrc = string_view(composed_fsrc);
     }
@@ -173,23 +173,41 @@ IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
 }
 
 /// The pipeline writing a batch's pixels to the visibility buffer. Only a material with an
-/// eval has a vertex shader that writes the varyings the fragment reads.
+/// eval has a vertex shader that writes the varyings the fragment reads. Everything shares
+/// one fragment shader but what is cut out, by its visual or its material's alpha.
 IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatch& batch)
 {
     auto material_ptr = batch.material();
+    auto shader_source_ptr = batch.shader_source();
+    auto* mat = material_ptr ? interface_cast<IMaterial>(material_ptr.get()) : nullptr;
     auto* src = material_ptr ? interface_cast<IShaderSource>(material_ptr.get()) : nullptr;
+    string_view eval_src;
+    string_view eval_fn;
     string_view vsrc;
-    if (src && !src->get_source(shader_role::kEval).empty()) {
+    if (mat && src) {
+        eval_src = src->get_source(shader_role::kEval);
+        eval_fn = src->get_fn_name(shader_role::kEval);
+    }
+    if (!eval_src.empty()) {
         vsrc = src->get_source(shader_role::kVertex);
     }
     if (vsrc.empty()) {
         vsrc = default_gbuffer_vertex_src;
     }
+    const string_view discard_src =
+        shader_source_ptr ? shader_source_ptr->get_source(shader_role::kDiscard) : string_view{};
+    const float threshold = !eval_src.empty() && !eval_fn.empty() ? mat->get_discard_threshold() : 0.f;
 
     PipelineOptions po = batch.pipeline_options();
     po.blend_mode = BlendMode::Opaque;
     PipelineContentHasher hasher(kVisibilityContentTag);
     hasher.str(vsrc);
+    hasher.str(discard_src);
+    hasher.f32(threshold);
+    if (threshold > 0.f) {
+        hasher.str(eval_src);
+        hasher.str(eval_fn);
+    }
     hasher.options(po);
     const uint64_t key = hasher.key();
 
@@ -198,7 +216,19 @@ IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatc
     if (auto pipeline = ctx.pipelines().find(cache_key)) {
         return pipeline;
     }
-    return ctx.pipelines().compile_dynamic(visibility_fragment_src, vsrc, key, formats, DepthFormat::Default, po);
+
+    string composed;
+    if (threshold > 0.f) {
+        composed = compose_eval_fragment(visibility_masked_fragment_template, eval_src, eval_fn, threshold);
+    } else {
+        composed.append(discard_src.empty() ? visibility_fragment_src : visibility_discard_fragment_src);
+    }
+    if (threshold > 0.f && discard_src.empty()) {
+        composed.append(string_view("void velk_visual_discard() {}\n", 30));
+    } else {
+        composed.append(discard_src);
+    }
+    return ctx.pipelines().compile_dynamic(string_view(composed), vsrc, key, formats, DepthFormat::Default, po);
 }
 
 } // namespace
@@ -306,7 +336,7 @@ uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
 uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 8); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 9); }
 
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
@@ -848,7 +878,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
-    emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
+    if (visibility_mode == 0) {
+        emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
+    }
 }
 
 void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -1105,7 +1137,7 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         {
             uint32_t ids_id, output_id, width, height, mode, gbuffer_id, resolved_id;
         };
-        const uint32_t attachment = mode >= 4u ? mode - 4u : 0u;
+        const uint32_t attachment = mode >= 4u && mode <= 8u ? mode - 4u : 0u;
         const PushC pc{vs.visibility->attachment(0),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
                        vs.visibility_size.x, vs.visibility_size.y, mode,
