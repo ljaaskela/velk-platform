@@ -414,8 +414,21 @@ R"(
 // fragment shader. It takes the name so the identifier a shader assigns to is
 // one it declared:
 //   VELK_FRAG_OUT(frag_color)
+//
+// VELK_VISIBILITY_OUT is the visibility buffer's attachments, and
+// VELK_WRITE_VISIBILITY(root) fills them: the draw record's index plus one, 0 where
+// nothing was drawn, then the draw instance and the triangle, split at the record's
+// triangle_bits, and the depth.
 R"(
 #define VELK_FRAG_OUT(Name) layout(location = 0) out vec4 Name;
+
+#define VELK_VISIBILITY_OUT                    \
+    layout(location = 0) out uvec2 g_visibility; \
+    layout(location = 1) out float g_depth;
+
+#define VELK_WRITE_VISIBILITY(root)                                                                              \
+    g_visibility = uvec2((root).draw_base + 1u, (v_instance << velk_draw(root).triangle_bits) | uint(gl_PrimitiveID)); \
+    g_depth = gl_FragCoord.z
 )";
 
 } // namespace velk

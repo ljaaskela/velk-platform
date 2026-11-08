@@ -1164,7 +1164,7 @@ void main()
 )";
 
 /// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance, 3 per
-/// triangle.
+/// triangle. Mode 4 shows the depth pyramid's fourth level.
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -1179,6 +1179,7 @@ layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint mode;
+    uint pyramid_word;
 } pc;
 
 vec3 id_color(uint id)
@@ -1194,6 +1195,17 @@ void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+
+    if (pc.mode == 4u) {
+        const uint level = 3u;
+        uint width = max(velk_culling.data[pc.pyramid_word + 1u] >> level, 1u);
+        uint height = max(velk_culling.data[pc.pyramid_word + 2u] >> level, 1u);
+        uint first = velk_culling.data[pc.pyramid_word + 3u + level];
+        uvec2 at = uvec2(coord) * uvec2(width, height) / uvec2(pc.width, pc.height);
+        float depth = uintBitsToFloat(velk_culling.data[first + at.y * width + at.x]);
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(vec3(pow(depth, 0.25)), 1.0));
+        return;
+    }
 
     uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
     vec3 color = vec3(0.0);

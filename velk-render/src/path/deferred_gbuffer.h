@@ -41,8 +41,9 @@ inline constexpr PixelFormat kGBufferFormats[static_cast<uint32_t>(GBufferAttach
     PixelFormat::RGBA16F,  // Emissive (HDR; see comment above)
 };
 
-/** @brief Format of the visibility buffer. See visibility_fragment_src. */
-inline constexpr PixelFormat kVisibilityFormats[1] = {PixelFormat::RG32UI};
+/** @brief The visibility buffer's attachments: IDs, then depth. See VELK_VISIBILITY_OUT. */
+inline constexpr uint32_t kVisibilityAttachments = 2;
+inline constexpr PixelFormat kVisibilityFormats[kVisibilityAttachments] = {PixelFormat::RG32UI, PixelFormat::R32F};
 
 /**
  * @brief Tells the compute lighting pass how to interpret a G-buffer pixel.

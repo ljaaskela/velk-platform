@@ -47,6 +47,7 @@ VkFormat vk_format_for(PixelFormat f)
         case PixelFormat::RGBA16F:    return VK_FORMAT_R16G16B16A16_SFLOAT;
         case PixelFormat::RGBA32F:    return VK_FORMAT_R32G32B32A32_SFLOAT;
         case PixelFormat::RG32UI:     return VK_FORMAT_R32G32_UINT;
+        case PixelFormat::R32F:       return VK_FORMAT_R32_SFLOAT;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -3389,8 +3390,8 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
         td.height = height;
         td.format = f;
         td.usage = desc.usage;
-        // Integer formats cannot be filtered.
-        if (f == PixelFormat::RG32UI) {
+        // These formats need not support filtering.
+        if (f == PixelFormat::RG32UI || f == PixelFormat::R32F) {
             td.sampler.mag_filter = SamplerFilter::Nearest;
             td.sampler.min_filter = SamplerFilter::Nearest;
         }

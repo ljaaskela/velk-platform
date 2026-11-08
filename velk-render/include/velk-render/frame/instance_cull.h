@@ -43,6 +43,62 @@ bool velk_instance_is_far(uint id, float area, float clip_w, mat4 vp, float heig
 }
 )"
 
+/// Words before the levels of a depth pyramid in the culling arena: the level count, the
+/// first level's width and height, then each level's first word, as many as
+/// kDepthPyramidMaxLevels. See depth_pyramid_compute_src.
+inline constexpr uint32_t kDepthPyramidMaxLevels = 15;
+inline constexpr uint32_t kDepthPyramidHeaderWords = 3 + kDepthPyramidMaxLevels;
+
+/**
+ * Fills one level of a depth pyramid in the culling arena with the farthest depth of what
+ * each of its texels covers, depth being larger for what is nearer. The first level halves
+ * the frame's depth texture, and later ones the level before.
+ */
+inline constexpr string_view depth_pyramid_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 16, std430) buffer PyramidWords { uint data[]; } pyramid_words;
+
+layout(push_constant) uniform PC {
+    uint depth_id;       // the depth texture, when source_word is 0xFFFFFFFF
+    uint source_word;
+    uint source_width;
+    uint source_height;
+    uint target_word;
+    uint width;
+    uint height;
+} pc;
+
+float read_source(ivec2 at)
+{
+    if (pc.source_word == 0xFFFFFFFFu) {
+        return texelFetch(velk_textures[nonuniformEXT(pc.depth_id)], at, 0).r;
+    }
+    return uintBitsToFloat(pyramid_words.data[pc.source_word + uint(at.y) * pc.source_width + uint(at.x)]);
+}
+
+void main()
+{
+    uvec2 id = gl_GlobalInvocationID.xy;
+    if (id.x >= pc.width || id.y >= pc.height) return;
+
+    // An odd source's last column or row belongs to the last texel, so that none is left out.
+    ivec2 last = ivec2(1 + ((pc.source_width & 1u) != 0u && id.x == pc.width - 1u ? 1 : 0),
+                       1 + ((pc.source_height & 1u) != 0u && id.y == pc.height - 1u ? 1 : 0));
+    ivec2 limit = ivec2(pc.source_width, pc.source_height) - 1;
+    float farthest = 1e30;
+    for (int y = 0; y <= last.y; ++y) {
+        for (int x = 0; x <= last.x; ++x) {
+            farthest = min(farthest, read_source(min(ivec2(id) * 2 + ivec2(x, y), limit)));
+        }
+    }
+    pyramid_words.data[pc.target_word + id.y * pc.width + id.x] = floatBitsToUint(farthest);
+}
+)";
+
 /// How far a level of detail may be from the full mesh on screen, in pixels.
 inline constexpr float kLodMaxErrorPixels = 1.f;
 

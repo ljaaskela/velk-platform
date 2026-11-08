@@ -143,6 +143,11 @@ public:
         bool visibility_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr visibility_resolve_pass;
+        /// The depth of what is drawn at decreasing sizes, in the culling arena.
+        ArenaRegion depth_pyramid;
+        uvec2 depth_pyramid_size{0, 0};
+        uint32_t depth_pyramid_levels = 0;
+        IRenderPass::Ptr depth_pyramid_pass;
         InstanceCullPass instance_cull;
         /// Instances too small to draw. A region of the frame's size per visual.
         IRenderPass::Ptr far_instance_pass;
@@ -274,6 +279,7 @@ private:
 
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
