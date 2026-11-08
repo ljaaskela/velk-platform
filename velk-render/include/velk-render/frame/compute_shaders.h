@@ -1437,10 +1437,10 @@ float velk_gi_sample(uint atlas, uint maps, int ladder, vec3 rel, vec3 cam, out 
     return total;
 }
 
-// Irradiance from the field for a surface point relative to the camera. Uses the finest
+// The field's coefficients for a surface point relative to the camera. Uses the finest
 // level holding the point, fading into the next one over the last two cells, and a coarser
-// one where probes are yet to fill in. Negative if no probe could light it.
-vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 N, vec3 cam)
+// one where probes are yet to fill in. False if no probe could light it.
+bool velk_gi_lookup(uint atlas, uint maps, int finest, vec3 world_pos, vec3 N, vec3 cam, out vec3 sh[4])
 {
     int level = 0;
     float edge = 0.0;
@@ -1453,14 +1453,13 @@ vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 
         if (edge >= 0.0) break;
     }
 
-    vec3 sh[4];
     int used = level;
     float weight = velk_gi_sample(atlas, maps, finest + used, shade_pos, cam, sh);
     while (weight <= 0.0 && used + 1 < kGiLevels) {
         ++used;
         weight = velk_gi_sample(atlas, maps, finest + used, shade_pos, cam, sh);
     }
-    if (weight <= 0.0) return vec3(-1.0);
+    if (weight <= 0.0) return false;
 
     if (used == level && used + 1 < kGiLevels && edge < 2.0) {
         vec3 outer[4];
@@ -1469,11 +1468,24 @@ vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 
             for (int c = 0; c < 4; ++c) sh[c] = mix(outer[c], sh[c], t);
         }
     }
+    return true;
+}
 
+// Irradiance from the field against a surface's normal. Negative if no probe could light it.
+vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 N, vec3 cam)
+{
+    vec3 sh[4];
+    if (!velk_gi_lookup(atlas, maps, finest, world_pos, N, cam, sh)) return vec3(-1.0);
     // Lambertian convolution of an L1 radiance SH, divided by pi, since this renderer
     // leaves 1/pi out of every light term.
     vec3 e = 0.282095 * sh[0] + 0.325735 * (sh[1] * N.y + sh[2] * N.z + sh[3] * N.x);
     return max(e, vec3(0.0));
+}
+
+vec3 velk_sh_radiance(vec3 sh[4], vec3 d)
+{
+    return 0.282095 * sh[0]
+         + 0.488603 * (sh[1] * d.y + sh[2] * d.z + sh[3] * d.x);
 }
 )"
 
@@ -1662,6 +1674,16 @@ vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
 {
     if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(0.0);
     return max(velk_gi_irradiance(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, VELK_GLOBALS.cam_pos.xyz), vec3(0.0));
+}
+
+// Light arriving from a direction, as the GI probe field knows it. Broad, since the field
+// holds only a low-order approximation. Negative if no probe could light the point.
+vec3 velk_gi_radiance(vec3 world_pos, vec3 N, vec3 dir)
+{
+    if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(-1.0);
+    vec3 sh[4];
+    if (!velk_gi_lookup(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, VELK_GLOBALS.cam_pos.xyz, sh)) return vec3(-1.0);
+    return max(velk_sh_radiance(sh, dir), vec3(0.0));
 }
 
 )";
@@ -2466,6 +2488,17 @@ void main()
         // Alpha marks "this pixel traced a ray this frame". The temporal pass
         // keeps history untouched where it is 0 rather than folding in a zero.
         irr_valid = trace_now ? 1.0 : 0.0;
+        // The environment map cannot tell whether the sky is visible along the reflection.
+        // The field can: how much of the environment's light it finds that way is how much
+        // of the sharp reflection stays, and what it finds in place of the sky fills the rest.
+        vec3 reflected = reflect(-V, N);
+        vec3 field_reflection = velk_gi_radiance(world_pos, N, reflected);
+        if (field_reflection.r >= 0.0) {
+            const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+            float env_broad = dot(env_miss_color_lod(reflected, env_max_lod), kLuma);
+            float sky_seen = env_broad > 1e-4 ? clamp(dot(field_reflection, kLuma) / env_broad, 0.0, 1.0) : 0.0;
+            env_specular = env_specular * sky_seen + field_reflection * (1.0 - sky_seen);
+        }
         // Sharp, view-dependent terms (NOT denoised).
         rest = direct_specular + F_env * env_specular;
         // Area lights are integrated in closed form, including their
@@ -3310,12 +3343,6 @@ bool velk_gi_inside_solid(RayHit hit, vec3 dir)
 // constants the surface lookup uses: that one convolves with a cosine lobe to
 // get irradiance, while a merge substitutes what the ray itself would have
 // seen.
-vec3 velk_sh_radiance(vec3 sh[4], vec3 d)
-{
-    return 0.282095 * sh[0]
-         + 0.488603 * (sh[1] * d.y + sh[2] * d.z + sh[3] * d.x);
-}
-
 // Fibonacci sphere, rotated per frame so successive frames fill the gaps
 // between directions instead of resampling the same 64.
 vec3 velk_probe_dir(uint i, uint n, float phase)
