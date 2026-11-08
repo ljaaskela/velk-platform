@@ -228,6 +228,14 @@ float velk_ray_lift = 0.0;
 // before tracing and use after: optical depth, and colour times depth.
 float velk_ray_medium_depth = 0.0;
 vec3 velk_ray_medium_color = vec3(0.0);
+#ifdef VELK_TRACE_MEDIUM
+// For a closest-hit ray entering a record whose meshes count as a medium where the ray is
+// wider than them: whether this one does, the part of the ray in view, and the colour.
+bool velk_ray_mesh_medium = false;
+float velk_ray_medium_near = 0.0;
+float velk_ray_medium_far = 0.0;
+vec3 velk_ray_mesh_color = vec3(0.0);
+#endif
 
 // How many footprints wide a node can be and still count as a medium. It varies per node
 // so that same-sized nodes do not all change over at one distance, which shows as a ring,
@@ -315,6 +323,22 @@ bool intersect_mesh(Ray ray, RtShape shape, out RayHit hit)
         BvhNode node = velk_blas_nodes.data[blas_node_base + ni];
         float t_aabb;
         if (!ray_aabb(local_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_aabb)) continue;
+
+#ifdef VELK_TRACE_MEDIUM
+        if (velk_ray_mesh_medium && (st.flags & VELK_MESH_SCATTERED) != 0u) {
+            vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
+            float widest = max(max(extent.x, extent.y), extent.z);
+            if (widest < velk_ray_footprint * ld_scale * velk_medium_reach(blas_node_base + ni)) {
+                vec3 sides = max(extent, vec3(widest * 1e-3));
+                float enter = max(t_aabb, velk_ray_medium_near * ld_scale);
+                float leave = min(min(ray_aabb_exit(local_ray, node.aabb_min.xyz, node.aabb_max.xyz), velk_ray_medium_far * ld_scale), best_t);
+                float depth = node.aabb_max.w / (sides.x * sides.y * sides.z) * max(leave - enter, 0.0);
+                velk_ray_medium_depth += depth;
+                velk_ray_medium_color += depth * velk_ray_mesh_color;
+                continue;
+            }
+        }
+#endif
 
         if (node.shape_count > 0u) {
             // Leaf: test triangles, reading the cluster's own positions.
@@ -535,6 +559,9 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
     Ray local = velk_local_ray(ray, rec);
     hit.t = t_max;
     bool found = false;
+#ifdef VELK_TRACE_MEDIUM
+    velk_ray_mesh_medium = !any_hit && velk_ray_footprint > 0.0 && (rec.flags & 2u) != 0u;
+#endif
     if (rec.tree_root == VELK_NO_TREE) {
         for (uint i = 0u; i < rec.shape_count; ++i) {
             Ray shape_ray = local;
@@ -590,9 +617,10 @@ bool velk_intersect_record(Ray ray, uint record, float t_min, float t_max, bool 
 // in aabb_max.w, 0 for one that is not made of instances, and its average colour is in
 // the bits of aabb_min.w, as unorm RGB.
 #ifdef VELK_TRACE_MEDIUM
-// How much of a wide ray gets through a mesh, in its local space. A node much narrower than
-// the ray counts as a medium, by the area under it, so a mesh costs a wide ray what the ray
-// can resolve rather than all of its triangles.
+// How much of a wide ray gets through a mesh, in its local space. In a mesh of separate pieces,
+// a node much narrower than the ray counts as a medium, by the area under it, so the mesh costs
+// a wide ray what the ray can resolve rather than all of its triangles. A solid surface would
+// let light through that way, so other meshes are tested exactly.
 float velk_mesh_visibility(Ray ray, RtShape shape, float t_max)
 {
     if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) return 1.0;
@@ -623,7 +651,7 @@ float velk_mesh_visibility(Ray ray, RtShape shape, float t_max)
         float widest = max(max(extent.x, extent.y), extent.z);
         // In the mesh's units, where its t is the world's times ld_scale.
         float footprint = velk_ray_footprint * ld_scale + velk_ray_spread * max(enter, 0.0);
-        if (widest < footprint * velk_medium_reach(blas_node_base + ni)) {
+        if ((st.flags & VELK_MESH_SCATTERED) != 0u && widest < footprint * velk_medium_reach(blas_node_base + ni)) {
             vec3 sides = max(extent, vec3(widest * 1e-3));
             float len = max(min(ray_aabb_exit(local_ray, node.aabb_min.xyz, node.aabb_max.xyz), limit) - enter, 0.0);
             visibility *= exp(-node.aabb_max.w / (sides.x * sides.y * sides.z) * len);
@@ -775,8 +803,11 @@ bool trace_closest_hit_medium(Ray ray, float t_min, float t_max, inout RayHit hi
                 continue;
             }
         }
+        velk_ray_mesh_color = unpackUnorm4x8(floatBitsToUint(node.aabb_min.w)).rgb;
+        velk_ray_medium_near = t_min;
         for (uint i = 0u; i < node.shape_count; ++i) {
             RayHit h;
+            velk_ray_medium_far = hit.t;
             if (velk_intersect_record(ray, node.first_shape + i, t_min, hit.t, false, h)) {
                 hit = h;
             }

@@ -203,6 +203,7 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     // global vertex indices in our gltf-imported meshes, so the vertex run starts
     // at the region base itself.
     out.vbo_base = get_gpu_ref(buffer_).get_base();
+    out.flags = merge_pieces_ ? kMeshStaticScattered : 0u;
     out.triangle_count = index_count_ / 3;
     out.vertex_stride = vertex_stride_;
     out.blas_root = rt_blas_.root_index;

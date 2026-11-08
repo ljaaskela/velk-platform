@@ -71,7 +71,7 @@ struct BvhNode {
 R"(
 struct MeshStaticData {
     uint     vbo_base;        // word base of this primitive's first vertex in velk_mesh_words
-    uint     _pad0;
+    uint     flags;           // VELK_MESH_SCATTERED: wide rays may count parts of it as a medium
     uint     triangle_count;
     uint     vertex_stride;   // bytes per vertex, from the primitive (48 for VelkVertex3D)
     uint     blas_root;       // root index within this primitive's BLAS node run
@@ -103,6 +103,7 @@ struct RtRecord {
 // gpu_data.h.
 R"(
 #define VELK_INVALID_MESH_STATIC 0xFFFFFFFFu
+#define VELK_MESH_SCATTERED 1u
 )"
 // Every mesh's VBO + IBO bytes as raw 32-bit words (set = 1 slot 14). Both
 // paths read geometry from here: RT walks it by triangle, raster fetches the
