@@ -30,6 +30,7 @@ public:
     bool init(void* params) override;
     void shutdown() override;
     void wait_idle() override;
+    bool supports_primitive_id() const override { return primitive_id_supported_; }
     uint64_t frame_completion_marker() const override;
     void wait_for_frame_completion(uint64_t marker) override;
     uint64_t pending_frame_completion_marker() const override;
@@ -387,6 +388,7 @@ private:
     // present_surface_id, present_acquire_sem_idx moved into FrameSync.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame (debug flag only).
     bool device_fault_supported_ = false; ///< VK_EXT_device_fault is enabled.
+    bool primitive_id_supported_ = false; ///< The device's geometryShader feature is enabled.
     bool device_lost_ = false;            ///< A lost device has already been reported.
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 

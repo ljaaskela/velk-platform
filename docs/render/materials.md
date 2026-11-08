@@ -73,9 +73,8 @@ Shader includes are registered via `IRenderContext::shaders().register_include()
 - `velk_vertex3d(root)` / `velk_uv1(root)`: fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
 - `VELK_INSTANCES(Type)` / `velk_instance(root)`: declare the set = 1 instance arena as `Type` and read this draw's instance by index.
 - `VELK_MATERIAL(Type)` / `velk_material(root)`: declare the set = 1 material arena as `Type` and read this draw's material record by index (for full custom fragment shaders / ShaderMaterial).
-- `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`: the eight varyings `element_vertex_src` writes and every composed fragment driver reads (`v_color`, `v_local_uv`, `v_size`, `v_world_pos`, `v_world_normal`, `v_shape_param`, `v_uv1`, `v_world_tangent`). Declare all of them even when the shader ignores some, so the stage interfaces match.
+- `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`: the ten varyings `element_vertex_src` writes and every composed fragment driver reads (`v_color`, `v_local_uv`, `v_size`, `v_rel_pos`, `v_world_normal`, `v_shape_param`, `v_uv1`, `v_world_tangent`, `v_lod_error`, `v_instance`). Declare all of them even when the shader ignores some, so the stage interfaces match.
 - `VELK_FRAG_OUT(Name)`: single-target colour output at location 0. Takes the name so the identifier a shader assigns to is one it declared.
-- `VELK_GBUFFER_OUT`: the five deferred G-buffer attachments, in render-target-group order.
 - `velk_texture(id, uv)`: bindless texture sample helper.
 - `BvhNode`, `RtRecord`, `RtShape`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
 
@@ -86,6 +85,7 @@ Shader includes are registered via `IRenderContext::shaders().register_include()
 - `VELK_LOAD_MATERIAL(Type, ctx)`: reads this shading point's material record. Pairs with the `VELK_MATERIAL(Type)` declaration; see [Eval bodies](#eval-bodies).
 - `MaterialEval`: the canonical eval output, carrying `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`.
 - `velk_default_material_eval()`: returns a `MaterialEval` pre-filled with spec-correct defaults; eval bodies build on top so new fields get sensible values without every material tracking them.
+- `VelkVaryings` / `velk_default_varyings(v, inst, globals)`: what a vertex gives the surface, and the standard way to compute it. See [Moving vertices](#moving-vertices).
 
 Other modules can register their own includes. The text plugin registers `velk_text.glsl` (curve/band/glyph buffers + coverage sampling); application code can add its own via `IRenderContext::shaders().register_include()`.
 
@@ -100,17 +100,35 @@ The UI renderer registers default vertex and fragment shaders via `IRenderContex
 | 0 | `v_color` | vec4, the instance colour |
 | 1 | `v_local_uv` | vec2, 0..1 across the shape |
 | 2 | `v_size` | vec2, flat, the instance extents |
-| 3 | `v_world_pos` | vec3, world-space position |
+| 3 | `v_rel_pos` | vec3, position relative to the camera |
 | 4 | `v_world_normal` | vec3, world-space normal |
 | 5 | `v_shape_param` | uint, flat, `params[0]` (glyph index, ...) |
 | 6 | `v_uv1` | vec2, TEXCOORD_1, or `v_local_uv` when the primitive has none |
 | 7 | `v_world_tangent` | vec4, world-space tangent + handedness |
+| 8 | `v_lod_error` | float, flat, how far the surface may be from the full mesh, in world units |
+| 9 | `v_instance` | uint, flat, the draw instance |
 
 A fragment shader declares the matching `VELK_VARYINGS_IN`, including the entries it ignores, so the stage interfaces line up.
 
 **Default fragment shader**: passes through `v_color` as a solid fill.
 
 Most materials only need to provide a fragment shader. The default vertex shader handles quad positioning, color, and UV passthrough.
+
+## Moving vertices
+
+A material that moves its vertices supplies a function under `shader_role::kVertexFunction`, named by `get_fn_name`. The deferred path calls it for each corner of a pixel's triangle, as well as in the vertex shader, so the surface it shades is where the vertices went.
+
+```glsl
+VelkVaryings velk_vertex_sway(VelkVertex3D v, ElementInstance inst, GlobalData globals)
+{
+    v.position.x += sin(float(globals.present_counter) / 60.0) * v.position.y * 0.1;
+    return velk_default_varyings(v, inst, globals);
+}
+```
+
+The material returns `ext::velk_vertex_shader_with(function, "velk_vertex_sway")` under `shader_role::kVertex`, which builds the vertex shader around that function. A material class has one vertex function.
+
+A full vertex shader under `shader_role::kVertex` with no vertex function still works in forward. In deferred, its surface is shaded from the unmoved vertices.
 
 ## Shader cache
 
@@ -294,7 +312,7 @@ A material's shading logic is a single GLSL function:
 MaterialEval velk_eval_my_material(EvalContext ctx);
 ```
 
-The framework composes the full forward fragment shader, the deferred G-buffer shader, and the ray-trace fill shader around this one body.
+The framework composes the full forward fragment shader, the deferred material resolve, and the ray-trace fill shader around this one body.
 
 `EvalContext` carries everything the body might need: the material record (reached via `VELK_LOAD_MATERIAL`, backed by `material_base` on every path), `texture_id`, `shape_param`, `uv`, `uv1`, `base` (instance tint), `ray_dir`, `normal`, `hit_pos`, `tangent`. `MaterialEval` is the canonical output: `color`, `normal`, `metallic`, `roughness`, `emissive`, `occlusion`, specular fields, `lighting_mode`. Both types come from the `velk-ui.glsl` include and are documented in that file.
 
@@ -323,7 +341,9 @@ MaterialEval velk_eval_my_material(EvalContext ctx)
 }
 ```
 
-An eval body defines this one function and nothing else. The driver templates supply `main()` and convert the returned `MaterialEval` into the output each path expects: `frag_color` in forward, the G-buffer attachments in deferred, a `BrdfSample` in the ray-trace fill.
+An eval body defines this one function and nothing else. The driver templates supply `main()` and convert the returned `MaterialEval` into the output each path expects: `frag_color` in forward, the G-buffer textures in deferred, a `BrdfSample` in the ray-trace fill.
+
+What `color.a` means depends on the material's alpha mode. When blended, it is the opacity. When opaque, it is ignored. In `AlphaMode::Mask`, pixels below `alpha_cutoff` are cut out. A material with no `IMaterialOptions` attached is blended.
 
 The material record is reached through two macros so one eval body works in every path: declare the record as a plain `struct`, follow it with `VELK_MATERIAL(Type)`, and load it with `VELK_LOAD_MATERIAL(Type, ctx)`. Both paths read the same `set = 1` material arena, but they get there differently:
 

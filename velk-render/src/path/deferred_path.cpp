@@ -691,6 +691,16 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     if (render_view.width <= 0 || render_view.height <= 0) return;
 
+    if (!ctx.backend->supports_primitive_id()) {
+        if (!forward_fallback_) {
+            forward_fallback_ = instance().create<IRenderPath>(ClassId::Path::Forward);
+        }
+        if (forward_fallback_) {
+            forward_fallback_->build_passes(entry, render_view, color_target, ctx, graph);
+        }
+        return;
+    }
+
     auto [it, inserted] = view_states_.try_emplace(&entry);
     auto& vs = it->second;
     if (inserted) {
@@ -1568,8 +1578,11 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
     }
 }
 
-void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
+void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& ctx)
 {
+    if (forward_fallback_) {
+        forward_fallback_->on_view_removed(entry, ctx);
+    }
     auto it = view_states_.find(&entry);
     if (it == view_states_.end()) return;
     entry.remove_render_state_observer(this);
@@ -1578,8 +1591,12 @@ void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
     view_states_.erase(it);
 }
 
-void DeferredPath::shutdown(FrameContext& /*ctx*/)
+void DeferredPath::shutdown(FrameContext& ctx)
 {
+    if (forward_fallback_) {
+        forward_fallback_->shutdown(ctx);
+        forward_fallback_ = nullptr;
+    }
     for (auto& [view, _] : view_states_) {
         view->remove_render_state_observer(this);
     }

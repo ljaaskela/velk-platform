@@ -22,25 +22,19 @@
 namespace velk {
 
 /**
- * @brief Deferred shading path: G-buffer fill + compute lighting + blit.
+ * @brief Deferred shading path: visibility buffer + material resolve +
+ *        compute lighting + blit.
  *
- * Two-stage pipeline collapsed into a single IRenderPath since one
- * camera attaches one path. Per view we:
+ * Per view:
  *
- *   1. Rebuild raster batches if the scene's visual set changed.
- *   2. Allocate / resize the per-view G-buffer (multi-attachment
- *      render target group) and emit a `PassKind::GBufferFill` pass
- *      that fills albedo / normal / world-pos / material-params.
- *   3. Allocate / resize the deferred output storage texture and the
- *      RT-shadow debug texture.
- *   4. Compose a compute pipeline for the active intersect-snippet
- *      set, look up G-buffer attachments, gather lights + env, and
- *      emit a `PassKind::ComputeBlit` pass that shades into the
- *      output texture and blits to the view surface.
+ *   1. A raster pass writes which triangle each pixel shows, and depth.
+ *   2. A compute pass evaluates each pixel's material from that, filling
+ *      the G-buffer's albedo / normal / position / material / emissive.
+ *   3. A compute pass shades the G-buffer into the output texture, which
+ *      is blitted to the view surface.
  *
- * The two stages share per-view state (batches, gbuffer_group,
- * deferred_output_tex, shadow_debug_tex) via the
- * `ViewState` struct.
+ * On a device that cannot read gl_PrimitiveID, the view is drawn by a
+ * forward path instead.
  */
 class DeferredPath : public ext::RenderPath<DeferredPath, IRenderStateObserver>
 {
@@ -201,6 +195,8 @@ public:
 
 private:
     std::unordered_map<IViewEntry*, ViewState> view_states_;
+    /// Draws the views on a device that cannot read gl_PrimitiveID.
+    IRenderPath::Ptr forward_fallback_;
 
     /// LTC lookup for analytic area-light specular (Heitz et al. 2016). The
     /// fit depends only on roughness and view angle, never on the scene, so

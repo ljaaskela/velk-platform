@@ -114,7 +114,7 @@ This is the single mechanism for getting all data to the GPU: frame globals, ins
 
 The texture id can be used in any shader and any draw call. The backend manages the descriptor array internally.
 
-**Render target groups** bundle N color attachments + an optional depth into one allocation unit. Used by the deferred G-buffer path: producers ask the group for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. The group is a producer-side wrapper, not a backend concept; there is no group-aware `begin_pass` overload.
+**Render target groups** bundle N color attachments + an optional depth into one allocation unit. `TextureGroupDesc::usage` makes the attachments color targets or storage textures filled from compute; the deferred path uses one of each. Producers rasterizing into a group ask it for its color/depth `IGpuTexture*`s and pass them straight into `record_begin_rendering`. The group is a producer-side wrapper, not a backend concept; there is no group-aware `begin_pass` overload.
 
 **Pipelines** link shaders plus rasterizer state. Pipelines are compiled against dynamic-rendering attachment formats, never against an explicit render pass:
 
@@ -359,7 +359,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 
 | Include | Source | Provides |
 |--|--|--|
-| `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`, `VELK_FRAG_OUT(Name)`, `VELK_GBUFFER_OUT`, `velk_texture(id, uv)`, BVH / RT / mesh types and their accessors |
+| `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`, `VELK_FRAG_OUT(Name)`, `velk_texture(id, uv)`, BVH / RT / mesh types and their accessors |
 | `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
 Modules can register additional includes via `IRenderContext::shaders().register_include()`; the text plugin registers `velk_text.glsl` for glyph coverage sampling.

@@ -102,7 +102,7 @@ The `env:` URI prefix routes through the environment decoder, which loads the HD
 
 ## The deferred lighting path
 
-Lighting is evaluated in the deferred path. After the G-buffer is filled (albedo, normal, world position, material parameters, emissive), a compute pass shades every pixel. The shading is built to keep cost independent of the number of lights:
+Lighting is evaluated in the deferred path. A raster pass writes which triangle each pixel shows, and a compute pass evaluates each pixel's material to fill the G-buffer (albedo, normal, position, material parameters, emissive). Another compute pass then shades every pixel. The deferred path needs the device's `geometryShader` feature, for `gl_PrimitiveID`; on a device without it, views using this path are drawn forward instead. The shading is built to keep cost independent of the number of lights:
 
 1. **Direct lighting.** For each pixel, one light is importance-sampled (weighted by its contribution) and a **single** soft shadow ray is traced for it, then weighted to give an unbiased estimate of all lights' contribution. So the shadow-ray cost is **one ray per pixel regardless of how many lights the scene has**: twenty lights cost the same as one. Specular is evaluated analytically for all lights.
 2. **Ambient / IBL.** The environment supplies a diffuse irradiance term (modulated by ray-traced ambient occlusion) and a roughness-scaled specular reflection.

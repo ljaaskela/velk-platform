@@ -626,7 +626,10 @@ bool VkBackend::create_device()
     // Lets fragment shaders read gl_PrimitiveID, for the visibility buffer.
     VkPhysicalDeviceFeatures available{};
     vkGetPhysicalDeviceFeatures(physical_device_, &available);
-    features2.features.geometryShader = available.geometryShader;
+    // VELK_NO_PRIMITIVE_ID=1 acts as a device without it, to exercise the fallback.
+    const char* no_primitive_id = std::getenv("VELK_NO_PRIMITIVE_ID");
+    primitive_id_supported_ = available.geometryShader == VK_TRUE && !(no_primitive_id && no_primitive_id[0] == '1');
+    features2.features.geometryShader = primitive_id_supported_ ? VK_TRUE : VK_FALSE;
     features2.pNext = &features12;
 
     if (!check_required_features(features12, dynamic_rendering)) {
