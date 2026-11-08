@@ -12,6 +12,7 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_draw_data.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
+#include <velk-render/interface/intf_frame_snippet_registry.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/material/intf_material_internal.h>
@@ -57,7 +58,9 @@ inline void emit_draw_calls(
     IBuffer* default_uv1,
     uint32_t view_globals_base,
     ResolvePipelineFn resolve_pipeline,
-    const ::velk::render::Frustum* frustum = nullptr)
+    const ::velk::render::Frustum* frustum = nullptr,
+    IFrameSnippetRegistry* snippets = nullptr,
+    const FrameResolveContext* resolve_ctx = nullptr)
 {
     VELK_PERF_SCOPE("renderer.emit_draw_calls");
 
@@ -126,6 +129,7 @@ inline void emit_draw_calls(
         // cached because growth replaces the backing buffer.
         IGpuBuffer* ibo_gb = nullptr;
         size_t ibo_offset = 0;
+        uint32_t index_base = kNoVisibleList;
         if (buffer->get_ibo_size() > 0) {
             const GpuRef geometry = get_gpu_ref(buffer);
             if (geometry.kind != GpuRef::Kind::Index) continue;
@@ -134,6 +138,7 @@ inline void emit_draw_calls(
             ibo_gb = arena->buffer();
             if (!ibo_gb) continue;
             ibo_offset = size_t(geometry.get_base()) * 4u + buffer->get_ibo_offset();
+            index_base = static_cast<uint32_t>(ibo_offset / 4u);
         }
 
         DrawDataHeader header{};
@@ -150,6 +155,10 @@ inline void emit_draw_calls(
         while (header.triangle_bits < 31u && (uint64_t(1) << header.triangle_bits) < triangles) {
             ++header.triangle_bits;
         }
+        header.index_base = cull_info.cluster_count != 0 ? cull_info.cluster_index_word : index_base;
+        header.cluster_first_base = cull_info.cluster_count != 0
+            ? cull_info.cluster_errors_word + cull_info.cluster_capacity
+            : kNoVisibleList;
         // Vertex streams are word bases into the mesh-word arena, the same
         // bytes and the same model RT reads.
         const GpuRef vbo_ref = get_gpu_ref(buffer);
@@ -176,6 +185,11 @@ inline void emit_draw_calls(
         // shader adds to reach velk_materials.data[material_base]. Materials
         // with no draw data (record size 0) get base 0.
         auto material_ptr = batch.material();
+        if (snippets && resolve_ctx && material_ptr) {
+            const auto ref = snippets->resolve_material(material_ptr.get(), *resolve_ctx);
+            header.material_id = ref.mat_id;
+            header.material_words = ref.mat_base;
+        }
         if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
             if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
                 const size_t rec = dd->get_draw_data_size();

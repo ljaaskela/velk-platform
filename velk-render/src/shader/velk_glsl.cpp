@@ -321,8 +321,12 @@ struct VelkDrawData {
     uint material_base;
     uint lod_error_base;
     uint triangle_bits;
+    uint material_id;
+    uint material_words;
+    uint index_base;
+    uint cluster_first_base;
+    uint _pad_draw0;
     uint _pad_draw1;
-    uint _pad_draw2;
 };
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;

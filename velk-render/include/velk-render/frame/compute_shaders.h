@@ -987,8 +987,135 @@ inline string velk_with_trace_medium(string_view source)
     return out;
 }
 
+/**
+ * Fills the G-buffer from the visibility buffer: for each pixel, finds its triangle, where
+ * the view ray meets it, and what the material gives there. Goes after compose_rt_compute's
+ * shared body, whose push constants it borrows.
+ */
+inline constexpr string_view visibility_resolve_main_src = R"(
+layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
+
+#define RESOLVE_IDS pc.extras.x
+#define RESOLVE_WIDTH pc.extras.y
+#define RESOLVE_HEIGHT pc.extras.z
+#define RESOLVE_ALBEDO pc.extras.w
+#define RESOLVE_NORMAL pc.env.x
+#define RESOLVE_POSITION pc.env.y
+#define RESOLVE_MATERIAL pc.env.z
+#define RESOLVE_EMISSIVE pc.env.w
+
+struct ResolveVertex {
+    vec3 rel;
+    vec3 normal;
+    vec2 uv;
+    vec2 uv1;
+    vec4 tangent;
+};
+
+ResolveVertex resolve_vertex(VelkDrawData d, ElementInstance inst, GlobalData g, uint index)
+{
+    VelkVertex3D v = velk_unpack_vertex3d(d.vbo_base + index * VELK_VERTEX3D_WORDS);
+    ResolveVertex r;
+    r.rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, g);
+    r.normal = normalize(mat3(inst.world_matrix) * v.normal);
+    r.uv = v.uv;
+    r.uv1 = vec2(velk_vertex_word(d.uv1_base, d.uv1_enabled * index * 2u),
+                 velk_vertex_word(d.uv1_base, d.uv1_enabled * index * 2u + 1u));
+    r.tangent = vec4(mat3(inst.world_matrix) * v.tangent.xyz, v.tangent.w);
+    return r;
+}
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(RESOLVE_WIDTH) || coord.y >= int(RESOLVE_HEIGHT)) return;
+
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(RESOLVE_IDS)], coord, 0).xy;
+    if (ids.x == 0u) {
+        imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(0.0));
+        imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(0.0));
+        imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(0.0));
+        return;
+    }
+
+    VelkDrawData d = velk_draw_data.data[ids.x - 1u];
+    uint triangle = ids.y & ((1u << d.triangle_bits) - 1u);
+    uint position = ids.y >> d.triangle_bits;
+    uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+    ElementInstance inst = velk_instances.data[d.instances_base + slot];
+    GlobalData g = velk_globals.data[d.globals_base];
+
+    // A triangle strip's triangles start one vertex apart.
+    uvec3 corners = uvec3(triangle) + uvec3(0u, 1u, 2u);
+    if (d.index_base != VELK_NO_VISIBLE_LIST) {
+        uint first = d.cluster_first_base == VELK_NO_VISIBLE_LIST ? 0u : velk_culling.data[d.cluster_first_base + position];
+        uint word = d.index_base + first + triangle * 3u;
+        corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+    }
+    ResolveVertex v0 = resolve_vertex(d, inst, g, corners.x);
+    ResolveVertex v1 = resolve_vertex(d, inst, g, corners.y);
+    ResolveVertex v2 = resolve_vertex(d, inst, g, corners.z);
+
+    // A ray rather than dividing by each corner's w, which fails for corners behind the
+    // camera. It starts on the near plane so that it also suits orthographic views.
+    vec2 ndc = (vec2(coord) + 0.5) / vec2(float(RESOLVE_WIDTH), float(RESOLVE_HEIGHT)) * 2.0 - 1.0;
+    vec4 near_point = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec4 far_point = g.inverse_view_projection * vec4(ndc, 1e-4, 1.0);
+    vec3 origin = near_point.xyz / near_point.w;
+    vec3 dir = normalize(far_point.xyz / far_point.w - origin);
+
+    vec3 e1 = v1.rel - v0.rel;
+    vec3 e2 = v2.rel - v0.rel;
+    vec3 h = cross(dir, e2);
+    float det = dot(e1, h);
+    vec3 weights = vec3(1.0 / 3.0);
+    vec3 rel = v0.rel * weights.x + v1.rel * weights.y + v2.rel * weights.z;
+    if (abs(det) > 0.0) {
+        vec3 s = origin - v0.rel;
+        vec3 q = cross(s, e1);
+        float b1 = dot(s, h) / det;
+        float b2 = dot(dir, q) / det;
+        weights = vec3(1.0 - b1 - b2, b1, b2);
+        // Along the ray, so that imprecision in a large triangle's weights only moves
+        // the point towards or away from the camera.
+        rel = origin + dir * (dot(e2, q) / det);
+    }
+
+    vec3 normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
+
+    EvalContext ctx;
+    ctx.material_base = d.material_words;
+    ctx.texture_id = d.texture_id;
+    ctx.shape_param = inst.params.x;
+    ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
+    ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
+    ctx.base = inst.color;
+    ctx.ray_dir = normalize(rel);
+    ctx.normal = normal;
+    ctx.hit_pos = rel + g.cam_pos.xyz;
+    ctx.rel_pos = rel;
+    ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
+
+    MaterialEval e = velk_eval_material(d.material_id, ctx);
+    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : normal);
+    float lod_error = d.lod_error_base == VELK_NO_VISIBLE_LIST
+        ? 0.0
+        : uintBitsToFloat(velk_culling.data[d.lod_error_base + position]);
+
+    imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, e.color);
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(N, lod_error));
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, 0.0));
+    imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
+               vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0));
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
+}
+)";
+
 /// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance, 3 per
-/// triangle.
+/// triangle. Modes 4 to 8 show how far the resolve is from the G-buffer's albedo, normal,
+/// position, material or emissive, magnified.
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -1003,6 +1130,8 @@ layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint mode;
+    uint gbuffer_id;
+    uint resolved_id;
 } pc;
 
 vec3 id_color(uint id)
@@ -1018,6 +1147,13 @@ void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+
+    if (pc.mode >= 4u) {
+        vec4 expected = texelFetch(velk_textures[nonuniformEXT(pc.gbuffer_id)], coord, 0);
+        vec4 resolved = texelFetch(velk_textures[nonuniformEXT(pc.resolved_id)], coord, 0);
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(abs(expected.rgb - resolved.rgb) * 16.0, 1.0));
+        return;
+    }
 
     uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
     vec3 color = vec3(0.0);
@@ -3558,6 +3694,29 @@ inline string compose_rt_compute(const IFrameSnippetRegistry& snippets,
     // it calls) and before velk_resolve_fill (which calls it for Lit
     // materials).
     src += rt_pbr_shade_src;
+
+    // velk_eval_material: dispatch by material id, without shading.
+    append_literal("MaterialEval velk_eval_material(uint mid, EvalContext ctx) {\n");
+    append_literal("    switch (mid) {\n");
+    for (auto id : material_ids) {
+        if (id == 0 || id > material_info.size()) continue;
+        const auto& mi = material_info[id - 1];
+        int n = std::snprintf(buf, sizeof(buf), "        case %uu: return ", id);
+        if (n > 0) {
+            src += string_view(static_cast<const char*>(buf), static_cast<size_t>(n));
+        }
+        src += mi.fn_name;
+        append_literal("(ctx);\n");
+    }
+    append_literal("        default: {"
+                   " MaterialEval e = velk_default_material_eval();"
+                   " e.color = ctx.base;"
+                   " e.normal = ctx.normal;"
+                   " e.roughness = 0.5;"
+                   " e.lighting_mode = VELK_LIGHTING_STANDARD;"
+                   " return e; }\n");
+    append_literal("    }\n");
+    append_literal("}\n");
 
     // velk_resolve_fill: dispatch by material id; route Lit through
     // velk_pbr_shade and Unlit straight to emission.

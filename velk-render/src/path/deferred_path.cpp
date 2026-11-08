@@ -306,7 +306,7 @@ uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
 uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 3); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 8); }
 
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
@@ -821,6 +821,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (visibility_mode != 0) {
         emit_visibility_pass(vs, render_view, ctx, graph);
     }
+    if (visibility_mode >= 4) {
+        emit_visibility_resolve_pass(vs, render_view, ctx, graph);
+    }
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
     emit_gi_measure_pass(vs, ctx, graph);
@@ -876,6 +879,7 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                 return raw;
             };
             vector<DrawCall> gbuffer_draw_calls;
+            const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
             emit_draw_calls(
                 gbuffer_draw_calls,
                 *render_view.batches,
@@ -884,7 +888,9 @@ void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
                 default_uv1,
                 render_view.view_globals_base,
                 resolve,
-                render_view.has_frustum ? &render_view.frustum : nullptr);
+                render_view.has_frustum ? &render_view.frustum : nullptr,
+                ctx.snippets,
+                &resolve_ctx);
 
             rect viewport{0, 0,
                           static_cast<float>(vs.gbuffer_size.x),
@@ -957,9 +963,10 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
                 return raw;
             };
             vector<DrawCall> draw_calls;
+            const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
             emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_uv1,
                             render_view.view_globals_base, resolve,
-                            render_view.has_frustum ? &render_view.frustum : nullptr);
+                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx);
 
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;
@@ -982,6 +989,93 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             rec.cmd = std::move(cmd);
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
         });
+}
+
+void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
+                                                IRenderGraph& graph)
+{
+    if (!vs.visibility || !render_view.batches || !ctx.snippets) return;
+
+    // The frame's list of materials decides which evals the shader composes.
+    const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
+    for (const auto& batch : *render_view.batches) {
+        if (batch && batch->material() && batch->pipeline_options().blend_mode != BlendMode::Alpha) {
+            ctx.snippets->resolve_material(batch->material().get(), resolve_ctx);
+        }
+    }
+
+    constexpr uint32_t kCount = static_cast<uint32_t>(GBufferAttachment::Count);
+    if (vs.resolved_size != vs.visibility_size || !vs.resolved[0]) {
+        for (uint32_t i = 0; i < kCount; ++i) {
+            TextureDesc td{};
+            td.width = static_cast<int>(vs.visibility_size.x);
+            td.height = static_cast<int>(vs.visibility_size.y);
+            td.format = kGBufferFormats[i];
+            td.usage = TextureUsage::Storage;
+            vs.resolved[i] = graph.resources().create_render_texture(td);
+            if (!vs.resolved[i]) return;
+        }
+        vs.resolved_size = vs.visibility_size;
+    }
+
+    constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
+    constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
+    uint64_t key = kFnvBasis ^ 0x5649'53526573ULL;
+    for (auto id : ctx.snippets->frame_materials()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    for (auto id : ctx.snippets->frame_shadow_techs()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    for (auto id : ctx.snippets->frame_intersects()) {
+        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    }
+    key |= 0x1000000000000000ULL;
+    auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+    if (!pipeline) {
+        pipeline = ctx.render_ctx->pipelines().compile_compute(
+            string_view(compose_rt_compute(*ctx.snippets, visibility_resolve_main_src)), key);
+    }
+    if (!pipeline) return;
+
+    const auto handle = [&](GBufferAttachment a) {
+        return static_cast<uint32_t>(vs.resolved[static_cast<uint32_t>(a)]->get_gpu_handle(GpuResourceKey::Default));
+    };
+    struct PushC
+    {
+        uint32_t shapes_base, globals_base, light_count, lights_base;
+        float env_params[2];
+        uint32_t extras[4];
+        uint32_t env[4];
+    };
+    const PushC pc{0u, render_view.view_globals_base, 0u, 0u, {0.f, 0.f},
+                   {vs.visibility->attachment(0), vs.visibility_size.x, vs.visibility_size.y, handle(GBufferAttachment::Albedo)},
+                   {handle(GBufferAttachment::Normal), handle(GBufferAttachment::WorldPos),
+                    handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.visibility_resolve_pass, dirty, "deferred.resolve", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
+        dc.groups_y = (vs.visibility_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: visibility resolve");
+        cmd->record_dispatch(dc);
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        for (uint32_t i = 0; i < kCount; ++i) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.resolved[i]));
+        }
+        rec.held.push_back(std::move(pipeline));
+    });
 }
 
 void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
@@ -1009,11 +1103,14 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (!cmd) return;
         struct PushC
         {
-            uint32_t ids_id, output_id, width, height, mode;
+            uint32_t ids_id, output_id, width, height, mode, gbuffer_id, resolved_id;
         };
+        const uint32_t attachment = mode >= 4u ? mode - 4u : 0u;
         const PushC pc{vs.visibility->attachment(0),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-                       vs.visibility_size.x, vs.visibility_size.y, mode};
+                       vs.visibility_size.x, vs.visibility_size.y, mode,
+                       vs.gbuffer->attachment(attachment),
+                       vs.resolved[attachment] ? static_cast<uint32_t>(vs.resolved[attachment]->get_gpu_handle(GpuResourceKey::Default)) : 0u};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
@@ -1034,6 +1131,10 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        if (vs.resolved[attachment]) {
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.resolved[attachment]));
+        }
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

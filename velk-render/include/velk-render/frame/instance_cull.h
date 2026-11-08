@@ -298,7 +298,7 @@ void main()
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
  * use gets an indexed command, instanced over its own run of the list, so that instances
  * using the same cluster share a draw. An entry is 10 words: the word of the list, which
- * is followed by each position's surface error, its capacity, the word of the cluster table
+ * is followed by each position's surface error and its cluster's first index, its capacity, the word of the cluster table
  * (kLodClusterWords words per cluster, starting with the cluster's first index and triangle
  * count), the cluster count, the words of the counts, the cursors and the commands, one of
  * each per cluster, how many commands are in use, and the word of its levels and how many.
@@ -392,6 +392,7 @@ void main()
         uint list = cull_words.data[entry];
         cull_words.data[list + at] = cull_words.data[record + 2u];
         cull_words.data[list + capacity + at] = cull_words.data[record + 3u];
+        cull_words.data[list + capacity * 2u + at] = cull_words.data[cull_words.data[entry + 2u] + cull_words.data[record + 1u] * 13u];
     }
 }
 )";

@@ -121,7 +121,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
                 // A coarser choice uses fewer clusters than the full mesh.
                 const auto capacity = static_cast<uint32_t>(std::min(uint64_t(instances) * lod.level0_clusters, kMaxClusterRuns));
                 pending.push_back({m, primitive.get(), lod, capacity});
-                words += kClusterEntryWords + uint64_t(lod.cluster_count) * kClusterWords + uint64_t(capacity) * 2u;
+                words += kClusterEntryWords + uint64_t(lod.cluster_count) * kClusterWords + uint64_t(capacity) * 3u;
             }
         };
         if (!instance_source_) {
@@ -232,7 +232,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         const uint32_t commands_word = cursors_word + clusters;
         const uint32_t list_word = commands_word + clusters * 5u;
         const uint32_t errors_word = list_word + draw.capacity;
-        next_list = errors_word + draw.capacity;
+        // Each position has its surface error, then its cluster's first index.
+        next_list = errors_word + draw.capacity * 2u;
 
         vector<uint32_t> zeros;
         zeros.resize(clusters, 0u);

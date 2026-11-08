@@ -96,10 +96,14 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
     uint32_t lod_error_base;    ///< Word base in the culling arena of how far each draw instance's surface may be from the full mesh, in world units, or kNoVisibleList when it is the full mesh.
     uint32_t triangle_bits;     ///< Low bits of a visibility ID's second word that hold the triangle. The rest hold the draw instance.
+    uint32_t material_id;       ///< Which material eval the visibility resolve calls, 0 for the default.
+    uint32_t material_words;    ///< Word base of the material's record, as compute reads it.
+    uint32_t index_base;        ///< Word base of the draw's indices in the mesh-word arena, or kNoVisibleList when it has none.
+    uint32_t cluster_first_base;///< Word base in the culling arena of each list position's cluster's first index, or kNoVisibleList when not drawn by cluster.
     uint32_t _pad[2];
 };
 
-static_assert(sizeof(DrawDataHeader) == 48, "DrawDataHeader must be 48 bytes for std430 alignment");
+static_assert(sizeof(DrawDataHeader) == 64, "DrawDataHeader must be 64 bytes for std430 alignment");
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.

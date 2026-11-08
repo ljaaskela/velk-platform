@@ -5,6 +5,7 @@
 
 #include <unordered_map>
 
+#include "path/deferred_gbuffer.h"
 #include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
@@ -154,6 +155,10 @@ public:
         IRenderPass::Ptr cached_visibility_pass;
         bool visibility_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
+        /// What the visibility resolve wrote, one per G-buffer attachment.
+        IRenderTarget::Ptr resolved[static_cast<uint32_t>(GBufferAttachment::Count)];
+        uvec2 resolved_size{0, 0};
+        IRenderPass::Ptr visibility_resolve_pass;
         InstanceCullPass instance_cull;
         /// Instances too small to draw. A region of the frame's size per visual.
         IRenderPass::Ptr far_instance_pass;
@@ -286,6 +291,7 @@ private:
                                      IRenderGraph& graph);
 
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
