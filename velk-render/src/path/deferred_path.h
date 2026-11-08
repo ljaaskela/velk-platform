@@ -82,8 +82,7 @@ public:
     struct ViewState
     {
         IRenderTextureGroup::Ptr gbuffer;
-        // Recorded after gbuffer creation; consumed by emit_lighting_pass
-        // and emit_gbuffer_pass for viewport sizing.
+        // Recorded after gbuffer creation; consumed by the passes for sizing.
         uvec2 gbuffer_size{};
 
         IRenderTarget::Ptr deferred_output;
@@ -143,21 +142,12 @@ public:
         /// find_named_output("gbuffer.worldpos") for debug readback.
         IRenderTarget::Ptr worldpos_alias;
 
-        /// Cached gbuffer pass. Stable Ptr across frames so the graph's
-        /// compile-time short-circuit can match. Rebuilt only when
-        /// `gbuffer_dirty` is set by `on_render_state_changed` or by
-        /// `ensure_gbuffer` recreating the gbuffer group on resize.
-        IRenderPass::Ptr cached_gbuffer_pass;
-        bool gbuffer_dirty = true;
-        /// Which triangle each pixel shows, with its own depth.
+        /// Which triangle each pixel shows, and the depth of what is drawn.
         IRenderTextureGroup::Ptr visibility;
         uvec2 visibility_size{0, 0};
         IRenderPass::Ptr cached_visibility_pass;
         bool visibility_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
-        /// What the visibility resolve wrote, one per G-buffer attachment.
-        IRenderTarget::Ptr resolved[static_cast<uint32_t>(GBufferAttachment::Count)];
-        uvec2 resolved_size{0, 0};
         IRenderPass::Ptr visibility_resolve_pass;
         InstanceCullPass instance_cull;
         /// Instances too small to draw. A region of the frame's size per visual.
@@ -258,10 +248,6 @@ private:
 
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);
-
-    void emit_gbuffer_pass(IViewEntry& view, ViewState& vs,
-                           const RenderView& render_view, FrameContext& ctx,
-                           IRenderGraph& graph);
 
     void emit_lighting_pass(IViewEntry& view, ViewState& vs,
                             const RenderView& render_view,

@@ -62,6 +62,7 @@ struct TextureGroupDesc
     int width{};                                     ///< Width in pixels (shared by all attachments).
     int height{};                                    ///< Height in pixels.
     DepthFormat depth{DepthFormat::None};            ///< Optional depth attachment format.
+    TextureUsage usage{TextureUsage::ColorAttachment}; ///< ColorAttachment to raster into, Storage to fill from compute.
 };
 
 /// Primitive topology for pipeline creation.

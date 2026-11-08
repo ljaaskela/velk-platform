@@ -35,38 +35,6 @@ void main()
 }
 )";
 
-[[maybe_unused]] constexpr string_view default_gbuffer_vertex_src =
-    ::velk::ext::element_vertex_src;
-
-// Default fragment shader for the deferred G-buffer fill. Writes the
-// instance color straight through to albedo, marks the fragment as
-// "unlit" so the compute lighting pass passes albedo through unchanged.
-// Materials that want lighting (StandardMaterial) override this.
-[[maybe_unused]] constexpr string_view default_gbuffer_fragment_src = R"(
-#version 450
-#include "velk.glsl"
-
-VELK_VARYINGS_IN
-
-// G-buffer attachment locations. Must match deferred_gbuffer.h's
-// GBufferAttachment enum; coupled to the deferred lighting compute.
-VELK_GBUFFER_OUT
-
-// Forward decl; the gbuffer-pipeline composer appends either the
-// visual's discard snippet or an empty stub after this fragment's body.
-void velk_visual_discard();
-
-void main()
-{
-    velk_visual_discard();
-    g_albedo      = v_color;
-    g_normal      = vec4(normalize(v_world_normal), v_lod_error);
-    g_world_pos   = vec4(v_rel_pos, 0.0);
-    g_material    = vec4(0.0, 0.5, 1.0 / 255.0 /*Standard*/, 0.0);
-    g_emissive    = vec4(0.0);
-}
-)";
-
 // Writes which triangle a pixel shows: the draw record's index plus one, 0 where nothing
 // was drawn, then the draw instance and the triangle, split at the record's triangle_bits.
 [[maybe_unused]] constexpr string_view visibility_fragment_src = R"(
@@ -227,59 +195,6 @@ void main()
         opacity = e.color.a + fresnel * (1.0 - e.color.a);
     }
     frag_color = vec4(e.color.rgb, opacity);
-}
-)";
-
-[[maybe_unused]] constexpr string_view deferred_fragment_driver_template = R"(
-VELK_DRAW_DATA(root)
-
-VELK_VARYINGS_IN
-
-VELK_GBUFFER_OUT
-
-// Composer appends either the visual's discard snippet or an empty stub.
-void velk_visual_discard();
-
-void main()
-{
-    GlobalData globals = velk_global_data(root);
-    velk_visual_discard();
-
-    EvalContext ctx;
-    ctx.material_base = velk_draw(root).material_base;
-    ctx.texture_id  = velk_draw(root).texture_id;
-    ctx.shape_param = v_shape_param;
-    ctx.uv          = v_local_uv;
-    ctx.uv1         = v_uv1;
-    ctx.base        = v_color;
-    ctx.ray_dir     = normalize(v_rel_pos);
-    ctx.normal      = v_world_normal;
-    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
-    ctx.rel_pos     = v_rel_pos;
-    ctx.tangent     = v_world_tangent;
-
-    MaterialEval e = <%EVAL_FN%>(ctx);
-    if (e.color.a < <%DISCARD%>) discard;
-
-    vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
-
-    // Geometric specular antialiasing (Tokuyoshi 2019). With the dominant
-    // mipmap aliasing fixed, this targets the residual sub-pixel specular
-    // shimmer: estimate the shading normal's screen-space variance and fold it
-    // into roughness so a tight GGX lobe widens exactly where it would alias.
-    // N is kept finite by velk_eval_standard's TBN guard, so the derivatives
-    // are clean (an earlier attempt amplified NaN normals before that guard).
-    vec3 dndx = dFdx(N);
-    vec3 dndy = dFdy(N);
-    float specaa_var = 0.25 * (dot(dndx, dndx) + dot(dndy, dndy)); // SIGMA2 = 0.5^2
-    float aa_roughness = sqrt(clamp(e.roughness * e.roughness
-                                    + min(2.0 * specaa_var, 0.18 /*KAPPA*/), 0.0, 1.0));
-
-    g_albedo    = e.color;
-    g_normal    = vec4(N, v_lod_error);
-    g_world_pos = vec4(v_rel_pos, 0.0);
-    g_material  = vec4(e.metallic, aa_roughness, float(e.lighting_mode) / 255.0, 0.0);
-    g_emissive  = vec4(e.emissive, 0.0);
 }
 )";
 

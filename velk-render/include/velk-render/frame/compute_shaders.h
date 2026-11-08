@@ -1164,8 +1164,7 @@ void main()
 )";
 
 /// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance, 3 per
-/// triangle. Modes 4 to 8 show how far the resolve is from the G-buffer's albedo, normal,
-/// position, material or emissive, magnified. Mode 9 shows the resolve's albedo.
+/// triangle.
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -1180,8 +1179,6 @@ layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint mode;
-    uint gbuffer_id;
-    uint resolved_id;
 } pc;
 
 vec3 id_color(uint id)
@@ -1197,14 +1194,6 @@ void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-
-    if (pc.mode >= 4u) {
-        vec4 expected = texelFetch(velk_textures[nonuniformEXT(pc.gbuffer_id)], coord, 0);
-        vec4 resolved = texelFetch(velk_textures[nonuniformEXT(pc.resolved_id)], coord, 0);
-        vec3 shown = pc.mode == 9u ? resolved.rgb : abs(expected.rgb - resolved.rgb) * 16.0;
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(shown, 1.0));
-        return;
-    }
 
     uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
     vec3 color = vec3(0.0);

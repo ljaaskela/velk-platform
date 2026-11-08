@@ -19,7 +19,6 @@ namespace velk {
 /// basis so a forward and a gbuffer variant of the same material never
 /// collide even with identical inputs.
 constexpr uint64_t kForwardEvalContentTag = 0x46776452'4576616cULL; // "FwdREval"
-constexpr uint64_t kGbufferEvalContentTag = 0x47427546'4576616cULL; // "GBufEval"
 constexpr uint64_t kVisibilityContentTag = 0x56697342'75666572ULL; // "VisBufer"
 constexpr uint64_t kTransparentEvalContentTag = 0x54726e73'4576616cULL; // "TrnsEval"
 
@@ -148,32 +147,6 @@ inline uint64_t forward_material_content_key(IRenderContext& ctx, const IBatch& 
     hasher.f32(mat->get_discard_threshold());
     hasher.options(batch.pipeline_options());
     return hasher.key();
-}
-
-/**
- * @brief Returns the material's stable forward-pipeline cache key, minting it
- *        from content on first request.
- *
- * `IMaterial::get_pipeline_handle` caches the key; paths use it as the
- * material's identity (e.g. the deferred path's skip guard, and the lazy
- * include-registration the gbuffer compile depends on). The key is the
- * forward content key (see `forward_material_content_key`), so it is stable
- * across recreation of an identical material rather than a per-instance id.
- *
- * Returns 0 if the material lacks the eval source needed to render, so the
- * deferred / RT paths skip the batch as before.
- */
-inline uint64_t ensure_material_forward_key(IRenderContext& ctx, const IBatch& batch)
-{
-    auto material_ptr = batch.material();
-    if (!material_ptr) return 0;
-    uint64_t key = material_ptr->get_pipeline_handle(ctx);
-    if (key != 0) return key;
-    key = forward_material_content_key(ctx, batch);
-    if (key != 0) {
-        material_ptr->set_pipeline_handle(key);
-    }
-    return key;
 }
 
 /**

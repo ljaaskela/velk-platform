@@ -11,9 +11,9 @@ namespace velk {
  * @brief Deferred path's G-buffer attachment layout.
  *
  * Internal to the deferred path. The lighting compute shader, the
- * raster gbuffer-fill shader template, and DeferredPath all share this
- * layout positionally; changing it requires coordinated edits across
- * those three sites. Not a public extension point.
+ * visibility resolve, and DeferredPath all share this layout
+ * positionally; changing it requires coordinated edits across those
+ * three sites. Not a public extension point.
  */
 enum class GBufferAttachment : uint32_t
 {

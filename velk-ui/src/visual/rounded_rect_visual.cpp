@@ -116,8 +116,8 @@ void velk_visual_discard()
 ::velk::string_view RoundedRectVisual::get_source(::velk::string_view role) const
 {
     // Forward: custom SDF fragment (vertex stays default).
-    // Deferred: a `velk_visual_discard()` body so the deferred gbuffer
-    // composer clips rounded corners in the deferred pass too.
+    // Deferred: a `velk_visual_discard()` body so the visibility pass
+    // clips rounded corners too.
     // RT: a custom `velk_intersect_rounded_rect` for the analytic
     // shape registry.
     if (role == ::velk::shader_role::kFragment)  return kFragmentSrc;

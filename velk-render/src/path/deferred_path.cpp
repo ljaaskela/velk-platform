@@ -35,143 +35,6 @@ namespace velk {
 
 namespace {
 
-/// Resolves (or lazy-compiles) the deferred g-buffer pipeline for a
-/// batch. The cache key is the forward key XOR'd with a per-visual-
-/// class perturbation derived from the shader-source class uid; that
-/// way two visuals sharing a material still get distinct pipelines
-/// with the right `velk_visual_discard` body. Returns 0 to skip.
-IGpuPipeline::Ptr resolve_or_compile_gbuffer(IRenderContext& ctx,
-                                             const IBatch& batch)
-{
-    auto material_ptr = batch.material();
-    auto shader_source_ptr = batch.shader_source();
-
-    // Forward cache key bootstrap: the gbuffer key is derived from the
-    // forward key, which is populated lazily by ForwardPath compiling
-    // the material. For deferred-only views (where ForwardPath never
-    // runs for this material) the helper compiles the forward variant
-    // here so the key is stable. Without it, the batch would be
-    // silently skipped from the gbuffer pass.
-    uint64_t forward_key = batch.pipeline_key();
-    if (forward_key == 0) {
-        forward_key = ensure_material_forward_key(ctx, batch);
-    }
-    if (forward_key == 0) return {};
-
-    // Pull the material's eval snippet for the gbuffer compile below.
-    // Fast-path note: when ensure_material_forward_key just compiled,
-    // the same source is fetched twice — cheap (string_view copies),
-    // and keeps the helper composable.
-    auto* mat = material_ptr ? interface_cast<IMaterial>(material_ptr.get()) : nullptr;
-    auto* src = material_ptr ? interface_cast<IShaderSource>(material_ptr.get()) : nullptr;
-    string_view eval_src;
-    string_view vertex_src;
-    string_view eval_fn;
-    bool has_eval = false;
-    if (mat && src) {
-        eval_src = src->get_source(shader_role::kEval);
-        vertex_src = src->get_source(shader_role::kVertex);
-        eval_fn = src->get_fn_name(shader_role::kEval);
-        if (!eval_src.empty() && !vertex_src.empty() && !eval_fn.empty()) {
-            has_eval = true;
-        }
-    }
-
-    uint64_t gbuffer_key;
-    if (has_eval) {
-        // Content key: identical materials share one gbuffer pipeline and a
-        // recreated material hits the cache. Captures the deferred eval inputs
-        // (the deferred driver template is constant, covered by the tag).
-        string_view discard_def =
-            shader_source_ptr ? shader_source_ptr->get_source(shader_role::kDiscard)
-                              : string_view{};
-        PipelineOptions po = batch.pipeline_options();
-        po.blend_mode = BlendMode::Opaque; // gbuffer always writes opaquely
-        PipelineContentHasher hasher(kGbufferEvalContentTag);
-        hasher.str(eval_src);
-        hasher.str(eval_fn);
-        hasher.f32(mat->get_discard_threshold());
-        hasher.str(discard_def);
-        hasher.str(vertex_src);
-        hasher.options(po);
-        gbuffer_key = hasher.key();
-    } else {
-        // Non-eval batch (default gbuffer shader): keep the per-instance key
-        // XOR'd with a per-visual-class perturb so two visuals sharing a
-        // material still get distinct velk_visual_discard bodies.
-        uint64_t perturb = 0;
-        if (auto* obj = interface_cast<IObject>(shader_source_ptr.get())) {
-            Uid uid = obj->get_class_uid();
-            perturb = uid.lo ^ uid.hi;
-        }
-        gbuffer_key = forward_key ^ perturb;
-    }
-    // Cache lookup must match what compile_dynamic stores:
-    // color_formats[0] (Albedo = RGBA8) plus the MRT layout signature
-    // derived from the full gbuffer format set (stable across resize).
-    const auto gbuffer_formats = array_view<const PixelFormat>(
-        kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
-    PipelineCacheKey gkey{gbuffer_key, kGBufferFormats[0], DepthFormat::Default,
-                          pipeline_target_layout(gbuffer_formats)};
-    if (auto pipeline = ctx.pipelines().find(gkey)) {
-        return pipeline;
-    }
-
-    string_view vsrc;
-    string_view base_fsrc;
-    string composed_fsrc;
-    if (has_eval) {
-        composed_fsrc = compose_eval_fragment(
-            deferred_fragment_driver_template,
-            eval_src, eval_fn,
-            mat->get_discard_threshold());
-        vsrc = vertex_src;
-        base_fsrc = string_view(composed_fsrc);
-    }
-    if (base_fsrc.empty()) {
-        base_fsrc = default_gbuffer_fragment_src;
-    }
-    if (vsrc.empty() && shader_source_ptr) {
-        auto v = shader_source_ptr->get_source(shader_role::kVertex);
-        if (!v.empty()) vsrc = v;
-    }
-    if (vsrc.empty()) {
-        vsrc = default_gbuffer_vertex_src;
-    }
-
-    string composed;
-    composed.append(base_fsrc);
-    composed.append(string_view("\n", 1));
-    string_view discard_def =
-        shader_source_ptr
-            ? shader_source_ptr->get_source(shader_role::kDiscard)
-            : string_view{};
-    if (!discard_def.empty()) {
-        // Role::Discard returns the full `void velk_visual_discard()`
-        // definition; the composer appends it verbatim after the
-        // fragment driver template.
-        composed.append(discard_def);
-    } else {
-        composed.append(string_view("void velk_visual_discard() {}\n", 30));
-    }
-
-    PipelineOptions po = batch.pipeline_options();
-    // G-buffer passes always write opaquely regardless of alpha mode.
-    po.blend_mode = BlendMode::Opaque;
-
-    // Gbuffer compiles against kGBufferFormats + DepthFormat::Default. The
-    // layout signature (computed inside compile_dynamic from these
-    // formats) differentiates gbuffer pipelines from forward ones using the
-    // same user_key.
-    // Compile and return the strong Ptr directly (cache is weak, so a
-    // find-after-compile would already be dead).
-    return ctx.pipelines().compile_dynamic(
-        string_view(composed), vsrc,
-        gbuffer_key, gbuffer_formats,
-        DepthFormat::Default,
-        po);
-}
-
 /// The pipeline writing a batch's pixels to the visibility buffer. Only a material with an
 /// eval has a vertex shader that writes the varyings the fragment reads. Everything shares
 /// one fragment shader but what is cut out, by its visual or its material's alpha.
@@ -192,7 +55,7 @@ IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatc
         vsrc = src->get_source(shader_role::kVertex);
     }
     if (vsrc.empty()) {
-        vsrc = default_gbuffer_vertex_src;
+        vsrc = ext::element_vertex_src;
     }
     const string_view discard_src =
         shader_source_ptr ? shader_source_ptr->get_source(shader_role::kDiscard) : string_view{};
@@ -336,7 +199,7 @@ uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
 uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 9); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 3); }
 
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
@@ -795,12 +658,11 @@ IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int 
         kGBufferFormats, static_cast<uint32_t>(GBufferAttachment::Count));
     gdesc.width = width;
     gdesc.height = height;
-    gdesc.depth = DepthFormat::Default;
+    gdesc.usage = TextureUsage::Storage;
     vs.gbuffer = graph.resources().create_render_texture_group(gdesc);
     if (!vs.gbuffer) return nullptr;
 
     vs.gbuffer_size = want;
-    vs.gbuffer_dirty = true;
     vs.lighting_dirty = true;
     vs.transparent_dirty = true;
 
@@ -842,18 +704,12 @@ void DeferredPath::build_passes(IViewEntry& entry,
     IGpuBuffer* const culling_buffer = vs.instance_cull.arena_buffer;
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true);
     if (vs.instance_cull.arena_buffer != culling_buffer) {
-        vs.gbuffer_dirty = true;
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
-    emit_gbuffer_pass(entry, vs, render_view, ctx, graph);
+    emit_visibility_pass(vs, render_view, ctx, graph);
+    emit_visibility_resolve_pass(vs, render_view, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode();
-    if (visibility_mode != 0) {
-        emit_visibility_pass(vs, render_view, ctx, graph);
-    }
-    if (visibility_mode >= 4) {
-        emit_visibility_resolve_pass(vs, render_view, ctx, graph);
-    }
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
     emit_gi_measure_pass(vs, ctx, graph);
@@ -881,87 +737,6 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (visibility_mode == 0) {
         emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
     }
-}
-
-void DeferredPath::emit_gbuffer_pass(IViewEntry& /*entry*/, ViewState& vs,
-                                     const RenderView& render_view, FrameContext& ctx,
-                                     IRenderGraph& graph)
-{
-    if (!render_view.batches) return;
-
-    emit_cached_view_pass(
-        vs.cached_gbuffer_pass, vs.gbuffer_dirty, "deferred.gbuffer",
-        graph,
-        [&](CachedPassRecording& rec) {
-            IRenderTextureGroup* group = vs.gbuffer.get();
-            auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
-            // Hold strong refs to every pipeline this pass binds (cache is
-            // weak). resolve runs before set_held_pipelines replaces the
-            // pass's old set, so reused pipelines never drop to zero refs.
-            auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
-                // Blended materials draw in the transparent pass, not the
-                // opaque G-buffer; skip them here.
-                if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
-                    return nullptr;
-                }
-                auto p = resolve_or_compile_gbuffer(*ctx.render_ctx, b);
-                if (!p) return nullptr;
-                IGpuPipeline* raw = p.get();
-                rec.held.push_back(std::move(p));
-                return raw;
-            };
-            vector<DrawCall> gbuffer_draw_calls;
-            const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
-            emit_draw_calls(
-                gbuffer_draw_calls,
-                *render_view.batches,
-                *ctx.frame_buffer,
-                *ctx.resources,
-                default_uv1,
-                render_view.view_globals_base,
-                resolve,
-                render_view.has_frustum ? &render_view.frustum : nullptr,
-                ctx.snippets,
-                &resolve_ctx);
-
-            rect viewport{0, 0,
-                          static_cast<float>(vs.gbuffer_size.x),
-                          static_cast<float>(vs.gbuffer_size.y)};
-
-            // Gbuffer raster runs as a self-contained dynamic-rendering
-            // secondary. Attachments bound inline via `record_begin_rendering`;
-            // executor doesn't wrap in begin_pass / end_pass.
-            if (auto cmd = ctx.backend->create_command_buffer()) {
-                constexpr uint32_t kColorCount = static_cast<uint32_t>(GBufferAttachment::Count);
-                ColorAttachment colors[kColorCount]{};
-                for (uint32_t i = 0; i < kColorCount; ++i) {
-                    colors[i].texture = group->attachment_texture(i);
-                    colors[i].clear = true;
-                    colors[i].clear_color[0] = 0.f;
-                    colors[i].clear_color[1] = 0.f;
-                    colors[i].clear_color[2] = 0.f;
-                    colors[i].clear_color[3] = 0.f;
-                }
-                DepthAttachment depth_att{};
-                depth_att.texture = group->depth_attachment();
-                depth_att.clear = true;
-                depth_att.clear_stencil = 0;
-
-                cmd->begin_recording();
-                cmd->push_label("DeferredPath: gbuffer");
-                cmd->record_begin_rendering(
-                    array_view<const ColorAttachment>(colors, kColorCount),
-                    depth_att.texture ? &depth_att : nullptr);
-                cmd->set_viewport(viewport);
-                cmd->record_draws({gbuffer_draw_calls.data(), gbuffer_draw_calls.size()});
-                cmd->record_end_rendering();
-                cmd->pop_label();
-                cmd->end_recording();
-                rec.cmd = std::move(cmd);
-            }
-            // Self-contained cmd buffer; no target_* seam.
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-        });
 }
 
 void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
@@ -1036,20 +811,6 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         }
     }
 
-    constexpr uint32_t kCount = static_cast<uint32_t>(GBufferAttachment::Count);
-    if (vs.resolved_size != vs.visibility_size || !vs.resolved[0]) {
-        for (uint32_t i = 0; i < kCount; ++i) {
-            TextureDesc td{};
-            td.width = static_cast<int>(vs.visibility_size.x);
-            td.height = static_cast<int>(vs.visibility_size.y);
-            td.format = kGBufferFormats[i];
-            td.usage = TextureUsage::Storage;
-            vs.resolved[i] = graph.resources().create_render_texture(td);
-            if (!vs.resolved[i]) return;
-        }
-        vs.resolved_size = vs.visibility_size;
-    }
-
     constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
     constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
     uint64_t key = kFnvBasis ^ 0x5649'53526573ULL;
@@ -1070,9 +831,7 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
     }
     if (!pipeline) return;
 
-    const auto handle = [&](GBufferAttachment a) {
-        return static_cast<uint32_t>(vs.resolved[static_cast<uint32_t>(a)]->get_gpu_handle(GpuResourceKey::Default));
-    };
+    const auto handle = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
     struct PushC
     {
         uint32_t shapes_base, globals_base, light_count, lights_base;
@@ -1103,9 +862,7 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
-        for (uint32_t i = 0; i < kCount; ++i) {
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.resolved[i]));
-        }
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.held.push_back(std::move(pipeline));
     });
 }
@@ -1135,14 +892,11 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (!cmd) return;
         struct PushC
         {
-            uint32_t ids_id, output_id, width, height, mode, gbuffer_id, resolved_id;
+            uint32_t ids_id, output_id, width, height, mode;
         };
-        const uint32_t attachment = mode >= 4u && mode <= 8u ? mode - 4u : 0u;
         const PushC pc{vs.visibility->attachment(0),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-                       vs.visibility_size.x, vs.visibility_size.y, mode,
-                       vs.gbuffer->attachment(attachment),
-                       vs.resolved[attachment] ? static_cast<uint32_t>(vs.resolved[attachment]->get_gpu_handle(GpuResourceKey::Default)) : 0u};
+                       vs.visibility_size.x, vs.visibility_size.y, mode};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
@@ -1163,10 +917,6 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-        if (vs.resolved[attachment]) {
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.resolved[attachment]));
-        }
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
@@ -1706,7 +1456,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
                                          IRenderGraph& graph)
 {
     if (!render_view.batches || render_view.batches->empty()) return;
-    if (!color_target || !vs.gbuffer || !ctx.backend || !ctx.frame_buffer) return;
+    if (!color_target || !vs.visibility || !ctx.backend || !ctx.frame_buffer) return;
 
     // Resolve the composite target as an IGpuTexture (surface composite casts
     // directly; a RenderTexture proxy needs find_texture).
@@ -1719,7 +1469,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     if (!target_texture) return;
 
-    IGpuTexture* depth_texture = vs.gbuffer->depth_attachment();
+    IGpuTexture* depth_texture = vs.visibility->depth_attachment();
 
     // Retarget / resize detection: the cached cmd buffer bakes the composite
     // VkImage handle.
@@ -1811,7 +1561,6 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
     if (!view) return;
     auto it = view_states_.find(view);
     if (it != view_states_.end()) {
-        it->second.gbuffer_dirty = true;
         it->second.visibility_dirty = true;
         it->second.lighting_dirty = true;
         it->second.transparent_dirty = true;

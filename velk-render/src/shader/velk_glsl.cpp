@@ -414,19 +414,8 @@ R"(
 // fragment shader. It takes the name so the identifier a shader assigns to is
 // one it declared:
 //   VELK_FRAG_OUT(frag_color)
-//
-// VELK_GBUFFER_OUT is the deferred G-buffer attachment set, in the order the
-// render target group creates them. Mirrors the CPU-side slot order; the two
-// must stay in step.
 R"(
 #define VELK_FRAG_OUT(Name) layout(location = 0) out vec4 Name;
-
-#define VELK_GBUFFER_OUT                      \
-    layout(location = 0) out vec4 g_albedo;     \
-    layout(location = 1) out vec4 g_normal;     \
-    layout(location = 2) out vec4 g_world_pos;  \
-    layout(location = 3) out vec4 g_material;   \
-    layout(location = 4) out vec4 g_emissive;
 )";
 
 } // namespace velk

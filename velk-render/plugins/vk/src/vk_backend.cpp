@@ -3385,7 +3385,7 @@ IRenderTextureGroup::Ptr VkBackend::create_render_target_group(const TextureGrou
         td.width = width;
         td.height = height;
         td.format = f;
-        td.usage = TextureUsage::ColorAttachment;
+        td.usage = desc.usage;
         // Integer formats cannot be filtered.
         if (f == PixelFormat::RG32UI) {
             td.sampler.mag_filter = SamplerFilter::Nearest;
