@@ -83,7 +83,7 @@ function Run-Test([string]$test, [string]$file, [int]$frames) {
 }
 
 $tests = "leak_light", "leak_lit", "leak_sky", "open_sky", "size_1", "size_10", "size_100", "outlier",
-         "shapes_mesh", "move", "move_ref", "deform", "deform_ref", "lights_1", "lights_64"
+         "shapes_mesh", "move", "move_ref", "deform", "deform_ref", "lights_1", "lights_64", "dense", "dense_ref"
 foreach ($t in $tests) { Run-Test $t $t $Frames }
 Run-Test "size_1" "noise" ($Frames + 7)
 
@@ -96,10 +96,12 @@ foreach ($pair in @(@("leak_light", "leak_lit"), @("leak_sky", "open_sky"))) {
     "{0,-14} {1,-34} {2}" -f $pair[0], ("leak {0:F4}" -f $ratio), (Time $pair[0])
 }
 $pairs = @(@("noise", "size_1"), @("size_10", "size_1"), @("size_100", "size_1"), @("outlier", "size_1"),
-           @("shapes_mesh", "size_1"), @("move", "move_ref"), @("deform", "deform_ref"), @("lights_64", "lights_1"))
+           @("shapes_mesh", "size_1"), @("move", "move_ref"), @("deform", "deform_ref"), @("lights_64", "lights_1"),
+           @("dense", "dense_ref"))
 foreach ($pair in $pairs) {
     $d = [GiScore]::Diff((Png $pair[0]), (Png $pair[1]))
     "{0,-14} {1,-34} {2}" -f $pair[0], ("mean {0:F2}  p99 {1,3}  over8 {2:F2}%" -f $d[0], $d[1], $d[2]), (Time $pair[0])
 }
+"{0,-14} {1,-34} {2}" -f "dense_ref", "reference for dense", (Time "dense_ref")
 "captures: $Out"
 if ($problems.Count -gt 0) { "PROBLEMS:"; $problems } else { "logs clean" }

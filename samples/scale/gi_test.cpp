@@ -27,6 +27,10 @@
 // The court lit only from one place:
 //   lights_1:  one point light.
 //   lights_64: 64 lights packed around that point, with the same total power.
+//
+// Instances much wider than the spacing between GI probes, with triangles much smaller:
+//   dense:     the instances, far form on, so wide rays may stop inside their meshes.
+//   dense_ref: far form off, so rays test every triangle.
 
 #include <velk/api/velk.h>
 
@@ -37,7 +41,6 @@
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/api/shadow_technique.h>
-#include <velk-render/blas.h>
 #include <velk-render/interface/intf_camera.h>
 #include <velk-runtime/api/application.h>
 #include <velk-scene/api/camera.h>
@@ -51,6 +54,7 @@
 #include <velk-scene/api/trait/orbit.h>
 #include <velk-scene/api/trait/trs.h>
 #include <velk-scene/api/visual/cube.h>
+#include <velk-scene/api/visual/instanced_mesh.h>
 #include <velk-scene/api/visual/mesh.h>
 #include <velk-scene/api/visual/sphere.h>
 #include <velk-ui/api/trait/fixed_size.h>
@@ -89,113 +93,6 @@ velk::vector<uint8_t> build_flat_hdr(float r, float g, float b)
     return bytes;
 }
 
-struct Vertex
-{
-    float position[3];
-    float normal[3];
-    float uv[2];
-    float tangent[4];
-};
-
-/// A mesh rays can hit, from the given triangles.
-velk::IMesh::Ptr build_traced_mesh(velk::IRenderContext& ctx, const velk::vector<Vertex>& vertices, const velk::vector<uint32_t>& indices)
-{
-    static constexpr velk::VertexAttribute kAttributes[] = {
-        {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
-        {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
-        {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
-        {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
-    };
-    velk::aabb bounds{};
-    bounds.position = {0.f, 0.f, 0.f};
-    bounds.extent = {1.f, 1.f, 1.f};
-    const auto vertex_count = static_cast<uint32_t>(vertices.size());
-    const auto index_count = static_cast<uint32_t>(indices.size());
-    auto& builder = ctx.get_mesh_builder();
-    auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count, indices.data(), index_count,
-                                             velk::MeshTopology::TriangleList, bounds);
-    if (!primitive) {
-        return nullptr;
-    }
-    primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count, indices.data(), index_count / 3));
-    velk::IMeshPrimitive::Ptr primitives[] = {primitive};
-    return builder.build({primitives, 1});
-}
-
-/// The unit box [0,1]^3, as triangles.
-velk::IMesh::Ptr build_box_triangles(velk::IRenderContext& ctx)
-{
-    struct Face
-    {
-        float origin[3];
-        float u[3];
-        float v[3];
-        float n[3];
-    };
-    static constexpr Face kFaces[] = {
-        {{0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {-1, 0, 0}}, {{1, 0, 1}, {0, 0, -1}, {0, 1, 0}, {1, 0, 0}}, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, -1, 0}},
-        {{0, 1, 1}, {1, 0, 0}, {0, 0, -1}, {0, 1, 0}}, {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, 0, -1}}, {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
-    };
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    for (const Face& f : kFaces) {
-        const auto base = static_cast<uint32_t>(vertices.size());
-        for (int corner = 0; corner < 4; ++corner) {
-            const float u = (corner == 1 || corner == 2) ? 1.f : 0.f;
-            const float v = corner >= 2 ? 1.f : 0.f;
-            Vertex vertex{};
-            for (int i = 0; i < 3; ++i) {
-                vertex.position[i] = f.origin[i] + f.u[i] * u + f.v[i] * v;
-                vertex.normal[i] = f.n[i];
-                vertex.tangent[i] = f.u[i];
-            }
-            vertex.tangent[3] = 1.f;
-            vertex.uv[0] = u;
-            vertex.uv[1] = v;
-            vertices.push_back(vertex);
-        }
-        for (uint32_t offset : {0u, 1u, 2u, 0u, 2u, 3u}) {
-            indices.push_back(base + offset);
-        }
-    }
-    return build_traced_mesh(ctx, vertices, indices);
-}
-
-/// The sphere inscribed in [0,1]^3, as triangles, with the tessellation of ctx.build_sphere(32).
-velk::IMesh::Ptr build_sphere_triangles(velk::IRenderContext& ctx)
-{
-    constexpr float kPi = 3.14159265358979323846f;
-    constexpr uint32_t kSegments = 32;
-    constexpr uint32_t kRings = 16;
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    for (uint32_t r = 0; r <= kRings; ++r) {
-        const float vy = static_cast<float>(r) / kRings;
-        const float phi = vy * kPi;
-        for (uint32_t s = 0; s <= kSegments; ++s) {
-            const float vx = static_cast<float>(s) / kSegments;
-            const float theta = vx * kPi * 2.f;
-            const float nx = std::sin(phi) * std::cos(theta);
-            const float ny = std::cos(phi);
-            const float nz = std::sin(phi) * std::sin(theta);
-            vertices.push_back({{0.5f + 0.5f * nx, 0.5f + 0.5f * ny, 0.5f + 0.5f * nz}, {nx, ny, nz}, {vx, vy}, {-std::sin(theta), 0.f, std::cos(theta), 1.f}});
-        }
-    }
-    const uint32_t stride = kSegments + 1;
-    for (uint32_t r = 0; r < kRings; ++r) {
-        for (uint32_t s = 0; s < kSegments; ++s) {
-            const uint32_t i00 = r * stride + s;
-            const uint32_t i10 = i00 + 1;
-            const uint32_t i01 = i00 + stride;
-            const uint32_t i11 = i01 + 1;
-            for (uint32_t i : {i00, i01, i11, i00, i11, i10}) {
-                indices.push_back(i);
-            }
-        }
-    }
-    return build_traced_mesh(ctx, vertices, indices);
-}
-
 } // namespace
 
 int run_gi_test(const char* test, long frames)
@@ -205,7 +102,8 @@ int run_gi_test(const char* test, long frames)
     const bool moving = is("move") || is("move_ref");
     const bool deforming = is("deform") || is("deform_ref");
     const bool light_cluster = is("lights_1") || is("lights_64");
-    if (!leak_room && !moving && !deforming && !light_cluster && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
+    const bool dense_instances = is("dense") || is("dense_ref");
+    if (!leak_room && !moving && !deforming && !light_cluster && !dense_instances && !is("size_1") && !is("size_10") && !is("size_100") && !is("outlier")
         && !is("shapes_mesh")) {
         VELK_LOG(E, "gitest: unknown test %s", test);
         return 1;
@@ -247,7 +145,7 @@ int run_gi_test(const char* test, long frames)
         auto trs = velk::trait::transform::create_trs();
         trs.set_translate(min);
         element.add_trait(trs);
-        velk::Mesh mesh(as_mesh ? build_box_triangles(*render_context) : ctx.build_cube());
+        velk::Mesh mesh(ctx.build_cube());
         mesh.set_material(0, velk::material::create_standard(c, 0.f, 0.9f));
         if (as_mesh) {
             trs.set_scale(size);
@@ -269,7 +167,7 @@ int run_gi_test(const char* test, long frames)
         auto trs = velk::trait::transform::create_trs();
         trs.set_translate({center.x - radius, center.y - radius, center.z - radius});
         element.add_trait(trs);
-        velk::Mesh mesh(as_mesh ? build_sphere_triangles(*render_context) : ctx.build_sphere(32));
+        velk::Mesh mesh(ctx.build_sphere(32));
         mesh.set_material(0, velk::material::create_standard(c, 0.f, 0.9f));
         if (as_mesh) {
             trs.set_scale({radius * 2.f, radius * 2.f, radius * 2.f});
@@ -331,12 +229,39 @@ int run_gi_test(const char* test, long frames)
         pitch = 0.f;
         distance = 349.f;
     } else {
-        const float half = kCourtHalf * (is("size_10") ? 10.f : is("size_100") ? 100.f : 1.f);
+        const float half = dense_instances ? 16000.f : kCourtHalf * (is("size_10") ? 10.f : is("size_100") ? 100.f : 1.f);
         far_clip = std::max(far_clip, half * 4.f);
         add_box({-half, 0.f, -half}, {half * 2.f, 4.f, half * 2.f}, grey);
-        add_box({-200.f, -300.f, -200.f}, {20.f, 300.f, 400.f}, velk::color{0.8f, 0.1f, 0.1f, 1.f});
-        add_box({20.f, -140.f, -60.f}, {120.f, 140.f, 120.f}, white);
-        add_sphere({-60.f, -70.f, 60.f}, 70.f, velk::color{0.2f, 0.7f, 0.25f, 1.f});
+        if (dense_instances) {
+            constexpr float kSize = 2400.f;
+            constexpr float kStep = 4000.f;
+            velk::Mesh mesh(ctx.build_sphere(512));
+            mesh.set_material(0, velk::material::create_standard(velk::color{0.7f, 0.55f, 0.4f, 1.f}, 0.f, 0.9f));
+            velk::vector<velk::InstanceTransform> transforms;
+            for (int x = -3; x <= 3; ++x) {
+                for (int z = -3; z <= 3; ++z) {
+                    const float px = static_cast<float>(x) * kStep - kSize * 0.5f;
+                    const float pz = static_cast<float>(z) * kStep - kSize * 0.5f;
+                    transforms.push_back(velk::InstanceTransform{{{kSize, 0.f, 0.f, px}, {0.f, kSize, 0.f, -kSize}, {0.f, 0.f, kSize, pz}}});
+                }
+            }
+            auto visual = velk::trait::visual::create_instanced_mesh();
+            visual.set_mesh(mesh);
+            if (is("dense_ref")) {
+                visual.set_far_form(false);
+            }
+            visual.add_instances({transforms.data(), transforms.size()});
+            auto element = velk::create_element();
+            element.add_trait(visual);
+            scene.add(root, element);
+            focus_at = {0.f, -800.f, 0.f};
+            pitch = -35.f;
+            distance = 11000.f;
+        } else {
+            add_box({-200.f, -300.f, -200.f}, {20.f, 300.f, 400.f}, velk::color{0.8f, 0.1f, 0.1f, 1.f});
+            add_box({20.f, -140.f, -60.f}, {120.f, 140.f, 120.f}, white);
+            add_sphere({-60.f, -70.f, 60.f}, 70.f, velk::color{0.2f, 0.7f, 0.25f, 1.f});
+        }
         if (is("outlier")) {
             add_box({1000000.f, -20.f, 0.f}, {20.f, 20.f, 20.f}, white);
         }
