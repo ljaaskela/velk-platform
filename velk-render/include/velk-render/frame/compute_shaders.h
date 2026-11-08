@@ -987,14 +987,14 @@ inline string velk_with_trace_medium(string_view source)
     return out;
 }
 
-/// @p source with the number of rays each GI probe traces per update compiled in. A power
-/// of two, 64 at most.
+/// @p source as the GI probe pass, with the number of rays each probe traces per update
+/// compiled in. A power of two, 64 at most.
 inline string velk_with_probe_dirs(string_view source, uint32_t dirs)
 {
     const size_t version = source.find(string_view("#version"));
     const size_t after = source.find('\n', version) + 1;
-    char define[48];
-    const int size = std::snprintf(define, sizeof(define), "#define VELK_PROBE_DIRS %uu\n", dirs);
+    char define[72];
+    const int size = std::snprintf(define, sizeof(define), "#define VELK_PROBE_PASS\n#define VELK_PROBE_DIRS %uu\n", dirs);
     string out;
     out += source.substr(0, after);
     out += string_view(define, static_cast<size_t>(size));
@@ -1214,6 +1214,45 @@ float velk_gi_sample(uint atlas, uint maps, int ladder, vec3 rel, vec3 cam, out 
     }
     return total;
 }
+
+// Irradiance from the field for a surface point relative to the camera. Uses the finest
+// level holding the point, fading into the next one over the last two cells, and a coarser
+// one where probes are yet to fill in. Negative if no probe could light it.
+vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 N, vec3 cam)
+{
+    int level = 0;
+    float edge = 0.0;
+    vec3 shade_pos = world_pos;
+    for (; level < kGiLevels - 1; ++level) {
+        // Lifting the point off the surface keeps a probe almost in its plane from landing
+        // on either side by chance, and the surface from hiding the point from its probes.
+        shade_pos = world_pos + N * (0.2 * velk_gi_cell(finest + level));
+        edge = velk_gi_edge(finest + level, shade_pos, cam);
+        if (edge >= 0.0) break;
+    }
+
+    vec3 sh[4];
+    int used = level;
+    float weight = velk_gi_sample(atlas, maps, finest + used, shade_pos, cam, sh);
+    while (weight <= 0.0 && used + 1 < kGiLevels) {
+        ++used;
+        weight = velk_gi_sample(atlas, maps, finest + used, shade_pos, cam, sh);
+    }
+    if (weight <= 0.0) return vec3(-1.0);
+
+    if (used == level && used + 1 < kGiLevels && edge < 2.0) {
+        vec3 outer[4];
+        if (velk_gi_sample(atlas, maps, finest + used + 1, shade_pos, cam, outer) > 0.0) {
+            float t = clamp(edge * 0.5, 0.0, 1.0);
+            for (int c = 0; c < 4; ++c) sh[c] = mix(outer[c], sh[c], t);
+        }
+    }
+
+    // Lambertian convolution of an L1 radiance SH, divided by pi, since this renderer
+    // leaves 1/pi out of every light term.
+    vec3 e = 0.282095 * sh[0] + 0.325735 * (sh[1] * N.y + sh[2] * N.z + sh[3] * N.x);
+    return max(e, vec3(0.0));
+}
 )"
 
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
@@ -1396,53 +1435,11 @@ vec3 velk_tonemap_aces(vec3 x)
 }
 )" VELK_GI_FIELD_GLSL R"(
 // Indirect diffuse from the GI probe field, as irradiance against a surface's normal, for
-// a point relative to the camera. Uses the finest level holding the point, fading into the
-// next one over the last two cells, and a coarser one where probes are yet to fill in.
+// a point relative to the camera.
 vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
 {
     if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(0.0);
-    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
-
-    int level = 0;
-    float edge = 0.0;
-    vec3 shade_pos = world_pos;
-    for (; level < kGiLevels - 1; ++level) {
-        // Lifting the point off the surface keeps a probe almost in its plane from landing
-        // on either side by chance, and the surface from hiding the point from its probes.
-        shade_pos = world_pos + N * (0.2 * velk_gi_cell(pc.gi_finest + level));
-        edge = velk_gi_edge(pc.gi_finest + level, shade_pos, cam);
-        if (edge >= 0.0) break;
-    }
-
-    vec3 sh[4];
-    int used = level;
-    float weight = velk_gi_sample(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest + used, shade_pos, cam, sh);
-    while (weight <= 0.0 && used + 1 < kGiLevels) {
-        ++used;
-        weight = velk_gi_sample(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest + used, shade_pos, cam, sh);
-    }
-    if (weight <= 0.0) return vec3(0.0);
-
-    if (used == level && used + 1 < kGiLevels && edge < 2.0) {
-        vec3 outer[4];
-        if (velk_gi_sample(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest + used + 1, shade_pos, cam, outer) > 0.0) {
-            float t = clamp(edge * 0.5, 0.0, 1.0);
-            for (int c = 0; c < 4; ++c) sh[c] = mix(outer[c], sh[c], t);
-        }
-    }
-
-    // Lambertian convolution of an L1 radiance SH: A0*Y00*L00 + A1*Y1m*L1m,
-    // with A0 = pi and A1 = 2pi/3 - then divided by pi.
-    //
-    // The 1/pi is a convention match, not physics. This renderer omits it
-    // everywhere: direct light is albedo * N.L * radiance rather than
-    // albedo * E / pi, and the env stand-in fed a raw radiance sample in as
-    // irradiance. True irradiance from a uniform sky of radiance R is pi*R, so
-    // returning E unscaled makes GI 3.14x brighter than everything it sits
-    // beside, which reads as a flat over-lit wash.
-    vec3 e = 0.282095 * sh[0]
-           + 0.325735 * (sh[1] * N.y + sh[2] * N.z + sh[3] * N.x);
-    return max(e, vec3(0.0));
+    return max(velk_gi_irradiance(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, VELK_GLOBALS.cam_pos.xyz), vec3(0.0));
 }
 
 )";
@@ -2805,6 +2802,10 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
     }
 }
 
+#ifdef VELK_PROBE_PASS
+vec3 velk_hit_irradiance(vec3 pos, vec3 N);
+#endif
+
 BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 {
     vec3 N = normalize(eval.normal);
@@ -2853,6 +2854,12 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // sample, modulated by AO. Upgrade to preconvolved irradiance or
     // stochastic cosine sampling when visibly needed.
     vec3 env_at_normal = env_miss_color(N);
+#ifdef VELK_PROBE_PASS
+    // A probe's hit is lit by the field itself, which sees what is really around it and
+    // carries light over further bounces as frames go by.
+    vec3 from_field = velk_hit_irradiance(ctx.rel_pos, N);
+    if (from_field.r >= 0.0) env_at_normal = from_field;
+#endif
     vec3 diffuse = base * (1.0 - metallic) * env_at_normal * ao;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
 
@@ -3058,6 +3065,11 @@ void main()
 // contribution, so the cost does not depend on the light count.
 [[maybe_unused]] constexpr string_view probe_gi_main_src = VELK_GI_FIELD_GLSL R"(
 shared vec3 s_sh[4][64];
+vec3 velk_hit_irradiance(vec3 pos, vec3 N)
+{
+    return velk_gi_irradiance(pc.env.w, pc.extras.y, int(pc.env.z), pos, N, VELK_GLOBALS.cam_pos.xyz);
+}
+
 // What each ray found nearby: how far, and whether it was the back of something solid.
 shared float s_near[64];
 shared uint s_back[64];
