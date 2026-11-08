@@ -188,9 +188,10 @@ public:
 
     /// Attaches a pre-built BVH for this primitive's triangles to be
     /// used by the RT/shadow path. Default no-op so primitive impls
-    /// that don't participate in RT (or haven't built a BLAS yet) stay
-    /// trivially compliant. Concrete `MeshPrimitive` overrides to
-    /// store the build and serialise it through its IDrawData buffer.
+    /// that don't participate in RT stay trivially compliant. Concrete
+    /// `MeshPrimitive` overrides to store the build and serialise it
+    /// through its IDrawData buffer. Without one, `MeshPrimitive` builds
+    /// the BVH from its own geometry the first time rays need it.
     virtual void set_rt_blas(BlasBuild blas) { (void)blas; }
 
     /// Whether its separate pieces stand for a whole rather than for themselves, such as
@@ -199,7 +200,7 @@ public:
     /// default, and to be set before its first frame.
     virtual void set_merge_pieces(bool merge) = 0;
 
-    /// Area of its triangles, from its BLAS. 0 without one.
+    /// Area of its triangles, from its BLAS. 0 if it cannot have one.
     virtual float get_surface_area() const = 0;
     /// That area by which of kSurfaceDirections it faces.
     virtual const float* get_direction_area() const = 0;

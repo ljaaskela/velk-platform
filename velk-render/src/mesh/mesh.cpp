@@ -132,9 +132,10 @@ uint32_t MeshPrimitive::ensure_rt_data(IGpuResourceManager& resources)
     if (rt_static_region_.valid()) return rt_static_base_;
 
     // RT consumes mesh primitives only when they're indexed triangle-list
-    // geometry with a built BLAS. Anything else is skipped entirely.
+    // geometry with a BLAS. Anything else is skipped entirely.
     if (topology_ != MeshTopology::TriangleList) return kInvalidMeshStaticBase;
     if (!buffer_ || index_count_ == 0 || vertex_stride_ == 0) return kInvalidMeshStaticBase;
+    ensure_blas();
     if (rt_blas_.nodes.empty() || rt_blas_.cluster_words.empty()) {
         return kInvalidMeshStaticBase;
     }
@@ -160,6 +161,27 @@ uint32_t MeshPrimitive::ensure_rt_data(IGpuResourceManager& resources)
         static_region.offset() / sizeof(MeshStaticData));
     rt_static_region_ = std::move(static_region);
     return rt_static_base_;
+}
+
+void MeshPrimitive::ensure_blas() const
+{
+    if (!rt_blas_.nodes.empty() || blas_build_tried_) return;
+    blas_build_tried_ = true;
+    if (topology_ != MeshTopology::TriangleList || !buffer_ || index_count_ == 0 || vertex_stride_ == 0) return;
+
+    // The BLAS builder reads positions from the start of each vertex.
+    bool positions_first = false;
+    for (const auto& attribute : attributes_) {
+        positions_first = positions_first
+            || (attribute.semantic == VertexAttributeSemantic::Position && attribute.format == VertexAttributeFormat::Float3 && attribute.offset == 0);
+    }
+    auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
+    vector<uint8_t> bytes;
+    if (!positions_first || !buffer || !buffer->read_geometry(bytes)) return;
+
+    const auto* vertices = reinterpret_cast<const float*>(bytes.data());
+    const auto* indices = reinterpret_cast<const uint32_t*>(bytes.data() + buffer_->get_ibo_offset() + index_offset_);
+    rt_blas_ = build_mesh_blas(vertices, vertex_stride_, static_cast<uint32_t>(buffer_->get_vbo_size() / vertex_stride_), indices, index_count_ / 3);
 }
 
 bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData& out)

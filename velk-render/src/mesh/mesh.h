@@ -71,8 +71,16 @@ public:
     /// arena regions, so the next `ensure_rt_data` republishes the nodes +
     /// cluster words.
     void set_rt_blas(BlasBuild blas) override;
-    float get_surface_area() const override { return rt_blas_.surface_area; }
-    const float* get_direction_area() const override { return rt_blas_.direction_area; }
+    float get_surface_area() const override
+    {
+        ensure_blas();
+        return rt_blas_.surface_area;
+    }
+    const float* get_direction_area() const override
+    {
+        ensure_blas();
+        return rt_blas_.direction_area;
+    }
 
     void refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
                IGpuResourceManager& resources) override;
@@ -86,6 +94,10 @@ private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
     /// everything that refers to them. Leaves the current regions on failure.
     bool publish_tree(IGpuResourceManager& resources, MeshStaticData& out);
+
+    /// Builds the BLAS from the primitive's own geometry if none was set. Only rays and area
+    /// queries call this, so a primitive drawn alone, or as an analytic shape, never pays for it.
+    void ensure_blas() const;
 
     IMeshBuffer::Ptr buffer_;
     uint32_t vertex_offset_ = 0;
@@ -112,10 +124,11 @@ private:
     /// while the RT data is not published.
     uint32_t rt_static_base_ = kInvalidMeshStaticBase;
 
-    /// Pre-built BLAS for the RT path. Empty until `set_rt_blas` runs;
+    /// BLAS for the RT path. Empty until `set_rt_blas` or `ensure_blas` fills it;
     /// `get_draw_data_size` and `write_draw_data` include the BLAS
     /// payload only when populated.
-    BlasBuild rt_blas_;
+    mutable BlasBuild rt_blas_;
+    mutable bool blas_build_tried_ = false;
 
     /// Tree cost when `rt_blas_` was last built, once it has been refit.
     float rt_built_cost_ = 0.f;
