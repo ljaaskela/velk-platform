@@ -2096,6 +2096,7 @@ void main()
             imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
         } else {
             imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
+            imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord, vec4(0.0));
         }
         return;
     }
@@ -2118,6 +2119,8 @@ void main()
     // ratio rather than radiance. Zero for unlit pixels, which zeroes the
     // product at composite regardless of what the ratio filtered to.
     vec3 unshadowed_out = vec3(0.0);
+    // How much of `rest` is the lights' highlights, which composite shadows by the ratio.
+    float highlight_share = 0.0;
     float irr_valid = 1.0;
     if (lighting_mode == 0u) {
         // Unlit: emit albedo as-is (no diffuse irradiance).
@@ -2424,6 +2427,9 @@ void main()
         // would otherwise have applied on its way out of the irradiance
         // image, so the result is identical bar the blur.
         rest += albedo.rgb * (1.0 - metallic) * area_irr + area_spec;
+        const vec3 kHighlightLuma = vec3(0.2126, 0.7152, 0.0722);
+        float rest_luma = dot(rest, kHighlightLuma);
+        highlight_share = rest_luma > 1e-5 ? clamp(dot(direct_specular, kHighlightLuma) / rest_luma, 0.0, 1.0) : 0.0;
     }
 
     // Emissive is additive radiance; part of the sharp output.
@@ -2441,7 +2447,7 @@ void main()
     // out of the denoiser deliberately: it is exact and sharp, and it carries
     // the high-frequency detail (light falloff, N.L) that must not be blurred.
     imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord,
-               vec4(unshadowed_out, 1.0));
+               vec4(unshadowed_out, highlight_share));
 }
 )";
 
@@ -2702,8 +2708,12 @@ void main()
     // irr_out is the filtered VISIBILITY RATIO; the radiance it scales is read
     // sharp and unfiltered here, so light falloff and N.L keep their detail
     // and only the visibility carries the filter's blur.
-    vec3 unshadowed = velk_texture(pc.unshadowed_id, uv).rgb;
-    vec3 final = albedo.rgb * (1.0 - metallic) * (unshadowed * irr_out) + rest.rgb;
+    vec4 unshadowed_share = velk_texture(pc.unshadowed_id, uv);
+    vec3 unshadowed = unshadowed_share.rgb;
+    // The lights' highlights, in the alpha as a share of `rest`, are shadowed like their diffuse.
+    float seen = clamp(dot(irr_out.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    vec3 sharp = rest.rgb * (1.0 - unshadowed_share.a * (1.0 - seen));
+    vec3 final = albedo.rgb * (1.0 - metallic) * (unshadowed * irr_out) + sharp;
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
 }
 )";
