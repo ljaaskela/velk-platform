@@ -16,6 +16,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $bin = Join-Path $root "build\bin"
 if (-not $Out) { $Out = Join-Path $root "build\render_tests" }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
 . (Join-Path $PSScriptRoot "lib\metrics.ps1")
 
 $files = Get-ChildItem (Join-Path $PSScriptRoot "cases") -Filter *.ps1 | Sort-Object Name

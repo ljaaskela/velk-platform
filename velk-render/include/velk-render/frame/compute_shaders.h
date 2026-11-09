@@ -3859,6 +3859,7 @@ inline constexpr string_view test_diagnostics_compute_src = R"(
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 layout(set = 1, binding = 16, std430) buffer TestWords { uint data[]; } test_words;
 
 )" VELK_GI_FIELD_GLSL R"(
@@ -3878,6 +3879,8 @@ layout(push_constant, scalar) uniform PC {
     uint output_id;
     uint width;
     uint height;
+    uint tiles_up_only;
+    uint view_id;
 } pc;
 
 const uint kTilesX = 16u;
@@ -3895,6 +3898,7 @@ void main()
     }
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    if (pc.view_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.view_id)], p, vec4(0.0, 0.0, 0.0, 1.0));
 
     vec3 normal = texelFetch(velk_textures[nonuniformEXT(pc.normal_id)], p, 0).xyz;
     if (dot(normal, normal) < 1e-6) {
@@ -3906,9 +3910,16 @@ void main()
     vec3 albedo = texelFetch(velk_textures[nonuniformEXT(pc.albedo_id)], p, 0).rgb;
     vec3 color = texelFetch(velk_textures[nonuniformEXT(pc.color_id)], p, 0).rgb;
     float light = max(dot(color, kLuma) / max(dot(albedo, kLuma), 0.04), 1e-4);
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (pc.mode == 2u && pc.atlas != 0u) {
+        light = max(dot(velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz), kLuma), 1e-4);
+    } else if (pc.mode == 3u || pc.mode == 4u) {
+        light = max(dot(color, kLuma), 1e-4);
+    } else if (pc.mode == 5u) {
+        light = max(dot(albedo, kLuma), 1e-4);
+    }
     imageStore(gStorageImagesF32[nonuniformEXT(pc.output_id)], p, vec4(rel, light));
 
-    GlobalData g = velk_globals.data[pc.globals_base];
     if (pc.atlas != 0u && ((p.x + p.y) & 3) == 0) {
         add(8u, 1u);
         if (velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz).r < 0.0) add(9u, 1u);
@@ -3942,6 +3953,12 @@ void main()
 
     float nearest = clamp(light, lowest, highest);
     float change = abs(light - nearest) / max(max(light, nearest), 1e-3);
+    // White where the surface faces up or down, blue elsewhere.
+    if (pc.view_id != 0u) {
+        float shown = min(change * 8.0, 1.0);
+        float up = abs(N.y) > 0.9 ? shown : 0.0;
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.view_id)], p, vec4(up, up, shown, 1.0));
+    }
     uint scaled = uint(change * 256.0);
     add(0u, 1u);
     add(1u, scaled);
@@ -3953,6 +3970,7 @@ void main()
         if (change > 0.05) add(6u, 1u);
         if (change > 0.2) add(7u, 1u);
     }
+    if (pc.tiles_up_only != 0u && abs(N.y) <= 0.9) return;
     uint tile = min(uint(p.y) * kTilesY / pc.height, kTilesY - 1u) * kTilesX + min(uint(p.x) * kTilesX / pc.width, kTilesX - 1u);
     add(10u + tile, 1u);
     add(10u + kTilesX * kTilesY + tile, scaled);

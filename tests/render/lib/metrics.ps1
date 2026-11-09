@@ -45,14 +45,14 @@ function Get-Stat([double[]]$values, [string]$stat) {
 # Per frame series from test_frame lines, after the frames a case skips to warm up.
 function Read-RunLog([string]$path, [int]$warm) {
     $m = @{ series = @{}; finest = New-Object System.Collections.ArrayList; points = @{}; gpu = @{}; errors = @() }
-    foreach ($name in "mean", "over5", "over20", "up_mean", "up_over5", "up_over20", "tile_max", "missing_pct") {
+    foreach ($name in "mean", "over5", "over20", "up_mean", "up_over5", "up_over20", "tile_max", "patch_tiles", "missing_pct") {
         $m.series[$name] = New-Object System.Collections.Generic.List[double]
     }
     foreach ($line in [IO.File]::ReadLines($path)) {
         if ($line -match "\[ERROR|Validation Error|device lost|compilation failed") {
             $m.errors += $line
         }
-        if ($line -match "test_frame frame=(\d+) valid=(\d+) mean=([0-9.]+) over5=([0-9.]+) over20=([0-9.]+) up_valid=(\d+) up_mean=([0-9.]+) up_over5=([0-9.]+) up_over20=([0-9.]+) tile_max=([0-9.]+) tested=(\d+) missing=(\d+)") {
+        if ($line -match "test_frame frame=(\d+) valid=(\d+) mean=([0-9.]+) over5=([0-9.]+) over20=([0-9.]+) up_valid=(\d+) up_mean=([0-9.]+) up_over5=([0-9.]+) up_over20=([0-9.]+) tile_max=([0-9.]+) tested=(\d+) missing=(\d+) patch=(\d+)") {
             if ([int]$Matches[1] -lt $warm -or [int]$Matches[2] -eq 0) { continue }
             $m.series.mean.Add([double]$Matches[3])
             $m.series.over5.Add([double]$Matches[4])
@@ -63,6 +63,7 @@ function Read-RunLog([string]$path, [int]$warm) {
                 $m.series.up_over20.Add([double]$Matches[9])
             }
             $m.series.tile_max.Add([double]$Matches[10])
+            $m.series.patch_tiles.Add([double]$Matches[13])
             if ([int]$Matches[11] -gt 0) {
                 $m.series.missing_pct.Add(100.0 * [double]$Matches[12] / [double]$Matches[11])
             }

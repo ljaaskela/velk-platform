@@ -55,6 +55,7 @@ Measurements come from the log. A new one is a line the renderer logs when `VELK
 | `flicker.mean`, `flicker.over5`, `flicker.over20` | Change in lighting per frame, or the share of pixels changing by more than 5% or 20%. Followed from frame to frame so camera motion does not count; surfaces that moved are skipped | p95 |
 | `flicker.up_mean`, `flicker.up_over5`, `flicker.up_over20` | The same for surfaces facing up or down, such as the ground | p95 |
 | `flicker.tile_max` | The worst of 16x9 screen tiles | p95 |
+| `flicker.patch_tiles` | The largest connected group of those tiles changing by more than 1%, so a patch cannot hide in an average | p95 |
 | `finest.reversals` | Finest GI level steps that undo the step before within 30 frames | |
 | `finest.changes` | Finest GI level steps | |
 | `field.step_pct` | Largest single-frame change of the GI field at the points in `groundpoints=`, in percent | |

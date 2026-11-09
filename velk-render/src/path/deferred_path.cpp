@@ -934,7 +934,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
     if (test_diagnostics_enabled()) {
-        emit_test_diagnostics_pass(vs, render_view, ctx, graph);
+        emit_test_diagnostics_pass(vs, render_view, color_target, ctx, graph);
     }
     if (visibility_mode != 0) {
         emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
@@ -1587,7 +1587,8 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
     });
 }
 
-void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                              FrameContext& ctx, IRenderGraph& graph)
 {
     if (!vs.test_words.valid() || !vs.gbuffer || !vs.deferred_output) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
@@ -1609,9 +1610,41 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
                 tile_max = std::max(tile_max, ratio(w[10 + kTestTilesX * kTestTilesY + t], tile_valid) / kScale);
             }
         }
-        VELK_LOG(I, "test_frame frame=%llu valid=%u mean=%.5f over5=%.5f over20=%.5f up_valid=%u up_mean=%.5f up_over5=%.5f up_over20=%.5f tile_max=%.5f tested=%u missing=%u",
+        // The largest connected group of tiles whose light changed, so that a patch changing
+        // together cannot hide in an average over the screen.
+        constexpr float kPatchChange = 0.01f;
+        constexpr uint32_t kTiles = kTestTilesX * kTestTilesY;
+        bool changed[kTiles];
+        for (uint32_t t = 0; t < kTiles; ++t) {
+            changed[t] = w[10 + t] >= 64u && ratio(w[10 + kTiles + t], w[10 + t]) / kScale > kPatchChange;
+        }
+        uint32_t patch = 0;
+        uint32_t stack[kTiles];
+        for (uint32_t t = 0; t < kTiles; ++t) {
+            if (!changed[t]) continue;
+            changed[t] = false;
+            uint32_t depth = 0;
+            uint32_t tiles = 0;
+            stack[depth++] = t;
+            while (depth > 0) {
+                const uint32_t at = stack[--depth];
+                ++tiles;
+                const auto visit = [&](uint32_t next) {
+                    if (changed[next]) {
+                        changed[next] = false;
+                        stack[depth++] = next;
+                    }
+                };
+                if (at % kTestTilesX != 0u) visit(at - 1u);
+                if (at % kTestTilesX != kTestTilesX - 1u) visit(at + 1u);
+                if (at >= kTestTilesX) visit(at - kTestTilesX);
+                if (at + kTestTilesX < kTiles) visit(at + kTestTilesX);
+            }
+            patch = std::max(patch, tiles);
+        }
+        VELK_LOG(I, "test_frame frame=%llu valid=%u mean=%.5f over5=%.5f over20=%.5f up_valid=%u up_mean=%.5f up_over5=%.5f up_over20=%.5f tile_max=%.5f tested=%u missing=%u patch=%u",
                  static_cast<unsigned long long>(read_frame), w[0], ratio(w[1], w[0]) / kScale, ratio(w[2], w[0]), ratio(w[3], w[0]), w[4],
-                 ratio(w[5], w[4]) / kScale, ratio(w[6], w[4]), ratio(w[7], w[4]), tile_max, w[8], w[9]);
+                 ratio(w[5], w[4]) / kScale, ratio(w[6], w[4]), ratio(w[7], w[4]), tile_max, w[8], w[9], patch);
     }
 
     constexpr uint64_t kKey = 0x5445'5354'4449'0001ULL;
@@ -1638,6 +1671,25 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
     }
     if (!vs.test_history[0] || !vs.test_history[1]) return;
 
+    // Shows what the flicker measure sees instead of the image.
+    const bool show_flicker = std::getenv("VELK_TEST_FLICKER_VIEW") != nullptr;
+    if (show_flicker && (!vs.test_view || vs.test_view_size != vs.gbuffer_size)) {
+        TextureDesc td{};
+        td.width = static_cast<int>(width);
+        td.height = static_cast<int>(height);
+        td.format = PixelFormat::RGBA16F;
+        td.usage = TextureUsage::Storage;
+        vs.test_view = graph.resources().create_render_texture(td);
+        vs.test_view_size = vs.gbuffer_size;
+    }
+    IGpuTexture* view_tex = show_flicker && vs.test_view ? graph.resources().find_texture(vs.test_view.get()) : nullptr;
+    IGpuTexture* view_dst = nullptr;
+    if (view_tex && color_target) {
+        view_dst = interface_cast<IGpuTexture>(color_target.get());
+        if (!view_dst) view_dst = graph.resources().find_texture(color_target.get());
+        if (!view_dst) view_dst = ctx.resources->find_texture(color_target.get());
+    }
+
     const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
     const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
     auto previous = vs.test_history[parity];
@@ -1654,7 +1706,7 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
             uint32_t word, words, mode, globals_base;
             uint32_t atlas, maps;
             int32_t finest;
-            uint32_t normal_id, pos_id, albedo_id, color_id, history_id, output_id, width, height;
+            uint32_t normal_id, pos_id, albedo_id, color_id, history_id, output_id, width, height, tiles_up_only, view_id;
         };
         const bool has_field = vs.gi_probes && vs.gi_field_ready && vs.gi_finest_known;
         PushC pc{};
@@ -1667,11 +1719,17 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
         pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
         pc.pos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
         pc.albedo_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
-        pc.color_id = handle(vs.deferred_output);
+        // What the flicker measure follows: the finished image unless told otherwise.
+        const char* source = std::getenv("VELK_TEST_FLICKER_SOURCE");
+        const auto from = [&](const char* name) { return source && std::strcmp(source, name) == 0; };
+        const uint32_t measure_mode = from("field") ? 2u : from("unshadowed") ? 3u : from("ratio") ? 4u : from("albedo") ? 5u : 1u;
+        pc.color_id = measure_mode == 3u ? handle(vs.unshadowed) : measure_mode == 4u ? handle(vs.diffuse_irr) : handle(vs.deferred_output);
         pc.history_id = handle(previous);
         pc.output_id = handle(current);
         pc.width = width;
         pc.height = height;
+        pc.tiles_up_only = std::getenv("VELK_TEST_TILES_UP") ? 1u : 0u;
+        pc.view_id = view_tex ? handle(vs.test_view) : 0u;
 
         DispatchCall clear{};
         clear.pipeline = pipeline.get();
@@ -1681,7 +1739,7 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
         clear.root_constants_size = sizeof(pc);
         std::memcpy(clear.root_constants, &pc, sizeof(pc));
 
-        pc.mode = 1u;
+        pc.mode = measure_mode;
         DispatchCall measure{};
         measure.pipeline = pipeline.get();
         measure.groups_x = (width + 7u) / 8u;
@@ -1696,6 +1754,9 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
         cmd->record_global_barrier();
         cmd->record_dispatch(measure);
         cmd->record_global_barrier();
+        if (view_tex && view_dst) {
+            cmd->record_blit_to_texture(*view_tex, *view_dst, render_view.viewport);
+        }
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));

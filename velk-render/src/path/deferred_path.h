@@ -214,6 +214,8 @@ public:
         IRenderPass::Ptr cached_measure_pass;
         /// Render test measurements, while VELK_TEST_DIAGNOSTICS is set.
         ArenaRegion test_words;
+        IRenderTarget::Ptr test_view;
+        uvec2 test_view_size{};
         IRenderTarget::Ptr test_history[2];
         uvec2 test_history_size{};
         IRenderPass::Ptr test_diagnostics_pass;
@@ -329,7 +331,8 @@ private:
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
     /// Logs how a frame differs from the last, for render tests. See test_diagnostics_compute_src.
-    void emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    void emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                    FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with a view of the GI probe field.
     void emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                             FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
