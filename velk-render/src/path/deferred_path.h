@@ -259,7 +259,7 @@ private:
                                             float ray_motion_reach);
 
     /// Samples distances to what the camera sees, for choosing the probe field's finest level.
-    void emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
+    void emit_gi_measure_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
 
     /// Chooses the probe field's finest level from the camera's setting, or else from the
     /// distances sampled on earlier frames. Returns whether one is chosen yet.

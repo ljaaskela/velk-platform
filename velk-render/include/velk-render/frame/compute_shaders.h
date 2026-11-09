@@ -1050,17 +1050,42 @@ layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_wor
 
 layout(push_constant) uniform PC {
     uint word;
-    uint worldpos_id;
-    uint normal_id;
+    uint pyramid_word;
+    uint globals_base;
 } pc;
 
+// Mirrors kGiDistanceFirstLog2 and kGiDistanceBinLog2 in deferred_path.cpp.
+const float kFirstLog2 = -4.0;
+const float kBinLog2 = 0.375;
+
+shared uint s_bins[64];
+
+// Counts what the view holds by how far away it is, in 64 bins of log2 distance, from a level
+// of the depth pyramid. Each texel holds the farthest depth under it, so a thin thing close
+// to the camera only counts where it covers a whole texel.
 void main()
 {
-    uint i = gl_LocalInvocationIndex;
-    vec2 uv = (vec2(float(i & 7u), float(i >> 3u)) + 0.5) / 8.0;
-    vec3 n = velk_texture(pc.normal_id, uv).xyz;
-    float distance_to = dot(n, n) > 1e-6 ? length(velk_texture(pc.worldpos_id, uv).xyz) : -1.0;
-    cull_words.data[pc.word + i] = floatBitsToUint(distance_to);
+    uint lane = gl_LocalInvocationIndex;
+    s_bins[lane] = 0u;
+    barrier();
+
+    const uint level = 3u;
+    uint width = max(cull_words.data[pc.pyramid_word + 1u] >> level, 1u);
+    uint height = max(cull_words.data[pc.pyramid_word + 2u] >> level, 1u);
+    uint first = cull_words.data[pc.pyramid_word + 3u + level];
+    mat4 inverse_vp = velk_globals.data[pc.globals_base].inverse_view_projection;
+    uint texels = first != 0u ? width * height : 0u;
+    for (uint i = lane; i < texels; i += 64u) {
+        float depth = uintBitsToFloat(cull_words.data[first + i]);
+        if (depth <= 0.0) continue;
+        vec2 ndc = (vec2(float(i % width), float(i / width)) + 0.5) / vec2(float(width), float(height)) * 2.0 - 1.0;
+        vec4 at = inverse_vp * vec4(ndc, depth, 1.0);
+        float away = length(at.xyz / at.w);
+        uint bin = uint(clamp((log2(max(away, 1e-6)) - kFirstLog2) / kBinLog2, 0.0, 63.0));
+        atomicAdd(s_bins[bin], 1u);
+    }
+    barrier();
+    cull_words.data[pc.word + lane] = s_bins[lane];
 }
 )";
 

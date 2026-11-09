@@ -364,7 +364,10 @@ constexpr uint32_t kGiDim = 16;
 constexpr int kGiLevels = 8;
 constexpr int kGiRows = 5;
 constexpr int kGiMapSize = 8;
-constexpr uint32_t kGiDistanceSamples = 64;
+constexpr uint32_t kGiDistanceBins = 64;
+// Mirror kFirstLog2 and kBinLog2 in gi_measure_compute_src.
+constexpr float kGiDistanceFirstLog2 = -4.f;
+constexpr float kGiDistanceBinLog2 = 0.375f;
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp).
 VELK_GPU_STRUCT ProbePushC {
@@ -382,8 +385,8 @@ VELK_GPU_STRUCT ProbePushC {
 
 VELK_GPU_STRUCT GiMeasurePushC {
     uint32_t word;
-    uint32_t worldpos_id;
-    uint32_t normal_id;
+    uint32_t pyramid_word;
+    uint32_t globals_base;
 };
 
 } // namespace
@@ -431,15 +434,14 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool sh
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
-void DeferredPath::emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph)
+void DeferredPath::emit_gi_measure_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena || !vs.gbuffer) return;
+    if (!arena || !vs.depth_pyramid.valid()) return;
     if (!vs.gi_distances.valid()) {
-        vs.gi_distances = arena->alloc(kGiDistanceSamples * sizeof(float));
+        vs.gi_distances = arena->alloc(kGiDistanceBins * sizeof(uint32_t));
         if (!vs.gi_distances.valid()) return;
-        float none[kGiDistanceSamples];
-        std::fill(std::begin(none), std::end(none), -1.f);
+        const uint32_t none[kGiDistanceBins] = {};
         arena->write_at(vs.gi_distances.offset(), none, sizeof(none));
     }
 
@@ -450,8 +452,8 @@ void DeferredPath::emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRende
 
     GiMeasurePushC pc{};
     pc.word = static_cast<uint32_t>(vs.gi_distances.offset() / sizeof(uint32_t));
-    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
-    pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.pyramid_word = static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t));
+    pc.globals_base = render_view.view_globals_base;
 
     bool dirty = true;
     emit_cached_view_pass(vs.cached_measure_pass, dirty, "gi.measure", graph, [&](CachedPassRecording& rec) {
@@ -464,17 +466,19 @@ void DeferredPath::emit_gi_measure_pass(ViewState& vs, FrameContext& ctx, IRende
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
         if (auto cmd = ctx.backend->create_command_buffer()) {
             cmd->begin_recording();
+            cmd->record_global_barrier();
             cmd->record_dispatch(dc);
             cmd->end_recording();
             rec.cmd = std::move(cmd);
         }
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.held.push_back(std::move(pipeline));
     });
 }
 
 bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
 {
+    // Only when it is well off, so a level is not given up on small changes of view.
+    constexpr float kHysteresis = 0.75f;
     float exact = 0.f;
     bool have_target = false;
 
@@ -486,28 +490,40 @@ bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
     } else if (vs.gi_distances.valid()) {
         auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
         if (arena) {
-            float samples[kGiDistanceSamples];
-            arena->read_at(vs.gi_distances.offset(), samples, sizeof(samples));
-            float* const end = std::remove_if(std::begin(samples), std::end(samples), [](float d) { return !(d > 0.f); });
-            const auto count = static_cast<size_t>(end - samples);
+            uint32_t bins[kGiDistanceBins];
+            arena->read_at(vs.gi_distances.offset(), bins, sizeof(bins));
+            uint64_t count = 0;
+            for (uint32_t i = 0; i < kGiDistanceBins; ++i) {
+                count += bins[i];
+            }
             if (count > 0) {
-                // A quarter of what is seen lies nearer than this. The finest level's box
-                // reaches it, so a cell seen at the box's edge has the same size on screen
-                // as on every other level.
-                std::sort(samples, end);
-                exact = std::log2(samples[count / 4] / (static_cast<float>(kGiDim) * 0.5f));
-                // However close something else is, the coarsest level still reaches the
-                // farthest of what is seen, short of where it fades out.
-                const float coarsest_cell = end[-1] / (static_cast<float>(kGiDim) * 0.5f - 1.5f);
-                const int reaching = static_cast<int>(std::ceil(std::log2(coarsest_cell))) - (kGiLevels - 1);
-                exact = std::max(exact, static_cast<float>(reaching));
+                // The log2 distance that this share of what is seen lies nearer than.
+                const auto distance_at = [&](double share) {
+                    const double wanted = static_cast<double>(count) * share;
+                    double below = 0.0;
+                    for (uint32_t i = 0; i < kGiDistanceBins; ++i) {
+                        if (bins[i] != 0u && below + bins[i] >= wanted) {
+                            const double within = (wanted - below) / bins[i];
+                            return kGiDistanceFirstLog2 + (static_cast<float>(i) + static_cast<float>(within)) * kGiDistanceBinLog2;
+                        }
+                        below += bins[i];
+                    }
+                    return kGiDistanceFirstLog2 + static_cast<float>(kGiDistanceBins) * kGiDistanceBinLog2;
+                };
+                // The finest level's box reaches a quarter of what is seen, so a cell seen at
+                // the box's edge has the same size on screen as on every other level.
+                exact = distance_at(0.25) - std::log2(static_cast<float>(kGiDim) * 0.5f);
+                // However close something else is, the coarsest level still reaches nearly
+                // all of what is seen, short of where it fades out. Smooth, so that a few
+                // distant texels coming and going do not move it, and with room for how far
+                // the level in use may be from this.
+                const float coarsest_cell = distance_at(0.99) - std::log2(static_cast<float>(kGiDim) * 0.5f - 1.5f);
+                exact = std::max(exact, coarsest_cell - static_cast<float>(kGiLevels - 1) + kHysteresis);
                 have_target = true;
             }
         }
     }
 
-    // Only when it is well off, so a level is not given up on small changes of view.
-    constexpr float kHysteresis = 0.75f;
     if (have_target && (!vs.gi_finest_known || std::abs(exact - static_cast<float>(vs.gi_finest)) > kHysteresis)) {
         vs.gi_finest = static_cast<int32_t>(std::lround(exact));
         vs.gi_finest_known = true;
@@ -884,7 +900,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     const uint32_t visibility_mode = visibility_debug_mode();
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
-    emit_gi_measure_pass(vs, ctx, graph);
+    emit_gi_measure_pass(vs, render_view, ctx, graph);
     // GI probes update before lighting, so lighting reads a field built from
     // this frame's geometry.
     emit_probe_pass(vs, render_view, ctx, graph);
