@@ -199,6 +199,7 @@ public:
         IRenderPass::Ptr cached_probe_pass;
         /// What the probe rays found, for the pass that updates the probes' maps.
         ArenaRegion gi_probe_rays;
+        IRenderPass::Ptr cached_probe_trace_pass;
         IRenderPass::Ptr cached_probe_maps_pass;
         /// Exponent of the finest probe cell's width. Chosen once distances arrive.
         int32_t gi_finest = 0;
@@ -247,9 +248,9 @@ private:
     /// (standalone compute). Strong Ptr; the temporal pass holds it.
     IGpuPipeline::Ptr ensure_denoise_pipeline(FrameContext& ctx);
 
-    /// World-space GI probe pass. Composed with the RT body so probe hits get
-    /// real material evaluation.
-    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool with_medium, string_view ray_motion,
+    /// World-space GI probe passes. With @p shade, the pass composed with the RT body so
+    /// probe hits get real material evaluation; otherwise the pass that only traces.
+    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool shade, bool with_medium, string_view ray_motion,
                                             float ray_motion_reach);
 
     /// Samples distances to what the camera sees, for choosing the probe field's finest level.
@@ -258,6 +259,10 @@ private:
     /// Chooses the probe field's finest level from the camera's setting, or else from the
     /// distances sampled on earlier frames. Returns whether one is chosen yet.
     bool update_gi_finest(ViewState& vs, FrameContext& ctx);
+
+    /// Allocates the words the probe passes share. Call before recording anything that names
+    /// the culling arena.
+    void ensure_probe_rays(ViewState& vs, FrameContext& ctx);
 
     void emit_probe_pass(ViewState& vs, const RenderView& render_view,
                          FrameContext& ctx, IRenderGraph& graph);

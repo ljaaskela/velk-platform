@@ -86,10 +86,12 @@ function Run-Test([string]$test, [string]$file, [int]$frames) {
     Push-Location $bin
     $log = cmd /c "`"$exe`" gitest $test $Frames 2>&1"
     Pop-Location
-    $probes = ($log | Select-String "gpu pass gi\.probes\s+med=\s*([0-9.]+)" | Select-Object -First 1)
+    $probes = $log | Select-String "gpu pass gi\.(trace|shade|maps)\s+med=\s*([0-9.]+)"
+    $probe_ms = 0.0
+    foreach ($m in $probes) { $probe_ms += [double]$m.Matches[0].Groups[2].Value }
     $light = ($log | Select-String "gpu pass deferred\.lighting\s+med=\s*([0-9.]+)" | Select-Object -First 1)
     $script:timings[$file] = @(
-        $(if ($probes) { $probes.Matches[0].Groups[1].Value } else { "?" }),
+        $(if ($probes) { $probe_ms.ToString("0.000", [Globalization.CultureInfo]::InvariantCulture) } else { "?" }),
         $(if ($light) { $light.Matches[0].Groups[1].Value } else { "?" })
     )
     $bad = $log | Select-String "Validation Error|device lost|\[ERROR"

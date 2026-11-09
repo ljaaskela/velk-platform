@@ -280,7 +280,6 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     append_literal("    switch (shape.shape_kind) {\n");
     append_literal("        case 1u: return intersect_cube(ray, shape, hit);\n");
     append_literal("        case 2u: return intersect_sphere(ray, shape, hit);\n");
-    append_literal("        case 255u: return intersect_mesh(ray, shape, hit);\n");
     char buf[128];
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
@@ -343,6 +342,11 @@ namespace {
 constexpr uint32_t kProbeRaysPerFrame = 283000;
 // Rays per probe update. A power of two, 64 at most.
 constexpr uint32_t kProbeDirs = 64;
+// The probe passes' workgroups, and the words they share: 4 per ray, 3 per probe, 11 per hit.
+constexpr uint32_t kProbeGroups = kProbeRaysPerFrame / 64u;
+constexpr uint32_t kProbeCount = kProbeGroups * (64u / kProbeDirs);
+constexpr uint32_t kProbeRayWords = kProbeGroups * 64u * 4u;
+constexpr uint32_t kProbeHitWords = kProbeGroups * 64u * 11u;
 // Mirrors the constants and atlas layouts in VELK_GI_FIELD_GLSL.
 constexpr uint32_t kGiDim = 16;
 constexpr int kGiLevels = 8;
@@ -359,7 +363,7 @@ VELK_GPU_STRUCT ProbePushC {
     float    env_params[2];
     uint32_t extras[4];        // RT main uses these for its output image; the probe main
                                // uses x = workgroups in the dispatch, y = irradiance maps,
-                               // w = the level being rebuilt, or all ones.
+                               // z = the rays' words, w = the level being rebuilt, or all ones.
     uint32_t env[4];           // x = env material, y = env texture,
                                // z = finest level's ladder index, w = probe atlas image
 };
@@ -372,7 +376,7 @@ VELK_GPU_STRUCT GiMeasurePushC {
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool with_medium, string_view ray_motion,
+IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool shade, bool with_medium, string_view ray_motion,
                                                       float ray_motion_reach)
 {
     if (!ctx.render_ctx || !ctx.snippets) return {};
@@ -381,12 +385,14 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
     // plus a tag, since it shares that body under a different main.
     constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
     constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
-    uint64_t key = kFnvBasis ^ 0x4749'50726f626573ULL;
-    for (auto id : ctx.snippets->frame_materials()) {
-        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
-    }
-    for (auto id : ctx.snippets->frame_shadow_techs()) {
-        key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    uint64_t key = kFnvBasis ^ (shade ? 0x4749'50726f626573ULL : 0x4749'5472'6163'6501ULL);
+    if (shade) {
+        for (auto id : ctx.snippets->frame_materials()) {
+            key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+        }
+        for (auto id : ctx.snippets->frame_shadow_techs()) {
+            key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+        }
     }
     for (auto id : ctx.snippets->frame_intersects()) {
         key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
@@ -401,7 +407,9 @@ IGpuPipeline::Ptr DeferredPath::ensure_probe_pipeline(FrameContext& ctx, bool wi
             PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
         return p;
     }
-    string src = velk_with_probe_dirs(string_view(compose_rt_compute(*ctx.snippets, probe_gi_main_src)), kProbeDirs);
+    const string composed = shade ? compose_rt_compute(*ctx.snippets, probe_gi_main_src)
+                                  : compose_rt_trace_compute(*ctx.snippets, probe_trace_main_src);
+    string src = velk_with_probe_dirs(string_view(composed), kProbeDirs);
     if (!ray_motion.empty()) {
         src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
     }
@@ -491,6 +499,14 @@ bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
     return vs.gi_finest_known;
 }
 
+void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
+{
+    if (vs.gi_probe_rays.valid()) return;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+    vs.gi_probe_rays = arena->alloc(uint64_t(kProbeRayWords + kProbeCount * 3u + kProbeHitWords) * sizeof(uint32_t));
+}
+
 void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                                    FrameContext& ctx, IRenderGraph& graph)
 {
@@ -521,9 +537,12 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     if (!vs.gi_probes || !vs.gi_probe_irradiance) return;
     auto& fine = vs.gi_probes;
 
-    auto pipeline = ensure_probe_pipeline(ctx, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
+    auto pipeline = ensure_probe_pipeline(ctx, true, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
                                           render_view.bvh.ray_motion_reach);
     if (!pipeline) return;
+    auto trace_pipeline = ensure_probe_pipeline(ctx, false, render_view.bvh.has_medium != 0u, render_view.bvh.ray_motion,
+                                                render_view.bvh.ray_motion_reach);
+    if (!trace_pipeline) return;
 
     const auto handle = [](const IRenderTarget::Ptr& t) {
         return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default));
@@ -595,21 +614,36 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     auto maps_pipeline = maps_found ? maps_found : ctx.render_ctx->pipelines().compile_compute(probe_maps_compute_src, kMapsKey);
     if (!maps_pipeline) return;
 
-    // 4 words for each ray, then 3 for each probe.
-    const uint32_t probes = groups * (64u / kProbeDirs);
-    const uint32_t ray_words = groups * 64u * 4u;
-    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena) return;
-    if (!vs.gi_probe_rays.valid()) {
-        vs.gi_probe_rays = arena->alloc(uint64_t(ray_words + probes * 3u) * sizeof(uint32_t));
-        if (!vs.gi_probe_rays.valid()) return;
-    }
+    if (!vs.gi_probe_rays.valid()) return;
+    const uint32_t probes = kProbeCount;
+    const uint32_t ray_words = kProbeRayWords;
     const auto rays_word = static_cast<uint32_t>(vs.gi_probe_rays.offset() / sizeof(uint32_t));
     pc.extras[2] = rays_word;
 
+    bool trace_dirty = true;
+    emit_cached_view_pass(vs.cached_probe_trace_pass, trace_dirty, "gi.trace", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = trace_pipeline.get();
+        dc.groups_x = groups;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->push_label("GI: probe rays");
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.held.push_back(std::move(trace_pipeline));
+    });
+
     bool dirty = true;
     emit_cached_view_pass(
-        vs.cached_probe_pass, dirty, "gi.probes", graph,
+        vs.cached_probe_pass, dirty, "gi.shade", graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
@@ -806,6 +840,10 @@ void DeferredPath::build_passes(IViewEntry& entry,
 
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
+
+    // Before anything is recorded: growing the culling arena replaces the buffer that
+    // recorded commands name.
+    ensure_probe_rays(vs, ctx);
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
     const uint32_t culling_generation = vs.instance_cull.arena_generation;
