@@ -1172,6 +1172,15 @@ float velk_gi_edge(int ladder, vec3 rel, vec3 cam)
     return min(min(g.x, min(g.y, g.z)), float(kGiDim - 1) - max(g.x, max(g.y, g.z)));
 }
 
+// How many cells inside a level a point is for fading into the next level. Measured from the
+// camera, so it moves smoothly with it where the grid moves in steps, and at most
+// velk_gi_edge, so a fade is complete before the level ends.
+float velk_gi_fade_edge(int ladder, vec3 rel)
+{
+    vec3 cells = abs(rel) / velk_gi_cell(ladder);
+    return float(kGiDim / 2) - 1.5 - max(cells.x, max(cells.y, cells.z));
+}
+
 // The weight one of the eight probes around a point gets: 0 unless it holds this level's
 // cell, fading out the more of its rays reach the inside of something, such as one under
 // the ground. With a normal, probes behind the surface get none, since they cannot see
@@ -1342,10 +1351,11 @@ bool velk_gi_lookup(uint atlas, int finest, vec3 world_pos, vec3 N, vec3 cam, ou
     }
     if (weight <= 0.0) return false;
 
-    if (used == level && used + 1 < kGiLevels && edge < 2.0) {
+    float fade = velk_gi_fade_edge(finest + level, shade_pos);
+    if (used == level && used + 1 < kGiLevels && fade < 2.0) {
         vec3 outer[4];
         if (velk_gi_sample(atlas, finest + used + 1, shade_pos, cam, N, outer) > 0.0) {
-            float t = clamp(edge * 0.5, 0.0, 1.0);
+            float t = clamp(fade * 0.5, 0.0, 1.0);
             for (int c = 0; c < 4; ++c) sh[c] = mix(outer[c], sh[c], t);
         }
     }
@@ -1369,10 +1379,11 @@ vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 
     }
     if (weight <= 0.0) return vec3(-1.0);
 
-    if (used == level && used + 1 < kGiLevels && edge < 2.0) {
+    float fade = velk_gi_fade_edge(finest + level, shade_pos);
+    if (used == level && used + 1 < kGiLevels && fade < 2.0) {
         vec3 outer;
         if (velk_gi_sample_irradiance(atlas, maps, finest + used + 1, world_pos, shade_pos, cam, N, outer) > 0.0) {
-            irradiance = mix(outer, irradiance, clamp(edge * 0.5, 0.0, 1.0));
+            irradiance = mix(outer, irradiance, clamp(fade * 0.5, 0.0, 1.0));
         }
     }
     return max(irradiance, vec3(0.0));
