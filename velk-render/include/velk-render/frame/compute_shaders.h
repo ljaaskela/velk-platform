@@ -1583,11 +1583,11 @@ vec3 velk_tonemap_aces(vec3 x)
 }
 )" VELK_GI_FIELD_GLSL R"(
 // Indirect diffuse from the GI probe field, as irradiance against a surface's normal, for
-// a point relative to the camera.
+// a point relative to the camera. Negative if no probe could light it.
 vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
 {
     if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(0.0);
-    return max(velk_gi_irradiance(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, normalize(world_pos), VELK_GLOBALS.cam_pos.xyz), vec3(0.0));
+    return velk_gi_irradiance(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, normalize(world_pos), VELK_GLOBALS.cam_pos.xyz);
 }
 
 // Light arriving from a direction, as the GI probe field knows it. Broad, since the field
@@ -2394,8 +2394,9 @@ void main()
         // both counts the sky twice, which in a daylit scene washes everything
         // flat - and the probe field supersedes the AO term too, since its
         // occlusion is real rather than a single 0.3-unit ray.
-        vec3 ambient_unshadowed = has_gi ? gi : env_diffuse;
-        vec3 ambient_shadowed   = has_gi ? gi : env_diffuse * ao;
+        // Where no probe could light the surface, the environment stands in.
+        vec3 ambient_unshadowed = has_gi && gi.r >= 0.0 ? gi : env_diffuse;
+        vec3 ambient_shadowed   = ambient_unshadowed * ao;
         unshadowed_out = unshadowed_direct + ambient_unshadowed;
         vec3 shadowed_total = direct_diffuse + ambient_shadowed;
         irr = shadowed_total / max(unshadowed_out, vec3(1e-4));

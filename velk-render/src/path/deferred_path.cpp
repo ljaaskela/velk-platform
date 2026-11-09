@@ -488,6 +488,11 @@ bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
                 // as on every other level.
                 std::sort(samples, end);
                 exact = std::log2(samples[count / 4] / (static_cast<float>(kGiDim) * 0.5f));
+                // However close something else is, the coarsest level still reaches the
+                // farthest of what is seen, short of where it fades out.
+                const float coarsest_cell = end[-1] / (static_cast<float>(kGiDim) * 0.5f - 1.5f);
+                const int reaching = static_cast<int>(std::ceil(std::log2(coarsest_cell))) - (kGiLevels - 1);
+                exact = std::max(exact, static_cast<float>(reaching));
                 have_target = true;
             }
         }
