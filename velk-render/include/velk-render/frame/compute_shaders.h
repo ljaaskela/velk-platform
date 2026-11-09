@@ -3942,33 +3942,12 @@ void main()
 // dispatch. Each level is an independent DDGI volume, and its rays go as far as they need to.
 //
 // A workgroup is 64 threads, VELK_PROBE_DIRS rays for each of its probes. Their results
-// reduce in shared memory to 4 spherical-harmonic coefficients, used for broad reflections,
-// and blend into the probe's irradiance and distance maps. Each hit shades against one light chosen by
-// contribution, so the cost does not depend on the light count.
-#define VELK_PROBE_HELPERS_GLSL VELK_GI_FIELD_GLSL R"(
-shared vec3 s_sh[4][64];
-// The ray being shaded, for biasing the lookup at its hit towards where the ray came from.
-vec3 velk_probe_ray_dir = vec3(0.0, 1.0, 0.0);
-vec3 velk_hit_irradiance(vec3 pos, vec3 N)
-{
-    return velk_gi_irradiance(pc.env.w, pc.extras.y, int(pc.env.z), pos, N, velk_probe_ray_dir, VELK_GLOBALS.cam_pos.xyz);
-}
-
-// What each ray found nearby: how far, and whether it was the back of something solid.
-shared float s_near[64];
-shared uint s_back[64];
-shared vec3 s_radiance[64];
-
-// Open surfaces are seen from both sides, so only solid shapes say a probe is inside one.
-bool velk_gi_inside_solid(RayHit hit, vec3 dir)
-{
-    if (dot(hit.normal, dir) <= 0.0) return false;
-    RtShape s = velk_bvh_shapes.data[hit.shape_index];
-    if (s.shape_kind == 1u || s.shape_kind == 2u) return true;
-    if (s.shape_kind != 255u || s.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
-    return (velk_mesh_static(s).flags & (VELK_MESH_SCATTERED | VELK_MESH_DOUBLE_SIDED)) == 0u;
-}
-
+// reduce in shared memory to 4 spherical-harmonic coefficients, used for broad reflections.
+// What each ray found goes to the words at `extras.z`, for probe_maps_compute_src: 4 per ray,
+// radiance and distance, the distance negative for the back of a solid, then 3 per probe. Each
+// hit shades against one light chosen by contribution, so the cost does not depend on the
+// light count.
+#define VELK_PROBE_DIR_GLSL R"(
 // Fibonacci sphere, rotated per frame so successive frames fill the gaps
 // between directions instead of resampling the same 64.
 vec3 velk_probe_dir(uint i, uint n, float phase)
@@ -3983,6 +3962,30 @@ vec3 velk_probe_dir(uint i, uint n, float phase)
     float c = cos(tilt);
     float s = sin(tilt);
     return vec3(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
+}
+)"
+
+#define VELK_PROBE_HELPERS_GLSL VELK_GI_FIELD_GLSL VELK_PROBE_DIR_GLSL R"(
+layout(set = 1, binding = 16, std430) buffer ProbeRays { uint data[]; } probe_rays;
+shared vec3 s_sh[4][64];
+// The ray being shaded, for biasing the lookup at its hit towards where the ray came from.
+vec3 velk_probe_ray_dir = vec3(0.0, 1.0, 0.0);
+vec3 velk_hit_irradiance(vec3 pos, vec3 N)
+{
+    return velk_gi_irradiance(pc.env.w, pc.extras.y, int(pc.env.z), pos, N, velk_probe_ray_dir, VELK_GLOBALS.cam_pos.xyz);
+}
+
+// Whether each ray found the back of something solid.
+shared uint s_back[64];
+
+// Open surfaces are seen from both sides, so only solid shapes say a probe is inside one.
+bool velk_gi_inside_solid(RayHit hit, vec3 dir)
+{
+    if (dot(hit.normal, dir) <= 0.0) return false;
+    RtShape s = velk_bvh_shapes.data[hit.shape_index];
+    if (s.shape_kind == 1u || s.shape_kind == 2u) return true;
+    if (s.shape_kind != 255u || s.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
+    return (velk_mesh_static(s).flags & (VELK_MESH_SCATTERED | VELK_MESH_DOUBLE_SIDED)) == 0u;
 }
 
 float velk_probe_hash(uint x)
@@ -4205,9 +4208,14 @@ void main()
     s_sh[1][lane] = radiance * (kY1 * d.y * w);
     s_sh[2][lane] = radiance * (kY1 * d.z * w);
     s_sh[3][lane] = radiance * (kY1 * d.x * w);
-    s_near[lane] = near_t;
     s_back[lane] = near_back ? 1u : 0u;
-    s_radiance[lane] = radiance;
+    if (probe_live) {
+        uint ray_at = pc.extras.z + (gl_WorkGroupID.x * 64u + lane) * 4u;
+        probe_rays.data[ray_at] = floatBitsToUint(radiance.r);
+        probe_rays.data[ray_at + 1u] = floatBitsToUint(radiance.g);
+        probe_rays.data[ray_at + 2u] = floatBitsToUint(radiance.b);
+        probe_rays.data[ray_at + 3u] = floatBitsToUint(near_back ? -near_t : near_t);
+    }
     barrier();
 
     // Reduce within each probe's 8-lane block. The barrier stays outside the
@@ -4219,7 +4227,12 @@ void main()
         barrier();
     }
 
-    if (dir != 0u || !probe_live) return;
+    if (dir != 0u) return;
+    uint header = pc.extras.z + pc.extras.x * 256u + (gl_WorkGroupID.x * kProbesPerGroup + probe_local) * 3u;
+    if (!probe_live) {
+        probe_rays.data[header] = 0u;
+        return;
+    }
 
     // A block holding another cell starts over. Otherwise a running average settles into
     // a fixed rate, so moving lights do not smear indefinitely.
@@ -4246,59 +4259,112 @@ void main()
                ivec2(texel.x + texel.z * kGiDim, texel.y + (4 + slot * kGiRows) * kGiDim), vec4(moved, 1.0));
 
     // Too many rays reaching the back of something: the probe is inside it, so its maps are
-    // left alone. Then each entry blends the rays around it, as DDGI does.
-    if (float(backs) >= float(kDirs) * 0.25) return;
+    // left alone.
+    bool update_maps = float(backs) < float(kDirs) * 0.25;
+    bool keep_history = same_cell && !drop_history;
+    probe_rays.data[header] = (update_maps ? 1u : 0u) | (keep_history ? 2u : 0u)
+        | (uint(texel.x) << 8u) | (uint(texel.y) << 12u) | (uint(texel.z) << 16u) | (uint(slot) << 20u);
+    probe_rays.data[header + 1u] = floatBitsToUint(phase);
+    probe_rays.data[header + 2u] = floatBitsToUint(length(vec3(spacing)) * 1.5);
+}
+)";
+
+/// Blends what a probe's rays found into its irradiance and distance maps, as DDGI does. Runs
+/// after the probe rays. A workgroup is one probe and each thread one map entry.
+inline constexpr string_view probe_maps_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+layout(set = 1, binding = 16, std430) readonly buffer ProbeRays { uint data[]; } probe_rays;
+)" VELK_GI_FIELD_GLSL VELK_PROBE_DIR_GLSL R"(
+layout(push_constant) uniform PC {
+    uint rays_word;
+    uint headers_word;
+    uint maps;
+    uint dirs;
+} pc;
+
+shared vec3 s_dir[64];
+shared vec3 s_radiance[64];
+shared float s_near[64];
+shared uint s_back[64];
+
+void main()
+{
+    uint lane = gl_LocalInvocationIndex;
+    uint probe = gl_WorkGroupID.x;
+    uint header = pc.headers_word + probe * 3u;
+    uint flags = probe_rays.data[header];
+    float phase = uintBitsToFloat(probe_rays.data[header + 1u]);
+    float max_distance = uintBitsToFloat(probe_rays.data[header + 2u]);
+
+    // Each thread brings in one ray, so every entry can read them all from shared memory.
+    if ((flags & 1u) != 0u && lane < pc.dirs) {
+        uint at = pc.rays_word + (probe * pc.dirs + lane) * 4u;
+        s_radiance[lane] = vec3(uintBitsToFloat(probe_rays.data[at]),
+                                uintBitsToFloat(probe_rays.data[at + 1u]),
+                                uintBitsToFloat(probe_rays.data[at + 2u]));
+        float found_at = uintBitsToFloat(probe_rays.data[at + 3u]);
+        s_near[lane] = abs(found_at);
+        s_back[lane] = found_at < 0.0 ? 1u : 0u;
+        s_dir[lane] = velk_probe_dir(lane, pc.dirs, phase);
+    }
+    barrier();
+    if ((flags & 1u) == 0u) return;
+
+    bool keep_history = (flags & 2u) != 0u;
+    ivec3 texel = ivec3(int((flags >> 8u) & 15u), int((flags >> 12u) & 15u), int((flags >> 16u) & 15u));
+    int slot = int((flags >> 20u) & 7u);
     const float kHysteresis = 0.97;
     const float kChangeThreshold = 0.2;
     const float kBrightnessThreshold = 1.0;
     const float kDarkeningStep = 1.0 / 1024.0;
-    float max_distance = length(vec3(spacing)) * 1.5;
-    bool keep_history = same_cell && !drop_history;
-    for (int y = 0; y < kGiMapSize; ++y) {
-        for (int x = 0; x < kGiMapSize; ++x) {
-            vec2 p = (vec2(float(x), float(y)) + 0.5) / float(kGiMapSize) * 2.0 - 1.0;
-            vec3 entry_dir = velk_gi_oct_dir(p);
-            float irradiance_weight = 0.0;
-            vec3 irradiance_sum = vec3(0.0);
-            float distance_weight = 0.0;
-            vec2 distance_sum = vec2(0.0);
-            for (uint r = 0u; r < kDirs; ++r) {
-                float facing = max(dot(entry_dir, velk_probe_dir(r, kDirs, phase)), 0.0);
-                if (s_back[lane + r] == 0u) {
-                    irradiance_weight += facing;
-                    irradiance_sum += facing * s_radiance[lane + r];
-                }
-                float sharp = pow(facing, 50.0);
-                float away = min(s_near[lane + r], max_distance);
-                distance_weight += sharp;
-                distance_sum += sharp * vec2(away, away * away);
-            }
 
-            ivec2 at = velk_gi_map_texel(texel, slot, ivec2(x, y), 0);
-            vec3 held = keep_history ? velk_texture(irradiance_maps, velk_gi_map_uv(at)).rgb : vec3(0.0);
-            float hysteresis = dot(held, held) == 0.0 ? 0.0 : kHysteresis;
-            vec3 now = pow(irradiance_sum / max(irradiance_weight, 1e-9), vec3(1.0 / kGiIrradianceGamma));
-            vec3 delta = now - held;
-            if (max(held.r - now.r, max(held.g - now.g, held.b - now.b)) > kChangeThreshold) {
-                hysteresis = max(0.0, hysteresis - 0.75);
-            }
-            if (dot(delta, vec3(0.2126, 0.7152, 0.0722)) > kBrightnessThreshold) {
-                delta *= 0.25;
-            }
-            vec3 step_by = (1.0 - hysteresis) * delta;
-            if (max(now.r, max(now.g, now.b)) < max(held.r, max(held.g, held.b))) {
-                step_by = min(max(vec3(kDarkeningStep), abs(step_by)), abs(delta)) * sign(step_by);
-            }
-            imageStore(gStorageImagesF16[nonuniformEXT(irradiance_maps)], at, vec4(held + step_by, 1.0));
-
-            ivec2 at_distance = velk_gi_map_texel(texel, slot, ivec2(x, y), 1);
-            vec2 held_distance = keep_history ? velk_texture(irradiance_maps, velk_gi_map_uv(at_distance)).rg : vec2(0.0);
-            float distance_hysteresis = dot(held_distance, held_distance) == 0.0 ? 0.0 : kHysteresis;
-            vec2 now_distance = distance_sum / max(distance_weight, 1e-9);
-            imageStore(gStorageImagesF16[nonuniformEXT(irradiance_maps)], at_distance,
-                       vec4(mix(now_distance, held_distance, distance_hysteresis), 0.0, 1.0));
+    int x = int(lane) % kGiMapSize;
+    int y = int(lane) / kGiMapSize;
+    vec2 p = (vec2(float(x), float(y)) + 0.5) / float(kGiMapSize) * 2.0 - 1.0;
+    vec3 entry_dir = velk_gi_oct_dir(p);
+    float irradiance_weight = 0.0;
+    vec3 irradiance_sum = vec3(0.0);
+    float distance_weight = 0.0;
+    vec2 distance_sum = vec2(0.0);
+    for (uint r = 0u; r < pc.dirs; ++r) {
+        float facing = max(dot(entry_dir, s_dir[r]), 0.0);
+        if (s_back[r] == 0u) {
+            irradiance_weight += facing;
+            irradiance_sum += facing * s_radiance[r];
         }
+        float sharp = pow(facing, 50.0);
+        float away = min(s_near[r], max_distance);
+        distance_weight += sharp;
+        distance_sum += sharp * vec2(away, away * away);
     }
+
+    ivec2 at = velk_gi_map_texel(texel, slot, ivec2(x, y), 0);
+    vec3 held = keep_history ? velk_texture(pc.maps, velk_gi_map_uv(at)).rgb : vec3(0.0);
+    float hysteresis = dot(held, held) == 0.0 ? 0.0 : kHysteresis;
+    vec3 now = pow(irradiance_sum / max(irradiance_weight, 1e-9), vec3(1.0 / kGiIrradianceGamma));
+    vec3 delta = now - held;
+    if (max(held.r - now.r, max(held.g - now.g, held.b - now.b)) > kChangeThreshold) {
+        hysteresis = max(0.0, hysteresis - 0.75);
+    }
+    if (dot(delta, vec3(0.2126, 0.7152, 0.0722)) > kBrightnessThreshold) {
+        delta *= 0.25;
+    }
+    vec3 step_by = (1.0 - hysteresis) * delta;
+    if (max(now.r, max(now.g, now.b)) < max(held.r, max(held.g, held.b))) {
+        step_by = min(max(vec3(kDarkeningStep), abs(step_by)), abs(delta)) * sign(step_by);
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.maps)], at, vec4(held + step_by, 1.0));
+
+    ivec2 at_distance = velk_gi_map_texel(texel, slot, ivec2(x, y), 1);
+    vec2 held_distance = keep_history ? velk_texture(pc.maps, velk_gi_map_uv(at_distance)).rg : vec2(0.0);
+    float distance_hysteresis = dot(held_distance, held_distance) == 0.0 ? 0.0 : kHysteresis;
+    vec2 now_distance = distance_sum / max(distance_weight, 1e-9);
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.maps)], at_distance,
+               vec4(mix(now_distance, held_distance, distance_hysteresis), 0.0, 1.0));
 }
 )";
 

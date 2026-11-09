@@ -590,6 +590,23 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
     pc.env[2] = static_cast<uint32_t>(vs.gi_finest);
     pc.env[3] = handle(fine);
 
+    constexpr uint64_t kMapsKey = 0x4749'4d41'5053'0001ULL;
+    auto maps_found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kMapsKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto maps_pipeline = maps_found ? maps_found : ctx.render_ctx->pipelines().compile_compute(probe_maps_compute_src, kMapsKey);
+    if (!maps_pipeline) return;
+
+    // 4 words for each ray, then 3 for each probe.
+    const uint32_t probes = groups * (64u / kProbeDirs);
+    const uint32_t ray_words = groups * 64u * 4u;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+    if (!vs.gi_probe_rays.valid()) {
+        vs.gi_probe_rays = arena->alloc(uint64_t(ray_words + probes * 3u) * sizeof(uint32_t));
+        if (!vs.gi_probe_rays.valid()) return;
+    }
+    const auto rays_word = static_cast<uint32_t>(vs.gi_probe_rays.offset() / sizeof(uint32_t));
+    pc.extras[2] = rays_word;
+
     bool dirty = true;
     emit_cached_view_pass(
         vs.cached_probe_pass, dirty, "gi.probes", graph,
@@ -606,6 +623,7 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                 cmd->begin_recording();
                 cmd->push_label("GI: probe update");
                 cmd->record_dispatch(dc);
+                cmd->record_global_barrier();
                 cmd->pop_label();
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
@@ -615,9 +633,37 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
             rec.held.push_back(std::move(pipeline));
         });
+
+    bool maps_dirty = true;
+    emit_cached_view_pass(vs.cached_probe_maps_pass, maps_dirty, "gi.maps", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            uint32_t rays_word, headers_word, maps, dirs;
+        };
+        const PushC maps_pc{rays_word, rays_word + ray_words, handle(vs.gi_probe_irradiance), kProbeDirs};
+        DispatchCall dc{};
+        dc.pipeline = maps_pipeline.get();
+        dc.groups_x = probes;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(maps_pc);
+        std::memcpy(dc.root_constants, &maps_pc, sizeof(maps_pc));
+        cmd->begin_recording();
+        cmd->push_label("GI: probe maps");
+        cmd->record_dispatch(dc);
+        // The next frame's rays overwrite what this pass read.
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
+        rec.held.push_back(std::move(maps_pipeline));
+    });
 }
 
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)

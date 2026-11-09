@@ -197,6 +197,9 @@ public:
         bool gi_swept = false;
         bool gi_field_ready = false;
         IRenderPass::Ptr cached_probe_pass;
+        /// What the probe rays found, for the pass that updates the probes' maps.
+        ArenaRegion gi_probe_rays;
+        IRenderPass::Ptr cached_probe_maps_pass;
         /// Exponent of the finest probe cell's width. Chosen once distances arrive.
         int32_t gi_finest = 0;
         bool gi_finest_known = false;
