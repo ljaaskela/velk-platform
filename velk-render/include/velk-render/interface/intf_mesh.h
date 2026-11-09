@@ -214,9 +214,9 @@ struct MeshRefitInfo
     uint32_t node_base = 0;     ///< The tree's nodes.
     uint32_t word_base = 0;     ///< The primitive's cluster words.
     uint32_t vertex_base = 0;   ///< The word of its first vertex in the mesh-word arena.
-    uint32_t leaf_word = 0;     ///< In the culling arena: its leaves' node indices.
+    uint32_t leaf_word = 0;     ///< In the culling arena: two words per leaf, its word offset and its parent link.
     uint32_t leaf_count = 0;
-    uint32_t parent_word = 0;   ///< In the culling arena: each node's parent, or 0xFFFFFFFF.
+    uint32_t parent_word = 0;   ///< In the culling arena: each node's parent link. See BlasGpuTree.
     uint32_t counter_word = 0;  ///< In the culling arena: a counter for each node, cleared before the refit.
     uint32_t node_count = 0;
 };

@@ -75,9 +75,10 @@ void main()
 /**
  * Refits one primitive's tree from its vertices, in one dispatch with an invocation per
  * leaf. A leaf copies its triangles' vertices into its cluster's positions, which leaves
- * sharing a vertex write identically, and sets its bounds. It then walks up the tree:
- * at each parent, the first child to arrive stops, and the second computes the parent
- * from both, since by then both are finished. Each node's counter starts at zero.
+ * sharing a vertex write identically, and works out its bounds. It then walks up the tree,
+ * writing the bounds into its side of the parent: the first child to arrive stops, and the
+ * second takes the union of both sides on up, since by then both are written. Each node's
+ * counter starts at zero.
  */
 inline constexpr string_view mesh_refit_src = R"(
 #version 450
@@ -85,7 +86,7 @@ inline constexpr string_view mesh_refit_src = R"(
 
 layout(local_size_x = 16) in;
 
-layout(set = 1, binding = 12, std430) coherent buffer RefitNodes { BvhNode data[]; } refit_nodes;
+layout(set = 1, binding = 12, std430) coherent buffer RefitNodes { VelkMeshNode data[]; } refit_nodes;
 layout(set = 1, binding = 13, std430) buffer RefitClusterWords { uint data[]; } refit_cluster_words;
 layout(set = 1, binding = 14, std430) readonly buffer RefitVertices { uint data[]; } refit_vertices;
 layout(set = 1, binding = 16, std430) coherent buffer RefitWords { uint data[]; } refit_words;
@@ -109,16 +110,18 @@ void main()
     uint leaf_index = gl_GlobalInvocationID.x;
     if (leaf_index >= pc.leaf_count) return;
 
-    uint node_index = refit_words.data[pc.leaf_word + leaf_index];
-    BvhNode node = refit_nodes.data[pc.node_base + node_index];
-    uint triangle_count = node.shape_count & 0xFFFFu;
-    uint positions = pc.word_base + node.first_child;
-    uint ids = positions + (node.shape_count >> 16u) * 3u;
+    uint leaf = pc.word_base + refit_words.data[pc.leaf_word + leaf_index * 2u];
+    uint link = refit_words.data[pc.leaf_word + leaf_index * 2u + 1u];
+    uint first_triangle = refit_cluster_words.data[leaf];
+    uint counts = refit_cluster_words.data[leaf + 1u];
+    uint triangle_count = counts & 0xFFFFu;
+    uint positions = pc.word_base + refit_cluster_words.data[leaf + 2u];
+    uint ids = positions + (counts >> 16u) * 3u;
 
     vec3 lo = vec3(1e30);
     vec3 hi = vec3(-1e30);
     for (uint t = 0u; t < triangle_count; ++t) {
-        uint triangle = refit_cluster_words.data[pc.word_base + node.first_shape + t];
+        uint triangle = refit_cluster_words.data[pc.word_base + first_triangle + t];
         for (uint c = 0u; c < 3u; ++c) {
             uint local = (triangle >> (c * 8u)) & 0xFFu;
             uint vertex = pc.vertex_base + refit_cluster_words.data[ids + local] * VELK_VERTEX3D_WORDS;
@@ -132,23 +135,27 @@ void main()
             hi = max(hi, p);
         }
     }
-    refit_nodes.data[pc.node_base + node_index].aabb_min.xyz = lo;
-    refit_nodes.data[pc.node_base + node_index].aabb_max.xyz = hi;
-    memoryBarrierBuffer();
-
-    uint parent = refit_words.data[pc.parent_word + node_index];
-    for (uint depth = 0u; depth < kMaxDepth && parent != kNoParent; ++depth) {
-        if (atomicAdd(refit_words.data[pc.counter_word + parent], 1u) == 0u) return;
+    for (uint depth = 0u; depth < kMaxDepth && link != kNoParent; ++depth) {
+        uint parent = pc.node_base + (link >> 1u);
+        if ((link & 1u) == 0u) {
+            refit_nodes.data[parent].a = vec4(lo, hi.x);
+            refit_nodes.data[parent].b.xy = hi.yz;
+        } else {
+            refit_nodes.data[parent].b.zw = lo.xy;
+            refit_nodes.data[parent].c = vec4(lo.z, hi);
+        }
+        memoryBarrierBuffer();
+        if (atomicAdd(refit_words.data[pc.counter_word + (link >> 1u)], 1u) == 0u) return;
         memoryBarrierBuffer();
 
-        uint first_child = refit_nodes.data[pc.node_base + parent].first_child;
-        BvhNode a = refit_nodes.data[pc.node_base + first_child];
-        BvhNode b = refit_nodes.data[pc.node_base + first_child + 1u];
-        refit_nodes.data[pc.node_base + parent].aabb_min.xyz = min(a.aabb_min.xyz, b.aabb_min.xyz);
-        refit_nodes.data[pc.node_base + parent].aabb_max.xyz = max(a.aabb_max.xyz, b.aabb_max.xyz);
-        memoryBarrierBuffer();
-
-        parent = refit_words.data[pc.parent_word + parent];
+        VelkMeshNode node = refit_nodes.data[parent];
+        vec3 left_min = node.a.xyz;
+        vec3 left_max = vec3(node.a.w, node.b.xy);
+        vec3 right_min = vec3(node.b.zw, node.c.x);
+        vec3 right_max = node.c.yzw;
+        lo = min(left_min, right_min);
+        hi = max(left_max, right_max);
+        link = refit_words.data[pc.parent_word + (link >> 1u)];
     }
 }
 )";

@@ -313,11 +313,13 @@ BvhNode velk_top_node(uint index)
 // of instances' area per volume. A node's area is in aabb_max.w, 0 for one not made of
 // instances, and its average colour is in the bits of aabb_min.w, as unorm RGB. Compiled out
 // otherwise, since registers are paid for by the whole pass.
-bool velk_walk_child(Ray ray, uint index, float limit, out float t)
-{
-    BvhNode child = velk_blas_nodes.data[index];
-    return ray_aabb(ray, child.aabb_min.xyz, child.aabb_max.xyz, limit, t);
-}
+#ifdef VELK_TRACE_MEDIUM
+// A mesh counted as a medium keeps going past what other shapes hit, as far as this record's
+// limit, since what it holds in front of that still dims the ray.
+#define VELK_WALK_LIMIT (mesh_medium ? min(mesh_best, medium_far * mesh_scale) : min(mesh_best, best_t * mesh_scale))
+#else
+#define VELK_WALK_LIMIT min(mesh_best, best_t * mesh_scale)
+#endif
 
 float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_record, RtShape seed, out RayHit hit)
 {
@@ -438,88 +440,85 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 if (level == kTree) walk_ray = velk_local_ray(ray, velk_records.data[cur_record]);
                 continue;
             }
-            uint ni = stack[--sp];
-            BvhNode node = velk_blas_nodes.data[mesh_base + ni];
-#ifdef VELK_TRACE_MEDIUM
-            // A mesh counted as a medium keeps going past what other shapes hit, as far as
-            // this record's limit, since what it holds in front of that still dims the ray.
-            float limit = mesh_medium ? min(mesh_best, medium_far * mesh_scale) : min(mesh_best, best_t * mesh_scale);
-#else
-            float limit = min(mesh_best, best_t * mesh_scale);
-#endif
-            float t_aabb;
-            if (!ray_aabb(walk_ray, node.aabb_min.xyz, node.aabb_max.xyz, limit, t_aabb)) continue;
+            uint ref = stack[--sp];
+            if ((ref & VELK_BLAS_LEAF) != 0u) {
+                uint leaf = word_base + (ref & ~VELK_BLAS_LEAF);
+                triangle_at = word_base + velk_cluster_words.data[leaf];
+                leaf_counts = velk_cluster_words.data[leaf + 1u];
+                positions = word_base + velk_cluster_words.data[leaf + 2u];
+                continue;
+            }
+            VelkMeshNode node = velk_mesh_nodes.data[mesh_base + ref];
+            float t_l, t_r;
+            float limit = VELK_WALK_LIMIT;
+            bool h_l = ray_aabb(walk_ray, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
+            bool h_r = ray_aabb(walk_ray, vec3(node.b.zw, node.c.x), node.c.yzw, limit, t_r);
+            bool left_first = h_l && (!h_r || t_l <= t_r);
+            uint near_ref = kNone;
+            uint far_ref = kNone;
+            // The nearer child first, so a near stop can cull the far one, and it goes on top
+            // of the stack so that a near hit or a blocker is found sooner.
+            for (uint k = 0u; k < 2u; ++k) {
+                bool left = (k == 0u) == left_first;
+                if (!(left ? h_l : h_r)) continue;
+                float t_aabb = left ? t_l : t_r;
+                if (t_aabb > VELK_WALK_LIMIT) continue;
+                uint child = left ? node.refs.x : node.refs.y;
+                uint surface = left ? node.refs.z : node.refs.w;
+                vec3 box_min = left ? node.a.xyz : vec3(node.b.zw, node.c.x);
+                vec3 box_max = left ? vec3(node.a.w, node.b.xy) : node.c.yzw;
 )"
                                                                       R"(
 #ifdef VELK_TRACE_MEDIUM
-            if (mesh_medium) {
-                vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
-                float widest = max(max(extent.x, extent.y), extent.z);
-                // In the mesh's units, where its t is the world's times mesh_scale.
-                if (widest < (footprint * mesh_scale + spread * t_aabb) * velk_medium_reach(mesh_base + ni)) {
-                    vec3 sides = max(extent, vec3(widest * 1e-3));
-                    float leave = min(min(ray_aabb_exit(walk_ray, node.aabb_min.xyz, node.aabb_max.xyz), medium_far * mesh_scale), mesh_best);
-                    float amount = node.aabb_max.w / (sides.x * sides.y * sides.z) * max(leave - t_aabb, 0.0);
-                    if (closest) {
-                        medium_depth += amount;
-                        medium_color += amount * unpackUnorm4x8(mesh_color_word).rgb;
-                    } else {
-                        visibility *= exp(-amount);
+                if (mesh_medium) {
+                    vec3 extent = box_max - box_min;
+                    float widest = max(max(extent.x, extent.y), extent.z);
+                    // In the mesh's units, where its t is the world's times mesh_scale.
+                    if (widest < (footprint * mesh_scale + spread * t_aabb) * velk_medium_reach(mesh_base + child)) {
+                        vec3 sides = max(extent, vec3(widest * 1e-3));
+                        float leave = min(min(ray_aabb_exit(walk_ray, box_min, box_max), medium_far * mesh_scale), mesh_best);
+                        float amount = uintBitsToFloat(surface) / (sides.x * sides.y * sides.z) * max(leave - t_aabb, 0.0);
+                        if (closest) {
+                            medium_depth += amount;
+                            medium_color += amount * unpackUnorm4x8(mesh_color_word).rgb;
+                        } else {
+                            visibility *= exp(-amount);
+                        }
+                        continue;
                     }
-                    continue;
                 }
-            }
 #endif
-            // Narrower than the cone: this node is the surface. A real triangle inside it
-            // gives the material something to read.
-            if (mesh_cone > 0.0) {
-                vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
-                if (max(max(extent.x, extent.y), extent.z) < mesh_cone * t_aabb) {
-                    BvhNode leaf = node;
-                    while (leaf.shape_count == 0u && leaf.child_count != 0u) {
-                        leaf = velk_blas_nodes.data[mesh_base + leaf.first_child];
-                    }
-                    if (leaf.shape_count != 0u) {
+                // Narrower than the cone: this child is the surface. A real triangle under it
+                // gives the material something to read.
+                if (mesh_cone > 0.0) {
+                    vec3 extent = box_max - box_min;
+                    if (max(max(extent.x, extent.y), extent.z) < mesh_cone * t_aabb) {
+                        uint under = child;
+                        while ((under & VELK_BLAS_LEAF) == 0u) {
+                            under = velk_mesh_nodes.data[mesh_base + under].refs.x;
+                        }
+                        uint leaf = word_base + (under & ~VELK_BLAS_LEAF);
                         mesh_best = t_aabb;
                         best_t = t_aabb / mesh_scale;
                         best_shape = cur_shape;
                         best_record = cur_record;
                         best_u = 1.0 / 3.0;
                         best_v = best_u;
-                        best_triangle = velk_cluster_words.data[word_base + leaf.first_shape];
-                        best_vertex_ids = word_base + leaf.first_child + (leaf.shape_count >> 16u) * 3u;
+                        best_triangle = velk_cluster_words.data[word_base + velk_cluster_words.data[leaf]];
+                        best_vertex_ids = word_base + velk_cluster_words.data[leaf + 2u] + (velk_cluster_words.data[leaf + 1u] >> 16u) * 3u;
                         best_stopped = true;
-                        best_stop_normal = floatBitsToUint(node.aabb_min.w);
+                        best_stop_normal = surface;
                         continue;
                     }
                 }
-            }
-            if (node.shape_count > 0u) {
-                triangle_at = word_base + node.first_shape;
-                leaf_counts = node.shape_count;
-                positions = word_base + node.first_child;
-            } else if (node.child_count == 2u) {
-                // The nearer child goes on top, so a near hit can cull the far one, and a
-                // blocker is found sooner.
-                uint first = node.first_child;
-                float t_l, t_r;
-                bool h_l = velk_walk_child(walk_ray, mesh_base + first, limit, t_l);
-                bool h_r = velk_walk_child(walk_ray, mesh_base + first + 1u, limit, t_r);
-                if (h_l && h_r) {
-                    uint near_child = t_l <= t_r ? first : first + 1u;
-                    uint far_child = t_l <= t_r ? first + 1u : first;
-                    if (sp < kStack) stack[sp++] = far_child;
-                    if (sp < kStack) stack[sp++] = near_child;
-                } else if (h_l) {
-                    if (sp < kStack) stack[sp++] = first;
-                } else if (h_r) {
-                    if (sp < kStack) stack[sp++] = first + 1u;
-                }
-            } else {
-                for (uint c = 0u; c < node.child_count; ++c) {
-                    if (sp < kStack) stack[sp++] = node.first_child + c;
+                if (k == 0u) {
+                    near_ref = child;
+                } else {
+                    far_ref = child;
                 }
             }
+            if (far_ref != kNone && sp < kStack) stack[sp++] = far_ref;
+            if (near_ref != kNone && sp < kStack) stack[sp++] = near_ref;
         } else if (shapes_left > 0u) {
             uint index = shape_at;
             ++shape_at;
@@ -738,6 +737,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     }
     return 1.0;
 }
+#undef VELK_WALK_LIMIT
 
 // How much light gets through along a shadow ray within t_max: 0 at the first blocker,
 // otherwise what is too fine for the ray to resolve lets some through.
@@ -1433,6 +1433,7 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord dat
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
+layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
 // RtShape / BvhNode come from velk.glsl.
@@ -2746,6 +2747,7 @@ layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord dat
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
 // Per-mesh BLAS, same buffers the deferred prelude reads.
 layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
+layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
 // Material records as raw words (set = 1 slot 4). The raster path binds this

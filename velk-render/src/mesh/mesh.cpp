@@ -191,14 +191,17 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
     if (!nodes_arena || !words_arena) return false;
 
-    const uint64_t nodes_bytes = rt_blas_.nodes.size() * sizeof(BlasNode);
-    const uint64_t words_bytes = rt_blas_.cluster_words.size() * sizeof(uint32_t);
-    auto nodes_region = nodes_arena->alloc(nodes_bytes);
+    const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+    const uint64_t nodes_bytes = tree.nodes.size() * sizeof(BlasGpuNode);
+    const uint64_t words_bytes = tree.words.size() * sizeof(uint32_t);
+    auto nodes_region = nodes_arena->alloc(std::max<uint64_t>(nodes_bytes, sizeof(BlasGpuNode)), sizeof(BlasGpuNode));
     auto words_region = words_arena->alloc(words_bytes);
     if (!nodes_region.valid() || !words_region.valid()) return false;
 
-    nodes_arena->write_at(nodes_region.offset(), rt_blas_.nodes.data(), nodes_bytes);
-    words_arena->write_at(words_region.offset(), rt_blas_.cluster_words.data(), words_bytes);
+    if (nodes_bytes != 0) {
+        nodes_arena->write_at(nodes_region.offset(), tree.nodes.data(), nodes_bytes);
+    }
+    words_arena->write_at(words_region.offset(), tree.words.data(), words_bytes);
 
     // A base is a word index into the shared mesh-word arena. IBO entries are
     // global vertex indices in our gltf-imported meshes, so the vertex run starts
@@ -213,9 +216,9 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     }
     out.triangle_count = index_count_ / 3;
     out.vertex_stride = vertex_stride_;
-    out.blas_root = rt_blas_.root_index;
+    out.blas_root = tree.root_ref;
     out.blas_node_count = static_cast<uint32_t>(rt_blas_.nodes.size());
-    out.blas_node_base = static_cast<uint32_t>(nodes_region.offset() / sizeof(BlasNode));
+    out.blas_node_base = static_cast<uint32_t>(nodes_region.offset() / sizeof(BlasGpuNode));
     out.cluster_word_base = static_cast<uint32_t>(words_region.offset() / sizeof(uint32_t));
 
     rt_blas_nodes_region_ = std::move(nodes_region);
@@ -248,14 +251,17 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
 
     if (!rt_static_region_.valid()) return;
 
-    const uint64_t nodes_bytes = rt_blas_.nodes.size() * sizeof(BlasNode);
-    const uint64_t words_bytes = rt_blas_.cluster_words.size() * sizeof(uint32_t);
+    const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+    const uint64_t nodes_bytes = std::max<uint64_t>(tree.nodes.size() * sizeof(BlasGpuNode), sizeof(BlasGpuNode));
+    const uint64_t words_bytes = tree.words.size() * sizeof(uint32_t);
     if (nodes_bytes == rt_blas_nodes_region_.size() && words_bytes == rt_cluster_words_region_.size()) {
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
         if (nodes_arena && words_arena) {
-            nodes_arena->update_at(rt_blas_nodes_region_.offset(), rt_blas_.nodes.data(), nodes_bytes);
-            words_arena->update_at(rt_cluster_words_region_.offset(), rt_blas_.cluster_words.data(), words_bytes);
+            if (!tree.nodes.empty()) {
+                nodes_arena->update_at(rt_blas_nodes_region_.offset(), tree.nodes.data(), tree.nodes.size() * sizeof(BlasGpuNode));
+            }
+            words_arena->update_at(rt_cluster_words_region_.offset(), tree.words.data(), words_bytes);
         }
         return;
     }
@@ -374,37 +380,29 @@ bool MeshPrimitive::prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitI
         if (!arena) {
             return false;
         }
-        const auto node_count = static_cast<uint32_t>(rt_blas_.nodes.size());
-        vector<uint32_t> leaves;
-        vector<uint32_t> parents;
-        parents.resize(node_count, 0xFFFFFFFFu);
-        for (uint32_t n = 0; n < node_count; ++n) {
-            const BlasNode& node = rt_blas_.nodes[n];
-            if (node.child_count == 0) {
-                leaves.push_back(n);
-            }
-            for (uint32_t c = 0; c < node.child_count; ++c) {
-                parents[node.first_child + c] = n;
-            }
-        }
-        const auto leaf_count = static_cast<uint32_t>(leaves.size());
+        const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+        const auto node_count = static_cast<uint32_t>(tree.nodes.size());
+        const auto leaf_count = static_cast<uint32_t>(tree.leaf_links.size() / 2u);
+        const uint32_t leaf_words = leaf_count * 2u;
         gpu_refit_region_ = arena->alloc(
-            (uint64_t(leaf_count) + uint64_t(node_count) * 2u) * sizeof(uint32_t));
+            (uint64_t(leaf_words) + uint64_t(node_count) * 2u) * sizeof(uint32_t));
         if (!gpu_refit_region_.valid()) {
             VELK_LOG(E, "MeshPrimitive: no room for a refit on the GPU");
             return false;
         }
         const uint64_t offset = gpu_refit_region_.offset();
-        arena->write_at(offset, leaves.data(), leaf_count * sizeof(uint32_t));
-        arena->write_at(offset + leaf_count * sizeof(uint32_t), parents.data(), node_count * sizeof(uint32_t));
+        arena->write_at(offset, tree.leaf_links.data(), leaf_words * sizeof(uint32_t));
+        if (node_count != 0) {
+            arena->write_at(offset + leaf_words * sizeof(uint32_t), tree.parent_links.data(), node_count * sizeof(uint32_t));
+        }
 
         const auto first_word = static_cast<uint32_t>(offset / sizeof(uint32_t));
-        gpu_refit_.node_base = static_cast<uint32_t>(rt_blas_nodes_region_.offset() / sizeof(BlasNode));
+        gpu_refit_.node_base = static_cast<uint32_t>(rt_blas_nodes_region_.offset() / sizeof(BlasGpuNode));
         gpu_refit_.word_base = static_cast<uint32_t>(rt_cluster_words_region_.offset() / sizeof(uint32_t));
         gpu_refit_.vertex_base = get_gpu_ref(buffer_).get_base();
         gpu_refit_.leaf_word = first_word;
         gpu_refit_.leaf_count = leaf_count;
-        gpu_refit_.parent_word = first_word + leaf_count;
+        gpu_refit_.parent_word = first_word + leaf_words;
         gpu_refit_.counter_word = gpu_refit_.parent_word + node_count;
         gpu_refit_.node_count = node_count;
 

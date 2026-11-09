@@ -56,6 +56,19 @@ struct BvhNode {
     uint child_count;
 };
 
+// A node of a mesh's tree, in one cache line: the boxes of its two children, packed as left
+// min, left max, right min, right max, then in refs the left and right child and each one's
+// surface: its area for a mesh of separate pieces, otherwise its packed normal. A child with
+// VELK_BLAS_LEAF set is a word offset to a leaf's first triangle word, its counts and its
+// positions.
+struct VelkMeshNode {
+    vec4 a;
+    vec4 b;
+    vec4 c;
+    uvec4 refs;
+};
+#define VELK_BLAS_LEAF 0x80000000u
+
 // child_count of a node that refers to a partition. Its first_child is the
 // partition's root, and its origin is in the fields read by velk_partition_origin.
 #define VELK_PARTITION_REF 0xFFFFFFFFu

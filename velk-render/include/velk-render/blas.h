@@ -31,6 +31,39 @@ struct alignas(16) BlasNode
 };
 static_assert(sizeof(BlasNode) == 48, "BlasNode layout mismatch");
 
+/// A mesh tree node as rays read it, one cache line. Mirrors VelkMeshNode.
+struct alignas(16) BlasGpuNode
+{
+    float left_min[3];
+    float left_max[3];
+    float right_min[3];
+    float right_max[3];
+    uint32_t left;
+    uint32_t right;
+    uint32_t left_surface;
+    uint32_t right_surface;
+};
+static_assert(sizeof(BlasGpuNode) == 64, "BlasGpuNode layout mismatch");
+
+/// Set on a child reference that is a leaf. Mirrors VELK_BLAS_LEAF.
+inline constexpr uint32_t kBlasLeafRef = 0x80000000u;
+/// Where a node's parent link says it has none.
+inline constexpr uint32_t kBlasNoParent = 0xFFFFFFFFu;
+
+/// A mesh tree as rays read it. Each reference to a leaf is a word offset into `words`,
+/// which starts with the build's `cluster_words` and ends with three words per leaf: its
+/// first triangle word, its counts, and its first position word.
+struct BlasGpuTree
+{
+    vector<BlasGpuNode> nodes;
+    vector<uint32_t> words;
+    uint32_t root_ref = 0;
+    /// For each node, its parent's index times two plus its side, or kBlasNoParent.
+    vector<uint32_t> parent_links;
+    /// Two words per leaf: its word offset, and its parent link.
+    vector<uint32_t> leaf_links;
+};
+
 /// Most triangles and vertices in one cluster. Local vertex indices are 8 bits.
 inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
@@ -607,6 +640,80 @@ inline void refit_mesh_blas(BlasBuild& blas, const float* vertices, uint32_t ver
             node.aabb_max[k] = hi[k];
         }
     }
+}
+
+/// Turns a built tree into the form rays read. With @p scattered, a child's surface word is its
+/// area, otherwise its packed normal, which are what wide rays use on each kind of mesh.
+inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas, bool scattered)
+{
+    BlasGpuTree tree;
+    const auto node_count = static_cast<uint32_t>(blas.nodes.size());
+    vector<uint32_t> indices;
+    indices.resize(node_count, 0u);
+    uint32_t inner_count = 0;
+    uint32_t leaf_count = 0;
+    for (uint32_t n = 0; n < node_count; ++n) {
+        if (blas.nodes[n].child_count != 0) {
+            indices[n] = inner_count++;
+        } else {
+            indices[n] = leaf_count++;
+        }
+    }
+
+    const auto leaf_base = static_cast<uint32_t>(blas.cluster_words.size());
+    tree.words.resize(size_t(leaf_base) + size_t(leaf_count) * 3u);
+    if (leaf_base != 0) {
+        std::memcpy(tree.words.data(), blas.cluster_words.data(), size_t(leaf_base) * sizeof(uint32_t));
+    }
+    tree.nodes.resize(inner_count);
+    tree.parent_links.resize(inner_count, kBlasNoParent);
+    tree.leaf_links.resize(size_t(leaf_count) * 2u);
+
+    const auto reference = [&](uint32_t n) {
+        return blas.nodes[n].child_count != 0 ? indices[n] : (kBlasLeafRef | (leaf_base + indices[n] * 3u));
+    };
+    const auto set_parent = [&](uint32_t n, uint32_t link) {
+        if (blas.nodes[n].child_count != 0) {
+            tree.parent_links[indices[n]] = link;
+        } else {
+            tree.leaf_links[size_t(indices[n]) * 2u + 1u] = link;
+        }
+    };
+    const auto surface = [&](const BlasNode& node) {
+        uint32_t bits;
+        std::memcpy(&bits, scattered ? &node.aabb_max[3] : &node.aabb_min[3], sizeof(bits));
+        return bits;
+    };
+
+    for (uint32_t n = 0; n < node_count; ++n) {
+        const BlasNode& node = blas.nodes[n];
+        if (node.child_count == 0) {
+            const uint32_t at = leaf_base + indices[n] * 3u;
+            tree.words[at] = node.first_shape;
+            tree.words[at + 1u] = node.shape_count;
+            tree.words[at + 2u] = node.first_child;
+            tree.leaf_links[size_t(indices[n]) * 2u] = at;
+            continue;
+        }
+        BlasGpuNode& out = tree.nodes[indices[n]];
+        const BlasNode& left = blas.nodes[node.first_child];
+        const BlasNode& right = blas.nodes[node.first_child + 1];
+        std::memcpy(out.left_min, left.aabb_min, sizeof(out.left_min));
+        std::memcpy(out.left_max, left.aabb_max, sizeof(out.left_max));
+        std::memcpy(out.right_min, right.aabb_min, sizeof(out.right_min));
+        std::memcpy(out.right_max, right.aabb_max, sizeof(out.right_max));
+        out.left = reference(node.first_child);
+        out.right = reference(node.first_child + 1);
+        out.left_surface = surface(left);
+        out.right_surface = surface(right);
+        set_parent(node.first_child, indices[n] * 2u);
+        set_parent(node.first_child + 1, indices[n] * 2u + 1u);
+    }
+    if (node_count != 0) {
+        tree.root_ref = reference(blas.root_index);
+        set_parent(blas.root_index, kBlasNoParent);
+    }
+    return tree;
 }
 
 /// The nodes' total surface area against the root's. Grows as a refit tree degrades.
