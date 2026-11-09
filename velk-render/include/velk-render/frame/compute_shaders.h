@@ -1466,7 +1466,7 @@ layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint da
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
     uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
-    uint _pad_globals;         // 4         (keeps cam_pos at offset 8)
+    uint direct_samples_id;    // 4         half-size lights picked and their shadow results; 0 = each pixel alone
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -2061,6 +2061,78 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 )";
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
+// Direct diffuse light from the lights nearby pixels picked, reusing the shadow rays they
+// traced. One light per pixel comes out the colour of that light, so a pixel averages several.
+// How far it looks follows how many lights share its light: where one light dominates it
+// keeps to the closest samples, so that light's shadows stay sharp. Alpha is 0 if no sample
+// could be used.
+vec4 velk_shared_direct(ivec2 coord, vec3 world_pos, vec3 N, vec3 albedo_rgb, float total_w, float total_w2, uint seed)
+{
+    if (total_w <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+    const int kSamples = 8;
+    const float kNearest = 1.5;
+    const float kFarthest = 8.0;
+    const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+
+    float lights_in_effect = total_w * total_w / max(total_w2, 1e-12);
+    float reach = mix(kNearest, kFarthest, clamp((lights_in_effect - 1.0) / 3.0, 0.0, 1.0));
+    ivec2 own = coord / 2;
+    ivec2 half_size = ivec2((int(pc.width) + 1) / 2, (int(pc.height) + 1) / 2);
+    float depth = length(world_pos);
+
+    vec3 sum = vec3(0.0);
+    float used = 0.0;
+    for (int k = 0; k < kSamples; ++k) {
+        ivec2 q = own;
+        if (k > 0) {
+            seed ^= seed >> 16; seed *= 0x7feb352du;
+            seed ^= seed >> 15; seed *= 0x846ca68bu;
+            seed ^= seed >> 16;
+            float angle = float(seed) * (6.28318531 / 4294967296.0);
+            seed ^= seed >> 16; seed *= 0x7feb352du;
+            seed ^= seed >> 15; seed *= 0x846ca68bu;
+            seed ^= seed >> 16;
+            float radius = sqrt(float(seed) * (1.0 / 4294967296.0)) * reach;
+            q += ivec2(round(vec2(cos(angle), sin(angle)) * radius));
+            if (q.x < 0 || q.y < 0 || q.x >= half_size.x || q.y >= half_size.y) continue;
+        }
+        vec4 picked = texelFetch(velk_textures[nonuniformEXT(pc.direct_samples_id)], q, 0);
+        if (picked.a <= 0.0) continue;
+        vec3 q_normal = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], q * 2, 0).xyz;
+        vec3 q_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], q * 2, 0).xyz;
+        if (dot(q_normal, q_normal) < 1e-6) continue;
+        if (dot(N, normalize(q_normal)) < 0.9 || abs(dot(q_pos - world_pos, N)) > 0.02 * depth) continue;
+        used += 1.0;
+
+        Light light = velk_light_at(pc.lights_base + uint(picked.r));
+        vec3 L;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            vec3 to_light = light.position.xyz - world_pos;
+            float dist = length(to_light);
+            L = to_light / max(dist, 1e-6);
+            float range = max(light.params.x, 1e-6);
+            float t = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                float cos_a = dot(-L, light.direction.xyz);
+                atten *= smoothstep(light.params.z, light.params.y, cos_a);
+            }
+        }
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0 || atten <= 0.0) continue;
+        vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
+        float w = dot(albedo_rgb * NdotL * radiance, kLuma);
+        if (w <= 0.0) continue;
+        // Weighted by how likely either pixel was to pick it, so that a light strong
+        // over there and weak here does not count as if this pixel had picked it.
+        sum += NdotL * radiance * picked.g / (0.5 * (w / total_w + picked.b));
+    }
+    return used > 0.0 ? vec4(sum / used, 1.0) : vec4(0.0);
+}
+
 void main()
 {
     // Rays run as a dispatch of their own over one pixel in each 2x2 block, since a thread
@@ -2094,7 +2166,9 @@ void main()
         // (albedo == 0 for sky pixels, so it adds nothing).
         if (pc.ray_pass != 0u) {
             imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
+            if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2, vec4(0.0));
         } else {
+            if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
             imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
             imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord, vec4(0.0));
         }
@@ -2149,6 +2223,7 @@ void main()
         float res_NdotL = 0.0;
         vec3  res_radiance = vec3(0.0);
         float total_w = 0.0;
+        float total_w2 = 0.0;
         // Per-pixel RIS stream. A tile-uniform stream was tried (Stage 0): it
         // makes neighbouring pixels pick the same light, which buys ray
         // coherence for free and did cut night from 31 to 25 ms - but it makes
@@ -2265,6 +2340,7 @@ void main()
             vec3 dcontrib = albedo.rgb * NdotL * radiance;
             float w = dot(dcontrib, vec3(0.2126, 0.7152, 0.0722));
             total_w += w;
+            total_w2 += w * w;
             // A full mix, not a linear step: the seed starts linear in the pixel
             // coordinates, so a linear step gives a value linear across the screen,
             // and comparing that to a probability draws diagonal stripes.
@@ -2300,6 +2376,7 @@ void main()
             / sqrt(max(NdotV, 0.05));
 
         vec3 direct_diffuse = vec3(0.0);
+        float picked_shadow = 0.0;
         if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
             Light chosen = velk_light_at(pc.lights_base + res_light);
             // It stands for its whole 2x2 block.
@@ -2312,6 +2389,22 @@ void main()
             velk_ray_lift = 0.0;
             float pdf = res_w / total_w;
             direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
+            picked_shadow = shadow;
+        }
+
+        // Rays only find out what each traced pixel picked and whether it is lit. Every pixel
+        // then works out its own light from those.
+        float shared_valid = 1.0;
+        if (pc.direct_samples_id != 0u) {
+            if (trace_now) {
+                bool picked = res_light != 0xffffffffu && res_w > 0.0;
+                imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2,
+                           picked ? vec4(float(res_light), picked_shadow, res_w / total_w, 1.0) : vec4(0.0));
+                return;
+            }
+            vec4 shared_direct = velk_shared_direct(coord, world_pos, N, albedo.rgb, total_w, total_w2, seed);
+            direct_diffuse = shared_direct.rgb;
+            shared_valid = shared_direct.a;
         }
 
         // Env lighting: single-sample approximation. Diffuse reads
@@ -2405,7 +2498,7 @@ void main()
         irr = shadowed_total / max(unshadowed_out, vec3(1e-4));
         // Alpha marks "this pixel traced a ray this frame". The temporal pass
         // keeps history untouched where it is 0 rather than folding in a zero.
-        irr_valid = trace_now ? 1.0 : 0.0;
+        irr_valid = pc.direct_samples_id != 0u ? shared_valid : (trace_now ? 1.0 : 0.0);
         // The environment map cannot tell whether the sky is visible along the reflection.
         // The field can: how much of the environment's light it finds that way is how much
         // of the sharp reflection stays, and what it finds in place of the sky fills the rest.
@@ -2440,8 +2533,10 @@ void main()
     // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
     if (pc.ray_pass != 0u) {
         imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
+        if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2, vec4(0.0));
         return;
     }
+    if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
     // The unshadowed term the composite multiplies the denoised ratio by. Kept
     // out of the denoiser deliberately: it is exact and sharp, and it carries

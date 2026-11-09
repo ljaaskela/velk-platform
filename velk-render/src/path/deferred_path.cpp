@@ -102,7 +102,7 @@ namespace {
 // (`layout(push_constant) PC` in deferred_compute_prelude_src).
 VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t globals_base;     // FrameGlobals arena index, GLSL pc.globals_base
-    uint32_t _pad_globals;
+    uint32_t direct_samples_id; // half-size lights picked and their shadow results; 0 = each pixel alone
     float    cam_pos[4];
     uint32_t output_image_id;
     uint32_t albedo_tex_id;
@@ -204,6 +204,14 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4
 // Diagnostic: shows the GI probe field instead of the image, read each frame so that an app
 // can switch it while running. See gi_debug_compute_src.
 uint32_t gi_debug_mode() { return env_uint("VELK_GI_DEBUG", 1, 7); }
+
+// Shares lights picked and their shadow results between pixels, unless VELK_DIRECT_SHARE is 0.
+// Read each frame so that an app can switch it while running.
+bool direct_share_enabled()
+{
+    const char* value = std::getenv("VELK_DIRECT_SHARE");
+    return !value || value[0] != '0';
+}
 
 // Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
 bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
@@ -1657,6 +1665,27 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     vs.output_size = want;
 
+    const bool share_direct = direct_share_enabled() && vs.gi_probes && vs.gi_field_ready;
+    if (share_direct && (!vs.direct_samples || vs.direct_samples_size != want)) {
+        TextureDesc td{};
+        td.width = (w + 1) / 2;
+        td.height = (h + 1) / 2;
+        td.format = PixelFormat::RGBA32F;
+        td.usage = TextureUsage::Storage;
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        vs.direct_samples = graph.resources().create_render_texture(td);
+        vs.direct_samples_size = want;
+        vs.lighting_dirty = true;
+    }
+    if (share_direct != vs.direct_share_on) {
+        vs.direct_share_on = share_direct;
+        vs.lighting_dirty = true;
+    }
+
     // Which shader variant this view needs. Changing it changes the pipeline,
     // so the cached pass has to be re-recorded.
     bool has_area_light = false;
@@ -1724,6 +1753,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         pc.gi_finest = vs.gi_finest;
         pc.gi_maps_id = static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default));
     }
+    if (share_direct && vs.direct_samples) {
+        pc.direct_samples_id = static_cast<uint32_t>(vs.direct_samples->get_gpu_handle(GpuResourceKey::Default));
+    }
     pc.unshadowed_image_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
     pc.light_loop_probe = light_loop_probe();
@@ -1754,6 +1786,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                 cmd->begin_recording();
                 cmd->push_label("DeferredPath: lighting");
                 cmd->record_dispatch(ray_dc);
+                // Every pixel reads what the traced pixels wrote.
+                if (pc.direct_samples_id != 0u) cmd->record_global_barrier();
                 cmd->record_dispatch(dc);
                 cmd->pop_label();
                 cmd->end_recording();
@@ -1763,6 +1797,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
+            if (pc.direct_samples_id != 0u) {
+                rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.direct_samples));
+            }
             // Hold the lighting compute pipeline strong (cache is weak).
             rec.held.push_back(std::move(lighting_pipeline));
         });

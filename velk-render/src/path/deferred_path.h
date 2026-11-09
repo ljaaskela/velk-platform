@@ -98,6 +98,10 @@ public:
         /// two: filtering the ratio keeps the shadow soft while light falloff
         /// and N.L stay crisp. Recreated on size change with `diffuse_irr`.
         IRenderTarget::Ptr unshadowed;
+        /// What each traced pixel picked and whether it is lit, for every pixel to share.
+        IRenderTarget::Ptr direct_samples;
+        uvec2 direct_samples_size{};
+        bool direct_share_on = false;
         IGpuTexture* unshadowed_tex = nullptr;
 
         /// Ping-pong temporal history for the diffuse-irradiance denoiser.
