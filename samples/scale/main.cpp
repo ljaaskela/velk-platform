@@ -1832,6 +1832,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     // In nature mode the camera sits at the focus and flies: W, A, S and D held, the wheel
     // for a jump along the view. Faster the higher it is above the ground.
     bool fly_keys[4] = {false, false, false, false};
+    int gi_debug_view = 0;
     // Until then the camera follows a slow loop over the forest.
     bool touring = nature && hold_stop < 0 && !has_view && !no_tour;
     float tour_height = 0.f;
@@ -1897,6 +1898,18 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             touring = false;
         }
         if (!held) {
+            return;
+        }
+        // Key code of G: steps through the GI debug views and back to the image.
+        if (e.key == 71 && e.action == velk::ui::KeyAction::Down) {
+            gi_debug_view = (gi_debug_view + 1) % 8;
+            const char text[2] = {static_cast<char>('0' + gi_debug_view), 0};
+#ifdef _WIN32
+            _putenv_s("VELK_GI_DEBUG", text);
+#else
+            setenv("VELK_GI_DEBUG", text, 1);
+#endif
+            VELK_LOG(I, "scale: GI debug view %d", gi_debug_view);
             return;
         }
         auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));

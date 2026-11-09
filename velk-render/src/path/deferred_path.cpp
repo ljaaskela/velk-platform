@@ -201,6 +201,10 @@ uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
 uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4); }
 
+// Diagnostic: shows the GI probe field instead of the image, read each frame so that an app
+// can switch it while running. See gi_debug_compute_src.
+uint32_t gi_debug_mode() { return env_uint("VELK_GI_DEBUG", 1, 7); }
+
 // Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
 bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
 
@@ -891,9 +895,13 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (visibility_mode != 0) {
         emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
     }
+    const uint32_t gi_mode = gi_debug_mode();
+    if (gi_mode != 0) {
+        emit_gi_debug_pass(vs, render_view, color_target, ctx, gi_mode, graph);
+    }
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
-    if (visibility_mode == 0) {
+    if (visibility_mode == 0 && gi_mode == 0) {
         emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
     }
 }
@@ -1510,6 +1518,76 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
+}
+
+void DeferredPath::emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                      FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
+{
+    if (!vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known || !vs.gbuffer || !vs.deferred_output) return;
+
+    constexpr uint64_t kKey = 0x4749'4442'4700'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(gi_debug_compute_src, kKey);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    bool dirty = true;
+    emit_cached_view_pass(vs.gi_debug_pass, dirty, "gi.debug", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            uint32_t atlas, maps, globals_base;
+            int32_t finest;
+            uint32_t normal_id, pos_id, output_id, width, height, mode;
+        };
+        const PushC pc{handle(vs.gi_probes),
+                       handle(vs.gi_probe_irradiance),
+                       render_view.view_globals_base,
+                       vs.gi_finest,
+                       vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)),
+                       vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
+                       handle(vs.deferred_output),
+                       vs.gbuffer_size.x,
+                       vs.gbuffer_size.y,
+                       mode};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.gbuffer_size.x + 7u) / 8u;
+        dc.groups_y = (vs.gbuffer_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: GI debug");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

@@ -144,6 +144,7 @@ public:
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
+        IRenderPass::Ptr gi_debug_pass;
         IRenderPass::Ptr visibility_resolve_pass;
         /// The depth of what is drawn at decreasing sizes, in the culling arena.
         ArenaRegion depth_pyramid;
@@ -318,6 +319,9 @@ private:
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
+    /// Replaces the final image with a view of the GI probe field.
+    void emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                            FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
 
     /// Forward pass for BLEND-mode batches, drawn over the lit composite in
     /// @p color_target with the gbuffer depth bound read-only. No-op when the

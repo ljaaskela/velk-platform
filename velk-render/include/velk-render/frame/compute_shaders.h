@@ -1274,6 +1274,9 @@ float velk_gi_sample_irradiance(uint atlas, uint maps, int ladder, vec3 rel, vec
         vec4 first = velk_texture(atlas, velk_gi_uv(texel, slot, 0));
         if (first.a != velk_gi_stamp(cell, ladder)) continue;
         if (velk_texture(atlas, velk_gi_uv(texel, slot, 2)).a > 0.25) continue;
+#ifdef VELK_GI_DEBUG_SWITCHES
+        if (velk_gi_ignore_young && velk_texture(atlas, velk_gi_uv(texel, slot, 1)).a < 8.0) continue;
+#endif
 
         vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * spacing;
         vec3 to_probe = normalize(probe - rel);
@@ -1296,6 +1299,9 @@ float velk_gi_sample_irradiance(uint atlas, uint maps, int ladder, vec3 rel, vec
             chebyshev = variance / (variance + v * v);
             chebyshev = max(chebyshev * chebyshev * chebyshev, 0.0);
         }
+#ifdef VELK_GI_DEBUG_SWITCHES
+        if (velk_gi_ignore_visibility) chebyshev = 1.0;
+#endif
         // Never quite zero, for when no probe sees the point.
         weight *= max(0.05, chebyshev);
         weight = max(0.000001, weight);
@@ -3597,6 +3603,117 @@ void main()
         print_words.data[pc.word + 3u + uint(level) * 4u] = floatBitsToUint(weight);
         put(4u + uint(level) * 4u, e);
     }
+}
+)";
+
+/// Shows the GI probe field in place of the image. Mode 1: what the field gives each surface,
+/// without albedo. Mode 2: the level in use as a flat colour, with its cells as a checker.
+/// Mode 3: of the eight probes around a surface, green if all hold this cell, yellow if some
+/// do, red if none. Mode 4: of those holding it, green if all see the surface, yellow if some
+/// do, red if none, blue if no probe holds it. Mode 5: the youngest of those holding it, red
+/// if at most 3 updates old, yellow if under 16, green if older, blue if no probe holds it.
+/// Mode 6: as mode 1, with every probe counting whether or not it sees the surface.
+/// Mode 7: as mode 1, without probes under 8 updates old.
+inline constexpr string_view gi_debug_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+#define VELK_GI_DEBUG_SWITCHES
+bool velk_gi_ignore_visibility = false;
+bool velk_gi_ignore_young = false;
+)" VELK_GI_FIELD_GLSL R"(
+layout(push_constant, scalar) uniform PC {
+    uint atlas;
+    uint maps;
+    uint globals_base;
+    int finest;
+    uint normal_id;
+    uint pos_id;
+    uint output_id;
+    uint width;
+    uint height;
+    uint mode;
+} pc;
+
+const vec3 kGreen = vec3(0.0, 1.0, 0.0);
+const vec3 kYellow = vec3(1.0, 1.0, 0.0);
+const vec3 kRed = vec3(1.0, 0.0, 0.0);
+const vec3 kBlue = vec3(0.0, 0.2, 1.0);
+
+const vec3 kLevelColors[8] = vec3[8](
+    vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
+    vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));
+
+vec3 velk_gi_debug_color(vec3 rel, vec3 N, vec3 cam)
+{
+    if (pc.mode == 1u || pc.mode == 6u || pc.mode == 7u) {
+        velk_gi_ignore_visibility = pc.mode == 6u;
+        velk_gi_ignore_young = pc.mode == 7u;
+        return max(velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), cam), vec3(0.0));
+    }
+
+    vec3 shade_pos;
+    float edge;
+    int level = velk_gi_level_for(pc.finest, rel, N, normalize(rel), cam, shade_pos, edge);
+    int ladder = pc.finest + level;
+    int slot = ladder & 7;
+    float spacing = velk_gi_cell(ladder);
+    vec3 cam_cells = cam / spacing;
+    vec3 cam_floor = floor(cam_cells);
+    vec3 g = clamp(velk_gi_lattice(ladder, shade_pos, cam), vec3(0.0), vec3(float(kGiDim - 1)));
+    vec3 gbase = floor(g);
+
+    if (pc.mode == 2u) {
+        ivec3 world_cell = ivec3(cam_floor) + ivec3(gbase);
+        return kLevelColors[level] * (((world_cell.x + world_cell.y + world_cell.z) & 1) != 0 ? 0.4 : 1.0);
+    }
+
+    int holding = 0;
+    int seeing = 0;
+    float youngest = 1e9;
+    for (int o = 0; o < 8; ++o) {
+        ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
+        ivec3 cell = ivec3(cam_floor) - kGiDim / 2 + min(ivec3(gbase) + off, ivec3(kGiDim - 1));
+        ivec3 texel = cell & ivec3(kGiDim - 1);
+        if (velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0)).a != velk_gi_stamp(cell, ladder)) continue;
+        ++holding;
+        youngest = min(youngest, velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a);
+        if (velk_texture(pc.atlas, velk_gi_uv(texel, slot, 2)).a > 0.25) continue;
+
+        vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * spacing;
+        vec3 to_probe = probe - shade_pos;
+        float dist = length(to_probe);
+        vec2 moments = velk_gi_map_read(pc.maps, texel, slot, 1, -to_probe / max(dist, 1e-5)).rg;
+        float seen = 1.0;
+        if (dist > moments.x) {
+            float variance = abs(moments.x * moments.x - moments.y);
+            float v = dist - moments.x;
+            seen = variance / (variance + v * v);
+            seen = seen * seen * seen;
+        }
+        if (seen >= 0.5) ++seeing;
+    }
+
+    if (pc.mode == 3u) return holding == 8 ? kGreen : holding > 0 ? kYellow : kRed;
+    if (holding == 0) return kBlue;
+    if (pc.mode == 5u) return youngest <= 3.0 ? kRed : youngest < 16.0 ? kYellow : kGreen;
+    return seeing == holding ? kGreen : seeing > 0 ? kYellow : kRed;
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    vec3 normal = texelFetch(velk_textures[nonuniformEXT(pc.normal_id)], p, 0).xyz;
+    vec3 color = vec3(0.0);
+    if (dot(normal, normal) >= 1e-6) {
+        vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], p, 0).xyz;
+        color = velk_gi_debug_color(rel, normalize(normal), velk_globals.data[pc.globals_base].cam_pos.xyz);
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], p, vec4(color, 1.0));
 }
 )";
 
