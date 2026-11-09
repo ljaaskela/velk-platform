@@ -3705,13 +3705,13 @@ void main()
 //
 // A workgroup is 64 threads, VELK_PROBE_DIRS rays for each of its probes. probe_trace_main_src
 // finds what each ray hits and probe_gi_main_src shades it, with the same thread handling the
-// same ray in both. The results reduce in shared memory to 4 spherical-harmonic coefficients,
-// used for broad reflections. Each hit shades against one light chosen by contribution, so the
-// cost does not depend on the light count.
+// same ray in both. Each hit shades against one light chosen by contribution, so the cost does
+// not depend on the light count.
 //
 // The words at `extras.z` hold, in order, 4 per ray for probe_maps_compute_src: radiance and
-// distance, the distance negative for the back of a solid; 3 per probe for the same; and 11 per
-// ray from the trace: distance, shape, uv, normal, and medium depth and colour.
+// distance, the distance negative for the back of a solid; 4 per probe from the trace, saying
+// which probe it is; and 11 per ray from the trace: distance, shape, uv, normal, and medium
+// depth and colour.
 #define VELK_PROBE_DIR_GLSL R"(
 // Fibonacci sphere, rotated per frame so successive frames fill the gaps
 // between directions instead of resampling the same 64.
@@ -3760,7 +3760,7 @@ struct VelkProbeRay {
 
 uint velk_probe_hits_word()
 {
-    return pc.extras.z + pc.extras.x * 256u + pc.extras.x * (64u / uint(VELK_PROBE_DIRS)) * 3u;
+    return pc.extras.z + pc.extras.x * 256u + pc.extras.x * (64u / uint(VELK_PROBE_DIRS)) * 4u;
 }
 
 VelkProbeRay velk_probe_ray()
@@ -3773,9 +3773,9 @@ VelkProbeRay velk_probe_ray()
     uint atlas = pc.env.w;
     uint serial = VELK_GLOBALS.present_counter;
 
-    // Each frame updates the levels of one parity of ladder index, finer ones with a larger
-    // share of the groups.
-    uint first_level = (serial ^ uint(finest)) & 1u;
+    // Every frame updates all the levels, finer ones with a larger share of the groups. Within
+    // a share, neighbouring groups take a pair of levels and swap each frame, so that one frame
+    // costs the same as the next.
     const uint kShares[4] = uint[4](6u, 2u, 1u, 1u);
     uint group_base = 0u;
     uint share = 0u;
@@ -3785,7 +3785,8 @@ VelkProbeRay velk_probe_ray()
         if (gl_WorkGroupID.x < group_base + groups || share == 3u) break;
         group_base += groups;
     }
-    uint level = first_level + share * 2u;
+    uint in_share = gl_WorkGroupID.x - group_base;
+    uint level = ((serial ^ uint(finest) ^ in_share) & 1u) + share * 2u;
 
     VelkProbeRay p;
     // When the field has to be right at once, each frame replaces one whole level.
@@ -3793,8 +3794,6 @@ VelkProbeRay velk_probe_ray()
     p.drop_history = p.sweeping && (pc.extras.w & 0x100u) != 0u;
     if (p.sweeping) {
         level = pc.extras.w & 0xFFu;
-        group_base = 0u;
-        groups = kLevelGroups;
     }
     p.ladder = finest + int(level);
     p.slot = p.ladder & 7;
@@ -3804,7 +3803,8 @@ VelkProbeRay velk_probe_ray()
     p.probe_local = p.lane / kDirs;
     p.dir = p.lane - p.probe_local * kDirs;
     // Whole groups take turns, since a group's probes run concurrently across its lanes.
-    uint group_in_level = (gl_WorkGroupID.x - group_base + (serial >> 1u) * groups) % kLevelGroups;
+    uint group_in_level = p.sweeping ? gl_WorkGroupID.x % kLevelGroups
+                                     : ((in_share >> 1u) + serial * (groups >> 1u)) % kLevelGroups;
     uint probe_in_level = group_in_level * kProbesPerGroup + p.probe_local;
     p.probe = probe_in_level + uint(p.slot) * uint(kGiDim * kGiDim * kGiDim);
     p.live = atlas != 0u && (!p.sweeping || gl_WorkGroupID.x < kLevelGroups);
@@ -3842,16 +3842,12 @@ VelkProbeRay velk_probe_ray()
 
 #define VELK_PROBE_HELPERS_GLSL VELK_PROBE_RAY_GLSL R"(
 layout(set = 1, binding = 16, std430) buffer ProbeRays { uint data[]; } probe_rays;
-shared vec3 s_sh[4][64];
 // The ray being shaded, for biasing the lookup at its hit towards where the ray came from.
 vec3 velk_probe_ray_dir = vec3(0.0, 1.0, 0.0);
 vec3 velk_hit_irradiance(vec3 pos, vec3 N)
 {
     return velk_gi_irradiance(pc.env.w, pc.extras.y, int(pc.env.z), pos, N, velk_probe_ray_dir, VELK_GLOBALS.cam_pos.xyz);
 }
-
-// Whether each ray found the back of something solid.
-shared uint s_back[64];
 
 // Open surfaces are seen from both sides, so only solid shapes say a probe is inside one.
 bool velk_gi_inside_solid(RayHit hit, vec3 dir)
@@ -3874,6 +3870,14 @@ layout(set = 1, binding = 16, std430) buffer ProbeHits { uint data[]; } probe_hi
 void main()
 {
     VelkProbeRay p = velk_probe_ray();
+    if (p.dir == 0u) {
+        uint header = pc.extras.z + pc.extras.x * 256u + (gl_WorkGroupID.x * (64u / uint(VELK_PROBE_DIRS)) + p.probe_local) * 4u;
+        probe_hits.data[header] = (p.live ? 1u : 0u) | (p.sweeping ? 2u : 0u) | (p.drop_history ? 4u : 0u)
+            | (uint(p.texel.x) << 8u) | (uint(p.texel.y) << 12u) | (uint(p.texel.z) << 16u) | (uint(p.slot) << 20u);
+        probe_hits.data[header + 1u] = floatBitsToUint(p.phase);
+        probe_hits.data[header + 2u] = floatBitsToUint(length(vec3(p.spacing)) * 1.5);
+        probe_hits.data[header + 3u] = floatBitsToUint(p.stamp);
+    }
     uint at = velk_probe_hits_word() + (gl_WorkGroupID.x * 64u + p.lane) * 11u;
     if (!p.live) {
         probe_hits.data[at + 1u] = 0xFFFFFFFFu;
@@ -3909,29 +3913,15 @@ void main()
 [[maybe_unused]] constexpr string_view probe_gi_main_src = VELK_PROBE_HELPERS_GLSL R"(
 void main()
 {
-    const uint kDirs = VELK_PROBE_DIRS;
-    const uint kProbesPerGroup = 64u / kDirs;
-
     VelkProbeRay p = velk_probe_ray();
-    uint atlas = pc.env.w;
     uint lane = p.lane;
     uint dir = p.dir;
-    uint probe_local = p.probe_local;
     uint probe = p.probe;
-    int slot = p.slot;
-    ivec3 texel = p.texel;
-    float stamp = p.stamp;
     vec3 origin = p.origin;
     vec3 d = p.d;
-    float phase = p.phase;
     float spacing = p.spacing;
-    bool sweeping = p.sweeping;
-    bool drop_history = p.drop_history;
-    // No early return before the barriers: every thread must reach them.
     // `probe_live` rather than `active`, which GLSL reserves.
     bool probe_live = p.live;
-    bool same_cell = velk_texture(atlas, velk_gi_uv(texel, slot, 0)).a == stamp;
-    vec3 moved = vec3(0.0);
 
     const float kBrightest = 5.0;
 
@@ -4058,16 +4048,6 @@ void main()
         }
     }
 
-    // Project into SH L1. 4*pi/N is the Monte Carlo weight for directions
-    // distributed uniformly over the sphere.
-    const float kY0 = 0.282095;
-    const float kY1 = 0.488603;
-    float w = 4.0 * 3.14159265 / float(kDirs);
-    s_sh[0][lane] = radiance * (kY0 * w);
-    s_sh[1][lane] = radiance * (kY1 * d.y * w);
-    s_sh[2][lane] = radiance * (kY1 * d.z * w);
-    s_sh[3][lane] = radiance * (kY1 * d.x * w);
-    s_back[lane] = near_back ? 1u : 0u;
     if (probe_live) {
         uint ray_at = pc.extras.z + (gl_WorkGroupID.x * 64u + lane) * 4u;
         probe_rays.data[ray_at] = floatBitsToUint(radiance.r);
@@ -4075,67 +4055,20 @@ void main()
         probe_rays.data[ray_at + 2u] = floatBitsToUint(radiance.b);
         probe_rays.data[ray_at + 3u] = floatBitsToUint(near_back ? -near_t : near_t);
     }
-    barrier();
-
-    // Reduce within each probe's 8-lane block. The barrier stays outside the
-    // conditional so every thread reaches it.
-    for (uint stride = kDirs >> 1; stride > 0u; stride >>= 1) {
-        if (dir < stride) {
-            for (int c = 0; c < 4; ++c) s_sh[c][lane] += s_sh[c][lane + stride];
-        }
-        barrier();
-    }
-
-    if (dir != 0u) return;
-    uint header = pc.extras.z + pc.extras.x * 256u + (gl_WorkGroupID.x * kProbesPerGroup + probe_local) * 3u;
-    if (!probe_live) {
-        probe_rays.data[header] = 0u;
-        return;
-    }
-
-    // A block holding another cell starts over. Otherwise a running average settles into
-    // a fixed rate, so moving lights do not smear indefinitely.
-    float count = same_cell && !sweeping ? velk_texture(atlas, velk_gi_uv(texel, slot, 1)).a : 0.0;
-    float blend = max(1.0 / (count + 1.0), 0.05);
-
-    // Inside something when enough rays reach the back of a solid.
-    uint backs = 0u;
-    for (uint r = 0u; r < kDirs; ++r) {
-        if (s_back[lane + r] != 0u) ++backs;
-    }
-    float inside_now = float(backs) / float(kDirs);
-    float inside = same_cell ? mix(velk_texture(atlas, velk_gi_uv(texel, slot, 2)).a, inside_now, 0.25) : inside_now;
-
-    for (int c = 0; c < 4; ++c) {
-        ivec2 at = ivec2(texel.x + texel.z * kGiDim, texel.y + (c + slot * kGiRows) * kGiDim);
-        vec3 prev = same_cell ? velk_texture(atlas, velk_gi_uv(texel, slot, c)).rgb : vec3(0.0);
-        float alpha = c == 0 ? stamp : (c == 1 ? min(count + 1.0, 100.0) : (c == 2 ? inside : 1.0));
-        // RGBA32F, not F16: the RT prelude declares the f32 storage array.
-        // s_sh[c][lane] is this probe's block total, lane being its dir-0 slot.
-        imageStore(gStorageImagesF32[nonuniformEXT(atlas)], at, vec4(mix(prev, s_sh[c][lane], blend), alpha));
-    }
-    imageStore(gStorageImagesF32[nonuniformEXT(atlas)],
-               ivec2(texel.x + texel.z * kGiDim, texel.y + (4 + slot * kGiRows) * kGiDim), vec4(moved, 1.0));
-
-    // Too many rays reaching the back of something: the probe is inside it, so its maps are
-    // left alone.
-    bool update_maps = float(backs) < float(kDirs) * 0.25;
-    bool keep_history = same_cell && !drop_history;
-    probe_rays.data[header] = (update_maps ? 1u : 0u) | (keep_history ? 2u : 0u)
-        | (uint(texel.x) << 8u) | (uint(texel.y) << 12u) | (uint(texel.z) << 16u) | (uint(slot) << 20u);
-    probe_rays.data[header + 1u] = floatBitsToUint(phase);
-    probe_rays.data[header + 2u] = floatBitsToUint(length(vec3(spacing)) * 1.5);
 }
 )";
 
-/// Blends what a probe's rays found into its irradiance and distance maps, as DDGI does. Runs
-/// after the probe rays. A workgroup is one probe and each thread one map entry.
+/// Stores what a probe's rays found: its spherical-harmonic coefficients in the atlas, and its
+/// irradiance and distance maps, as DDGI does. Runs after the probe rays are shaded, so that
+/// nothing is written while the field is read. A workgroup is one probe and each thread one
+/// map entry.
 inline constexpr string_view probe_maps_compute_src = R"(
 #version 450
 #include "velk.glsl"
 
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 layout(set = 1, binding = 16, std430) readonly buffer ProbeRays { uint data[]; } probe_rays;
 )" VELK_GI_FIELD_GLSL VELK_PROBE_DIR_GLSL R"(
 layout(push_constant) uniform PC {
@@ -4143,6 +4076,7 @@ layout(push_constant) uniform PC {
     uint headers_word;
     uint maps;
     uint dirs;
+    uint atlas;
 } pc;
 
 shared vec3 s_dir[64];
@@ -4154,10 +4088,11 @@ void main()
 {
     uint lane = gl_LocalInvocationIndex;
     uint probe = gl_WorkGroupID.x;
-    uint header = pc.headers_word + probe * 3u;
+    uint header = pc.headers_word + probe * 4u;
     uint flags = probe_rays.data[header];
     float phase = uintBitsToFloat(probe_rays.data[header + 1u]);
     float max_distance = uintBitsToFloat(probe_rays.data[header + 2u]);
+    float stamp = uintBitsToFloat(probe_rays.data[header + 3u]);
 
     // Each thread brings in one ray, so every entry can read them all from shared memory.
     if ((flags & 1u) != 0u && lane < pc.dirs) {
@@ -4173,9 +4108,57 @@ void main()
     barrier();
     if ((flags & 1u) == 0u) return;
 
-    bool keep_history = (flags & 2u) != 0u;
+    bool sweeping = (flags & 2u) != 0u;
+    bool drop_history = (flags & 4u) != 0u;
     ivec3 texel = ivec3(int((flags >> 8u) & 15u), int((flags >> 12u) & 15u), int((flags >> 16u) & 15u));
     int slot = int((flags >> 20u) & 7u);
+    bool same_cell = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0)).a == stamp;
+    bool keep_history = same_cell && !drop_history;
+
+    // Inside something when enough rays reach the back of a solid.
+    uint backs = 0u;
+    for (uint r = 0u; r < pc.dirs; ++r) {
+        if (s_back[r] != 0u) ++backs;
+    }
+
+    if (lane == 0u) {
+        // Project into SH L1. 4*pi/N is the Monte Carlo weight for directions
+        // distributed uniformly over the sphere.
+        const float kY0 = 0.282095;
+        const float kY1 = 0.488603;
+        float w = 4.0 * 3.14159265 / float(pc.dirs);
+        vec3 sh[4];
+        sh[0] = vec3(0.0);
+        sh[1] = vec3(0.0);
+        sh[2] = vec3(0.0);
+        sh[3] = vec3(0.0);
+        for (uint r = 0u; r < pc.dirs; ++r) {
+            sh[0] += s_radiance[r] * (kY0 * w);
+            sh[1] += s_radiance[r] * (kY1 * s_dir[r].y * w);
+            sh[2] += s_radiance[r] * (kY1 * s_dir[r].z * w);
+            sh[3] += s_radiance[r] * (kY1 * s_dir[r].x * w);
+        }
+
+        // A block holding another cell starts over. Otherwise a running average settles into
+        // a fixed rate, so moving lights do not smear indefinitely.
+        float count = same_cell && !sweeping ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a : 0.0;
+        float blend = max(1.0 / (count + 1.0), 0.05);
+        float inside_now = float(backs) / float(pc.dirs);
+        float inside = same_cell ? mix(velk_texture(pc.atlas, velk_gi_uv(texel, slot, 2)).a, inside_now, 0.25) : inside_now;
+        for (int c = 0; c < 4; ++c) {
+            ivec2 at = ivec2(texel.x + texel.z * kGiDim, texel.y + (c + slot * kGiRows) * kGiDim);
+            vec3 prev = same_cell ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, c)).rgb : vec3(0.0);
+            float alpha = c == 0 ? stamp : (c == 1 ? min(count + 1.0, 100.0) : (c == 2 ? inside : 1.0));
+            imageStore(gStorageImagesF32[nonuniformEXT(pc.atlas)], at, vec4(mix(prev, sh[c], blend), alpha));
+        }
+        imageStore(gStorageImagesF32[nonuniformEXT(pc.atlas)],
+                   ivec2(texel.x + texel.z * kGiDim, texel.y + (4 + slot * kGiRows) * kGiDim), vec4(0.0, 0.0, 0.0, 1.0));
+    }
+
+    // Too many rays reaching the back of something: the probe is inside it, so its maps are
+    // left alone.
+    if (float(backs) >= float(pc.dirs) * 0.25) return;
+
     const float kHysteresis = 0.97;
     const float kChangeThreshold = 0.2;
     const float kBrightnessThreshold = 1.0;

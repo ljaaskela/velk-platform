@@ -342,7 +342,7 @@ namespace {
 constexpr uint32_t kProbeRaysPerFrame = 283000;
 // Rays per probe update. A power of two, 64 at most.
 constexpr uint32_t kProbeDirs = 64;
-// The probe passes' workgroups, and the words they share: 4 per ray, 3 per probe, 11 per hit.
+// The probe passes' workgroups, and the words they share: 4 per ray, 4 per probe, 11 per hit.
 constexpr uint32_t kProbeGroups = kProbeRaysPerFrame / 64u;
 constexpr uint32_t kProbeCount = kProbeGroups * (64u / kProbeDirs);
 constexpr uint32_t kProbeRayWords = kProbeGroups * 64u * 4u;
@@ -504,7 +504,7 @@ void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
     if (vs.gi_probe_rays.valid()) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
-    vs.gi_probe_rays = arena->alloc(uint64_t(kProbeRayWords + kProbeCount * 3u + kProbeHitWords) * sizeof(uint32_t));
+    vs.gi_probe_rays = arena->alloc(uint64_t(kProbeRayWords + kProbeCount * 4u + kProbeHitWords) * sizeof(uint32_t));
 }
 
 void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
@@ -662,10 +662,7 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
             }
-            // The atlas is read and written: its temporal blend samples last
-            // frame's value from the same texel.
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
             rec.held.push_back(std::move(pipeline));
         });
@@ -676,9 +673,9 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         if (!cmd) return;
         VELK_GPU_STRUCT PushC
         {
-            uint32_t rays_word, headers_word, maps, dirs;
+            uint32_t rays_word, headers_word, maps, dirs, atlas;
         };
-        const PushC maps_pc{rays_word, rays_word + ray_words, handle(vs.gi_probe_irradiance), kProbeDirs};
+        const PushC maps_pc{rays_word, rays_word + ray_words, handle(vs.gi_probe_irradiance), kProbeDirs, handle(fine)};
         DispatchCall dc{};
         dc.pipeline = maps_pipeline.get();
         dc.groups_x = probes;
@@ -694,6 +691,10 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         cmd->pop_label();
         cmd->end_recording();
         rec.cmd = std::move(cmd);
+        // Both are read and written: their temporal blends sample last frame's value from the
+        // same texel.
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(fine));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(fine));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
         rec.held.push_back(std::move(maps_pipeline));
