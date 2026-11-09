@@ -2,6 +2,8 @@
 
 #include "glfw_window.h"
 
+#include <cstdlib>
+
 #include <velk/api/velk.h>
 #include <velk/interface/resource/intf_resource_protocol.h>
 #include <velk/interface/resource/intf_resource_store.h>
@@ -93,6 +95,8 @@ IWindow::Ptr GlfwPlugin::create_window(const WindowConfig& config,
 {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
+    // For automated runs, which render and exit without anyone looking at them.
+    glfwWindowHint(GLFW_VISIBLE, std::getenv("VELK_HIDE_WINDOW") ? GLFW_FALSE : GLFW_TRUE);
 
     GLFWwindow* glfw_win = glfwCreateWindow(
         config.width, config.height,

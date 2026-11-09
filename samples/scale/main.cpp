@@ -73,6 +73,11 @@
 // lodtest=N: nature is 10 trees of species N (0 oak, 1 birch, 2 conifer) at growing distances
 //           from a still camera, on flat ground, with no grass or wind.
 // nowind:   nature's trees stand still.
+// fixedstep: the tour moves by a fixed step per frame, so runs repeat.
+// tourhold=N: the tour stops at frame N and the camera stays there.
+// path=from,to,dx,dz,above: with view=, moves the camera by dx, dz between those frames, to
+//           `above` units over the ground, or at its starting height if that is negative.
+// groundpoints=x,z;x,z: asks the renderer to log GI at those points on the ground.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
 // flat:     nature's ground has no height.
@@ -1238,6 +1243,15 @@ int main(int argc, char* argv[])
     int kHeight = 720;
     bool no_tour = false;
     float tour_along = 0.f;
+    bool fixed_step = false;
+    long tour_hold_frame = -1;
+    bool has_path = false;
+    long path_from = 0;
+    long path_to = 0;
+    float path_dx = 0.f;
+    float path_dz = 0.f;
+    float path_above = -1.f;
+    const char* ground_points = nullptr;
     float gi_cell = 0.f;
     long grass_count = 1000000;
     bool ray_wind = true;
@@ -1269,6 +1283,12 @@ int main(int argc, char* argv[])
         no_sky = no_sky || std::strcmp(argv[i], "nosky") == 0;
         if (std::strncmp(argv[i], "size=", 5) == 0) std::sscanf(argv[i] + 5, "%dx%d", &kWidth, &kHeight);
         no_tour = no_tour || std::strcmp(argv[i], "notour") == 0;
+        fixed_step = fixed_step || std::strcmp(argv[i], "fixedstep") == 0;
+        if (std::strncmp(argv[i], "tourhold=", 9) == 0) tour_hold_frame = std::atol(argv[i] + 9);
+        if (std::strncmp(argv[i], "path=", 5) == 0) {
+            has_path = std::sscanf(argv[i] + 5, "%ld,%ld,%f,%f,%f", &path_from, &path_to, &path_dx, &path_dz, &path_above) == 5;
+        }
+        if (std::strncmp(argv[i], "groundpoints=", 13) == 0) ground_points = argv[i] + 13;
         if (std::strncmp(argv[i], "tour=", 5) == 0) tour_along = static_cast<float>(std::atof(argv[i] + 5));
         if (std::strncmp(argv[i], "gicell=", 7) == 0) gi_cell = static_cast<float>(std::atof(argv[i] + 7));
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
@@ -1405,6 +1425,28 @@ int main(int argc, char* argv[])
         orbit.set_yaw(view[3]);
         orbit.set_pitch(view[4]);
         orbit.set_distance(view[5]);
+    }
+    if (ground_points) {
+        // Hands the renderer's readout points on the ground, wherever the terrain puts them.
+        char points[640] = {};
+        int written = 0;
+        for (const char* at = ground_points; at && *at && written >= 0 && written < static_cast<int>(sizeof(points));) {
+            float x = 0.f;
+            float z = 0.f;
+            if (std::sscanf(at, "%f,%f", &x, &z) != 2) {
+                break;
+            }
+            written += std::snprintf(points + written, sizeof(points) - written, "%f,%f,%f,0,-1,0;", x, ground_y(x, z) - 0.5f, z);
+            at = std::strchr(at, ';');
+            if (at) {
+                ++at;
+            }
+        }
+#ifdef _WIN32
+        _putenv_s("VELK_GI_PRINT", points);
+#else
+        setenv("VELK_GI_PRINT", points, 1);
+#endif
     }
     camera.add_trait(orbit);
     camera.find_trait<velk::ICamera>()->far_clip().set_value(std::max(distance, extent) * 10.f);
@@ -1992,7 +2034,8 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
                 const float wave = 0.5f + 0.5f * std::sin(tour_along * 0.00045f + 1.f);
                 const float calm = wave * wave * wave;
                 const float tour_speed = 650.f + (70.f - 650.f) * calm;
-                tour_along += seconds * tour_speed;
+                const float tour_seconds = tour_hold_frame >= 0 && frame >= tour_hold_frame ? 0.f : fixed_step ? 1.f / 60.f : seconds;
+                tour_along += tour_seconds * tour_speed;
                 const velk::vec3 at = tour_point(tour_along);
                 // Clear of the highest ground in the next few seconds, rising and sinking smoothly.
                 float clear_y = ground_y(at.x, at.z);
@@ -2002,7 +2045,7 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
                 }
                 const float altitude = 450.f + (55.f - 450.f) * calm;
                 const float target_y = clear_y - altitude;
-                tour_height = frame == 0 ? target_y : tour_height + (target_y - tour_height) * std::min(seconds * 0.6f, 1.f);
+                tour_height = frame == 0 ? target_y : tour_height + (target_y - tour_height) * std::min(tour_seconds * 0.6f, 1.f);
                 focus_trs.set_translate({at.x, tour_height, at.z});
 
                 // Along the path, turned somewhat inward so the terrain's edge stays behind.
@@ -2164,6 +2207,15 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             VELK_LOG(I, "scale: frame %ld, %.2f ms/frame", frame, elapsed * 1000.0 / frames);
             report_start = now;
             report_frame = frame;
+        }
+
+        if (has_path && has_view) {
+            const float along = std::min(std::max(static_cast<float>(frame - path_from) / static_cast<float>(std::max(path_to - path_from, 1L)), 0.f), 1.f);
+            const float x = view[0] + path_dx * along;
+            const float z = view[2] + path_dz * along;
+            const float start_above = ground_y(view[0], view[2]) - view[1];
+            const float above = path_above < 0.f ? start_above : start_above + (path_above - start_above) * along;
+            focus_trs.set_translate({x, ground_y(x, z) - above, z});
         }
 
         if (frame_limit > 0 && frame >= frame_limit) {

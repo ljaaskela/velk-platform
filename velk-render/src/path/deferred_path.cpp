@@ -207,6 +207,8 @@ uint32_t gi_debug_mode() { return env_uint("VELK_GI_DEBUG", 1, 7); }
 
 // Shares lights picked and their shadow results between pixels, unless VELK_DIRECT_SHARE is 0.
 // Read each frame so that an app can switch it while running.
+bool test_diagnostics_enabled() { return std::getenv("VELK_TEST_DIAGNOSTICS") != nullptr; }
+
 bool direct_share_enabled()
 {
     const char* value = std::getenv("VELK_DIRECT_SHARE");
@@ -364,6 +366,13 @@ constexpr uint32_t kGiDim = 16;
 constexpr int kGiLevels = 8;
 constexpr int kGiRows = 5;
 constexpr int kGiMapSize = 8;
+// Mirror the tile grid and layout in test_diagnostics_compute_src. A slot is one frame's words.
+constexpr uint32_t kTestTilesX = 16;
+constexpr uint32_t kTestTilesY = 9;
+constexpr uint32_t kTestWords = 10 + kTestTilesX * kTestTilesY * 2;
+constexpr uint32_t kTestSlots = 16;
+// How many frames back a slot is read, so that no frame still in flight is writing it.
+constexpr uint64_t kTestReadBehind = 8;
 constexpr uint32_t kGiDistanceBins = 64;
 // Mirror kFirstLog2 and kBinLog2 in gi_measure_compute_src.
 constexpr float kGiDistanceFirstLog2 = -4.f;
@@ -534,9 +543,12 @@ bool DeferredPath::update_gi_finest(ViewState& vs, FrameContext& ctx)
 
 void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
 {
-    if (vs.gi_probe_rays.valid()) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
+    if (test_diagnostics_enabled() && !vs.test_words.valid()) {
+        vs.test_words = arena->alloc(uint64_t(kTestWords) * kTestSlots * sizeof(uint32_t));
+    }
+    if (vs.gi_probe_rays.valid()) return;
     vs.gi_probe_rays = arena->alloc(uint64_t(kProbeRayWords + kProbeCount * 4u + kProbeHitWords) * sizeof(uint32_t));
 }
 
@@ -921,6 +933,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
                                 static_cast<int>(vs.gbuffer_size.y), graph);
     emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
+    if (test_diagnostics_enabled()) {
+        emit_test_diagnostics_pass(vs, render_view, ctx, graph);
+    }
     if (visibility_mode != 0) {
         emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
     }
@@ -1278,27 +1293,41 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
 void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const char* request = std::getenv("VELK_GI_PRINT");
-    float v[6];
-    if (!request || std::sscanf(request, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
-    if (!vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known) return;
+    if (!request || !vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known) return;
+    constexpr uint32_t kMaxPoints = 8;
+    float points[kMaxPoints][6];
+    uint32_t count = 0;
+    for (const char* at = request; at && *at && count < kMaxPoints;) {
+        float* v = points[count];
+        if (std::sscanf(at, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) break;
+        ++count;
+        at = std::strchr(at, ';');
+        if (at) ++at;
+    }
+    if (count == 0) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
 
     constexpr uint32_t kWords = 3 + 4 * kGiLevels;
+    const uint32_t rate = std::max(env_uint("VELK_GI_PRINT_RATE", 1, 1000000), 1u);
+    const uint32_t every = std::getenv("VELK_GI_PRINT_RATE") ? rate : 60u;
     if (!vs.gi_print.valid()) {
-        vs.gi_print = arena->alloc(kWords * sizeof(uint32_t));
+        vs.gi_print = arena->alloc(uint64_t(kWords) * kMaxPoints * sizeof(uint32_t));
         if (!vs.gi_print.valid()) return;
-    } else if ((ctx.present_counter % 60ull) == 0ull) {
-        float out[kWords];
+    } else if ((ctx.present_counter % every) == 0ull) {
+        float out[kWords * kMaxPoints];
         arena->read_at(vs.gi_print.offset(), out, sizeof(out));
-        char line[640];
-        int at = std::snprintf(line, sizeof(line), "gi_print frame=%llu cell=2^%d total=%.4f,%.4f,%.4f",
-                               static_cast<unsigned long long>(ctx.present_counter), vs.gi_finest, out[0], out[1], out[2]);
-        for (uint32_t level = 0; level < kGiLevels && at > 0 && at < static_cast<int>(sizeof(line)); ++level) {
-            const float* s = out + 3 + level * 4;
-            at += std::snprintf(line + at, sizeof(line) - at, " L%u[w=%.2f %.3f]", level, s[0], s[1]);
+        for (uint32_t i = 0; i < count; ++i) {
+            const float* p = out + i * kWords;
+            char line[640];
+            int at = std::snprintf(line, sizeof(line), "gi_print frame=%llu point=%u cell=2^%d total=%.4f,%.4f,%.4f",
+                                   static_cast<unsigned long long>(ctx.present_counter), i, vs.gi_finest, p[0], p[1], p[2]);
+            for (uint32_t level = 0; level < kGiLevels && at > 0 && at < static_cast<int>(sizeof(line)); ++level) {
+                const float* s = p + 3 + level * 4;
+                at += std::snprintf(line + at, sizeof(line) - at, " L%u[w=%.2f %.3f]", level, s[0], s[1]);
+            }
+            VELK_LOG(I, "%s", line);
         }
-        VELK_LOG(I, "%s", line);
     }
 
     constexpr uint64_t kKey = 0x4749'5052'494e'5401ULL;
@@ -1317,22 +1346,25 @@ void DeferredPath::emit_gi_print_pass(ViewState& vs, const RenderView& render_vi
             uint32_t word, atlas, maps, globals_base;
             int32_t finest;
         };
-        const PushC pc{{v[0], v[1], v[2], 0.f},
-                       {v[3], v[4], v[5], 0.f},
-                       static_cast<uint32_t>(vs.gi_print.offset() / sizeof(uint32_t)),
-                       static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default)),
-                       static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default)),
-                       render_view.view_globals_base,
-                       vs.gi_finest};
-        DispatchCall dc{};
-        dc.pipeline = pipeline.get();
-        dc.groups_x = 1;
-        dc.groups_y = 1;
-        dc.groups_z = 1;
-        dc.root_constants_size = sizeof(pc);
-        std::memcpy(dc.root_constants, &pc, sizeof(pc));
         cmd->begin_recording();
-        cmd->record_dispatch(dc);
+        for (uint32_t i = 0; i < count; ++i) {
+            const float* v = points[i];
+            const PushC pc{{v[0], v[1], v[2], 0.f},
+                           {v[3], v[4], v[5], 0.f},
+                           static_cast<uint32_t>(vs.gi_print.offset() / sizeof(uint32_t)) + i * kWords,
+                           static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default)),
+                           static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default)),
+                           render_view.view_globals_base,
+                           vs.gi_finest};
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = 1;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            cmd->record_dispatch(dc);
+        }
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probes));
@@ -1551,6 +1583,125 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
         }
+        rec.held.push_back(pipeline);
+    });
+}
+
+void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    if (!vs.test_words.valid() || !vs.gbuffer || !vs.deferred_output) return;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+
+    VELK_LOG(I, "test_finest frame=%llu level=%d known=%d", static_cast<unsigned long long>(ctx.present_counter), vs.gi_finest,
+             vs.gi_finest_known ? 1 : 0);
+
+    if (ctx.present_counter >= kTestReadBehind) {
+        const uint64_t read_frame = ctx.present_counter - kTestReadBehind;
+        uint32_t w[kTestWords];
+        arena->read_at(vs.test_words.offset() + (read_frame % kTestSlots) * kTestWords * sizeof(uint32_t), w, sizeof(w));
+        constexpr float kScale = 256.f;
+        const auto ratio = [](uint32_t part, uint32_t whole) { return whole != 0u ? static_cast<float>(part) / static_cast<float>(whole) : 0.f; };
+        float tile_max = 0.f;
+        for (uint32_t t = 0; t < kTestTilesX * kTestTilesY; ++t) {
+            const uint32_t tile_valid = w[10 + t];
+            if (tile_valid >= 64u) {
+                tile_max = std::max(tile_max, ratio(w[10 + kTestTilesX * kTestTilesY + t], tile_valid) / kScale);
+            }
+        }
+        VELK_LOG(I, "test_frame frame=%llu valid=%u mean=%.5f over5=%.5f over20=%.5f up_valid=%u up_mean=%.5f up_over5=%.5f up_over20=%.5f tile_max=%.5f tested=%u missing=%u",
+                 static_cast<unsigned long long>(read_frame), w[0], ratio(w[1], w[0]) / kScale, ratio(w[2], w[0]), ratio(w[3], w[0]), w[4],
+                 ratio(w[5], w[4]) / kScale, ratio(w[6], w[4]), ratio(w[7], w[4]), tile_max, w[8], w[9]);
+    }
+
+    constexpr uint64_t kKey = 0x5445'5354'4449'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(test_diagnostics_compute_src, kKey);
+    if (!pipeline) return;
+
+    const auto width = vs.gbuffer_size.x;
+    const auto height = vs.gbuffer_size.y;
+    if (!vs.test_history[0] || vs.test_history_size != vs.gbuffer_size) {
+        TextureDesc td{};
+        td.width = static_cast<int>(width);
+        td.height = static_cast<int>(height);
+        td.format = PixelFormat::RGBA32F;
+        td.usage = TextureUsage::Storage;
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        vs.test_history[0] = graph.resources().create_render_texture(td);
+        vs.test_history[1] = graph.resources().create_render_texture(td);
+        vs.test_history_size = vs.gbuffer_size;
+    }
+    if (!vs.test_history[0] || !vs.test_history[1]) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
+    auto previous = vs.test_history[parity];
+    auto current = vs.test_history[1u - parity];
+    const uint32_t first_word = static_cast<uint32_t>(vs.test_words.offset() / sizeof(uint32_t))
+                                + static_cast<uint32_t>(ctx.present_counter % kTestSlots) * kTestWords;
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.test_diagnostics_pass, dirty, "test.diagnostics", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            uint32_t word, words, mode, globals_base;
+            uint32_t atlas, maps;
+            int32_t finest;
+            uint32_t normal_id, pos_id, albedo_id, color_id, history_id, output_id, width, height;
+        };
+        const bool has_field = vs.gi_probes && vs.gi_field_ready && vs.gi_finest_known;
+        PushC pc{};
+        pc.word = first_word;
+        pc.words = kTestWords;
+        pc.globals_base = render_view.view_globals_base;
+        pc.atlas = has_field ? handle(vs.gi_probes) : 0u;
+        pc.maps = has_field ? handle(vs.gi_probe_irradiance) : 0u;
+        pc.finest = vs.gi_finest;
+        pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+        pc.pos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+        pc.albedo_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
+        pc.color_id = handle(vs.deferred_output);
+        pc.history_id = handle(previous);
+        pc.output_id = handle(current);
+        pc.width = width;
+        pc.height = height;
+
+        DispatchCall clear{};
+        clear.pipeline = pipeline.get();
+        clear.groups_x = (kTestWords + 63u) / 64u;
+        clear.groups_y = 1;
+        clear.groups_z = 1;
+        clear.root_constants_size = sizeof(pc);
+        std::memcpy(clear.root_constants, &pc, sizeof(pc));
+
+        pc.mode = 1u;
+        DispatchCall measure{};
+        measure.pipeline = pipeline.get();
+        measure.groups_x = (width + 7u) / 8u;
+        measure.groups_y = (height + 7u) / 8u;
+        measure.groups_z = 1;
+        measure.root_constants_size = sizeof(pc);
+        std::memcpy(measure.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->record_global_barrier();
+        cmd->record_dispatch(clear);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(measure);
+        cmd->record_global_barrier();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(previous));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(current));
         rec.held.push_back(pipeline);
     });
 }
