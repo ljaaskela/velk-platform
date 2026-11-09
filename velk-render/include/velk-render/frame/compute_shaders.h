@@ -4467,6 +4467,8 @@ layout(push_constant) uniform PC {
     uint maps;
     uint dirs;
     uint atlas;
+    uint globals_base;
+    int finest;
 } pc;
 
 shared vec3 s_dir[64];
@@ -4504,6 +4506,7 @@ void main()
     int slot = int((flags >> 20u) & 7u);
     bool same_cell = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0)).a == stamp;
     bool keep_history = same_cell && !drop_history;
+    float updates = keep_history ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a : 0.0;
 
     // Inside something when enough rays reach the back of a solid.
     uint backs = 0u;
@@ -4576,7 +4579,23 @@ void main()
 
     ivec2 at = velk_gi_map_texel(texel, slot, ivec2(x, y), 0);
     vec3 held = keep_history ? velk_texture(pc.maps, velk_gi_map_uv(at)).rgb : vec3(0.0);
-    float hysteresis = dot(held, held) == 0.0 ? 0.0 : kHysteresis;
+    // A probe new to its cell starts from what the next level knows there, not from nothing.
+    int ladder = pc.finest + ((slot - pc.finest) & 7);
+    if (!same_cell && ladder < pc.finest + kGiLevels - 1) {
+        vec3 cam = velk_globals.data[pc.globals_base].cam_pos.xyz;
+        float cell_size = velk_gi_cell(ladder);
+        vec3 cam_cells = cam / cell_size;
+        vec3 cam_floor = floor(cam_cells);
+        ivec3 corner = ivec3(cam_floor) - kGiDim / 2;
+        ivec3 world_cell = corner + ((texel - corner) & ivec3(kGiDim - 1));
+        vec3 origin = (vec3(world_cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * cell_size;
+        vec3 known;
+        if (velk_gi_sample_irradiance(pc.atlas, pc.maps, ladder + 1, origin, origin, cam, entry_dir, known) > 0.0) {
+            held = pow(max(known, vec3(0.0)), vec3(1.0 / kGiIrradianceGamma));
+        }
+    }
+    // A running average over a probe's first updates, then the fixed rate.
+    float hysteresis = dot(held, held) == 0.0 ? 0.0 : min(kHysteresis, (updates + 1.0) / (updates + 2.0));
     vec3 now = pow(irradiance_sum / max(irradiance_weight, 1e-9), vec3(1.0 / kGiIrradianceGamma));
     vec3 delta = now - held;
     if (max(held.r - now.r, max(held.g - now.g, held.b - now.b)) > kChangeThreshold) {

@@ -718,9 +718,11 @@ void DeferredPath::emit_probe_pass(ViewState& vs, const RenderView& render_view,
         if (!cmd) return;
         VELK_GPU_STRUCT PushC
         {
-            uint32_t rays_word, headers_word, maps, dirs, atlas;
+            uint32_t rays_word, headers_word, maps, dirs, atlas, globals_base;
+            int32_t finest;
         };
-        const PushC maps_pc{rays_word, rays_word + ray_words, handle(vs.gi_probe_irradiance), kProbeDirs, handle(fine)};
+        const PushC maps_pc{rays_word, rays_word + ray_words, handle(vs.gi_probe_irradiance), kProbeDirs, handle(fine),
+                            render_view.view_globals_base, vs.gi_finest};
         DispatchCall dc{};
         dc.pipeline = maps_pipeline.get();
         dc.groups_x = probes;
