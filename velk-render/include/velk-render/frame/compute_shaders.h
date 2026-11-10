@@ -805,8 +805,11 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 #define RESOLVE_POSITION pc.env.y
 #define RESOLVE_MATERIAL pc.env.z
 #define RESOLVE_EMISSIVE pc.env.w
+// The resolve has no lights, so their field carries one more attachment.
+#define RESOLVE_SURFACE pc.lights_base
 
 struct ResolveVertex {
+    vec3 local;
     vec3 rel;
     vec3 normal;
     vec2 uv;
@@ -821,6 +824,7 @@ ResolveVertex resolve_vertex(VelkDrawData d, ElementInstance inst, GlobalData g,
     VelkVertex3D v = velk_unpack_vertex3d(d.vbo_base + index * VELK_VERTEX3D_WORDS);
     VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
     ResolveVertex r;
+    r.local = inst.offset.xyz + v.position * inst.size.xyz;
     r.rel = s.rel_pos;
     r.normal = s.world_normal;
     r.uv = s.local_uv;
@@ -893,6 +897,7 @@ void main()
         imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(0.0));
         imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord, vec4(0.0));
         imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(0.0));
+        imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord, vec4(0.0));
         return;
     }
 
@@ -962,6 +967,19 @@ void main()
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
                vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, 0.0));
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
+
+    // Where on the object this is, in the object's own axes but world units, and which of
+    // those axes the surface faces. From the vertices as stored and the unmapped normal, so
+    // neither a swaying material nor a normal map moves it.
+    mat3 to_world = mat3(inst.world_matrix);
+    vec3 axis_scale = vec3(length(to_world[0]), length(to_world[1]), length(to_world[2]));
+    vec3 local = v0.local * weights.x + v1.local * weights.y + v2.local * weights.z;
+    vec3 facing = transpose(to_world) * ctx.normal;
+    vec3 across = abs(facing);
+    float side = across.x >= across.y && across.x >= across.z ? (facing.x < 0.0 ? 1.0 : 0.0)
+               : across.y >= across.z ? (facing.y < 0.0 ? 3.0 : 2.0)
+               : (facing.z < 0.0 ? 5.0 : 4.0);
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord, vec4(local * axis_scale, side));
 }
 )";
 
@@ -1018,6 +1036,124 @@ void main()
         if (pc.mode >= 2u) id += (ids.y >> bits) * 8191u;
         if (pc.mode >= 3u) id += (ids.y & ((1u << bits) - 1u)) * 131u;
         color = id_color(id);
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(color, 1.0));
+}
+)";
+
+// Light cells: where a surface's light is kept. A cell is a cube in one object's own space,
+// so it moves with the object, and only the part of the surface that faces one of the
+// object's six axis directions, so the two sides of a thin wall are apart. Cubes double in
+// size from one level to the next. A reader picks the level by how wide it is there.
+#define VELK_LIGHT_CELL_GLSL R"(
+struct VelkLightCell {
+    uint object;  // which placed object: its record among the instances
+    int level;    // cubes are 2^level world units across
+    ivec3 at;     // which cube, in the object's own axes
+    uint side;    // which of the six axis directions the surface faces
+};
+
+// The level whose cubes are about `pixels` across on screen at `distance` from the camera.
+// `pixel_width` is a pixel's width in world units at distance 1.
+int velk_light_cell_level(float distance, float pixel_width, float pixels)
+{
+    return int(ceil(log2(max(distance * pixel_width * pixels, 1e-6))));
+}
+
+float velk_light_cell_size(int level)
+{
+    return exp2(float(level));
+}
+
+// The cell holding `surface`, a position as the G-buffer's surface attachment stores it.
+VelkLightCell velk_light_cell(uint object, vec3 surface, uint side, int level)
+{
+    VelkLightCell c;
+    c.object = object;
+    c.level = level;
+    c.at = ivec3(floor(surface / velk_light_cell_size(level)));
+    c.side = side;
+    return c;
+}
+
+uint velk_light_cell_mix(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+uint velk_light_cell_hash(VelkLightCell c)
+{
+    uint h = velk_light_cell_mix(c.object + 0x9e3779b9u);
+    h = velk_light_cell_mix(h ^ uint(c.at.x));
+    h = velk_light_cell_mix(h ^ uint(c.at.y));
+    h = velk_light_cell_mix(h ^ uint(c.at.z));
+    return velk_light_cell_mix(h ^ (uint(c.level + 64) * 8u + c.side));
+}
+)"
+
+/// Shows the light cells under each pixel in place of the image. Mode 1: each cell a flat
+/// colour of its own, darker where the surface turns from the camera. Mode 2: the level as a
+/// colour, with its cells as a checker. Mode 3: which way the surface faces on its object.
+inline constexpr string_view light_cells_debug_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+)" VELK_LIGHT_CELL_GLSL R"(
+layout(push_constant, scalar) uniform PC {
+    uint ids_id;
+    uint surface_id;
+    uint pos_id;
+    uint normal_id;
+    uint output_id;
+    uint width;
+    uint height;
+    uint mode;
+    uint globals_base;
+    float pixels;
+} pc;
+
+const vec3 kLevelColors[8] = vec3[8](
+    vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
+    vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));
+
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
+    vec3 color = vec3(0.0);
+    if (ids.x != 0u) {
+        VelkDrawData d = velk_draw_data.data[ids.x - 1u];
+        uint position = ids.y >> d.triangle_bits;
+        uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+        uint object = d.instances_base + slot;
+
+        vec4 surface = texelFetch(velk_textures[nonuniformEXT(pc.surface_id)], coord, 0);
+        vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], coord, 0).xyz;
+        vec3 N = normalize(texelFetch(velk_textures[nonuniformEXT(pc.normal_id)], coord, 0).xyz);
+
+        mat4 vp = velk_globals.data[pc.globals_base].view_projection;
+        float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
+        int level = velk_light_cell_level(length(rel), pixel_width, pc.pixels);
+        VelkLightCell cell = velk_light_cell(object, surface.xyz, uint(surface.w + 0.5), level);
+
+        if (pc.mode == 2u) {
+            float checker = ((cell.at.x + cell.at.y + cell.at.z) & 1) == 0 ? 1.0 : 0.6;
+            color = kLevelColors[uint(level + 64) & 7u] * checker;
+        } else if (pc.mode == 3u) {
+            color = kLevelColors[cell.side];
+        } else {
+            uint h = velk_light_cell_hash(cell);
+            vec3 flat_color = vec3(float(h & 255u), float((h >> 8u) & 255u), float((h >> 16u) & 255u)) / 255.0;
+            color = flat_color * (0.35 + 0.65 * abs(dot(N, normalize(-rel))));
+        }
     }
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(color, 1.0));
 }
@@ -2232,6 +2368,8 @@ void main()
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
         float a = roughness * roughness;
 
+)"
+                                                                      R"(
         // Direct lighting. The shadowed diffuse term is estimated by
         // resampled importance sampling (RIS): in one pass over the lights we
         // reservoir-pick a SINGLE light (weighted by its unshadowed diffuse
@@ -2267,6 +2405,13 @@ void main()
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
         vec3 unshadowed_direct = vec3(0.0);
+#ifdef VELK_LIGHT_CELLS
+        // With light cells, how much of each light gets through comes from them: nothing
+        // is picked at random and nothing is traced here, so each light's diffuse light and
+        // highlight are shadowed as they are summed.
+        bool cells_here = velk_cells_begin(coord, world_pos, normal_and_error);
+        vec3 cells_direct = vec3(0.0);
+#endif
         // Diagnostic accumulator; see the probe loop inside the light loop.
         float loop_probe = 0.0;
 
@@ -2319,7 +2464,13 @@ void main()
             float D = ggx_d(NdotH, a);
             float G = smith_g(NdotV, NdotL, roughness);
             vec3  F = fresnel_schlick(VdotH, F0);
-            direct_specular += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance;
+#ifdef VELK_LIGHT_CELLS
+            float through = cells_here ? velk_cells_light_through(i) : 1.0;
+            cells_direct += NdotL * radiance * through;
+#else
+            const float through = 1.0;
+#endif
+            direct_specular += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
 
             // Unshadowed diffuse, summed over ALL lights and free of noise.
             // The ratio estimator divides the stochastic estimate by this and
@@ -2432,6 +2583,10 @@ void main()
             shared_valid = shared_direct.a;
         }
 
+#ifdef VELK_LIGHT_CELLS
+        direct_diffuse = cells_direct;
+#endif
+
         // Env lighting: single-sample approximation. Diffuse reads
         // along N with a deep LOD so it reads roughly the irradiance
         // average; specular reads the mirror reflection with LOD scaled
@@ -2524,6 +2679,9 @@ void main()
         // Alpha marks "this pixel traced a ray this frame". The temporal pass
         // keeps history untouched where it is 0 rather than folding in a zero.
         irr_valid = pc.direct_samples_id != 0u ? shared_valid : (trace_now ? 1.0 : 0.0);
+#ifdef VELK_LIGHT_CELLS
+        irr_valid = 1.0;
+#endif
         // The environment map cannot tell whether the sky is visible along the reflection.
         // The field can: how much of the environment's light it finds that way is how much
         // of the sharp reflection stays, and what it finds in place of the sky fills the rest.
@@ -2548,6 +2706,10 @@ void main()
         const vec3 kHighlightLuma = vec3(0.2126, 0.7152, 0.0722);
         float rest_luma = dot(rest, kHighlightLuma);
         highlight_share = rest_luma > 1e-5 ? clamp(dot(direct_specular, kHighlightLuma) / rest_luma, 0.0, 1.0) : 0.0;
+#ifdef VELK_LIGHT_CELLS
+        // The highlights were shadowed light by light above.
+        highlight_share = 0.0;
+#endif
     }
 
     // Emissive is additive radiance; part of the sharp output.
@@ -2562,6 +2724,9 @@ void main()
         return;
     }
     if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
+#ifdef VELK_LIGHT_CELLS
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
+#endif
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
     // The unshadowed term the composite multiplies the denoised ratio by. Kept
     // out of the denoiser deliberately: it is exact and sharp, and it carries
@@ -2690,7 +2855,7 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF1
 
 layout(push_constant, scalar) uniform PC {
     uint globals_base;         // offset 0  (view's FrameGlobals index; cam_pos via VELK_GLOBALS)
-    uint _pad_globals;
+    uint own_pixel;            // 1: every pixel's ratio is its own and exact, so none is filtered
     uint albedo_id;
     uint material_id;
     uint normal_id;
@@ -2821,6 +2986,8 @@ void main()
         // All four rejected: fall back to this pixel, as a real implementation
         // would have to.
         irr_out = (aw > 1e-5) ? (acc / aw) : velk_filter_at(coord, dims);
+    } else if (pc.own_pixel != 0u) {
+        irr_out = texelFetch(velk_textures[nonuniformEXT(pc.hist_irr_id)], coord, 0).rgb;
     } else {
         irr_out = velk_filter_at(coord, dims);
     }
@@ -2835,6 +3002,827 @@ void main()
     vec3 sharp = rest.rgb * (1.0 - unshadowed_share.a * (1.0 - seen));
     vec3 final = albedo.rgb * (1.0 - metallic) * (unshadowed * irr_out) + sharp;
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
+}
+)";
+
+// Light cells, kept and read. Follows deferred_compute_prelude_src, whose push constants it
+// uses under the names below. Each pixel finds its cell in a table in the culling arena,
+// making it if it is new. A cell's light is traced from the pixel that gets to it first: per
+// light, how much of that light the surface sees, and how wide the soft edge of a shadow is
+// there, traced once and kept until something changes on the way to a light. The pixel then
+// shows direct diffuse light: each light's own falloff and angle at the pixel, times what
+// the cells around it say gets through.
+//
+// A soft edge is as wide as the light is large and the thing casting the shadow is far. A
+// wide one is read from larger cells, a few to its width, so that it comes out smooth
+// whatever its width, from the same sixteen rays a cell.
+//
+// A cell is 24 words: a state, the key (object, cube x y z, level and side), the frame its
+// light was last known good, the frame a pixel last read it, and 16 words of 8 bits per
+// light for the first 64 lights: in the low 4, how much gets through, in fifteenths; in
+// the high 4, how many half levels above its own a cell should be to suit the soft edge
+// there. A cell unread for a while gives up its slot to a new one. The
+// state is 0 for an empty slot, otherwise part of the key's hash with bit 0 set once the
+// light is there and bit 1 while a thread is tracing it.
+//
+// This is the part that keeps cells up, for light_cells_update_main_src: its
+// velk_cells_begin makes, checks and traces the cells of a pixel. Passes that only read use
+// light_cells_read_src, which is far smaller. Where the cells are comes as one word of the
+// push constants, CELLS_HEADER, under the name the deferred passes have for a field their
+// shaders do not use: the word in the culling arena of eight words, which are the table's
+// first word, its slots, how many pixels across a cell is, the first word of the list of
+// changes, the G-buffer's id and surface attachments, and two spare.
+[[maybe_unused]] constexpr string_view light_cells_src = R"(
+layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
+layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
+)" VELK_LIGHT_CELL_GLSL R"(
+#define CELLS_HEADER pc.shadow_debug_image_id
+// The header's words, read once a thread by velk_cells_load, which a main calls first.
+uint cells_header[7];
+void velk_cells_load()
+{
+    for (uint w = 0u; w < 7u; ++w) cells_header[w] = velk_light_cell_words.data[CELLS_HEADER + w];
+}
+#define CELLS_WORD cells_header[0]
+#define CELLS_SLOTS cells_header[1]
+#define CELLS_PIXELS cells_header[2]
+// What changed lately, in the same arena: a count, the frame before which changes are no
+// longer listed, two spare words, then 8 words a change: a world box's least corner, the
+// frame it changed in, its greatest corner, and a spare.
+#define CELLS_CHANGES cells_header[3]
+#define CELLS_IDS cells_header[4]
+#define CELLS_SURFACE cells_header[5]
+// The cells to trace this frame, in the same arena: a count, three spare words, then 3
+// words a cell: the word it starts at, the pixel that asked, x in the low half and y in
+// the high, and how many levels above that pixel's own it is.
+#define CELLS_WORK cells_header[6]
+const uint kCellWorkMax = 32768u;
+
+const uint kCellWords = 24u;
+// How many levels above pixel-sized cells a wide soft edge may be read from.
+const int kCellUp = 3;
+// The cells a reader blends at one level. See velk_cells_around.
+const int kAround = 18;
+// How many cells wide a soft edge should be at the level it is read from.
+const float kCellsPerEdge = 4.0;
+const uint kCellReady = 1u;
+const uint kCellBusy = 2u;
+const uint kCellProbes = 8u;
+const uint kCellLights = 64u;
+const uint kNoCell = 0xFFFFFFFFu;
+// A cell no pixel has read for this many frames gives up its slot to a new one.
+const uint kCellUnreadFrames = 60u;
+
+uint velk_cell_tag(uint hash)
+{
+    return (hash & 0xFFFFFFF0u) | 8u;
+}
+
+bool velk_cell_is(uint at, VelkLightCell c)
+{
+    return velk_light_cell_words.data[at + 1u] == c.object
+        && velk_light_cell_words.data[at + 2u] == uint(c.at.x)
+        && velk_light_cell_words.data[at + 3u] == uint(c.at.y)
+        && velk_light_cell_words.data[at + 4u] == uint(c.at.z)
+        && velk_light_cell_words.data[at + 5u] == (uint(c.level + 64) * 8u + c.side);
+}
+
+// The word a cell starts at, or kNoCell. With `make`, an absent cell is made, and `made`
+// says this thread made it and holds it as busy.
+uint velk_cell_find(VelkLightCell c, bool make, out bool made)
+{
+    made = false;
+    uint hash = velk_light_cell_hash(c);
+    uint tag = velk_cell_tag(hash);
+    uint now = VELK_GLOBALS.present_counter;
+    // Where a new cell could go: the first slot that is empty, or whose cell no pixel has
+    // read for a while.
+    uint spare = kNoCell;
+    uint spare_state = 0u;
+    for (uint p = 0u; p < kCellProbes; ++p) {
+        uint at = CELLS_WORD + ((hash + p) & (CELLS_SLOTS - 1u)) * kCellWords;
+        uint state = velk_light_cell_words.data[at];
+        if (state == 0u) {
+            // Nothing was ever put past an empty slot.
+            if (spare == kNoCell) {
+                spare = at;
+                spare_state = 0u;
+            }
+            break;
+        }
+        // Its key is written before its light, so a traced cell can be told from another
+        // with the same tag.
+        if ((state & 0xFFFFFFFCu) == tag && ((state & kCellReady) == 0u || velk_cell_is(at, c))) return at;
+        if (spare == kNoCell && (state & kCellBusy) == 0u
+            && now - velk_light_cell_words.data[at + 7u] > kCellUnreadFrames) {
+            spare = at;
+            spare_state = state;
+        }
+    }
+    if (!make || spare == kNoCell) return kNoCell;
+    // Another thread may take the slot first. This pixel then has no cell this frame.
+    if (atomicCompSwap(velk_light_cell_words.data[spare], spare_state, tag | kCellBusy) != spare_state) return kNoCell;
+    velk_light_cell_words.data[spare + 1u] = c.object;
+    velk_light_cell_words.data[spare + 2u] = uint(c.at.x);
+    velk_light_cell_words.data[spare + 3u] = uint(c.at.y);
+    velk_light_cell_words.data[spare + 4u] = uint(c.at.z);
+    velk_light_cell_words.data[spare + 5u] = uint(c.level + 64) * 8u + c.side;
+    velk_light_cell_words.data[spare + 7u] = now;
+    made = true;
+    return spare;
+}
+
+uint velk_cell_mix(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+bool velk_segment_touches(vec3 from, vec3 to, vec3 box_min, vec3 box_max)
+{
+    vec3 d = to - from;
+    vec3 inv_d = 1.0 / d;
+    vec3 t0 = (box_min - from) * inv_d;
+    vec3 t1 = (box_max - from) * inv_d;
+    vec3 tmn = min(t0, t1);
+    vec3 tmx = max(t0, t1);
+    return max(max(max(tmn.x, tmn.y), tmn.z), 0.0) <= min(min(min(tmx.x, tmx.y), tmx.z), 1.0);
+}
+
+// Whether a change listed since frame `valid` could alter what the surface at `world_pos`
+// sees of a light: its box, grown by `margin`, lies on the way to one of them.
+bool velk_cell_changed_since(uint valid, vec3 world_pos, vec3 N, float margin)
+{
+    uint count = velk_light_cell_words.data[CELLS_CHANGES];
+    if (valid < velk_light_cell_words.data[CELLS_CHANGES + 1u]) return true;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    for (uint b = 0u; b < count; ++b) {
+        uint at = CELLS_CHANGES + 4u + b * 8u;
+        if (valid >= velk_light_cell_words.data[at + 3u]) continue;
+        vec3 box_min = vec3(uintBitsToFloat(velk_light_cell_words.data[at]),
+                            uintBitsToFloat(velk_light_cell_words.data[at + 1u]),
+                            uintBitsToFloat(velk_light_cell_words.data[at + 2u])) - cam - margin;
+        vec3 box_max = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 4u]),
+                            uintBitsToFloat(velk_light_cell_words.data[at + 5u]),
+                            uintBitsToFloat(velk_light_cell_words.data[at + 6u])) - cam + margin;
+        uint lights = min(pc.light_count, kCellLights);
+        for (uint i = 0u; i < lights; ++i) {
+            Light light = velk_light_at(pc.lights_base + i);
+            if (light.flags.x == 3u) continue;
+            vec3 to = world_pos - light.direction.xyz * 1e4;
+            if (light.flags.x != 0u) {
+                to = light.position.xyz;
+                if (distance(to, world_pos) >= light.params.x) continue;
+            }
+            if (dot(N, to - world_pos) <= 0.0) continue;
+            if (velk_segment_touches(world_pos, to, box_min, box_max)) return true;
+        }
+    }
+    return false;
+}
+)";
+
+/// Traces a light cell. Follows light_cells_src.
+[[maybe_unused]] constexpr string_view light_cells_trace_src = R"(
+// Traces how much of each light the cell's surface sees, and stores it in the cell. Rays
+// start from places spread over the cell's surface around `world_pos`, its middle, the same
+// ones every time, so that the result is the share of the cell that is lit and does not
+// change between tracings. `world_u` and `world_v` are the world steps for a unit step along
+// the two object axes the surface lies in, or zero if unknown, when every ray starts at the
+// middle.
+void velk_cell_trace(uint at, vec3 world_pos, vec3 world_u, vec3 world_v, vec3 N, float cell_size, float lift, int sized_grid)
+{
+    uint seen[16];
+    for (int w = 0; w < 16; ++w) seen[w] = 0u;
+    uint count = min(pc.light_count, kCellLights);
+    velk_ray_lift = lift;
+    for (uint i = 0u; i < count; ++i) {
+        Light light = velk_light_at(pc.lights_base + i);
+        // An area light works out its own shadow.
+        if (light.flags.x == 3u) {
+            seen[i >> 2u] |= 15u << ((i & 3u) * 8u);
+            continue;
+        }
+        vec3 L;
+        float t_max = 1e30;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            vec3 to_light = light.position.xyz - world_pos;
+            t_max = length(to_light);
+            L = to_light / max(t_max, 1e-6);
+            float t = clamp(1.0 - t_max / max(light.params.x, 1e-6), 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                atten *= smoothstep(light.params.z, light.params.y, dot(-L, light.direction.xyz));
+            }
+        }
+        if (dot(N, L) <= 0.0 || atten <= 0.0) continue;
+
+        // Rays are laid out, each from its own place in a grid over the cell's surface,
+        // toward its own part of the light if the light has a size. How many get through
+        // is how much of the cell is lit, which is the soft edge: wider for a larger light
+        // and for a shadow falling further from what casts it. The grid is four by four,
+        // or `sized_grid` a side for a light with a size: a larger cell takes more rays,
+        // so that rays per area of surface stay about the same and the steps its value
+        // moves in get finer. For a light without a size, four of the sixteen, one in each
+        // row and column, are traced first, and if those agree the cell is all lit or all
+        // dark and the rest are not traced.
+        float size = max(light.params.w, 0.0);
+        int grid = size > 0.0 ? sized_grid : 4;
+        int rays = grid * grid;
+        // The same for every cell, so that cells side by side differ only by what they see.
+        float turn_by = float(velk_cell_mix(i * 747796405u + 1u) & 0xFFFFu) / 65536.0 * 6.28318531;
+        float through = 0.0;
+        float least = 1.0;
+        float most = 0.0;
+        int traced = 0;
+        // Of the rays that were stopped: how many, and how far they got in all.
+        float stopped = 0.0;
+        float stopped_at = 0.0;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int k = 0; k < rays; ++k) {
+                bool first = size > 0.0 || k == 1 || k == 7 || k == 8 || k == 14;
+                if (first != (pass == 0)) continue;
+                vec2 place = (vec2(float(k % grid), float(k / grid)) + 0.5) / float(grid) - 0.5;
+                vec3 from = world_pos + (world_u * place.x + world_v * place.y) * cell_size;
+                vec3 toward = L;
+                float reach = t_max;
+                if (light.flags.x != 0u) {
+                    vec3 to_light = light.position.xyz - from;
+                    reach = length(to_light);
+                    toward = to_light / max(reach, 1e-6);
+                }
+                if (size > 0.0) {
+                    float spread = light.flags.x == 0u ? tan(size) : size / max(reach, 1e-4);
+                    vec3 up = abs(toward.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                    vec3 T = normalize(cross(up, toward));
+                    vec3 B = cross(toward, T);
+                    // Spread evenly over the light's disc, in an order unlike the grid's.
+                    float j = float((k * (rays == 16 ? 7 : 23) + 3) % rays);
+                    float turn = j * 2.39996323 + turn_by;
+                    float out_by = sqrt((j + 0.5) / float(rays)) * spread;
+                    toward = normalize(toward + T * (out_by * cos(turn)) + B * (out_by * sin(turn)));
+                }
+                Ray r;
+                r.origin = from + toward * 0.005 + N * lift;
+                r.dir = toward;
+                // The nearest thing in the way, since how far it is sets the soft edge's width.
+                RayHit stop;
+                float got = 1.0;
+                if (trace_closest_hit(r, max(reach - max(size, 0.005), 0.0), stop)) {
+                    got = 0.0;
+                    stopped += 1.0;
+                    stopped_at += stop.t;
+                }
+                through += got;
+                least = min(least, got);
+                most = max(most, got);
+                ++traced;
+            }
+            // A light with a size has had all its rays. Part of one can be hidden where four
+            // rays happen to agree.
+            if (size > 0.0 || most - least < 0.01) break;
+        }
+        uint fifteenths = uint(clamp(through / float(traced), 0.0, 1.0) * 15.0 + 0.5);
+        // The soft edge's width here: the light's width as seen from what casts the shadow,
+        // carried on to the surface. Then how many half levels larger than this cell a cell
+        // would be with kCellsPerEdge of them across that.
+        uint half_levels = 0u;
+        if (size > 0.0 && stopped > 0.0) {
+            float to_blocker = stopped_at / stopped;
+            float edge = light.flags.x == 0u ? 2.0 * tan(size) * to_blocker
+                                             : 2.0 * size * to_blocker / max(t_max - to_blocker, 1e-3);
+            half_levels = uint(clamp(2.0 * log2(max(edge, 1e-6) / (kCellsPerEdge * cell_size)) + 0.5, 0.0, 15.0));
+        }
+        seen[i >> 2u] |= (fifteenths | (half_levels << 4u)) << ((i & 3u) * 8u);
+    }
+    velk_ray_lift = 0.0;
+    for (uint w = 0u; w < 16u; ++w) velk_light_cell_words.data[at + 8u + w] = seen[w];
+    velk_light_cell_words.data[at + 6u] = VELK_GLOBALS.present_counter;
+}
+)"
+                                                                      R"(
+// Traces the cells light_cells_touch_src listed, one a thread, so that no thread waits
+// beside another that traces. `pc.width` is the threads in a row of the dispatch. With
+// `pc.ray_pass` 2 it empties the list instead, for after the tracing.
+void main()
+{
+    velk_cells_load();
+    uint index = gl_GlobalInvocationID.y * pc.width + gl_GlobalInvocationID.x;
+    uint work = CELLS_WORK;
+    if (pc.ray_pass == 2u) {
+        if (index == 0u) velk_light_cell_words.data[work] = 0u;
+        return;
+    }
+    if (index >= min(velk_light_cell_words.data[work], kCellWorkMax)) return;
+    uint own = velk_light_cell_words.data[work + 4u + index * 3u];
+    uint packed = velk_light_cell_words.data[work + 4u + index * 3u + 1u];
+    int up = int(velk_light_cell_words.data[work + 4u + index * 3u + 2u]);
+    ivec2 coord = ivec2(int(packed & 0xFFFFu), int(packed >> 16u));
+
+    // The pixel that asked shows a point of the surface near the cell.
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
+    vec4 normal_and_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], coord, 0);
+    uint tag = velk_light_cell_words.data[own] & 0xFFFFFFFCu;
+    if (ids.x == 0u || dot(normal_and_error.xyz, normal_and_error.xyz) < 1e-6) {
+        velk_light_cell_words.data[own] = tag;
+        return;
+    }
+    uint bits = velk_draw_data.data[ids.x - 1u].triangle_bits;
+    uint position = ids.y >> bits;
+    vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
+    vec3 world_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
+    vec3 N = normalize(normal_and_error.xyz);
+    uint side = uint(surface.w + 0.5);
+
+    // The cell's middle on the surface, and how to step over the surface from it along the
+    // two object axes the surface lies in. Where those are in the world comes from how
+    // position on the object and in the world change together across the next pixels, if
+    // they show the same surface.
+    float cell_size = velk_light_cell_size(int(velk_light_cell_words.data[own + 5u] >> 3u) - 64);
+    vec3 middle = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
+                              velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size;
+    uint axis = side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    vec2 to_middle = vec2(middle[ua] - surface.xyz[ua], middle[va] - surface.xyz[va]);
+    vec3 world_u = vec3(0.0);
+    vec3 world_v = vec3(0.0);
+    ivec2 image_size = textureSize(velk_textures[nonuniformEXT(pc.normal_tex_id)], 0);
+    ivec2 nx = coord + ivec2(coord.x + 1 < image_size.x ? 1 : -1, 0);
+    ivec2 ny = coord + ivec2(0, coord.y + 1 < image_size.y ? 1 : -1);
+    uvec2 ids_x = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], nx, 0).xy;
+    uvec2 ids_y = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], ny, 0).xy;
+    vec4 surface_x = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], nx, 0);
+    vec4 surface_y = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], ny, 0);
+    vec3 normal_x = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], nx, 0).xyz;
+    vec3 normal_y = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], ny, 0).xyz;
+    // The same object, the same side of it, and facing the same way: one flat piece of
+    // surface, not the next face over an edge.
+    if (ids_x.x == ids.x && (ids_x.y >> bits) == position
+        && ids_y.x == ids.x && (ids_y.y >> bits) == position
+        && surface_x.w == surface.w && surface_y.w == surface.w
+        && dot(normal_x, N) > 0.995 * length(normal_x) && dot(normal_y, N) > 0.995 * length(normal_y)) {
+        vec3 sx = surface_x.xyz - surface.xyz;
+        vec3 sy = surface_y.xyz - surface.xyz;
+        vec3 wx = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], nx, 0).xyz - world_pos;
+        vec3 wy = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], ny, 0).xyz - world_pos;
+        float det = sx[ua] * sy[va] - sy[ua] * sx[va];
+        if (abs(det) > 1e-12) {
+            // The world step for a unit step along each of the two object axes.
+            world_u = (wx * sy[va] - wy * sx[va]) / det;
+            world_v = (wy * sx[ua] - wx * sy[ua]) / det;
+            // A step much longer than the object step is a silhouette, not a surface.
+            if (dot(world_u, world_u) > 4.0 || dot(world_v, world_v) > 4.0) {
+                world_u = vec3(0.0);
+                world_v = vec3(0.0);
+            }
+        }
+    }
+    vec3 middle_world = world_pos + world_u * to_middle.x + world_v * to_middle.y;
+    // Lifted by a little of the cell's size, since the places rays start from are only as
+    // exact as the differences between pixels they were found from.
+    velk_cell_trace(own, middle_world, world_u, world_v, N, cell_size, normal_and_error.w + 0.02 * cell_size,
+                    up > 0 ? 8 : 4);
+    velk_light_cell_words.data[own] = tag | kCellReady;
+}
+)";
+
+/// Notes which light cells the pixels need, makes the new ones, checks them against what
+/// changed, and lists those to trace for light_cells_trace_src. Follows light_cells_src.
+/// It traces nothing and holds no arrays, since nearly every thread only finds a cell.
+[[maybe_unused]] constexpr string_view light_cells_touch_src = R"(
+// The pixel being worked on, for the functions below. Set by velk_cells_begin.
+ivec2 coord;
+uvec2 ids;
+VelkDrawData d;
+uint position;
+uint object;
+vec4 surface;
+vec3 world_pos;
+vec3 N;
+uint side;
+vec4 normal_and_error;
+
+// Keeps cell `c` up for the pixel: made if new, checked against what changed, and listed
+// for tracing if it is due and it is this pixel's turn. `up` is how many levels above the
+// pixel's own it is. Returns the word it starts at, or kNoCell.
+uint velk_cell_keep(VelkLightCell c, int up)
+{
+    float cell_size = velk_light_cell_size(c.level);
+    bool made;
+    uint own = velk_cell_find(c, true, made);
+    if (own != kNoCell) {
+        // Several pixels share a cell, so most find it noted already.
+        if (velk_light_cell_words.data[own + 7u] != VELK_GLOBALS.present_counter) {
+            velk_light_cell_words.data[own + 7u] = VELK_GLOBALS.present_counter;
+        }
+        uint tag = velk_light_cell_words.data[own] & 0xFFFFFFFCu;
+        // Traced, and good up to some frame: is it still, given what changed since? If so
+        // it is good up to now, and next frame has only that frame's changes to look at.
+        bool changed = false;
+        if (velk_light_cell_words.data[own] == (tag | kCellReady)) {
+            uint valid = velk_light_cell_words.data[own + 6u];
+            if (valid != VELK_GLOBALS.present_counter) {
+                changed = velk_cell_changed_since(valid, world_pos, N, cell_size * (up > 0 ? 2.0 : 1.0));
+                if (!changed) velk_light_cell_words.data[own + 6u] = VELK_GLOBALS.present_counter;
+            }
+        }
+        uint draw = velk_cell_mix(uint(coord.x) * 1973u + uint(coord.y) * 9277u + VELK_GLOBALS.present_counter * 26699u);
+        // A cell costs rays for every light to trace. With few lights a pixel lists it at
+        // once; with many, only some pixels do each frame, so that a view full of new cells
+        // is spread over frames.
+        bool turn = (draw & 63u) < clamp(256u / max(pc.light_count, 1u), 1u, 64u);
+        // What the cell goes back to if it is not listed after all.
+        uint as_it_was = tag;
+        bool hold = made;
+        // Not traced yet and nobody at it.
+        if (!hold && turn) {
+            hold = atomicCompSwap(velk_light_cell_words.data[own], tag, tag | kCellBusy) == tag;
+        }
+        // Traced: again if something changed on the way to a light. Besides that one cell in
+        // 256 is due each frame, for what the list of changes does not hold.
+        bool due = (changed && turn) || (((own / kCellWords) + VELK_GLOBALS.present_counter) & 255u) == 0u;
+        if (!hold && due) {
+            hold = atomicCompSwap(velk_light_cell_words.data[own], tag | kCellReady,
+                                  tag | kCellReady | kCellBusy) == (tag | kCellReady);
+            as_it_was = tag | kCellReady;
+        }
+        if (hold) {
+            // Held as busy until the trace pass has been at it, which reads it as traced
+            // meanwhile if it was. Not this pixel's turn, or the list full: left for later.
+            uint place = turn ? atomicAdd(velk_light_cell_words.data[CELLS_WORK], 1u) : kCellWorkMax;
+            if (place >= kCellWorkMax) {
+                velk_light_cell_words.data[own] = as_it_was;
+            } else {
+                uint at = CELLS_WORK + 4u + place * 3u;
+                velk_light_cell_words.data[at] = own;
+                velk_light_cell_words.data[at + 1u] = uint(coord.x) | (uint(coord.y) << 16u);
+                velk_light_cell_words.data[at + 2u] = uint(up);
+            }
+        }
+    }
+    return own;
+}
+
+// What a cell holds for light `i`. See the layout above.
+uint velk_cell_light(uint at, uint i)
+{
+    return (velk_light_cell_words.data[at + 8u + (i >> 2u)] >> ((i & 3u) * 8u)) & 255u;
+}
+
+// Takes up the pixel at `pixel`, whose surface is at `rel_pos` from the camera with the
+// G-buffer's normal and error `normal_error`: keeps up its own cell, and the larger cells a
+// wide soft edge there is read from. False if there is no surface there.
+bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
+{
+    velk_cells_load();
+    coord = pixel;
+    ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
+    normal_and_error = normal_error;
+    if (ids.x == 0u || dot(normal_and_error.xyz, normal_and_error.xyz) < 1e-6) return false;
+    d = velk_draw_data.data[ids.x - 1u];
+    position = ids.y >> d.triangle_bits;
+    uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+    object = d.instances_base + slot;
+
+    surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
+    world_pos = rel_pos;
+    N = normalize(normal_and_error.xyz);
+    side = uint(surface.w + 0.5);
+
+    mat4 vp = VELK_GLOBALS.view_projection;
+    float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
+    int level = velk_light_cell_level(length(world_pos), pixel_width, float(CELLS_PIXELS));
+    uint own = velk_cell_keep(velk_light_cell(object, surface.xyz, side, level), 0);
+
+    // Its own cell says how wide the widest soft edge here is. That is read from larger
+    // cells, three by three of them around the pixel at each level, so those are kept up
+    // as well, whether or not a pixel of their own asks.
+    float widest = 0.0;
+    if (own != kNoCell && (velk_light_cell_words.data[own] & kCellReady) != 0u) {
+        uint held_lights = min(pc.light_count, kCellLights);
+        for (uint i = 0u; i < held_lights; ++i) {
+            uint held = velk_cell_light(own, i);
+            if ((held & 15u) != 15u) widest = max(widest, float(held >> 4u) * 0.5);
+        }
+    }
+    int up_levels = min(int(ceil(widest)), kCellUp);
+    uint axis = side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    for (int up = 1; up <= up_levels; ++up) {
+        // The same three by three a reader blends: around the cell whose middle is nearest.
+        VelkLightCell c = velk_light_cell(object, surface.xyz, side, level + up);
+        ivec3 nearest = ivec3(floor(surface.xyz / velk_light_cell_size(level + up)));
+        for (int k = 0; k < 9; ++k) {
+            c.at[ua] = nearest[ua] + k % 3 - 1;
+            c.at[va] = nearest[va] + k / 3 - 1;
+            velk_cell_keep(c, up);
+        }
+    }
+    return true;
+}
+)";
+
+/// Keeps the light cells in view up: one pixel in each 2x2 block takes up its cells. Follows
+/// deferred_compute_prelude_src, light_cells_src and light_cells_touch_src. Runs before
+/// anything reads the cells, so that the passes that read carry none of this.
+[[maybe_unused]] constexpr string_view light_cells_update_main_src = R"(
+void main()
+{
+    ivec2 at_pixel = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (at_pixel.x >= int(pc.width) || at_pixel.y >= int(pc.height)) return;
+    vec3 rel_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], at_pixel, 0).xyz;
+    vec4 normal_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], at_pixel, 0);
+    velk_cells_begin(at_pixel, rel_pos, normal_error);
+}
+)";
+
+/// Reads the light cells, and defines VELK_LIGHT_CELLS. Follows deferred_compute_prelude_src.
+/// A pass calls velk_cells_begin for a pixel and then velk_cells_light_through for each
+/// light. It writes nothing and traces nothing: light_cells_update_main_src keeps the cells
+/// up. See light_cells_src for what a cell holds and for CELLS_HEADER.
+[[maybe_unused]] constexpr string_view light_cells_read_src = R"(
+#define VELK_LIGHT_CELLS
+layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
+layout(set = 1, binding = 16, std430) readonly buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
+)" VELK_LIGHT_CELL_GLSL R"(
+#define CELLS_HEADER pc.shadow_debug_image_id
+// The header's words this shader uses, read once a pixel by velk_cells_begin.
+uint cells_word;
+uint cells_slots;
+uint cells_pixels;
+uint cells_ids;
+uint cells_surface_id;
+#define CELLS_WORD cells_word
+#define CELLS_SLOTS cells_slots
+#define CELLS_PIXELS cells_pixels
+#define CELLS_IDS cells_ids
+#define CELLS_SURFACE cells_surface_id
+
+const uint kCellWords = 24u;
+const int kCellUp = 3;
+const int kAround = 18;
+const uint kCellReady = 1u;
+const uint kCellProbes = 8u;
+const uint kCellLights = 64u;
+const uint kNoCell = 0xFFFFFFFFu;
+
+// The word a traced cell starts at, or kNoCell.
+uint velk_cell_lookup(VelkLightCell c)
+{
+    uint hash = velk_light_cell_hash(c);
+    uint tag = (hash & 0xFFFFFFF0u) | 8u;
+    for (uint p = 0u; p < kCellProbes; ++p) {
+        uint at = CELLS_WORD + ((hash + p) & (CELLS_SLOTS - 1u)) * kCellWords;
+        uint state = velk_light_cell_words.data[at];
+        if (state == 0u) return kNoCell;
+        if ((state & 0xFFFFFFFCu) != tag || (state & kCellReady) == 0u) continue;
+        if (velk_light_cell_words.data[at + 1u] == c.object
+            && velk_light_cell_words.data[at + 2u] == uint(c.at.x)
+            && velk_light_cell_words.data[at + 3u] == uint(c.at.y)
+            && velk_light_cell_words.data[at + 4u] == uint(c.at.z)
+            && velk_light_cell_words.data[at + 5u] == (uint(c.level + 64) * 8u + c.side)) {
+            return at;
+        }
+    }
+    return kNoCell;
+}
+
+// What a cell holds for light `i`: in the low 4 bits how much gets through, in fifteenths,
+// and in the high 4 how many half levels above its own suit the soft edge there.
+uint velk_cell_light(uint at, uint i)
+{
+    return (velk_light_cell_words.data[at + 8u + (i >> 2u)] >> ((i & 3u) * 8u)) & 255u;
+}
+
+// The pixel taken up by velk_cells_begin.
+ivec2 coord;
+vec3 world_pos;
+vec3 N;
+uint cells_object;
+vec3 cells_surface;
+uint cells_side;
+int cells_level;
+// Its own cell if traced, or kNoCell.
+uint cells_own = 0xFFFFFFFFu;
+// The traced cells around it at its own level, kNoCell for the rest, and their weights in all.
+uint cells_around[kAround];
+float cells_total = 0.0;
+
+// A reader blends the cells around a point: three by three along the two object axes the
+// surface lies in, weighted by a rounded curve so that no grid shows and an edge comes out
+// about two cells wide, and the nearest two along the third axis. This is where those are
+// at one level, and the weights' parts.
+struct VelkCellBlend {
+    int level;
+    ivec3 nearest;
+    int along_base;
+    vec3 curve_u;
+    vec3 curve_v;
+    float along_f;
+};
+
+VelkCellBlend velk_cell_blend(int level)
+{
+    uint axis = cells_side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    vec3 g = cells_surface / velk_light_cell_size(level) - 0.5;
+    VelkCellBlend b;
+    b.level = level;
+    b.nearest = ivec3(floor(g + 0.5));
+    vec3 t = g - vec3(b.nearest);
+    b.curve_u = vec3(0.5 * (0.5 - t[ua]) * (0.5 - t[ua]), 0.75 - t[ua] * t[ua], 0.5 * (0.5 + t[ua]) * (0.5 + t[ua]));
+    b.curve_v = vec3(0.5 * (0.5 - t[va]) * (0.5 - t[va]), 0.75 - t[va] * t[va], 0.5 * (0.5 + t[va]) * (0.5 + t[va]));
+    b.along_base = int(floor(g[axis]));
+    b.along_f = g[axis] - float(b.along_base);
+    return b;
+}
+
+// The `k`th of the cells a blend covers, if traced, and its weight.
+uint velk_cell_blend_at(VelkCellBlend b, int k, out float weight)
+{
+    uint axis = cells_side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    int iu = k % 3;
+    int iv = (k / 3) % 3;
+    int ia = k / 9;
+    weight = b.curve_u[iu] * b.curve_v[iv] * (ia == 0 ? 1.0 - b.along_f : b.along_f);
+    VelkLightCell c;
+    c.object = cells_object;
+    c.level = b.level;
+    c.side = cells_side;
+    c.at = ivec3(0);
+    c.at[ua] = b.nearest[ua] + iu - 1;
+    c.at[va] = b.nearest[va] + iv - 1;
+    c.at[axis] = b.along_base + ia;
+    return velk_cell_lookup(c);
+}
+
+VelkCellBlend cells_blend;
+
+// Takes up the pixel at `pixel`, whose surface is at `rel_pos` from the camera with the
+// G-buffer's normal and error `normal_error`. False if there is no surface there.
+bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
+{
+    coord = pixel;
+    world_pos = rel_pos;
+    cells_own = kNoCell;
+    cells_total = 0.0;
+    cells_word = velk_light_cell_words.data[CELLS_HEADER];
+    cells_slots = velk_light_cell_words.data[CELLS_HEADER + 1u];
+    cells_pixels = velk_light_cell_words.data[CELLS_HEADER + 2u];
+    cells_ids = velk_light_cell_words.data[CELLS_HEADER + 4u];
+    cells_surface_id = velk_light_cell_words.data[CELLS_HEADER + 5u];
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], pixel, 0).xy;
+    if (ids.x == 0u || dot(normal_error.xyz, normal_error.xyz) < 1e-6) return false;
+    N = normalize(normal_error.xyz);
+    VelkDrawData d = velk_draw_data.data[ids.x - 1u];
+    uint position = ids.y >> d.triangle_bits;
+    uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+    cells_object = d.instances_base + slot;
+    vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], pixel, 0);
+    cells_surface = surface.xyz;
+    cells_side = uint(surface.w + 0.5);
+
+    mat4 vp = VELK_GLOBALS.view_projection;
+    float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
+    cells_level = velk_light_cell_level(length(rel_pos), pixel_width, float(CELLS_PIXELS));
+    cells_own = velk_cell_lookup(velk_light_cell(cells_object, cells_surface, cells_side, cells_level));
+
+    cells_blend = velk_cell_blend(cells_level);
+    for (int k = 0; k < kAround; ++k) {
+        float weight;
+        uint at = velk_cell_blend_at(cells_blend, k, weight);
+        cells_around[k] = at;
+        if (at != kNoCell) cells_total += weight;
+    }
+    return true;
+}
+
+// How much of light `i` gets through from the cells of `level` around the pixel, looked up
+// as needed. Negative if none of them is traced.
+float velk_cells_level_through(uint i, int level)
+{
+    VelkCellBlend b = velk_cell_blend(level);
+    float sum = 0.0;
+    float total = 0.0;
+    for (int k = 0; k < kAround; ++k) {
+        float weight;
+        uint at = velk_cell_blend_at(b, k, weight);
+        if (at == kNoCell) continue;
+        sum += weight * float(velk_cell_light(at, i) & 15u) / 15.0;
+        total += weight;
+    }
+    return total > 0.0 ? sum / total : -1.0;
+}
+
+// How much of light `i` gets through at the pixel taken up by velk_cells_begin, 0 to 1. A
+// light past those a cell holds, or with no traced cell around yet, counts as unshadowed.
+float velk_cells_light_through(uint i)
+{
+    if (cells_total <= 0.0 || i >= kCellLights) return 1.0;
+    // From the cells of the pixel's own level: how much gets through, and how wide the soft
+    // edge is, as levels above this one, going by the cells that have any of it.
+    float own_through = 0.0;
+    float edge_sum = 0.0;
+    float edge_weight = 0.0;
+    for (int k = 0; k < kAround; ++k) {
+        uint at = cells_around[k];
+        if (at == kNoCell) continue;
+        int iu = k % 3;
+        int iv = (k / 3) % 3;
+        float weight = cells_blend.curve_u[iu] * cells_blend.curve_v[iv]
+                     * (k < 9 ? 1.0 - cells_blend.along_f : cells_blend.along_f);
+        uint held = velk_cell_light(at, i);
+        own_through += weight * float(held & 15u) / 15.0;
+        if ((held & 15u) != 15u) {
+            edge_sum += weight * float(held >> 4u) * 0.5;
+            edge_weight += weight;
+        }
+    }
+    own_through /= cells_total;
+    float wanted = edge_weight > 0.0 ? min(edge_sum / edge_weight, float(kCellUp)) : 0.0;
+    if (wanted <= 0.0) return own_through;
+    // A wide soft edge is read from larger cells: the two levels either side of the one it
+    // wants, blended, so that the choice of level does not show as a line. A level whose
+    // cells are not traced yet gives way to the one below it.
+    int below = int(floor(wanted));
+    float lower = below == 0 ? own_through : velk_cells_level_through(i, cells_level + below);
+    if (lower < 0.0) lower = own_through;
+    float upper = lower;
+    if (wanted > float(below) && below + 1 <= kCellUp) {
+        upper = velk_cells_level_through(i, cells_level + below + 1);
+        if (upper < 0.0) upper = lower;
+    }
+    return mix(lower, upper, wanted - float(below));
+}
+)";
+
+/// Shows the light cells' light in place of the image. Follows deferred_compute_prelude_src
+/// and light_cells_read_src. Mode 4: direct diffuse light, each light's own falloff and
+/// angle at the pixel times what the cells say gets through. Mode 5: green where the
+/// pixel's own cell is traced, red where not.
+[[maybe_unused]] constexpr string_view light_cells_main_src = R"(
+#define CELLS_MODE pc.ray_pass
+
+void main()
+{
+    ivec2 at_pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (at_pixel.x >= int(pc.width) || at_pixel.y >= int(pc.height)) return;
+
+    vec3 rel_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], at_pixel, 0).xyz;
+    vec4 normal_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], at_pixel, 0);
+    if (!velk_cells_begin(at_pixel, rel_pos, normal_error)) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], at_pixel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    if (CELLS_MODE == 5u) {
+        vec3 state_color = vec3(1.0, 0.0, 0.0);
+        if (cells_own != kNoCell) {
+            state_color = (velk_light_cell_words.data[cells_own] & kCellReady) != 0u ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 1.0, 0.0);
+        }
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord,
+                   vec4(state_color * (0.35 + 0.65 * abs(dot(N, normalize(-world_pos)))), 1.0));
+        return;
+    }
+
+    vec4 albedo = texelFetch(velk_textures[nonuniformEXT(pc.albedo_tex_id)], coord, 0);
+    float metallic = clamp(texelFetch(velk_textures[nonuniformEXT(pc.material_tex_id)], coord, 0).r, 0.0, 1.0);
+    vec3 direct = vec3(0.0);
+    for (uint i = 0u; i < pc.light_count; ++i) {
+        Light light = velk_light_at(pc.lights_base + i);
+        if (light.flags.x == 3u) continue;
+        vec3 L;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            vec3 to_light = light.position.xyz - world_pos;
+            float dist = length(to_light);
+            L = to_light / max(dist, 1e-6);
+            float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                atten *= smoothstep(light.params.z, light.params.y, dot(-L, light.direction.xyz));
+            }
+        }
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0 || atten <= 0.0) continue;
+
+        float through = velk_cells_light_through(i);
+        direct += NdotL * light.color_intensity.rgb * light.color_intensity.a * atten * through;
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord,
+               vec4(albedo.rgb * (1.0 - metallic) * direct, 1.0));
 }
 )";
 

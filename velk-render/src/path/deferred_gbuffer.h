@@ -29,7 +29,11 @@ enum class GBufferAttachment : uint32_t
     Emissive       = 4, ///< RGBA16F    rgb = HDR emissive radiance, a = unused. Half float so
                         ///  KHR_materials_emissive_strength values above 1 survive for bloom;
                         ///  the lighting pass adds this to the lit output before tonemap.
-    Count          = 5
+    Surface        = 5, ///< RGBA32F    xyz = position on the object in its own space, in world units, taken
+                        ///  before the material moves vertices, so it stays put on a surface that sways.
+                        ///  w = which of the object's six axis directions the surface faces. For finding
+                        ///  the light cells of a pixel; see VELK_LIGHT_CELL_GLSL.
+    Count          = 6
 };
 
 /** @brief G-buffer attachment formats in declaration order. */
@@ -39,6 +43,7 @@ inline constexpr PixelFormat kGBufferFormats[static_cast<uint32_t>(GBufferAttach
     PixelFormat::RGBA32F,  // WorldPos (precision-critical; see comment above)
     PixelFormat::RGBA8,    // MaterialParams
     PixelFormat::RGBA16F,  // Emissive (HDR; see comment above)
+    PixelFormat::RGBA32F,  // Surface (a position, like WorldPos)
 };
 
 /** @brief The visibility buffer's attachments: IDs, then depth. See VELK_VISIBILITY_OUT. */

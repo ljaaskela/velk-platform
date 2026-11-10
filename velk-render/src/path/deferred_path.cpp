@@ -152,7 +152,7 @@ VELK_GPU_STRUCT DenoisePushC {
 // in deferred_spatial_composite_compute_src).
 VELK_GPU_STRUCT SpatialPushC {
     uint32_t globals_base;
-    uint32_t _pad_globals;
+    uint32_t own_pixel;
     uint32_t albedo_id;
     uint32_t material_id;
     uint32_t normal_id;
@@ -201,6 +201,28 @@ uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
 uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4); }
 
+// Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
+// that an app can switch it while running. See light_cells_debug_compute_src.
+uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 5); }
+
+// Whether lighting takes its shadows from the light cells, from VELK_LIGHT_CELLS. Off unless
+// set to other than 0.
+bool light_cells_enabled()
+{
+    const char* value = std::getenv("VELK_LIGHT_CELLS");
+    return value && value[0] != '0';
+}
+
+// Whether anything reads the light cells this frame.
+bool light_cells_in_use() { return light_cells_enabled() || light_cells_debug_mode() >= 4; }
+
+// How many pixels across a light cell is on screen, from VELK_LIGHT_CELL_PIXELS. 4 unless set.
+float light_cell_pixels()
+{
+    const uint32_t pixels = env_uint("VELK_LIGHT_CELL_PIXELS", 1, 64);
+    return pixels != 0u ? static_cast<float>(pixels) : 4.f;
+}
+
 // Diagnostic: shows the GI probe field instead of the image, read each frame so that an app
 // can switch it while running. See gi_debug_compute_src.
 uint32_t gi_debug_mode() { return env_uint("VELK_GI_DEBUG", 1, 7); }
@@ -230,8 +252,11 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     bool with_area_lights = false,
                                                     bool with_medium = false,
                                                     string_view ray_motion = {},
-                                                    float ray_motion_reach = 0.f)
+                                                    float ray_motion_reach = 0.f,
+                                                    uint32_t cells = 0)
 {
+    // `cells`: 1 for a shader that reads the light cells, 2 for the one that notes which are
+    // needed, 3 for the one that traces them, whose main comes with it.
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
     const auto& intersect_ids = ctx.snippets->frame_intersects();
@@ -256,6 +281,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // cache entry.
     key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
+    key = (key ^ (0x43656c6cULL + cells)) * kFnvPrime;
     for (char c : ray_motion) {
         key = (key ^ static_cast<uint8_t>(c)) * kFnvPrime;
     }
@@ -277,6 +303,14 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // occupancy is paid by the whole pass: including it unconditionally cost
     // bistro (which has no area lights) roughly 3x on deferred.lighting.
     src += with_area_lights ? deferred_area_light_src : deferred_area_light_stub_src;
+    if (cells == 1) {
+        src += light_cells_read_src;
+    } else if (cells == 2) {
+        src += light_cells_src;
+        src += light_cells_touch_src;
+    } else if (cells == 3) {
+        src += light_cells_src;
+    }
     src += main_src;
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
@@ -347,10 +381,27 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
                                                 string_view ray_motion, float ray_motion_reach)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights, with_medium, ray_motion, ray_motion_reach);
+                                             with_area_lights, with_medium, ray_motion, ray_motion_reach,
+                                             light_cells_enabled() ? 1u : 0u);
 }
 
 namespace {
+
+// The table of light cells: its slots, a power of two, and the words of each. See
+// light_cells_main_src.
+constexpr uint32_t kCellSlots = 1u << 18;
+constexpr uint32_t kCellWords = 24;
+// The changes the light cells are given: how many at most, the words of each after 4 words
+// of header, and how many frames one stays listed.
+constexpr uint32_t kCellChanges = 128;
+constexpr uint32_t kCellChangeWords = 8;
+constexpr uint32_t kCellChangeFrames = 240;
+// The words that say where all of that is. See CELLS_HEADER in light_cells_src.
+constexpr uint32_t kCellHeaderWords = 8;
+// The cells to trace in a frame at most, and the words of each after 4 words of header.
+// See CELLS_WORK in light_cells_src.
+constexpr uint32_t kCellWorkMax = 32768;
+constexpr uint32_t kCellWorkWords = 3;
 
 // Rays the probe field traces per frame, whatever the scene.
 constexpr uint32_t kProbeRaysPerFrame = 283000;
@@ -547,6 +598,24 @@ void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
     if (!arena) return;
     if (test_diagnostics_enabled() && !vs.test_words.valid()) {
         vs.test_words = arena->alloc(uint64_t(kTestWords) * kTestSlots * sizeof(uint32_t));
+    }
+    if (light_cells_in_use() && !vs.light_cells.valid()) {
+        vs.light_cell_header = arena->alloc(uint64_t(kCellHeaderWords) * sizeof(uint32_t));
+        const uint64_t bytes = uint64_t(kCellSlots) * kCellWords * sizeof(uint32_t);
+        vs.light_cells = arena->alloc(bytes);
+        if (vs.light_cells.valid()) {
+            // Every slot starts empty.
+            vector<uint32_t> empty;
+            empty.resize(size_t(kCellSlots) * kCellWords);
+            arena->write_at(vs.light_cells.offset(), empty.data(), bytes);
+        }
+        vs.light_cell_change_words = arena->alloc(uint64_t(4u + kCellChanges * kCellChangeWords) * sizeof(uint32_t));
+        vs.light_cell_work = arena->alloc(uint64_t(4u + kCellWorkMax * kCellWorkWords) * sizeof(uint32_t));
+        if (vs.light_cell_work.valid()) {
+            // The list starts empty. The trace pass empties it again each frame.
+            const uint32_t none[4] = {};
+            arena->write_at(vs.light_cell_work.offset(), none, sizeof(none));
+        }
     }
     if (vs.gi_probe_rays.valid()) return;
     vs.gi_probe_rays = arena->alloc(uint64_t(kProbeRayWords + kProbeCount * 4u + kProbeHitWords) * sizeof(uint32_t));
@@ -922,6 +991,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_gi_pixels_pass(vs, render_view, ctx, graph);
     emit_gi_reference_pass(vs, render_view, ctx, graph);
     emit_gi_truth_pass(vs, render_view, ctx, graph);
+    if (light_cells_in_use() && prepare_light_cells(vs, render_view, ctx)) {
+        emit_light_cells_update_pass(vs, render_view, ctx, graph);
+    }
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
@@ -945,9 +1017,15 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (gi_mode != 0) {
         emit_gi_debug_pass(vs, render_view, color_target, ctx, gi_mode, graph);
     }
+    const uint32_t cells_mode = light_cells_debug_mode();
+    if (cells_mode >= 4) {
+        emit_light_cells_pass(vs, render_view, color_target, ctx, cells_mode, graph);
+    } else if (cells_mode != 0) {
+        emit_light_cells_debug_pass(vs, render_view, color_target, ctx, cells_mode, graph);
+    }
     // Blended geometry draws forward, over the lit composite, against the
     // retained gbuffer depth.
-    if (visibility_mode == 0 && gi_mode == 0) {
+    if (visibility_mode == 0 && gi_mode == 0 && cells_mode == 0) {
         emit_transparent_pass(entry, vs, render_view, color_target, ctx, graph);
     }
 }
@@ -1502,7 +1580,8 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         uint32_t extras[4];
         uint32_t env[4];
     };
-    const PushC pc{0u, render_view.view_globals_base, 0u, 0u, {0.f, 0.f},
+    // No lights here, so their field carries the surface attachment. See RESOLVE_SURFACE.
+    const PushC pc{0u, render_view.view_globals_base, 0u, handle(GBufferAttachment::Surface), {0.f, 0.f},
                    {vs.visibility->attachment(0), vs.visibility_size.x, vs.visibility_size.y, handle(GBufferAttachment::Albedo)},
                    {handle(GBufferAttachment::Normal), handle(GBufferAttachment::WorldPos),
                     handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};
@@ -1769,6 +1848,334 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
     });
 }
 
+void DeferredPath::emit_light_cells_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                               FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
+{
+    if (!vs.visibility || !vs.gbuffer || !vs.deferred_output) return;
+
+    constexpr uint64_t kKey = 0x4c43'454c'4c44'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(light_cells_debug_compute_src, kKey);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.light_cells_debug_pass, dirty, "light_cells.debug", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        VELK_GPU_STRUCT PushC
+        {
+            uint32_t ids_id, surface_id, pos_id, normal_id, output_id, width, height, mode, globals_base;
+            float pixels;
+        };
+        const auto attachment = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
+        const PushC pc{vs.visibility->attachment(0),
+                       attachment(GBufferAttachment::Surface),
+                       attachment(GBufferAttachment::WorldPos),
+                       attachment(GBufferAttachment::Normal),
+                       static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
+                       vs.gbuffer_size.x,
+                       vs.gbuffer_size.y,
+                       mode,
+                       render_view.view_globals_base,
+                       light_cell_pixels()};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.gbuffer_size.x + 7u) / 8u;
+        dc.groups_y = (vs.gbuffer_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light cells debug");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
+}
+
+bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_view, FrameContext& ctx)
+{
+    if (!vs.visibility || !vs.gbuffer || !ctx.resources) return false;
+
+    // Allocated in ensure_probe_rays, before anything is recorded.
+    if (!vs.light_cells.valid() || !vs.light_cell_change_words.valid() || !vs.light_cell_header.valid()
+        || !vs.light_cell_work.valid()) {
+        return false;
+    }
+
+    // What changed this frame joins the list the cells check their light against: what the
+    // scene's rays can hit, and lights that moved. A light's colour and strength are not
+    // part of what a cell keeps, so those changing needs nothing traced.
+    {
+        const auto now = static_cast<uint32_t>(ctx.present_counter);
+        auto& changes = vs.light_cell_changes;
+        const auto forget_all = [&] {
+            changes.clear();
+            vs.light_cell_changes_from = now;
+        };
+        if (render_view.bvh.changed_all) {
+            forget_all();
+        } else {
+            for (const auto& box : render_view.bvh.changed) {
+                changes.push_back({box, now});
+            }
+        }
+        const auto& lights = render_view.lights;
+        const auto& before = vs.light_cell_lights;
+        if (lights.size() != before.size()) {
+            forget_all();
+        } else {
+            for (size_t i = 0; i < lights.size(); ++i) {
+                const GpuLight& a = before[i];
+                const GpuLight& b = lights[i];
+                if (a.flags[0] == b.flags[0] && std::memcmp(a.position, b.position, sizeof(a.position)) == 0
+                    && std::memcmp(a.direction, b.direction, sizeof(a.direction)) == 0
+                    && std::memcmp(a.params, b.params, sizeof(a.params)) == 0) {
+                    continue;
+                }
+                // A light without a place reaches everywhere.
+                if (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
+                    || b.flags[0] == static_cast<uint32_t>(LightType::Directional)) {
+                    forget_all();
+                    break;
+                }
+                // Every way to a light ends at it, so a box at its place, before and after,
+                // marks them all.
+                const GpuLight* both[2] = {&a, &b};
+                for (const GpuLight* light : both) {
+                    const float half = std::max(light->params[3], 0.05f);
+                    WorldBox box;
+                    for (int k = 0; k < 3; ++k) {
+                        box.min[k] = light->position[k] - half;
+                        box.max[k] = light->position[k] + half;
+                    }
+                    changes.push_back({box, now});
+                }
+            }
+        }
+        vs.light_cell_lights.resize(lights.size());
+        if (!lights.empty()) {
+            std::memcpy(vs.light_cell_lights.data(), lights.data(), lights.size() * sizeof(GpuLight));
+        }
+
+        // Too old, or too many: those dropped are no longer listed, and a cell last checked
+        // before one of them cannot tell whether it mattered.
+        size_t drop = 0;
+        while (drop < changes.size()
+               && (now - changes[drop].frame > kCellChangeFrames || changes.size() - drop > kCellChanges)) {
+            vs.light_cell_changes_from = std::max(vs.light_cell_changes_from, changes[drop].frame);
+            ++drop;
+        }
+        if (drop > 0) {
+            vector<ViewState::LightCellChange> kept;
+            for (size_t i = drop; i < changes.size(); ++i) {
+                kept.push_back(changes[i]);
+            }
+            changes = std::move(kept);
+        }
+
+        vector<uint32_t> words;
+        words.resize(4u + kCellChanges * kCellChangeWords);
+        words[0] = static_cast<uint32_t>(changes.size());
+        words[1] = vs.light_cell_changes_from;
+        for (size_t i = 0; i < changes.size(); ++i) {
+            uint32_t* w = words.data() + 4u + i * kCellChangeWords;
+            std::memcpy(w, changes[i].box.min, sizeof(float) * 3);
+            w[3] = changes[i].frame;
+            std::memcpy(w + 4, changes[i].box.max, sizeof(float) * 3);
+        }
+        auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        if (!arena) return false;
+        arena->update_at(vs.light_cell_change_words.offset(), words.data(), words.size() * sizeof(uint32_t));
+
+        // Where everything is, for the shaders. See CELLS_HEADER in light_cells_src.
+        const uint32_t header[kCellHeaderWords] = {
+            static_cast<uint32_t>(vs.light_cells.offset() / sizeof(uint32_t)),
+            kCellSlots,
+            static_cast<uint32_t>(light_cell_pixels()),
+            static_cast<uint32_t>(vs.light_cell_change_words.offset() / sizeof(uint32_t)),
+            vs.visibility->attachment(0),
+            vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Surface)),
+            static_cast<uint32_t>(vs.light_cell_work.offset() / sizeof(uint32_t)),
+            0u,
+        };
+        arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
+    }
+    return true;
+}
+
+void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
+                                                IRenderGraph& graph)
+{
+    if (!vs.gbuffer || !vs.light_cell_header.valid()) return;
+
+    const bool has_medium = render_view.bvh.has_medium != 0u;
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false, has_medium,
+                                                      render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 2u);
+    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_src, 0x4c43'5452'4143ULL, false, has_medium,
+                                                            render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 3u);
+    if (!pipeline || !trace_pipeline) return;
+
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.normal_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.width = vs.gbuffer_size.x;
+    pc.height = vs.gbuffer_size.y;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    pc.lights_base = render_view.lights_base;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.light_cells_update_pass, dirty, "light_cells.update", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        // One pixel in each 2x2 block.
+        dc.groups_x = ((vs.gbuffer_size.x + 1u) / 2u + 7u) / 8u;
+        dc.groups_y = ((vs.gbuffer_size.y + 1u) / 2u + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        // The cells listed, one a thread, in rows of `width` threads. Then the list is emptied.
+        DeferredComputePushC trace_pc = pc;
+        DispatchCall trace_dc{};
+        trace_dc.pipeline = trace_pipeline.get();
+        trace_dc.groups_x = kCellWorkMax / 64u;
+        trace_dc.groups_y = 1;
+        trace_dc.groups_z = 1;
+        trace_pc.width = trace_dc.groups_x * 8u;
+        trace_dc.root_constants_size = sizeof(trace_pc);
+        std::memcpy(trace_dc.root_constants, &trace_pc, sizeof(trace_pc));
+        DispatchCall empty_dc = trace_dc;
+        empty_dc.groups_x = 1;
+        trace_pc.ray_pass = 2;
+        std::memcpy(empty_dc.root_constants, &trace_pc, sizeof(trace_pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light cells update");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(trace_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(empty_dc);
+        // What reads the cells comes after.
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.held.push_back(pipeline);
+        rec.held.push_back(trace_pipeline);
+    });
+}
+
+void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                         FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
+{
+    if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
+
+    const bool has_medium = render_view.bvh.has_medium != 0u;
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_main_src, 0x4c43'454c'4c53ULL, false, has_medium,
+                                                      render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 1u);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    // The deferred compute push constants. Where the cells are goes in a field the deferred
+    // shaders do not read, and the mode in another. See CELLS_HEADER and CELLS_MODE.
+    const auto attachment = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.output_image_id = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
+    pc.albedo_tex_id = attachment(GBufferAttachment::Albedo);
+    pc.normal_tex_id = attachment(GBufferAttachment::Normal);
+    pc.worldpos_tex_id = attachment(GBufferAttachment::WorldPos);
+    pc.material_tex_id = attachment(GBufferAttachment::MaterialParams);
+    pc.width = vs.gbuffer_size.x;
+    pc.height = vs.gbuffer_size.y;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    pc.lights_base = render_view.lights_base;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
+    pc.ray_pass = mode;
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.light_cells_pass, dirty, "light_cells", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.gbuffer_size.x + 7u) / 8u;
+        dc.groups_y = (vs.gbuffer_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light cells");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
+}
+
 void DeferredPath::emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                       FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
 {
@@ -1895,7 +2302,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
     vs.output_size = want;
 
-    const bool share_direct = direct_share_enabled() && vs.gi_probes && vs.gi_field_ready;
+    const bool share_direct = direct_share_enabled() && vs.gi_probes && vs.gi_field_ready && !light_cells_enabled();
     if (share_direct && (!vs.direct_samples || vs.direct_samples_size != want)) {
         TextureDesc td{};
         td.width = (w + 1) / 2;
@@ -1968,6 +2375,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.env_texture_id = render_view.env.texture_id;
     pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
+    // With light cells the shader reads no such image, and the field says where the cells
+    // are. See CELLS_HEADER in light_cells_src.
+    const bool cells = light_cells_enabled() && vs.light_cell_header.valid();
+    if (cells) {
+        pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    }
     // Zero means "no table", which the shader reads as diffuse-only area
     // lights rather than as a black highlight.
     const bool ltc_ready = ensure_ltc_tables(ctx, graph);
@@ -2015,7 +2428,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->push_label("DeferredPath: lighting");
-                cmd->record_dispatch(ray_dc);
+                // Light cells hold the shadows, so no pixel traces any.
+                if (!cells) cmd->record_dispatch(ray_dc);
                 // Every pixel reads what the traced pixels wrote.
                 if (pc.direct_samples_id != 0u) cmd->record_global_barrier();
                 cmd->record_dispatch(dc);
@@ -2352,6 +2766,7 @@ void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState&
     pc.unshadowed_id =
         static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
     pc.probe_grid = ss_probe_grid();
+    pc.own_pixel = light_cells_enabled() && vs.light_cell_header.valid() ? 1u : 0u;
 
     // The accumulated-history id alternates each frame (ping-pong) -> re-record
     // each frame (one dispatch + blit, negligible CPU).

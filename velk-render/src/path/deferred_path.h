@@ -149,6 +149,28 @@ public:
         bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr gi_debug_pass;
+        IRenderPass::Ptr light_cells_debug_pass;
+        IRenderPass::Ptr light_cells_pass;
+        IRenderPass::Ptr light_cells_update_pass;
+        /// The table of light cells, in the culling arena. See light_cells_main_src.
+        ArenaRegion light_cells;
+        /// What changed lately, for the light cells to check their light against: boxes with
+        /// the frame each changed in, oldest first, and their copy in the culling arena.
+        struct LightCellChange
+        {
+            WorldBox box;
+            uint32_t frame;
+        };
+        vector<LightCellChange> light_cell_changes;
+        ArenaRegion light_cell_change_words;
+        /// The words that say where the table and the list are. See CELLS_HEADER.
+        ArenaRegion light_cell_header;
+        /// The cells to trace this frame. See CELLS_WORK.
+        ArenaRegion light_cell_work;
+        /// Changes before this frame are no longer listed.
+        uint32_t light_cell_changes_from = 0;
+        /// Last frame's lights, to tell which moved.
+        vector<GpuLight> light_cell_lights;
         IRenderPass::Ptr visibility_resolve_pass;
         /// The depth of what is drawn at decreasing sizes, in the culling arena.
         ArenaRegion depth_pyramid;
@@ -336,6 +358,19 @@ private:
     /// Replaces the final image with a view of the GI probe field.
     void emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                             FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
+    /// Replaces the final image with the light cells under each pixel.
+    void emit_light_cells_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
+    /// Gives the light cells this frame's changes and tells their shaders where they are.
+    /// False if they are not set up.
+    bool prepare_light_cells(ViewState& vs, const RenderView& render_view, FrameContext& ctx);
+    /// Makes, checks and traces the light cells in view, before anything reads them.
+    void emit_light_cells_update_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
+                                      IRenderGraph& graph);
+    /// Replaces the final image with direct light read from the light cells (mode 4) or with
+    /// their states (mode 5).
+    void emit_light_cells_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                               FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
 
     /// Forward pass for BLEND-mode batches, drawn over the lit composite in
     /// @p color_target with the gbuffer depth bound read-only. No-op when the
