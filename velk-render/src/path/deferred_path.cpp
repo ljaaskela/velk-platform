@@ -213,6 +213,15 @@ bool light_cells_enabled()
     return value && value[0] != '0';
 }
 
+// How many rays a frame may trace to keep the light cells up, from VELK_LIGHT_CELL_RAYS.
+// 262,144 unless set. Cells past that wait for a later frame. A light on a cell is traced
+// by a group of 64 threads, a ray each, so this is in steps of 64.
+uint32_t light_cell_rays()
+{
+    const uint32_t rays = env_uint("VELK_LIGHT_CELL_RAYS", 1, 100000000);
+    return rays != 0u ? rays : 262144u;
+}
+
 // Whether anything reads the light cells this frame.
 bool light_cells_in_use() { return light_cells_enabled() || light_cells_debug_mode() >= 4; }
 
@@ -389,7 +398,7 @@ namespace {
 
 // The table of light cells: its slots, a power of two, and the words of each. See
 // light_cells_main_src.
-constexpr uint32_t kCellSlots = 1u << 18;
+constexpr uint32_t kCellSlots = 1u << 20;
 constexpr uint32_t kCellWords = 24;
 // The changes the light cells are given: how many at most, the words of each after 4 words
 // of header, and how many frames one stays listed.
@@ -398,10 +407,29 @@ constexpr uint32_t kCellChangeWords = 8;
 constexpr uint32_t kCellChangeFrames = 240;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
 constexpr uint32_t kCellHeaderWords = 8;
-// The cells to trace in a frame at most, and the words of each after 4 words of header.
-// See CELLS_WORK in light_cells_src.
+// What can be listed for tracing in a frame at most, one light for one cell an entry, the
+// words of each, and the header's words before them, counters for the log among them. See
+// CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
-constexpr uint32_t kCellWorkWords = 3;
+constexpr uint32_t kCellWorkWords = 4;
+constexpr uint32_t kCellWorkHeader = 16;
+constexpr uint32_t kCellStats = 12;
+// How often the counters are printed, in frames.
+constexpr uint64_t kCellStatFrames = 60;
+
+// How many pixels on screen something that moved must span to wake the cells it could
+// shadow, from VELK_LIGHT_CELL_MOVER_PIXELS. A cell's size on screen unless set.
+float light_cell_mover_pixels()
+{
+    const uint32_t pixels = env_uint("VELK_LIGHT_CELL_MOVER_PIXELS", 1, 4096);
+    return pixels != 0u ? static_cast<float>(pixels) : light_cell_pixels();
+}
+
+// How many entries a frame traces at most, from the rays it may trace.
+uint32_t light_cell_entries()
+{
+    return std::clamp(light_cell_rays() / 64u, 64u, kCellWorkMax);
+}
 
 // Rays the probe field traces per frame, whatever the scene.
 constexpr uint32_t kProbeRaysPerFrame = 283000;
@@ -610,10 +638,11 @@ void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
             arena->write_at(vs.light_cells.offset(), empty.data(), bytes);
         }
         vs.light_cell_change_words = arena->alloc(uint64_t(4u + kCellChanges * kCellChangeWords) * sizeof(uint32_t));
-        vs.light_cell_work = arena->alloc(uint64_t(4u + kCellWorkMax * kCellWorkWords) * sizeof(uint32_t));
+        vs.light_cell_work = arena->alloc(uint64_t(kCellWorkHeader + kCellWorkMax * kCellWorkWords) * sizeof(uint32_t));
         if (vs.light_cell_work.valid()) {
-            // The list starts empty. The trace pass empties it again each frame.
-            const uint32_t none[4] = {};
+            // The list starts empty, the counters at zero. The trace pass empties the list
+            // again each frame.
+            const uint32_t none[kCellWorkHeader] = {};
             arena->write_at(vs.light_cell_work.offset(), none, sizeof(none));
         }
     }
@@ -1926,6 +1955,27 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         return false;
     }
 
+    // The counters, per frame since last printed. They are read while frames are on the
+    // GPU, so a frame's worth may land on either side; over a second that does not matter.
+    if (auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        arena && ctx.present_counter >= vs.light_cell_stats_frame + kCellStatFrames) {
+        uint32_t now[kCellStats];
+        arena->read_at(vs.light_cell_work.offset() + 4u * sizeof(uint32_t), now, sizeof(now));
+        uint32_t d[kCellStats];
+        for (uint32_t i = 0; i < kCellStats; ++i) d[i] = now[i] - vs.light_cell_stats[i];
+        const float frames = static_cast<float>(std::max(d[7], 1u));
+        const auto per = [&](uint32_t i) { return static_cast<double>(static_cast<float>(d[i]) / frames); };
+        if (vs.light_cell_stats_frame != 0) {
+            VELK_LOG(I,
+                     "light cells per frame: entries asked %.0f listed %.0f traced %.0f, cells listed %.0f made %.0f "
+                     "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u",
+                     per(0), per(1), per(8), per(2), per(10), per(9), per(11), per(3), per(4), per(6), per(5),
+                     static_cast<unsigned>(vs.light_cell_changes.size()));
+        }
+        for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
+        vs.light_cell_stats_frame = ctx.present_counter;
+    }
+
     // What changed this frame joins the list the cells check their light against: what the
     // scene's rays can hit, and lights that moved. A light's colour and strength are not
     // part of what a cell keeps, so those changing needs nothing traced.
@@ -1939,46 +1989,78 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         if (render_view.bvh.changed_all) {
             forget_all();
         } else {
+            // Something that changed and is smaller on screen than light_cell_mover_pixels
+            // wakes no cell: what its shadow could change is no larger. How wide a pixel is,
+            // per unit of distance from the camera.
+            const mat4& vp = render_view.view_projection;
+            const float row = std::sqrt(vp(1, 0) * vp(1, 0) + vp(1, 1) * vp(1, 1) + vp(1, 2) * vp(1, 2));
+            const float pixel = row > 0.f && render_view.height > 0 ? 2.f / (row * static_cast<float>(render_view.height)) : 0.f;
+            const float least = light_cell_mover_pixels() * pixel;
+            const float cam[3] = {render_view.cam_pos.x, render_view.cam_pos.y, render_view.cam_pos.z};
             for (const auto& box : render_view.bvh.changed) {
-                changes.push_back({box, now});
-            }
-        }
-        const auto& lights = render_view.lights;
-        const auto& before = vs.light_cell_lights;
-        if (lights.size() != before.size()) {
-            forget_all();
-        } else {
-            for (size_t i = 0; i < lights.size(); ++i) {
-                const GpuLight& a = before[i];
-                const GpuLight& b = lights[i];
-                if (a.flags[0] == b.flags[0] && std::memcmp(a.position, b.position, sizeof(a.position)) == 0
-                    && std::memcmp(a.direction, b.direction, sizeof(a.direction)) == 0
-                    && std::memcmp(a.params, b.params, sizeof(a.params)) == 0) {
+                float extent = 0.f;
+                float distance = 0.f;
+                for (int k = 0; k < 3; ++k) {
+                    extent = std::max(extent, box.max[k] - box.min[k]);
+                    const float c = cam[k];
+                    const float out = std::max(std::max(box.min[k] - c, c - box.max[k]), 0.f);
+                    distance += out * out;
+                }
+                if (extent < least * std::sqrt(distance)) {
                     continue;
                 }
-                // A light without a place reaches everywhere.
-                if (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
-                    || b.flags[0] == static_cast<uint32_t>(LightType::Directional)) {
-                    forget_all();
-                    break;
-                }
-                // Every way to a light ends at it, so a box at its place, before and after,
-                // marks them all.
-                const GpuLight* both[2] = {&a, &b};
-                for (const GpuLight* light : both) {
-                    const float half = std::max(light->params[3], 0.05f);
-                    WorldBox box;
-                    for (int k = 0; k < 3; ++k) {
-                        box.min[k] = light->position[k] - half;
-                        box.max[k] = light->position[k] + half;
-                    }
-                    changes.push_back({box, now});
-                }
+                changes.push_back({box, now, 0xFFFFFFFFu});
             }
         }
-        vs.light_cell_lights.resize(lights.size());
-        if (!lights.empty()) {
-            std::memcpy(vs.light_cell_lights.data(), lights.data(), lights.size() * sizeof(GpuLight));
+        // Lights are compared with how each was when last listed, not with last frame, so
+        // that a light drifting a little each frame is listed once the drift adds up to
+        // something a shadow could show: a quarter of its size, or for one without a size
+        // a five-hundredth of its range.
+        const auto& lights = render_view.lights;
+        auto& listed = vs.light_cell_lights;
+        bool all_lights = lights.size() != listed.size();
+        for (size_t i = 0; !all_lights && i < lights.size(); ++i) {
+            const GpuLight& a = listed[i];
+            const GpuLight& b = lights[i];
+            const bool same_kind = a.flags[0] == b.flags[0] && std::memcmp(a.direction, b.direction, sizeof(a.direction)) == 0
+                && std::memcmp(a.params, b.params, sizeof(a.params)) == 0;
+            float moved = 0.f;
+            for (int k = 0; k < 3; ++k) {
+                moved += (a.position[k] - b.position[k]) * (a.position[k] - b.position[k]);
+            }
+            const float least = std::max(0.25f * b.params[3], 0.002f * b.params[0]);
+            if (same_kind && moved <= least * least) {
+                continue;
+            }
+            // A light without a place reaches everywhere.
+            if (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
+                || b.flags[0] == static_cast<uint32_t>(LightType::Directional)) {
+                all_lights = true;
+                break;
+            }
+            // One entry a light: a cell asks only whether the light changed since the cell
+            // was last good, and the light's reach is checked against where it is now.
+            vector<ViewState::LightCellChange> others;
+            for (const auto& change : changes) {
+                if (change.light != static_cast<uint32_t>(i)) {
+                    others.push_back(change);
+                }
+            }
+            changes = std::move(others);
+            WorldBox box;
+            for (int k = 0; k < 3; ++k) {
+                box.min[k] = b.position[k];
+                box.max[k] = b.position[k];
+            }
+            changes.push_back({box, now, static_cast<uint32_t>(i)});
+            listed[i] = b;
+        }
+        if (all_lights) {
+            forget_all();
+            listed.resize(lights.size());
+            if (!lights.empty()) {
+                std::memcpy(listed.data(), lights.data(), lights.size() * sizeof(GpuLight));
+            }
         }
 
         // Too old, or too many: those dropped are no longer listed, and a cell last checked
@@ -2006,6 +2088,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             std::memcpy(w, changes[i].box.min, sizeof(float) * 3);
             w[3] = changes[i].frame;
             std::memcpy(w + 4, changes[i].box.max, sizeof(float) * 3);
+            w[7] = changes[i].light;
         }
         auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
         if (!arena) return false;
@@ -2020,7 +2103,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             vs.visibility->attachment(0),
             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Surface)),
             static_cast<uint32_t>(vs.light_cell_work.offset() / sizeof(uint32_t)),
-            0u,
+            light_cell_entries(),
         };
         arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
     }
@@ -2066,15 +2149,20 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        // Twice: first only cells not traced yet, which show as gaps, then the rest with
+        // what is left of the list. See velk_cell_keep.
+        DispatchCall rest_dc = dc;
+        DeferredComputePushC rest_pc = pc;
+        rest_pc.ray_pass = 1;
+        std::memcpy(rest_dc.root_constants, &rest_pc, sizeof(rest_pc));
 
-        // The cells listed, one a thread, in rows of `width` threads. Then the list is emptied.
+        // What is listed, a group of threads an entry. Then the list is emptied.
         DeferredComputePushC trace_pc = pc;
         DispatchCall trace_dc{};
         trace_dc.pipeline = trace_pipeline.get();
-        trace_dc.groups_x = kCellWorkMax / 64u;
+        trace_dc.groups_x = light_cell_entries();
         trace_dc.groups_y = 1;
         trace_dc.groups_z = 1;
-        trace_pc.width = trace_dc.groups_x * 8u;
         trace_dc.root_constants_size = sizeof(trace_pc);
         std::memcpy(trace_dc.root_constants, &trace_pc, sizeof(trace_pc));
         DispatchCall empty_dc = trace_dc;
@@ -2086,6 +2174,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->push_label("DeferredPath: light cells update");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(rest_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(trace_dc);
         cmd->record_global_barrier();

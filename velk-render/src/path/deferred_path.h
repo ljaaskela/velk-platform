@@ -160,6 +160,7 @@ public:
         {
             WorldBox box;
             uint32_t frame;
+            uint32_t light;  ///< Which light moved, or 0xFFFFFFFF for a box something changed in.
         };
         vector<LightCellChange> light_cell_changes;
         ArenaRegion light_cell_change_words;
@@ -169,8 +170,11 @@ public:
         ArenaRegion light_cell_work;
         /// Changes before this frame are no longer listed.
         uint32_t light_cell_changes_from = 0;
-        /// Last frame's lights, to tell which moved.
+        /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
+        /// The cells' counters when last printed, and the frame. See kStatAsked.
+        uint32_t light_cell_stats[12] = {};
+        uint64_t light_cell_stats_frame = 0;
         IRenderPass::Ptr visibility_resolve_pass;
         /// The depth of what is drawn at decreasing sizes, in the culling arena.
         ArenaRegion depth_pyramid;
