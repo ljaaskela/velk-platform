@@ -1,6 +1,7 @@
 #ifndef VELK_RENDER_GPU_DATA_H
 #define VELK_RENDER_GPU_DATA_H
 
+#include <velk/array_view.h>
 #include <velk/string_view.h>
 
 #include <cstdint>
@@ -24,10 +25,22 @@ namespace velk {
 /// stamped (flat) into FrameGlobals / RtRoot. All indices are absolute in the
 /// shared node and record arenas. Not uploaded directly; the GPU structs mirror
 /// these fields individually.
+/// A box in world space.
+struct WorldBox
+{
+    float min[3];
+    float max[3];
+};
+
 struct BvhBinding
 {
     uint32_t root         = 0;
     uint32_t node_count   = 0;
+    /// Where something rays can hit changed this frame: the bounds of each thing that moved,
+    /// before and after, appeared or went away. Valid for the frame. See IBvh::changed_bounds.
+    array_view<const WorldBox> changed;
+    /// Everything may have changed, and `changed` does not list it.
+    bool changed_all = false;
     /// Whether instances in it have a far form, so tracing shaders need the medium
     /// traversals. Paths watch this themselves, since it changes which pipeline they use.
     uint32_t has_medium = 0;

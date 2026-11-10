@@ -90,6 +90,11 @@ public:
     uint32_t get_node_count() const override { return node_count_; }
     bool has_medium() const override;
     string_view get_ray_motion(float& reach) const override;
+    array_view<const WorldBox> changed_bounds(bool& all) const override
+    {
+        all = changed_all_;
+        return {changed_.data(), changed_.size()};
+    }
 
     void invalidate() override { needs_full_build_ = true; }
 
@@ -297,6 +302,9 @@ private:
     vector<LbvhPush> gpu_builds_;     ///< Trees to build on the GPU this frame.
     IRenderPass::Ptr gpu_build_pass_;
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
+    vector<WorldBox> changed_;        ///< See changed_bounds. Cleared by each update.
+    bool changed_all_ = false;
+    void note_changed(const BvhItemBounds& bounds);
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;

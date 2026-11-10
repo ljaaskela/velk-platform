@@ -4,6 +4,7 @@
 #include <velk/api/math_types.h>
 #include <velk/interface/intf_interface.h>
 
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_buffer.h>
 
 #include <cstdint>
@@ -70,6 +71,17 @@ public:
 
     /** @brief How rays follow motion it does not hold, and how far that reaches, or empty. */
     virtual string_view get_ray_motion(float& reach) const = 0;
+
+    /**
+     * @brief Where what it holds changed in its last update: the world bounds of each thing
+     *        that moved, before and after, appeared or went away.
+     *
+     * For whatever keeps results of rays, to know which to trace again. Valid until the
+     * next update.
+     *
+     * @param all Set if everything may have changed, in which case the list does not say.
+     */
+    virtual array_view<const WorldBox> changed_bounds(bool& all) const = 0;
 
     /**
      * @brief Marks the BVH as stale so the next access rebuilds.

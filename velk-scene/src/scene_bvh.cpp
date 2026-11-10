@@ -1123,6 +1123,8 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
             const bool moved = std::memcmp(record.gpu.inv_row, emitted.gpu.inv_row, sizeof(record.gpu.inv_row)) != 0
                 || std::memcmp(&record.bounds, &emitted.bounds, sizeof(record.bounds)) != 0;
             if (moved) {
+                note_changed(record.bounds);
+                note_changed(emitted.bounds);
                 std::memcpy(record.gpu.inv_row, emitted.gpu.inv_row, sizeof(record.gpu.inv_row));
                 record.bounds = emitted.bounds;
                 record.quiet_frames = 0;
@@ -1166,6 +1168,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         record.shapes = std::move(emitted.shapes);
         record.tree = std::move(emitted.tree);
         record.bounds = emitted.bounds;
+        note_changed(record.bounds);
         record.partition = kUnplaced;
         record.quiet_frames = 0;
         slots.push_back(slot);
@@ -1174,9 +1177,28 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
     }
 }
 
+void SceneBvh::note_changed(const BvhItemBounds& bounds)
+{
+    // Past this many, saying that everything changed costs readers less than the list.
+    constexpr size_t kMaxChanged = 256;
+    if (changed_all_) return;
+    if (changed_.size() >= kMaxChanged) {
+        changed_all_ = true;
+        changed_.clear();
+        return;
+    }
+    WorldBox box;
+    for (int k = 0; k < 3; ++k) {
+        box.min[k] = bounds.min[k];
+        box.max[k] = bounds.max[k];
+    }
+    changed_.push_back(box);
+}
+
 void SceneBvh::free_record(uint32_t slot)
 {
     Record& record = records_[slot];
+    note_changed(record.bounds);
     if (record.partition == kDynamic) {
         dynamic_.dirty = true;
     } else if (record.partition != kUnplaced) {
@@ -2055,10 +2077,13 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
 {
     VELK_PERF_SCOPE("renderer.bvh_rebuild");
     const EmitContext emit{ctx, shape_cb, shape_user};
+    changed_.clear();
+    changed_all_ = false;
 
     {
         VELK_PERF_SCOPE("renderer.bvh_emit");
         if (needs_full_build_) {
+            changed_all_ = true;
             full_build(state.scene, emit);
         } else {
             for (const auto& removed : state.removed_list) {
