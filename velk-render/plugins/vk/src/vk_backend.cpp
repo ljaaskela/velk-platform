@@ -289,6 +289,11 @@ void VkBackend::shutdown()
         vkDestroyQueryPool(device_, timestamp_pool_, nullptr);
         timestamp_pool_ = VK_NULL_HANDLE;
     }
+    if (pass_marker_buffer_) {
+        vmaDestroyBuffer(allocator_, pass_marker_buffer_, pass_marker_allocation_);
+        pass_marker_buffer_ = VK_NULL_HANDLE;
+        pass_markers_ = nullptr;
+    }
     for (uint32_t i = 0; i < kFrameOverlap; ++i) {
         // Pool destruction frees all buffers in the pool — the deferred
         // queue would dangle. Clear it explicitly first.
@@ -560,7 +565,7 @@ bool VkBackend::create_device()
     const bool core_dynamic_rendering = instance_api_version_ >= VK_API_VERSION_1_3 &&
                                         props.apiVersion >= VK_API_VERSION_1_3;
 
-    const char* extensions[3] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr, nullptr};
+    const char* extensions[4] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr, nullptr, nullptr};
     uint32_t extension_count = 1;
     if (!core_dynamic_rendering) {
         if (!has_device_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
@@ -655,6 +660,11 @@ bool VkBackend::create_device()
         dynamic_rendering.pNext = &fault_features;
     }
     VELK_LOG(I, "VkBackend: device fault reporting %s", device_fault_supported_ ? "available" : "not available");
+    // Optional: lets a lost device tell which timed pass the GPU was in.
+    pass_markers_supported_ = has_device_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+    if (pass_markers_supported_) {
+        extensions[extension_count++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME;
+    }
 
     VkDeviceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -783,6 +793,27 @@ bool VkBackend::create_sync_objects()
         if (vkCreateQueryPool(device_, &qpci, nullptr, &timestamp_pool_) != VK_SUCCESS) {
             timestamp_pool_ = VK_NULL_HANDLE;
             timestamp_period_ns_ = 0.f;
+        }
+    }
+
+    // Two words the GPU writes as it starts and finishes each timed pass, readable after a
+    // lost device. See begin_gpu_timer.
+    if (pass_markers_supported_) {
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = 2 * sizeof(uint32_t);
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+        aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        VmaAllocationInfo info{};
+        if (vmaCreateBuffer(allocator_, &bci, &aci, &pass_marker_buffer_, &pass_marker_allocation_, &info) == VK_SUCCESS) {
+            pass_markers_ = static_cast<volatile uint32_t*>(info.pMappedData);
+            pass_markers_[0] = 0;
+            pass_markers_[1] = 0;
+        } else {
+            pass_markers_supported_ = false;
         }
     }
     return true;
@@ -2776,7 +2807,18 @@ void VkBackend::begin_gpu_timer(const char* label)
     vkCmdWriteTimestamp(frame_sync_[recording_slot_].command_buffer,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                         timestamp_pool_, base);
+    // Which pass of which frame slot the GPU has started: written once the work before it
+    // is done. Its frame's low bits come above, so that markers of frames tell apart.
+    if (pass_markers_supported_) {
+        vkCmdWriteBufferMarkerAMD(frame_sync_[recording_slot_].command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  pass_marker_buffer_, 0, pass_marker(slot.count));
+    }
     timer_region_open_ = true;
+}
+
+uint32_t VkBackend::pass_marker(uint32_t index) const
+{
+    return (static_cast<uint32_t>(last_frame_value_.load() + 1) << 16) | (recording_slot_ << 8) | index;
 }
 
 void VkBackend::end_gpu_timer()
@@ -2787,6 +2829,11 @@ void VkBackend::end_gpu_timer()
     vkCmdWriteTimestamp(frame_sync_[recording_slot_].command_buffer,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                         timestamp_pool_, base);
+    // And which it has finished: written once the pass's work is done.
+    if (pass_markers_supported_) {
+        vkCmdWriteBufferMarkerAMD(frame_sync_[recording_slot_].command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                  pass_marker_buffer_, sizeof(uint32_t), pass_marker(slot.count));
+    }
     ++slot.count;
     timer_region_open_ = false;
 }
@@ -3216,6 +3263,19 @@ void VkBackend::report_failure(const char* call, VkResult result)
              static_cast<unsigned long long>(last_frame_value_.load()), static_cast<unsigned long long>(completed));
     for (const auto& timing : last_timings_) {
         VELK_LOG(E, "VkBackend:   last timed pass %s: %.3f ms", timing.label, static_cast<double>(timing.ms));
+    }
+    if (pass_markers_) {
+        // The pass the GPU was in: the last one started, and whether it finished.
+        const uint32_t started = pass_markers_[0];
+        const uint32_t finished = pass_markers_[1];
+        const auto name = [this](uint32_t marker) {
+            const uint32_t slot = (marker >> 8) & 0xFFu;
+            const uint32_t index = marker & 0xFFu;
+            if (slot >= kFrameOverlap || index >= kMaxTimedPasses || !timer_slots_[slot].labels[index]) return "?";
+            return timer_slots_[slot].labels[index];
+        };
+        VELK_LOG(E, "VkBackend:   GPU last started pass %s (frame %u), last finished pass %s (frame %u)",
+                 started ? name(started) : "none", started >> 16, finished ? name(finished) : "none", finished >> 16);
     }
 
     if (!device_fault_supported_) {

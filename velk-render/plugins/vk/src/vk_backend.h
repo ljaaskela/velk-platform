@@ -388,6 +388,15 @@ private:
     // present_surface_id, present_acquire_sem_idx moved into FrameSync.
     bool frame_open_ = false;             ///< True between begin_frame/end_frame (debug flag only).
     bool device_fault_supported_ = false; ///< VK_EXT_device_fault is enabled.
+    bool pass_markers_supported_ = false; ///< VK_AMD_buffer_marker is enabled and its buffer made.
+    /// Words the GPU writes as it starts (0) and finishes (1) each timed pass, read on a lost
+    /// device. See pass_marker.
+    VkBuffer pass_marker_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation pass_marker_allocation_ = VK_NULL_HANDLE;
+    volatile uint32_t* pass_markers_ = nullptr;
+    /// The marker for timed pass `index` of the frame being recorded: the frame's low 16 bits,
+    /// the frame slot, the index.
+    uint32_t pass_marker(uint32_t index) const;
     bool primitive_id_supported_ = false; ///< The device's geometryShader feature is enabled.
     bool device_lost_ = false;            ///< A lost device has already been reported.
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
