@@ -1092,6 +1092,49 @@ uint velk_object_id(uint instance)
     return velk_instance_words.data[instance * 32u + 31u];
 }
 
+// Half of each side of a square area light facing `facing`, `half_size` across from its
+// middle: the same axes velk_area_irradiance uses.
+void velk_area_axes(vec3 facing, float half_size, out vec3 a, out vec3 b)
+{
+    vec3 ln = normalize(facing);
+    vec3 lt = abs(ln.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), ln)) : normalize(cross(vec3(1.0, 0.0, 0.0), ln));
+    a = lt * half_size;
+    b = cross(ln, lt) * half_size;
+}
+
+// The diffuse light reaching a surface at `pos` facing `N` from a square area light with
+// nothing in the way, as a factor on the light's colour times intensity: on the same scale as
+// a point light's N.L, as velk_area_irradiance's diffuse is used.
+float velk_area_diffuse(vec3 middle, vec3 facing, float half_size, vec3 pos, vec3 N)
+{
+    vec3 a;
+    vec3 b;
+    velk_area_axes(facing, half_size, a, b);
+    vec3 c = middle - pos;
+    vec3 p[4] = vec3[4](c - a - b, c + a - b, c + a + b, c - a + b);
+    // Only what is above the surface's horizon: clipped there, up to five corners.
+    vec3 q[5];
+    int m = 0;
+    for (int i = 0; i < 4; ++i) {
+        vec3 u = p[i];
+        vec3 v = p[(i + 1) & 3];
+        float du = dot(N, u);
+        float dv = dot(N, v);
+        if (du >= 0.0 && m < 5) q[m++] = u;
+        if ((du >= 0.0) != (dv >= 0.0) && m < 5) q[m++] = mix(u, v, du / (du - dv));
+    }
+    if (m < 3) return 0.0;
+    vec3 f = vec3(0.0);
+    for (int i = 0; i < m; ++i) {
+        vec3 u = normalize(q[i]);
+        vec3 v = normalize(q[i + 1 == m ? 0 : i + 1]);
+        vec3 e = cross(u, v);
+        float el = length(e);
+        if (el > 1e-8) f += e * (acos(clamp(dot(u, v), -1.0, 1.0)) / el);
+    }
+    return abs(dot(f, N)) * 0.5;
+}
+
 struct VelkLightCell {
     uint object;  // which placed object: its object id
     int level;    // cubes are 2^level world units across
@@ -1562,17 +1605,16 @@ vec3 velk_tonemap_aces(vec3 x)
 )";
 
 // Area lights in closed form, for deferred_lighting_main_src. Appended after the prelude,
-// whose Light / RtShape / BvhNode declarations it depends on.
+// whose Light declaration it depends on.
 [[maybe_unused]] constexpr string_view deferred_area_light_src = R"(
 // Analytic area-light shading. The clamped-cosine integral over the emitter's
 // spherical polygon, evaluated in closed form: no samples, no noise, nothing
 // for the denoiser to resolve. Validated against Monte Carlo in
 // design-notes/spike_analytic/analytic.cpp before being written here.
 
-// Vertex capacity of every polygon handled here. The widest case is a
-// sphere's 8-gon silhouette, which each clip can grow by one vertex per
-// plane: one horizon, one light plane, and one per light-polygon edge.
-const int kOccPolyMax = 16;
+// Vertex capacity of every polygon handled here: the light's four corners, which
+// clipping at the horizon can grow by one.
+const int kOccPolyMax = 8;
 
 // One edge's contribution to the vector form factor.
 vec3 velk_ff_edge(vec3 a, vec3 b)
@@ -1606,26 +1648,6 @@ int velk_clip_half(inout vec3 p[kOccPolyMax], int n, vec3 nrm)
     return m;
 }
 
-// Clips against a plane through an arbitrary point rather than the origin.
-int velk_clip_at(inout vec3 p[kOccPolyMax], int n, vec3 pt, vec3 nrm)
-{
-    vec3 o[kOccPolyMax];
-    int m = 0;
-    for (int i = 0; i < n; ++i) {
-        vec3 a = p[i];
-        vec3 b = p[i + 1 == n ? 0 : i + 1];
-        float da = dot(nrm, a - pt);
-        float db = dot(nrm, b - pt);
-        if (da >= 0.0 && m < kOccPolyMax) { o[m] = a; ++m; }
-        if ((da >= 0.0) != (db >= 0.0) && m < kOccPolyMax) {
-            o[m] = mix(a, b, da / (da - db));
-            ++m;
-        }
-    }
-    for (int i = 0; i < m; ++i) p[i] = o[i];
-    return m;
-}
-
 // Vector form factor of a spherical polygon given as directions.
 vec3 velk_form_factor(vec3 p[kOccPolyMax], int n)
 {
@@ -1634,43 +1656,6 @@ vec3 velk_form_factor(vec3 p[kOccPolyMax], int n)
         f += velk_ff_edge(normalize(p[i]), normalize(p[i + 1 == n ? 0 : i + 1]));
     }
     return f;
-}
-
-// Clips a spherical polygon against another convex one, by that polygon's
-// great-circle edge planes. Normals are oriented against the clip polygon's
-// own centroid so winding does not matter.
-int velk_clip_by_poly(inout vec3 p[kOccPolyMax], int n, vec3 c[kOccPolyMax], int cn)
-{
-    vec3 centre = vec3(0.0);
-    for (int i = 0; i < cn; ++i) centre += normalize(c[i]);
-    centre = normalize(centre);
-
-    for (int i = 0; i < cn && n >= 3; ++i) {
-        vec3 nrm = cross(normalize(c[i]), normalize(c[i + 1 == cn ? 0 : i + 1]));
-        if (length(nrm) < 1e-8) continue;
-        nrm = normalize(nrm);
-        if (dot(nrm, centre) < 0.0) nrm = -nrm;
-        n = velk_clip_half(p, n, nrm);
-    }
-    return n;
-}
-
-// One occluder polygon's blocked form factor, given its corners already in the
-// shading frame. Discards anything below the shading horizon or beyond the
-// light plane, keeps what overlaps the light, and returns the magnitude of
-// what is left. The magnitude, because the clipped region carries the
-// OCCLUDER's winding, which follows an arbitrary axis order rather than the
-// light's.
-float velk_occ_form_factor(vec3 op[kOccPolyMax], int n,
-                           vec3 lc, vec3 lnf, vec3 lp[kOccPolyMax], int ln_count)
-{
-    n = velk_clip_half(op, n, vec3(0.0, 0.0, 1.0));
-    if (n < 3) return 0.0;
-    n = velk_clip_at(op, n, lc, lnf);
-    if (n < 3) return 0.0;
-    n = velk_clip_by_poly(op, n, lp, ln_count);
-    if (n < 3) return 0.0;
-    return abs(velk_form_factor(op, n).z);
 }
 
 )"
@@ -1695,57 +1680,9 @@ mat3 velk_ltc_minv(float roughness, float ndotv)
                 vec3(-b, 0.0, a));
 }
 
-// One occluder polygon's contribution to BOTH terms, from a single clip of the
-// shared spatial rejection. `op` holds its corners in the shading frame.
-//
-// Diffuse and specular differ only by the transform applied before the
-// integral, so the traversal, the corner construction and the "is it even
-// between the point and the light" tests are done once. The spatial tests must
-// happen in the ORIGINAL space (they are about position, not lobe shape); the
-// transform is applied only to the surviving region.
-void velk_occ_accum(vec3 op[kOccPolyMax], int n,
-                    vec3 lc, vec3 lnf, vec3 lp[kOccPolyMax], int ln_count,
-                    mat3 minv, vec3 lps[kOccPolyMax], int ls_count,
-                    inout float f_occ, inout float s_occ)
-{
-    n = velk_clip_half(op, n, vec3(0.0, 0.0, 1.0));
-    if (n < 3) return;
-    n = velk_clip_at(op, n, lc, lnf);
-    if (n < 3) return;
-
-    vec3 od[kOccPolyMax];
-    for (int i = 0; i < n; ++i) od[i] = op[i];
-    int nd = velk_clip_by_poly(od, n, lp, ln_count);
-    if (nd >= 3) f_occ += abs(velk_form_factor(od, nd).z);
-
-    if (ls_count >= 3) {
-        vec3 os[kOccPolyMax];
-        for (int i = 0; i < n; ++i) os[i] = minv * op[i];
-        int ns = velk_clip_half(os, n, vec3(0.0, 0.0, 1.0));
-        if (ns >= 3) {
-            ns = velk_clip_by_poly(os, ns, lps, ls_count);
-            if (ns >= 3) s_occ += abs(velk_form_factor(os, ns).z);
-        }
-    }
-}
-
-// Diffuse irradiance (.x) and the LTC specular integral (.y) from a square area
-// light at `world_pos`, with scene geometry subtracted analytically from BOTH.
-// Rects, boxes and spheres block; triangle meshes do not, having no silhouette
-// cheap enough to clip yet.
-//
-// The specular shadow is analytic here rather than a stochastically estimated
-// shadowed/unshadowed ratio: the LTC transform maps the GGX lobe onto a clamped
-// cosine, so the identical polygon subtraction applies to transformed vertices.
-// That keeps specular noise-free too, and costs one extra clip per occluder
-// rather than a second traversal.
-//
-// C2a scope: each occluder's overlap with the light is subtracted
-// independently. That is exact for a single blocker and for blockers that do
-// not overlap ON THE LIGHT, and over-darkens where two do, since the shared
-// region is subtracted twice. Front-to-back convex subtraction (which keeps
-// the visible region as disjoint pieces and is what the Step A harness
-// validated) is C2b.
+// Diffuse irradiance (.x) and the LTC specular integral (.y) from a square area light at
+// `world_pos`, with nothing in the way. What blocks it comes from the light cells, as for any
+// light.
 vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float roughness)
 {
     // Shading frame with N as +Z and the view in the +XZ half-plane. The
@@ -1764,18 +1701,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
     vec3 lb = cross(ln, lt);
     float hs = max(light.params.w, 1e-4);
 
-    // Lift the shading point off its own surface, the analytic equivalent of a
-    // shadow-ray bias. Without it a surface is exactly coplanar with its own
-    // shading plane, the horizon clip keeps all four of its vertices (da >= 0),
-    // and the resulting degenerate polygon lying on the horizon subtracts a
-    // large, meaningless form factor. Which way each pixel falls then depends
-    // on float noise in the G-buffer world position, which is generated per
-    // triangle: the surface self-shadows in a triangular pattern.
-    // Scaled by the light distance so it holds across scene scales.
-    vec3 to_light = light.position.xyz - world_pos;
-    vec3 shade_pos = world_pos + N * max(1e-3 * length(to_light), 1e-4);
-
-    vec3 ctr = light.position.xyz - shade_pos;
+    vec3 ctr = light.position.xyz - world_pos;
     vec3 ea = lt * hs;
     vec3 eb = lb * hs;
 
@@ -1817,179 +1743,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
         if (ls_count >= 3) s_max = abs(velk_form_factor(lps, ls_count).z);
     }
 
-    // Light plane in the shading frame, with its normal oriented so the
-    // shading point tests positive. Occluders are then kept on that same
-    // side: anything behind the light shadows nothing.
-    vec3 lc = vec3(dot(ctr, nt), dot(ctr, nb), dot(ctr, N));
-    vec3 lnf = normalize(vec3(dot(ln, nt), dot(ln, nb), dot(ln, N)));
-    if (dot(lnf, -lc) < 0.0) lnf = -lnf;
-
-    // Shaft planes, in world space, bounding everything that could possibly
-    // block this pixel: the shading plane, the light's plane, and the four
-    // sides of the pyramid from the shading point through the light quad.
-    // Built once per pixel and tested against each BVH node's AABB, which is
-    // what keeps the walk off the shapes that cannot matter. The planes are
-    // deliberately built from the UNCLIPPED light quad, so they stay
-    // conservative. Normals are left unnormalised: the AABB test scales with
-    // them, so it does not care.
-    vec3 cull_n[6];
-    vec3 cull_p[6];
-    cull_n[0] = N;
-    cull_p[0] = shade_pos;
-    cull_n[1] = (dot(ln, shade_pos - light.position.xyz) > 0.0) ? ln : -ln;
-    cull_p[1] = light.position.xyz;
-    for (int i = 0; i < 4; ++i) {
-        vec3 nr = cross(lw[i], lw[(i + 1) & 3]);
-        if (dot(nr, ctr) < 0.0) nr = -nr;
-        cull_n[2 + i] = nr;
-        cull_p[2 + i] = shade_pos;
-    }
-
-    float f_occ = 0.0;
-    float s_occ = 0.0;
-    if (VELK_GLOBALS.bvh_node_count > 0u) {
-        uint stack[32];
-        int sp = 0;
-        stack[sp++] = VELK_GLOBALS.bvh_root;
-        vec3 partition_origin = vec3(0.0);
-        int partition_sp = -1;
-        // Stops early once the light is fully blocked: nothing further can
-        // change the result, and this is the common case deep in a shadow.
-        // BOTH terms have to be saturated, since the specular lobe can still
-        // see a sliver of emitter after the diffuse hemisphere is covered.
-        while (sp > 0 && (f_occ < f_max || s_occ < s_max)) {
-            if (sp == partition_sp) {
-                partition_origin = vec3(0.0);
-                partition_sp = -1;
-            }
-            uint ni = stack[--sp];
-            BvhNode node = velk_bvh_nodes.data[ni];
-
-            vec3 bc = 0.5 * (node.aabb_min.xyz + node.aabb_max.xyz) + partition_origin - VELK_GLOBALS.cam_pos.xyz;
-            vec3 be = 0.5 * (node.aabb_max.xyz - node.aabb_min.xyz);
-            bool outside = false;
-            for (int p = 0; p < 6; ++p) {
-                if (dot(cull_n[p], bc - cull_p[p]) + dot(abs(cull_n[p]), be) < 0.0) {
-                    outside = true;
-                    break;
-                }
-            }
-            if (outside) continue;
-
-            if (node.child_count == VELK_PARTITION_REF) {
-                partition_sp = sp;
-                partition_origin = velk_partition_origin(node);
-                node = velk_bvh_nodes.data[node.first_child];
-            }
-
-            for (uint ri = 0u; ri < node.shape_count; ++ri) {
-              RtRecord rec = velk_records.data[node.first_shape + ri];
-              // Records hold the inverse; silhouettes need world-space corners.
-              mat3 to_world = inverse(transpose(mat3(rec.inv_row0.xyz, rec.inv_row1.xyz, rec.inv_row2.xyz)));
-              vec3 translation = vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) + partition_origin - VELK_GLOBALS.cam_pos.xyz;
-              for (uint i = 0u; i < rec.shape_count; ++i) {
-                RtShape s = velk_bvh_shapes.data[rec.first_shape + i];
-                if (s.shape_kind == 255u) continue;  // meshes: no silhouette yet
-
-                // Shape geometry, relative to the shading point. Origin is a
-                // corner and the axes span the shape, matching what the
-                // intersectors above assume.
-                vec3 o = to_world * s.origin.xyz + translation - shade_pos;
-                vec3 u = to_world * s.u_axis.xyz;
-                vec3 v = to_world * s.v_axis.xyz;
-                vec3 w = to_world * s.w_axis.xyz;
-                vec3 op[kOccPolyMax];
-
-                if (s.shape_kind == 1u) {
-                    // Box. Each opposing face pair contributes the one face that
-                    // turns toward the shading point, or NEITHER when the
-                    // shading point lies between the pair's two planes: seen
-                    // edge-on, that pair is not part of the silhouette at all,
-                    // and taking one of its faces anyway subtracts a sliver
-                    // that blocks nothing. The faces that do qualify tile the
-                    // silhouette without overlapping on the sphere, so
-                    // subtracting them independently is exact and no silhouette
-                    // has to be extracted. Checked against Monte Carlo in
-                    // design-notes/spike_analytic/analytic.cpp.
-                    for (int f = 0; f < 3; ++f) {
-                        vec3 ea2 = (f == 0) ? u : ((f == 1) ? v : w);
-                        vec3 eb2 = (f == 0) ? v : ((f == 1) ? w : u);
-                        vec3 ec2 = (f == 0) ? w : ((f == 1) ? u : v);
-                        vec3 fc0 = o + 0.5 * (ea2 + eb2);
-                        vec3 base;
-                        if (dot(ec2, fc0) > 0.0)            base = o;
-                        else if (dot(ec2, fc0 + ec2) < 0.0) base = o + ec2;
-                        else                                continue;
-                        vec3 fw[4];
-                        fw[0] = base;
-                        fw[1] = base + ea2;
-                        fw[2] = base + ea2 + eb2;
-                        fw[3] = base + eb2;
-                        for (int k = 0; k < 4; ++k) {
-                            op[k] = vec3(dot(fw[k], nt), dot(fw[k], nb), dot(fw[k], N));
-                        }
-                        velk_occ_accum(op, 4, lc, lnf, lp, ln_count,
-                                       minv, lps, ls_count, f_occ, s_occ);
-                    }
-                } else if (s.shape_kind == 2u) {
-                    // Sphere. Its silhouette is a cone, approximated by a
-                    // regular polygon about the cone axis. An inscribed polygon
-                    // would miss the slivers between chord and arc, so the
-                    // half-angle is widened by sqrt(pi / ((n/2) sin(2pi/n)))
-                    // to match the cap's area instead.
-                    vec3 sc = o + 0.5 * (u + v + w);
-                    float sd = length(sc);
-                    float sr = s.params.x;
-                    if (sd <= sr) continue;  // shading point inside the sphere
-                    float ha = min(asin(clamp(sr / sd, 0.0, 1.0)) * 1.0539, 1.5);
-                    vec3 sdir = sc / sd;
-                    vec3 st1 = (abs(sdir.y) < 0.9)
-                             ? normalize(cross(vec3(0.0, 1.0, 0.0), sdir))
-                             : normalize(cross(vec3(1.0, 0.0, 0.0), sdir));
-                    vec3 st2 = cross(sdir, st1);
-                    float ca = cos(ha);
-                    float sa = sin(ha);
-                    for (int k = 0; k < 8; ++k) {
-                        float ph = 6.28318531 * float(k) * 0.125;
-                        vec3 dv = sdir * ca + (st1 * cos(ph) + st2 * sin(ph)) * sa;
-                        // Placed at the centre's distance rather than left as a
-                        // direction: the light-plane clip tests points, so the
-                        // silhouette has to sit at the right depth.
-                        vec3 pw = dv * sd;
-                        op[k] = vec3(dot(pw, nt), dot(pw, nb), dot(pw, N));
-                    }
-                    velk_occ_accum(op, 8, lc, lnf, lp, ln_count,
-                                   minv, lps, ls_count, f_occ, s_occ);
-                } else {
-                    // Rect. Every shape emitted from a draw entry is one,
-                    // spanned by origin + u_axis + v_axis, whether or not its
-                    // visual registered an intersect snippet: a registered kind
-                    // (3 and up) only refines coverage INSIDE that rect (rounded
-                    // corners, glyph SDF), which is treated here as fully
-                    // covering.
-                    vec3 ow[4];
-                    ow[0] = o;
-                    ow[1] = o + u;
-                    ow[2] = o + u + v;
-                    ow[3] = o + v;
-                    for (int k = 0; k < 4; ++k) {
-                        op[k] = vec3(dot(ow[k], nt), dot(ow[k], nb), dot(ow[k], N));
-                    }
-                    velk_occ_accum(op, 4, lc, lnf, lp, ln_count,
-                                   minv, lps, ls_count, f_occ, s_occ);
-                }
-              }
-            }
-
-            for (uint c = 0u; c < node.child_count && sp < 30; ++c) {
-                stack[sp++] = node.first_child + c;
-            }
-        }
-    }
-
-    float e = (f_max - f_occ) / (2.0 * 3.14159265);
-    float s = (s_max - s_occ) / (2.0 * 3.14159265);
-    return vec2(max(e, 0.0), max(s, 0.0));
+    return vec2(f_max, s_max) / (2.0 * 3.14159265);
 }
 )";
 
@@ -2061,10 +1815,11 @@ void main()
         vec3 area_spec = vec3(0.0);
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_light_at(pc.lights_base + i);
-            // Area lights are integrated in closed form, their shadows included.
+            // Area lights are integrated in closed form, and blocked by what the cells say.
             if (light.flags.x == 3u) {
                 vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
-                vec3 radiance = light.color_intensity.rgb * light.color_intensity.a;
+                vec3 radiance = light.color_intensity.rgb * light.color_intensity.a
+                              * (cells_here ? velk_cells_light_through(i) : 1.0);
                 if (es.x > 0.0) {
                     // pi converts clamped-cosine units to the same scale as a
                     // delta light's N.L, so authored intensities stay comparable.
@@ -2240,7 +1995,7 @@ vec3 velk_cell_unpack_normal(uint packed)
 {
     return velk_unoct(unpackSnorm2x16(packed));
 }
-const uint kCellWorkHeader = 32u;
+const uint kCellWorkHeader = 38u;
 // Of the lights that moving things could be in the way of: how many the cells read this
 // frame hold, every how many frames each is due, and how many were due this frame.
 const uint kCellWorkLiveLoad = 1u;
@@ -2276,6 +2031,12 @@ const uint kStatHopMade = 24u;        // bounce cells made by bounce rays
 const uint kStatHopRefused = 25u;     // bounce cells bounce rays wanted made, with no room in the table
 const uint kStatHopListed = 26u;      // bounce cells made by bounce rays listed for tracing
 const uint kStatHopGathered = 27u;    // bounce cells made by bounce rays gathered
+const uint kStatChangeBoxSun = 28u;   // lights on cells found changed: a moved box on the way to a sun
+const uint kStatChangeBoxArea = 29u;  // the same, to an area light
+const uint kStatChangeBoxOther = 30u; // the same, to a point or spot light
+const uint kStatChangeLight = 31u;    // lights on cells found changed: the light itself moved
+const uint kStatChangeInside = 32u;   // of those found changed by a box, the cell is inside the box
+const uint kStatChangeCoarse = 33u;   // lights on cells found changed, on cells above a pixel's own level
 void velk_cell_stat(uint which, uint by)
 {
     atomicAdd(velk_light_cell_words.data[CELLS_WORK + 4u + which], by);
@@ -2412,8 +2173,13 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
             if (moved_light >= lights) continue;
             Light light = velk_light_at(pc.lights_base + moved_light);
             vec3 to = light.position.xyz - world_pos;
-            if (dot(to, to) < light.params.x * light.params.x && dot(N, to) > 0.0) {
-                if (moved_light < 32u) changed.x |= 1u << moved_light; else changed.y |= 1u << (moved_light - 32u);
+            bool reaches = light.flags.x == 3u
+                ? velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N) > 0.0
+                : dot(to, to) < light.params.x * light.params.x && dot(N, to) > 0.0;
+            uvec2 bit = moved_light < 32u ? uvec2(1u << moved_light, 0u) : uvec2(0u, 1u << (moved_light - 32u));
+            if (reaches && (changed & bit) == uvec2(0u)) {
+                changed |= bit;
+                velk_cell_stat(kStatChangeLight, 1u);
             }
             continue;
         }
@@ -2424,8 +2190,29 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
                             uintBitsToFloat(velk_light_cell_words.data[at + 5u]),
                             uintBitsToFloat(velk_light_cell_words.data[at + 6u])) - cam + margin;
         for (uint i = 0u; i < lights; ++i) {
+            uvec2 bit = i < 32u ? uvec2(1u << i, 0u) : uvec2(0u, 1u << (i - 32u));
+            if ((changed & bit) != uvec2(0u)) continue;
             Light light = velk_light_at(pc.lights_base + i);
-            if (light.flags.x == 3u) continue;
+            if (light.flags.x == 3u) {
+                // A square: the way to its middle and to each corner.
+                vec3 a;
+                vec3 b;
+                velk_area_axes(light.direction.xyz, light.params.w, a, b);
+                bool crossed = false;
+                for (int c = 0; c < 5 && !crossed; ++c) {
+                    vec2 on = c == 0 ? vec2(0.0) : vec2((c & 1) != 0 ? 1.0 : -1.0, c >= 3 ? 1.0 : -1.0);
+                    vec3 corner = light.position.xyz + a * on.x + b * on.y;
+                    crossed = dot(N, corner - world_pos) > 0.0 && velk_segment_touches(world_pos, corner, box_min, box_max);
+                }
+                if (crossed) {
+                    changed |= bit;
+                    velk_cell_stat(kStatChangeBoxArea, 1u);
+                    if (all(greaterThanEqual(world_pos, box_min)) && all(lessThanEqual(world_pos, box_max))) {
+                        velk_cell_stat(kStatChangeInside, 1u);
+                    }
+                }
+                continue;
+            }
             vec3 to = world_pos - light.direction.xyz * 1e4;
             if (light.flags.x != 0u) {
                 to = light.position.xyz;
@@ -2434,13 +2221,18 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
             }
             if (dot(N, to - world_pos) <= 0.0) continue;
             if (velk_segment_touches(world_pos, to, box_min, box_max)) {
-                if (i < 32u) changed.x |= 1u << i; else changed.y |= 1u << (i - 32u);
+                changed |= bit;
+                velk_cell_stat(light.flags.x == 0u ? kStatChangeBoxSun : kStatChangeBoxOther, 1u);
+                if (all(greaterThanEqual(world_pos, box_min)) && all(lessThanEqual(world_pos, box_max))) {
+                    velk_cell_stat(kStatChangeInside, 1u);
+                }
             }
         }
     }
     return changed;
 }
-
+)"
+                                                                      R"(
 // The bounce entry of cell `cell` (its word in the cell table), or kNoCell. With `make`, an
 // absent one takes an empty entry, or one unused for kBounceUnusedFrames, and `made` says so.
 uint velk_bounce_find(uint cell, bool make, out bool made)
@@ -2508,13 +2300,30 @@ float velk_cell_ray(Light light, uint i, int k, int grid, vec3 world_pos, vec3 w
     vec3 from = world_pos + (world_u * place.x + world_v * place.y) * cell_size;
     vec3 toward = -light.direction.xyz;
     float reach = 1e30;
-    if (light.flags.x != 0u) {
+    // How far short of where it aims a ray stops: the light's size for a sphere, which the
+    // ray aims at the middle of.
+    float short_by = max(size, 0.005);
+    if (light.flags.x == 3u) {
+        // A square: spread evenly over it, in an order unlike the grid's.
+        vec3 a;
+        vec3 b;
+        velk_area_axes(light.direction.xyz, size, a, b);
+        int j = (k * (rays == 16 ? 7 : 23) + 3) % rays;
+        vec2 on = (vec2(float(j % grid), float(j / grid)) + 0.5) / float(grid) * 2.0 - 1.0;
+        vec3 to_light = light.position.xyz + a * on.x + b * on.y - from;
+        reach = length(to_light);
+        toward = to_light / max(reach, 1e-6);
+        short_by = 0.005;
+        // Below the surface's horizon: the closed form leaves that part of the light out
+        // already, so it counts as getting through.
+        if (dot(N, toward) <= 0.0) return 1.0;
+    } else if (light.flags.x != 0u) {
         vec3 to_light = light.position.xyz - from;
         reach = length(to_light);
         toward = to_light / max(reach, 1e-6);
     }
     if (dot(N, toward) <= 0.0) return 0.0;
-    if (size > 0.0) {
+    if (size > 0.0 && light.flags.x != 3u) {
         float spread = light.flags.x == 0u ? tan(size) : size / max(reach, 1e-4);
         vec3 up = abs(toward.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
         vec3 T = normalize(cross(up, toward));
@@ -2534,7 +2343,7 @@ float velk_cell_ray(Light light, uint i, int k, int grid, vec3 world_pos, vec3 w
     velk_ray_met_motion = false;
     // The nearest thing in the way, since how far it is sets the soft edge's width.
     RayHit stop;
-    bool stopped = trace_closest_hit(r, max(reach - max(size, 0.005), 0.0), stop);
+    bool stopped = trace_closest_hit(r, max(reach - short_by, 0.0), stop);
     velk_ray_lift = 0.0;
     moving = velk_ray_met_motion;
     if (!stopped) return 1.0;
@@ -2828,6 +2637,9 @@ uint velk_cell_keep(VelkLightCell c, int up)
             if (valid != VELK_GLOBALS.present_counter) {
                 which = velk_cell_changed_lights(valid, world_pos, N, cell_size * (up > 0 ? 2.0 : 1.0));
                 changed = (which.x | which.y) != 0u;
+                if (changed && up > 0 && which != uvec2(0xFFFFFFFFu)) {
+                    velk_cell_stat(kStatChangeCoarse, uint(bitCount(which.x) + bitCount(which.y)));
+                }
                 if (!changed) velk_light_cell_words.data[own + 6u] = VELK_GLOBALS.present_counter;
             }
         }
@@ -2877,15 +2689,22 @@ uint velk_cell_keep(VelkLightCell c, int up)
             for (uint i = 0u; i < lights; ++i) {
                 if (((i < 32u ? which.x >> i : which.y >> (i - 32u)) & 1u) == 0u) continue;
                 Light light = velk_light_at(pc.lights_base + i);
-                if (light.flags.x == 3u) continue;
-                vec3 to = -light.direction.xyz;
-                if (light.flags.x != 0u) {
-                    to = light.position.xyz - world_pos;
-                    if (dot(to, to) >= light.params.x * light.params.x) continue;
-                    if (light.flags.x == 2u
-                        && dot(-normalize(to), light.direction.xyz) <= light.params.z) continue;
+                if (light.flags.x == 3u) {
+                    // A square reaches as far as its closed form does: wherever any of it is
+                    // above the surface's horizon.
+                    if (velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N) <= 0.0) {
+                        continue;
+                    }
+                } else {
+                    vec3 to = -light.direction.xyz;
+                    if (light.flags.x != 0u) {
+                        to = light.position.xyz - world_pos;
+                        if (dot(to, to) >= light.params.x * light.params.x) continue;
+                        if (light.flags.x == 2u
+                            && dot(-normalize(to), light.direction.xyz) <= light.params.z) continue;
+                    }
+                    if (dot(N, to) <= 0.0) continue;
                 }
-                if (dot(N, to) <= 0.0) continue;
                 if (i < 32u) reaching.x |= 1u << i; else reaching.y |= 1u << (i - 32u);
                 ++entries;
             }
@@ -2960,7 +2779,7 @@ uint velk_cell_light(uint at, uint i)
 
 // Adds the direct light arriving at the place `world_pos` (from the camera) facing `N` on
 // traced cell `at` to the cell's mean for this frame. Every place read on the cell adds
-// one. Area lights are not in it. See kCellArrive and kCellArriveSum.
+// one. See kCellArrive and kCellArriveSum.
 void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
 {
     if ((velk_light_cell_words.data[at] & kCellReady) == 0u) return;
@@ -2971,7 +2790,12 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
     vec3 sum = vec3(0.0);
     for (uint i = 0u; i < pc.light_count; ++i) {
         Light light = velk_light_at(pc.lights_base + i);
-        if (light.flags.x == 3u) continue;
+        float through = i < kCellLights ? float(velk_cell_light(at, i) & 15u) / 15.0 : 1.0;
+        if (light.flags.x == 3u) {
+            float area = velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N);
+            sum += area * light.color_intensity.rgb * light.color_intensity.a * through;
+            continue;
+        }
         vec3 L = -light.direction.xyz;
         float atten = 1.0;
         if (light.flags.x != 0u) {
@@ -2984,7 +2808,6 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
         }
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL <= 0.0 || atten <= 0.0) continue;
-        float through = i < kCellLights ? float(velk_cell_light(at, i) & 15u) / 15.0 : 1.0;
         sum += NdotL * light.color_intensity.rgb * light.color_intensity.a * atten * through;
     }
     // Up to 8192 a channel each, so that a thousand places still fit in 32 bits.
@@ -3993,7 +3816,12 @@ void main()
     vec3 direct = vec3(0.0);
     for (uint i = 0u; i < pc.light_count; ++i) {
         Light light = velk_light_at(pc.lights_base + i);
-        if (light.flags.x == 3u) continue;
+        float through = velk_cells_light_through(i);
+        if (light.flags.x == 3u) {
+            float area = velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N);
+            direct += area * light.color_intensity.rgb * light.color_intensity.a * through;
+            continue;
+        }
         vec3 L;
         float atten = 1.0;
         if (light.flags.x == 0u) {
@@ -4011,7 +3839,6 @@ void main()
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL <= 0.0 || atten <= 0.0) continue;
 
-        float through = velk_cells_light_through(i);
         direct += NdotL * light.color_intensity.rgb * light.color_intensity.a * atten * through;
     }
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord,

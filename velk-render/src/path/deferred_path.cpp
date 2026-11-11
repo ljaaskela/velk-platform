@@ -361,8 +361,8 @@ constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * 
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
 constexpr uint32_t kCellWorkWords = 8;
-constexpr uint32_t kCellWorkHeader = 32;
-constexpr uint32_t kCellStats = 28;
+constexpr uint32_t kCellWorkHeader = 38;
+constexpr uint32_t kCellStats = 34;
 // How often the counters are printed, in frames.
 constexpr uint64_t kCellStatFrames = 60;
 
@@ -1175,9 +1175,21 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                      per(0), per(1), per(8), per(2), per(10), per(9), per(11), per(3), per(4), per(6), per(5),
                      static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14), per(16), per(15),
                      per(17), per(18), per(19), per(20), per(21), per(22), per(23), per(24), per(25), per(26), per(27));
+            const double listed_frames = static_cast<double>(ctx.present_counter - vs.light_cell_stats_frame);
+            VELK_LOG(I,
+                     "light cell changes per frame: boxes listed %.1f, too small %.1f, lights moved %.2f; "
+                     "lights on cells found changed by a box to a sun %.0f, to an area light %.0f, to a point or "
+                     "spot %.0f, by the light moving %.0f; of all those, inside the box %.0f, above a pixel's own level %.0f; "
+                     "frames the list covers %u",
+                     vs.light_cell_boxes_listed / listed_frames, vs.light_cell_boxes_small / listed_frames,
+                     vs.light_cell_lights_moved / listed_frames, per(28), per(29), per(30), per(31), per(32), per(33),
+                     static_cast<unsigned>(static_cast<uint32_t>(ctx.present_counter) - vs.light_cell_changes_from));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
         vs.light_cell_stats_frame = ctx.present_counter;
+        vs.light_cell_boxes_listed = 0;
+        vs.light_cell_boxes_small = 0;
+        vs.light_cell_lights_moved = 0;
     }
 
     // What changed this frame joins the list the cells check their light against: what the
@@ -1211,8 +1223,10 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                     distance += out * out;
                 }
                 if (extent < least * std::sqrt(distance)) {
+                    ++vs.light_cell_boxes_small;
                     continue;
                 }
+                ++vs.light_cell_boxes_listed;
                 changes.push_back({box, now, 0xFFFFFFFFu});
             }
         }
@@ -1257,6 +1271,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                 box.max[k] = b.position[k];
             }
             changes.push_back({box, now, static_cast<uint32_t>(i)});
+            ++vs.light_cell_lights_moved;
             listed[i] = b;
         }
         if (all_lights) {
