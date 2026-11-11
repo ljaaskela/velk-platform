@@ -1189,7 +1189,7 @@ uint velk_light_cell_hash(VelkLightCell c)
 //   0      the cell's word, 0 for an empty entry
 //   1      the frame it was last used in
 //   2      kBounceUntraced, kBounceListed or kBounceTraced
-//   3      the frame its rays are known good up to: traced, or checked against what changed
+//   3      spare
 //   4..9   the light arriving from other surfaces as SH L1 of radiance: red, green and
 //          blue halves of each coefficient (velk_bounce_sh_irradiance)
 //   10..12 where its rays start, the pixel that listed it, in the world: not from the camera,
@@ -1969,10 +1969,9 @@ uint velk_bounce_scratch(uint listed, uint ray)
 {
     return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * kBounceScratchWords;
 }
-// What changed lately, in the same arena: a count, the frame before which changes are no
-// longer listed, 1 if this frame has changes for light_cells_mark_main_src, a spare word,
-// then 8 words a change: a world box's least corner, the frame it changed in, its greatest
-// corner, and which light moved or all ones.
+// What changed this frame, in the same arena: a count, 1 if everything changed, 1 if there is
+// anything for the mark passes, a spare word, then 8 words a change: a world box's least
+// corner, the frame, its greatest corner, and which light moved or all ones.
 #define CELLS_CHANGES cells_header[3]
 #define CELLS_IDS cells_header[4]
 #define CELLS_SURFACE cells_header[5]
@@ -2165,20 +2164,19 @@ bool velk_segment_touches(vec3 from, vec3 to, vec3 box_min, vec3 box_max)
 }
 )"
                                                                       R"(
-// Which lights the surface at `world_pos` may see differently for a change listed since
-// frame `valid`, as a bit a light, the first 32 in x. A change is a box, grown here by
-// `margin`: one that lies on the way to a light. Or it is a light that moved, named in the
-// change's last word, which alters that light alone, wherever it reaches.
-uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
+// Which lights the surface at `world_pos` may see differently for this frame's changes, as a
+// bit a light, the first 32 in x. A change is a box, grown here by `margin`: one that lies on
+// the way to a light. Or it is a light that moved, named in the change's last word, which
+// alters that light alone, wherever it reaches. Every light if everything changed.
+uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
 {
     uint count = velk_light_cell_words.data[CELLS_CHANGES];
-    if (valid < velk_light_cell_words.data[CELLS_CHANGES + 1u]) return uvec2(0xFFFFFFFFu);
+    if (velk_light_cell_words.data[CELLS_CHANGES + 1u] != 0u) return uvec2(0xFFFFFFFFu);
     uvec2 changed = uvec2(0u);
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
     uint lights = min(pc.light_count, kCellLights);
     for (uint b = 0u; b < count; ++b) {
         uint at = CELLS_CHANGES + 4u + b * 8u;
-        if (valid >= velk_light_cell_words.data[at + 3u]) continue;
         uint moved_light = velk_light_cell_words.data[at + 7u];
         if (moved_light != 0xFFFFFFFFu) {
             if (moved_light >= lights) continue;
@@ -3052,7 +3050,6 @@ void main()
             velk_light_cell_words.data[at + 12u] = floatBitsToUint(absolute.z);
             velk_light_cell_words.data[at + 13u] = velk_cell_pack_normal(cell_n);
         }
-        velk_light_cell_words.data[at + 3u] = VELK_GLOBALS.present_counter;
         velk_light_cell_words.data[at + 2u] = kBounceTraced;
     }
 
@@ -3177,9 +3174,9 @@ void main()
     vec3 facing;
     uvec2 which = uvec2(0xFFFFFFFFu);
     if (velk_cell_place(object, cube, level, level_side & 7u, place, facing)) {
-        // Only this frame's changes. The place is the cube's middle, up to most of a cell off
-        // the surface, so the margin is wider than a pixel's.
-        which = velk_cell_changed_lights(VELK_GLOBALS.present_counter - 1u, place, facing, 2.0 * velk_light_cell_size(level));
+        // The place is the cube's middle, up to most of a cell off the surface, so the margin
+        // is wider than a pixel's.
+        which = velk_cell_changed_lights(place, facing, 2.0 * velk_light_cell_size(level));
     } else {
         velk_cell_stat(kStatMarkUnplaced, 1u);
     }
@@ -3383,30 +3380,27 @@ void main()
 }
 )";
 
-/// Looks for what changed on the way of each bounce cell's rays since they were last known
-/// good, a group a cell and a ray a thread: the stretch to what a ray hit, or a long way for a
-/// miss, which something may now be in the way of. The boxes of a thing that moved, before and
-/// after, are both listed, so a ray whose hit moved away counts too. Only changes since then
-/// are looked at, and changes no longer listed count as having touched every ray. A cell with
-/// a ray crossed is marked to be traced again when a pixel next uses it, and is read as it is
-/// until then. Follows light_cells_src.
+/// Marks the bounce cells this frame's changes could alter, a group a cell and a ray a
+/// thread: a change on the stretch to what a ray hit, or a long way for a miss, which
+/// something may now be in the way of. The boxes of a thing that moved, before and after, are
+/// both listed, so a ray whose hit moved away counts too. Every traced entry is looked at,
+/// used now or not, so the mark is there whenever a pixel uses it again: the cell is traced
+/// again then, and read as it is until then. Follows light_cells_src.
 [[maybe_unused]] constexpr string_view light_cells_bounce_changes_main_src = R"(
 shared bool s_bounce_crossed[64];
 
 void main()
 {
     velk_cells_load();
+    if (velk_light_cell_words.data[CELLS_CHANGES + 2u] == 0u) return;
     uint lane = gl_LocalInvocationIndex;
     uint at = CELLS_BOUNCE + gl_WorkGroupID.x * kBounceWords;
     uint cell = velk_light_cell_words.data[at];
-    uint now = VELK_GLOBALS.present_counter;
     // The same for every thread of the group.
     if (cell == 0u || velk_light_cell_words.data[at + 2u] != kBounceTraced
-        || (velk_light_cell_words.data[at + 14u] & kBounceStale) != 0u || now - velk_light_cell_words.data[at + 1u] > 2u) return;
-    uint valid = velk_light_cell_words.data[at + 3u];
-    if (valid == now) return;
+        || (velk_light_cell_words.data[at + 14u] & kBounceStale) != 0u) return;
 
-    bool crossed = valid < velk_light_cell_words.data[CELLS_CHANGES + 1u];
+    bool crossed = velk_light_cell_words.data[CELLS_CHANGES + 1u] != 0u;
     if (!crossed) {
         vec3 cell_n = velk_cell_unpack_normal(velk_light_cell_words.data[at + 13u]);
         vec3 dir = velk_bounce_dir(lane, cell_n, velk_bounce_turn(cell));
@@ -3421,7 +3415,6 @@ void main()
         uint changes = velk_light_cell_words.data[CELLS_CHANGES];
         for (uint c = 0u; c < changes && !crossed; ++c) {
             uint change = CELLS_CHANGES + 4u + c * 8u;
-            if (valid >= velk_light_cell_words.data[change + 3u]) continue;
             // A moved light changes what the hits hold, which the gather reads anew each frame.
             if (velk_light_cell_words.data[change + 7u] != 0xFFFFFFFFu) continue;
             vec3 box_min = vec3(uintBitsToFloat(velk_light_cell_words.data[change]),
@@ -3438,12 +3431,7 @@ void main()
     if (lane != 0u) return;
     bool any_crossed = false;
     for (uint r = 0u; r < kBounceRays; ++r) any_crossed = any_crossed || s_bounce_crossed[r];
-    if (any_crossed) {
-        velk_light_cell_words.data[at + 14u] |= kBounceStale;
-    } else {
-        // Good up to now: next frame has only that frame's changes to look at.
-        velk_light_cell_words.data[at + 3u] = now;
-    }
+    if (any_crossed) velk_light_cell_words.data[at + 14u] |= kBounceStale;
 }
 )";
 

@@ -125,14 +125,10 @@ public:
         /// VELK_BOUNCE_GLSL and CELLS_BOUNCE_LIST.
         ArenaRegion light_bounce;
         ArenaRegion light_bounce_list;
-        /// Changes before this frame are no longer listed.
-        uint32_t light_cell_changes_from = 0;
         /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
         /// The cells' counters when last printed, and the frame. See kStatAsked.
         uint32_t light_cell_stats[36] = {};
-        /// Whether this frame's changes have anything for the light cells' mark pass.
-        bool light_cell_changed_now = false;
         /// What joined the cells' change list since the counters were last printed: moved
         /// boxes listed, moved boxes too small to list, and moved lights.
         uint32_t light_cell_boxes_listed = 0;

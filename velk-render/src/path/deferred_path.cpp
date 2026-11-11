@@ -340,11 +340,10 @@ namespace {
 // light_cells_main_src.
 constexpr uint32_t kCellSlots = 1u << 20;
 constexpr uint32_t kCellWords = 32;
-// The changes the light cells are given: how many at most, the words of each after 4 words
-// of header, and how many frames one stays listed.
+// The changes the light cells are given each frame: how many at most, and the words of each
+// after 4 words of header. More count as everything changed.
 constexpr uint32_t kCellChanges = 128;
 constexpr uint32_t kCellChangeWords = 8;
-constexpr uint32_t kCellChangeFrames = 240;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
 constexpr uint32_t kCellHeaderWords = 14;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
@@ -1170,10 +1169,9 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                      "light cell changes per frame: boxes listed %.1f, too small %.1f, lights moved %.2f; "
                      "lights on cells found changed by a box to a sun %.0f, to an area light %.0f, to a point or "
                      "spot %.0f, by the light moving %.0f; of all those, inside the box %.0f, above a pixel's own level %.0f; "
-                     "frames the list covers %u; cells marked %.0f, could not be placed %.0f",
+                     "cells marked %.0f, could not be placed %.0f",
                      vs.light_cell_boxes_listed / listed_frames, vs.light_cell_boxes_small / listed_frames,
                      vs.light_cell_lights_moved / listed_frames, per(28), per(29), per(30), per(31), per(32), per(33),
-                     static_cast<unsigned>(static_cast<uint32_t>(ctx.present_counter) - vs.light_cell_changes_from),
                      per(34), per(35));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
@@ -1183,15 +1181,18 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         vs.light_cell_lights_moved = 0;
     }
 
-    // What changed this frame joins the list the cells check their light against: what the
-    // scene's rays can hit, and lights that moved. A light's colour and strength are not
-    // part of what a cell keeps, so those changing needs nothing traced.
+    // What changed this frame, which the mark passes put on the cells and bounce entries it
+    // could alter: what the scene's rays can hit, and lights that moved. A light's colour and
+    // strength are not part of what a cell keeps, so those changing needs nothing traced.
+    // Nothing is kept from frame to frame: the marks are.
     {
         const auto now = static_cast<uint32_t>(ctx.present_counter);
         auto& changes = vs.light_cell_changes;
+        changes.clear();
+        bool all_changed = false;
         const auto forget_all = [&] {
             changes.clear();
-            vs.light_cell_changes_from = now;
+            all_changed = true;
         };
         if (render_view.bvh.changed_all) {
             forget_all();
@@ -1247,15 +1248,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                 all_lights = true;
                 break;
             }
-            // One entry a light: a cell asks only whether the light changed since the cell
-            // was last good, and the light's reach is checked against where it is now.
-            vector<ViewState::LightCellChange> others;
-            for (const auto& change : changes) {
-                if (change.light != static_cast<uint32_t>(i)) {
-                    others.push_back(change);
-                }
-            }
-            changes = std::move(others);
+            // The light's reach is checked against where it is now.
             WorldBox box;
             for (int k = 0; k < 3; ++k) {
                 box.min[k] = b.position[k];
@@ -1273,33 +1266,16 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             }
         }
 
-        // Too old, or too many: those dropped are no longer listed, and a cell last checked
-        // before one of them cannot tell whether it mattered.
-        size_t drop = 0;
-        while (drop < changes.size()
-               && (now - changes[drop].frame > kCellChangeFrames || changes.size() - drop > kCellChanges)) {
-            vs.light_cell_changes_from = std::max(vs.light_cell_changes_from, changes[drop].frame);
-            ++drop;
-        }
-        if (drop > 0) {
-            vector<ViewState::LightCellChange> kept;
-            for (size_t i = drop; i < changes.size(); ++i) {
-                kept.push_back(changes[i]);
-            }
-            changes = std::move(kept);
-        }
-        // What the light cells' mark pass has to look at: this frame's changes, or all of
-        // them changed.
-        vs.light_cell_changed_now = vs.light_cell_changes_from == now;
-        for (const auto& change : changes) {
-            vs.light_cell_changed_now = vs.light_cell_changed_now || change.frame == now;
+        // More than the list holds: everything counts as changed.
+        if (changes.size() > kCellChanges) {
+            forget_all();
         }
 
         vector<uint32_t> words;
         words.resize(4u + kCellChanges * kCellChangeWords);
         words[0] = static_cast<uint32_t>(changes.size());
-        words[1] = vs.light_cell_changes_from;
-        words[2] = vs.light_cell_changed_now ? 1u : 0u;
+        words[1] = all_changed ? 1u : 0u;
+        words[2] = all_changed || !changes.empty() ? 1u : 0u;
         for (size_t i = 0; i < changes.size(); ++i) {
             uint32_t* w = words.data() + 4u + i * kCellChangeWords;
             std::memcpy(w, changes[i].box.min, sizeof(float) * 3);
