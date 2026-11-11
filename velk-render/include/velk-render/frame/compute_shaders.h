@@ -1631,7 +1631,7 @@ layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint da
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
     uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
-    uint direct_samples_id;    // 4         half-size lights picked and their shadow results; 0 = each pixel alone
+    uint surface_light_id;     // 4         lighting's light on the surface, for far instances
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -1643,17 +1643,17 @@ layout(push_constant, scalar) uniform PC {
     uint height;               // 52
     uint light_count;          // 56
     uint env_texture_id;       // 60
-    uint shadow_debug_image_id;// 64  RGBA32F storage image; 0 = disabled
+    uint cells_header;         // 64  word of the light cells' header. See CELLS_HEADER
     uint ltc_matrix_id;        // 68  LTC transform table; 0 = area specular off
     uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
     uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
     vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
-    uint irr_image_id;         // 88  visibility RATIO out (denoised downstream)
-    uint unshadowed_image_id;  // 92  unshadowed diffuse out (sharp; composite multiplies)
-    uint ray_pass;             // 96  1: traces at half size, writing visibility only. 0: shades every pixel
+    uint spare0;               // 88
+    uint spare1;               // 92
+    uint mode;                 // 96  what a pass is to do, for passes that do more than one thing
     uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
     int gi_finest;             // 104 ladder index of the probe field's finest level
-    uint light_loop_probe;     // 108 diagnostic: extra per-light ALU repeats
+    uint spare2;               // 108
     uint gi_maps_id;           // 112 GI probe irradiance maps
 } pc;
 
@@ -1767,21 +1767,8 @@ vec3 velk_gi_radiance(vec3 world_pos, vec3 N, vec3 dir)
 
 )";
 
-// Deferred lighting main: full PBR + env IBL + stochastic single-light shadow.
-// Composed on top of `deferred_compute_prelude_src` (plus the intersect_shape /
-// velk_eval_shadow switches the composer appends).
-//
-// Outputs TWO images for the temporal denoiser downstream:
-//   irr_image_id   = demodulated diffuse IRRADIANCE (no albedo) - view-
-//                    independent, noisy (one stochastic light + jittered
-//                    shadow), reprojected + accumulated by the denoise pass.
-//   output_image_id= the SHARP "rest": analytic specular + env specular +
-//                    emissive (+ unlit albedo / sky). The denoise pass reads
-//                    this back, adds albedo*(1-metallic)*denoised_irradiance
-//                    in place, and produces the final HDR image.
-// Split from the main body below only because MSVC caps a single string
-// literal at 16380 bytes. Appended after the prelude, whose Light / RtShape /
-// BvhNode declarations it depends on.
+// Area lights in closed form, for deferred_lighting_main_src. Appended after the prelude,
+// whose Light / RtShape / BvhNode declarations it depends on.
 [[maybe_unused]] constexpr string_view deferred_area_light_src = R"(
 // Analytic area-light shading. The clamped-cosine integral over the emitter's
 // spherical polygon, evaluated in closed form: no samples, no noise, nothing
@@ -2226,201 +2213,61 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 )";
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
-// Direct diffuse light from the lights nearby pixels picked, reusing the shadow rays they
-// traced. One light per pixel comes out the colour of that light, so a pixel averages several.
-// How far it looks follows how many lights share its light: where one light dominates it
-// keeps to the closest samples, so that light's shadows stay sharp. Alpha is 0 if no sample
-// could be used.
-vec4 velk_shared_direct(ivec2 coord, vec3 world_pos, vec3 N, vec3 albedo_rgb, float total_w, float total_w2, uint seed)
-{
-    if (total_w <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
-    const int kSamples = 8;
-    const float kNearest = 1.5;
-    const float kFarthest = 8.0;
-    const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
-
-    float lights_in_effect = total_w * total_w / max(total_w2, 1e-12);
-    float reach = mix(kNearest, kFarthest, clamp((lights_in_effect - 1.0) / 3.0, 0.0, 1.0));
-    ivec2 own = coord / 2;
-    ivec2 half_size = ivec2((int(pc.width) + 1) / 2, (int(pc.height) + 1) / 2);
-    float depth = length(world_pos);
-
-    vec3 sum = vec3(0.0);
-    float used = 0.0;
-    for (int k = 0; k < kSamples; ++k) {
-        ivec2 q = own;
-        if (k > 0) {
-            seed ^= seed >> 16; seed *= 0x7feb352du;
-            seed ^= seed >> 15; seed *= 0x846ca68bu;
-            seed ^= seed >> 16;
-            float angle = float(seed) * (6.28318531 / 4294967296.0);
-            seed ^= seed >> 16; seed *= 0x7feb352du;
-            seed ^= seed >> 15; seed *= 0x846ca68bu;
-            seed ^= seed >> 16;
-            float radius = sqrt(float(seed) * (1.0 / 4294967296.0)) * reach;
-            q += ivec2(round(vec2(cos(angle), sin(angle)) * radius));
-            if (q.x < 0 || q.y < 0 || q.x >= half_size.x || q.y >= half_size.y) continue;
-        }
-        vec4 picked = texelFetch(velk_textures[nonuniformEXT(pc.direct_samples_id)], q, 0);
-        if (picked.a <= 0.0) continue;
-        vec3 q_normal = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], q * 2, 0).xyz;
-        vec3 q_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], q * 2, 0).xyz;
-        if (dot(q_normal, q_normal) < 1e-6) continue;
-        if (dot(N, normalize(q_normal)) < 0.9 || abs(dot(q_pos - world_pos, N)) > 0.02 * depth) continue;
-        used += 1.0;
-
-        Light light = velk_light_at(pc.lights_base + uint(picked.r));
-        vec3 L;
-        float atten = 1.0;
-        if (light.flags.x == 0u) {
-            L = -light.direction.xyz;
-        } else {
-            vec3 to_light = light.position.xyz - world_pos;
-            float dist = length(to_light);
-            L = to_light / max(dist, 1e-6);
-            float range = max(light.params.x, 1e-6);
-            float t = clamp(1.0 - dist / range, 0.0, 1.0);
-            atten = t * t;
-            if (light.flags.x == 2u) {
-                float cos_a = dot(-L, light.direction.xyz);
-                atten *= smoothstep(light.params.z, light.params.y, cos_a);
-            }
-        }
-        float NdotL = max(dot(N, L), 0.0);
-        if (NdotL <= 0.0 || atten <= 0.0) continue;
-        vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
-        float w = dot(albedo_rgb * NdotL * radiance, kLuma);
-        if (w <= 0.0) continue;
-        // Weighted by how likely either pixel was to pick it, so that a light strong
-        // over there and weak here does not count as if this pixel had picked it.
-        sum += NdotL * radiance * picked.g / (0.5 * (w / total_w + picked.b));
-    }
-    return used > 0.0 ? vec4(sum / used, 1.0) : vec4(0.0);
-}
-
+// Lights each pixel: each light's diffuse light and highlight, shadowed by what the light
+// cells hold; indirect light from the probe field, or the environment where the field has
+// nothing; reflections; area lights in closed form; emission. Writes the finished image,
+// and for instance_splat_composite_src the light on the surface: indirect light in rgb, and
+// in alpha the share of direct light that gets past what is in the way.
 void main()
 {
-    // Rays run as a dispatch of their own over one pixel in each 2x2 block, since a thread
-    // group lasts as long as its longest ray: sparse rays among all pixels would hold up
-    // every group.
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy) * (pc.ray_pass != 0u ? 2 : 1);
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-    vec4 albedo    = velk_texture(pc.albedo_tex_id, uv);
+    vec4 albedo = velk_texture(pc.albedo_tex_id, uv);
     vec4 normal_and_error = velk_texture(pc.normal_tex_id, uv);
-    vec3 world_n   = normal_and_error.xyz;
-    float lod_error = normal_and_error.w;
+    vec3 world_n = normal_and_error.xyz;
     vec3 world_pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
-    vec4 mat       = velk_texture(pc.material_tex_id, uv);
+    vec4 mat = velk_texture(pc.material_tex_id, uv);
 
-    // Sky path: pixels with no G-buffer coverage (cleared to zero,
-    // including normal) reconstruct a world-space view ray and sample
-    // the environment. Falls back to black when the view has no env.
+    // No surface: the environment along the view ray.
     if (dot(world_n, world_n) < 1e-6) {
         vec2 ndc = uv * 2.0 - 1.0;
         mat4 inv_vp = VELK_GLOBALS.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 1.0, 1.0);
-        vec4 far_h  = inv_vp * vec4(ndc, 0.0, 1.0);
-        vec3 near_w = near_h.xyz / near_h.w;
-        vec3 far_w  = far_h.xyz  / far_h.w;
-        vec3 rd = normalize(far_w - near_w);
-        vec3 sky = env_miss_color(rd);
-        // Sky is sharp (no diffuse irradiance): write it to the "rest" image
-        // and zero irradiance. The denoise/composite pass passes it through
-        // (albedo == 0 for sky pixels, so it adds nothing).
-        if (pc.ray_pass != 0u) {
-            imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
-            if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2, vec4(0.0));
-        } else {
-            if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(0.0));
-            imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(sky, 1.0));
-            imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord, vec4(0.0));
-        }
+        vec4 far_h = inv_vp * vec4(ndc, 0.0, 1.0);
+        vec3 rd = normalize(far_h.xyz / far_h.w - near_h.xyz / near_h.w);
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(env_miss_color(rd), 1.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.surface_light_id)], coord, vec4(0.0, 0.0, 0.0, 1.0));
         return;
     }
 
-    // Emissive radiance, added to the lit output below (sky pixels return
-    // above without reading it). HDR; folded in before tonemap so bloom
-    // can pick up bright emitters.
+    // Added to the lit colour, before tonemapping, so that bloom can pick up bright emitters.
     vec3 emissive = velk_texture(pc.emissive_tex_id, uv).rgb;
 
     // LightingMode encoded in mat.b (0 = Unlit, 1 = Standard, ...).
     uint lighting_mode = uint(mat.b * 255.0 + 0.5);
-    float metallic  = clamp(mat.r, 0.0, 1.0);
+    float metallic = clamp(mat.r, 0.0, 1.0);
     float roughness = clamp(mat.g, 0.04, 1.0);
 
-    // irr = demodulated diffuse irradiance (no albedo; denoised downstream);
-    // rest = the sharp, view-dependent remainder (specular / env spec / emissive).
-    vec3 irr  = vec3(0.0);
-    vec3 rest = vec3(0.0);
-    // Unshadowed diffuse, paired with `irr` which now carries the visibility
-    // ratio rather than radiance. Zero for unlit pixels, which zeroes the
-    // product at composite regardless of what the ratio filtered to.
-    vec3 unshadowed_out = vec3(0.0);
-    // How much of `rest` is the lights' highlights, which composite shadows by the ratio.
-    float highlight_share = 0.0;
-    float irr_valid = 1.0;
-    if (lighting_mode == 0u) {
-        // Unlit: emit albedo as-is (no diffuse irradiance).
-        rest = albedo.rgb;
-    } else {
+    vec3 color = albedo.rgb;
+    vec4 surface_light = vec4(0.0, 0.0, 0.0, 1.0);
+    if (lighting_mode != 0u) {
         vec3 N = normalize(world_n);
         vec3 V = normalize(-world_pos);
         float NdotV = max(dot(N, V), 0.0);
-
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
         float a = roughness * roughness;
 
-)"
-                                                                      R"(
-        // Direct lighting. The shadowed diffuse term is estimated by
-        // resampled importance sampling (RIS): in one pass over the lights we
-        // reservoir-pick a SINGLE light (weighted by its unshadowed diffuse
-        // luminance) and trace one jittered shadow ray for it, dividing by the
-        // pick pdf for an unbiased estimate of the sum over all lights. This
-        // keeps the shadow cost at one ray/pixel regardless of light count
-        // (scales to many / dynamic lights); the noise it introduces is what
-        // the temporal + spatial denoiser resolves. Specular is summed
-        // analytically over ALL lights but UNSHADOWED (no rays, stays sharp;
-        // a v1 approximation — specular shadowing is a later refinement).
-        vec3 direct_specular = vec3(0.0);
-        uint  res_light = 0xffffffffu;
-        float res_w = 0.0;        // chosen light's reservoir weight
-        float res_NdotL = 0.0;
-        vec3  res_radiance = vec3(0.0);
-        float total_w = 0.0;
-        float total_w2 = 0.0;
-        // Per-pixel RIS stream. A tile-uniform stream was tried (Stage 0): it
-        // makes neighbouring pixels pick the same light, which buys ray
-        // coherence for free and did cut night from 31 to 25 ms - but it makes
-        // the noise spatially correlated, which is precisely what a spatial
-        // filter cannot remove. It showed as 8x8 blockiness while converging
-        // and blur afterwards. Coherence has to come from reordering
-        // execution, never from correlating the sampling.
-        uint seed = (uint(coord.x) * 1973u + uint(coord.y) * 9277u
-                     + VELK_GLOBALS.present_counter * 26699u) | 1u;
-        // Analytic area lights, accumulated outside the reservoir. Their
-        // diffuse term is exact and noise-free, so they neither need a shadow
-        // ray nor belong in the stochastic estimator.
-        // Both terms are analytic, including their shadows, so neither is
-        // denoised: the diffuse half is demodulated into `rest` below and the
-        // specular half joins the other sharp specular sources.
+        bool cells_here = velk_cells_begin(coord, world_pos, normal_and_error);
+        vec3 direct = vec3(0.0);
+        vec3 unshadowed = vec3(0.0);
+        vec3 highlights = vec3(0.0);
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
-        vec3 unshadowed_direct = vec3(0.0);
-#ifdef VELK_LIGHT_CELLS
-        // With light cells, how much of each light gets through comes from them: nothing
-        // is picked at random and nothing is traced here, so each light's diffuse light and
-        // highlight are shadowed as they are summed.
-        bool cells_here = velk_cells_begin(coord, world_pos, normal_and_error);
-        vec3 cells_direct = vec3(0.0);
-#endif
-        // Diagnostic accumulator; see the probe loop inside the light loop.
-        float loop_probe = 0.0;
-
         for (uint i = 0u; i < pc.light_count; ++i) {
             Light light = velk_light_at(pc.lights_base + i);
+            // Area lights are integrated in closed form, their shadows included.
             if (light.flags.x == 3u) {
                 vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
                 vec3 radiance = light.color_intensity.rgb * light.color_intensity.a;
@@ -2461,551 +2308,51 @@ void main()
             if (NdotL <= 0.0 || atten <= 0.0) continue;
             vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
 
-            // Analytic specular (unshadowed), summed over all lights.
             vec3 H = normalize(L + V);
             float NdotH = max(dot(N, H), 0.0);
             float VdotH = max(dot(V, H), 0.0);
             float D = ggx_d(NdotH, a);
             float G = smith_g(NdotV, NdotL, roughness);
-            vec3  F = fresnel_schlick(VdotH, F0);
-#ifdef VELK_LIGHT_CELLS
+            vec3 F = fresnel_schlick(VdotH, F0);
             float through = cells_here ? velk_cells_light_through(i) : 1.0;
-            cells_direct += NdotL * radiance * through;
-#else
-            const float through = 1.0;
-#endif
-            direct_specular += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
-
-            // Unshadowed diffuse, summed over ALL lights and free of noise.
-            // The ratio estimator divides the stochastic estimate by this and
-            // denoises the quotient instead of the radiance.
-            unshadowed_direct += NdotL * radiance;
-
-            // DIAGNOSTIC: repeat this light's ALU to price what clustered light
-            // culling would remove. It ADDS iterations rather than removing
-            // them, so the reservoir seed, the chosen light, the shadow ray and
-            // the final image are all untouched and ray coherence cannot drift.
-            // Capping the loop instead would change which light RIS picks, and
-            // that confound has already wrecked two measurements in this scene.
-            for (uint r = 0u; r < pc.light_loop_probe; ++r) {
-                vec3 L2;
-                float atten2 = 1.0;
-                if (light.flags.x == 0u) {
-                    L2 = -light.direction.xyz;
-                } else {
-                    vec3 tl2 = light.position.xyz - world_pos;
-                    float d2 = length(tl2);
-                    L2 = tl2 / max(d2, 1e-6);
-                    float rg2 = max(light.params.x, 1e-6);
-                    float tt2 = clamp(1.0 - d2 / rg2, 0.0, 1.0);
-                    atten2 = tt2 * tt2;
-                    if (light.flags.x == 2u) {
-                        float ca2 = dot(-L2, light.direction.xyz);
-                        atten2 *= smoothstep(light.params.z, light.params.y, ca2);
-                    }
-                }
-                float ndl2 = max(dot(N, L2), 0.0);
-                vec3 rad2 = light.color_intensity.rgb * light.color_intensity.a * atten2;
-                vec3 H2 = normalize(L2 + V);
-                float nh2 = max(dot(N, H2), 0.0);
-                float vh2 = max(dot(V, H2), 0.0);
-                vec3 sp2 = (ggx_d(nh2, a) * smith_g(NdotV, ndl2, roughness))
-                         * fresnel_schlick(vh2, F0)
-                         / max(4.0 * NdotV * ndl2, 1e-6) * ndl2 * rad2;
-                loop_probe += sp2.r + sp2.g + sp2.b + ndl2;
-            }
-
-            // Reservoir step: weight = luminance of this light's unshadowed
-            // diffuse contribution.
-            vec3 dcontrib = albedo.rgb * NdotL * radiance;
-            float w = dot(dcontrib, vec3(0.2126, 0.7152, 0.0722));
-            total_w += w;
-            total_w2 += w * w;
-            // A full mix, not a linear step: the seed starts linear in the pixel
-            // coordinates, so a linear step gives a value linear across the screen,
-            // and comparing that to a probability draws diagonal stripes.
-            seed ^= seed >> 16; seed *= 0x7feb352du;
-            seed ^= seed >> 15; seed *= 0x846ca68bu;
-            seed ^= seed >> 16;
-            if (w > 0.0 && float(seed) * (1.0 / 4294967296.0) < w / total_w) {
-                res_light = i;
-                res_w = w;
-                res_NdotL = NdotL;
-                res_radiance = radiance;
-            }
+            direct += NdotL * radiance * through;
+            unshadowed += NdotL * radiance;
+            highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
         }
 
-        // Cannot fire: every term the probe loop accumulates is non-negative.
-        // It exists so the loop has an observable result and is not optimised
-        // away, without perturbing anything when the probe is off.
-        if (loop_probe < -1.0) unshadowed_direct += vec3(1.0);
-
-        // Shadowed diffuse IRRADIANCE estimate from the single chosen light
-        // (one ray), demodulated (no albedo - reapplied at composite).
-        // One pixel in each 2x2 block traces, always the same one, and the spatial pass fills
-        // in the rest from its neighbours by geometry. The unshadowed term is still computed
-        // for every pixel, so light falloff and N.L stay sharp; only visibility is sparse.
-        bool trace_now = pc.ray_pass != 0u;
-
-)"
-                                                                      R"(
-        // A pixel's width on the surface, wider when seen at a shallow angle.
-        mat4 footprint_vp = VELK_GLOBALS.view_projection;
-        float footprint_f = length(vec3(footprint_vp[0][1], footprint_vp[1][1], footprint_vp[2][1]));
-        float pixel_width = length(world_pos) * 2.0 / (footprint_f * float(pc.height))
-            / sqrt(max(NdotV, 0.05));
-
-        vec3 direct_diffuse = vec3(0.0);
-        float picked_shadow = 0.0;
-        if (trace_now && res_light != 0xffffffffu && res_w > 0.0) {
-            Light chosen = velk_light_at(pc.lights_base + res_light);
-            // It stands for its whole 2x2 block.
-            velk_ray_footprint = pixel_width * 2.0;
-            velk_ray_spread = chosen.flags.x == 0u ? 0.01 : 0.0;
-            velk_ray_lift = lod_error;
-            float shadow = velk_eval_shadow(chosen.flags.y, res_light, world_pos, N);
-            velk_ray_footprint = 0.0;
-            velk_ray_spread = 0.0;
-            velk_ray_lift = 0.0;
-            float pdf = res_w / total_w;
-            direct_diffuse = res_NdotL * res_radiance * (shadow / pdf);
-            picked_shadow = shadow;
-        }
-
-        // Rays only find out what each traced pixel picked and whether it is lit. Every pixel
-        // then works out its own light from those.
-        float shared_valid = 1.0;
-        if (pc.direct_samples_id != 0u) {
-            if (trace_now) {
-                bool picked = res_light != 0xffffffffu && res_w > 0.0;
-                imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2,
-                           picked ? vec4(float(res_light), picked_shadow, res_w / total_w, 1.0) : vec4(0.0));
-                return;
-            }
-            vec4 shared_direct = velk_shared_direct(coord, world_pos, N, albedo.rgb, total_w, total_w2, seed);
-            direct_diffuse = shared_direct.rgb;
-            shared_valid = shared_direct.a;
-        }
-
-#ifdef VELK_LIGHT_CELLS
-        direct_diffuse = cells_direct;
-#endif
-
-        // Env lighting: single-sample approximation. Diffuse reads
-        // along N with a deep LOD so it reads roughly the irradiance
-        // average; specular reads the mirror reflection with LOD scaled
-        // by roughness as a cheap GGX-prefilter stand-in (bilinear mips
-        // rather than true GGX-convolved, but it reads right).
-        float env_max_lod = float(textureQueryLevels(
-            velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
-        float spec_lod = roughness * env_max_lod;
-        float diffuse_lod = env_max_lod;
-        vec3 env_diffuse  = env_miss_color_lod(N, diffuse_lod);
-        vec3 env_specular = env_miss_color_lod(reflect(-V, N), spec_lod);
+        // Env lighting: single-sample approximation. Diffuse reads along N with a deep LOD
+        // so it reads roughly the irradiance average; specular reads the mirror reflection
+        // with LOD scaled by roughness as a cheap GGX-prefilter stand-in.
+        float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
+        vec3 env_diffuse = env_miss_color_lod(N, env_max_lod);
+        vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
         vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
-        vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
 
-        // RT ambient occlusion: one short any-hit ray along N. Without
-        // this the env term is unshadowed and dominates outdoor scenes,
-        // so geometry-cast shadows are invisible even when per-light
-        // shadow rays correctly occlude. Binary visibility is crude
-        // (real RT-AO would integrate hemispherical samples) but catches
-        // the dominant case where surfaces sit under overhangs / inside
-        // pockets reading sky they cannot actually see. Range is short
-        // (interior-crevice scale) because at scene scale a longer ray
-        // hits something for nearly every pixel in dense scenes, and
-        // binary occlusion at that point goes black instead of softly
-        // darker. Skipped when no BVH exists so non-RT scenes are
-        // unaffected.
-        // Contact-shadow / ambient occlusion: one short any-hit ray
-        // along the surface normal. Approximates "how much of the
-        // hemisphere above this surface is blocked by close geometry".
-        // Range is short (interior-crevice scale) — we don't try to
-        // catch full furniture-sized contact shadows here because a
-        // longer ray on dense scenes blacks out vertical surfaces
-        // (every wall has something within a meter). For real
-        // long-range contact shadow we'd want stochastic hemisphere
-        // sampling + temporal accumulation; binary single-ray
-        // visibility just covers the obvious crevice case.
-        // Occlusion over less than a pixel's width cannot be resolved, so it is not traced.
-        // The probe field replaces this term, so with probes bound no ray is traced.
-        bool has_gi = pc.gi_probe_id != 0u;
-        float ao = 1.0;
-        const float ao_range = 0.3;
-        if (trace_now && !has_gi && VELK_GLOBALS.bvh_node_count != 0u && ao_range > pixel_width) {
-            Ray ao_r;
-            ao_r.origin = world_pos + N * (0.01 + lod_error);
-            ao_r.dir    = N;
-            ao = trace_any_hit(ao_r, ao_range) ? 0.0 : 1.0;
-        }
-
-        // AO modulates env_diffuse only (the hemisphere-irradiance
-        // approximation that the AO ray actually approximates). It
-        // does NOT modulate env_specular — a mirror reflection is
-        // the radiance arriving along the reflection direction, which
-        // is occluded by whatever sits along *that* ray, not by what
-        // sits along the surface normal. Multiplying specular by AO
-        // makes a metallic sphere on a floor go black on its lower
-        // hemisphere because its outward-pointing normals all point
-        // toward the nearby floor.
-        // Diffuse IRRADIANCE (demodulated, view-independent) for the denoiser:
-        // the stochastic direct term + env diffuse * AO. albedo and the
-        // (1-metallic) factor are reapplied at composite. (Env diffuse's
-        // (1-F_env) energy factor is dropped so it shares the direct term's
-        // albedo*(1-metallic) demodulation; ~minor.)
-        // Ratio estimator (Heitz et al. 2018). What gets denoised is not the
-        // radiance but the quotient of the shadowed estimate by the unshadowed
-        // one. The quotient is visibility, which is low frequency and bounded,
-        // so it survives filtering far better than radiance does: a filter
-        // that would smear a bright light's falloff barely touches a shadow
-        // ratio. The composite multiplies the sharp unshadowed term back in.
-        //
-        // The env term is folded into the same ratio rather than kept beside
-        // it, so the binary AO ray's aliasing is denoised too.
-        // Indirect bounce from the probe field. It joins the UNSHADOWED term
-        // rather than the ratio: it is already a visibility-resolved gather
-        // (the probe rays did the occlusion), so multiplying it by the
-        // stochastic shadow ratio would darken it a second time.
-        vec3 gi = velk_gi_indirect(world_pos, N);
-        // The probe field REPLACES the env-diffuse stand-in rather than adding
-        // to it. `env_diffuse` is one raw radiance sample along N used as
-        // irradiance; the probes compute the same quantity properly, as a
-        // cosine-weighted gather that already includes sky visibility. Adding
-        // both counts the sky twice, which in a daylit scene washes everything
-        // flat - and the probe field supersedes the AO term too, since its
-        // occlusion is real rather than a single 0.3-unit ray.
+        // Indirect light from the probe field, which sees the sky only where it is open.
         // Where no probe could light the surface, the environment stands in.
-        vec3 ambient_unshadowed = has_gi && gi.r >= 0.0 ? gi : env_diffuse;
-        vec3 ambient_shadowed   = ambient_unshadowed * ao;
-        unshadowed_out = unshadowed_direct + ambient_unshadowed;
-        vec3 shadowed_total = direct_diffuse + ambient_shadowed;
-        irr = shadowed_total / max(unshadowed_out, vec3(1e-4));
-        // Alpha marks "this pixel traced a ray this frame". The temporal pass
-        // keeps history untouched where it is 0 rather than folding in a zero.
-        irr_valid = pc.direct_samples_id != 0u ? shared_valid : (trace_now ? 1.0 : 0.0);
-#ifdef VELK_LIGHT_CELLS
-        irr_valid = 1.0;
-#endif
+        vec3 gi = velk_gi_indirect(world_pos, N);
+        vec3 indirect = pc.gi_probe_id != 0u && gi.r >= 0.0 ? gi : env_diffuse;
+
         // The environment map cannot tell whether the sky is visible along the reflection.
         // The field can: how much of the environment's light it finds that way is how much
         // of the sharp reflection stays, and what it finds in place of the sky fills the rest.
+        const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
         vec3 reflected = reflect(-V, N);
         vec3 field_reflection = velk_gi_radiance(world_pos, N, reflected);
         if (field_reflection.r >= 0.0) {
-            const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
             float env_broad = dot(env_miss_color_lod(reflected, env_max_lod), kLuma);
             float sky_seen = env_broad > 1e-4 ? clamp(dot(field_reflection, kLuma) / env_broad, 0.0, 1.0) : 0.0;
             env_specular = env_specular * sky_seen + field_reflection * (1.0 - sky_seen);
         }
-        // Sharp, view-dependent terms (NOT denoised).
-        rest = direct_specular + F_env * env_specular;
-        // Area lights are integrated in closed form, including their
-        // visibility, so their diffuse term carries no noise and must not be
-        // denoised: blurring it would throw away the sharp penumbra the
-        // analytic path exists to produce. It goes to the sharp output
-        // instead, carrying the albedo * (1 - metallic) factor that composite
-        // would otherwise have applied on its way out of the irradiance
-        // image, so the result is identical bar the blur.
-        rest += albedo.rgb * (1.0 - metallic) * area_irr + area_spec;
-        const vec3 kHighlightLuma = vec3(0.2126, 0.7152, 0.0722);
-        float rest_luma = dot(rest, kHighlightLuma);
-        highlight_share = rest_luma > 1e-5 ? clamp(dot(direct_specular, kHighlightLuma) / rest_luma, 0.0, 1.0) : 0.0;
-#ifdef VELK_LIGHT_CELLS
-        // The highlights were shadowed light by light above.
-        highlight_share = 0.0;
-#endif
+
+        color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
+              + area_spec;
+        float lit = dot(unshadowed, kLuma);
+        surface_light = vec4(indirect, lit > 1e-4 ? clamp(dot(direct, kLuma) / lit, 0.0, 1.0) : 1.0);
     }
 
-    // Emissive is additive radiance; part of the sharp output.
-    rest += emissive;
-
-    // Two outputs (raw HDR linear): "rest" (sharp) on output_image_id, diffuse
-    // irradiance on irr_image_id. The denoise/composite pass reprojects +
-    // accumulates the irradiance and folds albedo*(1-metallic)*irr into rest.
-    if (pc.ray_pass != 0u) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
-        if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF32[nonuniformEXT(pc.direct_samples_id)], coord / 2, vec4(0.0));
-        return;
-    }
-    if (pc.direct_samples_id != 0u) imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
-#ifdef VELK_LIGHT_CELLS
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.irr_image_id)], coord, vec4(irr, irr_valid));
-#endif
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(rest, albedo.a));
-    // The unshadowed term the composite multiplies the denoised ratio by. Kept
-    // out of the denoiser deliberately: it is exact and sharp, and it carries
-    // the high-frequency detail (light falloff, N.L) that must not be blurred.
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.unshadowed_image_id)], coord,
-               vec4(unshadowed_out, highlight_share));
-}
-)";
-
-// Diffuse-irradiance TEMPORAL accumulation. Reprojects the noisy stochastic
-// diffuse irradiance by world position (irradiance is view-independent, so the
-// reprojection is exact under camera motion) and folds it into a running mean.
-// Writes only the ping-pong history (irradiance+count, world-position+validity);
-// the spatial+composite pass below filters this history and produces the final
-// image. `reset` discards history on the first frame / resize.
-[[maybe_unused]] constexpr string_view deferred_denoise_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
-
-// velk_globals (set = 1 slot 2) is declared in velk.glsl.
-#define VELK_GLOBALS velk_globals.data[pc.globals_base]
-
-layout(push_constant, scalar) uniform PC {
-    uint globals_base;         // offset 0  (view's FrameGlobals index)
-    uint _pad_globals;
-    uint normal_id;
-    uint worldpos_id;
-    uint irr_id;               // current-frame noisy diffuse irradiance (sampled)
-    uint hist_irr_prev_id;     // sampled
-    uint hist_pos_prev_id;     // sampled
-    uint hist_mom_prev_id;     // sampled (.r = accumulated luminance 2nd moment)
-    uint hist_irr_cur_id;      // storage
-    uint hist_pos_cur_id;      // storage
-    uint hist_mom_cur_id;      // storage
-    uint width;
-    uint height;
-    uint reset;
-} pc;
-
-void main()
-{
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-
-    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
-
-    // Sky / no coverage: store empty history (validity 0).
-    if (dot(world_n, world_n) < 1e-6) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(0.0));
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(0.0));
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_mom_cur_id)], coord, vec4(0.0));
-        return;
-    }
-
-    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-    vec4 cur_s     = velk_texture(pc.irr_id, uv);
-    vec3 cur_irr   = cur_s.rgb;
-    // Alpha 0 means the lighting pass skipped this pixel's ray this frame
-    // (half-rate shadows). There is nothing to fold in, and folding in the
-    // zero would darken it, so history passes through untouched and the
-    // sample count does not advance.
-    bool has_sample = cur_s.a > 0.5;
-    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
-    float cur_lum  = dot(cur_irr, LUMA);
-
-    // Temporal reprojection: where was this world point last frame?
-    vec3 irr_acc = has_sample ? cur_irr : vec3(0.0);
-    float count = has_sample ? 1.0 : 0.0;
-    float m2_acc = has_sample ? cur_lum * cur_lum : 0.0;
-    const bool kAccumulate = false;
-    if (kAccumulate && pc.reset == 0u) {
-        // Positions are relative to the camera, which was elsewhere then.
-        vec3 prev_pos = world_pos + VELK_GLOBALS.cam_moved;
-        vec4 prev_clip = VELK_GLOBALS.prev_view_projection * vec4(prev_pos, 1.0);
-        if (prev_clip.w > 1e-6) {
-            vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
-            if (all(greaterThanEqual(prev_uv, vec2(0.0))) &&
-                all(lessThanEqual(prev_uv, vec2(1.0)))) {
-                vec4 hp = velk_texture(pc.hist_pos_prev_id, prev_uv);
-                vec4 hi = velk_texture(pc.hist_irr_prev_id, prev_uv);
-                // Same surface? World-space distance, tolerance scaled by depth.
-                if (hp.w > 0.5 && length(hp.xyz - prev_pos) < 0.03 * max(prev_clip.w, 1.0)) {
-                    float m2_prev = velk_texture(pc.hist_mom_prev_id, prev_uv).r;
-                    if (has_sample) {
-                        // Fixed accumulation window. Shorter = shorter dynamic-
-                        // occluder trail, slightly noisier static; the spatial pass'
-                        // variance-guided filter cleans the residual. Tunable; the
-                        // spatial pass treats this count as converged.
-                        count = min(hi.a + 1.0, 8.0);
-                        float w = 1.0 / count;
-                        irr_acc = mix(hi.rgb, cur_irr, w);
-                        m2_acc = mix(m2_prev, cur_lum * cur_lum, w);
-                    } else {
-                        irr_acc = hi.rgb;
-                        count = hi.a;
-                        m2_acc = m2_prev;
-                    }
-                }
-            }
-        }
-    }
-
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_irr_cur_id)], coord, vec4(irr_acc, count));
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_pos_cur_id)], coord, vec4(world_pos, 1.0));
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.hist_mom_cur_id)], coord, vec4(m2_acc, 0.0, 0.0, 0.0));
-}
-)";
-
-// Spatial filter + composite. Fills every pixel's visibility from the pixels that traced a
-// ray, one in each 2x2 block, over a normal + plane-distance weighted neighbourhood. Then
-// composites the final image (albedo*(1-metallic)*filtered + sharp rest, read back in place
-// from the output) for the surface blit.
-[[maybe_unused]] constexpr string_view deferred_spatial_composite_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
-
-// velk_globals (set = 1 slot 2) is declared in velk.glsl.
-#define VELK_GLOBALS velk_globals.data[pc.globals_base]
-
-layout(push_constant, scalar) uniform PC {
-    uint globals_base;         // offset 0  (view's FrameGlobals index; cam_pos via VELK_GLOBALS)
-    uint own_pixel;            // 1: every pixel's ratio is its own and exact, so none is filtered
-    uint albedo_id;
-    uint material_id;
-    uint normal_id;
-    uint worldpos_id;
-    uint hist_irr_id;          // accumulated visibility RATIO + count (sampled, neighborhood)
-    uint hist_mom_id;          // accumulated luminance 2nd moment (.r)
-    uint output_id;            // deferred_output: "rest" on read, final on write
-    uint width;
-    uint height;
-    uint unshadowed_id;        // sharp unshadowed diffuse; multiplies the filtered ratio
-    uint probe_grid;           // diagnostic: reconstruct the ratio from an
-                               // N-pixel screen grid; 0 or 1 = per pixel
-} pc;
-
-// One filter tap set, centred on `coord` and using THAT pixel's own geometry
-// as the edge-stop reference. Factored out of main so the screen-grid
-// diagnostic below can run it at grid points instead of only at the shading
-// pixel: a probe sitting there would see its own surface, not the caller's.
-vec3 velk_filter_at(ivec2 coord, vec2 dims)
-{
-    vec2 uv = (vec2(coord) + 0.5) / dims;
-    vec3 n0 = velk_texture(pc.normal_id, uv).xyz;
-    if (dot(n0, n0) < 1e-6) return vec3(0.0);
-
-    vec3 N         = normalize(n0);
-    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
-
-    float depth = max(length(world_pos), 1e-3);
-
-    // Only pixels that traced a ray count, which are one in each 2x2 block, by geometry.
-    // A surface unlike all of them nearby, such as a leaf, takes their plain mean.
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    vec3 any_sum = vec3(0.0);
-    float any_wsum = 0.0;
-    for (int j = -2; j <= 2; ++j) {
-        for (int i = -2; i <= 2; ++i) {
-            ivec2 c2 = coord + ivec2(i, j);
-            if (c2.x < 0 || c2.y < 0 || c2.x >= int(pc.width) || c2.y >= int(pc.height)) continue;
-            if (((c2.x | c2.y) & 1) != 0) continue;
-            vec2 uv2 = (vec2(c2) + 0.5) / dims;
-            vec3 n2 = velk_texture(pc.normal_id, uv2).xyz;
-            if (dot(n2, n2) < 1e-6) continue; // sky neighbour
-            vec3 p2  = velk_texture(pc.worldpos_id, uv2).xyz;
-            vec3 ir2 = velk_texture(pc.hist_irr_id, uv2).rgb;
-            float wn = pow(max(dot(N, normalize(n2)), 0.0), 32.0);
-            float wp = exp(-abs(dot(p2 - world_pos, N)) / (0.05 * depth));
-            float wk = exp(-float(i * i + j * j) * 0.25);
-            float w = wn * wp * wk;
-            sum += ir2 * w;
-            wsum += w;
-            any_sum += ir2 * wk;
-            any_wsum += wk;
-        }
-    }
-    if (wsum > 1e-5) return sum / wsum;
-    return any_wsum > 0.0 ? any_sum / any_wsum : vec3(1.0);
-}
-)"
-                                                                      R"(
-void main()
-{
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec2 dims = vec2(float(pc.width), float(pc.height));
-    vec2 uv = (vec2(coord) + 0.5) / dims;
-
-    vec3 world_n = velk_texture(pc.normal_id, uv).xyz;
-    vec4 rest    = velk_texture(pc.output_id, uv);
-
-    // Sky / no coverage: pass the sharp value through unchanged.
-    if (dot(world_n, world_n) < 1e-6) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, rest);
-        return;
-    }
-
-    vec3 N         = normalize(world_n);
-    vec3 world_pos = velk_texture(pc.worldpos_id, uv).xyz;
-    vec4 albedo    = velk_texture(pc.albedo_id, uv);
-    float metallic = clamp(velk_texture(pc.material_id, uv).r, 0.0, 1.0);
-
-    vec3 irr_out;
-    if (pc.probe_grid > 1u) {
-        // DIAGNOSTIC, not a shipping path. Asks what a screen-space probe
-        // cascade could deliver, without building one: rebuild the visibility
-        // RATIO from probes on an N-pixel grid while falloff and N.L stay per
-        // pixel, which is the same split a cascade would make and needs no new
-        // rays. If the image holds, probe density at this spacing is enough.
-        //
-        // Each grid point runs the FULL filter, which is what an earlier run of
-        // this test got wrong: it interpolated the filter's OUTPUT, so it also
-        // deleted spatial filtering and then read the resulting slow
-        // convergence as a density result.
-        //
-        // Read distant SHARP shadows (building edges, awnings, railings), not
-        // contact shadows. Near occluders are the case this handles well;
-        // bistro's 2-degree sun and 0.3-unit bulbs stay sharp at any distance
-        // and are the case that would kill it. Cost here means nothing: five
-        // filter evaluations per pixel is the diagnostic's price, not the
-        // technique's.
-        int g = int(pc.probe_grid);
-        ivec2 g0 = (coord / g) * g;
-        vec2 f = vec2(coord - g0) / float(g);
-        float depth = max(length(world_pos), 1e-3);
-        vec3 acc = vec3(0.0);
-        float aw = 0.0;
-        for (int j = 0; j < 2; ++j) {
-            for (int i = 0; i < 2; ++i) {
-                ivec2 gc = min(g0 + ivec2(i, j) * g,
-                               ivec2(int(pc.width) - 1, int(pc.height) - 1));
-                vec2 guv = (vec2(gc) + 0.5) / dims;
-                vec3 gn = velk_texture(pc.normal_id, guv).xyz;
-                if (dot(gn, gn) < 1e-6) continue;
-                vec3 gp = velk_texture(pc.worldpos_id, guv).xyz;
-                // Bilinear, then gated on geometry. Without the gate a probe on
-                // the far side of a silhouette bleeds across it and the test
-                // would report edge halos that a real implementation rejects,
-                // rather than the resolution question being asked.
-                float bw = ((i == 0) ? (1.0 - f.x) : f.x)
-                         * ((j == 0) ? (1.0 - f.y) : f.y);
-                bw *= pow(max(dot(N, normalize(gn)), 0.0), 32.0);
-                bw *= exp(-abs(dot(gp - world_pos, N)) / (0.05 * depth));
-                if (bw <= 1e-6) continue;
-                acc += velk_filter_at(gc, dims) * bw;
-                aw += bw;
-            }
-        }
-        // All four rejected: fall back to this pixel, as a real implementation
-        // would have to.
-        irr_out = (aw > 1e-5) ? (acc / aw) : velk_filter_at(coord, dims);
-    } else if (pc.own_pixel != 0u) {
-        irr_out = texelFetch(velk_textures[nonuniformEXT(pc.hist_irr_id)], coord, 0).rgb;
-    } else {
-        irr_out = velk_filter_at(coord, dims);
-    }
-
-    // irr_out is the filtered VISIBILITY RATIO; the radiance it scales is read
-    // sharp and unfiltered here, so light falloff and N.L keep their detail
-    // and only the visibility carries the filter's blur.
-    vec4 unshadowed_share = velk_texture(pc.unshadowed_id, uv);
-    vec3 unshadowed = unshadowed_share.rgb;
-    // The lights' highlights, in the alpha as a share of `rest`, are shadowed like their diffuse.
-    float seen = clamp(dot(irr_out.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-    vec3 sharp = rest.rgb * (1.0 - unshadowed_share.a * (1.0 - seen));
-    vec3 final = albedo.rgb * (1.0 - metallic) * (unshadowed * irr_out) + sharp;
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(final, rest.a));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(color + emissive, albedo.a));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.surface_light_id)], coord, surface_light);
 }
 )";
 
@@ -3034,15 +2381,14 @@ void main()
 // This is the part that keeps cells up, for light_cells_update_main_src: its
 // velk_cells_begin makes, checks and traces the cells of a pixel. Passes that only read use
 // light_cells_read_src, which is far smaller. Where the cells are comes as one word of the
-// push constants, CELLS_HEADER, under the name the deferred passes have for a field their
-// shaders do not use: the word in the culling arena of eight words, which are the table's
+// push constants, CELLS_HEADER: the word in the culling arena of eight words, which are the table's
 // first word, its slots, how many pixels across a cell is, the first word of the list of
 // changes, the G-buffer's id and surface attachments, and two spare.
 [[maybe_unused]] constexpr string_view light_cells_src = R"(
 layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
 )" VELK_LIGHT_CELL_GLSL R"(
-#define CELLS_HEADER pc.shadow_debug_image_id
+#define CELLS_HEADER pc.cells_header
 // The header's words, read once a thread by velk_cells_load, which a main calls first.
 uint cells_header[8];
 void velk_cells_load()
@@ -3323,7 +2669,7 @@ shared bool s_moving[64];
 // Traces what light_cells_touch_src listed. A thread group takes one cell and one light,
 // and each of its threads one ray, so that no thread traces ray after ray while the pass
 // waits for it. The first thread then puts together what the cell holds for that light.
-// With `pc.ray_pass` 2 the group empties the list instead, for after the tracing, and
+// With `pc.mode` 2 the group empties the list instead, for after the tracing, and
 // works out how often lights that moving things could be in the way of are traced again:
 // as often as the room the rest of the list left this frame allows.
 void main()
@@ -3331,7 +2677,7 @@ void main()
     velk_cells_load();
     uint lane = gl_LocalInvocationIndex;
     uint work = CELLS_WORK;
-    if (pc.ray_pass == 2u) {
+    if (pc.mode == 2u) {
         if (gl_WorkGroupID.x == 0u && lane == 0u) {
             uint asked = velk_light_cell_words.data[work];
             uint load = velk_light_cell_words.data[work + kCellWorkLiveLoad];
@@ -3486,7 +2832,7 @@ vec3 N;
 uint side;
 vec4 normal_and_error;
 
-// The pass runs three times a frame, `pc.ray_pass` saying which round it is. The first
+// The pass runs three times a frame, `pc.mode` saying which round it is. The first
 // lists only the cells kCellUp levels up that were never traced, which pixels waiting for
 // their own cell show meanwhile; one covers many cells, so a view coming into sight has a
 // rough shadow at once. The second lists the other cells never traced, which show as gaps.
@@ -3519,16 +2865,16 @@ uint velk_cell_keep(VelkLightCell c, int up)
 {
     float cell_size = velk_light_cell_size(c.level);
     bool made;
-    if (pc.ray_pass == kCellRoundCoarse && up != kCellUp) return velk_cell_find(c, false, made);
+    if (pc.mode == kCellRoundCoarse && up != kCellUp) return velk_cell_find(c, false, made);
     uint own = velk_cell_find(c, true, made);
     uint now = VELK_GLOBALS.present_counter;
-    if (pc.ray_pass != kCellRoundRest && own != kNoCell && !made
+    if (pc.mode != kCellRoundRest && own != kNoCell && !made
         && (velk_light_cell_words.data[own] & kCellReady) != 0u) {
         return own;
     }
     // Several pixels share a cell. The first to come to it this frame notes it as read and
     // keeps it up; the rest only use it. The first time through, holding the cell does that.
-    if (pc.ray_pass == kCellRoundRest && own != kNoCell && !made
+    if (pc.mode == kCellRoundRest && own != kNoCell && !made
         && (velk_light_cell_words.data[own + 7u] == now || atomicExchange(velk_light_cell_words.data[own + 7u], now) == now)) {
         return own;
     }
@@ -3564,7 +2910,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
         // trace pass works out how many frames from how many there were.
         uvec2 live = uvec2(0u);
         bool live_due = false;
-        if (pc.ray_pass == kCellRoundRest && velk_light_cell_words.data[own] == (tag | kCellReady)) {
+        if (pc.mode == kCellRoundRest && velk_light_cell_words.data[own] == (tag | kCellReady)) {
             live = velk_cell_live_lights(own);
             uint live_lights = bitCount(live.x) + bitCount(live.y);
             if (live_lights != 0u) {
@@ -3610,7 +2956,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
             uint limit = CELLS_ENTRIES;
             uint first = entries > 0u ? atomicAdd(velk_light_cell_words.data[CELLS_WORK], entries) : 0u;
             velk_cell_stat(kStatAsked, entries);
-            if (pc.ray_pass == kCellRoundCoarse) velk_cell_stat(kStatCoarseAsked, entries);
+            if (pc.mode == kCellRoundCoarse) velk_cell_stat(kStatCoarseAsked, entries);
             if (changed) velk_cell_stat(kStatChanged, 1u);
             if (changed && which == uvec2(0xFFFFFFFFu)) velk_cell_stat(kStatStale, 1u);
             if (made) velk_cell_stat(kStatMade, 1u);
@@ -3622,7 +2968,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
                 }
                 velk_light_cell_words.data[own] = as_it_was;
                 velk_cell_stat(kStatRefused, 1u);
-                if (pc.ray_pass == kCellRoundCoarse) velk_cell_stat(kStatCoarseRefused, 1u);
+                if (pc.mode == kCellRoundCoarse) velk_cell_stat(kStatCoarseRefused, 1u);
             } else {
                 velk_cell_stat(kStatListed, entries);
                 velk_cell_stat(kStatCells, 1u);
@@ -3705,9 +3051,9 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     // larger are shown meanwhile, and kept up for that. Many pixels share one of them, so a
     // view coming into sight has them soon.
     bool waiting = own == kNoCell || (velk_light_cell_words.data[own] & kCellReady) == 0u;
-    if (pc.ray_pass == kCellRoundCoarse && !waiting) return true;
-    if (pc.ray_pass == kCellRoundRest && own == kNoCell) velk_cell_stat(kStatNoSlot, 1u);
-    if (pc.ray_pass == kCellRoundRest && waiting) velk_cell_stat(kStatWaiting, 1u);
+    if (pc.mode == kCellRoundCoarse && !waiting) return true;
+    if (pc.mode == kCellRoundRest && own == kNoCell) velk_cell_stat(kStatNoSlot, 1u);
+    if (pc.mode == kCellRoundRest && waiting) velk_cell_stat(kStatWaiting, 1u);
     uint axis = side >> 1u;
     uint ua = (axis + 1u) % 3u;
     uint va = (axis + 2u) % 3u;
@@ -3719,7 +3065,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
             c.at[ua] = nearest[ua] + k % 3 - 1;
             c.at[va] = nearest[va] + k / 3 - 1;
             uint kept = velk_cell_keep(c, up);
-            if (k == 4 && waiting && pc.ray_pass == kCellRoundRest
+            if (k == 4 && waiting && pc.mode == kCellRoundRest
                 && (kept == kNoCell || (velk_light_cell_words.data[kept] & kCellReady) == 0u)) {
                 velk_cell_stat(kStatCoarseWaiting, 1u);
             }
@@ -3743,16 +3089,15 @@ void main()
 }
 )";
 
-/// Reads the light cells, and defines VELK_LIGHT_CELLS. Follows deferred_compute_prelude_src.
+/// Reads the light cells. Follows deferred_compute_prelude_src.
 /// A pass calls velk_cells_begin for a pixel and then velk_cells_light_through for each
 /// light. It writes nothing and traces nothing: light_cells_update_main_src keeps the cells
 /// up. See light_cells_src for what a cell holds and for CELLS_HEADER.
 [[maybe_unused]] constexpr string_view light_cells_read_src = R"(
-#define VELK_LIGHT_CELLS
 layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 1, binding = 16, std430) readonly buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
 )" VELK_LIGHT_CELL_GLSL R"(
-#define CELLS_HEADER pc.shadow_debug_image_id
+#define CELLS_HEADER pc.cells_header
 // The header's words this shader uses, read once a pixel by velk_cells_begin.
 uint cells_word;
 uint cells_slots;
@@ -3976,7 +3321,7 @@ float velk_cells_light_through(uint i)
 /// angle at the pixel times what the cells say gets through. Mode 5: green where the
 /// pixel's own cell is traced, red where not.
 [[maybe_unused]] constexpr string_view light_cells_main_src = R"(
-#define CELLS_MODE pc.ray_pass
+#define CELLS_MODE pc.mode
 
 void main()
 {
@@ -5106,8 +4451,6 @@ void main()
     GlobalData g = velk_globals.data[pc.globals_base];
     if (pc.mode == 2u && pc.atlas != 0u) {
         light = max(dot(velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz), kLuma), 1e-4);
-    } else if (pc.mode == 3u || pc.mode == 4u) {
-        light = max(dot(color, kLuma), 1e-4);
     } else if (pc.mode == 5u) {
         light = max(dot(albedo, kLuma), 1e-4);
     }
@@ -5172,7 +4515,7 @@ void main()
 
 /// Diagnostic: for each pixel asked for, writes 70 words: the GI field's irradiance over pi,
 /// the sky along the normal at its broadest, then from the frame's textures the albedo, the
-/// final HDR colour, the lighting before shadows, and the normal.
+/// final HDR colour, the indirect light lighting used, and the normal.
 inline constexpr string_view gi_pixels_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -5191,7 +4534,7 @@ layout(push_constant, scalar) uniform PC {
     uint normal_id;
     uint pos_id;
     uint hdr_id;
-    uint unshadowed_id;
+    uint surface_light_id;
     uint env_id;
     float intensity;
     float rotation;
@@ -5229,7 +4572,7 @@ void main()
     put(at + 3u, sky);
     put(at + 6u, texelFetch(velk_textures[nonuniformEXT(pc.albedo_id)], p, 0).rgb);
     put(at + 9u, texelFetch(velk_textures[nonuniformEXT(pc.hdr_id)], p, 0).rgb);
-    put(at + 12u, texelFetch(velk_textures[nonuniformEXT(pc.unshadowed_id)], p, 0).rgb);
+    put(at + 12u, texelFetch(velk_textures[nonuniformEXT(pc.surface_light_id)], p, 0).rgb);
     put(at + 15u, N);
 
     // Then the point, the level a surface there uses, what each level holds for it (green),

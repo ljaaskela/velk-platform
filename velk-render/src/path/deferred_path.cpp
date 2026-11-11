@@ -102,7 +102,7 @@ namespace {
 // (`layout(push_constant) PC` in deferred_compute_prelude_src).
 VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t globals_base;     // FrameGlobals arena index, GLSL pc.globals_base
-    uint32_t direct_samples_id; // half-size lights picked and their shadow results; 0 = each pixel alone
+    uint32_t surface_light_id; // lighting's light on the surface, for far instances
     float    cam_pos[4];
     uint32_t output_image_id;
     uint32_t albedo_tex_id;
@@ -114,62 +114,21 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t height;
     uint32_t light_count;
     uint32_t env_texture_id;
-    uint32_t shadow_debug_image_id;
+    uint32_t cells_header;     // word of the light cells' header in the culling arena
     uint32_t ltc_matrix_id;    // LTC transform table; 0 = area specular off
     uint32_t lights_base;      // light array index (set = 1 slot 5)
     uint32_t ltc_magnitude_id; // LTC energy / Fresnel table
     float    env_params[2];    // x = intensity, y = rotation_rad (inline)
-    uint32_t irr_image_id;     // visibility RATIO output (denoised downstream)
-    uint32_t unshadowed_image_id; // unshadowed diffuse output (sharp)
-    uint32_t ray_pass;         // 1: traces at half size, writing visibility only. 0: shades every pixel
+    uint32_t spare0;
+    uint32_t spare1;
+    uint32_t mode;             // what a pass is to do, for passes that do more than one thing
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
     int32_t  gi_finest;        // ladder index of the probe field's finest level
-    uint32_t light_loop_probe; // diagnostic: extra per-light ALU repeats
+    uint32_t spare2;
     uint32_t gi_maps_id;       // GI probe irradiance maps
 };
 static_assert(sizeof(DeferredComputePushC) == 128, "Deferred compute PushC layout mismatch");
 
-// Push constants for the diffuse-irradiance TEMPORAL pass (scalar layout;
-// mirrors the PC block in deferred_denoise_compute_src).
-VELK_GPU_STRUCT DenoisePushC {
-    uint32_t globals_base;
-    uint32_t _pad_globals;
-    uint32_t normal_id;
-    uint32_t worldpos_id;
-    uint32_t irr_id;
-    uint32_t hist_irr_prev_id;
-    uint32_t hist_pos_prev_id;
-    uint32_t hist_mom_prev_id;
-    uint32_t hist_irr_cur_id;
-    uint32_t hist_pos_cur_id;
-    uint32_t hist_mom_cur_id;
-    uint32_t width;
-    uint32_t height;
-    uint32_t reset;
-};
-
-// Push constants for the spatial filter + composite pass (mirrors the PC block
-// in deferred_spatial_composite_compute_src).
-VELK_GPU_STRUCT SpatialPushC {
-    uint32_t globals_base;
-    uint32_t own_pixel;
-    uint32_t albedo_id;
-    uint32_t material_id;
-    uint32_t normal_id;
-    uint32_t worldpos_id;
-    uint32_t hist_irr_id;
-    uint32_t hist_mom_id;
-    uint32_t output_id;
-    uint32_t width;
-    uint32_t height;
-    uint32_t unshadowed_id;
-    uint32_t probe_grid;
-};
-
-// Diagnostic: rebuild the visibility ratio from probes on a screen grid of this
-// spacing in pixels, to ask what a screen-space probe cascade could deliver
-// before building one. Unset or 1 keeps the per-pixel path. VELK_SS_PROBE_GRID=4
-// is the spacing the sizing argument assumes (~60k probes at 1280x750).
 uint32_t env_uint(const char* name, long lo, long hi)
 {
     const auto parse = [&](const char* v) -> uint32_t {
@@ -190,28 +149,12 @@ uint32_t env_uint(const char* name, long lo, long hi)
 #endif
 }
 
-uint32_t ss_probe_grid() { return env_uint("VELK_SS_PROBE_GRID", 2, 64); }
-
-// Diagnostic: repeat each light's per-pixel ALU this many extra times, to price
-// what clustered light culling would remove. It adds work instead of removing
-// it, so the chosen light, the shadow ray and the image are unchanged and ray
-// coherence cannot drift into the measurement. 1 doubles the per-light ALU.
-uint32_t light_loop_probe() { return env_uint("VELK_LIGHT_LOOP_PROBE", 1, 16); }
-
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
 uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4); }
 
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
 uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 5); }
-
-// Whether lighting takes its shadows from the light cells, from VELK_LIGHT_CELLS. Off unless
-// set to other than 0.
-bool light_cells_enabled()
-{
-    const char* value = std::getenv("VELK_LIGHT_CELLS");
-    return value && value[0] != '0';
-}
 
 // How many rays a frame may trace to keep the light cells up, from VELK_LIGHT_CELL_RAYS.
 // 262,144 unless set. Cells past that wait for a later frame. A light on a cell is traced
@@ -221,9 +164,6 @@ uint32_t light_cell_rays()
     const uint32_t rays = env_uint("VELK_LIGHT_CELL_RAYS", 1, 100000000);
     return rays != 0u ? rays : 262144u;
 }
-
-// Whether anything reads the light cells this frame.
-bool light_cells_in_use() { return light_cells_enabled() || light_cells_debug_mode() >= 4; }
 
 // How many pixels across a light cell is on screen, from VELK_LIGHT_CELL_PIXELS. 4 unless set.
 float light_cell_pixels()
@@ -236,15 +176,8 @@ float light_cell_pixels()
 // can switch it while running. See gi_debug_compute_src.
 uint32_t gi_debug_mode() { return env_uint("VELK_GI_DEBUG", 1, 7); }
 
-// Shares lights picked and their shadow results between pixels, unless VELK_DIRECT_SHARE is 0.
-// Read each frame so that an app can switch it while running.
+// Render test measurements, while VELK_TEST_DIAGNOSTICS is set.
 bool test_diagnostics_enabled() { return std::getenv("VELK_TEST_DIAGNOSTICS") != nullptr; }
-
-bool direct_share_enabled()
-{
-    const char* value = std::getenv("VELK_DIRECT_SHARE");
-    return !value || value[0] != '0';
-}
 
 // Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
 bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
@@ -390,8 +323,7 @@ IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_are
                                                 string_view ray_motion, float ray_motion_reach)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights, with_medium, ray_motion, ray_motion_reach,
-                                             light_cells_enabled() ? 1u : 0u);
+                                             with_area_lights, with_medium, ray_motion, ray_motion_reach, 1u);
 }
 
 namespace {
@@ -627,7 +559,7 @@ void DeferredPath::ensure_probe_rays(ViewState& vs, FrameContext& ctx)
     if (test_diagnostics_enabled() && !vs.test_words.valid()) {
         vs.test_words = arena->alloc(uint64_t(kTestWords) * kTestSlots * sizeof(uint32_t));
     }
-    if (light_cells_in_use() && !vs.light_cells.valid()) {
+    if (!vs.light_cells.valid()) {
         vs.light_cell_header = arena->alloc(uint64_t(kCellHeaderWords) * sizeof(uint32_t));
         const uint64_t bytes = uint64_t(kCellSlots) * kCellWords * sizeof(uint32_t);
         vs.light_cells = arena->alloc(bytes);
@@ -895,30 +827,6 @@ bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)
     return true;
 }
 
-IGpuPipeline::Ptr DeferredPath::ensure_denoise_pipeline(FrameContext& ctx)
-{
-    if (!ctx.render_ctx) return {};
-    // Standalone compute; fixed key (no snippet variance). Bit 62 set to match
-    // the compute-pipeline key convention.
-    constexpr uint64_t key = 0x4465'6e6f'6973'6531ULL;
-    if (auto p = ctx.render_ctx->pipelines().find(
-            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
-        return p;
-    }
-    return ctx.render_ctx->pipelines().compile_compute(deferred_denoise_compute_src, key);
-}
-
-IGpuPipeline::Ptr DeferredPath::ensure_spatial_pipeline(FrameContext& ctx)
-{
-    if (!ctx.render_ctx) return {};
-    constexpr uint64_t key = 0x5370'6174'6961'6c31ULL;
-    if (auto p = ctx.render_ctx->pipelines().find(
-            PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0})) {
-        return p;
-    }
-    return ctx.render_ctx->pipelines().compile_compute(deferred_spatial_composite_compute_src, key);
-}
-
 IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int height,
                                                   FrameContext& /*ctx*/,
                                                   IRenderGraph& graph)
@@ -1020,20 +928,12 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_gi_pixels_pass(vs, render_view, ctx, graph);
     emit_gi_reference_pass(vs, render_view, ctx, graph);
     emit_gi_truth_pass(vs, render_view, ctx, graph);
-    if (light_cells_in_use() && prepare_light_cells(vs, render_view, ctx)) {
+    if (prepare_light_cells(vs, render_view, ctx)) {
         emit_light_cells_update_pass(vs, render_view, ctx, graph);
     }
     emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                        static_cast<int>(vs.gbuffer_size.x),
                        static_cast<int>(vs.gbuffer_size.y), graph);
-    // Temporally accumulate the noisy diffuse irradiance (writes history), then
-    // spatially filter it (count-driven) + composite the final image + blit.
-    emit_temporal_pass(entry, vs, render_view, ctx,
-                       static_cast<int>(vs.gbuffer_size.x),
-                       static_cast<int>(vs.gbuffer_size.y), graph);
-    emit_spatial_composite_pass(entry, vs, render_view, color_target, ctx,
-                                static_cast<int>(vs.gbuffer_size.x),
-                                static_cast<int>(vs.gbuffer_size.y), graph);
     emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
     if (test_diagnostics_enabled()) {
@@ -1311,7 +1211,7 @@ void DeferredPath::emit_gi_reference_pass(ViewState& vs, const RenderView& rende
 void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const char* request = std::getenv("VELK_GI_PIXELS");
-    if (!request || !vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known || !vs.deferred_output || !vs.unshadowed || !vs.gbuffer) return;
+    if (!request || !vs.gi_probes || !vs.gi_probe_irradiance || !vs.gi_finest_known || !vs.deferred_output || !vs.surface_light || !vs.gbuffer) return;
     int32_t pixels[12]{};
     uint32_t count = 0;
     for (const char* at = request; at && *at && count < 6;) {
@@ -1332,7 +1232,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         arena->read_at(vs.gi_pixels.offset(), out, sizeof(out));
         for (uint32_t i = 0; i < count; ++i) {
             const float* s = out + i * kWordsPerPixel;
-            VELK_LOG(I, "gi_px frame=%llu at=%d,%d field=%.3f,%.3f,%.3f sky=%.3f,%.3f,%.3f albedo=%.3f,%.3f,%.3f hdr=%.3f,%.3f,%.3f unshadowed=%.3f,%.3f,%.3f n=%.2f,%.2f,%.2f",
+            VELK_LOG(I, "gi_px frame=%llu at=%d,%d field=%.3f,%.3f,%.3f sky=%.3f,%.3f,%.3f albedo=%.3f,%.3f,%.3f hdr=%.3f,%.3f,%.3f indirect=%.3f,%.3f,%.3f n=%.2f,%.2f,%.2f",
                      static_cast<unsigned long long>(ctx.present_counter), pixels[i * 2], pixels[i * 2 + 1], s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11],
                      s[12], s[13], s[14], s[15], s[16], s[17]);
             VELK_LOG(I, "gi_levels at=%d,%d finest=%d used=%.0f rel=%.0f,%.0f,%.0f by_level=%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
@@ -1358,7 +1258,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         {
             uint32_t word, atlas, maps, globals_base;
             int32_t finest;
-            uint32_t albedo_id, normal_id, pos_id, hdr_id, unshadowed_id, env_id;
+            uint32_t albedo_id, normal_id, pos_id, hdr_id, surface_light_id, env_id;
             float intensity, rotation;
             uint32_t count;
             int32_t pixels[12];
@@ -1373,7 +1273,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         pc.normal_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
         pc.pos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
         pc.hdr_id = handle(vs.deferred_output);
-        pc.unshadowed_id = handle(vs.unshadowed);
+        pc.surface_light_id = handle(vs.surface_light);
         pc.env_id = render_view.env.texture_id;
         pc.intensity = render_view.env.intensity;
         pc.rotation = render_view.env.rotation_rad;
@@ -1394,7 +1294,7 @@ void DeferredPath::emit_gi_pixels_pass(ViewState& vs, const RenderView& render_v
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gi_probe_irradiance));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.surface_light));
         rec.held.push_back(std::move(pipeline));
     });
 }
@@ -1832,8 +1732,8 @@ void DeferredPath::emit_test_diagnostics_pass(ViewState& vs, const RenderView& r
         // What the flicker measure follows: the finished image unless told otherwise.
         const char* source = std::getenv("VELK_TEST_FLICKER_SOURCE");
         const auto from = [&](const char* name) { return source && std::strcmp(source, name) == 0; };
-        const uint32_t measure_mode = from("field") ? 2u : from("unshadowed") ? 3u : from("ratio") ? 4u : from("albedo") ? 5u : 1u;
-        pc.color_id = measure_mode == 3u ? handle(vs.unshadowed) : measure_mode == 4u ? handle(vs.diffuse_irr) : handle(vs.deferred_output);
+        const uint32_t measure_mode = from("field") ? 2u : from("albedo") ? 5u : 1u;
+        pc.color_id = handle(vs.deferred_output);
         pc.history_id = handle(previous);
         pc.output_id = handle(current);
         pc.width = width;
@@ -2134,7 +2034,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     pc.width = vs.gbuffer_size.x;
     pc.height = vs.gbuffer_size.y;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
-    pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    pc.cells_header = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
@@ -2156,9 +2056,9 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         DispatchCall gaps_dc = dc;
         DispatchCall rest_dc = dc;
         DeferredComputePushC round_pc = pc;
-        round_pc.ray_pass = 1;
+        round_pc.mode = 1;
         std::memcpy(gaps_dc.root_constants, &round_pc, sizeof(round_pc));
-        round_pc.ray_pass = 2;
+        round_pc.mode = 2;
         std::memcpy(rest_dc.root_constants, &round_pc, sizeof(round_pc));
 
         // What is listed, a group of threads an entry. Then the list is emptied.
@@ -2172,7 +2072,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         std::memcpy(trace_dc.root_constants, &trace_pc, sizeof(trace_pc));
         DispatchCall empty_dc = trace_dc;
         empty_dc.groups_x = 1;
-        trace_pc.ray_pass = 2;
+        trace_pc.mode = 2;
         std::memcpy(empty_dc.root_constants, &trace_pc, sizeof(trace_pc));
 
         cmd->begin_recording();
@@ -2218,8 +2118,7 @@ void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render
         if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
     }
 
-    // The deferred compute push constants. Where the cells are goes in a field the deferred
-    // shaders do not read, and the mode in another. See CELLS_HEADER and CELLS_MODE.
+    // The deferred compute push constants. See CELLS_HEADER and CELLS_MODE.
     const auto attachment = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
     DeferredComputePushC pc{};
     pc.globals_base = render_view.view_globals_base;
@@ -2234,11 +2133,11 @@ void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render
     pc.width = vs.gbuffer_size.x;
     pc.height = vs.gbuffer_size.y;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
-    pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    pc.cells_header = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
-    pc.ray_pass = mode;
+    pc.mode = mode;
 
     bool dirty = true;
     emit_cached_view_pass(vs.light_cells_pass, dirty, "light_cells", graph, [&](CachedPassRecording& rec) {
@@ -2368,55 +2267,30 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.deferred_output_tex = graph.resources().find_texture(vs.deferred_output.get());
         vs.lighting_dirty = true;
     }
-    if (!vs.deferred_output) return;
+    if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
 
-    if (!vs.shadow_debug || vs.output_size != want) {
-        TextureDesc td{};
-        td.width = w;
-        td.height = h;
-        td.format = PixelFormat::RGBA32F;
-        td.usage = TextureUsage::Storage;
-        vs.shadow_debug = graph.resources().create_render_texture(td);
-        vs.shadow_debug_tex = graph.resources().find_texture(vs.shadow_debug.get());
-        vs.lighting_dirty = true;
-    }
-
-    // The ratio-estimator pair. `diffuse_irr` carries the noisy VISIBILITY
-    // RATIO that the denoiser filters; `unshadowed` carries the exact radiance
-    // it scales, read sharp at composite. Split this way so the filter only
-    // ever blurs visibility, never falloff or N.L.
-    if (!vs.diffuse_irr || vs.output_size != want) {
+    if (!vs.surface_light || vs.output_size != want) {
         TextureDesc td{};
         td.width = w;
         td.height = h;
         td.format = PixelFormat::RGBA16F;
         td.usage = TextureUsage::Storage;
-        vs.diffuse_irr = graph.resources().create_render_texture(td);
-        vs.diffuse_irr_tex = graph.resources().find_texture(vs.diffuse_irr.get());
-        vs.unshadowed = graph.resources().create_render_texture(td);
-        vs.unshadowed_tex = graph.resources().find_texture(vs.unshadowed.get());
+        vs.surface_light = graph.resources().create_render_texture(td);
         vs.lighting_dirty = true;
     }
+    if (!vs.surface_light) return;
     vs.output_size = want;
 
-    const bool share_direct = direct_share_enabled() && vs.gi_probes && vs.gi_field_ready && !light_cells_enabled();
-    if (share_direct && (!vs.direct_samples || vs.direct_samples_size != want)) {
-        TextureDesc td{};
-        td.width = (w + 1) / 2;
-        td.height = (h + 1) / 2;
-        td.format = PixelFormat::RGBA32F;
-        td.usage = TextureUsage::Storage;
-        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
-        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
-        td.sampler.mag_filter = SamplerFilter::Nearest;
-        td.sampler.min_filter = SamplerFilter::Nearest;
-        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
-        vs.direct_samples = graph.resources().create_render_texture(td);
-        vs.direct_samples_size = want;
-        vs.lighting_dirty = true;
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex && ctx.resources) dst_tex = ctx.resources->find_texture(color_target.get());
     }
-    if (share_direct != vs.direct_share_on) {
-        vs.direct_share_on = share_direct;
+    if (dst_tex != vs.last_output_dst) {
+        vs.last_output_dst = dst_tex;
         vs.lighting_dirty = true;
     }
 
@@ -2450,11 +2324,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     auto material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
     auto emissive_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Emissive));
 
-    // Lights and env come pre-resolved from RenderView. ViewPreparer
-    // registered shadow techniques against the snippet registry and
-    // stamped flags[1] with the registered id; the deferred compute's
-    // velk_eval_shadow switch is composed from the same registry, so
-    // any tech ordering works.
+    // Lights and env come pre-resolved from RenderView; shadows come from the light cells.
     DeferredComputePushC pc{};
     pc.globals_base = render_view.view_globals_base;
     pc.cam_pos[0] = render_view.cam_pos.x;
@@ -2471,13 +2341,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.height = static_cast<uint32_t>(h);
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.env_texture_id = render_view.env.texture_id;
-    pc.shadow_debug_image_id = static_cast<uint32_t>(vs.shadow_debug->get_gpu_handle(GpuResourceKey::Default));
-    // With light cells the shader reads no such image, and the field says where the cells
-    // are. See CELLS_HEADER in light_cells_src.
-    const bool cells = light_cells_enabled() && vs.light_cell_header.valid();
-    if (cells) {
-        pc.shadow_debug_image_id = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
-    }
+    pc.cells_header = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
+    pc.surface_light_id = static_cast<uint32_t>(vs.surface_light->get_gpu_handle(GpuResourceKey::Default));
     // Zero means "no table", which the shader reads as diffuse-only area
     // lights rather than as a black highlight.
     const bool ltc_ready = ensure_ltc_tables(ctx, graph);
@@ -2486,23 +2351,14 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
-    pc.irr_image_id = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
     if (vs.gi_probes && vs.gi_field_ready) {
         pc.gi_probe_id =
             static_cast<uint32_t>(vs.gi_probes->get_gpu_handle(GpuResourceKey::Default));
         pc.gi_finest = vs.gi_finest;
         pc.gi_maps_id = static_cast<uint32_t>(vs.gi_probe_irradiance->get_gpu_handle(GpuResourceKey::Default));
     }
-    if (share_direct && vs.direct_samples) {
-        pc.direct_samples_id = static_cast<uint32_t>(vs.direct_samples->get_gpu_handle(GpuResourceKey::Default));
-    }
-    pc.unshadowed_image_id =
-        static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
-    pc.light_loop_probe = light_loop_probe();
 
-    // No surface blit here anymore: the lighting pass writes the "rest" image
-    // (deferred_output) + diffuse irradiance; the denoise/composite pass
-    // produces the final image and blits it.
+    // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
         vs.cached_lighting_pass, vs.lighting_dirty, "deferred.lighting",
         graph,
@@ -2515,139 +2371,32 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             dc.root_constants_size = sizeof(pc);
             std::memcpy(dc.root_constants, &pc, sizeof(pc));
 
-            DeferredComputePushC ray_pc = pc;
-            ray_pc.ray_pass = 1;
-            DispatchCall ray_dc = dc;
-            ray_dc.groups_x = ((w + 1) / 2 + 7) / 8;
-            ray_dc.groups_y = ((h + 1) / 2 + 7) / 8;
-            std::memcpy(ray_dc.root_constants, &ray_pc, sizeof(ray_pc));
-
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 cmd->begin_recording();
                 cmd->push_label("DeferredPath: lighting");
-                // Light cells hold the shadows, so no pixel traces any.
-                if (!cells) cmd->record_dispatch(ray_dc);
-                // Every pixel reads what the traced pixels wrote.
-                if (pc.direct_samples_id != 0u) cmd->record_global_barrier();
                 cmd->record_dispatch(dc);
+                if (src_tex && dst_tex) {
+                    cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+                }
                 cmd->pop_label();
                 cmd->end_recording();
                 rec.cmd = std::move(cmd);
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
-            if (pc.direct_samples_id != 0u) {
-                rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.direct_samples));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.surface_light));
+            if (color_target) {
+                rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
             }
             // Hold the lighting compute pipeline strong (cache is weak).
             rec.held.push_back(std::move(lighting_pipeline));
         });
 }
 
-void DeferredPath::emit_temporal_pass(IViewEntry& /*entry*/, ViewState& vs,
-                                      const RenderView& render_view,
-                                      FrameContext& ctx,
-                                      int w, int h,
-                                      IRenderGraph& graph)
-{
-    if (!vs.diffuse_irr || !vs.gbuffer) return;
-
-    uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-    if (!vs.hist_irr[0] || vs.hist_size != want) {
-        auto make = [&]() {
-            TextureDesc td{};
-            td.width = w;
-            td.height = h;
-            td.format = PixelFormat::RGBA16F;
-            td.usage = TextureUsage::Storage;
-            return graph.resources().create_render_texture(td);
-        };
-        for (int i = 0; i < 2; ++i) {
-            vs.hist_irr[i] = make();
-            vs.hist_pos[i] = make();
-            vs.hist_mom[i] = make();
-            vs.hist_irr_tex[i] = graph.resources().find_texture(vs.hist_irr[i].get());
-            vs.hist_pos_tex[i] = graph.resources().find_texture(vs.hist_pos[i].get());
-            vs.hist_mom_tex[i] = graph.resources().find_texture(vs.hist_mom[i].get());
-        }
-        vs.hist_size = want;
-        vs.denoise_reset_pending = true; // fresh (garbage) history
-    }
-    if (!vs.hist_irr[0] || !vs.hist_irr[1]) return;
-
-    auto temporal_pipeline = ensure_denoise_pipeline(ctx);
-    if (!temporal_pipeline) return;
-
-    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
-
-    DenoisePushC pc{};
-    pc.globals_base = render_view.view_globals_base;
-    pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
-    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
-    pc.irr_id      = static_cast<uint32_t>(vs.diffuse_irr->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_irr_prev_id = static_cast<uint32_t>(vs.hist_irr[parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_pos_prev_id = static_cast<uint32_t>(vs.hist_pos[parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_mom_prev_id = static_cast<uint32_t>(vs.hist_mom[parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_irr_cur_id  = static_cast<uint32_t>(vs.hist_irr[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_pos_cur_id  = static_cast<uint32_t>(vs.hist_pos[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_mom_cur_id  = static_cast<uint32_t>(vs.hist_mom[1u - parity]->get_gpu_handle(GpuResourceKey::Default));
-    pc.width  = static_cast<uint32_t>(w);
-    pc.height = static_cast<uint32_t>(h);
-    pc.reset  = vs.denoise_reset_pending ? 1u : 0u;
-    vs.denoise_reset_pending = false;
-
-    // Ping-pong history ids change every frame -> re-record each frame (one
-    // dispatch, negligible CPU).
-    vs.denoise_dirty = true;
-
-    IRenderTarget::Ptr hist_prev_irr = vs.hist_irr[parity];
-    IRenderTarget::Ptr hist_prev_pos = vs.hist_pos[parity];
-    IRenderTarget::Ptr hist_prev_mom = vs.hist_mom[parity];
-    IRenderTarget::Ptr hist_cur_irr  = vs.hist_irr[1u - parity];
-    IRenderTarget::Ptr hist_cur_pos  = vs.hist_pos[1u - parity];
-    IRenderTarget::Ptr hist_cur_mom  = vs.hist_mom[1u - parity];
-
-    emit_cached_view_pass(
-        vs.cached_denoise_pass, vs.denoise_dirty, "deferred.temporal",
-        graph,
-        [&](CachedPassRecording& rec) {
-            DispatchCall dc{};
-            dc.pipeline = temporal_pipeline.get();
-            dc.groups_x = (w + 7) / 8;
-            dc.groups_y = (h + 7) / 8;
-            dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
-
-            if (auto cmd = ctx.backend->create_command_buffer()) {
-                cmd->begin_recording();
-                cmd->push_label("DeferredPath: diffuse temporal accumulate");
-                cmd->record_dispatch(dc);
-                cmd->pop_label();
-                cmd->end_recording();
-                rec.cmd = std::move(cmd);
-            }
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.diffuse_irr));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_irr));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_pos));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(hist_prev_mom));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_irr));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_pos));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(hist_cur_mom));
-            rec.held.push_back(std::move(temporal_pipeline));
-        });
-}
-
 void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                           FrameContext& ctx, int w, int h, IRenderGraph& graph)
 {
-    if (!vs.deferred_output || !vs.gbuffer || !vs.unshadowed || !render_view.batches) return;
-    // What the temporal pass wrote this frame.
-    IRenderTarget::Ptr ratio = vs.hist_irr[1u - static_cast<uint32_t>(ctx.present_counter & 1ull)];
-    if (!ratio) return;
+    if (!vs.deferred_output || !vs.gbuffer || !vs.surface_light || !render_view.batches) return;
     vector<const void*> done;
     vector<InstanceCullInfo> visuals;
     for (const auto& batch : *render_view.batches) {
@@ -2707,7 +2456,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
     const auto words_word = [&](size_t i) {
         return static_cast<uint32_t>(vs.far_instance_words[i].words.offset() / sizeof(uint32_t));
     };
-    // Re-recorded each frame, as the spatial pass is: one dispatch per visual and a blit.
+    // Re-recorded each frame: one dispatch per visual and a blit.
     bool dirty = true;
     emit_cached_view_pass(vs.far_instance_pass, dirty, "instance.splat", graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
@@ -2767,8 +2516,8 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         cmd->record_global_barrier();
         struct CompositePush
         {
-            uint32_t words_word, width, height, output_id, unshadowed_id, normal_id, worldpos_id;
-            uint32_t globals_base, lights_base, light_count, ratio_id;
+            uint32_t words_word, width, height, output_id, surface_light_id, normal_id, worldpos_id;
+            uint32_t globals_base, lights_base, light_count;
             float facing[kSurfaceDirectionCount];
         };
         static_assert(sizeof(CompositePush) <= kMaxRootConstantsSize);
@@ -2776,12 +2525,11 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
             const auto& info = visuals[i];
             CompositePush pc{words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
                              static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-                             static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default)),
+                             static_cast<uint32_t>(vs.surface_light->get_gpu_handle(GpuResourceKey::Default)),
                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)),
                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
                              render_view.view_globals_base, render_view.lights_base,
                              static_cast<uint32_t>(render_view.lights.size()),
-                             static_cast<uint32_t>(ratio->get_gpu_handle(GpuResourceKey::Default)),
                              {}};
             std::memcpy(pc.facing, info.far_facing, sizeof(pc.facing));
             DispatchCall dc{};
@@ -2801,8 +2549,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(ratio));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.surface_light));
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
@@ -2811,97 +2558,6 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         rec.held.push_back(std::move(composite));
         rec.held.push_back(std::move(box_splat));
     });
-}
-
-void DeferredPath::emit_spatial_composite_pass(IViewEntry& /*entry*/, ViewState& vs,
-                                               const RenderView& render_view,
-                                               IRenderTarget::Ptr color_target,
-                                               FrameContext& ctx,
-                                               int w, int h,
-                                               IRenderGraph& graph)
-{
-    if (!vs.deferred_output || !vs.gbuffer) return;
-
-    const uint32_t parity = static_cast<uint32_t>(ctx.present_counter & 1ull);
-    // The temporal pass wrote hist_irr[1 - parity] / hist_mom[1 - parity] this frame.
-    IRenderTarget::Ptr cur_hist = vs.hist_irr[1u - parity];
-    IRenderTarget::Ptr cur_mom  = vs.hist_mom[1u - parity];
-    if (!cur_hist || !cur_mom) return;
-
-    auto spatial_pipeline = ensure_spatial_pipeline(ctx);
-    if (!spatial_pipeline) return;
-
-    // Resolve the surface composite as an IGpuTexture for the final blit.
-    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
-    if (!src_tex) src_tex = vs.deferred_output_tex;
-    IGpuTexture* dst_tex = nullptr;
-    if (color_target) {
-        dst_tex = interface_cast<IGpuTexture>(color_target.get());
-        if (!dst_tex) {
-            dst_tex = graph.resources().find_texture(color_target.get());
-            if (!dst_tex && ctx.resources) {
-                dst_tex = ctx.resources->find_texture(color_target.get());
-            }
-        }
-    }
-    if (dst_tex != vs.last_spatial_dst) {
-        vs.spatial_dirty = true;
-        vs.last_spatial_dst = dst_tex;
-    }
-
-    SpatialPushC pc{};
-    pc.globals_base = render_view.view_globals_base;
-    pc.albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));
-    pc.material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
-    pc.normal_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
-    pc.worldpos_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
-    pc.hist_irr_id = static_cast<uint32_t>(cur_hist->get_gpu_handle(GpuResourceKey::Default));
-    pc.hist_mom_id = static_cast<uint32_t>(cur_mom->get_gpu_handle(GpuResourceKey::Default));
-    pc.output_id   = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
-    pc.width  = static_cast<uint32_t>(w);
-    pc.height = static_cast<uint32_t>(h);
-    pc.unshadowed_id =
-        static_cast<uint32_t>(vs.unshadowed->get_gpu_handle(GpuResourceKey::Default));
-    pc.probe_grid = ss_probe_grid();
-    pc.own_pixel = light_cells_enabled() && vs.light_cell_header.valid() ? 1u : 0u;
-
-    // The accumulated-history id alternates each frame (ping-pong) -> re-record
-    // each frame (one dispatch + blit, negligible CPU).
-    vs.spatial_dirty = true;
-
-    emit_cached_view_pass(
-        vs.cached_spatial_pass, vs.spatial_dirty, "deferred.spatial",
-        graph,
-        [&](CachedPassRecording& rec) {
-            DispatchCall dc{};
-            dc.pipeline = spatial_pipeline.get();
-            dc.groups_x = (w + 7) / 8;
-            dc.groups_y = (h + 7) / 8;
-            dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
-
-            if (auto cmd = ctx.backend->create_command_buffer()) {
-                cmd->begin_recording();
-                cmd->push_label("DeferredPath: diffuse spatial + composite");
-                cmd->record_dispatch(dc);
-                if (src_tex && dst_tex) {
-                    cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
-                }
-                cmd->pop_label();
-                cmd->end_recording();
-                rec.cmd = std::move(cmd);
-            }
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_hist));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(cur_mom));
-            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.unshadowed));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-            if (color_target) {
-                rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
-            }
-            rec.held.push_back(std::move(spatial_pipeline));
-        });
 }
 
 void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
@@ -3031,8 +2687,8 @@ void DeferredPath::on_view_removed(IViewEntry& entry, FrameContext& ctx)
     auto it = view_states_.find(&entry);
     if (it == view_states_.end()) return;
     entry.remove_render_state_observer(this);
-    // Erase the view state; gbuffer / deferred_output / shadow_debug
-    // Ptrs drop, resource manager auto-defers the backend handles.
+    // Erase the view state; gbuffer / deferred_output Ptrs drop, resource manager
+    // auto-defers the backend handles.
     view_states_.erase(it);
 }
 
@@ -3067,9 +2723,6 @@ IGpuResource::Ptr DeferredPath::find_named_output(string_view name, IViewEntry* 
                 ? vs.gbuffer->attachment_texture(
                       static_cast<uint32_t>(GBufferAttachment::WorldPos))
                 : nullptr);
-    }
-    if (name == "shadow.debug") {
-        return wrap(vs.shadow_debug_tex);
     }
     if (name == "output") {
         return wrap(vs.deferred_output_tex);

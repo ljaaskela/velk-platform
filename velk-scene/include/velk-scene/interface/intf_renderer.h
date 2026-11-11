@@ -160,10 +160,7 @@ public:
      *                           `attachment(i)`).
      *   - "gbuffer.worldpos" — IRenderTarget alias of the worldpos
      *                          attachment (debug readback / overlay).
-     *   - "shadow.debug"     — RT-shadow diagnostic RGBA32F texture
-     *                      (IRenderTarget); each pixel carries
-     *                      geometry / BLAS identifying values of the
-     *                      instance the shadow ray walked.
+     *   - "output"           — the lit image before post-processing.
      *
      * Returns null when the view has no path / the path doesn't produce
      * that output.

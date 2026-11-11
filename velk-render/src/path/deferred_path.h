@@ -67,7 +67,7 @@ public:
 
     /// Exposes per-view "gbuffer" (the IRenderTextureGroup),
     /// "gbuffer.worldpos" (a RenderTexture aliasing the worldpos
-    /// attachment), "shadow.debug", and "output" outputs for debug
+    /// attachment), and "output" outputs for debug
     /// overlays / readback. See `IRenderPath::find_named_output`.
     IGpuResource::Ptr find_named_output(string_view name,
                                         IViewEntry* view) const override;
@@ -79,61 +79,15 @@ public:
         // Recorded after gbuffer creation; consumed by the passes for sizing.
         uvec2 gbuffer_size{};
 
+        /// The lit image, HDR. Recreated on size change.
         IRenderTarget::Ptr deferred_output;
         IGpuTexture* deferred_output_tex = nullptr;
-        IRenderTarget::Ptr shadow_debug;
-        IGpuTexture* shadow_debug_tex = nullptr;
-        // Cached size for deferred_output + shadow_debug (both follow
-        // the lighting target dims). Recreate only on size change.
+        /// The light on the surface, for far instances in front of it: indirect light in
+        /// rgb, and in alpha the share of direct light that gets through. Same size.
+        IRenderTarget::Ptr surface_light;
         uvec2 output_size{};
-
-        /// Demodulated diffuse irradiance (no albedo) written by the lighting
-        /// pass: the noisy single-light stochastic estimate the denoise pass
-        /// reprojects + accumulates. Recreated on size change.
-        IRenderTarget::Ptr diffuse_irr;
-        IGpuTexture* diffuse_irr_tex = nullptr;
-
-        /// Unshadowed diffuse (all lights, no visibility), written sharp
-        /// alongside the ratio in `diffuse_irr`. The composite multiplies the
-        /// two: filtering the ratio keeps the shadow soft while light falloff
-        /// and N.L stay crisp. Recreated on size change with `diffuse_irr`.
-        IRenderTarget::Ptr unshadowed;
-        /// What each traced pixel picked and whether it is lit, for every pixel to share.
-        IRenderTarget::Ptr direct_samples;
-        uvec2 direct_samples_size{};
-        bool direct_share_on = false;
-        IGpuTexture* unshadowed_tex = nullptr;
-
-        /// Ping-pong temporal history for the diffuse-irradiance denoiser.
-        /// hist_irr: rgb = accumulated irradiance, a = sample count.
-        /// hist_pos: rgb = world position (reprojection validation), a = valid.
-        /// The denoise pass reads [frame & 1], writes [1 - (frame & 1)].
-        IRenderTarget::Ptr hist_irr[2];
-        IGpuTexture* hist_irr_tex[2] = {nullptr, nullptr};
-        IRenderTarget::Ptr hist_pos[2];
-        IGpuTexture* hist_pos_tex[2] = {nullptr, nullptr};
-        /// Accumulated luminance 2nd moment (.r), ping-pong alongside hist_irr.
-        /// variance = moment - mean^2 drives the spatial filter's luminance edge
-        /// stop (SVGF-style).
-        IRenderTarget::Ptr hist_mom[2];
-        IGpuTexture* hist_mom_tex[2] = {nullptr, nullptr};
-        uvec2 hist_size{};
-        /// Cached temporal-accumulate pass (writes the history). Re-records
-        /// every frame (ping-pong ids change); cheap (one dispatch).
-        IRenderPass::Ptr cached_denoise_pass;
-        bool denoise_dirty = true;
-        /// Discards temporal history for one frame (first frame / resize). NOT
-        /// set on camera motion (reprojection handles that).
-        bool denoise_reset_pending = true;
-
-        /// Cached spatial-filter + composite pass (count-driven a-trous over the
-        /// accumulated history, then composite + surface blit). Re-records every
-        /// frame (the history ping-pong id alternates).
-        IRenderPass::Ptr cached_spatial_pass;
-        bool spatial_dirty = true;
-        /// Surface-composite blit target the spatial pass bakes; resize detect.
-        IGpuTexture* last_spatial_dst = nullptr;
-
+        /// What the lighting pass blits to; a new one re-records it.
+        IGpuTexture* last_output_dst = nullptr;
 
         /// RenderTexture alias for the gbuffer worldpos attachment.
         /// Does not own the GPU texture (the group does); exposed via
@@ -191,14 +145,9 @@ public:
         };
         vector<FarInstanceWords> far_instance_words;
 
-        /// Cached lighting (compute + blit) pass. All PushC inputs are
-        /// stable across frames now: gbuffer attachments (Step B),
-        /// deferred_output / shadow_debug (Step C), lights_base +
-        /// light_count (persistent light arena; re-record only on light
-        /// count change), cam_pos notify via Step A. Rebuilt only when
-        /// `lighting_dirty` is
-        /// set by `on_render_state_changed` (camera / batch / lights
-        /// change) or by gbuffer / output_size recreation.
+        /// Cached lighting (compute + blit) pass. Rebuilt only when `lighting_dirty` is set
+        /// by `on_render_state_changed` (camera / batch / lights change), by gbuffer /
+        /// output_size recreation, or by a new blit target.
         IRenderPass::Ptr cached_lighting_pass;
         bool lighting_dirty = true;
         /// Which lighting-shader variant this view last used. The analytic
@@ -282,10 +231,6 @@ private:
     IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium, string_view ray_motion,
                                       float ray_motion_reach);
 
-    /// Resolves the diffuse-irradiance temporal-accumulate pipeline
-    /// (standalone compute). Strong Ptr; the temporal pass holds it.
-    IGpuPipeline::Ptr ensure_denoise_pipeline(FrameContext& ctx);
-
     /// World-space GI probe passes. With @p shade, the pass composed with the RT body so
     /// probe hits get real material evaluation; otherwise the pass that only traces.
     IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool shade, bool with_medium, string_view ray_motion,
@@ -305,13 +250,11 @@ private:
     void emit_probe_pass(ViewState& vs, const RenderView& render_view,
                          FrameContext& ctx, IRenderGraph& graph);
 
-    /// Resolves the spatial filter + composite pipeline (standalone compute).
-    /// Strong Ptr; the spatial pass holds it.
-    IGpuPipeline::Ptr ensure_spatial_pipeline(FrameContext& ctx);
-
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);
 
+    /// Lights the G-buffer into deferred_output, shadows from the light cells, and blits
+    /// it to @p color_target.
     void emit_lighting_pass(IViewEntry& view, ViewState& vs,
                             const RenderView& render_view,
                             IRenderTarget::Ptr color_target,
@@ -319,25 +262,9 @@ private:
                             int w, int h,
                             IRenderGraph& graph);
 
-    /// Reprojects + temporally accumulates the noisy diffuse irradiance into
-    /// the ping-pong history (no composite).
-    void emit_temporal_pass(IViewEntry& view, ViewState& vs,
-                            const RenderView& render_view,
-                            FrameContext& ctx,
-                            int w, int h,
-                            IRenderGraph& graph);
-
-    /// Count-driven spatial filter over the accumulated irradiance history,
-    /// then composites the final HDR image (albedo*irr + sharp rest) into
-    /// deferred_output and blits it to @p color_target.
+    /// Adds instances too small to draw over deferred_output and blits it again.
     void emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                 FrameContext& ctx, int w, int h, IRenderGraph& graph);
-    void emit_spatial_composite_pass(IViewEntry& view, ViewState& vs,
-                                     const RenderView& render_view,
-                                     IRenderTarget::Ptr color_target,
-                                     FrameContext& ctx,
-                                     int w, int h,
-                                     IRenderGraph& graph);
 
     /// Draws what GPU culling kept. @p second_phase draws what its second test added, over the first.
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph,

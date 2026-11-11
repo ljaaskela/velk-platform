@@ -98,8 +98,7 @@ public:
      *                           `attachment_count()` / `attachment(i)`).
      *   - "gbuffer.worldpos"  — IRenderTarget alias of the worldpos
      *                           attachment (debug readback / overlay).
-     *   - "shadow.debug"      — RT-shadow debug storage texture
-     *                           (IRenderTarget).
+     *   - "output"            — the lit image before post-processing.
      *
      * Returns null when the path doesn't produce that output for the
      * given view. Non-introspecting paths can leave the empty default

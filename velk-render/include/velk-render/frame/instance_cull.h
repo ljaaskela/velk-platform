@@ -863,13 +863,13 @@ void main()
  * coverage saturates rather than adds.
  *
  * An instance is lit from which way its mesh's surface faces: of the surface turned to the
- * viewer, how much is turned to the light, and how far. Indirect light comes from what
- * reaches the surface behind it, from the lighting pass's unshadowed image with that
- * surface's direct light taken out, or the nearest surface below for a pixel with only sky
- * behind it. The directions are kSurfaceDirections, and instances' own rotations are not
- * taken into account.
+ * viewer, how much is turned to the light, and how far. Indirect light is what reaches the
+ * surface behind it, from the lighting pass's surface light image, or the nearest surface
+ * below for a pixel with only sky behind it. The directions are kSurfaceDirections, and
+ * instances' own rotations are not taken into account.
  *
- * Direct light is shadowed by what the lighting pass found for that surface: a share V of
+ * Direct light is shadowed by what the lighting pass found for that surface, in the alpha
+ * of the same image: a share V of
  * it arrives after passing through the layer of instances, an optical depth tl = -ln V, and
  * the viewer sees through a depth tv, the coverage. The instances seen, weighted by how
  * much of each is visible, then get tv / (tv + tl) * (1 - e^-(tv + tl)) / (1 - e^-tv) of
@@ -899,13 +899,12 @@ layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint output_id;
-    uint unshadowed_id;
+    uint surface_light_id;
     uint normal_id;
     uint worldpos_id;
     uint globals_base;
     uint lights_base;
     uint light_count;
-    uint ratio_id;
     float facing[14];
 } pc;
 
@@ -965,8 +964,7 @@ void main()
 
     vec3 behind_normal = vec3(0.0);
     vec3 behind_pos = vec3(0.0);
-    vec3 behind_light = vec3(0.0);
-    vec3 behind_ratio = vec3(1.0);
+    vec4 behind_light = vec4(0.0, 0.0, 0.0, 1.0);
     bool has_surface = false;
     for (int k = 0; k < 8 && !has_surface; ++k) {
         vec2 at = uv + vec2(0.0, float(k * k * 2)) / dims;
@@ -975,8 +973,7 @@ void main()
             has_surface = true;
             behind_normal = normalize(n);
             behind_pos = velk_texture(pc.worldpos_id, at).xyz;
-            behind_light = velk_texture(pc.unshadowed_id, at).rgb;
-            behind_ratio = velk_texture(pc.ratio_id, at).rgb;
+            behind_light = velk_texture(pc.surface_light_id, at);
         }
     }
 
@@ -1020,15 +1017,13 @@ void main()
             direct_on_behind += radiance * max(dot(behind_normal, L), 0.0);
         }
     }
-    vec3 indirect = max(behind_light - direct_on_behind, vec3(0.0));
+    vec3 indirect = behind_light.rgb;
 
-    // The ratio covers direct and indirect light together, and only direct gets shadowed.
     const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
     float direct_behind = dot(direct_on_behind, kLuma);
     float arriving = 1.0;
     if (direct_behind > 1e-4) {
-        float shadowed = dot(behind_ratio * behind_light, kLuma) - dot(indirect, kLuma);
-        float to_light = -log(clamp(shadowed / direct_behind, 1e-3, 0.999));
+        float to_light = -log(clamp(behind_light.a, 1e-3, 0.999));
         float both = to_light + to_viewer_depth;
         arriving = to_viewer_depth / both * (1.0 - exp(-both)) / (1.0 - exp(-to_viewer_depth));
     }

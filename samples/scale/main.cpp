@@ -1875,7 +1875,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     // for a jump along the view. Faster the higher it is above the ground.
     bool fly_keys[4] = {false, false, false, false};
     int gi_debug_view = 0;
-    bool direct_share = true;
     // Until then the camera follows a slow loop over the forest.
     bool touring = nature && hold_stop < 0 && !has_view && !no_tour;
     float tour_height = 0.f;
@@ -1953,17 +1952,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             setenv("VELK_GI_DEBUG", text, 1);
 #endif
             VELK_LOG(I, "scale: GI debug view %d", gi_debug_view);
-            return;
-        }
-        // Key code of L: switches sharing direct light between pixels on and off.
-        if (e.key == 76 && e.action == velk::ui::KeyAction::Down) {
-            direct_share = !direct_share;
-#ifdef _WIN32
-            _putenv_s("VELK_DIRECT_SHARE", direct_share ? "1" : "0");
-#else
-            setenv("VELK_DIRECT_SHARE", direct_share ? "1" : "0", 1);
-#endif
-            VELK_LOG(I, "scale: shared direct light %s", direct_share ? "on" : "off");
             return;
         }
         auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));

@@ -9,8 +9,7 @@ namespace {
 // light's shadow_tech_id resolves to this technique.
 constexpr string_view rt_shadow_snippet = R"(
 // Integer hash -> float in [0,1). Seeds a per-world-point per-frame disk
-// sample for soft-shadow jitter; the lighting path's temporal denoiser
-// integrates the resulting single sample across frames.
+// sample for soft-shadow jitter, which the callers average over frames.
 uint velk_shadow_mix(uint x)
 {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -45,8 +44,8 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     }
 
     // Soft shadows: jitter the ray within the light's apparent size
-    // (Light.params.w). One sample per light per frame; the lighting
-    // path accumulates + denoises across frames. params.w is an angular
+    // (Light.params.w). One sample per light per frame, averaged over
+    // frames by the caller. params.w is an angular
     // radius (rad) for a directional sun, or a world-space radius for a
     // point / spot source -> its apparent angular spread is radius/dist.
     // size == 0 keeps a single hard ray (today's behaviour).
@@ -55,7 +54,7 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
         float spread = (light.flags.x == 0u) ? tan(size) : (size / max(t_max, 1e-4));
         // Mixed one component at a time. A linear sum of the position's bits gives
         // whole lines of a flat surface the same seed in every frame, which shows as
-        // stripes the temporal filter cannot average out.
+        // stripes that averaging over frames cannot remove.
         uvec3 q = floatBitsToUint(world_pos);
         uint seed = velk_shadow_mix(velk_shadow_mix(velk_shadow_mix(q.x) ^ q.y) ^ q.z)
                     ^ velk_shadow_mix(VELK_GLOBALS.present_counter);
