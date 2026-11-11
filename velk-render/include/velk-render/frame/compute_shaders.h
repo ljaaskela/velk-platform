@@ -3062,7 +3062,7 @@ void velk_cells_load()
 #define CELLS_ENTRIES cells_header[7]
 const uint kCellWorkMax = 32768u;
 const uint kCellWorkWords = 4u;
-const uint kCellWorkHeader = 16u;
+const uint kCellWorkHeader = 20u;
 // Counters that only grow, for the log: what was asked of the list, what it got, and why
 // cells wait. The CPU reads them now and then and prints the differences.
 const uint kStatAsked = 0u;      // entries asked for
@@ -3077,6 +3077,9 @@ const uint kStatTraced = 8u;     // entries the trace pass traced
 const uint kStatChanged = 9u;    // cells due because something changed
 const uint kStatMade = 10u;      // cells made
 const uint kStatStale = 11u;     // cells due for every light, last checked before the oldest change kept
+const uint kStatCoarseAsked = 12u;    // entries asked for in the first round, for cells kCellUp levels up
+const uint kStatCoarseRefused = 13u;  // cells refused in the first round
+const uint kStatCoarseWaiting = 14u;  // pixels waiting whose cell kCellUp levels up was not traced either
 void velk_cell_stat(uint which, uint by)
 {
     atomicAdd(velk_light_cell_words.data[CELLS_WORK + 4u + which], by);
@@ -3440,6 +3443,15 @@ vec3 N;
 uint side;
 vec4 normal_and_error;
 
+// The pass runs three times a frame, `pc.ray_pass` saying which round it is. The first
+// lists only the cells kCellUp levels up that were never traced, which pixels waiting for
+// their own cell show meanwhile; one covers many cells, so a view coming into sight has a
+// rough shadow at once. The second lists the other cells never traced, which show as gaps.
+// The third the rest, with what is left of the list.
+const uint kCellRoundCoarse = 0u;
+const uint kCellRoundGaps = 1u;
+const uint kCellRoundRest = 2u;
+
 // Keeps cell `c` up for the pixel: made if new, checked against what changed, and listed
 // for tracing if it is due and it is this pixel's turn. `up` is how many levels above the
 // pixel's own it is. Returns the word it starts at, or kNoCell.
@@ -3447,17 +3459,16 @@ uint velk_cell_keep(VelkLightCell c, int up)
 {
     float cell_size = velk_light_cell_size(c.level);
     bool made;
+    if (pc.ray_pass == kCellRoundCoarse && up != kCellUp) return velk_cell_find(c, false, made);
     uint own = velk_cell_find(c, true, made);
     uint now = VELK_GLOBALS.present_counter;
-    // The pass runs twice a frame. The first time it lists only cells not traced yet, which
-    // show as gaps, so that those come first; the second time the rest, with what is left
-    // of the list.
-    if (pc.ray_pass == 0u && own != kNoCell && !made && (velk_light_cell_words.data[own] & kCellReady) != 0u) {
+    if (pc.ray_pass != kCellRoundRest && own != kNoCell && !made
+        && (velk_light_cell_words.data[own] & kCellReady) != 0u) {
         return own;
     }
     // Several pixels share a cell. The first to come to it this frame notes it as read and
     // keeps it up; the rest only use it. The first time through, holding the cell does that.
-    if (pc.ray_pass != 0u && own != kNoCell && !made
+    if (pc.ray_pass == kCellRoundRest && own != kNoCell && !made
         && (velk_light_cell_words.data[own + 7u] == now || atomicExchange(velk_light_cell_words.data[own + 7u], now) == now)) {
         return own;
     }
@@ -3524,6 +3535,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
             uint limit = CELLS_ENTRIES;
             uint first = entries > 0u ? atomicAdd(velk_light_cell_words.data[CELLS_WORK], entries) : 0u;
             velk_cell_stat(kStatAsked, entries);
+            if (pc.ray_pass == kCellRoundCoarse) velk_cell_stat(kStatCoarseAsked, entries);
             if (changed) velk_cell_stat(kStatChanged, 1u);
             if (changed && which == uvec2(0xFFFFFFFFu)) velk_cell_stat(kStatStale, 1u);
             if (made) velk_cell_stat(kStatMade, 1u);
@@ -3533,6 +3545,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
                 }
                 velk_light_cell_words.data[own] = as_it_was;
                 velk_cell_stat(kStatRefused, 1u);
+                if (pc.ray_pass == kCellRoundCoarse) velk_cell_stat(kStatCoarseRefused, 1u);
             } else {
                 velk_cell_stat(kStatListed, entries);
                 velk_cell_stat(kStatCells, 1u);
@@ -3614,8 +3627,9 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     // larger are shown meanwhile, and kept up for that. Many pixels share one of them, so a
     // view coming into sight has them soon.
     bool waiting = own == kNoCell || (velk_light_cell_words.data[own] & kCellReady) == 0u;
-    if (pc.ray_pass != 0u && own == kNoCell) velk_cell_stat(kStatNoSlot, 1u);
-    if (pc.ray_pass != 0u && waiting) velk_cell_stat(kStatWaiting, 1u);
+    if (pc.ray_pass == kCellRoundCoarse && !waiting) return true;
+    if (pc.ray_pass == kCellRoundRest && own == kNoCell) velk_cell_stat(kStatNoSlot, 1u);
+    if (pc.ray_pass == kCellRoundRest && waiting) velk_cell_stat(kStatWaiting, 1u);
     uint axis = side >> 1u;
     uint ua = (axis + 1u) % 3u;
     uint va = (axis + 2u) % 3u;
@@ -3626,7 +3640,11 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
         for (int k = 0; k < 9; ++k) {
             c.at[ua] = nearest[ua] + k % 3 - 1;
             c.at[va] = nearest[va] + k / 3 - 1;
-            velk_cell_keep(c, up);
+            uint kept = velk_cell_keep(c, up);
+            if (k == 4 && waiting && pc.ray_pass == kCellRoundRest
+                && (kept == kNoCell || (velk_light_cell_words.data[kept] & kCellReady) == 0u)) {
+                velk_cell_stat(kStatCoarseWaiting, 1u);
+            }
         }
     }
     return true;

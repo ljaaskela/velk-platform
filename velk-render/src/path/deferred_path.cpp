@@ -412,8 +412,8 @@ constexpr uint32_t kCellHeaderWords = 8;
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
 constexpr uint32_t kCellWorkWords = 4;
-constexpr uint32_t kCellWorkHeader = 16;
-constexpr uint32_t kCellStats = 12;
+constexpr uint32_t kCellWorkHeader = 20;
+constexpr uint32_t kCellStats = 15;
 // How often the counters are printed, in frames.
 constexpr uint64_t kCellStatFrames = 60;
 
@@ -1968,9 +1968,10 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         if (vs.light_cell_stats_frame != 0) {
             VELK_LOG(I,
                      "light cells per frame: entries asked %.0f listed %.0f traced %.0f, cells listed %.0f made %.0f "
-                     "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u",
+                     "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u; "
+                     "coarse round entries asked %.0f cells refused %.0f, waiting pixels without coarse %.0f",
                      per(0), per(1), per(8), per(2), per(10), per(9), per(11), per(3), per(4), per(6), per(5),
-                     static_cast<unsigned>(vs.light_cell_changes.size()));
+                     static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
         vs.light_cell_stats_frame = ctx.present_counter;
@@ -2149,12 +2150,15 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        // Twice: first only cells not traced yet, which show as gaps, then the rest with
-        // what is left of the list. See velk_cell_keep.
+        // Three rounds: the large cells shown while smaller ones wait, then the other cells
+        // not traced yet, then the rest with what is left of the list. See velk_cell_keep.
+        DispatchCall gaps_dc = dc;
         DispatchCall rest_dc = dc;
-        DeferredComputePushC rest_pc = pc;
-        rest_pc.ray_pass = 1;
-        std::memcpy(rest_dc.root_constants, &rest_pc, sizeof(rest_pc));
+        DeferredComputePushC round_pc = pc;
+        round_pc.ray_pass = 1;
+        std::memcpy(gaps_dc.root_constants, &round_pc, sizeof(round_pc));
+        round_pc.ray_pass = 2;
+        std::memcpy(rest_dc.root_constants, &round_pc, sizeof(round_pc));
 
         // What is listed, a group of threads an entry. Then the list is emptied.
         DeferredComputePushC trace_pc = pc;
@@ -2174,6 +2178,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->push_label("DeferredPath: light cells update");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(gaps_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(rest_dc);
         cmd->record_global_barrier();
