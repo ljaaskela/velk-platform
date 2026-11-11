@@ -32,6 +32,10 @@ struct RayHit {
     vec3 normal;
     uint shape_index; // only set by trace_closest_hit
     uint object;      // the object id of what was hit, only set by trace_closest_hit
+    // Where on its object the hit is, and which of its axes the surface faces, as the
+    // G-buffer's surface attachment has them. Only set by trace_closest_hit.
+    vec3 local;
+    uint side;
 };
 
 // Ray vs. oriented rect parameterised by (origin + s*u_axis + t*v_axis) for
@@ -270,6 +274,15 @@ Ray velk_local_ray(Ray ray, RtRecord rec)
     return local;
 }
 
+// Which of its object's six axis directions a surface facing `n`, in the object's own space,
+// faces: 0 and 1 for +x and -x, then y, then z, as the G-buffer's surface attachment has it.
+uint velk_facing_side(vec3 n)
+{
+    vec3 across = abs(n);
+    return across.x >= across.y && across.x >= across.z ? (n.x < 0.0 ? 1u : 0u)
+         : across.y >= across.z ? (n.y < 0.0 ? 3u : 2u) : (n.z < 0.0 ? 5u : 4u);
+}
+
 // Normals transform by the transpose of the inverse.
 vec3 velk_world_normal(RtRecord rec, vec3 n)
 {
@@ -438,6 +451,9 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 best_triangle = tri;
                 best_vertex_ids = positions + (leaf_counts >> 16u) * 3u;
                 best_stopped = false;
+                stack[kStack] = floatBitsToUint(velk_ray_frame.x);
+                stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
+                stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
             }
         } else if (level == kMesh) {
             if (sp == mesh_scope) {
@@ -513,6 +529,9 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                         best_vertex_ids = word_base + velk_cluster_words.data[leaf + 2u] + (velk_cluster_words.data[leaf + 1u] >> 16u) * 3u;
                         best_stopped = true;
                         best_stop_normal = surface;
+                        stack[kStack] = floatBitsToUint(velk_ray_frame.x);
+                        stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
+                        stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
                         continue;
                     }
                 }
@@ -730,6 +749,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             n = normalize(n0 * w + n1 * best_u + n2 * best_v);
         }
         hit.normal = velk_world_normal(rec, n);
+        hit.side = velk_facing_side(n);
     } else {
         velk_ray_frame = vec3(uintBitsToFloat(stack[kStack]), uintBitsToFloat(stack[kStack + 1]), uintBitsToFloat(stack[kStack + 2]));
         Ray shape_ray = velk_local_ray(ray, rec);
@@ -740,7 +760,17 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
         intersect_shape(shape_ray, shape, h);
         hit.uv = h.uv;
         hit.normal = velk_world_normal(rec, h.normal);
+        hit.side = velk_facing_side(h.normal);
     }
+    // Where on its object, from the ray in the object's own space. Its axes in world units, as
+    // the G-buffer has it: the inverse's rows are as long as one over each axis's scale.
+    velk_ray_frame = vec3(uintBitsToFloat(stack[kStack]), uintBitsToFloat(stack[kStack + 1]), uintBitsToFloat(stack[kStack + 2]));
+    Ray local_ray = velk_local_ray(ray, rec);
+#ifdef VELK_RAY_MOTION
+    if (!seeded) local_ray = velk_moved_ray(local_ray, rec, best_shape);
+#endif
+    vec3 axis_scale = 1.0 / max(vec3(length(rec.inv_row0.xyz), length(rec.inv_row1.xyz), length(rec.inv_row2.xyz)), vec3(1e-20));
+    hit.local = (local_ray.origin + local_ray.dir * best_t) * axis_scale;
     return 1.0;
 }
 #undef VELK_WALK_LIMIT
@@ -2418,16 +2448,34 @@ void velk_cells_load()
 #define CELLS_IDS cells_header[4]
 #define CELLS_SURFACE cells_header[5]
 // What to trace this frame, in the same arena: a count, three words on lights that moving
-// things could be in the way of (kCellWorkLive*), the counters below, then 4 words an
-// entry, which is one light for one cell: the word the cell starts
-// at, or kNoCell for an entry not in use; the pixel that asked, x in the low half and y in
-// the high; how many levels above that pixel's own the cell is, in the low 8 bits, and the
-// light above them; and a spare.
+// things could be in the way of (kCellWorkLive*), the counters below, then 8 words an
+// entry, which is one light for one cell: the word the cell starts at, or kNoCell for an
+// entry not in use; the pixel that asked, x in the low half and y in the high, or
+// kCellNoPixel for a cell a ray found; how many levels above that pixel's own the cell is,
+// in the low 8 bits, and the light above them; and for a cell a ray found, the normal
+// (velk_cell_pack_normal) and the place on the cell from the camera; and a spare.
 #define CELLS_WORK cells_header[6]
 // How many entries a frame may trace. Cells past that wait for a later frame.
 #define CELLS_ENTRIES cells_header[7]
 const uint kCellWorkMax = 32768u;
-const uint kCellWorkWords = 4u;
+const uint kCellWorkWords = 8u;
+const uint kCellNoPixel = 0xFFFFFFFFu;
+
+// A unit normal in one word, octahedral, 16 bits a coordinate.
+uint velk_cell_pack_normal(vec3 n)
+{
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return packSnorm2x16(e);
+}
+
+vec3 velk_cell_unpack_normal(uint packed)
+{
+    vec2 e = unpackSnorm2x16(packed);
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
 const uint kCellWorkHeader = 24u;
 // Of the lights that moving things could be in the way of: how many the cells read this
 // frame hold, every how many frames each is due, and how many were due this frame.
@@ -2619,7 +2667,7 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
 }
 )";
 
-/// Traces light cells. Follows light_cells_src.
+/// What tracing light cells needs. Follows light_cells_src.
 [[maybe_unused]] constexpr string_view light_cells_trace_src = R"(
 // How much of a light a cell's surface sees is traced with rays that start from places
 // spread over the cell's surface around `world_pos`, its middle, the same ones every time,
@@ -2692,6 +2740,76 @@ shared float s_through[64];
 shared float s_stopped_at[64];
 shared bool s_moving[64];
 
+// Where on cell `own` its rays start, as the pixel `packed` that listed it shows: the cell's
+// middle on the surface, how to step over the surface from it along the two object axes the
+// surface lies in (zero if unknown), its normal, and how far to lift the rays off it. False
+// if the pixel shows nothing.
+bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3 middle_world, out vec3 world_u,
+                                out vec3 world_v, out vec3 N, out float lift)
+{
+    world_u = vec3(0.0);
+    world_v = vec3(0.0);
+    ivec2 coord = ivec2(int(packed & 0xFFFFu), int(packed >> 16u));
+    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
+    vec4 normal_and_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], coord, 0);
+    uint bits = velk_draw_data.data[max(ids.x, 1u) - 1u].triangle_bits;
+    uint position = ids.y >> bits;
+    vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
+    vec3 world_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
+    N = normalize(normal_and_error.xyz);
+    uint side = uint(surface.w + 0.5);
+
+    // Where the surface steps along the object's axes in the world comes from how position on
+    // the object and in the world change together across the next pixels, if they show the
+    // same surface.
+    vec3 middle = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
+                               velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size;
+    uint axis = side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    vec2 to_middle = vec2(middle[ua] - surface.xyz[ua], middle[va] - surface.xyz[va]);
+    ivec2 image_size = textureSize(velk_textures[nonuniformEXT(pc.normal_tex_id)], 0);
+    ivec2 nx = coord + ivec2(coord.x + 1 < image_size.x ? 1 : -1, 0);
+    ivec2 ny = coord + ivec2(0, coord.y + 1 < image_size.y ? 1 : -1);
+    uvec2 ids_x = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], nx, 0).xy;
+    uvec2 ids_y = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], ny, 0).xy;
+    vec4 surface_x = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], nx, 0);
+    vec4 surface_y = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], ny, 0);
+    vec3 normal_x = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], nx, 0).xyz;
+    vec3 normal_y = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], ny, 0).xyz;
+    // The same object, the same side of it, and facing the same way: one flat piece of
+    // surface, not the next face over an edge.
+    if (ids_x.x == ids.x && (ids_x.y >> bits) == position
+        && ids_y.x == ids.x && (ids_y.y >> bits) == position
+        && surface_x.w == surface.w && surface_y.w == surface.w
+        && dot(normal_x, N) > 0.995 * length(normal_x) && dot(normal_y, N) > 0.995 * length(normal_y)) {
+        vec3 sx = surface_x.xyz - surface.xyz;
+        vec3 sy = surface_y.xyz - surface.xyz;
+        vec3 wx = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], nx, 0).xyz - world_pos;
+        vec3 wy = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], ny, 0).xyz - world_pos;
+        float det = sx[ua] * sy[va] - sy[ua] * sx[va];
+        if (abs(det) > 1e-12) {
+            // The world step for a unit step along each of the two object axes.
+            world_u = (wx * sy[va] - wy * sx[va]) / det;
+            world_v = (wy * sx[ua] - wx * sy[ua]) / det;
+            // A step much longer than the object step is a silhouette, not a surface.
+            if (dot(world_u, world_u) > 4.0 || dot(world_v, world_v) > 4.0) {
+                world_u = vec3(0.0);
+                world_v = vec3(0.0);
+            }
+        }
+    }
+    middle_world = world_pos + world_u * to_middle.x + world_v * to_middle.y;
+    // Lifted by a little of the cell's size, since the places rays start from are only as
+    // exact as the differences between pixels they were found from.
+    lift = normal_and_error.w + 0.02 * cell_size;
+    return ids.x != 0u;
+}
+)";
+
+/// The main of the pass that traces light cells. Follows light_cells_src and
+/// light_cells_trace_src.
+[[maybe_unused]] constexpr string_view light_cells_trace_main_src = R"(
 // Traces what light_cells_touch_src listed. A thread group takes one cell and one light,
 // and each of its threads one ray, so that no thread traces ray after ray while the pass
 // waits for it. The first thread then puts together what the cell holds for that light.
@@ -2747,76 +2865,38 @@ void main()
     uint packed = velk_light_cell_words.data[entry + 1u];
     int up = int(velk_light_cell_words.data[entry + 2u] & 255u);
     uint i = velk_light_cell_words.data[entry + 2u] >> 8u;
-    ivec2 coord = ivec2(int(packed & 0xFFFFu), int(packed >> 16u));
     Light light = velk_light_at(pc.lights_base + i);
     int grid = velk_cell_grid(light, up);
-
-    // The pixel that asked shows a point of the surface near the cell.
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
-    vec4 normal_and_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], coord, 0);
-    uint bits = velk_draw_data.data[max(ids.x, 1u) - 1u].triangle_bits;
-    uint position = ids.y >> bits;
-    vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
-    vec3 world_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
-    vec3 N = normalize(normal_and_error.xyz);
-    uint side = uint(surface.w + 0.5);
-
-    // The cell's middle on the surface, and how to step over the surface from it along the
-    // two object axes the surface lies in. Where those are in the world comes from how
-    // position on the object and in the world change together across the next pixels, if
-    // they show the same surface.
     float cell_size = velk_light_cell_size(int(velk_light_cell_words.data[own + 5u] >> 3u) - 64);
-    vec3 middle = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
-                              velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size;
-    uint axis = side >> 1u;
-    uint ua = (axis + 1u) % 3u;
-    uint va = (axis + 2u) % 3u;
-    vec2 to_middle = vec2(middle[ua] - surface.xyz[ua], middle[va] - surface.xyz[va]);
+
+    vec3 middle_world;
     vec3 world_u = vec3(0.0);
     vec3 world_v = vec3(0.0);
-    ivec2 image_size = textureSize(velk_textures[nonuniformEXT(pc.normal_tex_id)], 0);
-    ivec2 nx = coord + ivec2(coord.x + 1 < image_size.x ? 1 : -1, 0);
-    ivec2 ny = coord + ivec2(0, coord.y + 1 < image_size.y ? 1 : -1);
-    uvec2 ids_x = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], nx, 0).xy;
-    uvec2 ids_y = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], ny, 0).xy;
-    vec4 surface_x = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], nx, 0);
-    vec4 surface_y = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], ny, 0);
-    vec3 normal_x = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], nx, 0).xyz;
-    vec3 normal_y = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], ny, 0).xyz;
-    // The same object, the same side of it, and facing the same way: one flat piece of
-    // surface, not the next face over an edge.
-    if (ids_x.x == ids.x && (ids_x.y >> bits) == position
-        && ids_y.x == ids.x && (ids_y.y >> bits) == position
-        && surface_x.w == surface.w && surface_y.w == surface.w
-        && dot(normal_x, N) > 0.995 * length(normal_x) && dot(normal_y, N) > 0.995 * length(normal_y)) {
-        vec3 sx = surface_x.xyz - surface.xyz;
-        vec3 sy = surface_y.xyz - surface.xyz;
-        vec3 wx = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], nx, 0).xyz - world_pos;
-        vec3 wy = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], ny, 0).xyz - world_pos;
-        float det = sx[ua] * sy[va] - sy[ua] * sx[va];
-        if (abs(det) > 1e-12) {
-            // The world step for a unit step along each of the two object axes.
-            world_u = (wx * sy[va] - wy * sx[va]) / det;
-            world_v = (wy * sx[ua] - wx * sy[ua]) / det;
-            // A step much longer than the object step is a silhouette, not a surface.
-            if (dot(world_u, world_u) > 4.0 || dot(world_v, world_v) > 4.0) {
-                world_u = vec3(0.0);
-                world_v = vec3(0.0);
-            }
-        }
+    vec3 N;
+    float lift;
+    bool valid;
+    if (packed == kCellNoPixel) {
+        // Found by a ray rather than a pixel: the entry says where on the cell and which way
+        // it faces, and every ray starts there.
+        middle_world = vec3(uintBitsToFloat(velk_light_cell_words.data[entry + 4u]),
+                            uintBitsToFloat(velk_light_cell_words.data[entry + 5u]),
+                            uintBitsToFloat(velk_light_cell_words.data[entry + 6u]));
+        N = velk_cell_unpack_normal(velk_light_cell_words.data[entry + 3u]);
+        lift = 0.02 * cell_size;
+        valid = true;
+    } else {
+        valid = velk_cell_place_from_pixel(packed, own, cell_size, middle_world, world_u, world_v, N, lift);
     }
-    vec3 middle_world = world_pos + world_u * to_middle.x + world_v * to_middle.y;
 
-    // One ray a thread. Lifted by a little of the cell's size, since the places rays start
-    // from are only as exact as the differences between pixels they were found from.
+    // One ray a thread.
     s_through[lane] = 0.0;
     s_stopped_at[lane] = 0.0;
     s_moving[lane] = false;
-    if (int(lane) < grid * grid && ids.x != 0u) {
+    if (int(lane) < grid * grid && valid) {
         float stopped_at;
         bool moving;
         s_through[lane] = velk_cell_ray(light, i, int(lane), grid, middle_world, world_u, world_v, N, cell_size,
-                                        normal_and_error.w + 0.02 * cell_size, stopped_at, moving);
+                                        lift, stopped_at, moving);
         s_stopped_at[lane] = stopped_at;
         s_moving[lane] = moving;
     }
@@ -2884,6 +2964,10 @@ vec4 normal_and_error;
 const uint kCellRoundCoarse = 0u;
 const uint kCellRoundGaps = 1u;
 const uint kCellRoundRest = 2u;
+
+// Whether the place being worked on, `world_pos` and `N` below, came from a pixel. Passes
+// that find cells with rays clear it, and their entries then carry the place themselves.
+bool cells_from_pixel = true;
 
 // The lights cell `at` holds as ones that moving things could be in the way of, a bit a
 // light, the first 32 in x.
@@ -3038,8 +3122,14 @@ uint velk_cell_keep(VelkLightCell c, int up)
                     if (!traced) continue;
                     uint at = CELLS_WORK + kCellWorkHeader + e * kCellWorkWords;
                     velk_light_cell_words.data[at] = own;
-                    velk_light_cell_words.data[at + 1u] = uint(coord.x) | (uint(coord.y) << 16u);
+                    velk_light_cell_words.data[at + 1u] = cells_from_pixel ? (uint(coord.x) | (uint(coord.y) << 16u)) : kCellNoPixel;
                     velk_light_cell_words.data[at + 2u] = uint(up) | (i << 8u);
+                    if (!cells_from_pixel) {
+                        velk_light_cell_words.data[at + 3u] = velk_cell_pack_normal(N);
+                        velk_light_cell_words.data[at + 4u] = floatBitsToUint(world_pos.x);
+                        velk_light_cell_words.data[at + 5u] = floatBitsToUint(world_pos.y);
+                        velk_light_cell_words.data[at + 6u] = floatBitsToUint(world_pos.z);
+                    }
                     ++e;
                 }
                 // Everything listed is traced before anything reads the cells, so it counts
@@ -3095,6 +3185,8 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
     atomicAdd(velk_light_cell_words.data[at + kCellArriveSum + 3u], 1u);
 }
 
+)"
+                                                                      R"(
 // Takes up the pixel at `pixel`, whose surface is at `rel_pos` from the camera with the
 // G-buffer's normal and error `normal_error`: keeps up its own cell, and the larger cells a
 // wide soft edge there is read from. False if there is no surface there.

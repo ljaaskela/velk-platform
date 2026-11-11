@@ -198,7 +198,8 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     uint32_t cells = 0)
 {
     // `cells`: 1 for a shader that reads the light cells, 2 for the one that notes which are
-    // needed, 3 for the one that traces them, whose main comes with it.
+    // needed, 3 for the one that traces them, 4 for the one that traces bounce rays and finds
+    // the cells they hit, 5 for the one that gathers bounce light.
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
     const auto& intersect_ids = ctx.snippets->frame_intersects();
@@ -251,6 +252,13 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
         src += light_cells_src;
         src += light_cells_touch_src;
     } else if (cells == 3) {
+        src += light_cells_src;
+        src += light_cells_trace_src;
+    } else if (cells == 4) {
+        src += light_cells_src;
+        src += light_cells_trace_src;
+        src += light_cells_touch_src;
+    } else if (cells == 5) {
         src += light_cells_src;
     }
     src += main_src;
@@ -343,7 +351,7 @@ constexpr uint32_t kCellHeaderWords = 8;
 // words of each, and the header's words before them, counters for the log among them. See
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
-constexpr uint32_t kCellWorkWords = 4;
+constexpr uint32_t kCellWorkWords = 8;
 constexpr uint32_t kCellWorkHeader = 24;
 constexpr uint32_t kCellStats = 17;
 // How often the counters are printed, in frames.
@@ -2031,7 +2039,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     const bool has_medium = render_view.bvh.has_medium != 0u;
     auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false, has_medium,
                                                       render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 2u);
-    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_src, 0x4c43'5452'4143ULL, false, has_medium,
+    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false, has_medium,
                                                             render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 3u);
     if (!pipeline || !trace_pipeline) return;
 
