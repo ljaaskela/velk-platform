@@ -339,14 +339,14 @@ namespace {
 // The table of light cells: its slots, a power of two, and the words of each. See
 // light_cells_main_src.
 constexpr uint32_t kCellSlots = 1u << 20;
-constexpr uint32_t kCellWords = 30;
+constexpr uint32_t kCellWords = 32;
 // The changes the light cells are given: how many at most, the words of each after 4 words
 // of header, and how many frames one stays listed.
 constexpr uint32_t kCellChanges = 128;
 constexpr uint32_t kCellChangeWords = 8;
 constexpr uint32_t kCellChangeFrames = 240;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
-constexpr uint32_t kCellHeaderWords = 12;
+constexpr uint32_t kCellHeaderWords = 14;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
 // VELK_BOUNCE_GLSL.
 constexpr uint32_t kBounceEntries = 1u << 15;
@@ -361,8 +361,8 @@ constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * 
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
 constexpr uint32_t kCellWorkWords = 8;
-constexpr uint32_t kCellWorkHeader = 38;
-constexpr uint32_t kCellStats = 34;
+constexpr uint32_t kCellWorkHeader = 40;
+constexpr uint32_t kCellStats = 36;
 // How often the counters are printed, in frames.
 constexpr uint64_t kCellStatFrames = 60;
 
@@ -1170,10 +1170,11 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                      "light cell changes per frame: boxes listed %.1f, too small %.1f, lights moved %.2f; "
                      "lights on cells found changed by a box to a sun %.0f, to an area light %.0f, to a point or "
                      "spot %.0f, by the light moving %.0f; of all those, inside the box %.0f, above a pixel's own level %.0f; "
-                     "frames the list covers %u",
+                     "frames the list covers %u; cells marked %.0f, could not be placed %.0f",
                      vs.light_cell_boxes_listed / listed_frames, vs.light_cell_boxes_small / listed_frames,
                      vs.light_cell_lights_moved / listed_frames, per(28), per(29), per(30), per(31), per(32), per(33),
-                     static_cast<unsigned>(static_cast<uint32_t>(ctx.present_counter) - vs.light_cell_changes_from));
+                     static_cast<unsigned>(static_cast<uint32_t>(ctx.present_counter) - vs.light_cell_changes_from),
+                     per(34), per(35));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
         vs.light_cell_stats_frame = ctx.present_counter;
@@ -1287,11 +1288,18 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             }
             changes = std::move(kept);
         }
+        // What the light cells' mark pass has to look at: this frame's changes, or all of
+        // them changed.
+        vs.light_cell_changed_now = vs.light_cell_changes_from == now;
+        for (const auto& change : changes) {
+            vs.light_cell_changed_now = vs.light_cell_changed_now || change.frame == now;
+        }
 
         vector<uint32_t> words;
         words.resize(4u + kCellChanges * kCellChangeWords);
         words[0] = static_cast<uint32_t>(changes.size());
         words[1] = vs.light_cell_changes_from;
+        words[2] = vs.light_cell_changed_now ? 1u : 0u;
         for (size_t i = 0; i < changes.size(); ++i) {
             uint32_t* w = words.data() + 4u + i * kCellChangeWords;
             std::memcpy(w, changes[i].box.min, sizeof(float) * 3);
@@ -1317,6 +1325,8 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             kBounceEntries,
             static_cast<uint32_t>(vs.light_bounce_list.offset() / sizeof(uint32_t)),
             kBounceListMax,
+            render_view.bvh.object_transforms,
+            render_view.bvh.object_slots,
         };
         arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
     }
@@ -1345,6 +1355,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     auto changes_pipeline = bounce_pipeline(light_cells_bounce_changes_main_src, 0x4c43'4243'4847ULL, 4u);
     auto arrive_pipeline = bounce_pipeline(light_cells_bounce_arrive_main_src, 0x4c43'4241'5256ULL, 2u);
     auto hops_pipeline = bounce_pipeline(light_cells_bounce_hops_main_src, 0x4c43'4248'4f50ULL, 4u);
+    auto mark_pipeline = bounce_pipeline(light_cells_mark_main_src, 0x4c43'4d41'524bULL, 4u);
     // The material where bounce rays hit, composed with the frame's materials as the RT path's
     // shading is.
     IGpuPipeline::Ptr shade_pipeline;
@@ -1362,7 +1373,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         }
     }
     if (!pipeline || !trace_pipeline || !bounce_trace_pipeline || !hits_pipeline || !gather_pipeline || !changes_pipeline
-        || !arrive_pipeline || !hops_pipeline || !shade_pipeline) {
+        || !arrive_pipeline || !hops_pipeline || !mark_pipeline || !shade_pipeline) {
         return;
     }
 
@@ -1422,6 +1433,9 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         fold_dc.groups_x = kCellSlots / 64u;
         trace_pc.mode = 3;
         std::memcpy(fold_dc.root_constants, &trace_pc, sizeof(trace_pc));
+        // First of all: what this frame's changes alter, marked on the cells. A thread a slot.
+        DispatchCall mark_dc = fold_dc;
+        mark_dc.pipeline = mark_pipeline.get();
 
         // The bounce cells over the hits of those pixels use are kept up and listed with the
         // room the pixels left. The bounce cells listed: their rays, a group a cell, then the
@@ -1475,6 +1489,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light cells update");
         cmd->record_global_barrier();
+        cmd->record_dispatch(mark_dc);
+        cmd->record_global_barrier();
         cmd->record_dispatch(fold_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
@@ -1518,6 +1534,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         rec.held.push_back(changes_pipeline);
         rec.held.push_back(arrive_pipeline);
         rec.held.push_back(hops_pipeline);
+        rec.held.push_back(mark_pipeline);
         rec.held.push_back(shade_pipeline);
     });
 }

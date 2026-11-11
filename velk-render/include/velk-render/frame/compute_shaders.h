@@ -1941,11 +1941,15 @@ layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; }
 )" VELK_LIGHT_CELL_GLSL VELK_BOUNCE_GLSL R"(
 #define CELLS_HEADER pc.cells_header
 // The header's words, read once a thread by velk_cells_load, which a main calls first.
-uint cells_header[12];
+uint cells_header[14];
 void velk_cells_load()
 {
-    for (uint w = 0u; w < 12u; ++w) cells_header[w] = velk_light_cell_words.data[CELLS_HEADER + w];
+    for (uint w = 0u; w < 14u; ++w) cells_header[w] = velk_light_cell_words.data[CELLS_HEADER + w];
 }
+// Where each object is, by the slot of its id, and how many slots: see
+// IBvh::get_object_transforms. 0xFFFFFFFF if there is no table.
+#define CELLS_OBJECTS cells_header[12]
+#define CELLS_OBJECT_SLOTS cells_header[13]
 #define CELLS_WORD cells_header[0]
 #define CELLS_SLOTS cells_header[1]
 #define CELLS_PIXELS cells_header[2]
@@ -1966,8 +1970,9 @@ uint velk_bounce_scratch(uint listed, uint ray)
     return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * kBounceScratchWords;
 }
 // What changed lately, in the same arena: a count, the frame before which changes are no
-// longer listed, two spare words, then 8 words a change: a world box's least corner, the
-// frame it changed in, its greatest corner, and a spare.
+// longer listed, 1 if this frame has changes for light_cells_mark_main_src, a spare word,
+// then 8 words a change: a world box's least corner, the frame it changed in, its greatest
+// corner, and which light moved or all ones.
 #define CELLS_CHANGES cells_header[3]
 #define CELLS_IDS cells_header[4]
 #define CELLS_SURFACE cells_header[5]
@@ -1995,7 +2000,7 @@ vec3 velk_cell_unpack_normal(uint packed)
 {
     return velk_unoct(unpackSnorm2x16(packed));
 }
-const uint kCellWorkHeader = 38u;
+const uint kCellWorkHeader = 40u;
 // Of the lights that moving things could be in the way of: how many the cells read this
 // frame hold, every how many frames each is due, and how many were due this frame.
 const uint kCellWorkLiveLoad = 1u;
@@ -2037,12 +2042,17 @@ const uint kStatChangeBoxOther = 30u; // the same, to a point or spot light
 const uint kStatChangeLight = 31u;    // lights on cells found changed: the light itself moved
 const uint kStatChangeInside = 32u;   // of those found changed by a box, the cell is inside the box
 const uint kStatChangeCoarse = 33u;   // lights on cells found changed, on cells above a pixel's own level
+const uint kStatMarked = 34u;         // cells the mark pass marked a light on
+const uint kStatMarkUnplaced = 35u;   // cells the mark pass could not place, so took every light
 void velk_cell_stat(uint which, uint by)
 {
     atomicAdd(velk_light_cell_words.data[CELLS_WORK + 4u + which], by);
 }
 
-const uint kCellWords = 30u;
+const uint kCellWords = 32u;
+// The lights something changed on the way to since the cell was traced for them, 64 bits
+// in 2 words, set by light_cells_mark_main_src and cleared by the trace.
+const uint kCellChanged = 30u;
 // The direct light arriving at a cell, summed over its lights, from the surface's facing
 // and each light's falloff and how much of it gets through, as the mean over the places on
 // the cell that were read last time: red and green as halves, then blue as a half and in
@@ -2153,7 +2163,8 @@ bool velk_segment_touches(vec3 from, vec3 to, vec3 box_min, vec3 box_max)
     vec3 tmx = max(t0, t1);
     return max(max(max(tmn.x, tmn.y), tmn.z), 0.0) <= min(min(min(tmx.x, tmx.y), tmx.z), 1.0);
 }
-
+)"
+                                                                      R"(
 // Which lights the surface at `world_pos` may see differently for a change listed since
 // frame `valid`, as a bit a light, the first 32 in x. A change is a box, grown here by
 // `margin`: one that lies on the way to a light. Or it is a light that moved, named in the
@@ -2230,6 +2241,34 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
         }
     }
     return changed;
+}
+
+// Where the cell with key `object`, `at`, `level` and `side` is, from the camera, and the way
+// its side faces, from its object's place now (see CELLS_OBJECTS): the middle of its cube.
+// False if its object's place is not known.
+bool velk_cell_place(uint object, ivec3 at, int level, uint side, out vec3 world_pos, out vec3 N)
+{
+    world_pos = vec3(0.0);
+    N = vec3(0.0, 1.0, 0.0);
+    uint slot = object & 0x3FFFFFFu;
+    if (CELLS_OBJECTS == 0xFFFFFFFFu || object == 0u || slot >= CELLS_OBJECT_SLOTS) return false;
+    uint e = CELLS_OBJECTS + slot * 13u;
+    if (velk_light_cell_words.data[e + 12u] != (object >> 26u) + 1u) return false;
+    vec4 r0 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e], velk_light_cell_words.data[e + 1u],
+                                    velk_light_cell_words.data[e + 2u], velk_light_cell_words.data[e + 3u]));
+    vec4 r1 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 4u], velk_light_cell_words.data[e + 5u],
+                                    velk_light_cell_words.data[e + 6u], velk_light_cell_words.data[e + 7u]));
+    vec4 r2 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 8u], velk_light_cell_words.data[e + 9u],
+                                    velk_light_cell_words.data[e + 10u], velk_light_cell_words.data[e + 11u]));
+    mat3 m = mat3(vec3(r0.x, r1.x, r2.x), vec3(r0.y, r1.y, r2.y), vec3(r0.z, r1.z, r2.z));
+    // Keys are in the object's axes scaled by their lengths, as the G-buffer's surface is.
+    vec3 axis_scale = max(vec3(length(m[0]), length(m[1]), length(m[2])), vec3(1e-12));
+    vec3 middle = (vec3(at) + 0.5) * velk_light_cell_size(level);
+    world_pos = m * (middle / axis_scale) + vec3(r0.w, r1.w, r2.w) - VELK_GLOBALS.cam_pos.xyz;
+    vec3 n = vec3(0.0);
+    n[side >> 1u] = (side & 1u) != 0u ? -1.0 : 1.0;
+    N = normalize(transpose(inverse(m)) * n);
+    return true;
 }
 )"
                                                                       R"(
@@ -2556,6 +2595,8 @@ void main()
     uint shift = (i & 3u) * 8u;
     atomicAnd(velk_light_cell_words.data[own + 8u + (i >> 2u)], ~(255u << shift));
     atomicOr(velk_light_cell_words.data[own + 8u + (i >> 2u)], (fifteenths | (half_levels << 4u) | live) << shift);
+    // Traced now: nothing changed for this light since.
+    atomicAnd(velk_light_cell_words.data[own + kCellChanged + (i >> 5u)], ~(1u << (i & 31u)));
 }
 )";
 
@@ -2627,21 +2668,17 @@ uint velk_cell_keep(VelkLightCell c, int up)
     }
     if (own != kNoCell) {
         uint tag = velk_light_cell_words.data[own] & 0xFFFFFFFCu;
-        // Traced, and good up to some frame: is it still, given what changed since? If so
-        // it is good up to now, and next frame has only that frame's changes to look at.
-        // Only the lights a change could alter are traced again.
+        // Traced: the lights something changed on the way to since are marked on it (see
+        // light_cells_mark_main_src), and only those are traced again.
         uvec2 which = uvec2(0xFFFFFFFFu);
         bool changed = false;
         if (velk_light_cell_words.data[own] == (tag | kCellReady)) {
-            uint valid = velk_light_cell_words.data[own + 6u];
-            if (valid != VELK_GLOBALS.present_counter) {
-                which = velk_cell_changed_lights(valid, world_pos, N, cell_size * (up > 0 ? 2.0 : 1.0));
-                changed = (which.x | which.y) != 0u;
-                if (changed && up > 0 && which != uvec2(0xFFFFFFFFu)) {
-                    velk_cell_stat(kStatChangeCoarse, uint(bitCount(which.x) + bitCount(which.y)));
-                }
-                if (!changed) velk_light_cell_words.data[own + 6u] = VELK_GLOBALS.present_counter;
+            which = uvec2(velk_light_cell_words.data[own + kCellChanged], velk_light_cell_words.data[own + kCellChanged + 1u]);
+            changed = (which.x | which.y) != 0u;
+            if (changed && up > 0 && which != uvec2(0xFFFFFFFFu)) {
+                velk_cell_stat(kStatChangeCoarse, uint(bitCount(which.x) + bitCount(which.y)));
             }
+            if (!changed) velk_light_cell_words.data[own + 6u] = VELK_GLOBALS.present_counter;
         }
         // What the cell goes back to if it is not listed after all.
         uint as_it_was = tag;
@@ -2708,6 +2745,9 @@ uint velk_cell_keep(VelkLightCell c, int up)
                 if (i < 32u) reaching.x |= 1u << i; else reaching.y |= 1u << (i - 32u);
                 ++entries;
             }
+            // Marks for lights that do not reach it need nothing traced.
+            atomicAnd(velk_light_cell_words.data[own + kCellChanged], reaching.x);
+            atomicAnd(velk_light_cell_words.data[own + kCellChanged + 1u], reaching.y);
             // All of them have to fit in what the frame may trace, or the cell waits. A part
             // of the list taken and not used is marked as holding no cell.
             uint limit = CELLS_ENTRIES;
@@ -3113,6 +3153,47 @@ void main()
 }
 )";
 
+/// Marks on every traced light cell the lights this frame's changes could alter there, a
+/// thread a slot of the table, from where its object is now: a moved box on the way to a
+/// light, or a light that moved. The marks stay on the cell until it is traced for those
+/// lights, so a cell read again after a long time knows what changed meanwhile. A cell whose
+/// object's place is not known takes every light. Runs only on frames with changes. Follows
+/// light_cells_src.
+[[maybe_unused]] constexpr string_view light_cells_mark_main_src = R"(
+void main()
+{
+    velk_cells_load();
+    if (velk_light_cell_words.data[CELLS_CHANGES + 2u] == 0u) return;
+    uint slot = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    if (slot >= CELLS_SLOTS) return;
+    uint at = CELLS_WORD + slot * kCellWords;
+    if ((velk_light_cell_words.data[at] & kCellReady) == 0u) return;
+    uint object = velk_light_cell_words.data[at + 1u];
+    ivec3 cube = ivec3(int(velk_light_cell_words.data[at + 2u]), int(velk_light_cell_words.data[at + 3u]),
+                       int(velk_light_cell_words.data[at + 4u]));
+    uint level_side = velk_light_cell_words.data[at + 5u];
+    int level = int(level_side >> 3u) - 64;
+    vec3 place;
+    vec3 facing;
+    uvec2 which = uvec2(0xFFFFFFFFu);
+    if (velk_cell_place(object, cube, level, level_side & 7u, place, facing)) {
+        // Only this frame's changes. The place is the cube's middle, up to most of a cell off
+        // the surface, so the margin is wider than a pixel's.
+        which = velk_cell_changed_lights(VELK_GLOBALS.present_counter - 1u, place, facing, 2.0 * velk_light_cell_size(level));
+    } else {
+        velk_cell_stat(kStatMarkUnplaced, 1u);
+    }
+    // Only lights there are.
+    uint lights = min(pc.light_count, kCellLights);
+    which &= uvec2(lights >= 32u ? 0xFFFFFFFFu : (1u << lights) - 1u,
+                   lights >= 64u ? 0xFFFFFFFFu : lights > 32u ? (1u << (lights - 32u)) - 1u : 0u);
+    if ((which.x | which.y) == 0u) return;
+    velk_cell_stat(kStatMarked, 1u);
+    atomicOr(velk_light_cell_words.data[at + kCellChanged], which.x);
+    atomicOr(velk_light_cell_words.data[at + kCellChanged + 1u], which.y);
+}
+)";
+
 /// Keeps up the bounce cells over the hits of the rays of bounce cells pixels use, a group a
 /// cell and a ray a thread, so that the light arriving there from other surfaces is there to
 /// pass on: made if absent, starting their rays where this ray hit, noted as used, and listed
@@ -3469,7 +3550,7 @@ uint cells_surface_id;
 #define CELLS_IDS cells_ids
 #define CELLS_SURFACE cells_surface_id
 
-const uint kCellWords = 30u;
+const uint kCellWords = 32u;
 const uint kCellArrive = 24u;
 const int kCellUp = 3;
 const int kAround = 18;
