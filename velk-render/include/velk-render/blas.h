@@ -3,6 +3,8 @@
 
 #include <velk/vector.h>
 
+#include <velk-render/api/half_float.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -716,6 +718,126 @@ inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas, bool scattered)
         set_parent(blas.root_index, kBlasNoParent);
     }
     return tree;
+}
+
+/// Words per node in a tree's surface table: see blas_surface_table.
+inline constexpr uint32_t kBlasSurfaceWords = 4;
+
+/// What each node of a mesh tree looks like as a whole, for what is too small to show its
+/// triangles: kBlasSurfaceWords for the root, then for each inner node of blas_gpu_tree, in
+/// its order, the same for its left child and then its right. A node's words are its
+/// triangles' area as a float; their normal weighted by area, as signed 8-bit xyz, shorter
+/// the less they agree on a direction; their uv weighted by area, as two halves; and how far
+/// their uvs reach in each direction, as two halves. Normal and uvs are zero for vertices
+/// without them.
+/// @param vertices The vertices the tree's clusters name, @p stride bytes apart.
+/// @param normal_offset Bytes to a vertex's normal, three floats, or 0xFFFFFFFF for none.
+/// @param uv_offset Bytes to a vertex's first uv, two floats, or 0xFFFFFFFF for none.
+inline vector<uint32_t> blas_surface_table(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride,
+                                           uint32_t normal_offset, uint32_t uv_offset)
+{
+    struct Sum
+    {
+        float area = 0.f;
+        float normal[3] = {};
+        float uv[2] = {};
+        float uv_min[2] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+        float uv_max[2] = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+    };
+    const auto node_count = static_cast<uint32_t>(blas.nodes.size());
+    vector<Sum> sums;
+    sums.resize(node_count);
+    const auto read = [&](uint32_t vertex, uint32_t offset, int k) {
+        float value;
+        std::memcpy(&value, vertices + size_t(vertex) * stride + offset + k * sizeof(float), sizeof(float));
+        return value;
+    };
+    // A child's index is always greater than its parent's.
+    for (uint32_t n = node_count; n > 0; --n) {
+        const BlasNode& node = blas.nodes[n - 1];
+        Sum& sum = sums[n - 1];
+        if (node.child_count != 0) {
+            for (uint32_t c = 0; c < node.child_count; ++c) {
+                const Sum& child = sums[node.first_child + c];
+                sum.area += child.area;
+                for (int k = 0; k < 3; ++k) sum.normal[k] += child.normal[k];
+                for (int k = 0; k < 2; ++k) {
+                    sum.uv[k] += child.uv[k];
+                    sum.uv_min[k] = std::min(sum.uv_min[k], child.uv_min[k]);
+                    sum.uv_max[k] = std::max(sum.uv_max[k], child.uv_max[k]);
+                }
+            }
+            continue;
+        }
+        // A leaf's triangles are in its cluster: see build_mesh_blas.
+        const uint32_t triangles = node.shape_count & 0xFFFFu;
+        const uint32_t cluster_vertices = node.shape_count >> 16;
+        const float* positions = reinterpret_cast<const float*>(blas.cluster_words.data() + node.first_child);
+        const uint32_t* ids = blas.cluster_words.data() + node.first_child + cluster_vertices * 3u;
+        for (uint32_t t = 0; t < triangles; ++t) {
+            const uint32_t word = blas.cluster_words[node.first_shape + t];
+            const uint32_t local[3] = {word & 0xFFu, (word >> 8) & 0xFFu, (word >> 16) & 0xFFu};
+            const float* a = positions + local[0] * 3u;
+            const float* b = positions + local[1] * 3u;
+            const float* c = positions + local[2] * 3u;
+            const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+            const float v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+            const float cross[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+            const float area = 0.5f * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+            sum.area += area;
+            for (uint32_t corner = 0; corner < 3; ++corner) {
+                const uint32_t id = ids[local[corner]];
+                if (vertices && normal_offset != 0xFFFFFFFFu) {
+                    for (int k = 0; k < 3; ++k) sum.normal[k] += area * read(id, normal_offset, k) / 3.f;
+                }
+                if (vertices && uv_offset != 0xFFFFFFFFu) {
+                    for (int k = 0; k < 2; ++k) {
+                        const float value = read(id, uv_offset, k);
+                        sum.uv[k] += area * value / 3.f;
+                        sum.uv_min[k] = std::min(sum.uv_min[k], value);
+                        sum.uv_max[k] = std::max(sum.uv_max[k], value);
+                    }
+                }
+            }
+        }
+    }
+
+    const auto halves = [](float a, float b) {
+        return uint32_t(::velk::detail::float_to_half_scalar(a)) | (uint32_t(::velk::detail::float_to_half_scalar(b)) << 16);
+    };
+    const auto put = [&](const Sum& sum, uint32_t* out) {
+        std::memcpy(out, &sum.area, sizeof(float));
+        out[1] = out[2] = out[3] = 0u;
+        if (sum.area <= 0.f) return;
+        for (int k = 0; k < 3; ++k) {
+            const float unit = std::min(std::max(sum.normal[k] / sum.area, -1.f), 1.f);
+            out[1] |= static_cast<uint32_t>(static_cast<uint8_t>(static_cast<int8_t>(std::lround(unit * 127.f)))) << (k * 8);
+        }
+        if (vertices && uv_offset != 0xFFFFFFFFu) {
+            out[2] = halves(sum.uv[0] / sum.area, sum.uv[1] / sum.area);
+            out[3] = halves(sum.uv_max[0] - sum.uv_min[0], sum.uv_max[1] - sum.uv_min[1]);
+        }
+    };
+
+    // Inner nodes numbered as blas_gpu_tree numbers them.
+    vector<uint32_t> table;
+    uint32_t inner_count = 0;
+    for (const BlasNode& node : blas.nodes) {
+        inner_count += node.child_count != 0 ? 1u : 0u;
+    }
+    table.resize(size_t(kBlasSurfaceWords) * (1u + 2u * inner_count), 0u);
+    if (node_count == 0) return table;
+    put(sums[blas.root_index], table.data());
+    uint32_t inner = 0;
+    for (uint32_t n = 0; n < node_count; ++n) {
+        const BlasNode& node = blas.nodes[n];
+        if (node.child_count == 0) continue;
+        uint32_t* out = table.data() + kBlasSurfaceWords * (1u + 2u * inner);
+        put(sums[node.first_child], out);
+        put(sums[node.first_child + 1], out + kBlasSurfaceWords);
+        ++inner;
+    }
+    return table;
 }
 
 /// The nodes' total surface area against the root's. Grows as a refit tree degrades.

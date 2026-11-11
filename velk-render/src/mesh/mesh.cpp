@@ -24,6 +24,21 @@ namespace {
 /// this factor.
 constexpr float kBlasRebuildDrift = 1.5f;
 
+/// Where a vertex's normal and first uv are, kLodNoAttribute for what it has not.
+void attribute_offsets(const vector<VertexAttribute>& attributes, uint32_t& normal_offset, uint32_t& uv_offset)
+{
+    normal_offset = kLodNoAttribute;
+    uv_offset = kLodNoAttribute;
+    for (const auto& attribute : attributes) {
+        if (attribute.semantic == VertexAttributeSemantic::Normal && attribute.format == VertexAttributeFormat::Float3) {
+            normal_offset = attribute.offset;
+        }
+        if (attribute.semantic == VertexAttributeSemantic::TexCoord0 && attribute.format == VertexAttributeFormat::Float2) {
+            uv_offset = attribute.offset;
+        }
+    }
+}
+
 } // namespace
 
 void MeshPrimitive::init(const IMeshBuffer::Ptr& buffer,
@@ -68,6 +83,7 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
     rt_static_region_ = {};
     rt_blas_nodes_region_ = {};
     rt_cluster_words_region_ = {};
+    rt_surface_region_ = {};
     rt_static_base_ = kInvalidMeshStaticBase;
     lod_table_region_ = {};
     lod_index_region_ = {};
@@ -88,16 +104,9 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         vector<uint8_t> geometry;
         auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
-        uint32_t normal_offset = kLodNoAttribute;
-        uint32_t uv_offset = kLodNoAttribute;
-        for (const auto& attribute : attributes_) {
-            if (attribute.semantic == VertexAttributeSemantic::Normal && attribute.format == VertexAttributeFormat::Float3) {
-                normal_offset = attribute.offset;
-            }
-            if (attribute.semantic == VertexAttributeSemantic::TexCoord0 && attribute.format == VertexAttributeFormat::Float2) {
-                uv_offset = attribute.offset;
-            }
-        }
+        uint32_t normal_offset;
+        uint32_t uv_offset;
+        attribute_offsets(attributes_, normal_offset, uv_offset);
         const bool read = (normal_offset != kLodNoAttribute || uv_offset != kLodNoAttribute) && buffer
             && buffer->read_geometry(geometry);
         // A deforming mesh's coarser levels would be drawn in its rest pose.
@@ -193,23 +202,42 @@ void MeshPrimitive::ensure_blas() const
     rt_blas_ = build_mesh_blas(vertices, vertex_stride_, static_cast<uint32_t>(buffer_->get_vbo_size() / vertex_stride_), indices, index_count_ / 3);
 }
 
-bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData& out)
+vector<uint32_t> MeshPrimitive::surface_table(const uint8_t* vertices) const
+{
+    vector<uint8_t> geometry;
+    if (!vertices) {
+        auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
+        if (buffer && buffer->read_geometry(geometry)) {
+            vertices = geometry.data();
+        }
+    }
+    uint32_t normal_offset;
+    uint32_t uv_offset;
+    attribute_offsets(attributes_, normal_offset, uv_offset);
+    return blas_surface_table(rt_blas_, vertices, vertex_stride_, normal_offset, uv_offset);
+}
+
+bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData& out, const uint8_t* vertices)
 {
     auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
     auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
     if (!nodes_arena || !words_arena) return false;
 
     const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+    const vector<uint32_t> surfaces = surface_table(vertices);
     const uint64_t nodes_bytes = tree.nodes.size() * sizeof(BlasGpuNode);
     const uint64_t words_bytes = tree.words.size() * sizeof(uint32_t);
+    const uint64_t surface_bytes = surfaces.size() * sizeof(uint32_t);
     auto nodes_region = nodes_arena->alloc(std::max<uint64_t>(nodes_bytes, sizeof(BlasGpuNode)), sizeof(BlasGpuNode));
     auto words_region = words_arena->alloc(words_bytes);
-    if (!nodes_region.valid() || !words_region.valid()) return false;
+    auto surface_region = words_arena->alloc(surface_bytes);
+    if (!nodes_region.valid() || !words_region.valid() || !surface_region.valid()) return false;
 
     if (nodes_bytes != 0) {
         nodes_arena->write_at(nodes_region.offset(), tree.nodes.data(), nodes_bytes);
     }
     words_arena->write_at(words_region.offset(), tree.words.data(), words_bytes);
+    words_arena->write_at(surface_region.offset(), surfaces.data(), surface_bytes);
 
     // A base is a word index into the shared mesh-word arena. IBO entries are
     // global vertex indices in our gltf-imported meshes, so the vertex run starts
@@ -228,9 +256,11 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     out.blas_node_count = static_cast<uint32_t>(rt_blas_.nodes.size());
     out.blas_node_base = static_cast<uint32_t>(nodes_region.offset() / sizeof(BlasGpuNode));
     out.cluster_word_base = static_cast<uint32_t>(words_region.offset() / sizeof(uint32_t));
+    out.surface_word_base = static_cast<uint32_t>(surface_region.offset() / sizeof(uint32_t));
 
     rt_blas_nodes_region_ = std::move(nodes_region);
     rt_cluster_words_region_ = std::move(words_region);
+    rt_surface_region_ = std::move(surface_region);
     return true;
 }
 
@@ -245,12 +275,17 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
         rt_built_cost_ = blas_tree_cost(rt_blas_);
     }
     refit_mesh_blas(rt_blas_, floats, vertex_stride_);
+    // The surface table follows the tree's shape, which only a rebuild changes; deforming
+    // otherwise does not matter at the sizes it is read for.
+    bool rebuilt = false;
     if (blas_tree_cost(rt_blas_) > rt_built_cost_ * kBlasRebuildDrift) {
         VELK_PERF_SCOPE("mesh.blas_rebuild");
         rt_blas_ = build_mesh_blas(floats, vertex_stride_, static_cast<uint32_t>(vertices.size()),
                                    indices.begin() + index_offset_ / sizeof(uint32_t), index_count_ / 3);
         rt_built_cost_ = blas_tree_cost(rt_blas_);
+        rebuilt = true;
     }
+    const auto* vertex_bytes = reinterpret_cast<const uint8_t*>(vertices.begin());
 
     const BlasNode& root = rt_blas_.nodes[rt_blas_.root_index];
     bounds_.position = {root.aabb_min[0], root.aabb_min[1], root.aabb_min[2]};
@@ -270,6 +305,12 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
                 nodes_arena->update_at(rt_blas_nodes_region_.offset(), tree.nodes.data(), tree.nodes.size() * sizeof(BlasGpuNode));
             }
             words_arena->update_at(rt_cluster_words_region_.offset(), tree.words.data(), words_bytes);
+            if (rebuilt) {
+                const vector<uint32_t> surfaces = surface_table(vertex_bytes);
+                if (surfaces.size() * sizeof(uint32_t) == rt_surface_region_.size()) {
+                    words_arena->update_at(rt_surface_region_.offset(), surfaces.data(), rt_surface_region_.size());
+                }
+            }
         }
         return;
     }
@@ -278,7 +319,7 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
     // and the record pointing at them keeps its base.
     MeshStaticData s{};
     auto static_arena = resources.shared_arena(IRenderBackend::kGlobalMeshStatic, sizeof(MeshStaticData));
-    if (static_arena && publish_tree(resources, s)) {
+    if (static_arena && publish_tree(resources, s, vertex_bytes)) {
         static_arena->update_at(rt_static_region_.offset(), &s, sizeof(s));
     } else {
         VELK_LOG(E, "MeshPrimitive: no room for a rebuilt tree, rays use the previous one");

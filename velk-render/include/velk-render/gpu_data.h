@@ -172,8 +172,10 @@ VELK_GPU_STRUCT MeshStaticData
     uint32_t blas_node_count; ///< length of this primitive's BLAS node run; 0 = no BLAS.
     uint32_t blas_node_base;  ///< element base of the node run in the BLAS node arena.
     uint32_t cluster_word_base; ///< element base of this primitive's clusters in the cluster word arena.
+    uint32_t surface_word_base; ///< its tree's surface table (blas_surface_table) in the cluster word arena.
+    uint32_t pad[3];
 };
-static_assert(sizeof(MeshStaticData) == 32, "MeshStaticData layout mismatch");
+static_assert(sizeof(MeshStaticData) == 48, "MeshStaticData layout mismatch");
 
 /// `MeshStaticData::flags` bit for a primitive of separate pieces. Mirrors GLSL `VELK_MESH_SCATTERED`.
 inline constexpr uint32_t kMeshStaticScattered = 1u;

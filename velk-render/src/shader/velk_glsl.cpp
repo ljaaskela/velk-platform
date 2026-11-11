@@ -91,6 +91,10 @@ struct MeshStaticData {
     uint     blas_node_count; // length of this primitive's BLAS node run; 0 = no BLAS
     uint     blas_node_base;  // element base of the node run in velk_blas_nodes
     uint     cluster_word_base; // element base of this primitive's clusters in velk_cluster_words
+    uint     surface_word_base; // its tree's surface table in velk_cluster_words: blas_surface_table
+    uint     _pad_static0;
+    uint     _pad_static1;
+    uint     _pad_static2;
 };
 
 )"

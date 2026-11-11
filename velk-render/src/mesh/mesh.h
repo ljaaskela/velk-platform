@@ -93,7 +93,10 @@ public:
 private:
     /// Allocates and fills the node and cluster regions, and fills @p out with
     /// everything that refers to them. Leaves the current regions on failure.
-    bool publish_tree(IGpuResourceManager& resources, MeshStaticData& out);
+    /// @param vertices The vertices the tree was built from, or null to read the mesh's own.
+    bool publish_tree(IGpuResourceManager& resources, MeshStaticData& out, const uint8_t* vertices = nullptr);
+    /// The tree's surface table, from @p vertices, or from the mesh's own when null.
+    vector<uint32_t> surface_table(const uint8_t* vertices) const;
 
     /// Builds the BLAS from the primitive's own geometry if none was set. Only rays and area
     /// queries call this, so a primitive drawn alone, or as an analytic shape, never pays for it.
@@ -119,6 +122,8 @@ private:
     ArenaRegion rt_static_region_;
     ArenaRegion rt_blas_nodes_region_;
     ArenaRegion rt_cluster_words_region_;
+    /// The tree's surface table (blas_surface_table), in the cluster word arena.
+    ArenaRegion rt_surface_region_;
 
     /// Element index of `rt_static_region_`, or kInvalidMeshStaticBase
     /// while the RT data is not published.
