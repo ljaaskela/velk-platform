@@ -157,6 +157,14 @@ struct InstanceTransform
     }
 };
 
+/// Where an instance was before it moved or went away.
+struct InstanceBefore
+{
+    uint32_t slot;
+    uint32_t mesh;
+    InstanceTransform transform;
+};
+
 /**
  * @brief Draws meshes many times, on one element.
  *
@@ -290,8 +298,11 @@ public:
     virtual bool take_rest_changed() = 0;
 
     /// Slots changed since the last call, added to @p changed. Sets @p all instead when
-    /// everything is to be treated as changed, such as on a new motion function.
-    virtual void take_changed_slots(vector<uint32_t>& changed, bool& all) = 0;
+    /// everything is to be treated as changed, such as on a new motion function. For the
+    /// instances among them that were there before, where they were, added to @p before.
+    /// @p before_complete is false when there were too many to keep, and @p before is short.
+    virtual void take_changed_slots(vector<uint32_t>& changed, bool& all, vector<InstanceBefore>& before,
+                                    bool& before_complete) = 0;
 
     /// Where culling finds this visual's partitions in the culling arena, set by the BVH
     /// that holds them. See `instance_partition_cull_src`. A count of 0 means none.

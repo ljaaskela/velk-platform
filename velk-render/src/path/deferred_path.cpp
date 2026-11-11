@@ -412,8 +412,8 @@ constexpr uint32_t kCellHeaderWords = 8;
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
 constexpr uint32_t kCellWorkWords = 4;
-constexpr uint32_t kCellWorkHeader = 20;
-constexpr uint32_t kCellStats = 15;
+constexpr uint32_t kCellWorkHeader = 24;
+constexpr uint32_t kCellStats = 17;
 // How often the counters are printed, in frames.
 constexpr uint64_t kCellStatFrames = 60;
 
@@ -1969,9 +1969,10 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             VELK_LOG(I,
                      "light cells per frame: entries asked %.0f listed %.0f traced %.0f, cells listed %.0f made %.0f "
                      "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u; "
-                     "coarse round entries asked %.0f cells refused %.0f, waiting pixels without coarse %.0f",
+                     "coarse round entries asked %.0f cells refused %.0f, waiting pixels without coarse %.0f; "
+                     "moving in the way: lights held %.0f, cells re-traced %.0f",
                      per(0), per(1), per(8), per(2), per(10), per(9), per(11), per(3), per(4), per(6), per(5),
-                     static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14));
+                     static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14), per(16), per(15));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
         vs.light_cell_stats_frame = ctx.present_counter;

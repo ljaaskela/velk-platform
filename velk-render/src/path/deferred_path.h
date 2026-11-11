@@ -173,7 +173,7 @@ public:
         /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
         /// The cells' counters when last printed, and the frame. See kStatAsked.
-        uint32_t light_cell_stats[15] = {};
+        uint32_t light_cell_stats[17] = {};
         uint64_t light_cell_stats_frame = 0;
         IRenderPass::Ptr visibility_resolve_pass;
         /// The depth of what is drawn at decreasing sizes, in the culling arena.

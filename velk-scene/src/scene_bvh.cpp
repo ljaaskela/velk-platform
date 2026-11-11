@@ -120,9 +120,13 @@ void set_inverted_bounds(GpuBvhNode& node)
 
 BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slot) const
 {
-    const InstanceTransform& t = group.visual->get_transforms()[slot];
-    const mat4& w = group.world;
-    const BvhItemBounds& local = group.meshes[group.visual->get_slot_mesh(slot)].bounds;
+    return instance_bounds(group, group.world, group.visual->get_transforms()[slot], group.visual->get_slot_mesh(slot));
+}
+
+BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, const mat4& w, const InstanceTransform& t,
+                                        uint32_t mesh) const
+{
+    const BvhItemBounds& local = group.meshes[mesh].bounds;
     // The instance's matrix applied to the mesh bounds' center and half extents.
     float center[3];
     float half[3];
@@ -944,7 +948,9 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
 
     vector<uint32_t> changed;
     bool all_changed = false;
-    visual.take_changed_slots(changed, all_changed);
+    vector<InstanceBefore> before;
+    bool before_complete = true;
+    visual.take_changed_slots(changed, all_changed, before, before_complete);
     rebuild = rebuild || all_changed;
 
     const float max_displacement = visual.get_max_displacement();
@@ -980,6 +986,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                 delta[k] = new_world(k, 3) - old_world(k, 3);
             }
             for (uint32_t p : group.partitions) {
+                note_changed(partitions_[p].cull_bounds);
                 GpuBvhNode& ref = partitions_[p].ref;
                 float z = 0.f;
                 std::memcpy(&z, &ref.first_shape, sizeof(float));
@@ -997,6 +1004,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                     partition.cull_bounds.min[k] += delta[k];
                     partition.cull_bounds.max[k] += delta[k];
                 }
+                note_changed(partition.cull_bounds);
                 auto cull_arena = emit.frame.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
                 if (cull_arena && group.cull_table.valid() && partition.cull_entry != kUnplaced) {
                     write_cull_entry(partition, *cull_arena, false);
@@ -1007,8 +1015,22 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     }
 
     if (rebuild) {
+        note_all_changed();
         cut_instances(group, emit.frame);
         return;
+    }
+
+    // Where instances were and are, for whatever keeps results of rays.
+    if (!before_complete) {
+        note_all_changed();
+    }
+    for (const InstanceBefore& b : before) {
+        note_changed(instance_bounds(group, old_world, b.transform, b.mesh));
+    }
+    for (uint32_t slot : changed) {
+        if (visual.is_live(slot)) {
+            note_changed(instance_bounds(group, slot));
+        }
     }
 
     const auto slot_count = static_cast<uint32_t>(visual.get_transforms().size());
@@ -1193,6 +1215,12 @@ void SceneBvh::note_changed(const BvhItemBounds& bounds)
         box.max[k] = bounds.max[k];
     }
     changed_.push_back(box);
+}
+
+void SceneBvh::note_all_changed()
+{
+    changed_all_ = true;
+    changed_.clear();
 }
 
 void SceneBvh::free_record(uint32_t slot)

@@ -85,7 +85,8 @@ public:
     uint64_t rest_region_size() const override { return rest_region_.size(); }
     bool take_motion_params(float out[4]) override;
     bool take_rest_changed() override;
-    void take_changed_slots(vector<uint32_t>& changed, bool& all) override;
+    void take_changed_slots(vector<uint32_t>& changed, bool& all, vector<InstanceBefore>& before,
+                            bool& before_complete) override;
     void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) override
     {
         cull_table_word_ = table_word;
@@ -102,6 +103,8 @@ public:
 private:
     uint32_t place(const InstanceTransform& transform, uint32_t mesh);
     void note_changed(uint32_t slot);
+    /// Keeps where @p slot's instance is, before it moves or goes away.
+    void note_before(uint32_t slot);
     /// Without a budget, every slot's index is the slot. With one, none has a place yet.
     void reset_instance_indices();
     void update_instance_capacity();
@@ -127,6 +130,8 @@ private:
     vector<uint32_t> changed_slots_;
     bool flush_all_ = true;
     bool all_changed_ = true;
+    vector<InstanceBefore> before_;  ///< See take_changed_slots.
+    bool before_complete_ = true;
 
     uint32_t cull_table_word_ = 0;
     uint32_t cull_count_ = 0;

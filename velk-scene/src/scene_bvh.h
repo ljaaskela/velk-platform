@@ -246,6 +246,9 @@ private:
     void write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32_t slot, uint32_t record,
                            const float origin[3]);
     BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
+    /// The world bounds of mesh @p mesh of @p group placed by @p t, with the element at @p w.
+    BvhItemBounds instance_bounds(const InstanceGroup& group, const mat4& w, const InstanceTransform& t,
+                                  uint32_t mesh) const;
     RtRecord instance_record(const InstanceGroup& group, uint32_t slot) const;
     void free_record(uint32_t slot);
     /// Moves a record to the dynamic partition, leaving its static partition if any.
@@ -305,6 +308,7 @@ private:
     vector<WorldBox> changed_;        ///< See changed_bounds. Cleared by each update.
     bool changed_all_ = false;
     void note_changed(const BvhItemBounds& bounds);
+    void note_all_changed();
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;

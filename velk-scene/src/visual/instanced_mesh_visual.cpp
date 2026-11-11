@@ -167,6 +167,21 @@ void InstancedMeshVisual::note_changed(uint32_t slot)
     }
 }
 
+void InstancedMeshVisual::note_before(uint32_t slot)
+{
+    // Past this many, those that read where things changed treat everything as changed.
+    constexpr size_t kMaxBefore = 256;
+    if (!before_complete_) {
+        return;
+    }
+    if (before_.size() >= kMaxBefore) {
+        before_complete_ = false;
+        before_.clear();
+        return;
+    }
+    before_.push_back({slot, slot_mesh_[slot], transforms_[slot]});
+}
+
 uint32_t InstancedMeshVisual::add_instance(const mat4& transform, uint32_t mesh)
 {
     const uint32_t slot = place(InstanceTransform::from(transform), mesh);
@@ -197,6 +212,7 @@ void InstancedMeshVisual::set_transform(uint32_t slot, const mat4& transform)
     if (!is_live(slot)) {
         return;
     }
+    note_before(slot);
     transforms_[slot] = InstanceTransform::from(transform);
     grow_bounds(transforms_[slot]);
     note_changed(slot);
@@ -208,6 +224,7 @@ void InstancedMeshVisual::remove_instance(uint32_t slot)
     if (!is_live(slot)) {
         return;
     }
+    note_before(slot);
     live_[slot] = 0;
     free_slots_.push_back(slot);
     --mesh_counts_[slot_mesh_[slot]];
@@ -487,14 +504,19 @@ void InstancedMeshVisual::flush_instances(IGpuArena& arena, IGpuResourceManager&
     flushed_world_ = world;
 }
 
-void InstancedMeshVisual::take_changed_slots(vector<uint32_t>& changed, bool& all)
+void InstancedMeshVisual::take_changed_slots(vector<uint32_t>& changed, bool& all, vector<InstanceBefore>& before,
+                                             bool& before_complete)
 {
     all = all_changed_;
+    before_complete = before_complete_;
     if (!all) {
         changed.insert(changed.end(), changed_slots_.begin(), changed_slots_.end());
+        before.insert(before.end(), before_.begin(), before_.end());
     }
     changed_slots_.clear();
     all_changed_ = false;
+    before_.clear();
+    before_complete_ = true;
 }
 
 } // namespace velk::impl
