@@ -353,8 +353,8 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     const uint kTree = 2u;
     const uint kNone = 0xFFFFFFFFu;
 
-    // The three words past kStack hold the frame of an analytic hit, which few rays need
-    // and registers cannot spare.
+    // The three words past kStack hold the frame of the nearest hit so far, which only the
+    // hit's own record needs at the end, and registers cannot spare.
     uint stack[kStack + 3];
     int sp = 0;
     if (!seeded) stack[sp++] = VELK_GLOBALS.bvh_root;
@@ -1146,13 +1146,14 @@ uint velk_light_cell_hash(VelkLightCell c)
 //   0      the cell's word, 0 for an empty entry
 //   1      the frame it was last used in
 //   2      kBounceUntraced, kBounceListed or kBounceTraced
-//   3      the frame its rays were traced in
+//   3      the frame its rays are known good up to: traced, or checked against what changed
 //   4..9   the light arriving from other surfaces as SH L1 of radiance, laid out and
 //          weighted as the probe field's: red, green and blue halves of each coefficient
-//   10..12 where its rays start, in the world: not from the camera, which moves; only light
+//   10..12 where its rays start, the pixel that listed it, in the world: not from the camera,
+//          which moves; only light
 //          falloff reads it, which far from the origin does not need every digit
 //   13     its normal then (velk_oct)
-//   14     spare
+//   14     1 when something changed on the way of its rays, which are then traced again
 //   15     the cell's tag when the entry was made, so a slot taken by another cell is seen
 //   16..   its rays, kBounceRayWords each: the cell hit, or kNoCell for a miss; the distance
 //          as a half in the low 16 bits and the normal hit above (velk_oct8); the albedo
@@ -1169,6 +1170,8 @@ const uint kBounceListed = 1u;
 const uint kBounceTraced = 2u;
 // In place of the cell hit: something was hit, but its cell had no room in the table.
 const uint kBounceHitNoCell = 0xFFFFFFFEu;
+// In place of the cell hit: something was hit, and the cell is not found yet.
+const uint kBounceHitPending = 0xFFFFFFFDu;
 // An entry unused this many frames gives way to a new one.
 const uint kBounceUnusedFrames = 16u;
 // The tangent of the half angle of each ray's cone, kBounceRays of them sharing the
@@ -1177,6 +1180,8 @@ const float kBounceConeTan = 0.1784;
 // A single ray on a tiny, very bright thing would otherwise light a whole cell, as with the
 // probes.
 const float kBounceBrightest = 5.0;
+// How far a ray that hit nothing counts as reaching, for what may move into its way.
+const float kBounceMissReach = 1e5;
 
 // How far a cell's rays are turned about its normal, from its word, so neighbours do not
 // line up.
@@ -2549,14 +2554,16 @@ void velk_cells_load()
 #define CELLS_BOUNCE_ENTRIES cells_header[9]
 // The bounce cells to trace this frame: a count and three spare words, then 2 words an entry:
 // its word in the table, and the pixel that asked, x in the low half and y in the high. Then,
-// for each entry, 2 words a ray for the pass that finds the material at the hits: the shape
-// hit, or kNoCell, and the hit's uv as halves.
+// for each entry, kBounceScratchWords a ray, what the trace found for the passes after it:
+// the shape hit, or kNoCell; the hit's uv as halves; the object id; where on the object, 3
+// words; which side of it.
 #define CELLS_BOUNCE_LIST cells_header[10]
 // How many bounce cells a frame may trace.
 #define CELLS_BOUNCE_LIST_MAX cells_header[11]
+const uint kBounceScratchWords = 8u;
 uint velk_bounce_scratch(uint listed, uint ray)
 {
-    return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * 2u;
+    return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * kBounceScratchWords;
 }
 // What changed lately, in the same arena: a count, the frame before which changes are no
 // longer listed, two spare words, then 8 words a change: a world box's least corner, the
@@ -2588,7 +2595,7 @@ vec3 velk_cell_unpack_normal(uint packed)
 {
     return velk_unoct(unpackSnorm2x16(packed));
 }
-const uint kCellWorkHeader = 24u;
+const uint kCellWorkHeader = 28u;
 // Of the lights that moving things could be in the way of: how many the cells read this
 // frame hold, every how many frames each is due, and how many were due this frame.
 const uint kCellWorkLiveLoad = 1u;
@@ -2613,6 +2620,13 @@ const uint kStatCoarseRefused = 13u;  // cells refused in the first round
 const uint kStatCoarseWaiting = 14u;  // pixels waiting whose cell kCellUp levels up was not traced either
 const uint kStatLive = 15u;           // cells listed only because moving things could be in the way
 const uint kStatLiveLoad = 16u;       // lights in cells read that moving things could be in the way of
+const uint kStatBounceAskNew = 17u;   // bounce cells with no rays traced asking to be listed
+const uint kStatBounceAskStale = 18u; // bounce cells with rays crossed by a change asking to be listed
+const uint kStatBounceListed = 19u;   // bounce cells listed for tracing
+const uint kStatBounceGathered = 20u; // bounce cells gathered
+const uint kStatBounceAllUnknown = 21u; // of those, cells none of whose rays had anything to read
+const uint kStatBounceRaysUnknown = 22u; // rays gathered with nothing to read: hit cell with no light yet, or none
+const uint kStatBounceSelfHits = 23u; // bounce rays that first hit the back of their own object close by
 void velk_cell_stat(uint which, uint by)
 {
     atomicAdd(velk_light_cell_words.data[CELLS_WORK + 4u + which], by);
@@ -3327,28 +3341,42 @@ uint velk_bounce_find(uint cell, bool make, out bool made)
     if (atomicCompSwap(velk_light_cell_words.data[spare], spare_owner, cell) != spare_owner) return kNoCell;
     velk_light_cell_words.data[spare + 1u] = now;
     velk_light_cell_words.data[spare + 2u] = kBounceUntraced;
+    velk_light_cell_words.data[spare + 14u] = 0u;
     for (uint w = 4u; w < 10u; ++w) velk_light_cell_words.data[spare + w] = 0u;
     velk_light_cell_words.data[spare + 15u] = tag;
     made = true;
     return spare;
 }
 
-// Keeps up the bounce entry of cell `cell` for the pixel at `coord`: made if new, noted as
-// used, and listed for tracing if its rays are not traced, by the first pixel to get to it
-// this frame.
+// Keeps up the bounce entry of cell `cell` for the pixel at `coord`, and lists it for tracing:
+// made and listed if new, in the round that lists cells with no light yet, so these come
+// first; in the last round, noted as used by the first pixel to get to it this frame, and
+// listed again if something changed on the way of its rays, with what the list has left.
 void velk_bounce_keep(uint cell)
 {
     bool made;
     uint at = velk_bounce_find(cell, true, made);
     if (at == kNoCell) return;
-    uint now = VELK_GLOBALS.present_counter;
-    if (!made && (velk_light_cell_words.data[at + 1u] == now || atomicExchange(velk_light_cell_words.data[at + 1u], now) == now)) {
+    uint list = CELLS_BOUNCE_LIST;
+    if (pc.mode == kCellRoundGaps) {
+        // Only one pixel moves it from untraced to listed.
+        if (atomicCompSwap(velk_light_cell_words.data[at + 2u], kBounceUntraced, kBounceListed) != kBounceUntraced) return;
+        velk_cell_stat(kStatBounceAskNew, 1u);
+    } else {
+        uint now = VELK_GLOBALS.present_counter;
+        if (velk_light_cell_words.data[at + 1u] == now || atomicExchange(velk_light_cell_words.data[at + 1u], now) == now) {
+            return;
+        }
+        if (velk_light_cell_words.data[at + 2u] != kBounceTraced || velk_light_cell_words.data[at + 14u] == 0u) return;
+        velk_cell_stat(kStatBounceAskStale, 1u);
+    }
+    uint n = atomicAdd(velk_light_cell_words.data[list], 1u);
+    if (n >= CELLS_BOUNCE_LIST_MAX) {
+        // No room: a new cell waits for a later frame, and a stale one keeps what it holds.
+        if (pc.mode == kCellRoundGaps) velk_light_cell_words.data[at + 2u] = kBounceUntraced;
         return;
     }
-    if (velk_light_cell_words.data[at + 2u] != kBounceUntraced) return;
-    uint list = CELLS_BOUNCE_LIST;
-    uint n = atomicAdd(velk_light_cell_words.data[list], 1u);
-    if (n >= CELLS_BOUNCE_LIST_MAX) return;
+    velk_cell_stat(kStatBounceListed, 1u);
     velk_light_cell_words.data[at + 2u] = kBounceListed;
     velk_light_cell_words.data[list + 4u + n * 2u] = at;
     velk_light_cell_words.data[list + 4u + n * 2u + 1u] = uint(coord.x) | (uint(coord.y) << 16u);
@@ -3380,7 +3408,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     uint own = velk_cell_keep(velk_light_cell(object, surface.xyz, side, level), 0);
     if (pc.mode == kCellRoundRest && own != kNoCell) velk_cell_arrive(own, world_pos, N);
     // The bounce cell over the pixel, which gathers the light from other surfaces here.
-    if (pc.mode == kCellRoundRest) {
+    if (pc.mode == kCellRoundGaps || pc.mode == kCellRoundRest) {
         uint bounce_cell = velk_cell_keep(velk_light_cell(object, surface.xyz, side, level + kBounceUp), kBounceUp);
         if (bounce_cell != kNoCell) velk_bounce_keep(bounce_cell);
     }
@@ -3441,11 +3469,10 @@ void main()
 }
 )";
 
-/// Traces the rays of the bounce cells listed, a group a cell and a ray a thread, and keeps
-/// the cells they hit as a pixel keeps its own: made if new, and listed for their direct
-/// light. Follows light_cells_src, light_cells_trace_src and light_cells_touch_src, and runs
-/// before the pass that traces direct light, so the cells it lists are traced in the same
-/// frame.
+/// Traces the rays of the bounce cells listed, a group a cell and a ray a thread, and writes
+/// down what each hit, for light_cells_bounce_hits_main_src and the material pass: nothing
+/// else is done here, so the walk through the scene has the registers to itself. Follows
+/// light_cells_src and light_cells_trace_src.
 [[maybe_unused]] constexpr string_view light_cells_bounce_trace_main_src = R"(
 void main()
 {
@@ -3468,12 +3495,22 @@ void main()
     uint ray_at = at + kBounceHeader + lane * kBounceRayWords;
     uint scratch = velk_bounce_scratch(n, lane);
     if (!valid) {
-        // The pixel that asked shows nothing now: the cell waits for another.
-        if (lane == 0u) velk_light_cell_words.data[at + 2u] = kBounceUntraced;
+        // The pixel that asked shows nothing now: the cell waits for another, keeping what it
+        // holds if it was traced before.
+        if (lane == 0u) {
+            bool held = velk_light_cell_words.data[at + 14u] != 0u;
+            velk_light_cell_words.data[at + 2u] = held ? kBounceTraced : kBounceUntraced;
+        }
         velk_light_cell_words.data[scratch] = kNoCell;
         return;
     }
+    // The rays start from the pixel itself, with its own normal, rather than from the cell's
+    // middle: on a curved surface the middle faces elsewhere, and rays about the pixel's
+    // normal would start into the surface there.
+    ivec2 at_pixel = ivec2(int(packed & 0xFFFFu), int(packed >> 16u));
+    middle = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], at_pixel, 0).xyz;
     if (lane == 0u) {
+        velk_light_cell_words.data[at + 14u] = 0u;
         vec3 absolute = middle + VELK_GLOBALS.cam_pos.xyz;
         velk_light_cell_words.data[at + 10u] = floatBitsToUint(absolute.x);
         velk_light_cell_words.data[at + 11u] = floatBitsToUint(absolute.y);
@@ -3492,6 +3529,14 @@ void main()
     velk_ray_footprint = cell_size * 0.5;
     RayHit hit;
     bool found = trace_closest_hit(ray, 1e30, hit);
+    // The back of the cell's own object, close by: the ray started inside the surface rays
+    // see, as on a curved object drawn with flat triangles, so it goes on from there.
+    uint own_object = velk_light_cell_words.data[cell + 1u];
+    if (found && hit.object == own_object && hit.t < cell_size && dot(hit.normal, dir) > 0.0) {
+        velk_cell_stat(kStatBounceSelfHits, 1u);
+        ray.origin += dir * (hit.t + 0.01 * cell_size);
+        found = trace_closest_hit(ray, 1e30, hit);
+    }
     velk_ray_cone = 0.0;
     velk_ray_footprint = 0.0;
     velk_light_cell_words.data[ray_at + 2u] = 0u;
@@ -3510,29 +3555,68 @@ void main()
         hit_n = -hit_n;
         hit_side ^= 1u;
     }
-    // The cell hit is about as large as the cone is wide there, and kept as a pixel keeps its
-    // own, here from the hit rather than a pixel.
-    float width = cell_size + 2.0 * hit.t * kBounceConeTan;
-    int level = int(ceil(log2(max(width, 1e-6))));
-    cells_from_pixel = false;
-    world_pos = ray.origin + dir * hit.t;
-    N = hit_n;
-    object = hit.object;
-    side = hit_side;
-    coord = ivec2(0);
-    uint kept = velk_cell_keep(velk_light_cell(hit.object, hit.local, hit_side, level), 0);
-    velk_light_cell_words.data[ray_at] = kept != kNoCell ? kept : kBounceHitNoCell;
+    velk_light_cell_words.data[ray_at] = kBounceHitPending;
     velk_light_cell_words.data[ray_at + 1u] = (packHalf2x16(vec2(min(hit.t, 60000.0), 0.0)) & 0xFFFFu) | (velk_oct8(hit_n) << 16u);
     velk_light_cell_words.data[scratch] = hit.shape_index;
     velk_light_cell_words.data[scratch + 1u] = packHalf2x16(hit.uv);
+    velk_light_cell_words.data[scratch + 2u] = hit.object;
+    velk_light_cell_words.data[scratch + 3u] = floatBitsToUint(hit.local.x);
+    velk_light_cell_words.data[scratch + 4u] = floatBitsToUint(hit.local.y);
+    velk_light_cell_words.data[scratch + 5u] = floatBitsToUint(hit.local.z);
+    velk_light_cell_words.data[scratch + 6u] = hit_side;
+}
+)";
+
+/// Finds the cells the rays of the bounce cells listed hit, a group a cell and a ray a thread,
+/// from what light_cells_bounce_trace_main_src wrote down, and keeps them as a pixel keeps its
+/// own: made if new, and listed for their direct light. Runs before the pass that traces
+/// direct light, so the cells it lists are traced in the same frame. Follows light_cells_src
+/// and light_cells_touch_src; traces nothing.
+[[maybe_unused]] constexpr string_view light_cells_bounce_hits_main_src = R"(
+void main()
+{
+    velk_cells_load();
+    uint lane = gl_LocalInvocationIndex;
+    uint list = CELLS_BOUNCE_LIST;
+    uint n = gl_WorkGroupID.x;
+    if (n >= min(velk_light_cell_words.data[list], CELLS_BOUNCE_LIST_MAX)) return;
+    uint at = velk_light_cell_words.data[list + 4u + n * 2u];
+    uint ray_at = at + kBounceHeader + lane * kBounceRayWords;
+    if (velk_light_cell_words.data[ray_at] != kBounceHitPending) return;
+    uint scratch = velk_bounce_scratch(n, lane);
+
+    uint cell = velk_light_cell_words.data[at];
+    float cell_size = velk_light_cell_size(int(velk_light_cell_words.data[cell + 5u] >> 3u) - 64);
+    vec3 cell_n = velk_cell_unpack_normal(velk_light_cell_words.data[at + 13u]);
+    vec3 dir = velk_bounce_dir(lane, cell_n, velk_bounce_turn(cell));
+    vec3 from = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 10u]),
+                     uintBitsToFloat(velk_light_cell_words.data[at + 11u]),
+                     uintBitsToFloat(velk_light_cell_words.data[at + 12u])) - VELK_GLOBALS.cam_pos.xyz;
+    uint packed = velk_light_cell_words.data[ray_at + 1u];
+    float t = unpackHalf2x16(packed).x;
+
+    // The cell hit is about as large as the cone is wide there, and kept as a pixel keeps its
+    // own, here from the hit rather than a pixel.
+    float width = cell_size + 2.0 * t * kBounceConeTan;
+    int level = int(ceil(log2(max(width, 1e-6))));
+    cells_from_pixel = false;
+    world_pos = from + dir * t;
+    N = velk_unoct8(packed >> 16u);
+    object = velk_light_cell_words.data[scratch + 2u];
+    side = velk_light_cell_words.data[scratch + 6u];
+    coord = ivec2(0);
+    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[scratch + 3u]),
+                      uintBitsToFloat(velk_light_cell_words.data[scratch + 4u]),
+                      uintBitsToFloat(velk_light_cell_words.data[scratch + 5u]));
+    uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
+    velk_light_cell_words.data[ray_at] = kept != kNoCell ? kept : kBounceHitNoCell;
 }
 )";
 
 /// Gathers what each bounce cell's rays see, a group a cell and a ray a thread, into the
 /// cell's SH: for a hit, the light the cell hit holds as arriving there times the albedo
 /// there, plus what the surface there gives off; for a miss, the sky as wide as the ray's
-/// cone. Rays whose hit has no light yet are left out. Follows light_cells_src and
-/// light_cells_touch_src.
+/// cone. Rays whose hit has no light yet are left out. Follows light_cells_src.
 [[maybe_unused]] constexpr string_view light_cells_bounce_gather_main_src = R"(
 shared vec4 s_bounce_radiance[64];
 shared vec3 s_bounce_dir[64];
@@ -3557,18 +3641,9 @@ void main()
     if (hit == kNoCell) {
         float env_width = pc.env_texture_id != 0u ? float(textureSize(velk_textures[nonuniformEXT(pc.env_texture_id)], 0).x) : 1.0;
         radiance = env_miss_color_lod(dir, max(log2(env_width * kBounceConeTan / 3.14159265), 0.0));
-    } else if (hit == kBounceHitNoCell) {
+    } else if (hit == kBounceHitNoCell || hit == kBounceHitPending) {
         known = 0.0;
     } else {
-        // Cells no pixel reads only get their arriving light from here: an eighth of the
-        // rays a frame add a sample where they hit.
-        if (((lane + now) & 7u) == 0u) {
-            uint packed = velk_light_cell_words.data[ray_at + 1u];
-            vec3 middle = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 10u]),
-                               uintBitsToFloat(velk_light_cell_words.data[at + 11u]),
-                               uintBitsToFloat(velk_light_cell_words.data[at + 12u])) - VELK_GLOBALS.cam_pos.xyz;
-            velk_cell_arrive(hit, middle + dir * unpackHalf2x16(packed).x, velk_unoct8(packed >> 16u));
-        }
         uint b = velk_light_cell_words.data[hit + kCellArrive + 1u];
         if ((b & 0xFFFFu) == kArriveMade || (b >> 16u) == 0u) {
             known = 0.0;
@@ -3599,7 +3674,12 @@ void main()
         sh[2] += s.rgb * (kY1 * d.z);
         sh[3] += s.rgb * (kY1 * d.x);
     }
-    if (rays <= 0.0) return;
+    velk_cell_stat(kStatBounceGathered, 1u);
+    velk_cell_stat(kStatBounceRaysUnknown, kBounceRays - uint(rays));
+    if (rays <= 0.0) {
+        velk_cell_stat(kStatBounceAllUnknown, 1u);
+        return;
+    }
     float w = 2.0 * 3.14159265 / rays;
     for (int c = 0; c < 4; ++c) sh[c] *= w;
     velk_light_cell_words.data[at + 4u] = packHalf2x16(sh[0].rg);
@@ -3608,6 +3688,101 @@ void main()
     velk_light_cell_words.data[at + 7u] = packHalf2x16(sh[2].rg);
     velk_light_cell_words.data[at + 8u] = packHalf2x16(vec2(sh[2].b, sh[3].r));
     velk_light_cell_words.data[at + 9u] = packHalf2x16(sh[3].gb);
+}
+)";
+
+/// Looks for what changed on the way of each bounce cell's rays since they were last known
+/// good, a group a cell and a ray a thread: the stretch to what a ray hit, or a long way for a
+/// miss, which something may now be in the way of. The boxes of a thing that moved, before and
+/// after, are both listed, so a ray whose hit moved away counts too. Only changes since then
+/// are looked at, and changes no longer listed count as having touched every ray. A cell with
+/// a ray crossed is marked to be traced again when a pixel next uses it, and is read as it is
+/// until then. Follows light_cells_src.
+[[maybe_unused]] constexpr string_view light_cells_bounce_changes_main_src = R"(
+shared bool s_bounce_crossed[64];
+
+void main()
+{
+    velk_cells_load();
+    uint lane = gl_LocalInvocationIndex;
+    uint at = CELLS_BOUNCE + gl_WorkGroupID.x * kBounceWords;
+    uint cell = velk_light_cell_words.data[at];
+    uint now = VELK_GLOBALS.present_counter;
+    // The same for every thread of the group.
+    if (cell == 0u || velk_light_cell_words.data[at + 2u] != kBounceTraced
+        || velk_light_cell_words.data[at + 14u] != 0u || now - velk_light_cell_words.data[at + 1u] > 2u) return;
+    uint valid = velk_light_cell_words.data[at + 3u];
+    if (valid == now) return;
+
+    bool crossed = valid < velk_light_cell_words.data[CELLS_CHANGES + 1u];
+    if (!crossed) {
+        vec3 cell_n = velk_cell_unpack_normal(velk_light_cell_words.data[at + 13u]);
+        vec3 dir = velk_bounce_dir(lane, cell_n, velk_bounce_turn(cell));
+        uint ray_at = at + kBounceHeader + lane * kBounceRayWords;
+        vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+        vec3 from = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 10u]),
+                         uintBitsToFloat(velk_light_cell_words.data[at + 11u]),
+                         uintBitsToFloat(velk_light_cell_words.data[at + 12u])) - cam;
+        float reach = velk_light_cell_words.data[ray_at] == kNoCell ? kBounceMissReach
+                                                                   : unpackHalf2x16(velk_light_cell_words.data[ray_at + 1u]).x;
+        vec3 to = from + dir * reach;
+        uint changes = velk_light_cell_words.data[CELLS_CHANGES];
+        for (uint c = 0u; c < changes && !crossed; ++c) {
+            uint change = CELLS_CHANGES + 4u + c * 8u;
+            if (valid >= velk_light_cell_words.data[change + 3u]) continue;
+            // A moved light changes what the hits hold, which the gather reads anew each frame.
+            if (velk_light_cell_words.data[change + 7u] != 0xFFFFFFFFu) continue;
+            vec3 box_min = vec3(uintBitsToFloat(velk_light_cell_words.data[change]),
+                                uintBitsToFloat(velk_light_cell_words.data[change + 1u]),
+                                uintBitsToFloat(velk_light_cell_words.data[change + 2u])) - cam;
+            vec3 box_max = vec3(uintBitsToFloat(velk_light_cell_words.data[change + 4u]),
+                                uintBitsToFloat(velk_light_cell_words.data[change + 5u]),
+                                uintBitsToFloat(velk_light_cell_words.data[change + 6u])) - cam;
+            crossed = velk_segment_touches(from, to, box_min, box_max);
+        }
+    }
+    s_bounce_crossed[lane] = crossed;
+    barrier();
+    if (lane != 0u) return;
+    bool any_crossed = false;
+    for (uint r = 0u; r < kBounceRays; ++r) any_crossed = any_crossed || s_bounce_crossed[r];
+    if (any_crossed) {
+        velk_light_cell_words.data[at + 14u] = 1u;
+    } else {
+        // Good up to now: next frame has only that frame's changes to look at.
+        velk_light_cell_words.data[at + 3u] = now;
+    }
+}
+)";
+
+/// Brings the light arriving at the cells bounce rays hit, for those no pixel reads: an eighth
+/// of each bounce cell's rays a frame add a sample where they hit to their cell's mean (see
+/// velk_cell_arrive). A group takes eight bounce cells and a thread one ray of one of them.
+/// Follows light_cells_src and light_cells_touch_src; traces nothing.
+[[maybe_unused]] constexpr string_view light_cells_bounce_arrive_main_src = R"(
+void main()
+{
+    velk_cells_load();
+    uint lane = gl_LocalInvocationIndex;
+    uint entry = gl_WorkGroupID.x * 8u + lane / 8u;
+    if (entry >= CELLS_BOUNCE_ENTRIES) return;
+    uint at = CELLS_BOUNCE + entry * kBounceWords;
+    uint cell = velk_light_cell_words.data[at];
+    uint now = VELK_GLOBALS.present_counter;
+    if (cell == 0u || velk_light_cell_words.data[at + 2u] != kBounceTraced
+        || now - velk_light_cell_words.data[at + 1u] > 2u) return;
+    uint ray = (lane % 8u) * 8u + (now & 7u);
+    uint ray_at = at + kBounceHeader + ray * kBounceRayWords;
+    uint hit = velk_light_cell_words.data[ray_at];
+    // The markers for a miss, no room and not found yet are the top three values.
+    if (hit >= kBounceHitPending) return;
+    vec3 cell_n = velk_cell_unpack_normal(velk_light_cell_words.data[at + 13u]);
+    vec3 dir = velk_bounce_dir(ray, cell_n, velk_bounce_turn(cell));
+    vec3 from = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 10u]),
+                     uintBitsToFloat(velk_light_cell_words.data[at + 11u]),
+                     uintBitsToFloat(velk_light_cell_words.data[at + 12u])) - VELK_GLOBALS.cam_pos.xyz;
+    uint packed = velk_light_cell_words.data[ray_at + 1u];
+    velk_cell_arrive(hit, from + dir * unpackHalf2x16(packed).x, velk_unoct8(packed >> 16u));
 }
 )";
 
@@ -3627,7 +3802,8 @@ void main()
     if (n >= min(bounce_words.data[list], most)) return;
     uint at = bounce_words.data[list + 4u + n * 2u];
     if (bounce_words.data[at + 2u] != kBounceTraced) return;
-    uint scratch = list + 4u + most * 2u + (n * kBounceRays + lane) * 2u;
+    // See velk_bounce_scratch.
+    uint scratch = list + 4u + most * 2u + (n * kBounceRays + lane) * 8u;
     uint shape_index = bounce_words.data[scratch];
     if (shape_index == 0xFFFFFFFFu) return;
     uint ray_at = at + kBounceHeader + lane * kBounceRayWords;
@@ -3921,6 +4097,38 @@ float velk_cells_light_through(uint i)
     }
     return mix(lower, upper, wanted - float(below));
 }
+
+// The light from other surfaces at the pixel taken up by velk_cells_begin, for a surface
+// facing `normal`, blended from the bounce cells around it as direct light is from its own
+// cells. In the units of the probe field's irradiance. Negative if none has any yet.
+vec3 velk_cells_bounce(vec3 normal)
+{
+    VelkCellBlend b = velk_cell_blend(cells_own_level + kBounceUp);
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int k = 0; k < kAround; ++k) {
+        float weight;
+        uint cell = velk_cell_blend_at(b, k, weight);
+        if (cell == kNoCell) continue;
+        uint at = velk_bounce_lookup(cell);
+        if (at == kNoCell || velk_light_cell_words.data[at + 2u] != kBounceTraced) continue;
+        // A cell's rays cover the hemisphere about its own normal. On a curved surface the
+        // pixel may face well away from that, toward directions the cell has nothing for, so
+        // it reads at most 45 degrees off the cell's normal.
+        vec3 cell_n = velk_unoct(unpackSnorm2x16(velk_light_cell_words.data[at + 13u]));
+        float along = dot(normal, cell_n);
+        vec3 read_n = normal;
+        if (along < 0.70710678) {
+            vec3 across = normal - cell_n * along;
+            float across_length = length(across);
+            vec3 side_dir = across_length > 1e-4 ? across / across_length : vec3(0.0);
+            read_n = normalize(cell_n * 0.70710678 + side_dir * 0.70710678);
+        }
+        sum += weight * velk_bounce_irradiance(at, read_n);
+        total += weight;
+    }
+    return total > 0.0 ? sum / total : vec3(-1.0);
+}
 )";
 
 /// Shows the light cells' light in place of the image. Follows deferred_compute_prelude_src
@@ -3930,7 +4138,8 @@ float velk_cells_light_through(uint i)
 /// pixel's own cell as the cell holds it, one value a cell, times the surface colour;
 /// magenta where it was not worked out in the last few frames. Mode 7: the light from other
 /// surfaces its bounce cell holds, for the pixel's normal, without the surface colour, as
-/// VELK_GI_DEBUG=1 shows the probe field's; magenta where it has none.
+/// VELK_GI_DEBUG=1 shows the probe field's; magenta where it has none. Mode 8: the same as
+/// pixels read it, blended from the bounce cells around them (velk_cells_bounce).
 [[maybe_unused]] constexpr string_view light_cells_main_src = R"(
 #define CELLS_MODE pc.mode
 
@@ -3958,6 +4167,13 @@ void main()
 
     vec4 albedo = texelFetch(velk_textures[nonuniformEXT(pc.albedo_tex_id)], coord, 0);
     float metallic = clamp(texelFetch(velk_textures[nonuniformEXT(pc.material_tex_id)], coord, 0).r, 0.0, 1.0);
+
+    if (CELLS_MODE == 8u) {
+        vec3 bounce = velk_cells_bounce(N);
+        if (bounce.r < 0.0) bounce = vec3(1.0, 0.0, 1.0);
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(bounce, 1.0));
+        return;
+    }
 
     if (CELLS_MODE == 7u) {
         vec3 bounce = vec3(1.0, 0.0, 1.0);

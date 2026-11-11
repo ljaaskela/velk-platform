@@ -154,7 +154,7 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4
 
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
-uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 7); }
+uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 8); }
 
 // How many rays a frame may trace to keep the light cells up, from VELK_LIGHT_CELL_RAYS.
 // 262,144 unless set. Cells past that wait for a later frame. A light on a cell is traced
@@ -197,9 +197,9 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     float ray_motion_reach = 0.f,
                                                     uint32_t cells = 0)
 {
-    // `cells`: 1 for a shader that reads the light cells, 2 for the one that notes which are
-    // needed, 3 for the one that traces them, 4 for the one that traces bounce rays and finds
-    // the cells they hit, 5 for the one that gathers bounce light.
+    // `cells`, what of the light cells' code a shader is built with: 1 what reads them; 2 what
+    // keeps them up, for the passes that find, make and list cells; 3 what traces them, for the
+    // passes that trace rays and nothing else; 4 only the common part.
     if (!ctx.render_ctx || !ctx.snippets) return {};
 
     const auto& intersect_ids = ctx.snippets->frame_intersects();
@@ -256,11 +256,6 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
         src += light_cells_trace_src;
     } else if (cells == 4) {
         src += light_cells_src;
-        src += light_cells_trace_src;
-        src += light_cells_touch_src;
-    } else if (cells == 5) {
-        src += light_cells_src;
-        src += light_cells_touch_src;
     }
     src += main_src;
     for (auto id : intersect_ids) {
@@ -354,16 +349,16 @@ constexpr uint32_t kBounceEntries = 1u << 15;
 constexpr uint32_t kBounceRays = 64;
 constexpr uint32_t kBounceWords = 16 + kBounceRays * 4;
 // How many bounce cells a frame may trace, and the words of their list: a count and three
-// spare, 2 words an entry, then 2 words a ray of each. See CELLS_BOUNCE_LIST.
+// spare, 2 words an entry, then 8 words a ray of each. See CELLS_BOUNCE_LIST.
 constexpr uint32_t kBounceListMax = 256;
-constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 2;
+constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 8;
 // What can be listed for tracing in a frame at most, one light for one cell an entry, the
 // words of each, and the header's words before them, counters for the log among them. See
 // CELLS_WORK in light_cells_src.
 constexpr uint32_t kCellWorkMax = 32768;
 constexpr uint32_t kCellWorkWords = 8;
-constexpr uint32_t kCellWorkHeader = 24;
-constexpr uint32_t kCellStats = 17;
+constexpr uint32_t kCellWorkHeader = 28;
+constexpr uint32_t kCellStats = 24;
 // How often the counters are printed, in frames.
 constexpr uint64_t kCellStatFrames = 60;
 
@@ -1911,9 +1906,12 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                      "light cells per frame: entries asked %.0f listed %.0f traced %.0f, cells listed %.0f made %.0f "
                      "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u; "
                      "coarse round entries asked %.0f cells refused %.0f, waiting pixels without coarse %.0f; "
-                     "moving in the way: lights held %.0f, cells re-traced %.0f",
+                     "moving in the way: lights held %.0f, cells re-traced %.0f; "
+                     "bounce cells asking new %.0f stale %.0f, listed %.0f, gathered %.0f, with nothing to read %.0f, "
+                     "rays with nothing to read %.0f, rays that hit their own object's back %.0f",
                      per(0), per(1), per(8), per(2), per(10), per(9), per(11), per(3), per(4), per(6), per(5),
-                     static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14), per(16), per(15));
+                     static_cast<unsigned>(vs.light_cell_changes.size()), per(12), per(13), per(14), per(16), per(15),
+                     per(17), per(18), per(19), per(20), per(21), per(22), per(23));
         }
         for (uint32_t i = 0; i < kCellStats; ++i) vs.light_cell_stats[i] = now[i];
         vs.light_cell_stats_frame = ctx.present_counter;
@@ -2067,12 +2065,17 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
                                                       render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 2u);
     auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false, has_medium,
                                                             render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 3u);
-    auto bounce_trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_bounce_trace_main_src, 0x4c43'4254'5243ULL,
-                                                                   false, has_medium, render_view.bvh.ray_motion,
-                                                                   render_view.bvh.ray_motion_reach, 4u);
-    auto gather_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_bounce_gather_main_src, 0x4c43'4247'5448ULL, false,
-                                                             has_medium, render_view.bvh.ray_motion,
-                                                             render_view.bvh.ray_motion_reach, 5u);
+    // The bounce cells' passes, each built with only what it needs: the trace with the walk and
+    // nothing else, the passes that find and keep cells without it.
+    const auto bounce_pipeline = [&](string_view main_src, uint64_t tag, uint32_t cells) {
+        return compose_deferred_compute_pipeline(ctx, main_src, tag, false, has_medium, render_view.bvh.ray_motion,
+                                                 render_view.bvh.ray_motion_reach, cells);
+    };
+    auto bounce_trace_pipeline = bounce_pipeline(light_cells_bounce_trace_main_src, 0x4c43'4254'5243ULL, 3u);
+    auto hits_pipeline = bounce_pipeline(light_cells_bounce_hits_main_src, 0x4c43'4248'4954ULL, 2u);
+    auto gather_pipeline = bounce_pipeline(light_cells_bounce_gather_main_src, 0x4c43'4247'5448ULL, 4u);
+    auto changes_pipeline = bounce_pipeline(light_cells_bounce_changes_main_src, 0x4c43'4243'4847ULL, 4u);
+    auto arrive_pipeline = bounce_pipeline(light_cells_bounce_arrive_main_src, 0x4c43'4241'5256ULL, 2u);
     // The material where bounce rays hit, composed with the frame's materials as the probes'
     // shading is.
     IGpuPipeline::Ptr shade_pipeline;
@@ -2089,7 +2092,10 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
                 string_view(compose_rt_compute(*ctx.snippets, light_cells_bounce_shade_main_src)), key);
         }
     }
-    if (!pipeline || !trace_pipeline || !bounce_trace_pipeline || !gather_pipeline || !shade_pipeline) return;
+    if (!pipeline || !trace_pipeline || !bounce_trace_pipeline || !hits_pipeline || !gather_pipeline || !changes_pipeline
+        || !arrive_pipeline || !shade_pipeline) {
+        return;
+    }
 
     DeferredComputePushC pc{};
     pc.globals_base = render_view.view_globals_base;
@@ -2148,9 +2154,11 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         trace_pc.mode = 3;
         std::memcpy(fold_dc.root_constants, &trace_pc, sizeof(trace_pc));
 
-        // The bounce cells listed: their rays, a group a cell, before the direct light is traced
-        // so the cells they find are traced this frame too; then the material at their hits;
-        // then, after the list is emptied, every bounce entry in use gathers. See VELK_BOUNCE_GLSL.
+        // The bounce cells listed: their rays, a group a cell, then the cells those hit, both
+        // before the direct light is traced so the cells found are traced this frame too; then
+        // the material at the hits. After the list is emptied, every bounce entry in use
+        // gathers, is checked against what changed, and brings arriving light to its hits. See
+        // VELK_BOUNCE_GLSL.
         DispatchCall bounce_trace_dc = dc;
         bounce_trace_dc.pipeline = bounce_trace_pipeline.get();
         bounce_trace_dc.groups_x = kBounceListMax;
@@ -2158,9 +2166,16 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         DeferredComputePushC bounce_pc = pc;
         bounce_pc.mode = 4;
         std::memcpy(bounce_trace_dc.root_constants, &bounce_pc, sizeof(bounce_pc));
+        DispatchCall hits_dc = bounce_trace_dc;
+        hits_dc.pipeline = hits_pipeline.get();
         DispatchCall gather_dc = bounce_trace_dc;
         gather_dc.pipeline = gather_pipeline.get();
         gather_dc.groups_x = kBounceEntries;
+        DispatchCall changes_dc = gather_dc;
+        changes_dc.pipeline = changes_pipeline.get();
+        DispatchCall arrive_dc = gather_dc;
+        arrive_dc.pipeline = arrive_pipeline.get();
+        arrive_dc.groups_x = kBounceEntries / 8u;
         ProbePushC shade_pc{};
         shade_pc.globals_base = render_view.view_globals_base;
         shade_pc.light_count = static_cast<uint32_t>(render_view.lights.size());
@@ -2190,6 +2205,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_global_barrier();
         cmd->record_dispatch(bounce_trace_dc);
         cmd->record_global_barrier();
+        cmd->record_dispatch(hits_dc);
+        cmd->record_global_barrier();
         cmd->record_dispatch(trace_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(shade_dc);
@@ -2197,6 +2214,10 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_dispatch(empty_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(gather_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(changes_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(arrive_dc);
         // What reads the cells comes after.
         cmd->record_global_barrier();
         cmd->pop_label();
@@ -2207,7 +2228,10 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         rec.held.push_back(pipeline);
         rec.held.push_back(trace_pipeline);
         rec.held.push_back(bounce_trace_pipeline);
+        rec.held.push_back(hits_pipeline);
         rec.held.push_back(gather_pipeline);
+        rec.held.push_back(changes_pipeline);
+        rec.held.push_back(arrive_pipeline);
         rec.held.push_back(shade_pipeline);
     });
 }
