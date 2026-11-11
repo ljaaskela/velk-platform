@@ -166,7 +166,7 @@ RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) co
     record.first_shape = run.first_shape;
     record.shape_count = run.shape_count;
     record.flags = (group.visual->get_ray_motion_source().empty() ? 0u : kRtRecordRayMotion)
-        | (run.far_area > 0.f ? kRtRecordMedium : 0u);
+        | (run.far_area > 0.f ? kRtRecordMedium : 0u) | ((group.object_base + slot) << kRtRecordObjectShift);
     return record;
 }
 
@@ -964,6 +964,16 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         rebuild = true;
     }
 
+    // An object id per slot. A new range renames every instance, in its records and in
+    // what is drawn.
+    const uint32_t object_base =
+        emit.scene ? emit.scene->get_object_ids(*element, static_cast<uint32_t>(visual.get_transforms().size())) : 0u;
+    if (object_base != group.object_base) {
+        group.object_base = object_base;
+        visual.set_object_id_base(object_base);
+        rebuild = true;
+    }
+
     // A translated element keeps every record relative to its partition's origin, so
     // only the origins move. Anything else changes the records, and a motion function's
     // list of origins would have to be rewritten anyway.
@@ -1115,7 +1125,10 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         unresolved_.push_back(element);
     }
 
+    // All of the element's records are one object.
+    const uint32_t object = emit.scene && !collect.records.empty() ? emit.scene->get_object_ids(*element, 1) : 0u;
     for (auto& emitted : collect.records) {
+        emitted.gpu.flags |= object << kRtRecordObjectShift;
         if (emitted.shapes.size() > kMaxShapesWithoutTree) {
             build_local_tree(emitted.shapes, emitted.tree);
         }
@@ -2104,9 +2117,14 @@ void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
 void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user)
 {
     VELK_PERF_SCOPE("renderer.bvh_rebuild");
-    const EmitContext emit{ctx, shape_cb, shape_user};
+    const EmitContext emit{ctx, shape_cb, shape_user, state.scene};
     changed_.clear();
     changed_all_ = false;
+    // Object ids started again: every record names the old ones.
+    if (state.scene && state.scene->get_object_id_epoch() != object_id_epoch_) {
+        object_id_epoch_ = state.scene->get_object_id_epoch();
+        needs_full_build_ = true;
+    }
 
     {
         VELK_PERF_SCOPE("renderer.bvh_emit");

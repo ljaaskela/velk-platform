@@ -124,6 +124,8 @@ public:
         ArenaRegion light_cell_work;
         /// Changes before this frame are no longer listed.
         uint32_t light_cell_changes_from = 0;
+        /// The object id epoch the cells are keyed under. See BvhBinding::object_id_epoch.
+        uint32_t light_cell_epoch = 0;
         /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
         /// The cells' counters when last printed, and the frame. See kStatAsked.

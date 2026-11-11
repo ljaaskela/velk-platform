@@ -179,6 +179,22 @@ public:
      * scene root directly.
      */
     virtual ::velk::IBvh::Ptr get_default_bvh() const = 0;
+
+    /**
+     * @brief The first of at least @p count object ids for @p element.
+     *
+     * An object id names one placed object for whatever keeps data about it across
+     * frames, such as the light cells, and is the same in what is drawn and in what rays
+     * hit. A plain element asks for 1; an instanced visual for one per slot, slot `i`
+     * being the first id plus `i`. The answer stays the same while @p count fits, and is
+     * forgotten when the element leaves the scene. Ids are not handed out twice, so data
+     * kept under an old one is never taken for a new object's, until they run out and
+     * start again, which changes get_object_id_epoch().
+     */
+    virtual uint32_t get_object_ids(IElement& element, uint32_t count) = 0;
+
+    /** @brief Changes when object ids start again; anything kept by id is then stale. */
+    virtual uint32_t get_object_id_epoch() const = 0;
 };
 
 } // namespace velk

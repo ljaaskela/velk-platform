@@ -14,8 +14,9 @@ namespace velk::impl {
  * @brief Draws IVisual3D::mesh and any added meshes, once per instance.
  *
  * The transform array here is the only CPU copy of the instances. Raster reads a region
- * of ElementInstance, at the index a slot has there, whose params[1] is the mesh and
- * params[2] the slot, and a removed slot holds a zero matrix, which draws nothing.
+ * of ElementInstance, at the index a slot has there, whose params[1] is the mesh,
+ * params[2] the slot and params[3] its object id, and a removed slot holds a zero matrix,
+ * which draws nothing.
  */
 class InstancedMeshVisual : public ext::Visual3D<InstancedMeshVisual, IInstancedMeshVisual, IInstancedMeshInternal>
 {
@@ -87,6 +88,13 @@ public:
     bool take_rest_changed() override;
     void take_changed_slots(vector<uint32_t>& changed, bool& all, vector<InstanceBefore>& before,
                             bool& before_complete) override;
+    void set_object_id_base(uint32_t base) override
+    {
+        if (base != object_id_base_) {
+            object_id_base_ = base;
+            flush_all_ = true;
+        }
+    }
     void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) override
     {
         cull_table_word_ = table_word;
@@ -132,6 +140,7 @@ private:
     bool all_changed_ = true;
     vector<InstanceBefore> before_;  ///< See take_changed_slots.
     bool before_complete_ = true;
+    uint32_t object_id_base_ = 0;    ///< Slot i's object id is this plus i.
 
     uint32_t cull_table_word_ = 0;
     uint32_t cull_count_ = 0;

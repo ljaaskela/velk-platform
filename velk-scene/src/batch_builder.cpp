@@ -315,6 +315,11 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                     // visual leaves it zero-initialised; we fill it per
                     // instance so shaders get the correct transform.
                     std::memcpy(instance_data.data() + data_offset, world.m, sizeof(world.m));
+                    // The element's object id, the same as in its BVH records.
+                    if (de.instance_size == sizeof(ElementInstance) && state.scene) {
+                        auto* instance = reinterpret_cast<ElementInstance*>(instance_data.data() + data_offset);
+                        instance->params[3] = state.scene->get_object_ids(*elem, 1);
+                    }
 
                     batch->set_instance_count(slot_index + 1);
                     batch->set_world_aabb(aabb::merge(batch->world_aabb(), elem_state->world_aabb));

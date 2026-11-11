@@ -48,6 +48,8 @@ struct BvhBinding
     /// IInstancedMeshVisual::set_ray_motion. Tracing shaders are compiled with it.
     string_view ray_motion;
     float ray_motion_reach = 0.f;
+    /// Changes when the scene's object ids start again; anything kept by id is then stale.
+    uint32_t object_id_epoch = 0;
 
     bool operator==(const BvhBinding& o) const
     {
@@ -196,9 +198,12 @@ VELK_GPU_STRUCT RtRecord
     uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
     uint32_t shape_count;
     uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
-    uint32_t flags;           ///< kRtRecordRayMotion, kRtRecordMedium.
+    uint32_t flags;           ///< kRtRecordRayMotion, kRtRecordMedium, and the object id above kRtRecordObjectShift.
 };
 static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
+
+/// Where in RtRecord::flags the object id starts. See IScene::get_object_ids.
+inline constexpr uint32_t kRtRecordObjectShift = 2;
 
 /// Rays follow the scene's ray motion here. See BvhBinding::ray_motion.
 inline constexpr uint32_t kRtRecordRayMotion = 1;

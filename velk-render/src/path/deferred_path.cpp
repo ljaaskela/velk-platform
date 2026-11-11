@@ -1855,6 +1855,17 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         return false;
     }
 
+    // Object ids started again, so cells keyed by old ones could be taken for new objects'.
+    // Rare: only after a billion ids.
+    if (render_view.bvh.object_id_epoch != vs.light_cell_epoch) {
+        vs.light_cell_epoch = render_view.bvh.object_id_epoch;
+        if (auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+            vector<uint32_t> empty;
+            empty.resize(size_t(kCellSlots) * kCellWords);
+            arena->update_at(vs.light_cells.offset(), empty.data(), empty.size() * sizeof(uint32_t));
+        }
+    }
+
     // The counters, per frame since last printed. They are read while frames are on the
     // GPU, so a frame's worth may land on either side; over a second that does not matter.
     if (auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));

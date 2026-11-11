@@ -172,6 +172,7 @@ private:
         ArenaRegion motion_region;
         uint32_t motion_capacity = 0;  ///< Slots the region holds.
         float max_displacement = 0.f;  ///< Bounds are grown by this.
+        uint32_t object_base = 0;      ///< Slot i's object id is this plus i.
         bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
         bool motion_records_dirty = false;  ///< Records were written at rest.
         bool motion_error_logged = false;
@@ -217,6 +218,7 @@ private:
         FrameContext& frame;
         ShapeCb cb;
         void* user;
+        IScene* scene;  ///< Hands out object ids. Can be null.
     };
 
     void full_build(IScene* scene, const EmitContext& emit);
@@ -312,6 +314,8 @@ private:
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;
+    /// The scene's object id epoch the records were built with. A new one rebuilds them all.
+    uint32_t object_id_epoch_ = 0;
 };
 
 } // namespace impl

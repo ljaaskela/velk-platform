@@ -304,6 +304,10 @@ public:
     virtual void take_changed_slots(vector<uint32_t>& changed, bool& all, vector<InstanceBefore>& before,
                                     bool& before_complete) = 0;
 
+    /// Slot i's object id is @p base plus i, written to its raster data's params[3]. Set by
+    /// the BVH from IScene::get_object_ids.
+    virtual void set_object_id_base(uint32_t base) = 0;
+
     /// Where culling finds this visual's partitions in the culling arena, set by the BVH
     /// that holds them. See `instance_partition_cull_src`. A count of 0 means none.
     virtual void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) = 0;

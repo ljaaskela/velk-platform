@@ -11,7 +11,9 @@
 #include <velk-scene/interface/intf_scene_observer.h>
 #include <velk-scene/plugin.h>
 
+#include <mutex>
 #include <shared_mutex>
+#include <unordered_map>
 
 namespace velk::impl {
 
@@ -40,6 +42,8 @@ public:
     vector<IElement::Ptr> find_elements(const ElementQuery& query,
                                         size_t max_count = 0) const override;
     ::velk::IBvh::Ptr get_default_bvh() const override;
+    uint32_t get_object_ids(IElement& element, uint32_t count) override;
+    uint32_t get_object_id_epoch() const override;
 
     // IHierarchy forwarding
     ReturnValue set_root(const IObject::Ptr& root) override;
@@ -83,6 +87,17 @@ private:
     DirtyFlags dirty_ = DirtyFlags::All;
     bool full_layout_ = true;
     bool initialized_ = false;
+
+    /// See get_object_ids. Each element's first id and how many it holds.
+    struct ObjectIds
+    {
+        uint32_t first;
+        uint32_t count;
+    };
+    mutable std::mutex ids_mutex_;
+    std::unordered_map<IElement*, ObjectIds> object_ids_;
+    uint32_t next_object_id_ = 1;
+    uint32_t object_id_epoch_ = 0;
 };
 
 } // namespace velk::impl

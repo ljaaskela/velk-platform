@@ -31,6 +31,7 @@ struct RayHit {
     vec2 uv;
     vec3 normal;
     uint shape_index; // only set by trace_closest_hit
+    uint object;      // the object id of what was hit, only set by trace_closest_hit
 };
 
 // Ray vs. oriented rect parameterised by (origin + s*u_axis + t*v_axis) for
@@ -699,6 +700,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     hit.t = best_t;
     hit.shape_index = best_shape;
     RtRecord rec = velk_records.data[best_record];
+    hit.object = rec.flags >> 2u;
     RtShape shape = seeded ? seed : velk_bvh_shapes.data[best_shape];
     if (shape.shape_kind == 255u) {
         // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. (u, v) from the triangle test
@@ -1050,8 +1052,18 @@ void main()
 // object's six axis directions, so the two sides of a thin wall are apart. Cubes double in
 // size from one level to the next. A reader picks the level by how wide it is there.
 #define VELK_LIGHT_CELL_GLSL R"(
+// The instances drawn, as words: an ElementInstance is 32 of them, and its params[3], the
+// last, is the object id, the same one rays find in RtRecord.flags. See
+// IScene::get_object_ids.
+layout(set = 1, binding = 3, std430) readonly buffer VelkInstanceWords { uint data[]; } velk_instance_words;
+
+uint velk_object_id(uint instance)
+{
+    return velk_instance_words.data[instance * 32u + 31u];
+}
+
 struct VelkLightCell {
-    uint object;  // which placed object: its record among the instances
+    uint object;  // which placed object: its object id
     int level;    // cubes are 2^level world units across
     ivec3 at;     // which cube, in the object's own axes
     uint side;    // which of the six axis directions the surface faces
@@ -1137,7 +1149,7 @@ void main()
         VelkDrawData d = velk_draw_data.data[ids.x - 1u];
         uint position = ids.y >> d.triangle_bits;
         uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-        uint object = d.instances_base + slot;
+        uint object = velk_object_id(d.instances_base + slot);
 
         vec4 surface = texelFetch(velk_textures[nonuniformEXT(pc.surface_id)], coord, 0);
         vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], coord, 0).xyz;
@@ -3023,7 +3035,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     d = velk_draw_data.data[ids.x - 1u];
     position = ids.y >> d.triangle_bits;
     uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-    object = d.instances_base + slot;
+    object = velk_object_id(d.instances_base + slot);
 
     surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
     world_pos = rel_pos;
@@ -3232,7 +3244,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     VelkDrawData d = velk_draw_data.data[ids.x - 1u];
     uint position = ids.y >> d.triangle_bits;
     uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-    cells_object = d.instances_base + slot;
+    cells_object = velk_object_id(d.instances_base + slot);
     vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], pixel, 0);
     cells_surface = surface.xyz;
     cells_side = uint(surface.w + 0.5);

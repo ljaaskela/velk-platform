@@ -27,7 +27,8 @@ constexpr uint32_t kChangedListDivisor = 4;
 /// nodes of 48 bytes.
 constexpr uint64_t kResidentInstanceBytes = sizeof(ElementInstance) + 64u + 96u;
 
-ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh, uint32_t slot)
+ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh, uint32_t slot,
+                              uint32_t object)
 {
     ElementInstance instance{};
     instance.world_matrix = world * transform.to_mat4();
@@ -35,6 +36,7 @@ ElementInstance make_instance(const mat4& world, const InstanceTransform& transf
     instance.col = ::velk::color::white();
     instance.params[1] = mesh;
     instance.params[2] = slot;
+    instance.params[3] = object;
     return instance;
 }
 
@@ -453,7 +455,7 @@ void InstancedMeshVisual::flush_instances(IGpuArena& arena, IGpuResourceManager&
 
     const auto write_slot = [&](uint32_t slot, ElementInstance* out) {
         if (live_[slot] != 0) {
-            *out = make_instance(world, transforms_[slot], slot_mesh_[slot], slot);
+            *out = make_instance(world, transforms_[slot], slot_mesh_[slot], slot, object_id_base_ + slot);
         } else {
             *out = ElementInstance{};
         }
