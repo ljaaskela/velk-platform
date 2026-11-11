@@ -154,7 +154,7 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4
 
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
-uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 5); }
+uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 6); }
 
 // How many rays a frame may trace to keep the light cells up, from VELK_LIGHT_CELL_RAYS.
 // 262,144 unless set. Cells past that wait for a later frame. A light on a cell is traced
@@ -331,7 +331,7 @@ namespace {
 // The table of light cells: its slots, a power of two, and the words of each. See
 // light_cells_main_src.
 constexpr uint32_t kCellSlots = 1u << 20;
-constexpr uint32_t kCellWords = 24;
+constexpr uint32_t kCellWords = 30;
 // The changes the light cells are given: how many at most, the words of each after 4 words
 // of header, and how many frames one stays listed.
 constexpr uint32_t kCellChanges = 128;
@@ -2085,9 +2085,16 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         empty_dc.groups_x = 1;
         trace_pc.mode = 2;
         std::memcpy(empty_dc.root_constants, &trace_pc, sizeof(trace_pc));
+        // Before the rounds: last frame's gathered light into each cell's mean. A thread a slot.
+        DispatchCall fold_dc = trace_dc;
+        fold_dc.groups_x = kCellSlots / 64u;
+        trace_pc.mode = 3;
+        std::memcpy(fold_dc.root_constants, &trace_pc, sizeof(trace_pc));
 
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light cells update");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(fold_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
         cmd->record_global_barrier();
