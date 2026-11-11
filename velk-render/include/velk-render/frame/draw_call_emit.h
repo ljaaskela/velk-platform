@@ -223,6 +223,12 @@ inline void emit_draw_calls(
         draw_arena->update_at(draw_data_offset, &header, sizeof(header));
         const uint32_t draw_base =
             static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
+        if (cull_info.cluster_count != 0) {
+            if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+                culling->update_at(uint64_t(cull_info.cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
+                                   &draw_base, sizeof(draw_base));
+            }
+        }
 
         // Always-indirect: pull args + count from the batch's own
         // storage buffer when available; fall back to writing a record

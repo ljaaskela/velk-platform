@@ -40,6 +40,9 @@ public:
         (PROP, float, near_clip, 0.1f),
         (PROP, float, far_clip, 1000.f),
         (PROP, bool, occlusion_culling, true), ///< Whether the deferred path skips drawing what is hidden behind other geometry.
+        /// Clusters smaller than this on screen, in pixels across, are drawn as a few flat
+        /// pixels instead of as triangles, by the deferred path. 0 draws all as triangles.
+        (PROP, float, tiny_cluster_pixels, 2.f),
         (PROP, ObjectRef, environment, {}) ///< Optional IEnvironment for skybox/background.
     )
 

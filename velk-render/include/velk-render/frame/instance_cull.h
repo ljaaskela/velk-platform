@@ -154,12 +154,36 @@ bool velk_behind_pyramid(uint pyramid, mat4 vp, vec3 center, float radius)
 /// How far a level of detail may be from the full mesh on screen, in pixels.
 inline constexpr float kLodMaxErrorPixels = 1.f;
 
+/// Words before the records of the list of tiny clusters: how many were added, the group
+/// counts of the dispatches that draw them, and how many of them are drawn; three spare;
+/// then counters of all clusters chosen by how wide they are on screen, under 2, 4, 8 and 16
+/// pixels and wider, and how many could not be tiny since their draw was not known yet. A
+/// record is kTinyRecordWords: its draw data record, the word of its cluster in the level of
+/// detail table, and its instance's slot under that draw.
+inline constexpr uint32_t kTinyHeaderWords = 16;
+inline constexpr uint32_t kTinyRecordWords = 3;
+
+// Adds a cluster to the list of tiny ones, false when it is full. The shader has pc.tiny_word
+// and pc.tiny_capacity.
+#define VELK_TINY_ADD_GLSL R"(
+bool velk_tiny_add(uint draw, uint cluster, uint slot)
+{
+    uint at = atomicAdd(cull_words.data[pc.tiny_word], 1u);
+    if (at >= pc.tiny_capacity) return false;
+    uint record = pc.tiny_word + 16u + at * 3u;
+    cull_words.data[record] = draw;
+    cull_words.data[record + 1u] = cluster;
+    cull_words.data[record + 2u] = slot;
+    return true;
+}
+)"
+
 // Calls velk_lod_use, with its error in world units, for each cluster of a primitive's hierarchy that this instance draws:
 // those whose own error on screen is small enough and whose parent's is not. A parent's
 // sphere holds its children's and its error is not less than theirs, so going up from any
 // triangle the answer changes once, which is what picks one complete surface. The shader
-// declares cull_words, velk_lod_use and velk_lod_occluded first; a cluster that is occluded
-// is left out. `entry` is as at instance_cluster_runs_src, and a level's bound skips its
+// declares cull_words, pc.tiny_pixels, velk_lod_use, velk_tiny_add and velk_lod_occluded
+// first; a cluster that is occluded is left out, and a tiny one goes to velk_tiny_add. `entry` is as at instance_cluster_runs_src, and a level's bound skips its
 // clusters when none could qualify.
 #define VELK_LOD_SELECT_GLSL R"(
 vec3 velk_lod_center(uint word, mat4 world, vec3 cam)
@@ -174,6 +198,29 @@ float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels
 {
     float away = length(velk_lod_center(word, world, cam)) - uintBitsToFloat(cull_words.data[word + 3u]) * scale;
     return uintBitsToFloat(cull_words.data[word + 4u]) * scale * pixels_per_unit / max(away, 1e-3);
+}
+
+// Draws chosen cluster `c` of `entry`: as a few flat pixels when the sphere around its own
+// triangles is less than pc.tiny_pixels across on screen and the tiny list has room, else
+// by the hardware.
+void velk_lod_take(uint entry, uint c, uint slot, float error, mat4 world, float scale, vec3 cam, float pixels_per_unit)
+{
+    uint draw = cull_words.data[entry + 13u];
+    if (pc.tiny_pixels > 0.0) {
+        uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+        float away = length(velk_lod_center(cluster + 13u, world, cam));
+        float across = 2.0 * uintBitsToFloat(cull_words.data[cluster + 16u]) * scale * pixels_per_unit / max(away, 1e-3);
+        uint band = across < 2.0 ? 0u : across < 4.0 ? 1u : across < 8.0 ? 2u : across < 16.0 ? 3u : 4u;
+        atomicAdd(cull_words.data[pc.tiny_word + 8u + band], 1u);
+        if (across < pc.tiny_pixels) {
+            if (draw == 0xFFFFFFFFu) {
+                atomicAdd(cull_words.data[pc.tiny_word + 13u], 1u);
+            } else if (velk_tiny_add(draw, cluster, slot)) {
+                return;
+            }
+        }
+    }
+    velk_lod_use(entry, c, slot, error);
 }
 
 void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, mat4 vp, float height, float max_pixels)
@@ -201,7 +248,7 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
                 && velk_lod_pixels(cluster + 8u, world, scale, cam, pixels_per_unit) > max_pixels) {
                 float error = uintBitsToFloat(cull_words.data[cluster + 7u]) * scale;
                 if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot, error)) {
-                    velk_lod_use(entry, c, slot, error);
+                    velk_lod_take(entry, c, slot, error, world, scale, cam, pixels_per_unit);
                 }
             }
         }
@@ -328,8 +375,11 @@ layout(push_constant) uniform PC {
     uint pyramid_word;     // the previous frame's depth pyramid, or 0xFFFFFFFF for none
     uint retest_word;
     uint retest_capacity;
+    uint tiny_word;        // the list of tiny clusters, see kTinyHeaderWords
+    uint tiny_capacity;
+    float tiny_pixels;     // 0 for none
 } pc;
-)" VELK_INSTANCE_FAR_GLSL VELK_OCCLUSION_GLSL R"(
+)" VELK_INSTANCE_FAR_GLSL VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL R"(
 uint g_instance;
 uint g_table;
 
@@ -451,7 +501,7 @@ void main()
     }
 
     for (uint e = 0u; e < entries; ++e) {
-        velk_lod_visit(first_entry + e * 13u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
+        velk_lod_visit(first_entry + e * 14u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
                        pc.lod_max_pixels);
     }
 }
@@ -484,8 +534,11 @@ layout(push_constant) uniform PC {
     uint globals_base;
     uint pyramid_word;
     float lod_max_pixels;
+    uint tiny_word;
+    uint tiny_capacity;
+    float tiny_pixels;
 } pc;
-)" VELK_OCCLUSION_GLSL R"(
+)" VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL R"(
 uint g_chosen_word;
 uint g_chosen_capacity;
 
@@ -534,7 +587,9 @@ void main()
         uint sphere = cull_words.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
         float error = uintBitsToFloat(cull_words.data[record + 5u]);
         if (!velk_lod_occluded(sphere, world, scale, cam, entry, cluster, slot, error)) {
-            velk_lod_use(entry, cluster, slot, error);
+            mat4 vp = globals.view_projection;
+            float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
+            velk_lod_take(entry, cluster, slot, error, world, scale, cam, pixels_per_unit);
         }
         return;
     }
@@ -556,7 +611,7 @@ void main()
     uint first_entry = cull_words.data[table + 8u];
     uint entries = cull_words.data[table + 9u];
     for (uint e = 0u; e < entries; ++e) {
-        velk_lod_visit(first_entry + e * 13u, slot, world, scale, cam, globals.view_projection, globals.viewport.y,
+        velk_lod_visit(first_entry + e * 14u, slot, world, scale, cam, globals.view_projection, globals.viewport.y,
                        pc.lod_max_pixels);
     }
 }
@@ -565,12 +620,13 @@ void main()
 /**
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
  * use gets an indexed command, instanced over its own run of the list, so that instances
- * using the same cluster share a draw. An entry is 13 words: the word of the list, which
+ * using the same cluster share a draw. An entry is kClusterEntryWords: the word of the list, which
  * is followed by each position's surface error and its cluster's first index, its capacity, the word of the cluster table
  * (kLodClusterWords words per cluster, starting with the cluster's first index and triangle
  * count), the cluster count, the words of the counts, the cursors and the commands, one of
  * each per cluster, how many commands are in use, the word of its levels and how many, how
- * many positions the first phase used, and the second phase's commands and how many are in use.
+ * many positions the first phase used, the second phase's commands and how many are in use, and
+ * the draw data record its pixels name (kClusterEntryDrawWord).
  *
  * With entries_word set, one dispatch goes through the entries listed there. The first
  * invocation writes the group counts of the dispatch that sorts the records at chosen_word.
@@ -669,6 +725,113 @@ void main()
         cull_words.data[list + at] = cull_words.data[record + 2u];
         cull_words.data[list + capacity + at] = cull_words.data[record + 3u];
         cull_words.data[list + capacity * 2u + at] = cull_words.data[cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS];
+    }
+}
+)";
+
+/**
+ * Writes the group counts of the dispatches that draw the tiny clusters culling listed, and
+ * how many of them are drawn, as kTinyHeaderWords describes.
+ */
+inline constexpr string_view instance_tiny_args_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 16, std430) buffer TinyWords { uint data[]; } tiny_words;
+
+layout(push_constant) uniform PC {
+    uint list_word;
+    uint capacity;
+} pc;
+
+void main()
+{
+    uint count = min(tiny_words.data[pc.list_word], pc.capacity);
+    tiny_words.data[pc.list_word + 1u] = (count + 63u) / 64u;
+    tiny_words.data[pc.list_word + 2u] = 1u;
+    tiny_words.data[pc.list_word + 3u] = 1u;
+    tiny_words.data[pc.list_word + 4u] = count;
+}
+)";
+
+/**
+ * Draws each tiny cluster as a square of pixels around the middle of its own triangles, as
+ * wide as it is on screen, at least one pixel and at most `most` pixels, all at the depth of
+ * that middle, where nothing nearer was drawn. With `mode` 0, keeps the nearest depth of
+ * each pixel in the plane at planes_word; with 1, writes the word of the record whose depth
+ * that is to the plane after it. The resolve takes both from there.
+ */
+inline constexpr string_view instance_tiny_draw_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+struct TinyInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer TinyInstances { TinyInstance data[]; } tiny_instances;
+layout(set = 1, binding = 16, std430) buffer TinyWords { uint data[]; } tiny_words;
+
+layout(push_constant) uniform PC {
+    uint list_word;
+    uint planes_word;
+    uint width;
+    uint height;
+    uint depth_id;  // the hardware's depth
+    uint mode;
+    uint most;
+} pc;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= tiny_words.data[pc.list_word + 4u]) return;
+    uint record = pc.list_word + 16u + index * 3u;
+    VelkDrawData d = velk_draw_data.data[tiny_words.data[record]];
+    uint cluster = tiny_words.data[record + 1u];
+    TinyInstance inst = tiny_instances.data[d.instances_base + tiny_words.data[record + 2u]];
+    GlobalData g = velk_globals.data[d.globals_base];
+
+    vec3 local = vec3(uintBitsToFloat(tiny_words.data[cluster + 13u]), uintBitsToFloat(tiny_words.data[cluster + 14u]),
+                      uintBitsToFloat(tiny_words.data[cluster + 15u]));
+    vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
+    vec4 clip = g.view_projection * vec4(rel, 1.0);
+    if (clip.w <= 0.0) return;
+    float depth = clip.z / clip.w;
+    if (depth <= 0.0 || depth > 1.0) return;
+
+    mat3 to_world = mat3(inst.world_matrix);
+    float scale = max(max(length(to_world[0]) * abs(inst.size.x), length(to_world[1]) * abs(inst.size.y)),
+                      length(to_world[2]) * abs(inst.size.z));
+    mat4 vp = g.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height) * 0.5 / clip.w;
+    float across = 2.0 * uintBitsToFloat(tiny_words.data[cluster + 16u]) * scale * pixels_per_unit;
+    int n = clamp(int(ceil(across)), 1, int(pc.most));
+
+    vec2 at = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(pc.width), float(pc.height));
+    ivec2 first = ivec2(floor(at - 0.5 * float(n) + 0.5));
+    uint bits = floatBitsToUint(depth);
+    uint plane = pc.width * pc.height;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            ivec2 p = first + ivec2(x, y);
+            if (p.x < 0 || p.y < 0 || p.x >= int(pc.width) || p.y >= int(pc.height)) continue;
+            if (texelFetch(velk_textures[nonuniformEXT(pc.depth_id)], p, 0).r >= depth) continue;
+            uint word = pc.planes_word + uint(p.y) * pc.width + uint(p.x);
+            if (pc.mode == 0u) {
+                atomicMax(tiny_words.data[word], bits);
+            } else if (tiny_words.data[word] == bits) {
+                tiny_words.data[word + plane] = record;
+            }
+        }
     }
 }
 )";
@@ -1065,6 +1228,13 @@ struct InstanceCullPass
     uint32_t together_chosen = 0;  ///< How many records fit.
     ArenaRegion retest;            ///< What failed the first occlusion test.
     uint32_t retest_capacity = 0;
+    /// Where clusters too small on screen to draw as triangles go, set by the path before
+    /// culling: see kTinyHeaderWords. kCullNoSlot for none.
+    uint32_t tiny_word = kCullNoSlot;
+    uint32_t tiny_capacity = 0;
+    float tiny_pixels = 0.f;  ///< Clusters less than this across on screen are tiny.
+    uint32_t recorded_tiny_word = kCullNoSlot;  ///< What the recordings use.
+    float recorded_tiny_pixels = 0.f;
     uint32_t pyramid_word = kCullNoSlot;  ///< Which pyramid the recording reads.
     IRenderPass::Ptr retest_pass;
     bool retest_dirty = true;
@@ -1254,6 +1424,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
     }
     record = record || pyramid_word != state.pyramid_word;
     state.pyramid_word = pyramid_word;
+    if (state.tiny_word == kCullNoSlot || state.tiny_capacity == 0) {
+        state.tiny_word = kCullNoSlot;
+        state.tiny_pixels = 0.f;
+    }
+    record = record || state.tiny_word != state.recorded_tiny_word || state.tiny_pixels != state.recorded_tiny_pixels;
+    state.recorded_tiny_word = state.tiny_word;
+    state.recorded_tiny_pixels = state.tiny_pixels;
     state.retest_dirty = state.retest_dirty || record;
 
     // A mesh's count of visible slots, and at 7 words on, those the second phase added.
@@ -1303,6 +1480,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         }
         if (state.retest.valid()) {
             cmd->record_clear_buffer(arena_buffer, state.retest.offset(), sizeof(uint32_t));
+        }
+        if (state.tiny_word != kCullNoSlot) {
+            cmd->record_clear_buffer(arena_buffer, uint64_t(state.tiny_word) * sizeof(uint32_t), kTinyHeaderWords * sizeof(uint32_t));
         }
         for (const auto& info : visuals) {
             if (info.chosen_capacity != 0) {
@@ -1363,12 +1543,16 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t pyramid_word;
             uint32_t retest_word;
             uint32_t retest_capacity;
+            uint32_t tiny_word;
+            uint32_t tiny_capacity;
+            float tiny_pixels;
         };
         const auto retest_word = static_cast<uint32_t>(state.retest.offset() / sizeof(uint32_t));
         if (together) {
             const PushC pc{0u, state.together_items, 0u, view_globals_base, 0.f, kCullNoSlot, 0u, kLodMaxErrorPixels,
                            together_items_word, together_word, state.together_chosen,
-                           pyramid_word, retest_word, state.retest_capacity};
+                           pyramid_word, retest_word, state.retest_capacity,
+                           state.tiny_word, state.tiny_capacity, state.tiny_pixels};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (state.together_items + 63u) / 64u;
@@ -1383,7 +1567,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const PushC pc{info.instances_base, info.slot_count, info.table_word, view_globals_base, info.max_distance,
                            partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
                            far_form ? 1u : 0u, kLodMaxErrorPixels, kCullNoSlot, info.chosen_word, info.chosen_capacity,
-                           pyramid_word, retest_word, state.retest_capacity};
+                           pyramid_word, retest_word, state.retest_capacity,
+                           state.tiny_word, state.tiny_capacity, state.tiny_pixels};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (info.slot_count + 63u) / 64u;
@@ -1494,9 +1679,12 @@ inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBat
             uint32_t globals_base;
             uint32_t pyramid_word;
             float lod_max_pixels;
+            uint32_t tiny_word;
+            uint32_t tiny_capacity;
+            float tiny_pixels;
         };
         const PushC pc{static_cast<uint32_t>(state.retest.offset() / sizeof(uint32_t)), state.retest_capacity, view_globals_base,
-                       state.pyramid_word, kLodMaxErrorPixels};
+                       state.pyramid_word, kLodMaxErrorPixels, state.tiny_word, state.tiny_capacity, state.tiny_pixels};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (state.retest_capacity + 63u) / 64u;

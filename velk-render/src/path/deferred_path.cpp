@@ -150,7 +150,7 @@ uint32_t env_uint(const char* name, long lo, long hi)
 }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 6); }
 
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
@@ -465,6 +465,100 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
     } else if (reflect_bytes > 0 && (!vs.light_reflect.valid() || vs.light_reflect.size() < reflect_bytes)) {
         vs.light_reflect = arena->alloc(reflect_bytes);
     }
+
+    // The tiny clusters' list and the words of each pixel, made again when the frame's size
+    // changes. The planes the tiny clusters are drawn to start clear, and the resolve clears
+    // them again after it.
+    const uint64_t pixels = uint64_t(vs.gbuffer_size.x) * vs.gbuffer_size.y;
+    if (pixels > 0 && (!vs.pixel_words.valid() || vs.pixel_words_size != vs.gbuffer_size)) {
+        vs.pixel_words = arena->alloc(pixels * 4u * sizeof(uint32_t));
+        vs.pixel_words_size = vs.gbuffer_size;
+        if (vs.pixel_words.valid()) {
+            vector<uint32_t> clear;
+            clear.resize(size_t(pixels) * 2u);
+            arena->write_at(vs.pixel_words.offset(), clear.data(), clear.size() * sizeof(uint32_t));
+        }
+        vs.tiny_capacity = static_cast<uint32_t>(pixels);
+        vs.tiny_list = arena->alloc((uint64_t(kTinyHeaderWords) + pixels * kTinyRecordWords) * sizeof(uint32_t));
+        if (vs.tiny_list.valid()) {
+            const uint32_t none[kTinyHeaderWords] = {};
+            arena->write_at(vs.tiny_list.offset(), none, sizeof(none));
+        } else {
+            vs.tiny_capacity = 0;
+        }
+    }
+}
+
+uint32_t DeferredPath::pixel_ids_word(const ViewState& vs)
+{
+    return static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)) + vs.pixel_words_size.x * vs.pixel_words_size.y * 2u;
+}
+
+void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, float most_pixels)
+{
+    if (!vs.visibility || !vs.tiny_list.valid() || !vs.pixel_words.valid() || vs.instance_cull.tiny_word == kCullNoSlot) {
+        return;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
+    if (!arena_buffer) return;
+    const auto pipeline_for = [&](string_view src, uint64_t key) {
+        auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
+    };
+    auto args_pipeline = pipeline_for(instance_tiny_args_src, 0x5469'6e79'4172'6773ULL);
+    auto draw_pipeline = pipeline_for(instance_tiny_draw_src, 0x5469'6e79'4472'6177ULL);
+    if (!args_pipeline || !draw_pipeline) return;
+
+    // How many there were in some recent frame, now and then.
+    if (ctx.present_counter >= vs.tiny_log_frame + kCellStatFrames) {
+        vs.tiny_log_frame = ctx.present_counter;
+        uint32_t header[kTinyHeaderWords];
+        arena->read_at(vs.tiny_list.offset(), header, sizeof(header));
+        VELK_LOG(I, "tiny clusters: %u drawn as pixels, %u asked, room for %u; clusters chosen by width on screen: "
+                    "under 2 px %u, 2-4 %u, 4-8 %u, 8-16 %u, wider %u; draw not known %u",
+                 header[4], header[0], vs.tiny_capacity, header[8], header[9], header[10], header[11], header[12], header[13]);
+    }
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.tiny_pass, dirty, "deferred.tiny", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        const auto list_word = static_cast<uint32_t>(vs.tiny_list.offset() / sizeof(uint32_t));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: tiny clusters");
+        cmd->record_global_barrier();
+        {
+            const uint32_t pc[2] = {list_word, vs.tiny_capacity};
+            DispatchCall dc{};
+            dc.pipeline = args_pipeline.get();
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, pc, sizeof(pc));
+            cmd->record_dispatch(dc);
+        }
+        cmd->record_global_barrier();
+        for (uint32_t mode = 0; mode < 2; ++mode) {
+            struct PushC
+            {
+                uint32_t list_word, planes_word, width, height, depth_id, mode, most;
+            };
+            const PushC pc{list_word, static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)), vs.pixel_words_size.x,
+                           vs.pixel_words_size.y, vs.visibility->attachment(1), mode,
+                           static_cast<uint32_t>(std::max(std::ceil(most_pixels), 1.f))};
+            DispatchCall dc{};
+            dc.pipeline = draw_pipeline.get();
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(list_word + 1u) * sizeof(uint32_t));
+            cmd->record_global_barrier();
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.held.push_back(std::move(args_pipeline));
+        rec.held.push_back(std::move(draw_pipeline));
+    });
 }
 
 bool DeferredPath::ensure_ltc_tables(FrameContext& ctx, IRenderGraph& graph)
@@ -593,6 +687,12 @@ void DeferredPath::build_passes(IViewEntry& entry,
     auto* camera = interface_cast<ICamera>(ctx.view_camera_trait);
     auto camera_state = camera ? read_state<ICamera>(camera) : decltype(read_state<ICamera>(camera)){};
     const bool occlusion = (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid() && !no_occlusion_culling();
+    const float tiny_pixels = camera_state ? std::max(camera_state->tiny_cluster_pixels, 0.f) : 2.f;
+    vs.instance_cull.tiny_word = vs.tiny_list.valid() && vs.pixel_words.valid() && tiny_pixels > 0.f
+        ? static_cast<uint32_t>(vs.tiny_list.offset() / sizeof(uint32_t))
+        : kCullNoSlot;
+    vs.instance_cull.tiny_capacity = vs.tiny_capacity;
+    vs.instance_cull.tiny_pixels = tiny_pixels;
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot);
     if (vs.instance_cull.arena_generation != culling_generation) {
@@ -605,6 +705,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         emit_instance_retest_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
         emit_visibility_pass(vs, render_view, ctx, graph, true);
     }
+    emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode();
 
@@ -792,7 +893,7 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
 void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
                                                 IRenderGraph& graph)
 {
-    if (!vs.visibility || !render_view.batches || !ctx.snippets) return;
+    if (!vs.visibility || !render_view.batches || !ctx.snippets || !vs.pixel_words.valid()) return;
 
     // The frame's list of materials decides which evals the shader composes.
     const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
@@ -830,8 +931,10 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         uint32_t extras[4];
         uint32_t env[4];
     };
-    // No lights here, so their field carries the surface attachment. See RESOLVE_SURFACE.
-    const PushC pc{0u, render_view.view_globals_base, 0u, handle(GBufferAttachment::Surface), {0.f, 0.f},
+    // No lights here, so their fields carry the surface attachment and the words of each
+    // pixel. See RESOLVE_SURFACE and RESOLVE_TINY.
+    const PushC pc{0u, render_view.view_globals_base, static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)),
+                   handle(GBufferAttachment::Surface), {0.f, 0.f},
                    {vs.visibility->attachment(0), vs.visibility_size.x, vs.visibility_size.y, handle(GBufferAttachment::Albedo)},
                    {handle(GBufferAttachment::Normal), handle(GBufferAttachment::WorldPos),
                     handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};
@@ -849,7 +952,10 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
         cmd->begin_recording();
         cmd->push_label("DeferredPath: visibility resolve");
+        // The tiny clusters' planes before, and the pixels' ids for the passes after.
+        cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();
         rec.cmd = std::move(cmd);
@@ -886,7 +992,7 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         {
             uint32_t ids_id, output_id, width, height, mode, pyramid_word;
         };
-        const PushC pc{vs.visibility->attachment(0),
+        const PushC pc{pixel_ids_word(vs),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
                        vs.visibility_size.x, vs.visibility_size.y, mode,
                        static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t))};
@@ -1114,11 +1220,11 @@ void DeferredPath::emit_light_cells_debug_pass(ViewState& vs, const RenderView& 
         if (!cmd) return;
         VELK_GPU_STRUCT PushC
         {
-            uint32_t ids_id, surface_id, pos_id, normal_id, output_id, width, height, mode, globals_base;
+            uint32_t ids_word, surface_id, pos_id, normal_id, output_id, width, height, mode, globals_base;
             float pixels;
         };
         const auto attachment = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
-        const PushC pc{vs.visibility->attachment(0),
+        const PushC pc{pixel_ids_word(vs),
                        attachment(GBufferAttachment::Surface),
                        attachment(GBufferAttachment::WorldPos),
                        attachment(GBufferAttachment::Normal),
@@ -1319,7 +1425,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             kCellSlots,
             static_cast<uint32_t>(light_cell_pixels()),
             static_cast<uint32_t>(vs.light_cell_change_words.offset() / sizeof(uint32_t)),
-            vs.visibility->attachment(0),
+            pixel_ids_word(vs),
             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Surface)),
             static_cast<uint32_t>(vs.light_cell_work.offset() / sizeof(uint32_t)),
             light_cell_entries(),

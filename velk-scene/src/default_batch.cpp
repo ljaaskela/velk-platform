@@ -57,7 +57,6 @@ constexpr uint32_t kCullEntryCountWord = 9;
 constexpr uint32_t kCullFarAlbedoWord = 10;  ///< The far form's colour, as unorm RGB.
 
 /// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
-constexpr uint32_t kClusterEntryWords = 13;
 constexpr uint32_t kClusterEntryListWord = 0;
 constexpr uint32_t kClusterEntryCapacityWord = 1;
 constexpr uint32_t kClusterEntryTableWord = 2;
@@ -263,6 +262,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryLevelsWord] = draw.lod.level_word;
         entry[kClusterEntryLevelCountWord] = draw.lod.level_count | (draw.lod.deforming ? kLodDeforming : 0u);
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
+        entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});
     }
     // Batches culled together keep their records in one place, with the culling pass.

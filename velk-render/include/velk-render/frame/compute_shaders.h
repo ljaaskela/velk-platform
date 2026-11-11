@@ -843,6 +843,12 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 #define RESOLVE_EMISSIVE pc.env.w
 // The resolve has no lights, so their field carries one more attachment.
 #define RESOLVE_SURFACE pc.lights_base
+// And their count the word of the planes the tiny clusters were drawn to, a word a pixel
+// each: their depths, then the words of their records. After those come the pixels' ids it
+// writes for the passes after it, two words a pixel (velk_pixel_ids).
+#define RESOLVE_TINY pc.light_count
+
+layout(set = 1, binding = 16, std430) buffer ResolveWords { uint data[]; } resolve_words;
 
 struct ResolveVertex {
     vec3 local;
@@ -921,12 +927,94 @@ vec3 resolve_shading_normal(MaterialEval e, EvalContext ctx)
     return normalize(length(e.normal) > 0.0 ? e.normal : ctx.normal);
 }
 
+// Which of the object's axes `facing`, in the object's own axes, is mostly along: 0 to 5,
+// positive x first.
+float resolve_side(vec3 facing)
+{
+    vec3 across = abs(facing);
+    return across.x >= across.y && across.x >= across.z ? (facing.x < 0.0 ? 1.0 : 0.0)
+         : across.y >= across.z ? (facing.y < 0.0 ? 3.0 : 2.0)
+         : (facing.z < 0.0 ? 5.0 : 4.0);
+}
+
+// A tiny cluster's pixel, from what its whole cluster looks like: flat at the middle of its
+// own triangles, facing its mean normal, and the material read where its mean uv is at a
+// detail as coarse as all its uvs together.
+void resolve_tiny(ivec2 coord, uint record)
+{
+    VelkDrawData d = velk_draw_data.data[resolve_words.data[record]];
+    uint cluster = resolve_words.data[record + 1u];
+    ElementInstance inst = velk_instances.data[d.instances_base + resolve_words.data[record + 2u]];
+    GlobalData g = velk_globals.data[d.globals_base];
+
+    vec3 own = vec3(uintBitsToFloat(resolve_words.data[cluster + 13u]), uintBitsToFloat(resolve_words.data[cluster + 14u]),
+                    uintBitsToFloat(resolve_words.data[cluster + 15u]));
+    vec3 local = inst.offset.xyz + own * inst.size.xyz;
+    vec3 rel = velk_rel_position(inst.world_matrix, local, g);
+    mat3 to_world = mat3(inst.world_matrix);
+    vec3 facing = unpackSnorm4x8(resolve_words.data[cluster + 17u]).xyz;
+    vec3 N = to_world * facing;
+    // Triangles that agree on no direction, or none known: towards the camera.
+    N = dot(N, N) > 1e-8 ? normalize(N) : -normalize(rel);
+    vec2 uv = unpackHalf2x16(resolve_words.data[cluster + 18u]);
+    vec2 uv_range = unpackHalf2x16(resolve_words.data[cluster + 19u]);
+
+    EvalContext ctx;
+    ctx.material_base = d.material_words;
+    ctx.texture_id = d.texture_id;
+    ctx.shape_param = inst.params.x;
+    ctx.uv = uv;
+    ctx.uv1 = vec2(0.0);
+    ctx.base = inst.color;
+    ctx.ray_dir = normalize(rel);
+    ctx.normal = N;
+    ctx.hit_pos = rel + g.cam_pos.xyz;
+    ctx.rel_pos = rel;
+    vec3 helper = abs(N.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    ctx.tangent = vec4(normalize(cross(helper, N)), 1.0);
+    velk_uv_dx[0] = vec2(uv_range.x, 0.0);
+    velk_uv_dy[0] = vec2(0.0, uv_range.y);
+    velk_uv_dx[1] = vec2(0.0);
+    velk_uv_dy[1] = vec2(0.0);
+    velk_uv_set = 0u;
+    MaterialEval e = velk_eval_material(d.material_id, ctx);
+
+    vec3 axis_scale = vec3(length(to_world[0]), length(to_world[1]), length(to_world[2]));
+    imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, e.color);
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(resolve_shading_normal(e, ctx), 0.0));
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, 0.0));
+    imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
+               vec4(e.metallic, e.roughness, float(e.lighting_mode) / 255.0, 0.0));
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord,
+               vec4(local * axis_scale, resolve_side(transpose(to_world) * N)));
+}
+
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(RESOLVE_WIDTH) || coord.y >= int(RESOLVE_HEIGHT)) return;
 
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(RESOLVE_IDS)], coord, 0).xy;
+    // A tiny cluster drawn here was nearer than what the hardware drew. Its planes are left
+    // clear for the next frame.
+    uint pixel_index = uint(coord.y) * RESOLVE_WIDTH + uint(coord.x);
+    uint plane = RESOLVE_WIDTH * RESOLVE_HEIGHT;
+    uint tiny = resolve_words.data[RESOLVE_TINY + plane + pixel_index];
+    if (tiny != 0u) {
+        resolve_words.data[RESOLVE_TINY + pixel_index] = 0u;
+        resolve_words.data[RESOLVE_TINY + plane + pixel_index] = 0u;
+    } else if (resolve_words.data[RESOLVE_TINY + pixel_index] != 0u) {
+        resolve_words.data[RESOLVE_TINY + pixel_index] = 0u;
+    }
+    uvec2 ids = tiny != 0u ? uvec2((resolve_words.data[tiny] + 1u) | VELK_IDS_TINY, tiny)
+                           : texelFetch(velk_textures_uint[nonuniformEXT(RESOLVE_IDS)], coord, 0).xy;
+    uint ids_at = RESOLVE_TINY + plane * 2u + pixel_index * 2u;
+    resolve_words.data[ids_at] = ids.x;
+    resolve_words.data[ids_at + 1u] = ids.y;
+    if (tiny != 0u) {
+        resolve_tiny(coord, tiny);
+        return;
+    }
     if (ids.x == 0u) {
         imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, vec4(0.0));
         imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(0.0));
@@ -1010,27 +1098,23 @@ void main()
     mat3 to_world = mat3(inst.world_matrix);
     vec3 axis_scale = vec3(length(to_world[0]), length(to_world[1]), length(to_world[2]));
     vec3 local = v0.local * weights.x + v1.local * weights.y + v2.local * weights.z;
-    vec3 facing = transpose(to_world) * ctx.normal;
-    vec3 across = abs(facing);
-    float side = across.x >= across.y && across.x >= across.z ? (facing.x < 0.0 ? 1.0 : 0.0)
-               : across.y >= across.z ? (facing.y < 0.0 ? 3.0 : 2.0)
-               : (facing.z < 0.0 ? 5.0 : 4.0);
-    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord, vec4(local * axis_scale, side));
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord,
+               vec4(local * axis_scale, resolve_side(transpose(to_world) * ctx.normal)));
 }
 )";
 
-/// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance, 3 per
-/// triangle. Mode 4 shows the depth pyramid's fourth level.
+/// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per draw instance (or tiny
+/// cluster), 3 per triangle. Mode 4 shows the depth pyramid's fourth level. Modes 5 and 6
+/// show tiny clusters and how large triangles are on screen (triangle_size_color).
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
 layout(push_constant) uniform PC {
-    uint ids_id;
+    uint ids_word;
     uint output_id;
     uint width;
     uint height;
@@ -1045,6 +1129,52 @@ vec3 id_color(uint id)
     h *= 2246822519u;
     h ^= h >> 13u;
     return vec3(float(h & 255u), float((h >> 8u) & 255u), float((h >> 16u) & 255u)) / 255.0;
+}
+
+struct DebugInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+layout(set = 1, binding = 3, scalar) readonly buffer DebugInstances { DebugInstance data[]; } debug_instances;
+
+// Mode 5: a tiny cluster's pixel magenta, the rest grey. Mode 6: tiny magenta, the rest by how
+// large their triangle is on screen, the square root of its area in pixels: under a half red,
+// under 1 yellow, under 2 green, under 8 cyan, and larger blue.
+vec3 triangle_size_color(uvec2 ids)
+{
+    if ((ids.x & VELK_IDS_TINY) != 0u) return vec3(1.0, 0.0, 1.0);
+    if (pc.mode == 5u) return vec3(0.3);
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint triangle = ids.y & ((1u << d.triangle_bits) - 1u);
+    uint position = ids.y >> d.triangle_bits;
+    DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    GlobalData g = velk_globals.data[d.globals_base];
+    uvec3 corners = uvec3(triangle) + uvec3(0u, 1u, 2u);
+    if (d.index_base != VELK_NO_VISIBLE_LIST) {
+        uint first = d.cluster_first_base == VELK_NO_VISIBLE_LIST ? 0u : velk_culling.data[d.cluster_first_base + position];
+        uint word = d.index_base + first + triangle * 3u;
+        corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+    }
+    vec2 p[3];
+    for (int k = 0; k < 3; ++k) {
+        uint at = d.vbo_base + corners[k] * VELK_VERTEX3D_WORDS;
+        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
+                          uintBitsToFloat(velk_mesh_words.data[at + 2u]));
+        vec4 clip = g.view_projection * vec4(velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), 1.0);
+        if (clip.w <= 0.0) return vec3(0.0, 0.0, 1.0);
+        p[k] = clip.xy / clip.w * 0.5 * vec2(float(pc.width), float(pc.height));
+    }
+    vec2 e1 = p[1] - p[0];
+    vec2 e2 = p[2] - p[0];
+    float across = sqrt(0.5 * abs(e1.x * e2.y - e1.y * e2.x));
+    return across < 0.5 ? vec3(1.0, 0.0, 0.0)
+         : across < 1.0 ? vec3(1.0, 1.0, 0.0)
+         : across < 2.0 ? vec3(0.0, 1.0, 0.0)
+         : across < 8.0 ? vec3(0.0, 1.0, 1.0)
+         : vec3(0.0, 0.0, 1.0);
 }
 
 void main()
@@ -1063,14 +1193,16 @@ void main()
         return;
     }
 
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
+    uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (ids.x != 0u) {
-        uint draw = ids.x - 1u;
-        uint bits = velk_draw_data.data[draw].triangle_bits;
+    if (pc.mode >= 5u) {
+        if (ids.x != 0u) color = triangle_size_color(ids);
+    } else if (ids.x != 0u) {
+        uint draw = velk_ids_draw(ids);
+        VelkDrawData d = velk_draw_data.data[draw];
         uint id = draw * 16381u;
-        if (pc.mode >= 2u) id += (ids.y >> bits) * 8191u;
-        if (pc.mode >= 3u) id += (ids.y & ((1u << bits) - 1u)) * 131u;
+        if (pc.mode >= 2u) id += velk_ids_part(d, ids) * 8191u;
+        if (pc.mode >= 3u && (ids.x & VELK_IDS_TINY) == 0u) id += (ids.y & ((1u << d.triangle_bits) - 1u)) * 131u;
         color = id_color(id);
     }
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(color, 1.0));
@@ -1354,11 +1486,10 @@ inline constexpr string_view light_cells_debug_compute_src = R"(
 #include "velk.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 )" VELK_LIGHT_CELL_GLSL R"(
 layout(push_constant, scalar) uniform PC {
-    uint ids_id;
+    uint ids_word;
     uint surface_id;
     uint pos_id;
     uint normal_id;
@@ -1379,13 +1510,11 @@ void main()
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
 
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(pc.ids_id)], coord, 0).xy;
+    uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
     if (ids.x != 0u) {
-        VelkDrawData d = velk_draw_data.data[ids.x - 1u];
-        uint position = ids.y >> d.triangle_bits;
-        uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-        uint object = velk_object_id(d.instances_base + slot);
+        VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+        uint object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
 
         vec4 surface = texelFetch(velk_textures[nonuniformEXT(pc.surface_id)], coord, 0);
         vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], coord, 0).xyz;
@@ -2003,6 +2132,7 @@ uint velk_bounce_scratch(uint listed, uint ray)
 // anything for the mark passes, a spare word, then 8 words a change: a world box's least
 // corner, the frame, its greatest corner, and which light moved or all ones.
 #define CELLS_CHANGES cells_header[3]
+// The pixels' ids in the culling arena (velk_pixel_ids), and the G-buffer's surface texture.
 #define CELLS_IDS cells_header[4]
 #define CELLS_SURFACE cells_header[5]
 // What to trace this frame, in the same arena: a count, three words on lights that moving
@@ -2444,10 +2574,11 @@ bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3
     world_u = vec3(0.0);
     world_v = vec3(0.0);
     ivec2 coord = ivec2(int(packed & 0xFFFFu), int(packed >> 16u));
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
+    ivec2 image_size = textureSize(velk_textures[nonuniformEXT(pc.normal_tex_id)], 0);
+    uvec2 ids = velk_pixel_ids(CELLS_IDS, uint(image_size.x), coord);
     vec4 normal_and_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], coord, 0);
-    uint bits = velk_draw_data.data[max(ids.x, 1u) - 1u].triangle_bits;
-    uint position = ids.y >> bits;
+    VelkDrawData d = velk_draw_data.data[ids.x != 0u ? velk_ids_draw(ids) : 0u];
+    uint position = velk_ids_part(d, ids);
     vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
     vec3 world_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
     N = normalize(normal_and_error.xyz);
@@ -2462,19 +2593,18 @@ bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3
     uint ua = (axis + 1u) % 3u;
     uint va = (axis + 2u) % 3u;
     vec2 to_middle = vec2(middle[ua] - surface.xyz[ua], middle[va] - surface.xyz[va]);
-    ivec2 image_size = textureSize(velk_textures[nonuniformEXT(pc.normal_tex_id)], 0);
     ivec2 nx = coord + ivec2(coord.x + 1 < image_size.x ? 1 : -1, 0);
     ivec2 ny = coord + ivec2(0, coord.y + 1 < image_size.y ? 1 : -1);
-    uvec2 ids_x = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], nx, 0).xy;
-    uvec2 ids_y = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], ny, 0).xy;
+    uvec2 ids_x = velk_pixel_ids(CELLS_IDS, uint(image_size.x), nx);
+    uvec2 ids_y = velk_pixel_ids(CELLS_IDS, uint(image_size.x), ny);
     vec4 surface_x = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], nx, 0);
     vec4 surface_y = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], ny, 0);
     vec3 normal_x = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], nx, 0).xyz;
     vec3 normal_y = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], ny, 0).xyz;
     // The same object, the same side of it, and facing the same way: one flat piece of
     // surface, not the next face over an edge.
-    if (ids_x.x == ids.x && (ids_x.y >> bits) == position
-        && ids_y.x == ids.x && (ids_y.y >> bits) == position
+    if (ids_x.x == ids.x && velk_ids_part(d, ids_x) == position
+        && ids_y.x == ids.x && velk_ids_part(d, ids_y) == position
         && surface_x.w == surface.w && surface_y.w == surface.w
         && dot(normal_x, N) > 0.995 * length(normal_x) && dot(normal_y, N) > 0.995 * length(normal_y)) {
         vec3 sx = surface_x.xyz - surface.xyz;
@@ -2946,13 +3076,12 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
 {
     velk_cells_load();
     coord = pixel;
-    ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], coord, 0).xy;
+    ids = velk_pixel_ids(CELLS_IDS, uint(textureSize(velk_textures[nonuniformEXT(CELLS_SURFACE)], 0).x), coord);
     normal_and_error = normal_error;
     if (ids.x == 0u || dot(normal_and_error.xyz, normal_and_error.xyz) < 1e-6) return false;
-    d = velk_draw_data.data[ids.x - 1u];
-    position = ids.y >> d.triangle_bits;
-    uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-    object = velk_object_id(d.instances_base + slot);
+    d = velk_draw_data.data[velk_ids_draw(ids)];
+    position = velk_ids_part(d, ids);
+    object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
 
     surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
     world_pos = rel_pos;
@@ -3937,13 +4066,11 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     cells_pixels = velk_light_cell_words.data[CELLS_HEADER + 2u];
     cells_ids = velk_light_cell_words.data[CELLS_HEADER + 4u];
     cells_surface_id = velk_light_cell_words.data[CELLS_HEADER + 5u];
-    uvec2 ids = texelFetch(velk_textures_uint[nonuniformEXT(CELLS_IDS)], pixel, 0).xy;
+    uvec2 ids = velk_pixel_ids(CELLS_IDS, uint(textureSize(velk_textures[nonuniformEXT(CELLS_SURFACE)], 0).x), pixel);
     if (ids.x == 0u || dot(normal_error.xyz, normal_error.xyz) < 1e-6) return false;
     N = normalize(normal_error.xyz);
-    VelkDrawData d = velk_draw_data.data[ids.x - 1u];
-    uint position = ids.y >> d.triangle_bits;
-    uint slot = d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
-    cells_object = velk_object_id(d.instances_base + slot);
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    cells_object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
     vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], pixel, 0);
     cells_surface = surface.xyz;
     cells_side = uint(surface.w + 0.5);

@@ -376,6 +376,40 @@ struct VelkDrawData {
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
 layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[]; } velk_culling;
+
+// What each pixel shows, two words a pixel, row by row from `ids_word` in the culling arena,
+// as the deferred path's visibility resolve leaves it: 0 for nothing, else its draw data
+// record plus one, and under that draw either the position in its visible list shifted up
+// by its triangle bits, over the triangle, or, with VELK_IDS_TINY set, the word of a tiny
+// cluster's record (see instance_tiny_draw_src).
+#define VELK_IDS_TINY 0x80000000u
+
+uvec2 velk_pixel_ids(uint ids_word, uint width, ivec2 coord)
+{
+    uint at = ids_word + 2u * (uint(coord.y) * width + uint(coord.x));
+    return uvec2(velk_culling.data[at], velk_culling.data[at + 1u]);
+}
+
+// The draw data record of a pixel that shows something.
+uint velk_ids_draw(uvec2 ids)
+{
+    return (ids.x & ~VELK_IDS_TINY) - 1u;
+}
+
+// Which part of its draw a pixel shows: its position in the visible list, or its tiny
+// cluster. Equal for pixels of the same instance's same cluster.
+uint velk_ids_part(VelkDrawData d, uvec2 ids)
+{
+    return (ids.x & VELK_IDS_TINY) != 0u ? ids.y : ids.y >> d.triangle_bits;
+}
+
+// The slot of the instance a pixel shows, under its draw's instances_base.
+uint velk_ids_slot(VelkDrawData d, uvec2 ids)
+{
+    if ((ids.x & VELK_IDS_TINY) != 0u) return velk_culling.data[ids.y + 2u];
+    uint position = ids.y >> d.triangle_bits;
+    return d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+}
 )"
 // Declares a raster shader's push constant and names it. Put it at file scope,
 // once per shader (a shader may have only one push-constant block):

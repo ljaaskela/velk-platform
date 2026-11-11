@@ -57,6 +57,11 @@ struct BatchBufferLayout
 /// an error. See `instance_cluster_fill_src`.
 inline constexpr uint32_t kCullChosenHeaderWords = 4;
 inline constexpr uint32_t kCullChosenRecordWords = 4;
+/// Words in a cluster draw entry: see `instance_cluster_runs_src`.
+inline constexpr uint32_t kClusterEntryWords = 14;
+/// Where in a cluster draw entry the draw data record its pixels name is, written when the
+/// draw is emitted, so that tiny clusters can name it too. 0xFFFFFFFF until then.
+inline constexpr uint32_t kClusterEntryDrawWord = 13;
 
 /**
  * @brief What GPU culling needs to know about a batch. Batches with the same @c key
