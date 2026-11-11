@@ -1823,7 +1823,7 @@ layout(push_constant, scalar) uniform PC {
     uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
     uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
     vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
-    uint spare0;               // 88
+    uint bounce_hops;          // 88  how many surfaces bounce light passes over: 1 or 2
     uint spare1;               // 92
     uint mode;                 // 96  what a pass is to do, for passes that do more than one thing
     uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
@@ -3805,7 +3805,7 @@ void main()
             // Light from other surfaces arriving there too, from the bounce entry over the hit
             // if it has any; it holds one bounce more each frame.
             uint over = velk_light_cell_words.data[ray_at + 4u];
-            if (over != kNoCell) {
+            if (over != kNoCell && pc.bounce_hops >= 2u) {
                 bool made;
                 uint entry = velk_bounce_find(over, false, made);
                 if (entry != kNoCell && velk_light_cell_words.data[entry + 2u] == kBounceTraced) {

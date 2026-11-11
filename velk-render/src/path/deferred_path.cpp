@@ -119,7 +119,7 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t lights_base;      // light array index (set = 1 slot 5)
     uint32_t ltc_magnitude_id; // LTC energy / Fresnel table
     float    env_params[2];    // x = intensity, y = rotation_rad (inline)
-    uint32_t spare0;
+    uint32_t bounce_hops;      // how many surfaces bounce light passes over: 1 or 2
     uint32_t spare1;
     uint32_t mode;             // what a pass is to do, for passes that do more than one thing
     uint32_t gi_probe_id;      // GI probe atlas (SH L1); 0 = no GI
@@ -155,6 +155,14 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
 uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 8); }
+
+// How many surfaces bounce light passes over, from VELK_LIGHT_CELL_HOPS: 2 unless set to 1.
+// With 1, bounce rays read only the direct light where they hit, and make no bounce cells.
+uint32_t light_cell_hops()
+{
+    const uint32_t hops = env_uint("VELK_LIGHT_CELL_HOPS", 1, 2);
+    return hops ? hops : 2u;
+}
 
 // How many rays a frame may trace to keep the light cells up, from VELK_LIGHT_CELL_RAYS.
 // 262,144 unless set. Cells past that wait for a later frame. A light on a cell is traced
@@ -2168,6 +2176,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         bounce_trace_dc.groups_y = 1;
         DeferredComputePushC bounce_pc = pc;
         bounce_pc.mode = 4;
+        bounce_pc.bounce_hops = light_cell_hops();
         std::memcpy(bounce_trace_dc.root_constants, &bounce_pc, sizeof(bounce_pc));
         DispatchCall hits_dc = bounce_trace_dc;
         hits_dc.pipeline = hits_pipeline.get();
@@ -2213,11 +2222,12 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_global_barrier();
         cmd->record_dispatch(gaps_dc);
         cmd->record_global_barrier();
-        cmd->record_dispatch(hops_new_dc);
+        const bool hops = bounce_pc.bounce_hops >= 2u;
+        if (hops) cmd->record_dispatch(hops_new_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(rest_dc);
         cmd->record_global_barrier();
-        cmd->record_dispatch(hops_rest_dc);
+        if (hops) cmd->record_dispatch(hops_rest_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(bounce_trace_dc);
         cmd->record_global_barrier();
