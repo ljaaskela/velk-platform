@@ -1922,14 +1922,6 @@ vec3 velk_tonemap_aces(vec3 x)
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 )" VELK_GI_FIELD_GLSL R"(
-// Indirect diffuse from the GI probe field, as irradiance against a surface's normal, for
-// a point relative to the camera. Negative if no probe could light it.
-vec3 velk_gi_indirect(vec3 world_pos, vec3 N)
-{
-    if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(0.0);
-    return velk_gi_irradiance(pc.gi_probe_id, pc.gi_maps_id, pc.gi_finest, world_pos, N, normalize(world_pos), VELK_GLOBALS.cam_pos.xyz);
-}
-
 // Light arriving from a direction, as the GI probe field knows it. Broad, since the field
 // holds only a low-order approximation. Negative if no probe could light the point.
 vec3 velk_gi_radiance(vec3 world_pos, vec3 N, vec3 dir)
@@ -2503,10 +2495,10 @@ void main()
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
         vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
 
-        // Indirect light from the probe field, which sees the sky only where it is open.
-        // Where no probe could light the surface, the environment stands in.
-        vec3 gi = velk_gi_indirect(world_pos, N);
-        vec3 indirect = pc.gi_probe_id != 0u && gi.r >= 0.0 ? gi : env_diffuse;
+        // Light from other surfaces and the sky, from the bounce cells around the pixel, which
+        // see the sky only where it is open. Where none has any yet, the environment stands in.
+        vec3 gi = cells_here ? velk_cells_bounce(N) : vec3(-1.0);
+        vec3 indirect = gi.r >= 0.0 ? gi : env_diffuse;
 
         // The environment map cannot tell whether the sky is visible along the reflection.
         // The field can: how much of the environment's light it finds that way is how much
