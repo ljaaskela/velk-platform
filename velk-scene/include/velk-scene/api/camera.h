@@ -79,8 +79,6 @@ public:
     auto get_fov() const { return read_state_value<ICamera>(&ICamera::State::fov); }
     void set_fov(float v) { write_state_value<ICamera>(&ICamera::State::fov, v); }
 
-    /// Sets the width of the finest GI probe cells. 0, the default, chooses it from what the camera sees.
-    void set_gi_cell_size(float v) { write_state_value<ICamera>(&ICamera::State::gi_cell_size, v); }
 
     /// Sets whether the deferred path skips drawing what is hidden behind other geometry. On by default.
     void set_occlusion_culling(bool v) { write_state_value<ICamera>(&ICamera::State::occlusion_culling, v); }

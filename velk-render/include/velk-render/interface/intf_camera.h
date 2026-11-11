@@ -39,7 +39,6 @@ public:
         (PROP, float, fov, 60.f),
         (PROP, float, near_clip, 0.1f),
         (PROP, float, far_clip, 1000.f),
-        (PROP, float, gi_cell_size, 0.f), ///< Width of the finest GI probe cells, rounded to a power of two. 0 chooses it from what the camera sees.
         (PROP, bool, occlusion_culling, true), ///< Whether the deferred path skips drawing what is hidden behind other geometry.
         (PROP, ObjectRef, environment, {}) ///< Optional IEnvironment for skybox/background.
     )

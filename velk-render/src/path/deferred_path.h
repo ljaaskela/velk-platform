@@ -102,7 +102,6 @@ public:
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
-        IRenderPass::Ptr gi_debug_pass;
         IRenderPass::Ptr light_cells_debug_pass;
         IRenderPass::Ptr light_cells_pass;
         IRenderPass::Ptr light_cells_update_pass;
@@ -170,29 +169,6 @@ public:
         IRenderPass::Ptr cached_transparent_pass;
         bool transparent_dirty = true;
 
-        /// The GI probe field, all its levels in one atlas. See VELK_GI_FIELD_GLSL.
-        /// Read back by the probe pass for its temporal blend, so it persists
-        /// across frames rather than being transient.
-        IRenderTarget::Ptr gi_probes;
-        /// Each probe's map of irradiance against each direction. See VELK_GI_FIELD_GLSL.
-        IRenderTarget::Ptr gi_probe_irradiance;
-        /// The field being rebuilt from the top. See emit_probe_pass.
-        uint32_t gi_sweep_left = 0;
-        uint64_t gi_sweep_frame = 0;
-        uint64_t gi_lighting = 0;
-        bool gi_swept = false;
-        bool gi_field_ready = false;
-        IRenderPass::Ptr cached_probe_pass;
-        /// What the probe rays found, for the pass that updates the probes' maps.
-        ArenaRegion gi_probe_rays;
-        IRenderPass::Ptr cached_probe_trace_pass;
-        IRenderPass::Ptr cached_probe_maps_pass;
-        /// Exponent of the finest probe cell's width. Chosen once distances arrive.
-        int32_t gi_finest = 0;
-        bool gi_finest_known = false;
-        /// Distances to what the camera sees, sampled from the G-buffer each frame.
-        ArenaRegion gi_distances;
-        IRenderPass::Ptr cached_measure_pass;
         /// Render test measurements, while VELK_TEST_DIAGNOSTICS is set.
         ArenaRegion test_words;
         IRenderTarget::Ptr test_view;
@@ -200,14 +176,6 @@ public:
         IRenderTarget::Ptr test_history[2];
         uvec2 test_history_size{};
         IRenderPass::Ptr test_diagnostics_pass;
-        ArenaRegion gi_print;
-        IRenderPass::Ptr gi_print_pass;
-        ArenaRegion gi_pixels;
-        IRenderPass::Ptr gi_pixels_pass;
-        ArenaRegion gi_reference;
-        IRenderPass::Ptr gi_reference_pass;
-        ArenaRegion gi_truth;
-        IRenderPass::Ptr gi_truth_pass;
         IGpuTexture* last_transparent_target = nullptr;
     };
 
@@ -237,24 +205,9 @@ private:
     IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium, string_view ray_motion,
                                       float ray_motion_reach);
 
-    /// World-space GI probe passes. With @p shade, the pass composed with the RT body so
-    /// probe hits get real material evaluation; otherwise the pass that only traces.
-    IGpuPipeline::Ptr ensure_probe_pipeline(FrameContext& ctx, bool shade, bool with_medium, string_view ray_motion,
-                                            float ray_motion_reach);
-
-    /// Samples distances to what the camera sees, for choosing the probe field's finest level.
-    void emit_gi_measure_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-
-    /// Chooses the probe field's finest level from the camera's setting, or else from the
-    /// distances sampled on earlier frames. Returns whether one is chosen yet.
-    bool update_gi_finest(ViewState& vs, FrameContext& ctx);
-
-    /// Allocates the words the probe passes share. Call before recording anything that names
-    /// the culling arena.
-    void ensure_probe_rays(ViewState& vs, FrameContext& ctx);
-
-    void emit_probe_pass(ViewState& vs, const RenderView& render_view,
-                         FrameContext& ctx, IRenderGraph& graph);
+    /// Allocates the light cells' words and the render tests' in the culling arena. Call
+    /// before recording anything that names the culling arena.
+    void ensure_arena_words(ViewState& vs, FrameContext& ctx);
 
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);
@@ -277,24 +230,12 @@ private:
                               bool second_phase);
     void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
-    /// Diagnostic: with VELK_GI_PRINT="x,y,z,nx,ny,nz", logs the GI field at that point.
-    void emit_gi_print_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Diagnostic: with VELK_GI_PIXELS="x,y;x,y", logs what lights those pixels.
-    void emit_gi_pixels_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Diagnostic: with VELK_GI_PIXELS and VELK_GI_REFERENCE=1, logs the true irradiance there.
-    void emit_gi_reference_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Diagnostic: with VELK_GI_PIXELS and VELK_GI_TRUTH=1, logs each level's probe against
-    /// true paths from its own position.
-    void emit_gi_truth_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
     /// Logs how a frame differs from the last, for render tests. See test_diagnostics_compute_src.
     void emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, IRenderGraph& graph);
-    /// Replaces the final image with a view of the GI probe field.
-    void emit_gi_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                            FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
     /// Replaces the final image with the light cells under each pixel.
     void emit_light_cells_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                      FrameContext& ctx, uint32_t mode, IRenderGraph& graph);

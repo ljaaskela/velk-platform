@@ -17,8 +17,8 @@
 //           is translate.
 // group:    movers translate a parent that has no visual, and the visual sits on
 //           its child.
-// escape:   movers rise far above the scene and come back, which grows the GI
-//           probe volume and then shrinks it. The first 190 frames show both.
+// escape:   movers rise far above the scene and come back, which grows the scene's
+//           bounds and then shrinks them. The first 190 frames show both.
 // burst:    movers translate for 200 frames, then stay still for 200, and repeat.
 // churn:    movers translate, and every 20 frames one extra cube is removed and
 //           another added.
@@ -77,7 +77,6 @@
 // tourhold=N: the tour stops at frame N and the camera stays there.
 // path=from,to,dx,dz,above: with view=, moves the camera by dx, dz between those frames, to
 //           `above` units over the ground, or at its starting height if that is negative.
-// groundpoints=x,z;x,z: asks the renderer to log GI at those points on the ground.
 // noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
 // flat:     nature's ground has no height.
@@ -86,8 +85,6 @@
 // view=x,y,z,yaw,pitch,distance: starts the camera there. C logs the current one.
 // overlay:  shows the performance overlay. Off by default, since its numbers change
 //           from run to run and captures get compared.
-//
-// gicell=N: the finest GI probe cells are N wide, instead of being chosen from the view.
 //
 // Prints GPU pass timings on exit. The engine's perf log, also printed on exit,
 // has the BVH timings under renderer.bvh_*. The first frames are excluded from
@@ -1251,8 +1248,6 @@ int main(int argc, char* argv[])
     float path_dx = 0.f;
     float path_dz = 0.f;
     float path_above = -1.f;
-    const char* ground_points = nullptr;
-    float gi_cell = 0.f;
     long grass_count = 1000000;
     bool ray_wind = true;
     bool flat_terrain = false;
@@ -1288,9 +1283,7 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "path=", 5) == 0) {
             has_path = std::sscanf(argv[i] + 5, "%ld,%ld,%f,%f,%f", &path_from, &path_to, &path_dx, &path_dz, &path_above) == 5;
         }
-        if (std::strncmp(argv[i], "groundpoints=", 13) == 0) ground_points = argv[i] + 13;
         if (std::strncmp(argv[i], "tour=", 5) == 0) tour_along = static_cast<float>(std::atof(argv[i] + 5));
-        if (std::strncmp(argv[i], "gicell=", 7) == 0) gi_cell = static_cast<float>(std::atof(argv[i] + 7));
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
         ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
@@ -1380,7 +1373,6 @@ int main(int argc, char* argv[])
     velk::Camera cam(cam_trait);
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
-    cam.set_gi_cell_size(gi_cell);
     cam.add_render_path(reference ? velk::path::create_reference() : ray_traced ? velk::path::create_rt() : velk::path::create_deferred());
 
     auto post = velk::pp::create_post_process();
@@ -1425,28 +1417,6 @@ int main(int argc, char* argv[])
         orbit.set_yaw(view[3]);
         orbit.set_pitch(view[4]);
         orbit.set_distance(view[5]);
-    }
-    if (ground_points) {
-        // Hands the renderer's readout points on the ground, wherever the terrain puts them.
-        char points[640] = {};
-        int written = 0;
-        for (const char* at = ground_points; at && *at && written >= 0 && written < static_cast<int>(sizeof(points));) {
-            float x = 0.f;
-            float z = 0.f;
-            if (std::sscanf(at, "%f,%f", &x, &z) != 2) {
-                break;
-            }
-            written += std::snprintf(points + written, sizeof(points) - written, "%f,%f,%f,0,-1,0;", x, ground_y(x, z) - 0.5f, z);
-            at = std::strchr(at, ';');
-            if (at) {
-                ++at;
-            }
-        }
-#ifdef _WIN32
-        _putenv_s("VELK_GI_PRINT", points);
-#else
-        setenv("VELK_GI_PRINT", points, 1);
-#endif
     }
     camera.add_trait(orbit);
     camera.find_trait<velk::ICamera>()->far_clip().set_value(std::max(distance, extent) * 10.f);
@@ -1874,7 +1844,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     // In nature mode the camera sits at the focus and flies: W, A, S and D held, the wheel
     // for a jump along the view. Faster the higher it is above the ground.
     bool fly_keys[4] = {false, false, false, false};
-    int gi_debug_view = 0;
     // Until then the camera follows a slow loop over the forest.
     bool touring = nature && hold_stop < 0 && !has_view && !no_tour;
     float tour_height = 0.f;
@@ -1940,18 +1909,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             touring = false;
         }
         if (!held) {
-            return;
-        }
-        // Key code of G: steps through the GI debug views and back to the image.
-        if (e.key == 71 && e.action == velk::ui::KeyAction::Down) {
-            gi_debug_view = (gi_debug_view + 1) % 8;
-            const char text[2] = {static_cast<char>('0' + gi_debug_view), 0};
-#ifdef _WIN32
-            _putenv_s("VELK_GI_DEBUG", text);
-#else
-            setenv("VELK_GI_DEBUG", text, 1);
-#endif
-            VELK_LOG(I, "scale: GI debug view %d", gi_debug_view);
             return;
         }
         auto state = velk::read_state<velk::IOrbit>(static_cast<velk::IOrbit::Ptr>(orbit));

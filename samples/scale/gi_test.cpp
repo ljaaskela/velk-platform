@@ -29,11 +29,11 @@
 //   lights_1:  one point light.
 //   lights_64: 64 lights packed around that point, with the same total power.
 //
-// Instances much wider than the spacing between GI probes, with triangles much smaller:
+// Instances much wider than a light cell, with triangles much smaller:
 //   dense:     the instances, far form on, so wide rays may stop inside their meshes.
 //   dense_ref: far form off, so rays test every triangle.
 //
-// A plain floor with an answer that can be calculated, read with VELK_GI_PRINT:
+// A plain floor with an answer that can be calculated:
 //   sky_only: an even sky, no sun. Irradiance over pi on the floor equals the sky's radiance.
 //   bounce:   no sky, and a wall lit head-on by a sun parallel to the floor, which it does not
 //             light. At distance d from a wall of height H and radiance L, irradiance over pi
@@ -229,7 +229,7 @@ int run_gi_test(const char* test, long frames)
     float far_clip = 20000.f;
 
     if (leak_room) {
-        // One wall's thickness: much thinner than the spacing between GI probes.
+        // One wall's thickness: much thinner than a light cell.
         constexpr float kThin = 2.f;
         add_box({-kCourtHalf, 0.f, -kCourtHalf}, {kCourtHalf * 2.f, 4.f, kCourtHalf * 2.f}, grey);
         add_box({-400.f - kThin, -302.f, -202.f}, {kThin, 302.f, 404.f}, white);
@@ -377,9 +377,6 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
     velk::Camera cam(cam_trait);
     cam.set_projection(velk::Projection::Perspective);
     cam.set_fov(45.f);
-    if (const char* cell = std::getenv("VELK_GITEST_CELL")) {
-        cam.set_gi_cell_size(static_cast<float>(std::atof(cell)));
-    }
     cam.add_render_path(velk::path::create_deferred());
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());

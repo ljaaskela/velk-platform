@@ -1147,8 +1147,8 @@ uint velk_light_cell_hash(VelkLightCell c)
 //   1      the frame it was last used in
 //   2      kBounceUntraced, kBounceListed or kBounceTraced
 //   3      the frame its rays are known good up to: traced, or checked against what changed
-//   4..9   the light arriving from other surfaces as SH L1 of radiance, laid out and
-//          weighted as the probe field's: red, green and blue halves of each coefficient
+//   4..9   the light arriving from other surfaces as SH L1 of radiance: red, green and
+//          blue halves of each coefficient (velk_bounce_sh_irradiance)
 //   10..12 where its rays start, the pixel that listed it, in the world: not from the camera,
 //          which moves; only light
 //          falloff reads it, which far from the origin does not need every digit
@@ -1185,8 +1185,7 @@ const uint kBounceUnusedFrames = 16u;
 // The tangent of the half angle of each ray's cone, kBounceRays of them sharing the
 // hemisphere: cos = 1 - 1 / 64.
 const float kBounceConeTan = 0.1784;
-// A single ray on a tiny, very bright thing would otherwise light a whole cell, as with the
-// probes.
+// A single ray on a tiny, very bright thing would otherwise light a whole cell.
 const float kBounceBrightest = 5.0;
 // How far a ray that hit nothing counts as reaching, for what may move into its way.
 const float kBounceMissReach = 1e5;
@@ -1256,7 +1255,7 @@ vec3 velk_unpack_rgbe(uint w)
 }
 
 // The light from other surfaces arriving at a surface facing `N`, from the SH words 4 to 9 of
-// a bounce entry, in the units of the probe field's irradiance.
+// a bounce entry, as irradiance over pi.
 vec3 velk_bounce_sh_irradiance(uvec3 a, uvec3 b, vec3 N)
 {
     vec2 h0 = unpackHalf2x16(a.x);
@@ -1355,72 +1354,6 @@ void main()
 }
 )";
 
-/// @p source as the GI probe pass, with the number of rays each probe traces per update
-/// compiled in. A power of two, 64 at most.
-inline string velk_with_probe_dirs(string_view source, uint32_t dirs)
-{
-    const size_t version = source.find(string_view("#version"));
-    const size_t after = source.find('\n', version) + 1;
-    char define[72];
-    const int size = std::snprintf(define, sizeof(define), "#define VELK_PROBE_PASS\n#define VELK_PROBE_DIRS %uu\n", dirs);
-    string out;
-    out += source.substr(0, after);
-    out += string_view(define, static_cast<size_t>(size));
-    out += source.substr(after);
-    return out;
-}
-
-/// Samples the distance to what the camera sees at 64 points of the G-buffer into a run of
-/// words, or -1 where it sees nothing.
-[[maybe_unused]] constexpr string_view gi_measure_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 64) in;
-
-layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
-
-layout(push_constant) uniform PC {
-    uint word;
-    uint pyramid_word;
-    uint globals_base;
-} pc;
-
-// Mirrors kGiDistanceFirstLog2 and kGiDistanceBinLog2 in deferred_path.cpp.
-const float kFirstLog2 = -4.0;
-const float kBinLog2 = 0.375;
-
-shared uint s_bins[64];
-
-// Counts what the view holds by how far away it is, in 64 bins of log2 distance, from a level
-// of the depth pyramid. Each texel holds the farthest depth under it, so a thin thing close
-// to the camera only counts where it covers a whole texel.
-void main()
-{
-    uint lane = gl_LocalInvocationIndex;
-    s_bins[lane] = 0u;
-    barrier();
-
-    const uint level = 3u;
-    uint width = max(cull_words.data[pc.pyramid_word + 1u] >> level, 1u);
-    uint height = max(cull_words.data[pc.pyramid_word + 2u] >> level, 1u);
-    uint first = cull_words.data[pc.pyramid_word + 3u + level];
-    mat4 inverse_vp = velk_globals.data[pc.globals_base].inverse_view_projection;
-    uint texels = first != 0u ? width * height : 0u;
-    for (uint i = lane; i < texels; i += 64u) {
-        float depth = uintBitsToFloat(cull_words.data[first + i]);
-        if (depth <= 0.0) continue;
-        vec2 ndc = (vec2(float(i % width), float(i / width)) + 0.5) / vec2(float(width), float(height)) * 2.0 - 1.0;
-        vec4 at = inverse_vp * vec4(ndc, depth, 1.0);
-        float away = length(at.xyz / at.w);
-        uint bin = uint(clamp((log2(max(away, 1e-6)) - kFirstLog2) / kBinLog2, 0.0, 63.0));
-        atomicAdd(s_bins[bin], 1u);
-    }
-    barrier();
-    cull_words.data[pc.word + lane] = s_bins[lane];
-}
-)";
-
 /// @p source with a scene's ray motion compiled in. See IInstancedMeshVisual::set_ray_motion.
 inline string velk_with_ray_motion(string_view source, string_view motion, float reach)
 {
@@ -1447,318 +1380,6 @@ inline string velk_with_ray_motion(string_view source, string_view motion, float
 //     light (directional / point / spot) with distance + cone falloff.
 //   - Shadow modulation lands in a later slice (B.3.d) alongside the
 //     shared `velk_eval_shadow` composer.
-// The GI probe field: eight levels of 32x32x32 cells around the camera, each level's cells
-// twice as wide as the one below. Cell widths are powers of two in world units, named by
-// their exponent, the level's ladder index. A probe's texel depends only on its world cell,
-// so when the camera moves a level wraps around in the atlas and only the cells it newly
-// covers change. Each texel block carries a stamp of the cell and ladder index it holds,
-// so a stale block is recognised without tracking the movement.
-//
-// In the atlas, x = cell.x + cell.z * 32, and y = cell.y + (row + slot * 5) * 32, where a
-// level's slot is its ladder index modulo 8. Rows 0 to 3 are SH coefficients. Row 0's alpha
-// is the stamp, row 1's the number of samples blended in, and row 2's the share of rays that
-// hit the inside of something. Row 4 is how far the probe has moved from its cell's centre,
-// in cells.
-//
-// A second atlas holds two 8x8 octahedral maps per probe, side by side: irradiance over pi
-// against each direction (rgb, gamma encoded), then the mean distance to surfaces in each
-// direction and its square (rg). The maps, weights and blending follow DDGI.
-#define VELK_GI_FIELD_GLSL R"(
-const int kGiDim = 16;
-const int kGiLevels = 8;
-const int kGiRows = 5;
-const int kGiMapSize = 8;
-const float kGiIrradianceGamma = 5.0;
-
-float velk_gi_cell(int ladder)
-{
-    return ldexp(1.0, ladder);
-}
-
-float velk_gi_stamp(ivec3 cell, int ladder)
-{
-    uint m = 63u;
-    return float((uint(cell.x) & m) | ((uint(cell.y) & m) << 6u) | ((uint(cell.z) & m) << 12u) | ((uint(ladder) & m) << 18u));
-}
-
-vec2 velk_gi_uv(ivec3 texel, int slot, int row)
-{
-    return (vec2(float(texel.x + texel.z * kGiDim), float(texel.y + (row + slot * kGiRows) * kGiDim)) + 0.5)
-        / vec2(float(kGiDim * kGiDim), float(kGiDim * kGiRows * kGiLevels));
-}
-
-// A map entry's texel: `side` 0 is irradiance, 1 distance.
-ivec2 velk_gi_map_texel(ivec3 texel, int slot, ivec2 entry, int side)
-{
-    return ivec2((texel.x + texel.z * kGiDim) * (kGiMapSize * 2) + side * kGiMapSize + entry.x, (texel.y + slot * kGiDim) * kGiMapSize + entry.y);
-}
-
-vec2 velk_gi_map_uv(ivec2 at)
-{
-    return (vec2(at) + 0.5) / vec2(float(kGiDim * kGiDim * kGiMapSize * 2), float(kGiDim * kGiLevels * kGiMapSize));
-}
-
-vec2 velk_gi_oct(vec3 d)
-{
-    d /= abs(d.x) + abs(d.y) + abs(d.z);
-    if (d.z >= 0.0) return d.xy;
-    return (vec2(1.0) - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
-}
-
-vec3 velk_gi_oct_dir(vec2 p)
-{
-    vec3 n = vec3(p, 1.0 - abs(p.x) - abs(p.y));
-    if (n.z < 0.0) {
-        n.xy = (vec2(1.0) - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
-    }
-    return normalize(n);
-}
-
-// Where a point relative to the camera is on a level's lattice of probes, 0 to 31 inside.
-vec3 velk_gi_lattice(int ladder, vec3 rel, vec3 cam)
-{
-    float cell = velk_gi_cell(ladder);
-    vec3 cam_cells = cam / cell;
-    return rel / cell + (cam_cells - floor(cam_cells)) + float(kGiDim / 2) - 0.5;
-}
-
-// How many cells a point is inside a level's lattice, negative outside it.
-float velk_gi_edge(int ladder, vec3 rel, vec3 cam)
-{
-    vec3 g = velk_gi_lattice(ladder, rel, cam);
-    return min(min(g.x, min(g.y, g.z)), float(kGiDim - 1) - max(g.x, max(g.y, g.z)));
-}
-
-// How many cells inside a level a point is for fading into the next level. Measured from the
-// camera, so it moves smoothly with it where the grid moves in steps, and at most
-// velk_gi_edge, so a fade is complete before the level ends.
-float velk_gi_fade_edge(int ladder, vec3 rel)
-{
-    vec3 cells = abs(rel) / velk_gi_cell(ladder);
-    return float(kGiDim / 2) - 1.5 - max(cells.x, max(cells.y, cells.z));
-}
-
-// The weight one of the eight probes around a point gets: 0 unless it holds this level's
-// cell, fading out the more of its rays reach the inside of something, such as one under
-// the ground. With a normal, probes behind the surface get none, since they cannot see
-// what lights it.
-float velk_gi_corner(int ladder, vec3 rel, vec3 cam, vec3 N, int o, uint atlas, out ivec3 texel, out vec4 first, out vec4 third)
-{
-    float cell_size = velk_gi_cell(ladder);
-    vec3 cam_cells = cam / cell_size;
-    vec3 cam_floor = floor(cam_cells);
-    vec3 g = clamp(velk_gi_lattice(ladder, rel, cam), vec3(0.0), vec3(float(kGiDim - 1)));
-    vec3 gbase = floor(g);
-    vec3 gfrac = g - gbase;
-    ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
-    ivec3 cell = ivec3(cam_floor) - kGiDim / 2 + min(ivec3(gbase) + off, ivec3(kGiDim - 1));
-    vec3 tri = mix(vec3(1.0) - gfrac, gfrac, vec3(off));
-    float w = tri.x * tri.y * tri.z;
-    int slot = ladder & 7;
-    texel = cell & ivec3(kGiDim - 1);
-    first = vec4(0.0);
-    third = vec4(0.0);
-    if (w <= 0.0) return 0.0;
-    first = velk_texture(atlas, velk_gi_uv(texel, slot, 0));
-    if (first.a != velk_gi_stamp(cell, ladder)) return 0.0;
-    third = velk_texture(atlas, velk_gi_uv(texel, slot, 2));
-    if (dot(N, N) > 0.0) {
-        vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * cell_size;
-        w *= clamp(dot(probe - rel, N) / cell_size * 8.0, 0.0, 1.0);
-    }
-    return w * clamp(1.0 - third.a * 4.0, 0.0, 1.0);
-}
-
-// Trilinear SH of a level at a point, from the probes around it. Returns the weight found,
-// 0 if none did, and sh is then undefined.
-float velk_gi_sample(uint atlas, int ladder, vec3 rel, vec3 cam, vec3 N, out vec3 sh[4])
-{
-    for (int c = 0; c < 4; ++c) sh[c] = vec3(0.0);
-    int slot = ladder & 7;
-    float total = 0.0;
-    for (int o = 0; o < 8; ++o) {
-        ivec3 texel;
-        vec4 first;
-        vec4 third;
-        float w = velk_gi_corner(ladder, rel, cam, N, o, atlas, texel, first, third);
-        if (w <= 0.0) continue;
-        sh[0] += first.rgb * w;
-        sh[1] += velk_texture(atlas, velk_gi_uv(texel, slot, 1)).rgb * w;
-        sh[2] += third.rgb * w;
-        sh[3] += velk_texture(atlas, velk_gi_uv(texel, slot, 3)).rgb * w;
-        total += w;
-    }
-    if (total > 0.0) {
-        for (int c = 0; c < 4; ++c) sh[c] /= total;
-    }
-    return total;
-}
-
-// A map entry for a direction, bilinear between the entries around it.
-vec4 velk_gi_map_read(uint maps, ivec3 texel, int slot, int side, vec3 dir)
-{
-    vec2 at = (velk_gi_oct(dir) * 0.5 + 0.5) * float(kGiMapSize) - 0.5;
-    vec2 at_floor = floor(at);
-    vec2 f = at - at_floor;
-    vec4 sum = vec4(0.0);
-    for (int k = 0; k < 4; ++k) {
-        ivec2 corner = ivec2(k & 1, k >> 1);
-        ivec2 entry = clamp(ivec2(at_floor) + corner, ivec2(0), ivec2(kGiMapSize - 1));
-        vec2 weights = mix(vec2(1.0) - f, f, vec2(corner));
-        sum += velk_texture(maps, velk_gi_map_uv(velk_gi_map_texel(texel, slot, entry, side))) * weights.x * weights.y;
-    }
-    return sum;
-}
-
-// The irradiance over pi a level holds against a normal, as DDGI blends it: each probe by
-// how well it faces the surface and whether it sees the point. `rel` is the surface point
-// and `biased` that point moved off it. Returns the weight found, 0 if no probe has this cell.
-float velk_gi_sample_irradiance(uint atlas, uint maps, int ladder, vec3 rel, vec3 biased, vec3 cam, vec3 N, out vec3 irradiance)
-{
-    irradiance = vec3(0.0);
-    int slot = ladder & 7;
-    float spacing = velk_gi_cell(ladder);
-    vec3 cam_cells = cam / spacing;
-    vec3 cam_floor = floor(cam_cells);
-    vec3 g = clamp(velk_gi_lattice(ladder, biased, cam), vec3(0.0), vec3(float(kGiDim - 1)));
-    vec3 gbase = floor(g);
-    vec3 gfrac = g - gbase;
-    float total = 0.0;
-    for (int o = 0; o < 8; ++o) {
-        ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
-        ivec3 cell = ivec3(cam_floor) - kGiDim / 2 + min(ivec3(gbase) + off, ivec3(kGiDim - 1));
-        ivec3 texel = cell & ivec3(kGiDim - 1);
-        vec4 first = velk_texture(atlas, velk_gi_uv(texel, slot, 0));
-        if (first.a != velk_gi_stamp(cell, ladder)) continue;
-        if (velk_texture(atlas, velk_gi_uv(texel, slot, 2)).a > 0.25) continue;
-#ifdef VELK_GI_DEBUG_SWITCHES
-        if (velk_gi_ignore_young && velk_texture(atlas, velk_gi_uv(texel, slot, 1)).a < 8.0) continue;
-#endif
-
-        vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * spacing;
-        vec3 to_probe = normalize(probe - rel);
-        vec3 biased_to_probe = probe - biased;
-        float distance_to_probe = length(biased_to_probe);
-        vec3 biased_dir = biased_to_probe / max(distance_to_probe, 1e-5);
-
-        vec3 tri = max(vec3(0.001), mix(vec3(1.0) - gfrac, gfrac, vec3(off)));
-
-        // Wrap shading rather than a hard back-face test, so small details whose normals
-        // rule out every probe that sees them are still lit.
-        float wrap = (dot(to_probe, N) + 1.0) * 0.5;
-        float weight = wrap * wrap + 0.2;
-
-        vec2 moments = velk_gi_map_read(maps, texel, slot, 1, -biased_dir).rg;
-        float variance = abs(moments.x * moments.x - moments.y);
-        float chebyshev = 1.0;
-        if (distance_to_probe > moments.x) {
-            float v = distance_to_probe - moments.x;
-            chebyshev = variance / (variance + v * v);
-            chebyshev = max(chebyshev * chebyshev * chebyshev, 0.0);
-        }
-#ifdef VELK_GI_DEBUG_SWITCHES
-        if (velk_gi_ignore_visibility) chebyshev = 1.0;
-#endif
-        // Never quite zero, for when no probe sees the point.
-        weight *= max(0.05, chebyshev);
-        weight = max(0.000001, weight);
-
-        // Tiny weights are visible because perception is logarithmic, so they are crushed.
-        const float kCrush = 0.2;
-        if (weight < kCrush) weight *= weight * weight * (1.0 / (kCrush * kCrush));
-        weight *= tri.x * tri.y * tri.z;
-
-        // Decoded only part of the way, to blend in a perceptual space.
-        vec3 stored = max(velk_gi_map_read(maps, texel, slot, 0, N).rgb, vec3(0.0));
-        irradiance += weight * pow(stored, vec3(kGiIrradianceGamma * 0.5));
-        total += weight;
-    }
-    if (total > 0.0) {
-        irradiance /= total;
-        irradiance *= irradiance;
-    }
-    return total;
-}
-
-// The level a surface point relative to the camera uses: the finest holding it. Also gives
-// the point moved off the surface, towards the normal and the viewer as DDGI biases it, and
-// how many cells inside that level it is. `view_from` is the direction from viewer to point.
-int velk_gi_level_for(int finest, vec3 world_pos, vec3 N, vec3 view_from, vec3 cam, out vec3 shade_pos, out float edge)
-{
-    int level = 0;
-    edge = 0.0;
-    shade_pos = world_pos;
-    for (; level < kGiLevels - 1; ++level) {
-        float spacing = velk_gi_cell(finest + level);
-        shade_pos = world_pos + N * (0.2 * spacing) - view_from * (0.6 * spacing);
-        edge = velk_gi_edge(finest + level, shade_pos, cam);
-        if (edge >= 0.0) break;
-    }
-    return level;
-}
-
-// The field's coefficients for a surface point relative to the camera. Uses the finest
-// level holding the point, fading into the next one over the last two cells, and a coarser
-// one where probes are yet to fill in. False if no probe could light it.
-bool velk_gi_lookup(uint atlas, int finest, vec3 world_pos, vec3 N, vec3 cam, out vec3 sh[4])
-{
-    vec3 shade_pos;
-    float edge;
-    int level = velk_gi_level_for(finest, world_pos, N, normalize(world_pos), cam, shade_pos, edge);
-
-    int used = level;
-    float weight = velk_gi_sample(atlas, finest + used, shade_pos, cam, N, sh);
-    while (weight <= 0.0 && used + 1 < kGiLevels) {
-        ++used;
-        weight = velk_gi_sample(atlas, finest + used, shade_pos, cam, N, sh);
-    }
-    if (weight <= 0.0) return false;
-
-    float fade = velk_gi_fade_edge(finest + level, shade_pos);
-    if (used == level && used + 1 < kGiLevels && fade < 2.0) {
-        vec3 outer[4];
-        if (velk_gi_sample(atlas, finest + used + 1, shade_pos, cam, N, outer) > 0.0) {
-            float t = clamp(fade * 0.5, 0.0, 1.0);
-            for (int c = 0; c < 4; ++c) sh[c] = mix(outer[c], sh[c], t);
-        }
-    }
-    return true;
-}
-
-// Irradiance over pi from the field against a surface's normal, with the same choice of
-// levels. Negative if no probe could light it.
-vec3 velk_gi_irradiance(uint atlas, uint maps, int finest, vec3 world_pos, vec3 N, vec3 view_from, vec3 cam)
-{
-    vec3 shade_pos;
-    float edge;
-    int level = velk_gi_level_for(finest, world_pos, N, view_from, cam, shade_pos, edge);
-
-    int used = level;
-    vec3 irradiance;
-    float weight = velk_gi_sample_irradiance(atlas, maps, finest + used, world_pos, shade_pos, cam, N, irradiance);
-    while (weight <= 0.0 && used + 1 < kGiLevels) {
-        ++used;
-        weight = velk_gi_sample_irradiance(atlas, maps, finest + used, world_pos, shade_pos, cam, N, irradiance);
-    }
-    if (weight <= 0.0) return vec3(-1.0);
-
-    float fade = velk_gi_fade_edge(finest + level, shade_pos);
-    if (used == level && used + 1 < kGiLevels && fade < 2.0) {
-        vec3 outer;
-        if (velk_gi_sample_irradiance(atlas, maps, finest + used + 1, world_pos, shade_pos, cam, N, outer) > 0.0) {
-            irradiance = mix(outer, irradiance, clamp(fade * 0.5, 0.0, 1.0));
-        }
-    }
-    return max(irradiance, vec3(0.0));
-}
-
-vec3 velk_sh_radiance(vec3 sh[4], vec3 d)
-{
-    return 0.282095 * sh[0]
-         + 0.488603 * (sh[1] * d.y + sh[2] * d.z + sh[3] * d.x);
-}
-)"
-
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
 #version 450
 #include "velk.glsl"
@@ -1843,10 +1464,10 @@ layout(push_constant, scalar) uniform PC {
     uint bounce_hops;          // 88  how many surfaces bounce light passes over: 1 or 2
     uint spare1;               // 92
     uint mode;                 // 96  what a pass is to do, for passes that do more than one thing
-    uint gi_probe_id;          // 100 GI probe atlas (SH L1); 0 = no GI
-    int gi_finest;             // 104 ladder index of the probe field's finest level
+    uint spare3;               // 100
+    uint spare4;               // 104
     uint spare2;               // 108
-    uint gi_maps_id;           // 112 GI probe irradiance maps
+    uint spare5;               // 112
 } pc;
 
 // A scene light, with its position relative to the camera.
@@ -1938,8 +1559,6 @@ vec3 velk_tonemap_aces(vec3 x)
     const float e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
-)" VELK_GI_FIELD_GLSL R"(
-
 )";
 
 // Area lights in closed form, for deferred_lighting_main_src. Appended after the prelude,
@@ -2389,7 +2008,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 // Lights each pixel: each light's diffuse light and highlight, shadowed by what the light
-// cells hold; indirect light from the probe field, or the environment where the field has
+// cells hold; indirect light from the bounce cells, or the environment where they have
 // nothing; reflections; area lights in closed form; emission. Writes the finished image,
 // and for instance_splat_composite_src the light on the surface: indirect light in rgb, and
 // in alpha the share of direct light that gets past what is in the way.
@@ -3826,7 +3445,7 @@ void main()
     barrier();
     if (lane != 0u) return;
 
-    // SH L1 of radiance, as the probe field keeps it. Each ray stands for the same share of
+    // SH L1 of radiance. Each ray stands for the same share of
     // the hemisphere; those left out are left out of the shares too.
     const float kY0 = 0.282095;
     const float kY1 = 0.488603;
@@ -4050,8 +3669,8 @@ uint velk_bounce_lookup(uint cell)
     return kNoCell;
 }
 
-// The light from other surfaces arriving at a surface facing `N`, from bounce entry `at`, in
-// the units of the probe field's irradiance.
+// The light from other surfaces arriving at a surface facing `N`, from bounce entry `at`, as
+// irradiance over pi. See velk_bounce_sh_irradiance.
 vec3 velk_bounce_irradiance(uint at, vec3 N)
 {
     uvec3 a = uvec3(velk_light_cell_words.data[at + 4u], velk_light_cell_words.data[at + 5u], velk_light_cell_words.data[at + 6u]);
@@ -4261,7 +3880,7 @@ float velk_cells_light_through(uint i)
 
 // The light from other surfaces at the pixel taken up by velk_cells_begin, blended from the
 // bounce cells around it as direct light is from its own cells: with `along` false, as
-// irradiance on a surface facing `d`, in the units of the probe field's irradiance; with it
+// irradiance over pi on a surface facing `d`; with it
 // true, arriving along `d`. Negative if none has any yet.
 vec3 velk_cells_bounce_toward(vec3 d, bool along)
 {
@@ -4307,8 +3926,8 @@ vec3 velk_cells_bounce(vec3 normal)
 /// pixel's own cell is traced, red where not. Mode 6: the direct light arriving at the
 /// pixel's own cell as the cell holds it, one value a cell, times the surface colour;
 /// magenta where it was not worked out in the last few frames. Mode 7: the light from other
-/// surfaces its bounce cell holds, for the pixel's normal, without the surface colour, as
-/// VELK_GI_DEBUG=1 shows the probe field's; magenta where it has none. Mode 8: the same as
+/// surfaces its bounce cell holds, for the pixel's normal, without the surface colour;
+/// magenta where it has none. Mode 8: the same as
 /// pixels read it, blended from the bounce cells around them (velk_cells_bounce).
 [[maybe_unused]] constexpr string_view light_cells_main_src = R"(
 #define CELLS_MODE pc.mode
@@ -4664,10 +4283,6 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
     }
 }
 
-#ifdef VELK_PROBE_PASS
-vec3 velk_hit_irradiance(vec3 pos, vec3 N);
-#endif
-
 // What the last shaded surface passes on of the light arriving from around it. Zero for
 // materials that do not go through velk_pbr_shade.
 vec3 velk_hit_diffuse = vec3(0.0);
@@ -4694,13 +4309,10 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // and modulated by its shadow technique's visibility.
     vec3 direct = vec3(0.0);
     // Single-light mode. -1 (the default) shades against every light, which is
-    // what primary RT rays want. A GI probe sets one index and the reciprocal
-    // of the probability it was chosen with: probe hits accumulate over many
-    // frames, so one light per hit converges to the same answer while keeping
-    // the RAY count per hit independent of how many lights the scene has.
-    // Shading every probe hit against all of them would be ~21 shadow rays per
-    // probe ray in bistro, which is what makes the obvious implementation
-    // unaffordable.
+    // what primary RT rays want. The reference path sets one index and the
+    // reciprocal of the probability it was chosen with: its hits accumulate over
+    // many frames, so one light per hit converges to the same answer while
+    // keeping the ray count per hit independent of how many lights there are.
     uint li_begin = (velk_single_light >= 0) ? uint(velk_single_light) : 0u;
     uint li_end   = (velk_single_light >= 0) ? uint(velk_single_light) + 1u : pc.light_count;
     float li_weight = (velk_single_light >= 0) ? velk_single_light_weight : 1.0;
@@ -4720,12 +4332,6 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     // sample, modulated by AO. Upgrade to preconvolved irradiance or
     // stochastic cosine sampling when visibly needed.
     vec3 env_at_normal = env_miss_color(N);
-#ifdef VELK_PROBE_PASS
-    // A probe's hit is lit by the field itself, which sees what is really around it and
-    // carries light over further bounces as frames go by.
-    vec3 from_field = velk_hit_irradiance(ctx.rel_pos, N);
-    if (from_field.r >= 0.0) env_at_normal = from_field;
-#endif
     vec3 diffuse = base * (1.0 - metallic) * env_at_normal * ao;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
     velk_hit_diffuse = kD * base * (1.0 - metallic) * ao;
@@ -5073,348 +4679,11 @@ void main()
 }
 )";
 
-/// Diagnostic: for each pixel asked for and each level, takes the probe that counts most at
-/// that surface and follows true paths from that probe's own position, against the pixel's
-/// normal, to compare with what the probe holds. The words at `extras.x` are 12 of pixels, the
-/// normal and position textures, the atlas and the finest level, then 5 per level per pixel:
-/// weight, what the probe holds (green), first bounce sum, whole path sum, count. `extras.w`
-/// is the pixel count and `env` is as in rt_reference_main_src.
-inline constexpr string_view gi_truth_main_src = VELK_GI_FIELD_GLSL VELK_REFERENCE_PATH_GLSL R"(
-layout(set = 1, binding = 16, std430) buffer TruthWords { uint data[]; } truth_words;
-
-void main()
-{
-    reference_sky_cap = 5.0;
-    if (gl_LocalInvocationIndex != 0u) return;
-    uint index = gl_WorkGroupID.x;
-    uint base = pc.extras.x;
-    if (index >= pc.extras.w) return;
-    ivec2 pixel = ivec2(truth_words.data[base + index * 2u], truth_words.data[base + index * 2u + 1u]);
-    vec3 N = texelFetch(velk_textures[nonuniformEXT(truth_words.data[base + 12u])], pixel, 0).xyz;
-    if (dot(N, N) < 1e-6) return;
-    N = normalize(N);
-    vec3 rel = texelFetch(velk_textures[nonuniformEXT(truth_words.data[base + 13u])], pixel, 0).xyz;
-    uint atlas = truth_words.data[base + 14u];
-    int finest = int(truth_words.data[base + 15u]);
-    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
-    vec3 up = abs(N.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 T = normalize(cross(up, N));
-    vec3 B = cross(N, T);
-
-    for (int level = 0; level < kGiLevels; ++level) {
-        int ladder = finest + level;
-        int slot = ladder & 7;
-        float spacing = velk_gi_cell(ladder);
-        vec3 point = rel + N * (0.05 * spacing);
-        vec3 cam_cells = cam / spacing;
-        vec3 cam_floor = floor(cam_cells);
-        vec3 g = clamp(velk_gi_lattice(ladder, point, cam), vec3(0.0), vec3(float(kGiDim - 1)));
-        float best = 0.0;
-        float holds = 0.0;
-        vec3 origin = point;
-        for (int o = 0; o < 8; ++o) {
-            ivec3 texel;
-            vec4 first;
-            vec4 third;
-            float w = velk_gi_corner(ladder, point, cam, N, o, atlas, texel, first, third);
-            if (w > best) {
-                best = w;
-                ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
-                ivec3 cell = ivec3(cam_floor) - kGiDim / 2 + min(ivec3(floor(g)) + off, ivec3(kGiDim - 1));
-                origin = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * spacing;
-                vec3 second = velk_texture(atlas, velk_gi_uv(texel, slot, 1)).rgb;
-                vec3 fourth = velk_texture(atlas, velk_gi_uv(texel, slot, 3)).rgb;
-                holds = 0.282095 * first.g + 0.325735 * (second.g * N.y + third.g * N.z + fourth.g * N.x);
-            }
-        }
-
-        rng_init(uvec2(pixel) + uvec2(uint(level) * 131u, 0u), VELK_GLOBALS.present_counter);
-        // The same directions and reach as the probe readout, split the same way.
-        const uint kPaths = 64u;
-        float t_max = level + 1 < kGiLevels ? spacing : 1e30;
-        float first_sum = 0.0;
-        float whole_sum = 0.0;
-        float added = 0.0;
-        float near_count = 0.0;
-        float near_first = 0.0;
-        float near_whole = 0.0;
-        float far_whole = 0.0;
-        for (uint i = 0u; i < kPaths; ++i) {
-            float u = (float(i) + 0.5) / float(kPaths);
-            float phi = float(i) * 2.39996323;
-            float radius = sqrt(u);
-            Ray ray;
-            ray.origin = origin;
-            ray.dir = T * (radius * cos(phi)) + B * (radius * sin(phi)) + N * sqrt(1.0 - u);
-            RayHit hit;
-            bool near_hit = trace_closest_hit(ray, t_max, hit) && hit.t < t_max;
-            vec3 first_hit;
-            vec3 whole = reference_path(ray, first_hit);
-            if (any(isnan(whole)) || any(isinf(whole))) continue;
-            first_sum += first_hit.g;
-            whole_sum += whole.g;
-            added += 1.0;
-            if (near_hit) {
-                near_count += 1.0;
-                near_first += first_hit.g;
-                near_whole += whole.g;
-            } else {
-                far_whole += whole.g;
-            }
-        }
-
-        // True paths over the whole sphere: the mean, the mean along the normal for L1, and
-        // the mean against the cosine, turned a different way each frame.
-        float turn = rng_next_float() * 6.28318531;
-        float sphere_sum = 0.0;
-        float sphere_n_sum = 0.0;
-        float sphere_cos_sum = 0.0;
-        float sphere_added = 0.0;
-        for (uint i = 0u; i < kPaths; ++i) {
-            float along = 1.0 - 2.0 * (float(i) + 0.5) / float(kPaths);
-            float around = float(i) * 2.39996323 + turn;
-            float flat_len = sqrt(max(1.0 - along * along, 0.0));
-            Ray ray;
-            ray.origin = origin;
-            ray.dir = T * (flat_len * cos(around)) + B * (flat_len * sin(around)) + N * along;
-            vec3 first_hit;
-            vec3 whole = reference_path(ray, first_hit);
-            if (any(isnan(whole)) || any(isinf(whole))) continue;
-            sphere_sum += whole.g;
-            sphere_n_sum += whole.g * along;
-            sphere_cos_sum += whole.g * max(along, 0.0);
-            sphere_added += 1.0;
-        }
-
-        uint at = base + 16u + index * 104u + uint(level) * 13u;
-        truth_words.data[at + 9u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 9u]) + sphere_sum);
-        truth_words.data[at + 10u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 10u]) + sphere_n_sum);
-        truth_words.data[at + 11u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 11u]) + sphere_cos_sum);
-        truth_words.data[at + 12u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 12u]) + sphere_added);
-        truth_words.data[at] = floatBitsToUint(best);
-        truth_words.data[at + 1u] = floatBitsToUint(holds);
-        truth_words.data[at + 2u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 2u]) + first_sum);
-        truth_words.data[at + 3u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 3u]) + whole_sum);
-        truth_words.data[at + 4u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 4u]) + added);
-        truth_words.data[at + 5u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 5u]) + near_count);
-        truth_words.data[at + 6u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 6u]) + near_first);
-        truth_words.data[at + 7u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 7u]) + near_whole);
-        truth_words.data[at + 8u] = floatBitsToUint(uintBitsToFloat(truth_words.data[at + 8u]) + far_whole);
-    }
-}
-)";
-
-/// Diagnostic: the true irradiance over pi at each pixel asked for, to compare with the GI
-/// field. Adds a few cosine-weighted paths from the pixel's surface every frame to running
-/// sums. Goes after compose_rt_compute's shared body. `extras` is the word base (12 words of
-/// pixels, then 7 for each: first bounce sum, whole path sum, count), the normal and position
-/// textures, and the pixel count. `env` is as in rt_reference_main_src.
-inline constexpr string_view gi_reference_main_src = VELK_REFERENCE_PATH_GLSL R"(
-layout(set = 1, binding = 16, std430) buffer ReferenceWords { uint data[]; } reference_words;
-
-void main()
-{
-    reference_sky_cap = 5.0;
-    if (gl_LocalInvocationIndex != 0u) return;
-    uint index = gl_WorkGroupID.x;
-    if (index >= pc.extras.w) return;
-    ivec2 pixel = ivec2(reference_words.data[pc.extras.x + index * 2u], reference_words.data[pc.extras.x + index * 2u + 1u]);
-    vec3 N = texelFetch(velk_textures[nonuniformEXT(pc.extras.y)], pixel, 0).xyz;
-    if (dot(N, N) < 1e-6) return;
-    N = normalize(N);
-    vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], pixel, 0).xyz;
-    rng_init(uvec2(pixel), VELK_GLOBALS.present_counter);
-
-    const uint kPaths = 32u;
-    vec3 first_sum = vec3(0.0);
-    vec3 whole_sum = vec3(0.0);
-    float added = 0.0;
-    for (uint i = 0u; i < kPaths; ++i) {
-        Ray ray;
-        ray.origin = rel + N * 0.01;
-        ray.dir = reference_cosine(N);
-        vec3 first;
-        vec3 whole = reference_path(ray, first);
-        if (any(isnan(whole)) || any(isinf(whole))) continue;
-        first_sum += first;
-        whole_sum += whole;
-        added += 1.0;
-    }
-
-    uint at = pc.extras.x + 12u + index * 7u;
-    for (uint c = 0u; c < 3u; ++c) {
-        reference_words.data[at + c] = floatBitsToUint(uintBitsToFloat(reference_words.data[at + c]) + first_sum[c]);
-        reference_words.data[at + 3u + c] = floatBitsToUint(uintBitsToFloat(reference_words.data[at + 3u + c]) + whole_sum[c]);
-    }
-    reference_words.data[at + 6u] = floatBitsToUint(uintBitsToFloat(reference_words.data[at + 6u]) + added);
-}
-)";
-
-// World-space GI probes. Composed with the RT body, so probe hits get the same
-// material evaluation primary rays do - real albedo and emission rather than a
-// vertex-tint approximation.
-//
-/// Diagnostic: writes what the GI probe field holds at a point, against a normal, as irradiance
-/// over pi: first as used for shading, then each level's weight and value.
-inline constexpr string_view gi_print_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 1) in;
-layout(set = 1, binding = 16, std430) buffer PrintWords { uint data[]; } print_words;
-
-)" VELK_GI_FIELD_GLSL R"(
-layout(push_constant, scalar) uniform PC {
-    vec4 point;
-    vec4 normal;
-    uint word;
-    uint atlas;
-    uint maps;
-    uint globals_base;
-    int finest;
-} pc;
-
-void put(uint at, vec3 v)
-{
-    print_words.data[pc.word + at] = floatBitsToUint(v.x);
-    print_words.data[pc.word + at + 1u] = floatBitsToUint(v.y);
-    print_words.data[pc.word + at + 2u] = floatBitsToUint(v.z);
-}
-
-void main()
-{
-    GlobalData g = velk_globals.data[pc.globals_base];
-    vec3 cam = g.cam_pos.xyz;
-    vec3 rel = pc.point.xyz - cam;
-    vec3 N = pc.normal.xyz;
-    put(0u, velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), cam));
-    for (int level = 0; level < kGiLevels; ++level) {
-        vec3 sh[4];
-        vec3 at = rel + N * (0.05 * velk_gi_cell(pc.finest + level));
-        float weight = velk_gi_sample(pc.atlas, pc.finest + level, at, cam, N, sh);
-        vec3 e = weight > 0.0 ? 0.282095 * sh[0] + 0.325735 * (sh[1] * N.y + sh[2] * N.z + sh[3] * N.x) : vec3(0.0);
-        print_words.data[pc.word + 3u + uint(level) * 4u] = floatBitsToUint(weight);
-        put(4u + uint(level) * 4u, e);
-    }
-}
-)";
-
-/// Shows the GI probe field in place of the image. Mode 1: what the field gives each surface,
-/// without albedo. Mode 2: the level in use as a flat colour, with its cells as a checker.
-/// Mode 3: of the eight probes around a surface, green if all hold this cell, yellow if some
-/// do, red if none. Mode 4: of those holding it, green if all see the surface, yellow if some
-/// do, red if none, blue if no probe holds it. Mode 5: the youngest of those holding it, red
-/// if at most 3 updates old, yellow if under 16, green if older, blue if no probe holds it.
-/// Mode 6: as mode 1, with every probe counting whether or not it sees the surface.
-/// Mode 7: as mode 1, without probes under 8 updates old.
-inline constexpr string_view gi_debug_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 8, local_size_y = 8) in;
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
-
-#define VELK_GI_DEBUG_SWITCHES
-bool velk_gi_ignore_visibility = false;
-bool velk_gi_ignore_young = false;
-)" VELK_GI_FIELD_GLSL R"(
-layout(push_constant, scalar) uniform PC {
-    uint atlas;
-    uint maps;
-    uint globals_base;
-    int finest;
-    uint normal_id;
-    uint pos_id;
-    uint output_id;
-    uint width;
-    uint height;
-    uint mode;
-} pc;
-
-const vec3 kGreen = vec3(0.0, 1.0, 0.0);
-const vec3 kYellow = vec3(1.0, 1.0, 0.0);
-const vec3 kRed = vec3(1.0, 0.0, 0.0);
-const vec3 kBlue = vec3(0.0, 0.2, 1.0);
-
-const vec3 kLevelColors[8] = vec3[8](
-    vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
-    vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));
-
-vec3 velk_gi_debug_color(vec3 rel, vec3 N, vec3 cam)
-{
-    if (pc.mode == 1u || pc.mode == 6u || pc.mode == 7u) {
-        velk_gi_ignore_visibility = pc.mode == 6u;
-        velk_gi_ignore_young = pc.mode == 7u;
-        return max(velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), cam), vec3(0.0));
-    }
-
-    vec3 shade_pos;
-    float edge;
-    int level = velk_gi_level_for(pc.finest, rel, N, normalize(rel), cam, shade_pos, edge);
-    int ladder = pc.finest + level;
-    int slot = ladder & 7;
-    float spacing = velk_gi_cell(ladder);
-    vec3 cam_cells = cam / spacing;
-    vec3 cam_floor = floor(cam_cells);
-    vec3 g = clamp(velk_gi_lattice(ladder, shade_pos, cam), vec3(0.0), vec3(float(kGiDim - 1)));
-    vec3 gbase = floor(g);
-
-    if (pc.mode == 2u) {
-        ivec3 world_cell = ivec3(cam_floor) + ivec3(gbase);
-        return kLevelColors[level] * (((world_cell.x + world_cell.y + world_cell.z) & 1) != 0 ? 0.4 : 1.0);
-    }
-
-    int holding = 0;
-    int seeing = 0;
-    float youngest = 1e9;
-    for (int o = 0; o < 8; ++o) {
-        ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
-        ivec3 cell = ivec3(cam_floor) - kGiDim / 2 + min(ivec3(gbase) + off, ivec3(kGiDim - 1));
-        ivec3 texel = cell & ivec3(kGiDim - 1);
-        if (velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0)).a != velk_gi_stamp(cell, ladder)) continue;
-        ++holding;
-        youngest = min(youngest, velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a);
-        if (velk_texture(pc.atlas, velk_gi_uv(texel, slot, 2)).a > 0.25) continue;
-
-        vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * spacing;
-        vec3 to_probe = probe - shade_pos;
-        float dist = length(to_probe);
-        vec2 moments = velk_gi_map_read(pc.maps, texel, slot, 1, -to_probe / max(dist, 1e-5)).rg;
-        float seen = 1.0;
-        if (dist > moments.x) {
-            float variance = abs(moments.x * moments.x - moments.y);
-            float v = dist - moments.x;
-            seen = variance / (variance + v * v);
-            seen = seen * seen * seen;
-        }
-        if (seen >= 0.5) ++seeing;
-    }
-
-    if (pc.mode == 3u) return holding == 8 ? kGreen : holding > 0 ? kYellow : kRed;
-    if (holding == 0) return kBlue;
-    if (pc.mode == 5u) return youngest <= 3.0 ? kRed : youngest < 16.0 ? kYellow : kGreen;
-    return seeing == holding ? kGreen : seeing > 0 ? kYellow : kRed;
-}
-
-void main()
-{
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
-    vec3 normal = texelFetch(velk_textures[nonuniformEXT(pc.normal_id)], p, 0).xyz;
-    vec3 color = vec3(0.0);
-    if (dot(normal, normal) >= 1e-6) {
-        vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], p, 0).xyz;
-        color = velk_gi_debug_color(rel, normalize(normal), velk_globals.data[pc.globals_base].cam_pos.xyz);
-    }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], p, vec4(color, 1.0));
-}
-)";
-
 /// Measures a frame for render tests. Mode 0 clears this frame's words. Mode 1 follows each
 /// surface back to the previous frame and adds up how much its lighting changed, so camera
-/// motion does not count and surfaces that moved are skipped, and counts surfaces no probe
-/// could light. `words` holds: valid, summed change times 256, over 5%, over 20%, the same four
-/// for surfaces facing up or down, tested and missing, then per screen tile valid and summed.
+/// motion does not count and surfaces that moved are skipped. `words` holds: valid, summed
+/// change times 256, over 5%, over 20%, the same four for surfaces facing up or down, two
+/// unused, then per screen tile valid and summed.
 inline constexpr string_view test_diagnostics_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -5424,15 +4693,11 @@ layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF3
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 layout(set = 1, binding = 16, std430) buffer TestWords { uint data[]; } test_words;
 
-)" VELK_GI_FIELD_GLSL R"(
 layout(push_constant, scalar) uniform PC {
     uint word;
     uint words;
     uint mode;
     uint globals_base;
-    uint atlas;
-    uint maps;
-    int finest;
     uint normal_id;
     uint pos_id;
     uint albedo_id;
@@ -5473,17 +4738,10 @@ void main()
     vec3 color = texelFetch(velk_textures[nonuniformEXT(pc.color_id)], p, 0).rgb;
     float light = max(dot(color, kLuma) / max(dot(albedo, kLuma), 0.04), 1e-4);
     GlobalData g = velk_globals.data[pc.globals_base];
-    if (pc.mode == 2u && pc.atlas != 0u) {
-        light = max(dot(velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz), kLuma), 1e-4);
-    } else if (pc.mode == 5u) {
+    if (pc.mode == 5u) {
         light = max(dot(albedo, kLuma), 1e-4);
     }
     imageStore(gStorageImagesF32[nonuniformEXT(pc.output_id)], p, vec4(rel, light));
-
-    if (pc.atlas != 0u && ((p.x + p.y) & 3) == 0) {
-        add(8u, 1u);
-        if (velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz).r < 0.0) add(9u, 1u);
-    }
 
     vec3 prev_pos = rel + g.cam_moved;
     vec4 prev_clip = g.prev_view_projection * vec4(prev_pos, 1.0);
@@ -5537,648 +4795,6 @@ void main()
 }
 )";
 
-/// Diagnostic: for each pixel asked for, writes 70 words: the GI field's irradiance over pi,
-/// the sky along the normal at its broadest, then from the frame's textures the albedo, the
-/// final HDR colour, the indirect light lighting used, and the normal.
-inline constexpr string_view gi_pixels_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 1) in;
-layout(set = 1, binding = 16, std430) buffer PrintWords { uint data[]; } print_words;
-
-)" VELK_GI_FIELD_GLSL R"(
-layout(push_constant, scalar) uniform PC {
-    uint word;
-    uint atlas;
-    uint maps;
-    uint globals_base;
-    int finest;
-    uint albedo_id;
-    uint normal_id;
-    uint pos_id;
-    uint hdr_id;
-    uint surface_light_id;
-    uint env_id;
-    float intensity;
-    float rotation;
-    uint count;
-    ivec2 pixels[6];
-} pc;
-
-void put(uint at, vec3 v)
-{
-    print_words.data[at] = floatBitsToUint(v.x);
-    print_words.data[at + 1u] = floatBitsToUint(v.y);
-    print_words.data[at + 2u] = floatBitsToUint(v.z);
-}
-
-void main()
-{
-    uint i = gl_WorkGroupID.x;
-    if (i >= pc.count) return;
-    ivec2 p = pc.pixels[i];
-    uint at = pc.word + i * 70u;
-    GlobalData g = velk_globals.data[pc.globals_base];
-    vec3 N = normalize(texelFetch(velk_textures[nonuniformEXT(pc.normal_id)], p, 0).xyz);
-    vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], p, 0).xyz;
-    put(at, velk_gi_irradiance(pc.atlas, pc.maps, pc.finest, rel, N, normalize(rel), g.cam_pos.xyz));
-
-    vec3 sky = vec3(0.0);
-    if (pc.env_id != 0u) {
-        float c = cos(pc.rotation);
-        float s = sin(pc.rotation);
-        vec3 dir = vec3(c * N.x + s * N.z, N.y, -s * N.x + c * N.z);
-        vec2 uv = vec2(atan(dir.z, dir.x) / 6.28318531 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265 + 0.5);
-        float lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_id)])) - 1.0;
-        sky = textureLod(velk_textures[nonuniformEXT(pc.env_id)], uv, lod).rgb * pc.intensity;
-    }
-    put(at + 3u, sky);
-    put(at + 6u, texelFetch(velk_textures[nonuniformEXT(pc.albedo_id)], p, 0).rgb);
-    put(at + 9u, texelFetch(velk_textures[nonuniformEXT(pc.hdr_id)], p, 0).rgb);
-    put(at + 12u, texelFetch(velk_textures[nonuniformEXT(pc.surface_light_id)], p, 0).rgb);
-    put(at + 15u, N);
-
-    // Then the point, the level a surface there uses, what each level holds for it (green),
-    // and that level's eight probes: blend weight, whether it holds this cell, the share of
-    // its rays that hit the inside of something, its green irradiance against the normal, and
-    // its height above the surface in cells.
-    vec3 cam = g.cam_pos.xyz;
-    put(at + 18u, rel);
-    int level = 0;
-    vec3 shade = rel;
-    for (; level < kGiLevels - 1; ++level) {
-        shade = rel + N * (0.05 * velk_gi_cell(pc.finest + level));
-        if (velk_gi_edge(pc.finest + level, shade, cam) >= 0.0) break;
-    }
-    print_words.data[at + 21u] = floatBitsToUint(float(level));
-    for (int l = 0; l < kGiLevels; ++l) {
-        vec3 sh[4];
-        float weight = velk_gi_sample(pc.atlas, pc.finest + l, rel + N * (0.05 * velk_gi_cell(pc.finest + l)), cam, N, sh);
-        float e = weight > 0.0 ? 0.282095 * sh[0].g + 0.325735 * (sh[1].g * N.y + sh[2].g * N.z + sh[3].g * N.x) : -1.0;
-        print_words.data[at + 22u + uint(l)] = floatBitsToUint(e);
-    }
-
-    int ladder = pc.finest + level;
-    int slot = ladder & 7;
-    float cs = velk_gi_cell(ladder);
-    vec3 cam_cells = cam / cs;
-    vec3 cam_floor = floor(cam_cells);
-    vec3 lattice = clamp(velk_gi_lattice(ladder, shade, cam), vec3(0.0), vec3(float(kGiDim - 1)));
-    vec3 gbase = floor(lattice);
-    vec3 gfrac = lattice - gbase;
-    ivec3 base = ivec3(gbase);
-    ivec3 corner = ivec3(cam_floor) - kGiDim / 2;
-    for (int o = 0; o < 8; ++o) {
-        ivec3 off = ivec3(o & 1, (o >> 1) & 1, (o >> 2) & 1);
-        ivec3 cell = corner + min(base + off, ivec3(kGiDim - 1));
-        vec3 tri = mix(vec3(1.0) - gfrac, gfrac, vec3(off));
-        ivec3 texel = cell & ivec3(kGiDim - 1);
-        vec4 first = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0));
-        vec4 third = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 2));
-        vec3 second = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).rgb;
-        vec3 fourth = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 3)).rgb;
-        vec3 probe = (vec3(cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * cs;
-        uint base_word = at + 30u + uint(o) * 5u;
-        print_words.data[base_word] = floatBitsToUint(tri.x * tri.y * tri.z);
-        print_words.data[base_word + 1u] = floatBitsToUint(first.a == velk_gi_stamp(cell, ladder) ? 1.0 : 0.0);
-        print_words.data[base_word + 2u] = floatBitsToUint(third.a);
-        print_words.data[base_word + 3u] = floatBitsToUint(0.282095 * first.g + 0.325735 * (second.g * N.y + third.g * N.z + fourth.g * N.x));
-        print_words.data[base_word + 4u] = floatBitsToUint(dot(probe - rel, N) / cs);
-    }
-}
-)";
-
-// Updates part of the probe field each frame, see VELK_GI_FIELD_GLSL. `env.z` is the
-// finest level's ladder index, `env.w` the atlas, and `extras.x` the workgroups of this
-// dispatch. Each level is an independent DDGI volume, and its rays go as far as they need to.
-//
-// A workgroup is 64 threads, VELK_PROBE_DIRS rays for each of its probes. probe_trace_main_src
-// finds what each ray hits and probe_gi_main_src shades it, with the same thread handling the
-// same ray in both. Each hit shades against one light chosen by contribution, so the cost does
-// not depend on the light count.
-//
-// The words at `extras.z` hold, in order, 4 per ray for probe_maps_compute_src: radiance and
-// distance, the distance negative for the back of a solid; 4 per probe from the trace, saying
-// which probe it is; and 11 per ray from the trace: distance, shape, uv, normal, and medium
-// depth and colour.
-#define VELK_PROBE_DIR_GLSL R"(
-// Fibonacci sphere, rotated per frame so successive frames fill the gaps
-// between directions instead of resampling the same 64.
-vec3 velk_probe_dir(uint i, uint n, float phase)
-{
-    float k = float(i) + 0.5;
-    float phi = acos(1.0 - 2.0 * k / float(n));
-    float theta = 3.14159265 * (1.0 + sqrt(5.0)) * k + phase;
-    vec3 v = vec3(cos(theta) * sin(phi), sin(theta) * sin(phi), cos(phi));
-    // Tipped as well as turned, since turning alone leaves the same bands of latitude
-    // covered every frame.
-    float tilt = fract(phase * 7.13) * 6.28318531;
-    float c = cos(tilt);
-    float s = sin(tilt);
-    return vec3(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
-}
-)"
-
-// Which probe and ray a thread of the probe passes handles.
-#define VELK_PROBE_RAY_GLSL VELK_GI_FIELD_GLSL VELK_PROBE_DIR_GLSL R"(
-float velk_probe_hash(uint x)
-{
-    x ^= x >> 16; x *= 0x7feb352du;
-    x ^= x >> 15; x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return float(x) * (1.0 / 4294967296.0);
-}
-
-struct VelkProbeRay {
-    uint lane;
-    uint dir;
-    uint probe_local;
-    uint probe;
-    int slot;
-    int ladder;
-    ivec3 texel;
-    float stamp;
-    vec3 origin;
-    vec3 d;
-    float phase;
-    float spacing;
-    bool live;
-    bool sweeping;
-    bool drop_history;
-};
-
-uint velk_probe_hits_word()
-{
-    return pc.extras.z + pc.extras.x * 256u + pc.extras.x * (64u / uint(VELK_PROBE_DIRS)) * 4u;
-}
-
-VelkProbeRay velk_probe_ray()
-{
-    const uint kDirs = VELK_PROBE_DIRS;
-    const uint kProbesPerGroup = 64u / kDirs;
-    const uint kLevelGroups = uint(kGiDim * kGiDim * kGiDim) / kProbesPerGroup;
-
-    int finest = int(pc.env.z);
-    uint atlas = pc.env.w;
-    uint serial = VELK_GLOBALS.present_counter;
-
-    // Every frame updates all the levels, finer ones with a larger share of the groups. Within
-    // a share, neighbouring groups take a pair of levels and swap each frame, so that one frame
-    // costs the same as the next.
-    const uint kShares[4] = uint[4](6u, 2u, 1u, 1u);
-    uint group_base = 0u;
-    uint share = 0u;
-    uint groups = 0u;
-    for (; share < 4u; ++share) {
-        groups = pc.extras.x * kShares[share] / 10u;
-        if (gl_WorkGroupID.x < group_base + groups || share == 3u) break;
-        group_base += groups;
-    }
-    uint in_share = gl_WorkGroupID.x - group_base;
-    uint level = ((serial ^ uint(finest) ^ in_share) & 1u) + share * 2u;
-
-    VelkProbeRay p;
-    // When the field has to be right at once, each frame replaces one whole level.
-    p.sweeping = pc.extras.w != 0xFFFFFFFFu;
-    p.drop_history = p.sweeping && (pc.extras.w & 0x100u) != 0u;
-    if (p.sweeping) {
-        level = pc.extras.w & 0xFFu;
-    }
-    p.ladder = finest + int(level);
-    p.slot = p.ladder & 7;
-    float cell = velk_gi_cell(p.ladder);
-
-    p.lane = gl_LocalInvocationIndex;
-    p.probe_local = p.lane / kDirs;
-    p.dir = p.lane - p.probe_local * kDirs;
-    // Whole groups take turns, since a group's probes run concurrently across its lanes.
-    uint group_in_level = p.sweeping ? gl_WorkGroupID.x % kLevelGroups
-                                     : ((in_share >> 1u) + serial * (groups >> 1u)) % kLevelGroups;
-    uint probe_in_level = group_in_level * kProbesPerGroup + p.probe_local;
-    p.probe = probe_in_level + uint(p.slot) * uint(kGiDim * kGiDim * kGiDim);
-    p.live = atlas != 0u && (!p.sweeping || gl_WorkGroupID.x < kLevelGroups);
-
-    // The world cell this texel holds now: the one in the level's box that wraps to it.
-    uint dim = uint(kGiDim);
-    p.texel = ivec3(int(probe_in_level % dim), int((probe_in_level / dim) % dim), int(probe_in_level / (dim * dim)));
-    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
-    vec3 cam_cells = cam / cell;
-    vec3 cam_floor = floor(cam_cells);
-    ivec3 corner = ivec3(cam_floor) - kGiDim / 2;
-    ivec3 world_cell = corner + ((p.texel - corner) & ivec3(kGiDim - 1));
-    p.stamp = velk_gi_stamp(world_cell, p.ladder);
-    p.origin = (vec3(world_cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * cell;
-
-    // Rotating the direction set per frame matters far more with 8 directions
-    // than with 64: successive frames fill the gaps, and the temporal blend
-    // integrates them.
-    //
-    // The rotation is per PROBE as well as per frame. Sharing one phase across
-    // the whole field correlates every probe's sampling error, so a frame whose
-    // phase happens to favour bright surfaces lifts the entire field at once
-    // and the temporal blend then drags that excursion out over its window -
-    // visible as the whole scene slowly pulsing brighter and darker. Making the
-    // phase independent per probe turns one field-wide swing into unrelated
-    // per-probe noise, which the lookup already averages over eight probes.
-    p.phase = velk_probe_hash(p.probe * 2654435761u
-                              + VELK_GLOBALS.present_counter * 747796405u)
-            * 6.28318531;
-    p.d = velk_probe_dir(p.dir, kDirs, p.phase);
-    p.spacing = cell;
-    return p;
-}
-)"
-
-#define VELK_PROBE_HELPERS_GLSL VELK_PROBE_RAY_GLSL R"(
-layout(set = 1, binding = 16, std430) buffer ProbeRays { uint data[]; } probe_rays;
-// The ray being shaded, for biasing the lookup at its hit towards where the ray came from.
-vec3 velk_probe_ray_dir = vec3(0.0, 1.0, 0.0);
-vec3 velk_hit_irradiance(vec3 pos, vec3 N)
-{
-    return velk_gi_irradiance(pc.env.w, pc.extras.y, int(pc.env.z), pos, N, velk_probe_ray_dir, VELK_GLOBALS.cam_pos.xyz);
-}
-
-// Open surfaces are seen from both sides, so only solid shapes say a probe is inside one.
-bool velk_gi_inside_solid(RayHit hit, vec3 dir)
-{
-    if (dot(hit.normal, dir) <= 0.0) return false;
-    RtShape s = velk_bvh_shapes.data[hit.shape_index];
-    if (s.shape_kind == 1u || s.shape_kind == 2u) return true;
-    if (s.shape_kind != 255u || s.mesh_static_base == VELK_INVALID_MESH_STATIC) return false;
-    return (velk_mesh_static(s).flags & (VELK_MESH_SCATTERED | VELK_MESH_DOUBLE_SIDED)) == 0u;
-}
-
-)"
-
-// Finds what the probe rays hit. Holds no materials, so that the walk through the scene has
-// the GPU's registers to itself. Each level is a volume of its own, and its rays go as far
-// as they need to.
-[[maybe_unused]] constexpr string_view probe_trace_main_src = VELK_PROBE_RAY_GLSL R"(
-layout(set = 1, binding = 16, std430) buffer ProbeHits { uint data[]; } probe_hits;
-
-void main()
-{
-    VelkProbeRay p = velk_probe_ray();
-    if (p.dir == 0u) {
-        uint header = pc.extras.z + pc.extras.x * 256u + (gl_WorkGroupID.x * (64u / uint(VELK_PROBE_DIRS)) + p.probe_local) * 4u;
-        probe_hits.data[header] = (p.live ? 1u : 0u) | (p.sweeping ? 2u : 0u) | (p.drop_history ? 4u : 0u)
-            | (uint(p.texel.x) << 8u) | (uint(p.texel.y) << 12u) | (uint(p.texel.z) << 16u) | (uint(p.slot) << 20u);
-        probe_hits.data[header + 1u] = floatBitsToUint(p.phase);
-        probe_hits.data[header + 2u] = floatBitsToUint(length(vec3(p.spacing)) * 1.5);
-        probe_hits.data[header + 3u] = floatBitsToUint(p.stamp);
-    }
-    uint at = velk_probe_hits_word() + (gl_WorkGroupID.x * 64u + p.lane) * 11u;
-    if (!p.live) {
-        probe_hits.data[at + 1u] = 0xFFFFFFFFu;
-        return;
-    }
-
-    Ray ray;
-    ray.origin = p.origin;
-    ray.dir = p.d;
-    RayHit hit;
-    // A probe's rays stand for everything around it, out to the next probes, so
-    // instances smaller than that are not hit or missed one by one.
-    velk_ray_footprint = p.spacing * 0.25;
-    // The probe's rays share the sphere around it, each a cone of its share.
-    float cone_cos = 1.0 - 2.0 / float(VELK_PROBE_DIRS);
-    velk_ray_cone = sqrt(1.0 - cone_cos * cone_cos) / cone_cos;
-    bool found = trace_closest_hit(ray, 1e30, hit);
-
-    probe_hits.data[at] = floatBitsToUint(hit.t);
-    probe_hits.data[at + 1u] = found ? hit.shape_index : 0xFFFFFFFFu;
-    probe_hits.data[at + 2u] = floatBitsToUint(hit.uv.x);
-    probe_hits.data[at + 3u] = floatBitsToUint(hit.uv.y);
-    probe_hits.data[at + 4u] = floatBitsToUint(hit.normal.x);
-    probe_hits.data[at + 5u] = floatBitsToUint(hit.normal.y);
-    probe_hits.data[at + 6u] = floatBitsToUint(hit.normal.z);
-    probe_hits.data[at + 7u] = floatBitsToUint(velk_ray_medium_depth);
-    probe_hits.data[at + 8u] = floatBitsToUint(velk_ray_medium_color.r);
-    probe_hits.data[at + 9u] = floatBitsToUint(velk_ray_medium_color.g);
-    probe_hits.data[at + 10u] = floatBitsToUint(velk_ray_medium_color.b);
-}
-)";
-
-[[maybe_unused]] constexpr string_view probe_gi_main_src = VELK_PROBE_HELPERS_GLSL R"(
-void main()
-{
-    VelkProbeRay p = velk_probe_ray();
-    uint lane = p.lane;
-    uint dir = p.dir;
-    uint probe = p.probe;
-    vec3 origin = p.origin;
-    vec3 d = p.d;
-    float spacing = p.spacing;
-    // `probe_live` rather than `active`, which GLSL reserves.
-    bool probe_live = p.live;
-
-    const float kBrightest = 5.0;
-
-    vec3 radiance = vec3(0.0);
-    float near_t = 1e27;
-    bool near_back = false;
-    velk_probe_ray_dir = d;
-    if (probe_live) {
-        Ray ray;
-        ray.origin = origin;
-        ray.dir = d;
-        uint hit_at = velk_probe_hits_word() + (gl_WorkGroupID.x * 64u + lane) * 11u;
-        RayHit hit;
-        hit.t = uintBitsToFloat(probe_rays.data[hit_at]);
-        hit.shape_index = probe_rays.data[hit_at + 1u];
-        hit.uv = vec2(uintBitsToFloat(probe_rays.data[hit_at + 2u]), uintBitsToFloat(probe_rays.data[hit_at + 3u]));
-        hit.normal = vec3(uintBitsToFloat(probe_rays.data[hit_at + 4u]),
-                          uintBitsToFloat(probe_rays.data[hit_at + 5u]),
-                          uintBitsToFloat(probe_rays.data[hit_at + 6u]));
-        velk_ray_medium_depth = uintBitsToFloat(probe_rays.data[hit_at + 7u]);
-        velk_ray_medium_color = vec3(uintBitsToFloat(probe_rays.data[hit_at + 8u]),
-                                     uintBitsToFloat(probe_rays.data[hit_at + 9u]),
-                                     uintBitsToFloat(probe_rays.data[hit_at + 10u]));
-        bool found = hit.shape_index != 0xFFFFFFFFu;
-        // The shadow ray at the hit is as wide as the probe's own rays.
-        velk_ray_footprint = spacing * 0.25;
-        if (found) {
-            near_t = hit.t;
-            near_back = velk_gi_inside_solid(hit, d);
-        }
-        if (found && !near_back) {
-            RtShape s = velk_bvh_shapes.data[hit.shape_index];
-            EvalContext ectx;
-            ectx.material_base = s.material_base;
-            ectx.texture_id = s.texture_id;
-            ectx.shape_param = s.shape_param;
-            ectx.uv = hit.uv;
-            ectx.uv1 = hit.uv;
-            ectx.base = s.color;
-            ectx.ray_dir = ray.dir;
-            ectx.normal = hit.normal;
-            ectx.rel_pos = ray.origin + hit.t * ray.dir;
-            ectx.hit_pos = ectx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-            ectx.tangent = vec4(0.0);
-
-            // Full material evaluation. Measured FASTER than hand-rolled
-            // single-light shading (2.8 ms vs 3.5 ms at 256 probes), because
-            // materials that terminate early never trace a shadow ray at all,
-            // where the hand-rolled version traced one per hit unconditionally.
-            // Reservoir-pick ONE light, weighted by its unshadowed contribution
-            // here, rather than uniformly. Uniform picking is unbiased but its
-            // variance is brutal: a light contributing nothing to this hit -
-            // aimed away, out of range, or muted to zero intensity - still wins
-            // its share of the draws and returns black scaled by the light
-            // count. That noise does not merely look bad. The lookup clamps the
-            // reconstructed irradiance at zero, so it truncates the negative
-            // excursions and keeps the positive ones, and the field converges
-            // measurably too BRIGHT.
-            //
-            // One pass of cheap ALU over the lights, no extra rays: the ray
-            // count per hit stays independent of the light count, which is the
-            // part that costs.
-            uint seed = probe * 9781u + dir * 6271u
-                      + VELK_GLOBALS.present_counter * 26699u;
-            float w_sum = 0.0;
-            float w_chosen = 0.0;
-            for (uint li = 0u; li < pc.light_count; ++li) {
-                Light light = velk_light_at(pc.lights_base + li);
-                vec3 L;
-                float atten;
-                velk_light_sample(light, ectx.rel_pos, L, atten);
-                // Floored, not clamped to zero: this weights against the
-                // GEOMETRIC normal while shading uses the normal-mapped one, so
-                // a light this test rejects can still light the surface. A
-                // small floor keeps such a light reachable and the estimator
-                // unbiased. Zero intensity and out-of-range lights are excluded
-                // by the terms below instead, where the contribution really is
-                // zero for shading too.
-                float ndl = max(dot(hit.normal, L), 0.05);
-                vec3 rad = light.color_intensity.rgb * light.color_intensity.a;
-                float lw = (rad.r + rad.g + rad.b) * (1.0 / 3.0) * atten * ndl;
-                if (lw <= 0.0) continue;
-                w_sum += lw;
-                seed = seed * 1664525u + 1013904223u;
-                if (velk_probe_hash(seed) * w_sum <= lw) {
-                    velk_single_light = int(li);
-                    w_chosen = lw;
-                }
-            }
-            // 1 / p(chosen). Every light with any contribution stays reachable,
-            // so the estimator is unbiased; only the variance changes.
-            velk_single_light_weight = (w_chosen > 0.0) ? (w_sum / w_chosen) : 0.0;
-            BrdfSample bs = velk_resolve_fill(s.material_id, ectx);
-            velk_single_light = -1;
-            velk_single_light_weight = 1.0;
-            radiance = bs.emission.rgb * clamp(bs.emission.a, 0.0, 1.0);
-        } else if (!found) {
-            radiance = env_miss_color(d);
-        }
-        // A single ray on a tiny, very bright thing would otherwise light a whole probe.
-        radiance = min(radiance, vec3(kBrightest));
-        velk_ray_footprint = 0.0;
-)"
-                                                                      R"(
-        // The ray lost light in what it passed through, and gained what that reflects,
-        // lit as rounded objects seen along the ray. What reaches them from elsewhere
-        // is the environment.
-        if (velk_ray_medium_depth > 0.0) {
-            vec3 direct = vec3(0.0);
-            for (uint li = 0u; li < pc.light_count; ++li) {
-                Light light = velk_light_at(pc.lights_base + li);
-                vec3 L;
-                float atten;
-                velk_light_sample(light, origin, L, atten);
-                float cos_g = clamp(dot(L, -d), -1.0, 1.0);
-                float g = acos(cos_g);
-                direct += light.color_intensity.rgb * light.color_intensity.a * atten * (2.0 / 3.0)
-                          * (sin(g) + (3.14159265 - g) * cos_g) / 3.14159265;
-            }
-            vec3 elsewhere = env_miss_color(d);
-            float through = exp(-velk_ray_medium_depth);
-            radiance = radiance * through
-                + (velk_ray_medium_color / velk_ray_medium_depth) * (direct + elsewhere) * (1.0 - through);
-        }
-    }
-
-    if (probe_live) {
-        uint ray_at = pc.extras.z + (gl_WorkGroupID.x * 64u + lane) * 4u;
-        probe_rays.data[ray_at] = floatBitsToUint(radiance.r);
-        probe_rays.data[ray_at + 1u] = floatBitsToUint(radiance.g);
-        probe_rays.data[ray_at + 2u] = floatBitsToUint(radiance.b);
-        probe_rays.data[ray_at + 3u] = floatBitsToUint(near_back ? -near_t : near_t);
-    }
-}
-)";
-
-/// Stores what a probe's rays found: its spherical-harmonic coefficients in the atlas, and its
-/// irradiance and distance maps, as DDGI does. Runs after the probe rays are shaded, so that
-/// nothing is written while the field is read. A workgroup is one probe and each thread one
-/// map entry.
-inline constexpr string_view probe_maps_compute_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 64) in;
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
-layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
-layout(set = 1, binding = 16, std430) readonly buffer ProbeRays { uint data[]; } probe_rays;
-)" VELK_GI_FIELD_GLSL VELK_PROBE_DIR_GLSL R"(
-layout(push_constant) uniform PC {
-    uint rays_word;
-    uint headers_word;
-    uint maps;
-    uint dirs;
-    uint atlas;
-    uint globals_base;
-    int finest;
-} pc;
-
-shared vec3 s_dir[64];
-shared vec3 s_radiance[64];
-shared float s_near[64];
-shared uint s_back[64];
-
-void main()
-{
-    uint lane = gl_LocalInvocationIndex;
-    uint probe = gl_WorkGroupID.x;
-    uint header = pc.headers_word + probe * 4u;
-    uint flags = probe_rays.data[header];
-    float phase = uintBitsToFloat(probe_rays.data[header + 1u]);
-    float max_distance = uintBitsToFloat(probe_rays.data[header + 2u]);
-    float stamp = uintBitsToFloat(probe_rays.data[header + 3u]);
-
-    // Each thread brings in one ray, so every entry can read them all from shared memory.
-    if ((flags & 1u) != 0u && lane < pc.dirs) {
-        uint at = pc.rays_word + (probe * pc.dirs + lane) * 4u;
-        s_radiance[lane] = vec3(uintBitsToFloat(probe_rays.data[at]),
-                                uintBitsToFloat(probe_rays.data[at + 1u]),
-                                uintBitsToFloat(probe_rays.data[at + 2u]));
-        float found_at = uintBitsToFloat(probe_rays.data[at + 3u]);
-        s_near[lane] = abs(found_at);
-        s_back[lane] = found_at < 0.0 ? 1u : 0u;
-        s_dir[lane] = velk_probe_dir(lane, pc.dirs, phase);
-    }
-    barrier();
-    if ((flags & 1u) == 0u) return;
-
-    bool sweeping = (flags & 2u) != 0u;
-    bool drop_history = (flags & 4u) != 0u;
-    ivec3 texel = ivec3(int((flags >> 8u) & 15u), int((flags >> 12u) & 15u), int((flags >> 16u) & 15u));
-    int slot = int((flags >> 20u) & 7u);
-    bool same_cell = velk_texture(pc.atlas, velk_gi_uv(texel, slot, 0)).a == stamp;
-    bool keep_history = same_cell && !drop_history;
-    float updates = keep_history ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a : 0.0;
-
-    // Inside something when enough rays reach the back of a solid.
-    uint backs = 0u;
-    for (uint r = 0u; r < pc.dirs; ++r) {
-        if (s_back[r] != 0u) ++backs;
-    }
-
-    if (lane == 0u) {
-        // Project into SH L1. 4*pi/N is the Monte Carlo weight for directions
-        // distributed uniformly over the sphere.
-        const float kY0 = 0.282095;
-        const float kY1 = 0.488603;
-        float w = 4.0 * 3.14159265 / float(pc.dirs);
-        vec3 sh[4];
-        sh[0] = vec3(0.0);
-        sh[1] = vec3(0.0);
-        sh[2] = vec3(0.0);
-        sh[3] = vec3(0.0);
-        for (uint r = 0u; r < pc.dirs; ++r) {
-            sh[0] += s_radiance[r] * (kY0 * w);
-            sh[1] += s_radiance[r] * (kY1 * s_dir[r].y * w);
-            sh[2] += s_radiance[r] * (kY1 * s_dir[r].z * w);
-            sh[3] += s_radiance[r] * (kY1 * s_dir[r].x * w);
-        }
-
-        // A block holding another cell starts over. Otherwise a running average settles into
-        // a fixed rate, so moving lights do not smear indefinitely.
-        float count = same_cell && !sweeping ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, 1)).a : 0.0;
-        float blend = max(1.0 / (count + 1.0), 0.05);
-        float inside_now = float(backs) / float(pc.dirs);
-        float inside = same_cell ? mix(velk_texture(pc.atlas, velk_gi_uv(texel, slot, 2)).a, inside_now, 0.25) : inside_now;
-        for (int c = 0; c < 4; ++c) {
-            ivec2 at = ivec2(texel.x + texel.z * kGiDim, texel.y + (c + slot * kGiRows) * kGiDim);
-            vec3 prev = same_cell ? velk_texture(pc.atlas, velk_gi_uv(texel, slot, c)).rgb : vec3(0.0);
-            float alpha = c == 0 ? stamp : (c == 1 ? min(count + 1.0, 100.0) : (c == 2 ? inside : 1.0));
-            imageStore(gStorageImagesF32[nonuniformEXT(pc.atlas)], at, vec4(mix(prev, sh[c], blend), alpha));
-        }
-        imageStore(gStorageImagesF32[nonuniformEXT(pc.atlas)],
-                   ivec2(texel.x + texel.z * kGiDim, texel.y + (4 + slot * kGiRows) * kGiDim), vec4(0.0, 0.0, 0.0, 1.0));
-    }
-
-    // Too many rays reaching the back of something: the probe is inside it, so its maps are
-    // left alone.
-    if (float(backs) >= float(pc.dirs) * 0.25) return;
-
-    const float kHysteresis = 0.97;
-    const float kChangeThreshold = 0.2;
-    const float kBrightnessThreshold = 1.0;
-    const float kDarkeningStep = 1.0 / 1024.0;
-
-    int x = int(lane) % kGiMapSize;
-    int y = int(lane) / kGiMapSize;
-    vec2 p = (vec2(float(x), float(y)) + 0.5) / float(kGiMapSize) * 2.0 - 1.0;
-    vec3 entry_dir = velk_gi_oct_dir(p);
-    float irradiance_weight = 0.0;
-    vec3 irradiance_sum = vec3(0.0);
-    float distance_weight = 0.0;
-    vec2 distance_sum = vec2(0.0);
-    for (uint r = 0u; r < pc.dirs; ++r) {
-        float facing = max(dot(entry_dir, s_dir[r]), 0.0);
-        if (s_back[r] == 0u) {
-            irradiance_weight += facing;
-            irradiance_sum += facing * s_radiance[r];
-        }
-        float sharp = pow(facing, 50.0);
-        float away = min(s_near[r], max_distance);
-        distance_weight += sharp;
-        distance_sum += sharp * vec2(away, away * away);
-    }
-
-    ivec2 at = velk_gi_map_texel(texel, slot, ivec2(x, y), 0);
-    vec3 held = keep_history ? velk_texture(pc.maps, velk_gi_map_uv(at)).rgb : vec3(0.0);
-    // A probe new to its cell starts from what the next level knows there, not from nothing.
-    int ladder = pc.finest + ((slot - pc.finest) & 7);
-    if (!same_cell && ladder < pc.finest + kGiLevels - 1) {
-        vec3 cam = velk_globals.data[pc.globals_base].cam_pos.xyz;
-        float cell_size = velk_gi_cell(ladder);
-        vec3 cam_cells = cam / cell_size;
-        vec3 cam_floor = floor(cam_cells);
-        ivec3 corner = ivec3(cam_floor) - kGiDim / 2;
-        ivec3 world_cell = corner + ((texel - corner) & ivec3(kGiDim - 1));
-        vec3 origin = (vec3(world_cell) - cam_floor + 0.5 - (cam_cells - cam_floor)) * cell_size;
-        vec3 known;
-        if (velk_gi_sample_irradiance(pc.atlas, pc.maps, ladder + 1, origin, origin, cam, entry_dir, known) > 0.0) {
-            held = pow(max(known, vec3(0.0)), vec3(1.0 / kGiIrradianceGamma));
-        }
-    }
-    // A running average over a probe's first updates, then the fixed rate.
-    float hysteresis = dot(held, held) == 0.0 ? 0.0 : min(kHysteresis, (updates + 1.0) / (updates + 2.0));
-    vec3 now = pow(irradiance_sum / max(irradiance_weight, 1e-9), vec3(1.0 / kGiIrradianceGamma));
-    vec3 delta = now - held;
-    if (max(held.r - now.r, max(held.g - now.g, held.b - now.b)) > kChangeThreshold) {
-        hysteresis = max(0.0, hysteresis - 0.75);
-    }
-    if (dot(delta, vec3(0.2126, 0.7152, 0.0722)) > kBrightnessThreshold) {
-        delta *= 0.25;
-    }
-    vec3 step_by = (1.0 - hysteresis) * delta;
-    if (max(now.r, max(now.g, now.b)) < max(held.r, max(held.g, held.b))) {
-        step_by = min(max(vec3(kDarkeningStep), abs(step_by)), abs(delta)) * sign(step_by);
-    }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.maps)], at, vec4(held + step_by, 1.0));
-
-    ivec2 at_distance = velk_gi_map_texel(texel, slot, ivec2(x, y), 1);
-    vec2 held_distance = keep_history ? velk_texture(pc.maps, velk_gi_map_uv(at_distance)).rg : vec2(0.0);
-    float distance_hysteresis = dot(held_distance, held_distance) == 0.0 ? 0.0 : kHysteresis;
-    vec2 now_distance = distance_sum / max(distance_weight, 1e-9);
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.maps)], at_distance,
-               vec4(mix(now_distance, held_distance, distance_hysteresis), 0.0, 1.0));
-}
-)";
-
 /// Appends the #include lines of the intersect snippets registered for this frame.
 inline void append_rt_intersect_includes(string& src, const IFrameSnippetRegistry& snippets)
 {
@@ -6216,18 +4832,6 @@ inline void append_rt_intersect_shape(string& src, const IFrameSnippetRegistry& 
     append_literal("        default: return intersect_rect(ray, shape, hit);\n");
     append_literal("    }\n");
     append_literal("}\n");
-}
-
-/// Composes a compute shader that traces rays and shades nothing: the RT prelude and the
-/// frame's intersect snippets under @p main_src, without any material.
-inline string compose_rt_trace_compute(const IFrameSnippetRegistry& snippets, string_view main_src)
-{
-    string src;
-    src += rt_compute_prelude_src;
-    append_rt_intersect_includes(src, snippets);
-    append_rt_intersect_shape(src, snippets);
-    src += main_src;
-    return src;
 }
 
 /**
@@ -6379,7 +4983,7 @@ inline string compose_rt_compute(const IFrameSnippetRegistry& snippets,
     append_rt_intersect_shape(src, snippets);
 
     // Everything above is the shared RT body. Callers wanting that machinery
-    // under a different entry point (the GI probe pass) supply their own main.
+    // under a different entry point (the bounce cells' material pass) supply their own main.
     src += main_src.empty() ? rt_compute_main_src : main_src;
     return src;
 }
