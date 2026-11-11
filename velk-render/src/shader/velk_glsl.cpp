@@ -116,6 +116,11 @@ struct RtRecord {
 
 #define VELK_NO_TREE 0xFFFFFFFFu
 
+// Words per cluster in a level of detail table: kLodClusterWords.
+#define VELK_LOD_CLUSTER_WORDS 20u
+// In a cluster draw entry's level count: the mesh deforms (kLodDeforming).
+#define VELK_LOD_DEFORMING 0x80000000u
+
 )"
 // mesh_static_base value for a mesh whose static record is not resolvable yet
 // (geometry not uploaded, no BLAS built). Mirrors kInvalidMeshStaticBase in

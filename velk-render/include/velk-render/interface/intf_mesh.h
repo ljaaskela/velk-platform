@@ -239,6 +239,9 @@ struct MeshLodInfo
     uint32_t level_count = 0;
     uint32_t index_word = 0;       ///< Its indices in the mesh-word arena, which clusters' first indices count from.
     uint32_t vertex_word = 0xFFFFFFFFu;  ///< Its own vertices in that arena, which those indices read, or none for the mesh's.
+    /// The mesh deforms, so its clusters' spheres are where they are at rest: it has level 0
+    /// only, and its clusters are not tested for occlusion.
+    bool deforming = false;
 };
 
 class IMeshPrimitiveInternal : public Interface<IMeshPrimitiveInternal>

@@ -69,8 +69,10 @@ inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
 /// Words per cluster and per level in a level of detail hierarchy's tables, read by
 /// VELK_LOD_SELECT_GLSL.
-inline constexpr uint32_t kLodClusterWords = 13;
+inline constexpr uint32_t kLodClusterWords = 20;
 inline constexpr uint32_t kLodLevelWords = 8;
+/// Set in a cluster draw entry's level count when the mesh deforms (VELK_LOD_DEFORMING).
+inline constexpr uint32_t kLodDeforming = 0x80000000u;
 
 /// A tree over a set of primitives. `triangle_indices` is the per-leaf
 /// permutation: leaf node `n` covers items

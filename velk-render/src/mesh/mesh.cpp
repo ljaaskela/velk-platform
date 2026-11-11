@@ -76,8 +76,9 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
 bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out)
 {
     if (!lod_table_region_.valid()) {
-        // A single cluster has nothing to choose between.
-        if (deforming_ || rt_blas_.clusters.size() < 2) {
+        // A single cluster has nothing to choose between, but takes the same path, so that
+        // what is drawn is chosen the same way for every mesh.
+        if (rt_blas_.clusters.empty()) {
             return false;
         }
         auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
@@ -87,15 +88,21 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         vector<uint8_t> geometry;
         auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
-        const VertexAttribute* normal = nullptr;
+        uint32_t normal_offset = kLodNoAttribute;
+        uint32_t uv_offset = kLodNoAttribute;
         for (const auto& attribute : attributes_) {
             if (attribute.semantic == VertexAttributeSemantic::Normal && attribute.format == VertexAttributeFormat::Float3) {
-                normal = &attribute;
+                normal_offset = attribute.offset;
+            }
+            if (attribute.semantic == VertexAttributeSemantic::TexCoord0 && attribute.format == VertexAttributeFormat::Float2) {
+                uv_offset = attribute.offset;
             }
         }
-        const bool has_normals = normal && buffer && buffer->read_geometry(geometry);
-        const MeshLod lod = build_mesh_lod(rt_blas_, has_normals ? geometry.data() : nullptr, vertex_stride_,
-                                           has_normals ? normal->offset : 0u, merge_pieces_);
+        const bool read = (normal_offset != kLodNoAttribute || uv_offset != kLodNoAttribute) && buffer
+            && buffer->read_geometry(geometry);
+        // A deforming mesh's coarser levels would be drawn in its rest pose.
+        const MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, vertex_stride_, normal_offset,
+                                           uv_offset, merge_pieces_, !deforming_);
         const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
         const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
         lod_table_region_ = culling->alloc(clusters_size + levels_size);
@@ -123,6 +130,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         lod_info_.level_word = lod_info_.cluster_word + lod_info_.cluster_count * kLodClusterWords;
         lod_info_.level_count = static_cast<uint32_t>(lod.levels.size());
         lod_info_.index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
+        lod_info_.deforming = deforming_;
     }
     out = lod_info_;
     return true;

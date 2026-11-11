@@ -181,7 +181,10 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
     uint clusters = cull_words.data[entry + 2u];
     uint levels = cull_words.data[entry + 8u];
-    uint level_count = cull_words.data[entry + 9u];
+    uint level_count = cull_words.data[entry + 9u] & ~VELK_LOD_DEFORMING;
+    // A deforming mesh's spheres are where its clusters are at rest, which says nothing
+    // about whether they are hidden.
+    bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
     for (uint l = 0u; l < level_count; ++l) {
         uint level = levels + l * 8u;
         float dist = length(velk_lod_center(level + 4u, world, cam));
@@ -193,11 +196,11 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
         uint first = cull_words.data[level];
         uint count = cull_words.data[level + 1u];
         for (uint c = first; c < first + count; ++c) {
-            uint cluster = clusters + c * 13u;
+            uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
             if (velk_lod_pixels(cluster + 3u, world, scale, cam, pixels_per_unit) <= max_pixels
                 && velk_lod_pixels(cluster + 8u, world, scale, cam, pixels_per_unit) > max_pixels) {
                 float error = uintBitsToFloat(cull_words.data[cluster + 7u]) * scale;
-                if (!velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot, error)) {
+                if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot, error)) {
                     velk_lod_use(entry, c, slot, error);
                 }
             }
@@ -402,8 +405,13 @@ void main()
     float scale2 = max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                        dot(world[2].xyz, world[2].xyz));
     float radius = sphere.w * sqrt(scale2);
+    uint first_entry = cull_words.data[table + 8u];
+    uint entries = cull_words.data[table + 9u];
+    // A deforming mesh's sphere is where it was at rest, which says nothing about whether it
+    // is in view or hidden.
+    bool deforming = entries != 0u && (cull_words.data[first_entry + 9u] & VELK_LOD_DEFORMING) != 0u;
 
-    if (pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
+    if (!deforming && pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
 
     // The sphere against each clip plane. Planes are rows of the matrix added to or
     // taken from its last row, so their normals' lengths are at most the sum of the
@@ -416,9 +424,11 @@ void main()
     vec3 r2 = vec3(vp[0][2], vp[1][2], vp[2][2]);
     vec3 r3 = vec3(vp[0][3], vp[1][3], vp[2][3]);
     float w_reach = radius * length(r3);
-    if (abs(clip.x) > clip.w + w_reach + radius * length(r0)) return;
-    if (abs(clip.y) > clip.w + w_reach + radius * length(r1)) return;
-    if (abs(clip.z) > clip.w + w_reach + radius * length(r2)) return;
+    if (!deforming) {
+        if (abs(clip.x) > clip.w + w_reach + radius * length(r0)) return;
+        if (abs(clip.y) > clip.w + w_reach + radius * length(r1)) return;
+        if (abs(clip.z) > clip.w + w_reach + radius * length(r2)) return;
+    }
 
     if (pc.far_form != 0u) {
         float area = uintBitsToFloat(cull_words.data[table + 7u]) * scale2;
@@ -427,7 +437,7 @@ void main()
 
     g_instance = instance;
     g_table = table_word;
-    if (pc.pyramid_word != 0xFFFFFFFFu
+    if (!deforming && pc.pyramid_word != 0xFFFFFFFFu
         && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection, center + globals.cam_moved, radius)
         && velk_retest(0xFFFFFFFFu, 0u, slot, 0.0)) {
         return;
@@ -440,8 +450,6 @@ void main()
         }
     }
 
-    uint first_entry = cull_words.data[table + 8u];
-    uint entries = cull_words.data[table + 9u];
     for (uint e = 0u; e < entries; ++e) {
         velk_lod_visit(first_entry + e * 13u, slot, world, sqrt(scale2), globals.cam_pos.xyz, vp, globals.viewport.y,
                        pc.lod_max_pixels);
@@ -523,7 +531,7 @@ void main()
 
     if (entry != 0xFFFFFFFFu) {
         uint cluster = cull_words.data[record + 4u];
-        uint sphere = cull_words.data[entry + 2u] + cluster * 13u + 3u;
+        uint sphere = cull_words.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
         float error = uintBitsToFloat(cull_words.data[record + 5u]);
         if (!velk_lod_occluded(sphere, world, scale, cam, entry, cluster, slot, error)) {
             velk_lod_use(entry, cluster, slot, error);
@@ -612,7 +620,7 @@ void main()
         cull_words.data[counts + c] = 0u;
         cull_words.data[cursors + c] = first;
         if (count != 0u) {
-            uint cluster = table + c * 13u;
+            uint cluster = table + c * VELK_LOD_CLUSTER_WORDS;
             uint command = commands + draws * 5u;
             cull_words.data[command + 0u] = cull_words.data[cluster + 1u] * 3u;
             cull_words.data[command + 1u] = count;
@@ -660,7 +668,7 @@ void main()
         uint list = cull_words.data[entry];
         cull_words.data[list + at] = cull_words.data[record + 2u];
         cull_words.data[list + capacity + at] = cull_words.data[record + 3u];
-        cull_words.data[list + capacity * 2u + at] = cull_words.data[cull_words.data[entry + 2u] + cull_words.data[record + 1u] * 13u];
+        cull_words.data[list + capacity * 2u + at] = cull_words.data[cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS];
     }
 }
 )";

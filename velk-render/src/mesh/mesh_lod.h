@@ -25,6 +25,17 @@ struct MeshLodCluster
     float parent_center[3] = {};
     float parent_radius = 0.f;
     float parent_error = 0.f;     ///< Largest float when nothing replaces it.
+    /// With own_radius, a sphere around the cluster's own triangles. The sphere above is its
+    /// group's on coarser levels, so that the choice between levels stays consistent.
+    float own_center[3] = {};
+    float own_radius = 0.f;
+    /// Mean vertex normal weighted by area, as signed 8-bit xyz, shorter the less the
+    /// triangles agree on a direction. Zero without normals.
+    uint32_t normal = 0;
+    /// Mean uv weighted by area, and how far the uvs reach in each direction, as two halves
+    /// each. Zero without uvs.
+    uint32_t uv = 0;
+    uint32_t uv_range = 0;
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
@@ -50,14 +61,20 @@ struct MeshLod
     vector<MeshLodLevel> levels;
 };
 
+/// For build_mesh_lod: a vertex has no such attribute.
+inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
+
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.
-/// @param vertices The vertices @p blas indexes, so that normals are kept too. Null to go by
-///        positions alone.
+/// @param vertices The vertices @p blas indexes, so that normals and uvs are kept too. Null to
+///        go by positions alone.
 /// @param stride Bytes per vertex.
-/// @param normal_offset Bytes to a vertex's normal, three floats.
+/// @param normal_offset Bytes to a vertex's normal, three floats, or kLodNoAttribute.
+/// @param uv_offset Bytes to a vertex's first uv, two floats, or kLodNoAttribute.
 /// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
-///        IMeshPrimitive::set_merge_pieces.
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset, bool merge_pieces);
+///        IMeshPrimitive::set_merge_pieces. Needs normals.
+/// @param coarser_levels False for level 0 alone.
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
+                       uint32_t uv_offset, bool merge_pieces, bool coarser_levels);
 
 } // namespace velk::impl
 

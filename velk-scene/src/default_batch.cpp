@@ -261,7 +261,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCursorsWord] = cursors_word;
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryLevelsWord] = draw.lod.level_word;
-        entry[kClusterEntryLevelCountWord] = draw.lod.level_count;
+        entry[kClusterEntryLevelCountWord] = draw.lod.level_count | (draw.lod.deforming ? kLodDeforming : 0u);
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});
     }

@@ -8,6 +8,8 @@
 
 #include "meshoptimizer.h"
 
+#include <velk-render/api/half_float.h>
+
 namespace velk::impl {
 
 namespace {
@@ -394,9 +396,76 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
     return true;
 }
 
+uint32_t pack_halves(float a, float b)
+{
+    return uint32_t(::velk::detail::float_to_half_scalar(a)) | (uint32_t(::velk::detail::float_to_half_scalar(b)) << 16);
+}
+
+/// Fills what a cluster looks like as a whole: the sphere around its own triangles, and its
+/// normal and uvs by area. @p normals is empty and @p uv_bytes null when there are none.
+void fill_cluster_surface(MeshLodCluster& cluster, const vector<uint32_t>& indices, const vector<float>& positions,
+                          const vector<float>& normals, const uint8_t* uv_bytes, uint32_t stride, uint32_t uv_offset)
+{
+    const uint32_t* ids = indices.data() + cluster.first_index;
+    const size_t count = size_t(cluster.triangle_count) * 3;
+    vector<float> points;
+    points.reserve(count * 3);
+    for (size_t i = 0; i < count; ++i) {
+        points.insert(points.end(), positions.data() + size_t(ids[i]) * 3, positions.data() + size_t(ids[i]) * 3 + 3);
+    }
+    const meshopt_Bounds bounds = meshopt_computeSphereBounds(points.data(), count, sizeof(float) * 3, nullptr, 0);
+    std::memcpy(cluster.own_center, bounds.center, sizeof(float) * 3);
+    cluster.own_radius = bounds.radius;
+
+    const auto uv_of = [&](uint32_t id, int k) {
+        float value;
+        std::memcpy(&value, uv_bytes + size_t(id) * stride + uv_offset + k * sizeof(float), sizeof(float));
+        return value;
+    };
+    float area = 0.f;
+    float normal[3] = {};
+    float uv[2] = {};
+    float uv_min[2] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    float uv_max[2] = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+    for (size_t i = 0; i + 2 < count; i += 3) {
+        const float a = triangle_area(positions, ids[i], ids[i + 1], ids[i + 2]);
+        area += a;
+        if (!normals.empty()) {
+            for (int k = 0; k < 3; ++k) {
+                normal[k] += a * (normals[size_t(ids[i]) * 3 + k] + normals[size_t(ids[i + 1]) * 3 + k]
+                                  + normals[size_t(ids[i + 2]) * 3 + k]) / 3.f;
+            }
+        }
+        if (uv_bytes) {
+            for (int k = 0; k < 2; ++k) {
+                for (size_t corner = 0; corner < 3; ++corner) {
+                    const float value = uv_of(ids[i + corner], k);
+                    uv[k] += a * value / 3.f;
+                    uv_min[k] = std::min(uv_min[k], value);
+                    uv_max[k] = std::max(uv_max[k], value);
+                }
+            }
+        }
+    }
+    if (area <= 0.f) {
+        return;
+    }
+    if (!normals.empty()) {
+        for (int k = 0; k < 3; ++k) {
+            const float unit = std::min(std::max(normal[k] / area, -1.f), 1.f);
+            cluster.normal |= static_cast<uint32_t>(static_cast<uint8_t>(static_cast<int8_t>(std::lround(unit * 127.f)))) << (k * 8);
+        }
+    }
+    if (uv_bytes) {
+        cluster.uv = pack_halves(uv[0] / area, uv[1] / area);
+        cluster.uv_range = pack_halves(uv_max[0] - uv_min[0], uv_max[1] - uv_min[1]);
+    }
+}
+
 } // namespace
 
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset, bool merge_pieces)
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
+                       uint32_t uv_offset, bool merge_pieces, bool coarser_levels)
 {
     MeshLod lod;
     if (blas.clusters.empty()) {
@@ -413,13 +482,14 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     vector<unsigned char>& locks = lod_vertices.locks;
     size_t vertex_count = positions.size() / 3;
 
-    if (vertices) {
+    const bool has_normals = vertices && normal_offset != kLodNoAttribute;
+    if (has_normals) {
         normals.resize(vertex_count * 3);
         for (size_t v = 0; v < vertex_count; ++v) {
             std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
         }
     }
-    merge_pieces = merge_pieces && vertices != nullptr;
+    merge_pieces = merge_pieces && has_normals;
     if (merge_pieces) {
         lod_vertices.bytes.resize(vertex_count * stride);
         std::memcpy(lod_vertices.bytes.data(), vertices, vertex_count * stride);
@@ -439,7 +509,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     vector<uint32_t> first_seen;
     locks.resize(vertex_count);
 
-    for (uint32_t level = 1; level < kMaxLevels && pending.size() > 1; ++level) {
+    for (uint32_t level = 1; coarser_levels && level < kMaxLevels && pending.size() > 1; ++level) {
         first_seen.resize(vertex_count);
         vector<uint32_t> all_indices;
         vector<uint32_t> index_counts;
@@ -579,6 +649,14 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
         level.radius = bounds.radius;
         lod.levels.push_back(level);
         first = end;
+    }
+    // Merged vertices are only in the copy, which holds the originals too.
+    const uint8_t* uv_bytes = nullptr;
+    if (vertices && uv_offset != kLodNoAttribute) {
+        uv_bytes = lod_vertices.grown ? lod_vertices.bytes.data() : vertices;
+    }
+    for (MeshLodCluster& cluster : lod.clusters) {
+        fill_cluster_surface(cluster, lod.indices, positions, normals, uv_bytes, stride, uv_offset);
     }
     if (lod_vertices.grown) {
         lod.vertices = std::move(lod_vertices.bytes);
