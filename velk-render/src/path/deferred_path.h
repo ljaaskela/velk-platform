@@ -122,6 +122,10 @@ public:
         ArenaRegion light_cell_header;
         /// The cells to trace this frame. See CELLS_WORK.
         ArenaRegion light_cell_work;
+        /// The bounce cells' table, and the list of those to trace this frame. See
+        /// VELK_BOUNCE_GLSL and CELLS_BOUNCE_LIST.
+        ArenaRegion light_bounce;
+        ArenaRegion light_bounce_list;
         /// Changes before this frame are no longer listed.
         uint32_t light_cell_changes_from = 0;
         /// The object id epoch the cells are keyed under. See BvhBinding::object_id_epoch.
