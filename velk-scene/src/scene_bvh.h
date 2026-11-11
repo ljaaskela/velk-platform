@@ -96,6 +96,12 @@ public:
         return {changed_.data(), changed_.size()};
     }
 
+    uint32_t get_object_transforms(uint32_t& slots) const override
+    {
+        slots = object_transform_slots_;
+        return object_transforms_word_;
+    }
+
     void invalidate() override { needs_full_build_ = true; }
 
 private:
@@ -173,6 +179,7 @@ private:
         uint32_t motion_capacity = 0;  ///< Slots the region holds.
         float max_displacement = 0.f;  ///< Bounds are grown by this.
         uint32_t object_base = 0;      ///< Slot i's object id is this plus i.
+        uint32_t object_count = 0;     ///< How many ids from object_base it has placed.
         bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
         bool motion_records_dirty = false;  ///< Records were written at rest.
         bool motion_error_logged = false;
@@ -314,6 +321,24 @@ private:
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;
+
+    /// Each object's place, by the slot of its id: see get_object_transforms. A mirror of
+    /// what is in the culling arena, and the slots changed since it was last uploaded.
+    vector<uint32_t> object_transforms_;
+    uint32_t transforms_dirty_first_ = 0xFFFFFFFFu;
+    uint32_t transforms_dirty_last_ = 0;
+    bool transforms_all_dirty_ = false;
+    ArenaRegion object_transforms_region_;
+    uint32_t object_transforms_word_ = 0xFFFFFFFFu;
+    uint32_t object_transform_slots_ = 0;
+    /// Notes where object @p object is: @p world, its object space to the world.
+    void set_object_transform(uint32_t object, const mat4& world);
+    /// Forgets where @p count objects from @p object are.
+    void clear_object_transforms(uint32_t object, uint32_t count);
+    /// Writes the instances' places, every slot or only @p slots.
+    void set_instance_transforms(const InstanceGroup& group, const vector<uint32_t>* slots);
+    /// Uploads what changed to the culling arena.
+    void flush_object_transforms(FrameContext& ctx);
 };
 
 } // namespace impl

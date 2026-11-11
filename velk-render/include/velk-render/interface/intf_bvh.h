@@ -84,6 +84,19 @@ public:
     virtual array_view<const WorldBox> changed_bounds(bool& all) const = 0;
 
     /**
+     * @brief Where each object it holds is, by object id, for whatever keeps data by object.
+     *
+     * Returns the word in the culling arena (IRenderBackend::kGlobalCulling) where the
+     * table starts, or 0xFFFFFFFF if there is none yet, and sets @p slots to how many it
+     * has. Entry `id & 0x3FFFFFF` is 13 words: the object's object space to the world by
+     * rows (3 rows of 4 floats, the 4th the world position of its origin), then its id's
+     * generation plus one, or 0 if the entry is unknown. An entry whose generation is not
+     * the id's is another object's. Objects drawn but not in the BVH have none. Valid
+     * after the update.
+     */
+    virtual uint32_t get_object_transforms(uint32_t& slots) const = 0;
+
+    /**
      * @brief Marks the BVH as stale so the next access rebuilds.
      *
      * Implementations rebuild lazily: `invalidate()` only flags the

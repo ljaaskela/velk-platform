@@ -48,6 +48,10 @@ struct BvhBinding
     /// IInstancedMeshVisual::set_ray_motion. Tracing shaders are compiled with it.
     string_view ray_motion;
     float ray_motion_reach = 0.f;
+    /// Where each object is, by the slot of its id, and how many slots. See
+    /// IBvh::get_object_transforms.
+    uint32_t object_transforms = 0xFFFFFFFFu;
+    uint32_t object_slots = 0;
 
     bool operator==(const BvhBinding& o) const
     {

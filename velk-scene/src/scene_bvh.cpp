@@ -969,10 +969,16 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     const uint32_t object_base =
         emit.scene ? emit.scene->get_object_ids(*element, static_cast<uint32_t>(visual.get_transforms().size())) : 0u;
     if (object_base != group.object_base) {
+        clear_object_transforms(group.object_base, group.object_count);
         group.object_base = object_base;
         visual.set_object_id_base(object_base);
         rebuild = true;
     }
+    const auto object_count = static_cast<uint32_t>(visual.get_transforms().size());
+    if (object_count < group.object_count) {
+        clear_object_transforms(group.object_base + object_count, group.object_count - object_count);
+    }
+    group.object_count = object_count;
 
     // A translated element keeps every record relative to its partition's origin, so
     // only the origins move. Anything else changes the records, and a motion function's
@@ -1022,6 +1028,14 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
             }
             top_dirty_ = true;
         }
+    }
+
+    // Where each instance is, for whatever keeps data by object: all of them when the
+    // element moved or the group is new, else those that changed.
+    if (rebuild || new_group || std::memcmp(old_world.m, new_world.m, sizeof(new_world.m)) != 0) {
+        set_instance_transforms(group, nullptr);
+    } else if (!changed.empty()) {
+        set_instance_transforms(group, &changed);
     }
 
     if (rebuild) {
@@ -1096,6 +1110,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         const EmitContext& emit;
         vector<EmittedRecord> records;
         const void* open_group = nullptr;
+        mat4 world{};  ///< Its object space to the world: every site of an element has the same.
     };
     CollectState collect{*this, emit};
     emit_unresolved_ = false;
@@ -1112,6 +1127,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
             return;
         }
         s.open_group = site.record_group;
+        s.world = *site.world;
         s.records.emplace_back();
         auto& fresh = s.records.back();
         fresh.gpu = make_rt_record(*site.world);
@@ -1177,6 +1193,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
                 }
             }
         }
+        set_object_transform(object, collect.world);
         return;
     }
 
@@ -1210,6 +1227,112 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         unplaced_.push_back(slot);
         ++live_records_;
     }
+    if (!collect.records.empty()) {
+        set_object_transform(object, collect.world);
+    }
+}
+
+namespace {
+// See IBvh::get_object_transforms.
+constexpr uint32_t kObjectTransformWords = 13;
+constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
+constexpr uint32_t kObjectSlotBits = 26;
+} // namespace
+
+void SceneBvh::set_object_transform(uint32_t object, const mat4& world)
+{
+    if (object == 0) {
+        return;
+    }
+    const uint32_t slot = object & kObjectSlotMask;
+    if (object_transforms_.size() < size_t(slot + 1) * kObjectTransformWords) {
+        object_transforms_.resize(size_t(slot + 1) * kObjectTransformWords, 0u);
+    }
+    uint32_t* entry = object_transforms_.data() + size_t(slot) * kObjectTransformWords;
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            const float v = world(row, col);
+            std::memcpy(entry + row * 4 + col, &v, sizeof(float));
+        }
+    }
+    entry[12] = (object >> kObjectSlotBits) + 1u;
+    transforms_dirty_first_ = std::min(transforms_dirty_first_, slot);
+    transforms_dirty_last_ = std::max(transforms_dirty_last_, slot);
+}
+
+void SceneBvh::clear_object_transforms(uint32_t object, uint32_t count)
+{
+    const uint32_t first = object & kObjectSlotMask;
+    if (object == 0 || count == 0 || size_t(first) * kObjectTransformWords >= object_transforms_.size()) {
+        return;
+    }
+    const uint32_t last = std::min(first + count, static_cast<uint32_t>(object_transforms_.size() / kObjectTransformWords)) - 1u;
+    for (uint32_t slot = first; slot <= last; ++slot) {
+        object_transforms_[size_t(slot) * kObjectTransformWords + 12u] = 0u;
+    }
+    transforms_dirty_first_ = std::min(transforms_dirty_first_, first);
+    transforms_dirty_last_ = std::max(transforms_dirty_last_, last);
+}
+
+void SceneBvh::set_instance_transforms(const InstanceGroup& group, const vector<uint32_t>* slots)
+{
+    const auto& transforms = group.visual->get_transforms();
+    const auto place = [&](uint32_t slot) {
+        if (slot >= transforms.size()) {
+            return;
+        }
+        if (group.visual->is_live(slot)) {
+            set_object_transform(group.object_base + slot, group.world * transforms[slot].to_mat4());
+        } else {
+            clear_object_transforms(group.object_base + slot, 1);
+        }
+    };
+    if (slots) {
+        for (uint32_t slot : *slots) {
+            place(slot);
+        }
+    } else {
+        for (uint32_t slot = 0; slot < transforms.size(); ++slot) {
+            place(slot);
+        }
+    }
+}
+
+void SceneBvh::flush_object_transforms(FrameContext& ctx)
+{
+    if (transforms_dirty_first_ > transforms_dirty_last_ && !transforms_all_dirty_) {
+        return;
+    }
+    auto arena = ctx.resources ? ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t)) : nullptr;
+    if (!arena || object_transforms_.empty()) {
+        return;
+    }
+    const uint64_t bytes = object_transforms_.size() * sizeof(uint32_t);
+    if (!object_transforms_region_.valid() || object_transforms_region_.size() < bytes) {
+        // Room for twice as many, so that a growing scene seldom moves it.
+        object_transforms_region_ = arena->alloc(bytes * 2u);
+        if (!object_transforms_region_.valid()) {
+            VELK_LOG(E, "SceneBvh: object transform allocation failed");
+            object_transforms_word_ = 0xFFFFFFFFu;
+            object_transform_slots_ = 0;
+            return;
+        }
+        transforms_all_dirty_ = true;
+    }
+    if (transforms_all_dirty_) {
+        arena->update_at(object_transforms_region_.offset(), object_transforms_.data(), bytes);
+    } else {
+        const uint32_t last = std::min(transforms_dirty_last_, static_cast<uint32_t>(object_transforms_.size() / kObjectTransformWords) - 1u);
+        const uint64_t from = uint64_t(transforms_dirty_first_) * kObjectTransformWords;
+        const uint64_t words = uint64_t(last - transforms_dirty_first_ + 1u) * kObjectTransformWords;
+        arena->update_at(object_transforms_region_.offset() + from * sizeof(uint32_t), object_transforms_.data() + from,
+                         words * sizeof(uint32_t));
+    }
+    object_transforms_word_ = static_cast<uint32_t>(object_transforms_region_.offset() / sizeof(uint32_t));
+    object_transform_slots_ = static_cast<uint32_t>(object_transforms_.size() / kObjectTransformWords);
+    transforms_dirty_first_ = 0xFFFFFFFFu;
+    transforms_dirty_last_ = 0;
+    transforms_all_dirty_ = false;
 }
 
 void SceneBvh::note_changed(const BvhItemBounds& bounds)
@@ -1245,6 +1368,7 @@ void SceneBvh::free_record(uint32_t slot)
     } else if (record.partition != kUnplaced) {
         partitions_[record.partition].dirty = true;
     }
+    clear_object_transforms(record.gpu.object, 1);
     record.owner = nullptr;
     record.partition = kUnplaced;
     record.shapes.clear();
@@ -1264,6 +1388,7 @@ void SceneBvh::remove_element(IElement* element)
     }
     auto group = instance_groups_.find(element);
     if (group != instance_groups_.end()) {
+        clear_object_transforms(group->second.object_base, group->second.object_count);
         free_instance_partitions(group->second);
         instance_groups_.erase(group);
     }
@@ -2102,6 +2227,8 @@ void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
         free_instance_partitions(group);
     }
     instance_groups_.clear();
+    std::fill(object_transforms_.begin(), object_transforms_.end(), 0u);
+    transforms_all_dirty_ = true;
     unresolved_.clear();
     dynamic_ = Partition{};
     dynamic_transforms_dirty_ = false;
@@ -2238,6 +2365,7 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
     if (root_dirty_) {
         upload_root(ctx);
     }
+    flush_object_transforms(ctx);
 }
 
 } // namespace velk::impl
