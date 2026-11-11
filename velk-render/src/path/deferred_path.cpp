@@ -347,7 +347,7 @@ constexpr uint32_t kCellHeaderWords = 12;
 // VELK_BOUNCE_GLSL.
 constexpr uint32_t kBounceEntries = 1u << 15;
 constexpr uint32_t kBounceRays = 64;
-constexpr uint32_t kBounceWords = 16 + kBounceRays * 4;
+constexpr uint32_t kBounceWords = 16 + kBounceRays * 5;
 // How many bounce cells a frame may trace, and the words of their list: a count and three
 // spare, 2 words an entry, then 8 words a ray of each. See CELLS_BOUNCE_LIST.
 constexpr uint32_t kBounceListMax = 256;

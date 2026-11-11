@@ -1157,11 +1157,13 @@ uint velk_light_cell_hash(VelkLightCell c)
 //   15     the cell's tag when the entry was made, so a slot taken by another cell is seen
 //   16..   its rays, kBounceRayWords each: the cell hit, or kNoCell for a miss; the distance
 //          as a half in the low 16 bits and the normal hit above (velk_oct8); the albedo
-//          there, 8 bits a channel; the emission there (velk_pack_rgbe).
+//          there, 8 bits a channel; the emission there (velk_pack_rgbe); the bounce cell
+//          over the hit (its word in the cell table), whose light arriving there is passed
+//          on, or kNoCell.
 #define VELK_BOUNCE_GLSL R"(
 const int kBounceUp = 2;
 const uint kBounceRays = 64u;
-const uint kBounceRayWords = 4u;
+const uint kBounceRayWords = 5u;
 const uint kBounceHeader = 16u;
 const uint kBounceWords = kBounceHeader + kBounceRays * kBounceRayWords;
 const uint kBounceProbes = 4u;
@@ -1245,6 +1247,23 @@ vec3 velk_unpack_rgbe(uint w)
     if (w == 0u) return vec3(0.0);
     float scale = exp2(float(int(w >> 24u) - 128)) / 255.0;
     return vec3(float(w & 255u), float((w >> 8u) & 255u), float((w >> 16u) & 255u)) * scale;
+}
+
+// The light from other surfaces arriving at a surface facing `N`, from the SH words 4 to 9 of
+// a bounce entry, in the units of the probe field's irradiance.
+vec3 velk_bounce_sh_irradiance(uvec3 a, uvec3 b, vec3 N)
+{
+    vec2 h0 = unpackHalf2x16(a.x);
+    vec2 h1 = unpackHalf2x16(a.y);
+    vec2 h2 = unpackHalf2x16(a.z);
+    vec2 h3 = unpackHalf2x16(b.x);
+    vec2 h4 = unpackHalf2x16(b.y);
+    vec2 h5 = unpackHalf2x16(b.z);
+    vec3 sh0 = vec3(h0, h1.x);
+    vec3 sh1 = vec3(h1.y, h2);
+    vec3 sh2 = vec3(h3, h4.x);
+    vec3 sh3 = vec3(h4.y, h5);
+    return max(0.282095 * sh0 + 0.325735 * (sh1 * N.y + sh2 * N.z + sh3 * N.x), vec3(0.0));
 }
 )"
 
@@ -2791,6 +2810,40 @@ uvec2 velk_cell_changed_lights(uint valid, vec3 world_pos, vec3 N, float margin)
     }
     return changed;
 }
+
+// The bounce entry of cell `cell` (its word in the cell table), or kNoCell. With `make`, an
+// absent one takes an empty entry, or one unused for kBounceUnusedFrames, and `made` says so.
+uint velk_bounce_find(uint cell, bool make, out bool made)
+{
+    made = false;
+    uint now = VELK_GLOBALS.present_counter;
+    uint tag = velk_light_cell_words.data[cell] & 0xFFFFFFFCu;
+    uint hash = velk_light_cell_mix(cell * 2654435761u);
+    uint spare = kNoCell;
+    uint spare_owner = 0u;
+    for (uint p = 0u; p < kBounceProbes; ++p) {
+        uint at = CELLS_BOUNCE + ((hash + p) & (CELLS_BOUNCE_ENTRIES - 1u)) * kBounceWords;
+        uint owner = velk_light_cell_words.data[at];
+        bool same_cell = owner == cell && velk_light_cell_words.data[at + 15u] == tag;
+        if (same_cell) return at;
+        bool unused = now - velk_light_cell_words.data[at + 1u] > kBounceUnusedFrames
+                   && velk_light_cell_words.data[at + 2u] != kBounceListed;
+        if (spare == kNoCell && (owner == 0u || unused || owner == cell)) {
+            spare = at;
+            spare_owner = owner;
+        }
+    }
+    if (!make || spare == kNoCell) return kNoCell;
+    // Another thread may take the entry first; this pixel then has none this frame.
+    if (atomicCompSwap(velk_light_cell_words.data[spare], spare_owner, cell) != spare_owner) return kNoCell;
+    velk_light_cell_words.data[spare + 1u] = now;
+    velk_light_cell_words.data[spare + 2u] = kBounceUntraced;
+    velk_light_cell_words.data[spare + 14u] = 0u;
+    for (uint w = 4u; w < 10u; ++w) velk_light_cell_words.data[spare + w] = 0u;
+    velk_light_cell_words.data[spare + 15u] = tag;
+    made = true;
+    return spare;
+}
 )";
 
 /// What tracing light cells needs. Follows light_cells_src.
@@ -3314,40 +3367,6 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
 
 )"
                                                                       R"(
-// The bounce entry of cell `cell` (its word in the cell table), or kNoCell. With `make`, an
-// absent one takes an empty entry, or one unused for kBounceUnusedFrames, and `made` says so.
-uint velk_bounce_find(uint cell, bool make, out bool made)
-{
-    made = false;
-    uint now = VELK_GLOBALS.present_counter;
-    uint tag = velk_light_cell_words.data[cell] & 0xFFFFFFFCu;
-    uint hash = velk_light_cell_mix(cell * 2654435761u);
-    uint spare = kNoCell;
-    uint spare_owner = 0u;
-    for (uint p = 0u; p < kBounceProbes; ++p) {
-        uint at = CELLS_BOUNCE + ((hash + p) & (CELLS_BOUNCE_ENTRIES - 1u)) * kBounceWords;
-        uint owner = velk_light_cell_words.data[at];
-        bool same_cell = owner == cell && velk_light_cell_words.data[at + 15u] == tag;
-        if (same_cell) return at;
-        bool unused = now - velk_light_cell_words.data[at + 1u] > kBounceUnusedFrames
-                   && velk_light_cell_words.data[at + 2u] != kBounceListed;
-        if (spare == kNoCell && (owner == 0u || unused || owner == cell)) {
-            spare = at;
-            spare_owner = owner;
-        }
-    }
-    if (!make || spare == kNoCell) return kNoCell;
-    // Another thread may take the entry first; this pixel then has none this frame.
-    if (atomicCompSwap(velk_light_cell_words.data[spare], spare_owner, cell) != spare_owner) return kNoCell;
-    velk_light_cell_words.data[spare + 1u] = now;
-    velk_light_cell_words.data[spare + 2u] = kBounceUntraced;
-    velk_light_cell_words.data[spare + 14u] = 0u;
-    for (uint w = 4u; w < 10u; ++w) velk_light_cell_words.data[spare + w] = 0u;
-    velk_light_cell_words.data[spare + 15u] = tag;
-    made = true;
-    return spare;
-}
-
 // Keeps up the bounce entry of cell `cell` for the pixel at `coord`, and lists it for tracing:
 // made and listed if new, in the round that lists cells with no light yet, so these come
 // first; in the last round, noted as used by the first pixel to get to it this frame, and
@@ -3541,6 +3560,7 @@ void main()
     velk_ray_footprint = 0.0;
     velk_light_cell_words.data[ray_at + 2u] = 0u;
     velk_light_cell_words.data[ray_at + 3u] = 0u;
+    velk_light_cell_words.data[ray_at + 4u] = kNoCell;
     if (!found) {
         velk_light_cell_words.data[ray_at] = kNoCell;
         velk_light_cell_words.data[ray_at + 1u] = 0u;
@@ -3610,6 +3630,9 @@ void main()
                       uintBitsToFloat(velk_light_cell_words.data[scratch + 5u]));
     uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
     velk_light_cell_words.data[ray_at] = kept != kNoCell ? kept : kBounceHitNoCell;
+    // The bounce cell over the hit, kBounceUp levels up as over a pixel, whose light arriving
+    // there the gather passes on.
+    velk_light_cell_words.data[ray_at + 4u] = velk_cell_keep(velk_light_cell(object, local, side, level + kBounceUp), kBounceUp);
 }
 )";
 
@@ -3649,6 +3672,20 @@ void main()
             known = 0.0;
         } else {
             vec3 arriving = vec3(unpackHalf2x16(velk_light_cell_words.data[hit + kCellArrive]), unpackHalf2x16(b).x);
+            // Light from other surfaces arriving there too, from the bounce entry over the hit
+            // if it has any; it holds one bounce more each frame.
+            uint over = velk_light_cell_words.data[ray_at + 4u];
+            if (over != kNoCell) {
+                bool made;
+                uint entry = velk_bounce_find(over, false, made);
+                if (entry != kNoCell && velk_light_cell_words.data[entry + 2u] == kBounceTraced) {
+                    uvec3 a = uvec3(velk_light_cell_words.data[entry + 4u], velk_light_cell_words.data[entry + 5u],
+                                    velk_light_cell_words.data[entry + 6u]);
+                    uvec3 c = uvec3(velk_light_cell_words.data[entry + 7u], velk_light_cell_words.data[entry + 8u],
+                                    velk_light_cell_words.data[entry + 9u]);
+                    arriving += velk_bounce_sh_irradiance(a, c, velk_unoct8(velk_light_cell_words.data[ray_at + 1u] >> 16u));
+                }
+            }
             radiance = unpackUnorm4x8(velk_light_cell_words.data[ray_at + 2u]).rgb * arriving
                      + velk_unpack_rgbe(velk_light_cell_words.data[ray_at + 3u]);
         }
@@ -3885,17 +3922,9 @@ uint velk_bounce_lookup(uint cell)
 // the units of the probe field's irradiance.
 vec3 velk_bounce_irradiance(uint at, vec3 N)
 {
-    vec2 h0 = unpackHalf2x16(velk_light_cell_words.data[at + 4u]);
-    vec2 h1 = unpackHalf2x16(velk_light_cell_words.data[at + 5u]);
-    vec2 h2 = unpackHalf2x16(velk_light_cell_words.data[at + 6u]);
-    vec2 h3 = unpackHalf2x16(velk_light_cell_words.data[at + 7u]);
-    vec2 h4 = unpackHalf2x16(velk_light_cell_words.data[at + 8u]);
-    vec2 h5 = unpackHalf2x16(velk_light_cell_words.data[at + 9u]);
-    vec3 sh0 = vec3(h0, h1.x);
-    vec3 sh1 = vec3(h1.y, h2);
-    vec3 sh2 = vec3(h3, h4.x);
-    vec3 sh3 = vec3(h4.y, h5);
-    return max(0.282095 * sh0 + 0.325735 * (sh1 * N.y + sh2 * N.z + sh3 * N.x), vec3(0.0));
+    uvec3 a = uvec3(velk_light_cell_words.data[at + 4u], velk_light_cell_words.data[at + 5u], velk_light_cell_words.data[at + 6u]);
+    uvec3 b = uvec3(velk_light_cell_words.data[at + 7u], velk_light_cell_words.data[at + 8u], velk_light_cell_words.data[at + 9u]);
+    return velk_bounce_sh_irradiance(a, b, N);
 }
 
 // The word a traced cell starts at, or kNoCell.
