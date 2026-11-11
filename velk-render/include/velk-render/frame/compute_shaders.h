@@ -1223,6 +1223,20 @@ const uint kBounceFromRay = 2u;
 const uint kBounceHitNoCell = 0xFFFFFFFEu;
 // In place of the cell hit: something was hit, and the cell is not found yet.
 const uint kBounceHitPending = 0xFFFFFFFDu;
+
+// A pixel's reflection ray, kReflectWords at the pixel's place in a run of words, row by
+// row (CELLS_REFLECT). Its passes reuse words once done with them:
+//   0  what it hit: the cell there, kNoCell for a miss, kBounceHitPending until found,
+//      kBounceHitNoCell with no room, or kReflectSkip for a pixel that traces none
+//   1  the normal hit in the low 16 bits (velk_oct8) and which side of the object above
+//   2  the shape hit
+//   3  the uv there, as halves
+//   4  the object hit; then the bounce cell over the hit, or kNoCell
+//   5  where on the object, 3 words, x first; then the albedo there and the emission
+//      there (velk_pack_rgbe) in the first two
+//   8  the distance, as a float
+const uint kReflectWords = 9u;
+const uint kReflectSkip = 0xFFFFFFFCu;
 // An entry unused this many frames gives way to a new one.
 const uint kBounceUnusedFrames = 16u;
 // The tangent of the half angle of each ray's cone, kBounceRays of them sharing the
@@ -1888,11 +1902,22 @@ void main()
         // rest.
         const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
         vec3 reflected = reflect(-V, N);
+        vec3 env_along = env_specular;
         vec3 cells_reflection = cells_here ? velk_cells_bounce_toward(reflected, true) : vec3(-1.0);
         if (cells_reflection.r >= 0.0) {
             float env_broad = dot(env_miss_color_lod(reflected, env_max_lod), kLuma);
             float sky_seen = env_broad > 1e-4 ? clamp(dot(cells_reflection, kLuma) / env_broad, 0.0, 1.0) : 0.0;
             env_specular = env_specular * sky_seen + cells_reflection * (1.0 - sky_seen);
+        }
+        // Smooth enough to have traced its reflection: what the ray found, sharp, taking over
+        // from the broad reflection as the surface gets smoother. Not yet known: the broad one.
+        float reflect_below = uintBitsToFloat(velk_light_cell_words.data[CELLS_HEADER + 16u]);
+        if (cells_here && roughness < reflect_below) {
+            vec4 traced = velk_cells_reflection(coord, velk_light_cell_words.data[CELLS_HEADER + 15u]);
+            if (traced.w >= 0.0) {
+                vec3 sharp = traced.w > 0.0 ? traced.rgb : env_along;
+                env_specular = mix(env_specular, sharp, 1.0 - smoothstep(reflect_below / 3.0, reflect_below, roughness));
+            }
         }
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
@@ -1941,11 +1966,16 @@ layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; }
 )" VELK_LIGHT_CELL_GLSL VELK_BOUNCE_GLSL R"(
 #define CELLS_HEADER pc.cells_header
 // The header's words, read once a thread by velk_cells_load, which a main calls first.
-uint cells_header[14];
+uint cells_header[17];
 void velk_cells_load()
 {
-    for (uint w = 0u; w < 14u; ++w) cells_header[w] = velk_light_cell_words.data[CELLS_HEADER + w];
+    for (uint w = 0u; w < 17u; ++w) cells_header[w] = velk_light_cell_words.data[CELLS_HEADER + w];
 }
+// The pixels' reflection rays (see kReflectWords), how many pixels a row, and the roughness
+// below which a pixel traces one.
+#define CELLS_REFLECT cells_header[14]
+#define CELLS_REFLECT_WIDTH cells_header[15]
+#define CELLS_REFLECT_ROUGHNESS uintBitsToFloat(cells_header[16])
 // Where each object is, by the slot of its id, and how many slots: see
 // IBvh::get_object_transforms. 0xFFFFFFFF if there is no table.
 #define CELLS_OBJECTS cells_header[12]
@@ -2192,12 +2222,17 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
             }
             continue;
         }
-        vec3 box_min = vec3(uintBitsToFloat(velk_light_cell_words.data[at]),
+        vec3 raw_min = vec3(uintBitsToFloat(velk_light_cell_words.data[at]),
                             uintBitsToFloat(velk_light_cell_words.data[at + 1u]),
-                            uintBitsToFloat(velk_light_cell_words.data[at + 2u])) - cam - margin;
-        vec3 box_max = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 4u]),
+                            uintBitsToFloat(velk_light_cell_words.data[at + 2u])) - cam;
+        vec3 raw_max = vec3(uintBitsToFloat(velk_light_cell_words.data[at + 4u]),
                             uintBitsToFloat(velk_light_cell_words.data[at + 5u]),
-                            uintBitsToFloat(velk_light_cell_words.data[at + 6u])) - cam + margin;
+                            uintBitsToFloat(velk_light_cell_words.data[at + 6u])) - cam;
+        // How far from the surface the box's far side is, for how far a light's own size
+        // spreads the rays by the time they get there.
+        float box_reach = length(0.5 * (raw_min + raw_max) - world_pos) + 0.5 * length(raw_max - raw_min);
+        vec3 box_min = raw_min - margin;
+        vec3 box_max = raw_max + margin;
         for (uint i = 0u; i < lights; ++i) {
             uvec2 bit = i < 32u ? uvec2(1u << i, 0u) : uvec2(0u, 1u << (i - 32u));
             if ((changed & bit) != uvec2(0u)) continue;
@@ -2223,13 +2258,17 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
                 continue;
             }
             vec3 to = world_pos - light.direction.xyz * 1e4;
+            // A light with a size is traced toward points across it (see velk_cell_ray), so
+            // its rays spread: by its angle for a sun, by its radius over its distance else.
+            float spread = light.params.w > 0.0 ? box_reach * tan(light.params.w) : 0.0;
             if (light.flags.x != 0u) {
                 to = light.position.xyz;
                 vec3 by = to - world_pos;
                 if (dot(by, by) >= light.params.x * light.params.x) continue;
+                spread = light.params.w > 0.0 ? light.params.w * box_reach / max(length(by), 1e-3) : 0.0;
             }
             if (dot(N, to - world_pos) <= 0.0) continue;
-            if (velk_segment_touches(world_pos, to, box_min, box_max)) {
+            if (velk_segment_touches(world_pos, to, box_min - spread, box_max + spread)) {
                 changed |= bit;
                 velk_cell_stat(light.flags.x == 0u ? kStatChangeBoxSun : kStatChangeBoxOther, 1u);
                 if (all(greaterThanEqual(world_pos, box_min)) && all(lessThanEqual(world_pos, box_max))) {
@@ -3150,6 +3189,147 @@ void main()
 }
 )";
 
+/// Traces one ray a pixel along its mirror direction, for pixels smoother than
+/// CELLS_REFLECT_ROUGHNESS, and writes down what it hit for light_cells_reflect_hits_main_src
+/// and the material pass (see kReflectWords): nothing else is done here. Follows
+/// deferred_compute_prelude_src, light_cells_src and light_cells_trace_src.
+[[maybe_unused]] constexpr string_view light_cells_reflect_trace_main_src = R"(
+void main()
+{
+    velk_cells_load();
+    ivec2 at_pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (at_pixel.x >= int(pc.width) || at_pixel.y >= int(pc.height) || CELLS_REFLECT == 0xFFFFFFFFu) return;
+    uint rec = CELLS_REFLECT + (uint(at_pixel.y) * CELLS_REFLECT_WIDTH + uint(at_pixel.x)) * kReflectWords;
+    vec4 normal_error = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], at_pixel, 0);
+    vec4 mat = texelFetch(velk_textures[nonuniformEXT(pc.material_tex_id)], at_pixel, 0);
+    uint lighting_mode = uint(mat.b * 255.0 + 0.5);
+    if (dot(normal_error.xyz, normal_error.xyz) < 1e-6 || lighting_mode == 0u || mat.g >= CELLS_REFLECT_ROUGHNESS) {
+        velk_light_cell_words.data[rec] = kReflectSkip;
+        return;
+    }
+    vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], at_pixel, 0).xyz;
+    vec3 n = normalize(normal_error.xyz);
+    vec3 dir = reflect(normalize(pos), n);
+    Ray ray;
+    // Lifted off the surface by the G-buffer's own error and a little of the distance.
+    ray.origin = pos + n * (normal_error.w + 1e-4 * length(pos));
+    ray.dir = dir;
+    RayHit hit;
+    if (!trace_closest_hit(ray, 1e30, hit)) {
+        velk_light_cell_words.data[rec] = kNoCell;
+        return;
+    }
+    // The back of a surface is the other side of it, which has cells of its own.
+    vec3 hit_n = normalize(hit.normal);
+    uint hit_side = hit.side;
+    if (dot(hit_n, dir) > 0.0) {
+        hit_n = -hit_n;
+        hit_side ^= 1u;
+    }
+    velk_light_cell_words.data[rec] = kBounceHitPending;
+    velk_light_cell_words.data[rec + 1u] = velk_oct8(hit_n) | (hit_side << 16u);
+    velk_light_cell_words.data[rec + 2u] = hit.shape_index;
+    velk_light_cell_words.data[rec + 3u] = packHalf2x16(hit.uv);
+    velk_light_cell_words.data[rec + 4u] = hit.object;
+    velk_light_cell_words.data[rec + 5u] = floatBitsToUint(hit.local.x);
+    velk_light_cell_words.data[rec + 6u] = floatBitsToUint(hit.local.y);
+    velk_light_cell_words.data[rec + 7u] = floatBitsToUint(hit.local.z);
+    velk_light_cell_words.data[rec + 8u] = floatBitsToUint(hit.t);
+}
+)";
+
+/// Finds the cells the pixels' reflection rays hit, from what
+/// light_cells_reflect_trace_main_src wrote down, and keeps them as a pixel keeps its own:
+/// made if new, and listed for their direct light. The cell is about as wide as a pixel is
+/// seen through the reflection. Also keeps the bounce cell over the hit. Runs before the
+/// pass that traces direct light, so the cells it lists are traced this frame. Follows
+/// deferred_compute_prelude_src, light_cells_src and light_cells_touch_src; traces nothing.
+[[maybe_unused]] constexpr string_view light_cells_reflect_hits_main_src = R"(
+// Keeps up the bounce entry over a reflection's hit, as bounce rays keep those over theirs
+// (light_cells_bounce_hops_main_src), so that the light from other surfaces there is known
+// wherever reflections land: made if absent, starting its rays from the hit, noted as used,
+// and listed for tracing if new or stale. Made this way, it makes none over its own hits.
+void velk_reflect_bounce_keep(uint over)
+{
+    bool made;
+    uint entry = velk_bounce_find(over, true, made);
+    if (entry == kNoCell) return;
+    uint now = VELK_GLOBALS.present_counter;
+    bool was_stale = false;
+    if (made) {
+        vec3 absolute = world_pos + VELK_GLOBALS.cam_pos.xyz;
+        velk_light_cell_words.data[entry + 10u] = floatBitsToUint(absolute.x);
+        velk_light_cell_words.data[entry + 11u] = floatBitsToUint(absolute.y);
+        velk_light_cell_words.data[entry + 12u] = floatBitsToUint(absolute.z);
+        velk_light_cell_words.data[entry + 13u] = velk_cell_pack_normal(N);
+        // Listed before it is marked as made by a ray, so no other ray lists it as well.
+        velk_light_cell_words.data[entry + 2u] = kBounceListed;
+        velk_light_cell_words.data[entry + 14u] = kBounceFromRay;
+    } else {
+        // The first to get to it this frame; a pixel or a bounce ray may have been first.
+        if (velk_light_cell_words.data[entry + 1u] == now || atomicExchange(velk_light_cell_words.data[entry + 1u], now) == now) {
+            return;
+        }
+        uint state = velk_light_cell_words.data[entry + 2u];
+        uint flags = velk_light_cell_words.data[entry + 14u];
+        if (state == kBounceUntraced && (flags & kBounceFromRay) != 0u) {
+            if (atomicCompSwap(velk_light_cell_words.data[entry + 2u], kBounceUntraced, kBounceListed) != kBounceUntraced) return;
+        } else if (state == kBounceTraced && (flags & kBounceStale) != 0u) {
+            was_stale = true;
+            velk_light_cell_words.data[entry + 2u] = kBounceListed;
+        } else {
+            return;
+        }
+    }
+    uint list = CELLS_BOUNCE_LIST;
+    uint n = atomicAdd(velk_light_cell_words.data[list], 1u);
+    if (n >= CELLS_BOUNCE_LIST_MAX) {
+        // No room: a new one waits for a later frame, a stale one keeps what it holds.
+        velk_light_cell_words.data[entry + 2u] = was_stale ? kBounceTraced : kBounceUntraced;
+        return;
+    }
+    velk_light_cell_words.data[list + 4u + n * 2u] = entry;
+    velk_light_cell_words.data[list + 4u + n * 2u + 1u] = kCellNoPixel;
+}
+
+void main()
+{
+    velk_cells_load();
+    ivec2 at_pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (at_pixel.x >= int(pc.width) || at_pixel.y >= int(pc.height) || CELLS_REFLECT == 0xFFFFFFFFu) return;
+    uint rec = CELLS_REFLECT + (uint(at_pixel.y) * CELLS_REFLECT_WIDTH + uint(at_pixel.x)) * kReflectWords;
+    if (velk_light_cell_words.data[rec] != kBounceHitPending) return;
+    vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], at_pixel, 0).xyz;
+    vec3 n = normalize(texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], at_pixel, 0).xyz);
+    vec3 dir = reflect(normalize(pos), n);
+    uint packed = velk_light_cell_words.data[rec + 1u];
+    // In full: the cell made here is traced from this place, and a half's error at a
+    // distance can put it under the surface hit, in that surface's own shadow.
+    float t = uintBitsToFloat(velk_light_cell_words.data[rec + 8u]);
+
+    mat4 vp = VELK_GLOBALS.view_projection;
+    float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
+    int level = velk_light_cell_level(length(pos) + t, pixel_width, float(CELLS_PIXELS));
+    cells_from_pixel = false;
+    world_pos = pos + dir * t;
+    N = velk_unoct8(packed);
+    object = velk_light_cell_words.data[rec + 4u];
+    side = packed >> 16u;
+    coord = ivec2(0);
+    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[rec + 5u]),
+                      uintBitsToFloat(velk_light_cell_words.data[rec + 6u]),
+                      uintBitsToFloat(velk_light_cell_words.data[rec + 7u]));
+    uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
+    velk_light_cell_words.data[rec] = kept != kNoCell ? kept : kBounceHitNoCell;
+    uint over = velk_cell_keep(velk_light_cell(object, local, side, level + kBounceUp), kBounceUp);
+    velk_light_cell_words.data[rec + 4u] = over;
+    // Many of the cells reflections hit are seen by no pixel directly, so the light arriving
+    // at them comes from here: each ray adds a sample where it hit.
+    if (kept != kNoCell) velk_cell_arrive(kept, world_pos, N);
+    if (over != kNoCell) velk_reflect_bounce_keep(over);
+}
+)";
+
 /// Marks on every traced light cell the lights this frame's changes could alter there, a
 /// thread a slot of the table, from where its object is now: a moved box on the way to a
 /// light, or a light that moved. The marks stay on the cell until it is traced for those
@@ -3174,8 +3354,9 @@ void main()
     vec3 facing;
     uvec2 which = uvec2(0xFFFFFFFFu);
     if (velk_cell_place(object, cube, level, level_side & 7u, place, facing)) {
-        // The place is the cube's middle, up to most of a cell off the surface, so the margin
-        // is wider than a pixel's.
+        // The place is the cube's middle, up to 0.87 of a cell off the surface, and the cell's
+        // rays start across it, half a cell either way: the margin covers both. The light's
+        // own spread is added per light.
         which = velk_cell_changed_lights(place, facing, 2.0 * velk_light_cell_size(level));
     } else {
         velk_cell_stat(kStatMarkUnplaced, 1u);
@@ -3517,6 +3698,77 @@ void main()
 }
 )";
 
+/// Finds the material where the pixels' reflection rays hit, a thread a pixel: the albedo,
+/// and what the surface gives off. Composed with the materials by compose_rt_compute.
+/// `pc.extras` is the word of the rays (CELLS_REFLECT), the pixels a row and the rows in
+/// the high half, the G-buffer's world position and its normal.
+[[maybe_unused]] constexpr string_view light_cells_reflect_shade_main_src = VELK_BOUNCE_GLSL R"(
+layout(set = 1, binding = 16, std430) buffer ReflectWords { uint data[]; } reflect_words;
+
+// The environment along `rd`, blurred as a surface of `roughness` sees it, as the lighting
+// reads it for a pixel's own reflection. Black without one.
+vec3 velk_reflect_env(vec3 rd, float roughness)
+{
+    if (pc.env.x == 0u) return vec3(0.0);
+    float c = cos(pc.env_params.y);
+    float s = sin(pc.env_params.y);
+    vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
+    vec2 uv = vec2(atan(dir.z, dir.x) / 6.28318531 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265 + 0.5);
+    float lod = roughness * (float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env.y)])) - 1.0);
+    return textureLod(velk_textures[nonuniformEXT(pc.env.y)], uv, lod).rgb * pc.env_params.x;
+}
+
+void main()
+{
+    uint width = pc.extras.y & 0xFFFFu;
+    uint height = pc.extras.y >> 16u;
+    uint pixel = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    if (pixel >= width * height) return;
+    uint rec = pc.extras.x + pixel * kReflectWords;
+    uint hit = reflect_words.data[rec];
+    // The markers for a miss, no room, not found yet and no ray are the top four values.
+    if (hit >= kReflectSkip) return;
+    ivec2 at_pixel = ivec2(int(pixel % width), int(pixel / width));
+    vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], at_pixel, 0).xyz;
+    vec3 n = normalize(texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], at_pixel, 0).xyz);
+    vec3 dir = reflect(normalize(pos), n);
+    uint packed = reflect_words.data[rec + 1u];
+    float t = uintBitsToFloat(reflect_words.data[rec + 8u]);
+
+    RtShape s = velk_bvh_shapes.data[reflect_words.data[rec + 2u]];
+    EvalContext ectx;
+    ectx.material_base = s.material_base;
+    ectx.texture_id = s.texture_id;
+    ectx.shape_param = s.shape_param;
+    ectx.uv = unpackHalf2x16(reflect_words.data[rec + 3u]);
+    ectx.uv1 = ectx.uv;
+    ectx.base = s.color;
+    ectx.ray_dir = dir;
+    ectx.normal = velk_unoct8(packed);
+    ectx.rel_pos = pos + dir * t;
+    ectx.hit_pos = ectx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
+    ectx.tangent = vec4(0.0);
+    MaterialEval e = velk_eval_material(s.material_id, ectx);
+    bool lit = e.lighting_mode == VELK_LIGHTING_STANDARD;
+    float metallic = clamp(e.metallic, 0.0, 1.0);
+    vec3 albedo = lit ? e.color.rgb * (1.0 - metallic) : vec3(0.0);
+    vec3 emission = e.emissive + (lit ? vec3(0.0) : e.color.rgb);
+    // What the surface hit reflects of the sky toward the pixel, as the lighting has it for
+    // a pixel's own: Fresnel for the angle the ray comes in at, which at a grazing angle is
+    // most of what a surface shows.
+    if (lit) {
+        float roughness = clamp(e.roughness, 0.04, 1.0);
+        vec3 V = -dir;
+        float NdotV = max(dot(ectx.normal, V), 0.0);
+        vec3 F0 = mix(vec3(0.04), e.color.rgb, metallic);
+        vec3 F = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
+        emission += F * velk_reflect_env(reflect(dir, ectx.normal), roughness);
+    }
+    reflect_words.data[rec + 5u] = packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), 1.0));
+    reflect_words.data[rec + 6u] = velk_pack_rgbe(emission);
+}
+)";
+
 /// Reads the light cells. Follows deferred_compute_prelude_src.
 /// A pass calls velk_cells_begin for a pixel and then velk_cells_light_through for each
 /// light. It writes nothing and traces nothing: light_cells_update_main_src keeps the cells
@@ -3662,7 +3914,12 @@ uint velk_cell_blend_at(VelkCellBlend b, int k, out float weight)
     c.at[ua] = b.nearest[ua] + iu - 1;
     c.at[va] = b.nearest[va] + iv - 1;
     c.at[axis] = b.along_base + ia;
-    return velk_cell_lookup(c);
+    uint at = velk_cell_lookup(c);
+    // Only cells kept up, read by a pixel this frame or the last (word 7): changes reach a
+    // cell when it is kept up, so one that is not holds its light as it was. On a flat
+    // surface between two layers of cubes, only the layer its pixels are in is.
+    if (at != kNoCell && VELK_GLOBALS.present_counter - velk_light_cell_words.data[at + 7u] > 1u) return kNoCell;
+    return at;
 }
 
 VelkCellBlend cells_blend;
@@ -3810,6 +4067,38 @@ vec3 velk_cells_bounce(vec3 normal)
 {
     return velk_cells_bounce_toward(normal, false);
 }
+
+// The light coming back along the reflection ray of the pixel at `pixel`, `width` pixels a
+// row (see kReflectWords): what the surface it hit sends on, from that surface's cells, its
+// albedo times the direct and bounce light arriving there, plus what it gives off. In .w:
+// 1 if there is that, 0 for a miss (the environment, which the caller has), -1 if the pixel
+// traced none or the cell hit has no light yet.
+vec4 velk_cells_reflection(ivec2 pixel, uint width)
+{
+    uint records = velk_light_cell_words.data[CELLS_HEADER + 14u];
+    if (records == 0xFFFFFFFFu) return vec4(0.0, 0.0, 0.0, -1.0);
+    uint rec = records + (uint(pixel.y) * width + uint(pixel.x)) * kReflectWords;
+    uint hit = velk_light_cell_words.data[rec];
+    if (hit == kNoCell) return vec4(0.0);
+    if (hit >= kReflectSkip) return vec4(0.0, 0.0, 0.0, -1.0);
+    // 0xFFFF in place of blue marks a cell made this frame, with no light yet.
+    uint b = velk_light_cell_words.data[hit + kCellArrive + 1u];
+    if ((b & 0xFFFFu) == 0xFFFFu || (b >> 16u) == 0u) return vec4(0.0, 0.0, 0.0, -1.0);
+    vec3 arriving = vec3(unpackHalf2x16(velk_light_cell_words.data[hit + kCellArrive]), unpackHalf2x16(b).x);
+    // Light from other surfaces and the sky, from the bounce cell over the hit, or, where it
+    // has none, the environment along the hit's normal, as the lighting takes for a pixel.
+    vec3 hit_n = velk_unoct8(velk_light_cell_words.data[rec + 1u]);
+    uint over = velk_light_cell_words.data[rec + 4u];
+    uint entry = over != kNoCell ? velk_bounce_lookup(over) : kNoCell;
+    if (entry != kNoCell && velk_light_cell_words.data[entry + 2u] == kBounceTraced) {
+        arriving += velk_bounce_irradiance(entry, hit_n);
+    } else if (pc.env_texture_id != 0u) {
+        float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
+        arriving += env_miss_color_lod(hit_n, env_max_lod);
+    }
+    vec3 albedo = unpackUnorm4x8(velk_light_cell_words.data[rec + 5u]).rgb;
+    return vec4(albedo * arriving + velk_unpack_rgbe(velk_light_cell_words.data[rec + 6u]), 1.0);
+}
 )";
 
 /// Shows the light cells' light in place of the image. Follows deferred_compute_prelude_src
@@ -3820,7 +4109,11 @@ vec3 velk_cells_bounce(vec3 normal)
 /// magenta where it was not worked out in the last few frames. Mode 7: the light from other
 /// surfaces its bounce cell holds, for the pixel's normal, without the surface colour;
 /// magenta where it has none. Mode 8: the same as
-/// pixels read it, blended from the bounce cells around them (velk_cells_bounce).
+/// pixels read it, blended from the bounce cells around them (velk_cells_bounce). Mode 9: the
+/// pixel's traced reflection alone (velk_cells_reflection), the environment for a miss, black
+/// where it traces none or the cell hit has no light yet. Mode 10: which cell the pixel's
+/// reflection ray hit, a colour a cell. Mode 11: whether the place and facing the mark pass
+/// works out for the pixel's own cell agree with the pixel.
 [[maybe_unused]] constexpr string_view light_cells_main_src = R"(
 #define CELLS_MODE pc.mode
 
@@ -3853,6 +4146,79 @@ void main()
         vec3 bounce = velk_cells_bounce(N);
         if (bounce.r < 0.0) bounce = vec3(1.0, 0.0, 1.0);
         imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(bounce, 1.0));
+        return;
+    }
+
+    if (CELLS_MODE == 9u) {
+        // Black where the pixel traces none or the cell hit has no light yet.
+        vec4 traced = velk_cells_reflection(coord, velk_light_cell_words.data[CELLS_HEADER + 15u]);
+        vec3 shown = traced.w > 0.0 ? traced.rgb : traced.w == 0.0 ? env_miss_color_lod(reflect(normalize(world_pos), N), 0.0)
+                                                                   : vec3(0.0);
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(shown, 1.0));
+        return;
+    }
+
+    if (CELLS_MODE == 11u) {
+        // How far the place light_cells_mark_main_src works out for the pixel's own cell (see
+        // velk_cell_place) is from the pixel, in cell widths: green within one, to red at
+        // three or more; blue where the way it faces is more than 60 degrees off the pixel's
+        // normal; magenta where no place is known.
+        vec3 shown = vec3(0.0);
+        if (cells_own != kNoCell) {
+            uint objects = velk_light_cell_words.data[CELLS_HEADER + 12u];
+            uint slots = velk_light_cell_words.data[CELLS_HEADER + 13u];
+            uint object = velk_light_cell_words.data[cells_own + 1u];
+            uint slot = object & 0x3FFFFFFu;
+            uint level_side = velk_light_cell_words.data[cells_own + 5u];
+            float size = velk_light_cell_size(int(level_side >> 3u) - 64);
+            shown = vec3(1.0, 0.0, 1.0);
+            if (objects != 0xFFFFFFFFu && object != 0u && slot < slots
+                && velk_light_cell_words.data[objects + slot * 13u + 12u] == (object >> 26u) + 1u) {
+                uint e = objects + slot * 13u;
+                vec4 r0 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e], velk_light_cell_words.data[e + 1u],
+                                                velk_light_cell_words.data[e + 2u], velk_light_cell_words.data[e + 3u]));
+                vec4 r1 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 4u], velk_light_cell_words.data[e + 5u],
+                                                velk_light_cell_words.data[e + 6u], velk_light_cell_words.data[e + 7u]));
+                vec4 r2 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 8u], velk_light_cell_words.data[e + 9u],
+                                                velk_light_cell_words.data[e + 10u], velk_light_cell_words.data[e + 11u]));
+                mat3 m = mat3(vec3(r0.x, r1.x, r2.x), vec3(r0.y, r1.y, r2.y), vec3(r0.z, r1.z, r2.z));
+                vec3 axis_scale = max(vec3(length(m[0]), length(m[1]), length(m[2])), vec3(1e-12));
+                ivec3 cube = ivec3(int(velk_light_cell_words.data[cells_own + 2u]), int(velk_light_cell_words.data[cells_own + 3u]),
+                                   int(velk_light_cell_words.data[cells_own + 4u]));
+                vec3 place = m * ((vec3(cube) + 0.5) * size / axis_scale) + vec3(r0.w, r1.w, r2.w) - VELK_GLOBALS.cam_pos.xyz;
+                float off = length(place - world_pos) / size;
+                shown = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), clamp((off - 1.0) / 2.0, 0.0, 1.0));
+                // Blue where the way the cell faces, as worked out from its side, is not
+                // within 60 degrees of the pixel's normal.
+                vec3 axis = vec3(0.0);
+                uint side = level_side & 7u;
+                axis[side >> 1u] = (side & 1u) != 0u ? -1.0 : 1.0;
+                vec3 facing = normalize(transpose(inverse(m)) * axis);
+                if (dot(facing, N) < 0.5) shown = vec3(0.0, 0.3, 1.0);
+            }
+        }
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(shown, 1.0));
+        return;
+    }
+
+    if (CELLS_MODE == 10u) {
+        // Which cell the reflection ray hit, as a colour of its own: grey for a miss, black
+        // where the pixel traces none, magenta where the hit has no cell.
+        uint records = velk_light_cell_words.data[CELLS_HEADER + 14u];
+        vec3 shown = vec3(0.0);
+        if (records != 0xFFFFFFFFu) {
+            uint width = velk_light_cell_words.data[CELLS_HEADER + 15u];
+            uint hit = velk_light_cell_words.data[records + (uint(coord.y) * width + uint(coord.x)) * kReflectWords];
+            if (hit == kNoCell) {
+                shown = vec3(0.3);
+            } else if (hit == kBounceHitNoCell || hit == kBounceHitPending) {
+                shown = vec3(1.0, 0.0, 1.0);
+            } else if (hit != kReflectSkip) {
+                uint h = velk_light_cell_mix(hit * 2654435761u);
+                shown = vec3(float(h & 255u), float((h >> 8u) & 255u), float((h >> 16u) & 255u)) / 255.0;
+            }
+        }
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(shown, 1.0));
         return;
     }
 

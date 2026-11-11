@@ -125,6 +125,8 @@ public:
         /// VELK_BOUNCE_GLSL and CELLS_BOUNCE_LIST.
         ArenaRegion light_bounce;
         ArenaRegion light_bounce_list;
+        /// The pixels' reflection rays. See kReflectWords.
+        ArenaRegion light_reflect;
         /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
         /// The cells' counters when last printed, and the frame. See kStatAsked.

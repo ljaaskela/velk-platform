@@ -154,7 +154,23 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 4
 
 // Diagnostic: shows the light cells under each pixel instead of the image, read each frame so
 // that an app can switch it while running. See light_cells_debug_compute_src.
-uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 8); }
+uint32_t light_cells_debug_mode() { return env_uint("VELK_LIGHT_CELLS_DEBUG", 1, 11); }
+
+// Below what roughness a pixel traces its reflection, from VELK_REFLECT_ROUGHNESS in
+// hundredths: 0.3 unless set, 0 for none. See light_cells_reflect_trace_main_src.
+float light_reflect_roughness()
+{
+    const char* set = std::getenv("VELK_REFLECT_ROUGHNESS");
+    if (!set) return 0.3f;
+    return static_cast<float>(std::clamp(std::atoi(set), 0, 100)) / 100.f;
+}
+
+uint32_t float_bits(float f)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof(bits));
+    return bits;
+}
 
 // How many surfaces bounce light passes over, from VELK_LIGHT_CELL_HOPS: 2 unless set to 1.
 // With 1, bounce rays read only the direct light where they hit, and make no bounce cells.
@@ -345,7 +361,9 @@ constexpr uint32_t kCellWords = 32;
 constexpr uint32_t kCellChanges = 128;
 constexpr uint32_t kCellChangeWords = 8;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
-constexpr uint32_t kCellHeaderWords = 14;
+constexpr uint32_t kCellHeaderWords = 17;
+// The words of each pixel's reflection ray. See kReflectWords.
+constexpr uint32_t kReflectWords = 9;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
 // VELK_BOUNCE_GLSL.
 constexpr uint32_t kBounceEntries = 1u << 15;
@@ -438,6 +456,14 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
             const uint32_t none[4] = {};
             arena->write_at(vs.light_bounce_list.offset(), none, sizeof(none));
         }
+    }
+    // A reflection ray a pixel, as large as the G-buffer, made again when it grows. The trace
+    // writes every pixel each frame, so nothing needs clearing.
+    const uint64_t reflect_bytes = uint64_t(vs.gbuffer_size.x) * vs.gbuffer_size.y * kReflectWords * sizeof(uint32_t);
+    if (light_reflect_roughness() <= 0.f) {
+        vs.light_reflect = {};
+    } else if (reflect_bytes > 0 && (!vs.light_reflect.valid() || vs.light_reflect.size() < reflect_bytes)) {
+        vs.light_reflect = arena->alloc(reflect_bytes);
     }
 }
 
@@ -1303,6 +1329,9 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             kBounceListMax,
             render_view.bvh.object_transforms,
             render_view.bvh.object_slots,
+            vs.light_reflect.valid() ? static_cast<uint32_t>(vs.light_reflect.offset() / sizeof(uint32_t)) : 0xFFFFFFFFu,
+            vs.gbuffer_size.x,
+            float_bits(light_reflect_roughness()),
         };
         arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
     }
@@ -1332,24 +1361,31 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     auto arrive_pipeline = bounce_pipeline(light_cells_bounce_arrive_main_src, 0x4c43'4241'5256ULL, 2u);
     auto hops_pipeline = bounce_pipeline(light_cells_bounce_hops_main_src, 0x4c43'4248'4f50ULL, 4u);
     auto mark_pipeline = bounce_pipeline(light_cells_mark_main_src, 0x4c43'4d41'524bULL, 4u);
-    // The material where bounce rays hit, composed with the frame's materials as the RT path's
-    // shading is.
-    IGpuPipeline::Ptr shade_pipeline;
-    if (ctx.snippets) {
+    // The pixels' reflection rays: the trace with the walk only, then the cells they hit.
+    auto reflect_trace_pipeline = bounce_pipeline(light_cells_reflect_trace_main_src, 0x4c43'5246'5452ULL, 3u);
+    auto reflect_hits_pipeline = bounce_pipeline(light_cells_reflect_hits_main_src, 0x4c43'5246'4849ULL, 2u);
+    // The material where bounce and reflection rays hit, composed with the frame's materials
+    // as the RT path's shading is.
+    const auto material_pipeline = [&](string_view main_src, uint64_t tag) {
+        IGpuPipeline::Ptr found;
+        if (!ctx.snippets) return found;
         constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
-        uint64_t key = 0xcbf29ce484222325ULL ^ 0x4c43'4253'4844ULL;
+        uint64_t key = 0xcbf29ce484222325ULL ^ tag;
         for (auto id : ctx.snippets->frame_materials()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
         for (auto id : ctx.snippets->frame_shadow_techs()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
         for (auto id : ctx.snippets->frame_intersects()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
         key |= 0x2000000000000000ULL;
-        shade_pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
-        if (!shade_pipeline) {
-            shade_pipeline = ctx.render_ctx->pipelines().compile_compute(
-                string_view(compose_rt_compute(*ctx.snippets, light_cells_bounce_shade_main_src)), key);
+        found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+        if (!found) {
+            found = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_compute(*ctx.snippets, main_src)), key);
         }
-    }
+        return found;
+    };
+    IGpuPipeline::Ptr shade_pipeline = material_pipeline(light_cells_bounce_shade_main_src, 0x4c43'4253'4844ULL);
+    IGpuPipeline::Ptr reflect_shade_pipeline = material_pipeline(light_cells_reflect_shade_main_src, 0x4c43'5246'5348ULL);
     if (!pipeline || !trace_pipeline || !bounce_trace_pipeline || !hits_pipeline || !gather_pipeline || !changes_pipeline
-        || !arrive_pipeline || !hops_pipeline || !mark_pipeline || !shade_pipeline) {
+        || !arrive_pipeline || !hops_pipeline || !mark_pipeline || !shade_pipeline || !reflect_trace_pipeline
+        || !reflect_hits_pipeline || !reflect_shade_pipeline) {
         return;
     }
 
@@ -1360,6 +1396,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     pc.cam_pos[2] = render_view.cam_pos.z;
     pc.normal_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
     pc.worldpos_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.material_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
     pc.width = vs.gbuffer_size.x;
     pc.height = vs.gbuffer_size.y;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
@@ -1452,6 +1489,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         shade_pc.lights_base = render_view.lights_base;
         shade_pc.env_params[0] = render_view.env.intensity;
         shade_pc.env_params[1] = render_view.env.rotation_rad;
+        shade_pc.env[0] = render_view.env.material_id;
+        shade_pc.env[1] = render_view.env.texture_id;
         shade_pc.extras[0] = static_cast<uint32_t>(vs.light_bounce_list.offset() / sizeof(uint32_t));
         shade_pc.extras[1] = kBounceListMax;
         DispatchCall shade_dc{};
@@ -1461,6 +1500,26 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         shade_dc.groups_z = 1;
         shade_dc.root_constants_size = sizeof(shade_pc);
         std::memcpy(shade_dc.root_constants, &shade_pc, sizeof(shade_pc));
+
+        // The pixels' reflection rays: traced, a thread a pixel, then the cells they hit, both
+        // before the direct light is traced; then the material at the hits.
+        const bool reflect = vs.light_reflect.valid();
+        DispatchCall reflect_trace_dc = dc;
+        reflect_trace_dc.pipeline = reflect_trace_pipeline.get();
+        reflect_trace_dc.groups_x = (vs.gbuffer_size.x + 7u) / 8u;
+        reflect_trace_dc.groups_y = (vs.gbuffer_size.y + 7u) / 8u;
+        std::memcpy(reflect_trace_dc.root_constants, &bounce_pc, sizeof(bounce_pc));
+        DispatchCall reflect_hits_dc = reflect_trace_dc;
+        reflect_hits_dc.pipeline = reflect_hits_pipeline.get();
+        BounceShadePushC reflect_pc = shade_pc;
+        reflect_pc.extras[0] = static_cast<uint32_t>(vs.light_reflect.offset() / sizeof(uint32_t));
+        reflect_pc.extras[1] = vs.gbuffer_size.x | (vs.gbuffer_size.y << 16u);
+        reflect_pc.extras[2] = pc.worldpos_tex_id;
+        reflect_pc.extras[3] = pc.normal_tex_id;
+        DispatchCall reflect_shade_dc = shade_dc;
+        reflect_shade_dc.pipeline = reflect_shade_pipeline.get();
+        reflect_shade_dc.groups_x = (vs.gbuffer_size.x * vs.gbuffer_size.y + 63u) / 64u;
+        std::memcpy(reflect_shade_dc.root_constants, &reflect_pc, sizeof(reflect_pc));
 
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light cells update");
@@ -1478,6 +1537,14 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_global_barrier();
         cmd->record_dispatch(rest_dc);
         cmd->record_global_barrier();
+        // Before the bounce trace, so the bounce entries reflections list are traced this
+        // frame too.
+        if (reflect) {
+            cmd->record_dispatch(reflect_trace_dc);
+            cmd->record_global_barrier();
+            cmd->record_dispatch(reflect_hits_dc);
+            cmd->record_global_barrier();
+        }
         if (hops) cmd->record_dispatch(hops_rest_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(bounce_trace_dc);
@@ -1488,6 +1555,10 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_global_barrier();
         cmd->record_dispatch(shade_dc);
         cmd->record_global_barrier();
+        if (reflect) {
+            cmd->record_dispatch(reflect_shade_dc);
+            cmd->record_global_barrier();
+        }
         cmd->record_dispatch(empty_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(gather_dc);
@@ -1511,6 +1582,9 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         rec.held.push_back(arrive_pipeline);
         rec.held.push_back(hops_pipeline);
         rec.held.push_back(mark_pipeline);
+        rec.held.push_back(reflect_trace_pipeline);
+        rec.held.push_back(reflect_hits_pipeline);
+        rec.held.push_back(reflect_shade_pipeline);
         rec.held.push_back(shade_pipeline);
     });
 }
