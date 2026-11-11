@@ -48,8 +48,6 @@ struct BvhBinding
     /// IInstancedMeshVisual::set_ray_motion. Tracing shaders are compiled with it.
     string_view ray_motion;
     float ray_motion_reach = 0.f;
-    /// Changes when the scene's object ids start again; anything kept by id is then stale.
-    uint32_t object_id_epoch = 0;
 
     bool operator==(const BvhBinding& o) const
     {
@@ -196,19 +194,18 @@ VELK_GPU_STRUCT RtRecord
     /// position of the local origin.
     float    inv_row[3][4];
     uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
-    uint32_t shape_count;
+    uint32_t shape_count;     ///< How many, under kRtRecordShapeCount, with kRtRecordRayMotion and kRtRecordMedium above.
     uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
-    uint32_t flags;           ///< kRtRecordRayMotion, kRtRecordMedium, and the object id above kRtRecordObjectShift.
+    uint32_t object;          ///< The object id. See IScene::get_object_ids.
 };
 static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
 
-/// Where in RtRecord::flags the object id starts. See IScene::get_object_ids.
-inline constexpr uint32_t kRtRecordObjectShift = 2;
-
-/// Rays follow the scene's ray motion here. See BvhBinding::ray_motion.
-inline constexpr uint32_t kRtRecordRayMotion = 1;
-/// Rays wider than parts of its meshes count those parts as a medium.
-inline constexpr uint32_t kRtRecordMedium = 2;
+/// The bits of RtRecord::shape_count that hold the count.
+inline constexpr uint32_t kRtRecordShapeCount = 0x3FFFFFFFu;
+/// Rays follow the scene's ray motion here. See BvhBinding::ray_motion. In RtRecord::shape_count.
+inline constexpr uint32_t kRtRecordRayMotion = 1u << 31;
+/// Rays wider than parts of its meshes count those parts as a medium. In RtRecord::shape_count.
+inline constexpr uint32_t kRtRecordMedium = 1u << 30;
 
 /// GPU-side scene light. Mirrors the `Light` struct in the compute
 /// shaders (80 bytes). `flags.y` is shadow_tech_id; callers populate

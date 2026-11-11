@@ -314,8 +314,6 @@ private:
     bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;
-    /// The scene's object id epoch the records were built with. A new one rebuilds them all.
-    uint32_t object_id_epoch_ = 0;
 };
 
 } // namespace impl

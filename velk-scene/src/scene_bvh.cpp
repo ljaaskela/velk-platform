@@ -164,9 +164,9 @@ RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) co
     RtRecord record = make_rt_record(group.world * group.visual->get_transforms()[slot].to_mat4());
     const auto& run = group.meshes[group.visual->get_slot_mesh(slot)];
     record.first_shape = run.first_shape;
-    record.shape_count = run.shape_count;
-    record.flags = (group.visual->get_ray_motion_source().empty() ? 0u : kRtRecordRayMotion)
-        | (run.far_area > 0.f ? kRtRecordMedium : 0u) | ((group.object_base + slot) << kRtRecordObjectShift);
+    record.shape_count = run.shape_count | (group.visual->get_ray_motion_source().empty() ? 0u : kRtRecordRayMotion)
+        | (run.far_area > 0.f ? kRtRecordMedium : 0u);
+    record.object = group.object_base + slot;
     return record;
 }
 
@@ -1128,7 +1128,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
     // All of the element's records are one object.
     const uint32_t object = emit.scene && !collect.records.empty() ? emit.scene->get_object_ids(*element, 1) : 0u;
     for (auto& emitted : collect.records) {
-        emitted.gpu.flags |= object << kRtRecordObjectShift;
+        emitted.gpu.object = object;
         if (emitted.shapes.size() > kMaxShapesWithoutTree) {
             build_local_tree(emitted.shapes, emitted.tree);
         }
@@ -2120,11 +2120,6 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
     const EmitContext emit{ctx, shape_cb, shape_user, state.scene};
     changed_.clear();
     changed_all_ = false;
-    // Object ids started again: every record names the old ones.
-    if (state.scene && state.scene->get_object_id_epoch() != object_id_epoch_) {
-        object_id_epoch_ = state.scene->get_object_id_epoch();
-        needs_full_build_ = true;
-    }
 
     {
         VELK_PERF_SCOPE("renderer.bvh_emit");

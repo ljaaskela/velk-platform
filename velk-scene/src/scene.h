@@ -43,7 +43,6 @@ public:
                                         size_t max_count = 0) const override;
     ::velk::IBvh::Ptr get_default_bvh() const override;
     uint32_t get_object_ids(IElement& element, uint32_t count) override;
-    uint32_t get_object_id_epoch() const override;
 
     // IHierarchy forwarding
     ReturnValue set_root(const IObject::Ptr& root) override;
@@ -94,10 +93,16 @@ private:
         uint32_t first;
         uint32_t count;
     };
+    /// Gives back the slots of @p ids for reuse. Called with ids_mutex_ held.
+    void free_object_ids(const ObjectIds& ids);
     mutable std::mutex ids_mutex_;
     std::unordered_map<IElement*, ObjectIds> object_ids_;
-    uint32_t next_object_id_ = 1;
-    uint32_t object_id_epoch_ = 0;
+    /// The next slot never handed out. Slot 0 is never handed out, so that id 0 names nothing.
+    uint32_t next_object_slot_ = 1;
+    /// Each slot's generation, the high bits of its id.
+    vector<uint8_t> object_generations_;
+    /// Ranges given back, by the power of two of their size: their first slots.
+    vector<uint32_t> free_object_ranges_[27];
 };
 
 } // namespace velk::impl

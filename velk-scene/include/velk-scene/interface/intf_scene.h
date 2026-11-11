@@ -187,14 +187,14 @@ public:
      * frames, such as the light cells, and is the same in what is drawn and in what rays
      * hit. A plain element asks for 1; an instanced visual for one per slot, slot `i`
      * being the first id plus `i`. The answer stays the same while @p count fits, and is
-     * forgotten when the element leaves the scene. Ids are not handed out twice, so data
-     * kept under an old one is never taken for a new object's, until they run out and
-     * start again, which changes get_object_id_epoch().
+     * given back when the element leaves the scene.
+     *
+     * An id is a slot in its low 26 bits and the slot's generation in the high 6. Slots
+     * are reused, a generation later each time, so data kept under an old id is not taken
+     * for a new object's until a slot has been reused 64 times. 0 names nothing, and is
+     * the answer when every slot is taken.
      */
     virtual uint32_t get_object_ids(IElement& element, uint32_t count) = 0;
-
-    /** @brief Changes when object ids start again; anything kept by id is then stale. */
-    virtual uint32_t get_object_id_epoch() const = 0;
 };
 
 } // namespace velk

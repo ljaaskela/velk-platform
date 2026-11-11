@@ -385,39 +385,63 @@ vector<IElement::Ptr> Scene::find_elements(const ElementQuery& query, size_t max
     return ::velk::find_attachment<::velk::IBvh>(logical_.root().object());
 }
 
+namespace {
+// An object id is a slot in its low bits and the slot's generation above.
+constexpr uint32_t kObjectSlotBits = 26;
+constexpr uint32_t kObjectSlotLimit = 1u << kObjectSlotBits;
+constexpr uint32_t kObjectGenerations = 64;
+} // namespace
+
 uint32_t Scene::get_object_ids(IElement& element, uint32_t count)
 {
-    // Ids fit in 30 bits, since rays carry them beside two flags.
-    constexpr uint32_t kObjectIdLimit = 1u << 30;
-    count = std::clamp(count, 1u, kObjectIdLimit / 4u);
+    count = std::clamp(count, 1u, kObjectSlotLimit / 2u);
     std::lock_guard lock(ids_mutex_);
     auto it = object_ids_.find(&element);
-    if (it != object_ids_.end() && it->second.count >= count) {
-        return it->second.first;
+    if (it != object_ids_.end()) {
+        if (it->second.count >= count) {
+            return it->second.first;
+        }
+        free_object_ids(it->second);
+        object_ids_.erase(it);
     }
-    // A power of two, so that a growing instanced visual seldom needs a new range.
+    // A power of two, so that a growing instanced visual seldom needs a new range, and a
+    // range given back fits the next one of its size.
     uint32_t size = 1;
+    uint32_t size_class = 0;
     while (size < count) {
         size <<= 1;
+        ++size_class;
     }
-    if (size > kObjectIdLimit - next_object_id_) {
-        // Run out: start again. Every element then asks again, and gets a new id.
-        object_ids_.clear();
-        next_object_id_ = 1;
-        ++object_id_epoch_;
-        std::unique_lock state_lock(state_mutex_);
-        set_dirty(DirtyFlags::DrawOrder);
+    uint32_t slot = 0;
+    auto& free_ranges = free_object_ranges_[size_class];
+    if (!free_ranges.empty()) {
+        // Reused: the next generation, so that its ids are not those of what had it before.
+        slot = free_ranges.back();
+        free_ranges.pop_back();
+        for (uint32_t i = 0; i < size; ++i) {
+            object_generations_[slot + i] = static_cast<uint8_t>((object_generations_[slot + i] + 1) % kObjectGenerations);
+        }
+    } else {
+        if (size > kObjectSlotLimit - next_object_slot_) {
+            VELK_LOG(E, "Scene: no room for %u more object ids", size);
+            return 0;
+        }
+        slot = next_object_slot_;
+        next_object_slot_ += size;
+        object_generations_.resize(next_object_slot_, 0);
     }
-    const ObjectIds ids{next_object_id_, size};
-    next_object_id_ += size;
+    const ObjectIds ids{slot | (uint32_t(object_generations_[slot]) << kObjectSlotBits), size};
     object_ids_[&element] = ids;
     return ids.first;
 }
 
-uint32_t Scene::get_object_id_epoch() const
+void Scene::free_object_ids(const ObjectIds& ids)
 {
-    std::lock_guard lock(ids_mutex_);
-    return object_id_epoch_;
+    uint32_t size_class = 0;
+    while ((1u << size_class) < ids.count) {
+        ++size_class;
+    }
+    free_object_ranges_[size_class].push_back(ids.first & (kObjectSlotLimit - 1u));
 }
 
 void Scene::ensure_hierarchy()
@@ -444,7 +468,11 @@ void Scene::detach_element(const IObject::Ptr& obj)
     }
     if (auto* element = interface_cast<IElement>(obj)) {
         std::lock_guard ids_lock(ids_mutex_);
-        object_ids_.erase(element);
+        auto it = object_ids_.find(element);
+        if (it != object_ids_.end()) {
+            free_object_ids(it->second);
+            object_ids_.erase(it);
+        }
     }
     std::unique_lock lock(state_mutex_);
     removed_list_.push_back(interface_pointer_cast<IElement>(obj));

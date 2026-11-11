@@ -103,10 +103,16 @@ struct RtRecord {
     vec4 inv_row1;
     vec4 inv_row2;
     uint first_shape;  // index into velk_bvh_shapes
-    uint shape_count;
+    uint shape_count;  // how many, under VELK_RECORD_SHAPE_COUNT, with VELK_RECORD_RAY_MOTION and VELK_RECORD_MEDIUM above
     uint tree_root;    // index into velk_blas_nodes, or VELK_NO_TREE to test each shape
-    uint flags;        // 1: rays follow the scene's ray motion here. 2: wide rays count parts of its meshes as a medium. Above those: the object id
+    uint object;       // the object id
 };
+
+// In RtRecord.shape_count: the count's bits; rays follow the scene's ray motion here; wide
+// rays count parts of its meshes as a medium.
+#define VELK_RECORD_SHAPE_COUNT 0x3FFFFFFFu
+#define VELK_RECORD_RAY_MOTION 0x80000000u
+#define VELK_RECORD_MEDIUM 0x40000000u
 
 #define VELK_NO_TREE 0xFFFFFFFFu
 

@@ -294,7 +294,7 @@ vec3 velk_world_normal(RtRecord rec, vec3 n)
 // the shape for this ray. Rays wider than the motion would not show it.
 Ray velk_moved_ray(Ray local, RtRecord rec, uint shape_index)
 {
-    if ((rec.flags & 1u) == 0u || velk_ray_footprint >= VELK_RAY_MOTION_REACH) return local;
+    if ((rec.shape_count & VELK_RECORD_RAY_MOTION) == 0u || velk_ray_footprint >= VELK_RAY_MOTION_REACH) return local;
     velk_ray_met_motion = true;
     RtShape moved = velk_bvh_shapes.data[shape_index];
     vec3 middle = (moved.origin.xyz + moved.u_axis.xyz) * 0.5;
@@ -618,12 +618,12 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             --records_left;
             RtRecord rec = velk_records.data[cur_record];
 #ifdef VELK_TRACE_MEDIUM
-            record_medium = footprint > 0.0 && (rec.flags & 2u) != 0u && (closest || rec.tree_root == VELK_NO_TREE);
+            record_medium = footprint > 0.0 && (rec.shape_count & VELK_RECORD_MEDIUM) != 0u && (closest || rec.tree_root == VELK_NO_TREE);
             medium_far = best_t;
 #endif
             if (rec.tree_root == VELK_NO_TREE) {
                 shape_at = rec.first_shape;
-                shapes_left = rec.shape_count;
+                shapes_left = rec.shape_count & VELK_RECORD_SHAPE_COUNT;
             } else {
                 walk_ray = velk_local_ray(ray, rec);
                 level = kTree;
@@ -719,7 +719,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     hit.t = best_t;
     hit.shape_index = best_shape;
     RtRecord rec = velk_records.data[best_record];
-    hit.object = rec.flags >> 2u;
+    hit.object = rec.object;
     RtShape shape = seeded ? seed : velk_bvh_shapes.data[best_shape];
     if (shape.shape_kind == 255u) {
         // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. (u, v) from the triangle test
