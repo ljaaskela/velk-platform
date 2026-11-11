@@ -1271,6 +1271,23 @@ vec3 velk_bounce_sh_irradiance(uvec3 a, uvec3 b, vec3 N)
     vec3 sh3 = vec3(h4.y, h5);
     return max(0.282095 * sh0 + 0.325735 * (sh1 * N.y + sh2 * N.z + sh3 * N.x), vec3(0.0));
 }
+
+// The same entry's light arriving along direction `d`, broad, since SH L1 holds only a rough
+// picture of where light comes from.
+vec3 velk_bounce_sh_radiance(uvec3 a, uvec3 b, vec3 d)
+{
+    vec2 h0 = unpackHalf2x16(a.x);
+    vec2 h1 = unpackHalf2x16(a.y);
+    vec2 h2 = unpackHalf2x16(a.z);
+    vec2 h3 = unpackHalf2x16(b.x);
+    vec2 h4 = unpackHalf2x16(b.y);
+    vec2 h5 = unpackHalf2x16(b.z);
+    vec3 sh0 = vec3(h0, h1.x);
+    vec3 sh1 = vec3(h1.y, h2);
+    vec3 sh2 = vec3(h3, h4.x);
+    vec3 sh3 = vec3(h4.y, h5);
+    return max(0.282095 * sh0 + 0.488603 * (sh1 * d.y + sh2 * d.z + sh3 * d.x), vec3(0.0));
+}
 )"
 
 /// Shows the light cells under each pixel in place of the image. Mode 1: each cell a flat
@@ -1922,15 +1939,6 @@ vec3 velk_tonemap_aces(vec3 x)
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 )" VELK_GI_FIELD_GLSL R"(
-// Light arriving from a direction, as the GI probe field knows it. Broad, since the field
-// holds only a low-order approximation. Negative if no probe could light the point.
-vec3 velk_gi_radiance(vec3 world_pos, vec3 N, vec3 dir)
-{
-    if (pc.gi_probe_id == 0u || VELK_GLOBALS.bvh_node_count == 0u) return vec3(-1.0);
-    vec3 sh[4];
-    if (!velk_gi_lookup(pc.gi_probe_id, pc.gi_finest, world_pos, N, VELK_GLOBALS.cam_pos.xyz, sh)) return vec3(-1.0);
-    return max(velk_sh_radiance(sh, dir), vec3(0.0));
-}
 
 )";
 
@@ -2501,15 +2509,16 @@ void main()
         vec3 indirect = gi.r >= 0.0 ? gi : env_diffuse;
 
         // The environment map cannot tell whether the sky is visible along the reflection.
-        // The field can: how much of the environment's light it finds that way is how much
-        // of the sharp reflection stays, and what it finds in place of the sky fills the rest.
+        // The bounce cells can: how much of the environment's light they find that way is how
+        // much of the sharp reflection stays, and what they find in place of the sky fills the
+        // rest.
         const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
         vec3 reflected = reflect(-V, N);
-        vec3 field_reflection = velk_gi_radiance(world_pos, N, reflected);
-        if (field_reflection.r >= 0.0) {
+        vec3 cells_reflection = cells_here ? velk_cells_bounce_toward(reflected, true) : vec3(-1.0);
+        if (cells_reflection.r >= 0.0) {
             float env_broad = dot(env_miss_color_lod(reflected, env_max_lod), kLuma);
-            float sky_seen = env_broad > 1e-4 ? clamp(dot(field_reflection, kLuma) / env_broad, 0.0, 1.0) : 0.0;
-            env_specular = env_specular * sky_seen + field_reflection * (1.0 - sky_seen);
+            float sky_seen = env_broad > 1e-4 ? clamp(dot(cells_reflection, kLuma) / env_broad, 0.0, 1.0) : 0.0;
+            env_specular = env_specular * sky_seen + cells_reflection * (1.0 - sky_seen);
         }
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
@@ -4250,10 +4259,11 @@ float velk_cells_light_through(uint i)
     return mix(lower, upper, wanted - float(below));
 }
 
-// The light from other surfaces at the pixel taken up by velk_cells_begin, for a surface
-// facing `normal`, blended from the bounce cells around it as direct light is from its own
-// cells. In the units of the probe field's irradiance. Negative if none has any yet.
-vec3 velk_cells_bounce(vec3 normal)
+// The light from other surfaces at the pixel taken up by velk_cells_begin, blended from the
+// bounce cells around it as direct light is from its own cells: with `along` false, as
+// irradiance on a surface facing `d`, in the units of the probe field's irradiance; with it
+// true, arriving along `d`. Negative if none has any yet.
+vec3 velk_cells_bounce_toward(vec3 d, bool along)
 {
     VelkCellBlend b = velk_cell_blend(cells_own_level + kBounceUp);
     vec3 sum = vec3(0.0);
@@ -4268,18 +4278,26 @@ vec3 velk_cells_bounce(vec3 normal)
         // pixel may face well away from that, toward directions the cell has nothing for, so
         // it reads at most 45 degrees off the cell's normal.
         vec3 cell_n = velk_unoct(unpackSnorm2x16(velk_light_cell_words.data[at + 13u]));
-        float along = dot(normal, cell_n);
-        vec3 read_n = normal;
-        if (along < 0.70710678) {
-            vec3 across = normal - cell_n * along;
+        float off = dot(d, cell_n);
+        vec3 read_d = d;
+        if (off < 0.70710678) {
+            vec3 across = d - cell_n * off;
             float across_length = length(across);
             vec3 side_dir = across_length > 1e-4 ? across / across_length : vec3(0.0);
-            read_n = normalize(cell_n * 0.70710678 + side_dir * 0.70710678);
+            read_d = normalize(cell_n * 0.70710678 + side_dir * 0.70710678);
         }
-        sum += weight * velk_bounce_irradiance(at, read_n);
+        uvec3 sa = uvec3(velk_light_cell_words.data[at + 4u], velk_light_cell_words.data[at + 5u], velk_light_cell_words.data[at + 6u]);
+        uvec3 sb = uvec3(velk_light_cell_words.data[at + 7u], velk_light_cell_words.data[at + 8u], velk_light_cell_words.data[at + 9u]);
+        sum += weight * (along ? velk_bounce_sh_radiance(sa, sb, read_d) : velk_bounce_sh_irradiance(sa, sb, read_d));
         total += weight;
     }
     return total > 0.0 ? sum / total : vec3(-1.0);
+}
+
+// Irradiance on a surface facing `normal`. See velk_cells_bounce_toward.
+vec3 velk_cells_bounce(vec3 normal)
+{
+    return velk_cells_bounce_toward(normal, false);
 }
 )";
 
