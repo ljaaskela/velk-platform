@@ -365,7 +365,13 @@ constexpr uint32_t kCellWords = 32;
 constexpr uint32_t kCellChanges = 128;
 constexpr uint32_t kCellChangeWords = 8;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
-constexpr uint32_t kCellHeaderWords = 17;
+constexpr uint32_t kCellHeaderWords = 18;
+// The cells due in a frame, before the list is decided: how many at most, the classes they
+// are ranked in, the header's words and each one's. See CELLS_CANDIDATES.
+constexpr uint32_t kCellCandidateMax = 1u << 17;
+constexpr uint32_t kCellClasses = 32;
+constexpr uint32_t kCellCandidateHeader = 4 + kCellClasses;
+constexpr uint32_t kCellCandidateWords = 12;
 // The words of each pixel's reflection ray. See kReflectWords.
 constexpr uint32_t kReflectWords = 9;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
@@ -447,6 +453,14 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
             // again each frame.
             const uint32_t none[kCellWorkHeader] = {};
             arena->write_at(vs.light_cell_work.offset(), none, sizeof(none));
+        }
+        // None put forward yet. The list's empty pass empties them again each frame.
+        vs.light_cell_candidates =
+            arena->alloc(uint64_t(kCellCandidateHeader + kCellCandidateMax * kCellCandidateWords) * sizeof(uint32_t));
+        if (vs.light_cell_candidates.valid()) {
+            uint32_t header[kCellCandidateHeader] = {};
+            header[2] = kCellCandidateMax;
+            arena->write_at(vs.light_cell_candidates.offset(), header, sizeof(header));
         }
         // Every bounce entry starts empty, and so does the list.
         vs.light_bounce = arena->alloc(uint64_t(kBounceEntries) * kBounceWords * sizeof(uint32_t));
@@ -1287,7 +1301,8 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
 
     // Allocated in ensure_arena_words, before anything is recorded.
     if (!vs.light_cells.valid() || !vs.light_cell_change_words.valid() || !vs.light_cell_header.valid()
-        || !vs.light_cell_work.valid() || !vs.light_bounce.valid() || !vs.light_bounce_list.valid()) {
+        || !vs.light_cell_work.valid() || !vs.light_cell_candidates.valid() || !vs.light_bounce.valid()
+        || !vs.light_bounce_list.valid()) {
         return false;
     }
 
@@ -1306,7 +1321,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             VELK_LOG(I,
                      "light cells per frame: entries asked %.0f listed %.0f traced %.0f, cells listed %.0f made %.0f "
                      "changed %.0f (all lights %.0f) refused %.0f busy %.0f, pixels waiting %.0f no slot %.0f, changes %u; "
-                     "coarse round entries asked %.0f cells refused %.0f, waiting pixels without coarse %.0f; "
+                     "list cut at class %.1f of 32, changed cells left waiting %.0f, waiting pixels without coarse %.0f; "
                      "moving in the way: lights held %.0f, cells re-traced %.0f; "
                      "bounce cells asking new %.0f stale %.0f, listed %.0f, gathered %.0f, with nothing to read %.0f, "
                      "rays with nothing to read %.0f, rays that hit their own object's back %.0f; "
@@ -1456,6 +1471,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             vs.light_reflect.valid() ? static_cast<uint32_t>(vs.light_reflect.offset() / sizeof(uint32_t)) : 0xFFFFFFFFu,
             vs.gbuffer_size.x,
             float_bits(light_reflect_roughness()),
+            static_cast<uint32_t>(vs.light_cell_candidates.offset() / sizeof(uint32_t)),
         };
         arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
     }
@@ -1485,6 +1501,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     auto arrive_pipeline = bounce_pipeline(light_cells_bounce_arrive_main_src, 0x4c43'4241'5256ULL, 2u);
     auto hops_pipeline = bounce_pipeline(light_cells_bounce_hops_main_src, 0x4c43'4248'4f50ULL, 4u);
     auto mark_pipeline = bounce_pipeline(light_cells_mark_main_src, 0x4c43'4d41'524bULL, 4u);
+    auto list_pipeline = bounce_pipeline(light_cells_list_main_src, 0x4c43'4c49'5354ULL, 2u);
     // The pixels' reflection rays: the trace with the walk only, then the cells they hit.
     auto reflect_trace_pipeline = bounce_pipeline(light_cells_reflect_trace_main_src, 0x4c43'5246'5452ULL, 3u);
     auto reflect_hits_pipeline = bounce_pipeline(light_cells_reflect_hits_main_src, 0x4c43'5246'4849ULL, 2u);
@@ -1508,7 +1525,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
     IGpuPipeline::Ptr shade_pipeline = material_pipeline(light_cells_bounce_shade_main_src, 0x4c43'4253'4844ULL);
     IGpuPipeline::Ptr reflect_shade_pipeline = material_pipeline(light_cells_reflect_shade_main_src, 0x4c43'5246'5348ULL);
     if (!pipeline || !trace_pipeline || !bounce_trace_pipeline || !hits_pipeline || !gather_pipeline || !changes_pipeline
-        || !arrive_pipeline || !hops_pipeline || !mark_pipeline || !shade_pipeline || !reflect_trace_pipeline
+        || !arrive_pipeline || !hops_pipeline || !mark_pipeline || !list_pipeline || !shade_pipeline || !reflect_trace_pipeline
         || !reflect_hits_pipeline || !reflect_shade_pipeline) {
         return;
     }
@@ -1542,15 +1559,31 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        // Three rounds: the large cells shown while smaller ones wait, then the other cells
-        // not traced yet, then the rest with what is left of the list. See velk_cell_keep.
-        DispatchCall gaps_dc = dc;
+        // Once a frame: every cell due is put forward with its class. See velk_cell_keep.
         DispatchCall rest_dc = dc;
         DeferredComputePushC round_pc = pc;
-        round_pc.mode = 1;
-        std::memcpy(gaps_dc.root_constants, &round_pc, sizeof(round_pc));
         round_pc.mode = 2;
         std::memcpy(rest_dc.root_constants, &round_pc, sizeof(round_pc));
+
+        // After everything that puts cells forward and before the trace: where the room runs
+        // out, then the classes before it and those after it, then that class while room is
+        // left. See light_cells_list_main_src.
+        DispatchCall cut_dc{};
+        cut_dc.pipeline = list_pipeline.get();
+        cut_dc.groups_x = 1;
+        cut_dc.groups_y = 1;
+        cut_dc.groups_z = 1;
+        cut_dc.root_constants_size = sizeof(pc);
+        DeferredComputePushC list_pc = pc;
+        list_pc.mode = 0;
+        std::memcpy(cut_dc.root_constants, &list_pc, sizeof(list_pc));
+        DispatchCall list_dc = cut_dc;
+        list_dc.groups_x = kCellCandidateMax / 64u;
+        list_pc.mode = 1;
+        std::memcpy(list_dc.root_constants, &list_pc, sizeof(list_pc));
+        DispatchCall list_cut_dc = list_dc;
+        list_pc.mode = 2;
+        std::memcpy(list_cut_dc.root_constants, &list_pc, sizeof(list_pc));
 
         // What is listed, a group of threads an entry. Then the list is emptied.
         DeferredComputePushC trace_pc = pc;
@@ -1652,10 +1685,6 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_global_barrier();
         cmd->record_dispatch(fold_dc);
         cmd->record_global_barrier();
-        cmd->record_dispatch(dc);
-        cmd->record_global_barrier();
-        cmd->record_dispatch(gaps_dc);
-        cmd->record_global_barrier();
         const bool hops = bounce_pc.bounce_hops >= 2u;
         if (hops) cmd->record_dispatch(hops_new_dc);
         cmd->record_global_barrier();
@@ -1674,6 +1703,12 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         cmd->record_dispatch(bounce_trace_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(hits_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(cut_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(list_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(list_cut_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(trace_dc);
         cmd->record_global_barrier();
@@ -1706,6 +1741,7 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         rec.held.push_back(arrive_pipeline);
         rec.held.push_back(hops_pipeline);
         rec.held.push_back(mark_pipeline);
+        rec.held.push_back(list_pipeline);
         rec.held.push_back(reflect_trace_pipeline);
         rec.held.push_back(reflect_hits_pipeline);
         rec.held.push_back(reflect_shade_pipeline);

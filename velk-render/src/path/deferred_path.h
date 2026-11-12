@@ -121,6 +121,7 @@ public:
         ArenaRegion light_cell_header;
         /// The cells to trace this frame. See CELLS_WORK.
         ArenaRegion light_cell_work;
+        ArenaRegion light_cell_candidates;  ///< Cells due, before the list is decided. See CELLS_CANDIDATES.
         /// The bounce cells' table, and the list of those to trace this frame. See
         /// VELK_BOUNCE_GLSL and CELLS_BOUNCE_LIST.
         ArenaRegion light_bounce;
