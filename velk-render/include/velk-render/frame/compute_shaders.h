@@ -1936,7 +1936,12 @@ void main()
         vec3 highlights = vec3(0.0);
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
-        for (uint i = 0u; i < pc.light_count; ++i) {
+        // The lights its cells keep, or every light while it has none.
+        uint pixel_lights[kPixelLights];
+        uint listed = cells_here ? velk_cells_lights(pixel_lights) : kNoLight;
+        uint light_count = listed == kNoLight ? pc.light_count : listed;
+        for (uint k = 0u; k < light_count; ++k) {
+            uint i = listed == kNoLight ? k : pixel_lights[k];
             Light light = velk_light_at(pc.lights_base + i);
             // Area lights are integrated in closed form, and blocked by what the cells say.
             if (light.flags.x == 3u) {
@@ -4397,8 +4402,9 @@ void main()
 )";
 
 /// Reads the light cells. Follows deferred_compute_prelude_src.
-/// A pass calls velk_cells_begin for a pixel and then velk_cells_light_through for each
-/// light. It writes nothing and traces nothing: light_cells_update_main_src keeps the cells
+/// A pass calls velk_cells_begin for a pixel, velk_cells_lights for the lights that light it,
+/// and then velk_cells_light_through for each of those. It writes nothing and traces nothing:
+/// light_cells_update_main_src keeps the cells
 /// up. See light_cells_src for what a cell holds and for CELLS_HEADER.
 [[maybe_unused]] constexpr string_view light_cells_read_src = R"(
 layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
@@ -4425,6 +4431,7 @@ const int kAround = 18;
 const uint kCellReady = 1u;
 const uint kCellProbes = 8u;
 const uint kNoCell = 0xFFFFFFFFu;
+const uint kNoLight = 0xFFFFFFFFu;
 
 // The bounce entry of traced cell `cell`, or kNoCell. See velk_bounce_find.
 uint velk_bounce_lookup(uint cell)
@@ -4613,6 +4620,33 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
         }
     }
     return true;
+}
+
+)"
+                                                                      R"(
+// The most lights a pixel is lit by from its cells. See velk_cells_lights.
+const uint kPixelLights = 16u;
+
+// The lights the cells around the pixel taken up by velk_cells_begin keep, up to
+// kPixelLights of them, into `lights`, and how many. Only these light the pixel, since a cell
+// that does not keep a light lets none of it through. kNoLight with no traced cell around
+// yet, when every light lights it, unshadowed.
+uint velk_cells_lights(out uint lights[kPixelLights])
+{
+    if (cells_total <= 0.0) return kNoLight;
+    uint count = 0u;
+    for (int k = 0; k < kAround; ++k) {
+        uint at = cells_around[k];
+        if (at == kNoCell) continue;
+        for (uint s = 0u; s < kCellLightSlots; ++s) {
+            uint id = (velk_light_cell_words.data[at + 8u + s] >> 8u) & 0xFFFFu;
+            if (id == 0u) continue;
+            bool known = false;
+            for (uint j = 0u; j < count && !known; ++j) known = lights[j] == id - 1u;
+            if (!known && count < kPixelLights) lights[count++] = id - 1u;
+        }
+    }
+    return count;
 }
 
 // How much of light `i` gets through from the cells of `level` around the pixel, looked up
@@ -4913,7 +4947,11 @@ void main()
     }
 
     vec3 direct = vec3(0.0);
-    for (uint i = 0u; i < pc.light_count; ++i) {
+    uint pixel_lights[kPixelLights];
+    uint listed = velk_cells_lights(pixel_lights);
+    uint light_count = listed == kNoLight ? pc.light_count : listed;
+    for (uint k = 0u; k < light_count; ++k) {
+        uint i = listed == kNoLight ? k : pixel_lights[k];
         Light light = velk_light_at(pc.lights_base + i);
         float through = velk_cells_light_through(i);
         if (light.flags.x == 3u) {
