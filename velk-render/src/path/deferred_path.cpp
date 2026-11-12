@@ -359,7 +359,7 @@ namespace {
 // The table of light cells: its slots, a power of two, and the words of each. See
 // light_cells_main_src.
 constexpr uint32_t kCellSlots = 1u << 20;
-constexpr uint32_t kCellWords = 32;
+constexpr uint32_t kCellWords = 24;
 // The changes the light cells are given each frame: how many at most, and the words of each
 // after 4 words of header. More count as everything changed.
 constexpr uint32_t kCellChanges = 128;
@@ -371,7 +371,7 @@ constexpr uint32_t kCellHeaderWords = 18;
 constexpr uint32_t kCellCandidateMax = 1u << 17;
 constexpr uint32_t kCellClasses = 32;
 constexpr uint32_t kCellCandidateHeader = 4 + kCellClasses;
-constexpr uint32_t kCellCandidateWords = 12;
+constexpr uint32_t kCellCandidateWords = 10;
 // The words of each pixel's reflection ray. See kReflectWords.
 constexpr uint32_t kReflectWords = 9;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
@@ -1391,10 +1391,15 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
         // Lights are compared with how each was when last listed, not with last frame, so
         // that a light drifting a little each frame is listed once the drift adds up to
         // something a shadow could show: a quarter of its size, or for one without a size
-        // a five-hundredth of its range.
+        // a five-hundredth of its range. A light whose brightness changed by a sixteenth
+        // changes which lights cells keep, as a cell keeps its shadow in fifteenths.
         const auto& lights = render_view.lights;
         auto& listed = vs.light_cell_lights;
         bool all_lights = lights.size() != listed.size();
+        const auto brightness = [](const GpuLight& l) {
+            return (0.2126f * l.color_intensity[0] + 0.7152f * l.color_intensity[1] + 0.0722f * l.color_intensity[2])
+                * l.color_intensity[3];
+        };
         for (size_t i = 0; !all_lights && i < lights.size(); ++i) {
             const GpuLight& a = listed[i];
             const GpuLight& b = lights[i];
@@ -1405,12 +1410,17 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
                 moved += (a.position[k] - b.position[k]) * (a.position[k] - b.position[k]);
             }
             const float least = std::max(0.25f * b.params[3], 0.002f * b.params[0]);
-            if (same_kind && moved <= least * least) {
+            const bool still = same_kind && moved <= least * least;
+            const float was = brightness(a);
+            const float now_brightness = brightness(b);
+            const bool same_brightness = std::abs(now_brightness - was) <= std::max(was, now_brightness) / 16.f;
+            if (still && same_brightness) {
                 continue;
             }
             // A light without a place reaches everywhere.
-            if (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
-                || b.flags[0] == static_cast<uint32_t>(LightType::Directional)) {
+            if (!still
+                && (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
+                    || b.flags[0] == static_cast<uint32_t>(LightType::Directional))) {
                 all_lights = true;
                 break;
             }
