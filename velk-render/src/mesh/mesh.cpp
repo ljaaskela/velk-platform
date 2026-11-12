@@ -107,11 +107,10 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         uint32_t normal_offset;
         uint32_t uv_offset;
         attribute_offsets(attributes_, normal_offset, uv_offset);
-        const bool read = (normal_offset != kLodNoAttribute || uv_offset != kLodNoAttribute) && buffer
-            && buffer->read_geometry(geometry);
+        const bool read = normal_offset != kLodNoAttribute && buffer && buffer->read_geometry(geometry);
         // A deforming mesh's coarser levels would be drawn in its rest pose.
         const MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, vertex_stride_, normal_offset,
-                                           uv_offset, merge_pieces_, !deforming_);
+                                           merge_pieces_, !deforming_);
         const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
         const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
         lod_table_region_ = culling->alloc(clusters_size + levels_size);

@@ -6,6 +6,7 @@
 #include <velk-render/interface/intf_gpu_resource.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
+#include <velk-render/interface/intf_shader_source.h>
 #include <velk-render/plugin.h>
 
 #include <cstring>
@@ -222,6 +223,13 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         cull_far_albedo_[k] = far_weight > 0.f ? far_sum[k] / far_weight : 1.f;
     }
 
+    // Whether the material moves vertices, which compute raster does not: its clusters then
+    // stay with the hardware.
+    bool moved = false;
+    if (auto* source = interface_cast<IShaderSource>(material_.get())) {
+        moved = !source->get_source(shader_role::kVertexFunction).empty();
+    }
+
     // Each mesh's entries in a row, then each entry's counts, cursors, commands and list.
     cull_cluster_draws_.clear();
     vector<uint32_t> entries;
@@ -260,7 +268,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCursorsWord] = cursors_word;
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryLevelsWord] = draw.lod.level_word;
-        entry[kClusterEntryLevelCountWord] = draw.lod.level_count | (draw.lod.deforming ? kLodDeforming : 0u);
+        entry[kClusterEntryLevelCountWord] = draw.lod.level_count | (draw.lod.deforming ? kLodDeforming : 0u)
+            | (moved ? kLodMoved : 0u);
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});

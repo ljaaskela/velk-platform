@@ -212,17 +212,24 @@ float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels
 
 // Draws chosen cluster `c` of `entry`: in compute when its mean triangle on screen, the
 // width of the sphere around its own triangles over the square root of their count, is
-// less than pc.tiny_pixels and the list has room, else by the hardware. Also by the hardware
-// while its draw is not known yet.
+// less than pc.tiny_pixels, its largest triangle fits the most compute raster covers (4
+// times that, see instance_tiny_draw_src), and the list has room. Else by the hardware: also
+// while its draw is not known yet, and when its material moves vertices.
 void velk_lod_take(uint entry, uint c, uint slot, float error, mat4 world, float scale, vec3 cam, float pixels_per_unit)
 {
     uint draw = cull_words.data[entry + 13u];
-    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu) {
+    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + 9u] & VELK_LOD_MOVED) == 0u) {
         uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+        float radius = uintBitsToFloat(cull_words.data[cluster + 16u]) * scale;
         float away = length(velk_lod_center(cluster + 13u, world, cam));
-        float across = 2.0 * uintBitsToFloat(cull_words.data[cluster + 16u]) * scale * pixels_per_unit / max(away, 1e-3);
+        float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
         float triangles = float(max(cull_words.data[cluster + 1u], 1u));
-        if (across < pc.tiny_pixels * sqrt(triangles) && velk_tiny_add(draw, cluster, slot, error)) return;
+        // The largest triangle as wide as it can be on screen, at the cluster's nearest.
+        float largest = uintBitsToFloat(cull_words.data[cluster + 17u]) * scale * pixels_per_unit / max(away - radius, 1e-3);
+        if (across < pc.tiny_pixels * sqrt(triangles) && largest < 4.0 * pc.tiny_pixels
+            && velk_tiny_add(draw, cluster, slot, error)) {
+            return;
+        }
     }
     velk_lod_use(entry, c, slot, error);
 }
@@ -232,7 +239,7 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
     uint clusters = cull_words.data[entry + 2u];
     uint levels = cull_words.data[entry + 8u];
-    uint level_count = cull_words.data[entry + 9u] & ~VELK_LOD_DEFORMING;
+    uint level_count = cull_words.data[entry + 9u] & ~(VELK_LOD_DEFORMING | VELK_LOD_MOVED);
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
     // about whether they are hidden.
     bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
@@ -764,11 +771,11 @@ void main()
 
 /**
  * Rasterizes the clusters culling listed for compute, a work group per cluster and a thread
- * per triangle. Corners are placed as the vertex shader would from the vertices as stored,
- * without the material's vertex function. A pixel is covered when its centre is inside the
- * triangle, at the depth interpolated there, where the hardware drew nothing nearer. A
- * triangle covers at most `most` pixels in each direction, which only a cluster of very
- * mixed sizes reaches.
+ * per triangle. Corners are placed as the vertex shader would from the vertices as stored:
+ * clusters whose material has a vertex function stay with the hardware. A pixel is covered
+ * when its centre is inside the triangle, at the depth interpolated there, where the hardware
+ * drew nothing nearer. A triangle covers at most `most` pixels in each direction; culling
+ * leaves a cluster with a larger one to the hardware, so this only guards against error.
  *
  * Two dispatches. With `mode` 0, keeps the nearest depth of each pixel in the plane at
  * planes_word, with a fixed number per triangle in its lowest bits, so that exact ties go to

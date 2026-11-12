@@ -75,6 +75,9 @@ inline constexpr uint32_t kLodClusterWords = 20;
 inline constexpr uint32_t kLodLevelWords = 8;
 /// Set in a cluster draw entry's level count when the mesh deforms (VELK_LOD_DEFORMING).
 inline constexpr uint32_t kLodDeforming = 0x80000000u;
+/// Set in a cluster draw entry's level count when its material moves vertices, which compute
+/// raster does not (VELK_LOD_MOVED).
+inline constexpr uint32_t kLodMoved = 0x40000000u;
 
 /// A tree over a set of primitives. `triangle_indices` is the per-leaf
 /// permutation: leaf node `n` covers items

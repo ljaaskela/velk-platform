@@ -124,6 +124,8 @@ struct RtRecord {
 #define VELK_LOD_CLUSTER_WORDS 20u
 // In a cluster draw entry's level count: the mesh deforms (kLodDeforming).
 #define VELK_LOD_DEFORMING 0x80000000u
+// In a cluster draw entry's level count: its material moves vertices (kLodMoved).
+#define VELK_LOD_MOVED 0x40000000u
 
 )"
 // mesh_static_base value for a mesh whose static record is not resolvable yet
