@@ -3023,7 +3023,7 @@ uvec2 velk_cell_live_lights(uint at)
 // slowly enough that near cells keep their lead when more is due than the list holds.
 uint velk_cell_class(bool traced, bool changed, int up, uint own)
 {
-    uint kind = !traced ? (up == kCellUp ? 0u : 1u) : (changed && up == 0 ? 2u : 3u);
+    uint kind = !traced ? (up == kCellUp ? 0u : 1u) : (changed && up <= 0 ? 2u : 3u);
     vec4 clip = VELK_GLOBALS.view_projection * vec4(world_pos, 1.0);
     float depth = clip.w > 0.0 ? clip.z / clip.w : 0.0;
     int band = depth > 0.0 ? int(0.5 * log2(1.0 / min(depth, 1.0))) : 7;
@@ -3035,7 +3035,8 @@ uint velk_cell_class(bool traced, bool changed, int up, uint own)
                                                                       R"(
 // Keeps cell `c` up for the pixel: made if new, checked against what changed, and put forward
 // for tracing if it is due and it is this pixel's turn (CELLS_CANDIDATES). `up` is how many
-// levels above the pixel's own it is. Returns the word it starts at, or kNoCell.
+// levels above the pixel's own it is, -1 for the finer cell under a sharp edge. Returns the
+// word it starts at, or kNoCell.
 uint velk_cell_keep(VelkLightCell c, int up)
 {
     float cell_size = velk_light_cell_size(c.level);
@@ -3177,7 +3178,7 @@ uint velk_cell_keep(VelkLightCell c, int up)
             } else {
                 uint r = cand + kCandidateHeader + n * kCandidateWords;
                 velk_light_cell_words.data[r] = own;
-                velk_light_cell_words.data[r + 1u] = cls | (uint(up) << 8u) | (changed ? kCandidateChanged : 0u)
+                velk_light_cell_words.data[r + 1u] = cls | (uint(max(up, 0)) << 8u) | (changed ? kCandidateChanged : 0u)
                                                    | (only_live ? kCandidateOnlyLive : 0u);
                 velk_light_cell_words.data[r + 2u] = which.x;
                 velk_light_cell_words.data[r + 3u] = which.y;
@@ -3316,6 +3317,19 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
         }
     }
     int up_levels = min(int(ceil(widest)), kCellUp);
+    // A light partly through its own cell at the narrowest edge a cell records: the cell a
+    // level finer under the pixel is kept up too, and the lighting reads the edge from there
+    // (velk_cells_light_through). With the touch at one pixel in each 2x2, every finer cell
+    // has a pixel to keep it up.
+    if (pc.mode == kCellRoundRest && own != kNoCell && (velk_light_cell_words.data[own] & kCellReady) != 0u) {
+        bool sharp = false;
+        uint held_lights = min(pc.light_count, kCellLights);
+        for (uint i = 0u; i < held_lights && !sharp; ++i) {
+            uint held = velk_cell_light(own, i);
+            sharp = (held & 15u) != 0u && (held & 15u) != 15u && ((held >> 4u) & 7u) == 0u;
+        }
+        if (sharp) velk_cell_keep(velk_pixel_cell(level - 1), -1);
+    }
     // Its own cell not traced yet, waiting for room in the list: the cells kCellUp levels
     // larger are shown meanwhile, and kept up for that. Many pixels share one of them, so a
     // view coming into sight has them soon.
@@ -4497,6 +4511,15 @@ float velk_cells_light_through(uint i)
         }
     }
     own_through /= cells_total;
+    // A sharp edge at its own cell: read from the cells a level finer where they are traced,
+    // which the touch pass keeps up there.
+    if (cells_own != kNoCell && cells_level == cells_own_level) {
+        uint held = velk_cell_light(cells_own, i);
+        if ((held & 15u) != 0u && (held & 15u) != 15u && ((held >> 4u) & 7u) == 0u) {
+            float fine = velk_cells_level_through(i, cells_own_level - 1);
+            if (fine >= 0.0) return fine;
+        }
+    }
     float wanted = edge_weight > 0.0 ? min(edge_sum / edge_weight, float(kCellUp)) : 0.0;
     if (wanted <= 0.0) return own_through;
     // A wide soft edge is read from larger cells: the two levels either side of the one it
