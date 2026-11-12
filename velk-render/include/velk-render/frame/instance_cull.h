@@ -52,7 +52,9 @@ inline constexpr uint32_t kDepthPyramidHeaderWords = 3 + kDepthPyramidMaxLevels;
 /**
  * Fills one level of a depth pyramid in the culling arena with the farthest depth of what
  * each of its texels covers, depth being larger for what is nearer. The first level halves
- * the frame's depth texture, and later ones the level before.
+ * the frame's depth texture, and later ones the level before. With compute_word set, the first
+ * level takes each pixel's nearer of that texture and what compute raster drew there
+ * (instance_tiny_draw_src), so that those pixels hide what is behind them too.
  */
 inline constexpr string_view depth_pyramid_compute_src = R"(
 #version 450
@@ -70,12 +72,19 @@ layout(push_constant) uniform PC {
     uint target_word;
     uint width;
     uint height;
+    uint compute_word;   // compute raster's depth plane, a word a pixel, or 0xFFFFFFFF for none
 } pc;
 
 float read_source(ivec2 at)
 {
     if (pc.source_word == 0xFFFFFFFFu) {
-        return texelFetch(velk_textures[nonuniformEXT(pc.depth_id)], at, 0).r;
+        float depth = texelFetch(velk_textures[nonuniformEXT(pc.depth_id)], at, 0).r;
+        if (pc.compute_word != 0xFFFFFFFFu) {
+            // Its lowest bits break ties, not part of the depth.
+            uint drawn = pyramid_words.data[pc.compute_word + uint(at.y) * pc.source_width + uint(at.x)];
+            depth = max(depth, uintBitsToFloat(drawn & ~0xFFu));
+        }
+        return depth;
     }
     return uintBitsToFloat(pyramid_words.data[pc.source_word + uint(at.y) * pc.source_width + uint(at.x)]);
 }

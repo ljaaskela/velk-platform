@@ -705,12 +705,15 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.transparent_dirty = true;
     }
     emit_visibility_pass(vs, render_view, ctx, graph, false);
-    emit_depth_pyramid_pass(vs, ctx, graph);
+    emit_depth_pyramid_pass(vs, ctx, graph, false);
     if (occlusion && vs.instance_cull.pyramid_word != kCullNoSlot) {
         emit_instance_retest_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
         emit_visibility_pass(vs, render_view, ctx, graph, true);
     }
     emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
+    // Built again with what compute raster drew, for the next frame's culling. The retest
+    // above had only the hardware's first pass to go by.
+    if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode();
 
@@ -809,9 +812,12 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         });
 }
 
-void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph)
+void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, bool with_compute)
 {
     if (!vs.visibility) return;
+    // Compute raster's depth, where it covers the whole frame.
+    const bool compute = with_compute && vs.pixel_words.valid() && vs.pixel_words_size == vs.visibility_size;
+    if (with_compute && !compute) return;
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
 
@@ -852,12 +858,13 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
     if (!pipeline) return;
 
     bool dirty = true;
-    emit_cached_view_pass(vs.depth_pyramid_pass, dirty, "deferred.pyramid", graph, [&](CachedPassRecording& rec) {
+    auto& pass = compute ? vs.depth_pyramid_compute_pass : vs.depth_pyramid_pass;
+    emit_cached_view_pass(pass, dirty, compute ? "deferred.pyramid2" : "deferred.pyramid", graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         struct PushC
         {
-            uint32_t depth_id, source_word, source_width, source_height, target_word, width, height;
+            uint32_t depth_id, source_word, source_width, source_height, target_word, width, height, compute_word;
         };
         const uint32_t base = static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t));
         const uint32_t first_width = std::max(vs.visibility_size.x / 2u, 1u);
@@ -867,6 +874,9 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
 
         cmd->begin_recording();
         cmd->push_label("DeferredPath: depth pyramid");
+        // Compute raster's depth before.
+        if (compute) cmd->record_global_barrier();
+        const uint32_t compute_word = compute ? static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)) : 0xFFFFFFFFu;
         for (uint32_t level = 0; level < vs.depth_pyramid_levels; ++level) {
             const uint32_t width = std::max(first_width >> level, 1u);
             const uint32_t height = std::max(first_height >> level, 1u);
@@ -874,7 +884,7 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
                            level == 0 ? 0xFFFFFFFFu : words[3 + level - 1],
                            level == 0 ? vs.visibility_size.x : std::max(first_width >> (level - 1), 1u),
                            level == 0 ? vs.visibility_size.y : std::max(first_height >> (level - 1), 1u),
-                           words[3 + level], width, height};
+                           words[3 + level], width, height, compute_word};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_x = (width + 7u) / 8u;

@@ -153,6 +153,7 @@ public:
         uvec2 depth_pyramid_size{0, 0};
         uint32_t depth_pyramid_levels = 0;
         IRenderPass::Ptr depth_pyramid_pass;
+        IRenderPass::Ptr depth_pyramid_compute_pass;  ///< Built again with compute raster's pixels.
         InstanceCullPass instance_cull;
         /// Instances too small to draw. A region of the frame's size per visual.
         IRenderPass::Ptr far_instance_pass;
@@ -245,7 +246,9 @@ private:
     void emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, float tiny_pixels);
     /// Where the pixels' ids start in the culling arena: see ViewState::pixel_words.
     static uint32_t pixel_ids_word(const ViewState& vs);
-    void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
+    /// Builds the depth pyramid from the hardware's depth, or with @p with_compute from that and
+    /// what compute raster drew, before the resolve clears it.
+    void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, bool with_compute);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
