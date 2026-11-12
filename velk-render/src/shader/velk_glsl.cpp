@@ -68,6 +68,8 @@ struct VelkMeshNode {
     uvec4 refs;
 };
 #define VELK_BLAS_LEAF 0x80000000u
+// Words per node in a mesh tree's surface table: kBlasSurfaceWords, see blas_surface_table.
+#define VELK_BLAS_SURFACE_WORDS 4u
 
 // child_count of a node that refers to a partition. Its first_child is the
 // partition's root, and its origin is in the fields read by velk_partition_origin.

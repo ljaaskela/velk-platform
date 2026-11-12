@@ -88,7 +88,6 @@ public:
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
-    bool has_medium() const override;
     string_view get_ray_motion(float& reach) const override;
     array_view<const WorldBox> changed_bounds(bool& all) const override
     {

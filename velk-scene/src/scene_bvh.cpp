@@ -209,18 +209,6 @@ string_view SceneBvh::get_ray_motion(float& reach) const
     return {};
 }
 
-bool SceneBvh::has_medium() const
-{
-    for (const auto& [element, group] : instance_groups_) {
-        for (const auto& run : group.meshes) {
-            if (run.far_area > 0.f) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 void SceneBvh::free_instance_partitions(InstanceGroup& group)
 {
     for (uint32_t p : group.partitions) {

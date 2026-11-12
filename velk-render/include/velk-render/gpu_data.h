@@ -41,9 +41,6 @@ struct BvhBinding
     array_view<const WorldBox> changed;
     /// Everything may have changed, and `changed` does not list it.
     bool changed_all = false;
-    /// Whether instances in it have a far form, so tracing shaders need the medium
-    /// traversals. Paths watch this themselves, since it changes which pipeline they use.
-    uint32_t has_medium = 0;
     /// How rays follow motion of instances that the tree does not hold, if any. See
     /// IInstancedMeshVisual::set_ray_motion. Tracing shaders are compiled with it.
     string_view ray_motion;

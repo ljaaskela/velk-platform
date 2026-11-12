@@ -216,7 +216,6 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
                                                     uint64_t variant_tag,
                                                     bool with_area_lights = false,
-                                                    bool with_medium = false,
                                                     string_view ray_motion = {},
                                                     float ray_motion_reach = 0.f,
                                                     uint32_t cells = 0)
@@ -247,7 +246,6 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // Distinct variants: the two differ in source, so they must not share a
     // cache entry.
     key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
-    key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key = (key ^ (0x43656c6cULL + cells)) * kFnvPrime;
     for (char c : ray_motion) {
         key = (key ^ static_cast<uint8_t>(c)) * kFnvPrime;
@@ -338,20 +336,16 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     if (!ray_motion.empty()) {
         src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
     }
-    if (with_medium) {
-        const string with_define = velk_with_trace_medium(string_view(src));
-        return ctx.render_ctx->pipelines().compile_compute(string_view(with_define), key);
-    }
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium,
-                                                string_view ray_motion, float ray_motion_reach)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, string_view ray_motion,
+                                                float ray_motion_reach)
 {
     return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights, with_medium, ray_motion, ray_motion_reach, 1u);
+                                             with_area_lights, ray_motion, ray_motion_reach, 1u);
 }
 
 namespace {
@@ -1457,15 +1451,14 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
 {
     if (!vs.gbuffer || !vs.light_cell_header.valid()) return;
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false, has_medium,
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false,
                                                       render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 2u);
-    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false, has_medium,
+    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false,
                                                             render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 3u);
     // The bounce cells' passes, each built with only what it needs: the trace with the walk and
     // nothing else, the passes that find and keep cells without it.
     const auto bounce_pipeline = [&](string_view main_src, uint64_t tag, uint32_t cells) {
-        return compose_deferred_compute_pipeline(ctx, main_src, tag, false, has_medium, render_view.bvh.ray_motion,
+        return compose_deferred_compute_pipeline(ctx, main_src, tag, false, render_view.bvh.ray_motion,
                                                  render_view.bvh.ray_motion_reach, cells);
     };
     auto bounce_trace_pipeline = bounce_pipeline(light_cells_bounce_trace_main_src, 0x4c43'4254'5243ULL, 3u);
@@ -1708,8 +1701,7 @@ void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render
 {
     if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_main_src, 0x4c43'454c'4c53ULL, false, has_medium,
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_main_src, 0x4c43'454c'4c53ULL, false,
                                                       render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 1u);
     if (!pipeline) return;
 
@@ -1842,13 +1834,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    if (has_medium != vs.had_medium) {
-        vs.had_medium = has_medium;
-        vs.lighting_dirty = true;
-    }
-
-    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, has_medium, render_view.bvh.ray_motion,
+    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, render_view.bvh.ray_motion,
                                              render_view.bvh.ray_motion_reach);
     if (!lighting_pipeline) return;
 

@@ -223,14 +223,11 @@ float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
     return min(min(tmx.x, tmx.y), tmx.z);
 }
 
-// How wide the area a visibility ray stands for is, in world units, for the shader to
-// set before tracing one. 0 means a single line, which tests every instance.
+// How wide what a ray stands for is where it starts, in world units, across, and how much
+// wider it gets per unit along it, for the shader to set before tracing. A part of a mesh narrower
+// than that where the ray reaches it is not gone into: a closest-hit ray stops there, as on
+// the surface, and any other ray is dimmed by it as by a medium. Both 0 for an exact ray.
 float velk_ray_footprint = 0.0;
-// How much wider that gets per unit along the ray, for a light that is not a point.
-float velk_ray_spread = 0.0;
-// For a closest-hit ray that stands for a cone: the tangent of its half angle, for the
-// shader to set. A part of a solid mesh narrower than the cone where the ray reaches it
-// counts as the surface there. 0 for an exact ray.
 float velk_ray_cone = 0.0;
 // How far the surface a ray starts from may be from the full mesh rays are tested against,
 // in world units, when it is drawn at a coarser level of detail. For the shader to set.
@@ -252,6 +249,14 @@ vec3 velk_ray_frame = vec3(0.0);
 float velk_medium_reach(uint node_index)
 {
     return 4.0 * (0.5 + float((node_index * 2654435761u) >> 16u) / 65536.0);
+}
+
+// How many times a ray's width a part of a mesh can be and still be too fine to go into:
+// about one, varying per node so that same-sized nodes do not all change over at one
+// distance, which shows as a ring, and the same while the camera moves, so nothing crawls.
+float velk_stop_reach(uint node_index)
+{
+    return 0.5 + float((node_index * 2654435761u) >> 16u) / 65536.0;
 }
 
 // The composer generates the body after intersect snippets have been included.
@@ -325,19 +330,17 @@ BvhNode velk_top_node(uint index)
 //
 // Mesh hits keep only what identifies them, and the surface is worked out once, for the winner.
 //
-// With VELK_TRACE_MEDIUM, for scenes with instances that have a far form: a node of instances
-// not much wider than the ray's footprint counts as a medium, since one line through it would
-// hit or miss one instance at random. Light falls off with distance through it, by its density
-// of instances' area per volume. A node's area is in aabb_max.w, 0 for one not made of
-// instances, and its average colour is in the bits of aabb_min.w, as unorm RGB. Compiled out
-// otherwise, since registers are paid for by the whole pass.
-#ifdef VELK_TRACE_MEDIUM
-// A mesh counted as a medium keeps going past what other shapes hit, as far as this record's
-// limit, since what it holds in front of that still dims the ray.
-#define VELK_WALK_LIMIT (mesh_medium ? min(mesh_best, medium_far * mesh_scale) : min(mesh_best, best_t * mesh_scale))
-#else
+// A part of a mesh, or a whole mesh, narrower than the ray where the ray reaches it is not
+// gone into (see velk_ray_footprint), unless the ray starts inside it: one line through it
+// would hit or miss its triangles at random. A closest-hit ray stops there, with the part's mean normal and uv from the mesh's
+// surface table (blas_surface_table). Any other ray is dimmed by it, by its triangles' area
+// per volume over the length it goes through.
+//
+// A node of instances not much wider than the ray's footprint likewise counts as a medium.
+// Light falls off with distance through it, by its density of instances' area per volume. A
+// node's area is in aabb_max.w, 0 for one not made of instances, and its average colour is in
+// the bits of aabb_min.w, as unorm RGB.
 #define VELK_WALK_LIMIT min(mesh_best, best_t * mesh_scale)
-#endif
 
 float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_record, RtShape seed, out RayHit hit)
 {
@@ -380,8 +383,8 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     float mesh_scale = 1.0;
     uint mesh_base = 0u;
     uint word_base = 0u;
+    uint surface_base = 0u;
     uint positions = 0u;
-    float mesh_cone = 0.0;
     float mesh_best = 1e30;
 
     float best_t = t_max;
@@ -391,20 +394,15 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     uint best_vertex_ids = 0u;
     float best_u = 0.0;
     float best_v = 0.0;
+    // Stopped on a part too fine for the ray: the word of its entry in the surface table.
     bool best_stopped = false;
-    uint best_stop_normal = 0u;
+    uint best_stop_surface = 0u;
 
-#ifdef VELK_TRACE_MEDIUM
     float footprint = velk_ray_footprint;
-    float spread = closest ? 0.0 : velk_ray_spread;
-    bool record_medium = false;
-    bool mesh_medium = false;
-    float medium_far = t_max;
-    uint mesh_color_word = 0u;
+    float cone = velk_ray_cone;
     float medium_depth = 0.0;
     vec3 medium_color = vec3(0.0);
     float visibility = 1.0;
-#endif
 
     while (true) {
         if ((leaf_counts & 0xFFFFu) != 0u) {
@@ -485,55 +483,35 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 float t_aabb = left ? t_l : t_r;
                 if (t_aabb > VELK_WALK_LIMIT) continue;
                 uint child = left ? node.refs.x : node.refs.y;
-                uint surface = left ? node.refs.z : node.refs.w;
                 vec3 box_min = left ? node.a.xyz : vec3(node.b.zw, node.c.x);
                 vec3 box_max = left ? vec3(node.a.w, node.b.xy) : node.c.yzw;
 )"
                                                                       R"(
-#ifdef VELK_TRACE_MEDIUM
-                if (mesh_medium) {
-                    vec3 extent = box_max - box_min;
-                    float widest = max(max(extent.x, extent.y), extent.z);
-                    // In the mesh's units, where its t is the world's times mesh_scale.
-                    if (widest < (footprint * mesh_scale + spread * t_aabb) * velk_medium_reach(mesh_base + child)) {
-                        vec3 sides = max(extent, vec3(widest * 1e-3));
-                        float leave = min(min(ray_aabb_exit(walk_ray, box_min, box_max), medium_far * mesh_scale), mesh_best);
-                        float amount = uintBitsToFloat(surface) / (sides.x * sides.y * sides.z) * max(leave - t_aabb, 0.0);
-                        if (closest) {
-                            medium_depth += amount;
-                            medium_color += amount * unpackUnorm4x8(mesh_color_word).rgb;
-                        } else {
-                            visibility *= exp(-amount);
-                        }
-                        continue;
-                    }
-                }
-#endif
-                // Narrower than the cone: this child is the surface. A real triangle under it
-                // gives the material something to read.
-                if (mesh_cone > 0.0) {
-                    vec3 extent = box_max - box_min;
-                    if (max(max(extent.x, extent.y), extent.z) < mesh_cone * t_aabb) {
-                        uint under = child;
-                        while ((under & VELK_BLAS_LEAF) == 0u) {
-                            under = velk_mesh_nodes.data[mesh_base + under].refs.x;
-                        }
-                        uint leaf = word_base + (under & ~VELK_BLAS_LEAF);
+                // Too fine for the ray, in the mesh's units, where its t is the world's times
+                // mesh_scale. One the ray starts in is gone into: it holds the surface the ray
+                // leaves from.
+                vec3 extent = box_max - box_min;
+                float widest = max(max(extent.x, extent.y), extent.z);
+                if (t_aabb > 0.0 && widest < (footprint * mesh_scale + cone * t_aabb) * velk_stop_reach(mesh_base + child)) {
+                    uint surface = surface_base + VELK_BLAS_SURFACE_WORDS * (1u + 2u * ref + (left ? 0u : 1u));
+                    if (closest) {
                         mesh_best = t_aabb;
                         best_t = t_aabb / mesh_scale;
                         best_shape = cur_shape;
                         best_record = cur_record;
-                        best_u = 1.0 / 3.0;
-                        best_v = best_u;
-                        best_triangle = velk_cluster_words.data[word_base + velk_cluster_words.data[leaf]];
-                        best_vertex_ids = word_base + velk_cluster_words.data[leaf + 2u] + (velk_cluster_words.data[leaf + 1u] >> 16u) * 3u;
                         best_stopped = true;
-                        best_stop_normal = surface;
+                        best_stop_surface = surface;
                         stack[kStack] = floatBitsToUint(velk_ray_frame.x);
                         stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
                         stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
-                        continue;
+                    } else {
+                        vec3 sides = max(extent, vec3(widest * 1e-3));
+                        float leave = min(ray_aabb_exit(walk_ray, box_min, box_max), mesh_best);
+                        float area = uintBitsToFloat(velk_cluster_words.data[surface]);
+                        visibility *= exp(-area / (sides.x * sides.y * sides.z) * max(leave - t_aabb, 0.0));
+                        if (visibility < 1e-3) return 0.0;
                     }
+                    continue;
                 }
                 if (k == 0u) {
                     near_ref = child;
@@ -558,29 +536,43 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             RtShape shape = seeded ? seed : velk_bvh_shapes.data[index];
             if (shape.shape_kind == 255u) {
                 if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) continue;
-#ifdef VELK_TRACE_MEDIUM
-                bool is_medium = record_medium;
-                float reach = is_medium ? medium_far : best_t;
-#else
-                float reach = best_t;
-#endif
                 float t_box;
-                if (!ray_aabb(shape_ray, shape.origin.xyz, shape.u_axis.xyz, reach, t_box)) continue;
+                if (!ray_aabb(shape_ray, shape.origin.xyz, shape.u_axis.xyz, best_t, t_box)) continue;
                 MeshStaticData st = velk_mesh_static(shape);
                 if (st.triangle_count == 0u || st.vertex_stride == 0u || st.blas_node_count == 0u) continue;
                 // Normalized so that the triangle thresholds do not depend on how much an
                 // instance is scaled. The length converts hits back to the ray's t.
                 float scale = length(shape_ray.dir);
                 if (scale < 1e-30) continue;
+                // The whole mesh too fine for the ray, in its own units: as a part of it would
+                // be, with its tree's root.
+                vec3 extent = shape.u_axis.xyz - shape.origin.xyz;
+                float widest = max(max(extent.x, extent.y), extent.z);
+                if (t_box > 0.0 && widest < (footprint + cone * t_box) * scale * velk_stop_reach(st.blas_node_base)) {
+                    if (closest) {
+                        best_t = t_box;
+                        best_shape = index;
+                        best_record = cur_record;
+                        best_stopped = true;
+                        best_stop_surface = st.surface_word_base;
+                        stack[kStack] = floatBitsToUint(velk_ray_frame.x);
+                        stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
+                        stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
+                    } else {
+                        vec3 sides = max(extent, vec3(widest * 1e-3));
+                        float leave = min(ray_aabb_exit(shape_ray, shape.origin.xyz, shape.u_axis.xyz), best_t);
+                        float area = uintBitsToFloat(velk_cluster_words.data[st.surface_word_base]);
+                        visibility *= exp(-area / (sides.x * sides.y * sides.z) * max(leave - t_box, 0.0) * scale);
+                        if (visibility < 1e-3) return 0.0;
+                    }
+                    continue;
+                }
                 walk_ray.origin = shape_ray.origin;
                 walk_ray.dir = shape_ray.dir / scale;
                 mesh_scale = scale;
                 mesh_base = st.blas_node_base;
                 word_base = st.cluster_word_base;
-                mesh_cone = closest && (st.flags & (VELK_MESH_SCATTERED | VELK_MESH_DEFORMING)) == 0u ? velk_ray_cone : 0.0;
-#ifdef VELK_TRACE_MEDIUM
-                mesh_medium = is_medium && (st.flags & VELK_MESH_SCATTERED) != 0u;
-#endif
+                surface_base = st.surface_word_base;
                 mesh_best = 1e30;
                 cur_shape = index;
                 level_after_mesh = level;
@@ -617,10 +609,6 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             ++record_at;
             --records_left;
             RtRecord rec = velk_records.data[cur_record];
-#ifdef VELK_TRACE_MEDIUM
-            record_medium = footprint > 0.0 && (rec.shape_count & VELK_RECORD_MEDIUM) != 0u && (closest || rec.tree_root == VELK_NO_TREE);
-            medium_far = best_t;
-#endif
             if (rec.tree_root == VELK_NO_TREE) {
                 shape_at = rec.first_shape;
                 shapes_left = rec.shape_count & VELK_RECORD_SHAPE_COUNT;
@@ -650,10 +638,10 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             }
 )"
                                                                       R"(
-#ifdef VELK_TRACE_MEDIUM
             if (footprint > 0.0 && node.aabb_max.w > 0.0) {
                 vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
                 float widest = max(max(extent.x, extent.y), extent.z);
+                float spread = closest ? 0.0 : cone;
                 // The leaf of a partition without its instances has nothing else to offer.
                 if (widest < (footprint + spread * max(t_enter, 0.0)) * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
                     float enter;
@@ -671,8 +659,6 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                     continue;
                 }
             }
-            mesh_color_word = floatBitsToUint(node.aabb_min.w);
-#endif
             record_at = node.first_shape;
             records_left = node.shape_count;
 #ifdef VELK_TRACE_ORDERED_ANY_HIT
@@ -702,18 +688,10 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
         }
     }
 
-    if (!closest) {
-#ifdef VELK_TRACE_MEDIUM
-        return visibility;
-#else
-        return 1.0;
-#endif
-    }
+    if (!closest) return visibility;
 
-#ifdef VELK_TRACE_MEDIUM
     velk_ray_medium_depth = medium_depth;
     velk_ray_medium_color = medium_color;
-#endif
     if (best_shape == kNone) return 0.0;
 
     hit.t = best_t;
@@ -722,27 +700,29 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     hit.object = rec.object;
     RtShape shape = seeded ? seed : velk_bvh_shapes.data[best_shape];
     if (shape.shape_kind == 255u) {
-        // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. (u, v) from the triangle test
-        // make (1-u-v, u, v) the weights for its three vertices.
         MeshStaticData st = velk_mesh_static(shape);
-        uint floats_per_vert = st.vertex_stride >> 2u;
-        float w = 1.0 - best_u - best_v;
-        uint o0 = velk_cluster_words.data[best_vertex_ids + (best_triangle & 0xFFu)] * floats_per_vert;
-        uint o1 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 8u) & 0xFFu)] * floats_per_vert;
-        uint o2 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 16u) & 0xFFu)] * floats_per_vert;
-        vec2 uv0 = vec2(velk_mesh_vertex(st, o0 + 6u), velk_mesh_vertex(st, o0 + 7u));
-        vec2 uv1 = vec2(velk_mesh_vertex(st, o1 + 6u), velk_mesh_vertex(st, o1 + 7u));
-        vec2 uv2 = vec2(velk_mesh_vertex(st, o2 + 6u), velk_mesh_vertex(st, o2 + 7u));
-        hit.uv = uv0 * w + uv1 * best_u + uv2 * best_v;
         vec3 n;
         if (best_stopped) {
-            // The less the node's surface agrees on a direction, the more it faces the ray.
+            // The part's mean uv, and its mean normal: the less its surface agrees on a
+            // direction, the more it faces the ray.
+            hit.uv = unpackHalf2x16(velk_cluster_words.data[best_stop_surface + 2u]);
             vec3 ld = normalize(vec3(dot(rec.inv_row0.xyz, ray.dir), dot(rec.inv_row1.xyz, ray.dir), dot(rec.inv_row2.xyz, ray.dir)));
-            vec3 stop_normal = unpackSnorm4x8(best_stop_normal).xyz;
+            vec3 stop_normal = unpackSnorm4x8(velk_cluster_words.data[best_stop_surface + 1u]).xyz;
             vec3 bent = stop_normal - ld * (1.0 - min(length(stop_normal), 1.0));
             float bent_length = length(bent);
             n = bent_length > 1e-4 ? bent / bent_length : -ld;
         } else {
+            // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. (u, v) from the triangle test
+            // make (1-u-v, u, v) the weights for its three vertices.
+            uint floats_per_vert = st.vertex_stride >> 2u;
+            float w = 1.0 - best_u - best_v;
+            uint o0 = velk_cluster_words.data[best_vertex_ids + (best_triangle & 0xFFu)] * floats_per_vert;
+            uint o1 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 8u) & 0xFFu)] * floats_per_vert;
+            uint o2 = velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 16u) & 0xFFu)] * floats_per_vert;
+            vec2 uv0 = vec2(velk_mesh_vertex(st, o0 + 6u), velk_mesh_vertex(st, o0 + 7u));
+            vec2 uv1 = vec2(velk_mesh_vertex(st, o1 + 6u), velk_mesh_vertex(st, o1 + 7u));
+            vec2 uv2 = vec2(velk_mesh_vertex(st, o2 + 6u), velk_mesh_vertex(st, o2 + 7u));
+            hit.uv = uv0 * w + uv1 * best_u + uv2 * best_v;
             vec3 n0 = vec3(velk_mesh_vertex(st, o0 + 3u), velk_mesh_vertex(st, o0 + 4u), velk_mesh_vertex(st, o0 + 5u));
             vec3 n1 = vec3(velk_mesh_vertex(st, o1 + 3u), velk_mesh_vertex(st, o1 + 4u), velk_mesh_vertex(st, o1 + 5u));
             vec3 n2 = vec3(velk_mesh_vertex(st, o2 + 3u), velk_mesh_vertex(st, o2 + 4u), velk_mesh_vertex(st, o2 + 5u));
@@ -811,19 +791,6 @@ bool trace_shape(Ray ray, uint record, RtShape shape, out RayHit hit)
     return velk_walk(ray, 1e30, true, true, record, shape, hit) > 0.5;
 }
 )";
-
-/// @p source with the medium traversals of velk_trace_src compiled in, for a scene with
-/// instances that have a far form.
-inline string velk_with_trace_medium(string_view source)
-{
-    const size_t version = source.find(string_view("#version"));
-    const size_t after = source.find('\n', version) + 1;
-    string out;
-    out += source.substr(0, after);
-    out += string_view("#define VELK_TRACE_MEDIUM\n");
-    out += source.substr(after);
-    return out;
-}
 
 /**
  * Fills the G-buffer from the visibility buffer: for each pixel, finds its triangle, where
@@ -3246,9 +3213,10 @@ void main()
     Ray ray;
     ray.origin = middle + cell_n * lift + dir * 0.005;
     ray.dir = dir;
-    // Each ray stands for a cone, and for the cell it leaves from.
-    velk_ray_cone = kBounceConeTan;
-    velk_ray_footprint = cell_size * 0.5;
+    // Each ray stands for a cone, and for the cell it leaves from: as wide as the cell where it
+    // starts, and as the cell its hit reads where it lands.
+    velk_ray_cone = 2.0 * kBounceConeTan;
+    velk_ray_footprint = cell_size;
     RayHit hit;
     bool found = trace_closest_hit(ray, 1e30, hit);
     // The back of the cell's own object, close by: the ray started inside the surface rays
@@ -3375,8 +3343,17 @@ void main()
     // Lifted off the surface by the G-buffer's own error and a little of the distance.
     ray.origin = pos + n * (normal_error.w + 1e-4 * length(pos));
     ray.dir = dir;
+    // The ray stands for the pixel, as wide as it is here and widening as it does from the
+    // camera.
+    mat4 vp = VELK_GLOBALS.view_projection;
+    float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
+    velk_ray_footprint = pixel_width * length(pos);
+    velk_ray_cone = pixel_width;
     RayHit hit;
-    if (!trace_closest_hit(ray, 1e30, hit)) {
+    bool found = trace_closest_hit(ray, 1e30, hit);
+    velk_ray_footprint = 0.0;
+    velk_ray_cone = 0.0;
+    if (!found) {
         velk_light_cell_words.data[rec] = kNoCell;
         return;
     }

@@ -998,7 +998,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 auto* b = bit->second;
                 ctx.bvh.root = b->get_root_index();
                 ctx.bvh.node_count = b->get_node_count();
-                ctx.bvh.has_medium = b->has_medium() ? 1u : 0u;
                 ctx.bvh.ray_motion = b->get_ray_motion(ctx.bvh.ray_motion_reach);
                 ctx.bvh.changed = b->changed_bounds(ctx.bvh.changed_all);
                 ctx.bvh.object_transforms = b->get_object_transforms(ctx.bvh.object_slots);

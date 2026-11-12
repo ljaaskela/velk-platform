@@ -66,9 +66,6 @@ public:
      */
     virtual uint32_t get_node_count() const = 0;
 
-    /** @brief Whether any instances in it have a far form, for rays too wide to resolve them. */
-    virtual bool has_medium() const = 0;
-
     /** @brief How rays follow motion it does not hold, and how far that reaches, or empty. */
     virtual string_view get_ray_motion(float& reach) const = 0;
 
