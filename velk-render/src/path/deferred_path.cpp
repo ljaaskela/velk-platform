@@ -365,7 +365,10 @@ constexpr uint32_t kCellWords = 24;
 constexpr uint32_t kCellChanges = 128;
 constexpr uint32_t kCellChangeWords = 8;
 // The words that say where all of that is. See CELLS_HEADER in light_cells_src.
-constexpr uint32_t kCellHeaderWords = 18;
+constexpr uint32_t kCellHeaderWords = 19;
+// The most grid cubes a light is listed in, as 4 a side; a light that reaches further is
+// listed everywhere. See VELK_LIGHT_GRID_GLSL.
+constexpr int32_t kGridSpan = 4;
 // The cells due in a frame, before the list is decided: how many at most, the classes they
 // are ranked in, the header's words and each one's. See CELLS_CANDIDATES.
 constexpr uint32_t kCellCandidateMax = 1u << 17;
@@ -429,6 +432,106 @@ VELK_GPU_STRUCT BounceShadePushC {
 };
 
 } // namespace
+
+namespace {
+
+// A grid cube's bucket, before masking to the buckets there are. Mirrors velk_light_grid_hash.
+uint32_t light_grid_hash(int32_t x, int32_t y, int32_t z)
+{
+    uint32_t h = (static_cast<uint32_t>(x) * 0x8da6b343u) ^ (static_cast<uint32_t>(y) * 0xd8163841u)
+               ^ (static_cast<uint32_t>(z) * 0xcb1ab31fu);
+    h ^= h >> 16; h *= 0x7feb352du;
+    h ^= h >> 15; h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+} // namespace
+
+void DeferredPath::build_light_grid(ViewState& vs, const RenderView& render_view, FrameContext& ctx)
+{
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+    const auto& lights = render_view.lights;
+    const auto ranged = [](const GpuLight& l) {
+        return l.flags[0] == static_cast<uint32_t>(LightType::Point) || l.flags[0] == static_cast<uint32_t>(LightType::Spot);
+    };
+    // The cubes are as large as the middle one of the point and spot lights' ranges, up to a
+    // power of two, so that most of those are listed in at most two cubes a side.
+    vector<float> ranges;
+    for (const auto& l : lights) {
+        if (ranged(l)) ranges.push_back(std::max(l.params[0], 1e-3f));
+    }
+    float size = 1.f;
+    if (!ranges.empty()) {
+        float* middle = ranges.begin() + ranges.size() / 2;
+        std::nth_element(ranges.begin(), middle, ranges.end());
+        size = std::exp2(std::ceil(std::log2(*middle)));
+    }
+    // Each light in the cubes its range's box covers; one without a range, or reaching
+    // further than kGridSpan cubes a side, everywhere.
+    const auto cubes = [&](const GpuLight& l, int32_t lo[3], int32_t hi[3]) {
+        bool fits = ranged(l);
+        for (int k = 0; fits && k < 3; ++k) {
+            lo[k] = static_cast<int32_t>(std::floor((l.position[k] - l.params[0]) / size));
+            hi[k] = static_cast<int32_t>(std::floor((l.position[k] + l.params[0]) / size));
+            fits = hi[k] - lo[k] < kGridSpan;
+        }
+        return fits;
+    };
+    vector<uint32_t> everywhere;
+    size_t listings = 0;
+    for (uint32_t i = 0; i < lights.size(); ++i) {
+        int32_t lo[3];
+        int32_t hi[3];
+        if (!cubes(lights[i], lo, hi)) {
+            everywhere.push_back(i);
+            continue;
+        }
+        listings += size_t(hi[0] - lo[0] + 1) * size_t(hi[1] - lo[1] + 1) * size_t(hi[2] - lo[2] + 1);
+    }
+    uint32_t buckets = 1;
+    while (buckets < listings) buckets <<= 1;
+    // Each listing as its bucket in the high half and its light in the low, sorted by bucket.
+    vector<uint64_t> listed;
+    for (uint32_t i = 0; i < lights.size(); ++i) {
+        int32_t lo[3];
+        int32_t hi[3];
+        if (!cubes(lights[i], lo, hi)) continue;
+        for (int32_t z = lo[2]; z <= hi[2]; ++z) {
+            for (int32_t y = lo[1]; y <= hi[1]; ++y) {
+                for (int32_t x = lo[0]; x <= hi[0]; ++x) {
+                    const uint64_t bucket = light_grid_hash(x, y, z) & (buckets - 1u);
+                    listed.push_back((bucket << 32) | i);
+                }
+            }
+        }
+    }
+    std::sort(listed.begin(), listed.end());
+    // Two cubes of one light can share a bucket: listed once.
+    size_t kept = 0;
+    for (size_t k = 0; k < listed.size(); ++k) {
+        if (kept == 0 || listed[k] != listed[kept - 1]) listed[kept++] = listed[k];
+    }
+    vector<uint32_t> words;
+    const size_t at_buckets = 4 + everywhere.size();
+    const size_t at_lights = at_buckets + size_t(buckets) * 2;
+    words.resize(at_lights + kept, 0u);
+    words[0] = buckets;
+    words[1] = float_bits(size);
+    words[2] = static_cast<uint32_t>(everywhere.size());
+    for (size_t k = 0; k < everywhere.size(); ++k) words[4 + k] = everywhere[k];
+    for (size_t k = 0; k < kept; ++k) {
+        const auto bucket = static_cast<uint32_t>(listed[k] >> 32);
+        uint32_t* entry = words.data() + at_buckets + size_t(bucket) * 2;
+        if (entry[1] == 0) entry[0] = static_cast<uint32_t>(at_lights + k);
+        ++entry[1];
+        words[at_lights + k] = static_cast<uint32_t>(listed[k] & 0xFFFFFFFFu);
+    }
+    const uint64_t bytes = uint64_t(words.size()) * sizeof(uint32_t);
+    if (!vs.light_grid.valid() || vs.light_grid.size() < bytes) vs.light_grid = arena->alloc(bytes);
+    if (vs.light_grid.valid()) arena->update_at(vs.light_grid.offset(), words.data(), bytes);
+}
 
 void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
 {
@@ -699,6 +802,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // Before anything is recorded: growing the culling arena replaces the buffer that
     // recorded commands name.
     ensure_arena_words(vs, ctx);
+    build_light_grid(vs, render_view, ctx);
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
     const uint32_t culling_generation = vs.instance_cull.arena_generation;
@@ -1348,8 +1452,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
     }
 
     // What changed this frame, which the mark passes put on the cells and bounce entries it
-    // could alter: what the scene's rays can hit, and lights that moved. A light's colour and
-    // strength are not part of what a cell keeps, so those changing needs nothing traced.
+    // could alter: what the scene's rays can hit, and lights that moved or changed brightness.
     // Nothing is kept from frame to frame: the marks are.
     {
         const auto now = static_cast<uint32_t>(ctx.present_counter);
@@ -1483,6 +1586,7 @@ bool DeferredPath::prepare_light_cells(ViewState& vs, const RenderView& render_v
             vs.gbuffer_size.x,
             float_bits(light_reflect_roughness()),
             static_cast<uint32_t>(vs.light_cell_candidates.offset() / sizeof(uint32_t)),
+            vs.light_grid.valid() ? static_cast<uint32_t>(vs.light_grid.offset() / sizeof(uint32_t)) : 0xFFFFFFFFu,
         };
         arena->update_at(vs.light_cell_header.offset(), header, sizeof(header));
     }

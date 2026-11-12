@@ -128,6 +128,8 @@ public:
         ArenaRegion light_bounce_list;
         /// The pixels' reflection rays. See kReflectWords.
         ArenaRegion light_reflect;
+        /// The lights by where they reach, rebuilt each frame. See VELK_LIGHT_GRID_GLSL.
+        ArenaRegion light_grid;
         /// The lights as each was when last listed as moved, to tell which moved enough since.
         vector<GpuLight> light_cell_lights;
         /// The cells' counters when last printed, and the frame. See kStatAsked.
@@ -223,6 +225,10 @@ private:
     /// Allocates the light cells' words and the render tests' in the culling arena. Call
     /// before recording anything that names the culling arena.
     void ensure_arena_words(ViewState& vs, FrameContext& ctx);
+    /// Builds the grid of lights by where they reach and writes it to the culling arena,
+    /// growing its region as needed. Call before recording anything that names the culling
+    /// arena. See VELK_LIGHT_GRID_GLSL.
+    void build_light_grid(ViewState& vs, const RenderView& render_view, FrameContext& ctx);
 
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);

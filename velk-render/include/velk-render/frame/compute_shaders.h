@@ -1312,6 +1312,49 @@ VelkLightCell velk_point_cell(uint object, float radius, vec3 surface, uint side
 //          there, 8 bits a channel; the emission there (velk_pack_rgbe); the bounce cell
 //          over the hit (its word in the cell table), whose light arriving there is passed
 //          on, or kNoCell.
+// The lights by where they reach, rebuilt each frame (DeferredPath::build_light_grid), in the
+// culling arena at the cells' header word 18, 0xFFFFFFFF if there is none. Its words: how many
+// buckets, a power of two; the size of its cubes, a float; how many lights are listed
+// everywhere, and a spare word; those lights; then two words a bucket, where its lights start
+// from the grid's first word and how many; then the buckets' lights. A light is listed in the
+// cubes its range's box covers, or everywhere. A bucket holds the lights of the cubes that hash
+// to it, so it can list lights that do not reach a place in its cube. Follows the declaration
+// of velk_light_cell_words and CELLS_HEADER.
+#define VELK_LIGHT_GRID_GLSL R"(
+uint velk_light_grid_hash(ivec3 cube)
+{
+    uint h = (uint(cube.x) * 0x8da6b343u) ^ (uint(cube.y) * 0xd8163841u) ^ (uint(cube.z) * 0xcb1ab31fu);
+    h ^= h >> 16; h *= 0x7feb352du;
+    h ^= h >> 15; h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+// How many lights could reach the place `world_at`, from the world's origin, and in `first`
+// where its bucket's lights start, for velk_light_grid_at. Every light if there is no grid.
+uint velk_light_grid_count(vec3 world_at, out uint first)
+{
+    first = 0u;
+    uint grid = velk_light_cell_words.data[CELLS_HEADER + 18u];
+    if (grid == 0xFFFFFFFFu) return pc.light_count;
+    uint buckets = velk_light_cell_words.data[grid];
+    float size = uintBitsToFloat(velk_light_cell_words.data[grid + 1u]);
+    uint everywhere = velk_light_cell_words.data[grid + 2u];
+    uint b = grid + 4u + everywhere + (velk_light_grid_hash(ivec3(floor(world_at / size))) & (buckets - 1u)) * 2u;
+    uint count = velk_light_cell_words.data[b + 1u];
+    if (count != 0u) first = grid + velk_light_cell_words.data[b];
+    return everywhere + count;
+}
+
+// The `k`th light that could reach the place velk_light_grid_count gave `first` for.
+uint velk_light_grid_at(uint first, uint k)
+{
+    uint grid = velk_light_cell_words.data[CELLS_HEADER + 18u];
+    if (grid == 0xFFFFFFFFu) return k;
+    uint everywhere = velk_light_cell_words.data[grid + 2u];
+    return k < everywhere ? velk_light_cell_words.data[grid + 4u + k] : velk_light_cell_words.data[first + k - everywhere];
+}
+)"
 #define VELK_BOUNCE_GLSL R"(
 const int kBounceUp = 2;
 const uint kBounceRays = 64u;
@@ -1936,7 +1979,8 @@ void main()
         vec3 highlights = vec3(0.0);
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
-        // The lights its cells keep, or every light while it has none.
+        // The lights its cells keep (velk_cells_lights), or every light for a pixel cells
+        // cannot be found for.
         uint pixel_lights[kPixelLights];
         uint listed = cells_here ? velk_cells_lights(pixel_lights) : kNoLight;
         uint light_count = listed == kNoLight ? pc.light_count : listed;
@@ -2081,6 +2125,7 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
 )" VELK_LIGHT_CELL_GLSL VELK_BOUNCE_GLSL R"(
 #define CELLS_HEADER pc.cells_header
+)" VELK_LIGHT_GRID_GLSL R"(
 // The header's words, read once a thread by velk_cells_load, which a main calls first.
 uint cells_header[18];
 void velk_cells_load()
@@ -2411,16 +2456,19 @@ float velk_light_brings(Light light, vec3 world_pos)
     return dot(velk_light_unshadowed(light, world_pos, toward), kLuminance);
 }
 
-// Chooses the lights cell `own` keeps, at `world_pos`: of those that could bring it any light
-// (velk_light_brings), the kCellLightSlots that could bring the most. A light it keeps already
-// stays in its slot with what it holds. A light new to it is marked changed until it is
-// traced. Returns the slots given a light new to it, a bit a slot.
+// Chooses the lights cell `own` keeps, at `world_pos`: of those the light grid lists there
+// that could bring it any light (velk_light_brings), the kCellLightSlots that could bring the
+// most. A light it keeps already stays in its slot with what it holds. A light new to it is
+// marked changed until it is traced. Returns the slots given a light new to it, a bit a slot.
 uint velk_cell_choose(uint own, vec3 world_pos)
 {
     uint best[kCellLightSlots];
     float most[kCellLightSlots];
     uint count = 0u;
-    for (uint i = 0u; i < pc.light_count; ++i) {
+    uint first;
+    uint candidates = velk_light_grid_count(world_pos + VELK_GLOBALS.cam_pos.xyz, first);
+    for (uint c = 0u; c < candidates; ++c) {
+        uint i = velk_light_grid_at(first, c);
         float brings = velk_light_brings(velk_light_at(pc.lights_base + i), world_pos);
         if (brings <= 0.0) continue;
         if (count == kCellLightSlots && brings <= most[count - 1u]) continue;
@@ -4411,6 +4459,7 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 layout(set = 1, binding = 16, std430) readonly buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
 )" VELK_LIGHT_CELL_GLSL VELK_BOUNCE_GLSL R"(
 #define CELLS_HEADER pc.cells_header
+)" VELK_LIGHT_GRID_GLSL R"(
 // The header's words this shader uses, read once a pixel by velk_cells_begin.
 uint cells_word;
 uint cells_slots;
@@ -4629,12 +4678,17 @@ const uint kPixelLights = 16u;
 
 // The lights the cells around the pixel taken up by velk_cells_begin keep, up to
 // kPixelLights of them, into `lights`, and how many. Only these light the pixel, since a cell
-// that does not keep a light lets none of it through. kNoLight with no traced cell around
-// yet, when every light lights it, unshadowed.
+// that does not keep a light lets none of it through. With no traced cell around yet, those
+// the light grid lists there, which light it unshadowed.
 uint velk_cells_lights(out uint lights[kPixelLights])
 {
-    if (cells_total <= 0.0) return kNoLight;
     uint count = 0u;
+    if (cells_total <= 0.0) {
+        uint first;
+        uint candidates = velk_light_grid_count(cells_world, first);
+        for (uint c = 0u; c < candidates && count < kPixelLights; ++c) lights[count++] = velk_light_grid_at(first, c);
+        return count;
+    }
     for (int k = 0; k < kAround; ++k) {
         uint at = cells_around[k];
         if (at == kNoCell) continue;
@@ -4948,10 +5002,9 @@ void main()
 
     vec3 direct = vec3(0.0);
     uint pixel_lights[kPixelLights];
-    uint listed = velk_cells_lights(pixel_lights);
-    uint light_count = listed == kNoLight ? pc.light_count : listed;
+    uint light_count = velk_cells_lights(pixel_lights);
     for (uint k = 0u; k < light_count; ++k) {
-        uint i = listed == kNoLight ? k : pixel_lights[k];
+        uint i = pixel_lights[k];
         Light light = velk_light_at(pc.lights_base + i);
         float through = velk_cells_light_through(i);
         if (light.flags.x == 3u) {
