@@ -138,16 +138,16 @@ public:
         uint32_t light_cell_lights_moved = 0;
         uint64_t light_cell_stats_frame = 0;
         IRenderPass::Ptr visibility_resolve_pass;
-        /// Clusters too small on screen to draw as triangles: their list, with room for one a
-        /// pixel (kTinyHeaderWords), and a word a pixel each for the depth and the record
-        /// drawn there, followed by every pixel's ids as the resolve leaves them, two words a
-        /// pixel (velk_pixel_ids). All in the culling arena.
+        /// Clusters whose triangles are too small on screen for the hardware, drawn in
+        /// compute: their list, with room for one a pixel (kTinyHeaderWords), and a word a
+        /// pixel for the depth compute drew, followed by every pixel's ids as the resolve
+        /// leaves them, two words a pixel (velk_pixel_ids). All in the culling arena.
         ArenaRegion tiny_list;
         uint32_t tiny_capacity = 0;
         ArenaRegion pixel_words;
         uvec2 pixel_words_size{0, 0};
         IRenderPass::Ptr tiny_pass;
-        uint64_t tiny_log_frame = 0;  ///< When the tiny clusters' count was last printed.
+        uint64_t tiny_log_frame = 0;  ///< When the count drawn in compute was last printed.
         /// The depth of what is drawn at decreasing sizes, in the culling arena.
         ArenaRegion depth_pyramid;
         uvec2 depth_pyramid_size{0, 0};
@@ -242,7 +242,7 @@ private:
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph,
                               bool second_phase);
     void emit_visibility_resolve_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    void emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, float most_pixels);
+    void emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, float tiny_pixels);
     /// Where the pixels' ids start in the culling arena: see ViewState::pixel_words.
     static uint32_t pixel_ids_word(const ViewState& vs);
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);

@@ -383,10 +383,13 @@ layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[];
 
 // What each pixel shows, two words a pixel, row by row from `ids_word` in the culling arena,
 // as the deferred path's visibility resolve leaves it: 0 for nothing, else its draw data
-// record plus one, and under that draw either the position in its visible list shifted up
-// by its triangle bits, over the triangle, or, with VELK_IDS_TINY set, the word of a tiny
-// cluster's record (see instance_tiny_draw_src).
+// record plus one. Drawn by the hardware, the second word is the position in the draw's
+// visible list shifted up by its triangle bits, over the triangle. Drawn in compute
+// (instance_tiny_draw_src), the first word also has VELK_IDS_TINY and the triangle in the
+// cluster at VELK_IDS_TRIANGLE_SHIFT, and the second is the word of the cluster's record.
 #define VELK_IDS_TINY 0x80000000u
+#define VELK_IDS_TRIANGLE_SHIFT 23u
+#define VELK_IDS_DRAW_MASK 0x7FFFFFu
 
 uvec2 velk_pixel_ids(uint ids_word, uint width, ivec2 coord)
 {
@@ -397,11 +400,11 @@ uvec2 velk_pixel_ids(uint ids_word, uint width, ivec2 coord)
 // The draw data record of a pixel that shows something.
 uint velk_ids_draw(uvec2 ids)
 {
-    return (ids.x & ~VELK_IDS_TINY) - 1u;
+    return (ids.x & VELK_IDS_DRAW_MASK) - 1u;
 }
 
-// Which part of its draw a pixel shows: its position in the visible list, or its tiny
-// cluster. Equal for pixels of the same instance's same cluster.
+// Which part of its draw a pixel shows: its position in the visible list, or its cluster's
+// record. Equal for pixels of the same instance's same cluster.
 uint velk_ids_part(VelkDrawData d, uvec2 ids)
 {
     return (ids.x & VELK_IDS_TINY) != 0u ? ids.y : ids.y >> d.triangle_bits;
@@ -413,6 +416,31 @@ uint velk_ids_slot(VelkDrawData d, uvec2 ids)
     if ((ids.x & VELK_IDS_TINY) != 0u) return velk_culling.data[ids.y + 2u];
     uint position = ids.y >> d.triangle_bits;
     return d.visible_base == VELK_NO_VISIBLE_LIST ? position : velk_culling.data[d.visible_base + position];
+}
+
+// The triangle a pixel shows, counted from its cluster's first index, or from the draw's
+// first vertex or index when it is not drawn by cluster.
+uint velk_ids_triangle(VelkDrawData d, uvec2 ids)
+{
+    if ((ids.x & VELK_IDS_TINY) != 0u) return (ids.x & ~VELK_IDS_TINY) >> VELK_IDS_TRIANGLE_SHIFT;
+    return ids.y & ((1u << d.triangle_bits) - 1u);
+}
+
+// The first index of the cluster a pixel shows, under the draw's index_base. 0 when it is
+// not drawn by cluster.
+uint velk_ids_first_index(VelkDrawData d, uvec2 ids)
+{
+    if ((ids.x & VELK_IDS_TINY) != 0u) return velk_culling.data[velk_culling.data[ids.y + 1u]];
+    if (d.cluster_first_base == VELK_NO_VISIBLE_LIST) return 0u;
+    return velk_culling.data[d.cluster_first_base + (ids.y >> d.triangle_bits)];
+}
+
+// How far the surface a pixel shows may be from the full mesh, in world units.
+float velk_ids_lod_error(VelkDrawData d, uvec2 ids)
+{
+    if ((ids.x & VELK_IDS_TINY) != 0u) return uintBitsToFloat(velk_culling.data[ids.y + 3u]);
+    if (d.lod_error_base == VELK_NO_VISIBLE_LIST) return 0.0;
+    return uintBitsToFloat(velk_culling.data[d.lod_error_base + (ids.y >> d.triangle_bits)]);
 }
 )"
 // Declares a raster shader's push constant and names it. Put it at file scope,
