@@ -2109,7 +2109,8 @@ const uint kCandidateOnlyLive = 1u << 18u;
 // The bounce cells' table, and how many entries it has, a power of two. See VELK_BOUNCE_GLSL.
 #define CELLS_BOUNCE cells_header[8]
 #define CELLS_BOUNCE_ENTRIES cells_header[9]
-// The bounce cells to trace this frame: a count and three spare words, then 2 words an entry:
+// The bounce cells to trace this frame: a count, how many ask to be traced again
+// (velk_bounce_asking) and two spare words, then 2 words an entry:
 // its word in the table, and the pixel that asked, x in the low half and y in the high. Then,
 // for each entry, kBounceScratchWords a ray, what the trace found for the passes after it:
 // the shape hit, or kNoCell; the hit's uv as halves; the object id; where on the object, 3
@@ -2121,6 +2122,13 @@ const uint kBounceScratchWords = 8u;
 uint velk_bounce_scratch(uint listed, uint ray)
 {
     return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * kBounceScratchWords;
+}
+// Traced bounce cells asking to be traced again, up to CELLS_BOUNCE_LIST_MAX of them, after the
+// rays' scratch, 2 words each as a list entry; how many in the list's second word. They are
+// listed with the room left once new cells are in (light_cells_list_main_src).
+uint velk_bounce_asking(uint n)
+{
+    return velk_bounce_scratch(CELLS_BOUNCE_LIST_MAX, 0u) + n * 2u;
 }
 // What changed this frame, in the same arena: a count, 1 if everything changed, 1 if there is
 // anything for the mark passes, a spare word, then 8 words a change: a world box's least
@@ -2792,6 +2800,7 @@ void main()
             velk_light_cell_words.data[work + kCellWorkLiveAsked] = 0u;
             velk_light_cell_words.data[work] = 0u;
             velk_light_cell_words.data[CELLS_BOUNCE_LIST] = 0u;
+            velk_light_cell_words.data[CELLS_BOUNCE_LIST + 1u] = 0u;
             velk_cell_stat(kStatFrames, 1u);
             velk_cell_stat(kStatLiveLoad, load);
         }
@@ -3228,10 +3237,10 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
 
 )"
                                                                       R"(
-// Keeps up the bounce entry of cell `cell` for the pixel at `coord`, and lists it for tracing:
-// made and listed if new, in the round that lists cells with no light yet, so these come
-// first; in the last round, noted as used by the first pixel to get to it this frame, and
-// listed again if something changed on the way of its rays, with what the list has left.
+// Keeps up the bounce entry of cell `cell` for the pixel at `coord`: made and listed for
+// tracing if new; noted as used by the first pixel to get to it this frame, and put forward
+// again if something changed on the way of its rays, to be listed with what the list has left
+// once new cells are in (velk_bounce_asking).
 void velk_bounce_keep(uint cell)
 {
     bool made;
@@ -3258,15 +3267,19 @@ void velk_bounce_keep(uint cell)
             return;
         }
         velk_cell_stat(kStatBounceAskStale, 1u);
+        uint k = atomicAdd(velk_light_cell_words.data[list + 1u], 1u);
+        if (k >= CELLS_BOUNCE_LIST_MAX) return;
+        velk_light_cell_words.data[velk_bounce_asking(k)] = at;
+        velk_light_cell_words.data[velk_bounce_asking(k) + 1u] = uint(coord.x) | (uint(coord.y) << 16u);
+        return;
     }
     uint n = atomicAdd(velk_light_cell_words.data[list], 1u);
     if (n >= CELLS_BOUNCE_LIST_MAX) {
-        // No room: a new cell waits for a later frame, and a stale one keeps what it holds.
-        if (fresh) velk_light_cell_words.data[at + 2u] = kBounceUntraced;
+        // No room: it waits for a later frame.
+        velk_light_cell_words.data[at + 2u] = kBounceUntraced;
         return;
     }
     velk_cell_stat(kStatBounceListed, 1u);
-    velk_light_cell_words.data[at + 2u] = kBounceListed;
     velk_light_cell_words.data[list + 4u + n * 2u] = at;
     velk_light_cell_words.data[list + 4u + n * 2u + 1u] = uint(coord.x) | (uint(coord.y) << 16u);
 }
@@ -3381,7 +3394,8 @@ void main()
 /// far as the list has room. `pc.mode` 0, one thread: finds the class the room runs out at. 1,
 /// a thread a cell: lists the cells of the classes before it, all of which fit, and lets those
 /// after it go. 2, a thread a cell: lists the cells of that class while there is room, in no
-/// order. A cell let go keeps what it held and is put forward again next frame. Follows
+/// order. A cell let go keeps what it held and is put forward again next frame. 3, a thread a
+/// bounce cell asking to be traced again: lists it with the room left (velk_bounce_asking). Follows
 /// deferred_compute_prelude_src, light_cells_src and light_cells_touch_src.
 [[maybe_unused]] constexpr string_view light_cells_list_main_src = R"(
 // Lists cell candidate `r` at `first` in the list. See velk_cell_keep for what it holds.
@@ -3452,6 +3466,24 @@ void main()
         velk_light_cell_words.data[cand + 1u] = cut;
         velk_light_cell_words.data[cand + 3u] = sum;
         if (velk_light_cell_words.data[cand] != 0u) velk_cell_stat(kStatCut, cut);
+        return;
+    }
+    if (pc.mode == 3u) {
+        // Bounce cells asking to be traced again, into the room new ones left. Those that do
+        // not fit keep what they hold and ask again next frame.
+        uint list = CELLS_BOUNCE_LIST;
+        uint k = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+        if (k >= min(velk_light_cell_words.data[list + 1u], CELLS_BOUNCE_LIST_MAX)) return;
+        uint at = velk_light_cell_words.data[velk_bounce_asking(k)];
+        if (atomicCompSwap(velk_light_cell_words.data[at + 2u], kBounceTraced, kBounceListed) != kBounceTraced) return;
+        uint n = atomicAdd(velk_light_cell_words.data[list], 1u);
+        if (n >= CELLS_BOUNCE_LIST_MAX) {
+            velk_light_cell_words.data[at + 2u] = kBounceTraced;
+            return;
+        }
+        velk_cell_stat(kStatBounceListed, 1u);
+        velk_light_cell_words.data[list + 4u + n * 2u] = at;
+        velk_light_cell_words.data[list + 4u + n * 2u + 1u] = velk_light_cell_words.data[velk_bounce_asking(k) + 1u];
         return;
     }
     uint n = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;

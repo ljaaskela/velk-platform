@@ -379,10 +379,11 @@ constexpr uint32_t kReflectWords = 9;
 constexpr uint32_t kBounceEntries = 1u << 15;
 constexpr uint32_t kBounceRays = 64;
 constexpr uint32_t kBounceWords = 16 + kBounceRays * 5;
-// How many bounce cells a frame may trace, and the words of their list: a count and three
-// spare, 2 words an entry, then 8 words a ray of each. See CELLS_BOUNCE_LIST.
+// How many bounce cells a frame may trace, and the words of their list: a count, how many ask
+// again, two spare, 2 words an entry, 8 words a ray of each, then 2 words each of those asking
+// again. See CELLS_BOUNCE_LIST.
 constexpr uint32_t kBounceListMax = 256;
-constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 8;
+constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 8 + kBounceListMax * 2;
 // What can be listed for tracing in a frame at most, one light for one cell an entry, the
 // words of each, and the header's words before them, counters for the log among them. See
 // CELLS_WORK in light_cells_src.
@@ -1584,6 +1585,12 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
         DispatchCall list_cut_dc = list_dc;
         list_pc.mode = 2;
         std::memcpy(list_cut_dc.root_constants, &list_pc, sizeof(list_pc));
+        // Bounce cells asking to be traced again, after every pass that lists new ones and
+        // before the bounce trace, so new ones come first.
+        DispatchCall asking_dc = cut_dc;
+        asking_dc.groups_x = kBounceListMax / 64u;
+        list_pc.mode = 3;
+        std::memcpy(asking_dc.root_constants, &list_pc, sizeof(list_pc));
 
         // What is listed, a group of threads an entry. Then the list is emptied.
         DeferredComputePushC trace_pc = pc;
@@ -1699,6 +1706,8 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
             cmd->record_global_barrier();
         }
         if (hops) cmd->record_dispatch(hops_rest_dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(asking_dc);
         cmd->record_global_barrier();
         cmd->record_dispatch(bounce_trace_dc);
         cmd->record_global_barrier();
