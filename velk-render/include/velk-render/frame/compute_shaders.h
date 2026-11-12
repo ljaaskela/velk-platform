@@ -2572,15 +2572,22 @@ bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3
     // exact as the differences between pixels they were found from.
     lift = normal_and_error.w + 0.02 * cell_size;
 
-    // A world cell is in the world's own axes: its middle and its steps are known as they are.
+    // A world cell is in the world's own axes. Its middle is the cube's moved onto the surface
+    // the pixel shows, along the pixel's normal, and its steps are the cube's axes laid onto
+    // that surface the same way: the cube's own middle is as likely to be under the surface as
+    // over it.
     if (velk_light_cell_words.data[own + 1u] == kWorldCellObject) {
         uint world_side = velk_light_cell_words.data[own + 5u] & 7u;
         uint axis = world_side >> 1u;
         world_u[(axis + 1u) % 3u] = 1.0;
         world_v[(axis + 2u) % 3u] = 1.0;
-        middle_world = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
-                                   velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size
-                     - VELK_GLOBALS.cam_pos.xyz;
+        world_u -= N * dot(N, world_u);
+        world_v -= N * dot(N, world_v);
+        vec3 cube_middle = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
+                                       velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size
+                         - VELK_GLOBALS.cam_pos.xyz;
+        vec3 to_cube = cube_middle - world_pos;
+        middle_world = world_pos + to_cube - N * dot(N, to_cube);
         return ids.x != 0u;
     }
 
