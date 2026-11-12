@@ -109,6 +109,32 @@ struct EmittedRecord
     BvhItemBounds bounds{};
 };
 
+float bounds_radius(const BvhItemBounds& b)
+{
+    float r2 = 0.f;
+    for (int k = 0; k < 3; ++k) {
+        const float half = 0.5f * (b.max[k] - b.min[k]);
+        r2 += half * half;
+    }
+    return std::sqrt(r2);
+}
+
+// The radius of the box around all of an element's records, in world units.
+float records_radius(const vector<EmittedRecord>& records)
+{
+    if (records.empty()) {
+        return 0.f;
+    }
+    BvhItemBounds all = records[0].bounds;
+    for (const auto& record : records) {
+        for (int k = 0; k < 3; ++k) {
+            all.min[k] = std::min(all.min[k], record.bounds.min[k]);
+            all.max[k] = std::max(all.max[k], record.bounds.max[k]);
+        }
+    }
+    return bounds_radius(all);
+}
+
 void set_inverted_bounds(GpuBvhNode& node)
 {
     node = {};
@@ -1193,7 +1219,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
                 }
             }
         }
-        set_object_transform(object, collect.world);
+        set_object_transform(object, collect.world, records_radius(collect.records));
         return;
     }
 
@@ -1228,18 +1254,18 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         ++live_records_;
     }
     if (!collect.records.empty()) {
-        set_object_transform(object, collect.world);
+        set_object_transform(object, collect.world, records_radius(collect.records));
     }
 }
 
 namespace {
 // See IBvh::get_object_transforms.
-constexpr uint32_t kObjectTransformWords = 13;
+constexpr uint32_t kObjectTransformWords = 14;
 constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
 constexpr uint32_t kObjectSlotBits = 26;
 } // namespace
 
-void SceneBvh::set_object_transform(uint32_t object, const mat4& world)
+void SceneBvh::set_object_transform(uint32_t object, const mat4& world, float radius)
 {
     if (object == 0) {
         return;
@@ -1256,6 +1282,7 @@ void SceneBvh::set_object_transform(uint32_t object, const mat4& world)
         }
     }
     entry[12] = (object >> kObjectSlotBits) + 1u;
+    std::memcpy(entry + 13, &radius, sizeof(float));
     transforms_dirty_first_ = std::min(transforms_dirty_first_, slot);
     transforms_dirty_last_ = std::max(transforms_dirty_last_, slot);
 }
@@ -1282,7 +1309,8 @@ void SceneBvh::set_instance_transforms(const InstanceGroup& group, const vector<
             return;
         }
         if (group.visual->is_live(slot)) {
-            set_object_transform(group.object_base + slot, group.world * transforms[slot].to_mat4());
+            set_object_transform(group.object_base + slot, group.world * transforms[slot].to_mat4(),
+                                 bounds_radius(instance_bounds(group, slot)));
         } else {
             clear_object_transforms(group.object_base + slot, 1);
         }

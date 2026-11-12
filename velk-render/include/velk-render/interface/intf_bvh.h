@@ -88,9 +88,10 @@ public:
      *
      * Returns the word in the culling arena (IRenderBackend::kGlobalCulling) where the
      * table starts, or 0xFFFFFFFF if there is none yet, and sets @p slots to how many it
-     * has. Entry `id & 0x3FFFFFF` is 13 words: the object's object space to the world by
+     * has. Entry `id & 0x3FFFFFF` is 14 words: the object's object space to the world by
      * rows (3 rows of 4 floats, the 4th the world position of its origin), then its id's
-     * generation plus one, or 0 if the entry is unknown. An entry whose generation is not
+     * generation plus one, or 0 if the entry is unknown, then the radius of its bounds in
+     * world units as a float. An entry whose generation is not
      * the id's is another object's. Objects drawn but not in the BVH have none. Valid
      * after the update.
      */

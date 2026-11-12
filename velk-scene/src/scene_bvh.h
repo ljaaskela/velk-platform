@@ -331,8 +331,9 @@ private:
     ArenaRegion object_transforms_region_;
     uint32_t object_transforms_word_ = 0xFFFFFFFFu;
     uint32_t object_transform_slots_ = 0;
-    /// Notes where object @p object is: @p world, its object space to the world.
-    void set_object_transform(uint32_t object, const mat4& world);
+    /// Notes where object @p object is: @p world, its object space to the world, and
+    /// @p radius, the radius of its bounds in world units.
+    void set_object_transform(uint32_t object, const mat4& world, float radius);
     /// Forgets where @p count objects from @p object are.
     void clear_object_transforms(uint32_t object, uint32_t count);
     /// Writes the instances' places, every slot or only @p slots.

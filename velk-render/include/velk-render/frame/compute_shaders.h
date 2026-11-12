@@ -1247,6 +1247,48 @@ uint velk_light_cell_hash(VelkLightCell c)
     h = velk_light_cell_mix(h ^ uint(c.at.z));
     return velk_light_cell_mix(h ^ (uint(c.level + 64) * 8u + c.side));
 }
+
+// The object world cells are keyed by: cubes in the world's own axes from its origin, which
+// hold the surfaces of objects no wider than a cube there. Its slot and generation are the
+// last there are, which the scene does not hand out.
+const uint kWorldCellObject = 0xFFFFFFFFu;
+
+// The radius of object `object`'s bounds in world units, from the table of objects at word
+// `objects` with `slots` entries (IBvh::get_object_transforms). Very large when not known,
+// so that such an object keeps cells of its own.
+float velk_object_radius(uint objects, uint slots, uint object)
+{
+    uint slot = object & 0x3FFFFFFu;
+    if (objects == 0xFFFFFFFFu || object == 0u || object == kWorldCellObject || slot >= slots) return 1e30;
+    uint e = objects + slot * 14u;
+    if (velk_culling.data[e + 12u] != (object >> 26u) + 1u) return 1e30;
+    return uintBitsToFloat(velk_culling.data[e + 13u]);
+}
+
+// Which of the six axis directions `facing` is mostly along, positive x first.
+uint velk_cell_side(vec3 facing)
+{
+    vec3 across = abs(facing);
+    return across.x >= across.y && across.x >= across.z ? (facing.x < 0.0 ? 1u : 0u)
+         : across.y >= across.z ? (facing.y < 0.0 ? 3u : 2u)
+         : (facing.z < 0.0 ? 5u : 4u);
+}
+
+// Whether the surface of an object whose bounds have radius `radius` is kept in world cells
+// at `level`: when the object is no wider than the level's cubes.
+bool velk_cell_in_world(float radius, int level)
+{
+    return 2.0 * radius <= velk_light_cell_size(level);
+}
+
+// The cell at `level` holding a point of object `object`, whose bounds have radius `radius`:
+// its own, at `surface` as the G-buffer's surface attachment stores it and facing `side`, or
+// the world cell at `world`, from the world's origin, facing `world_side`.
+VelkLightCell velk_point_cell(uint object, float radius, vec3 surface, uint side, vec3 world, uint world_side, int level)
+{
+    return velk_cell_in_world(radius, level) ? velk_light_cell(kWorldCellObject, world, world_side, level)
+                                             : velk_light_cell(object, surface, side, level);
+}
 )"
 
 // Bounce cells: light cells kBounceUp levels larger than a pixel's, which also gather the
@@ -1433,6 +1475,8 @@ layout(push_constant, scalar) uniform PC {
     uint mode;
     uint globals_base;
     float pixels;
+    uint objects;       // see IBvh::get_object_transforms
+    uint object_slots;
 } pc;
 
 const vec3 kLevelColors[8] = vec3[8](
@@ -1457,7 +1501,9 @@ void main()
         mat4 vp = velk_globals.data[pc.globals_base].view_projection;
         float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
         int level = velk_light_cell_level(length(rel), pixel_width, pc.pixels);
-        VelkLightCell cell = velk_light_cell(object, surface.xyz, uint(surface.w + 0.5), level);
+        VelkLightCell cell = velk_point_cell(object, velk_object_radius(pc.objects, pc.object_slots, object), surface.xyz,
+                                             uint(surface.w + 0.5), rel + velk_globals.data[pc.globals_base].cam_pos.xyz,
+                                             velk_cell_side(N), level);
 
         if (pc.mode == 2u) {
             float checker = ((cell.at.x + cell.at.y + cell.at.z) & 1) == 0 ? 1.0 : 0.6;
@@ -2345,15 +2391,22 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
 }
 
 // Where the cell with key `object`, `at`, `level` and `side` is, from the camera, and the way
-// its side faces, from its object's place now (see CELLS_OBJECTS): the middle of its cube.
-// False if its object's place is not known.
+// its side faces, from its object's place now (see CELLS_OBJECTS), or for a world cell
+// directly: the middle of its cube. False if its object's place is not known.
 bool velk_cell_place(uint object, ivec3 at, int level, uint side, out vec3 world_pos, out vec3 N)
 {
     world_pos = vec3(0.0);
     N = vec3(0.0, 1.0, 0.0);
+    vec3 n = vec3(0.0);
+    n[side >> 1u] = (side & 1u) != 0u ? -1.0 : 1.0;
+    if (object == kWorldCellObject) {
+        world_pos = (vec3(at) + 0.5) * velk_light_cell_size(level) - VELK_GLOBALS.cam_pos.xyz;
+        N = n;
+        return true;
+    }
     uint slot = object & 0x3FFFFFFu;
     if (CELLS_OBJECTS == 0xFFFFFFFFu || object == 0u || slot >= CELLS_OBJECT_SLOTS) return false;
-    uint e = CELLS_OBJECTS + slot * 13u;
+    uint e = CELLS_OBJECTS + slot * 14u;
     if (velk_light_cell_words.data[e + 12u] != (object >> 26u) + 1u) return false;
     vec4 r0 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e], velk_light_cell_words.data[e + 1u],
                                     velk_light_cell_words.data[e + 2u], velk_light_cell_words.data[e + 3u]));
@@ -2366,8 +2419,6 @@ bool velk_cell_place(uint object, ivec3 at, int level, uint side, out vec3 world
     vec3 axis_scale = max(vec3(length(m[0]), length(m[1]), length(m[2])), vec3(1e-12));
     vec3 middle = (vec3(at) + 0.5) * velk_light_cell_size(level);
     world_pos = m * (middle / axis_scale) + vec3(r0.w, r1.w, r2.w) - VELK_GLOBALS.cam_pos.xyz;
-    vec3 n = vec3(0.0);
-    n[side >> 1u] = (side & 1u) != 0u ? -1.0 : 1.0;
     N = normalize(transpose(inverse(m)) * n);
     return true;
 }
@@ -2517,6 +2568,21 @@ bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3
     vec3 world_pos = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
     N = normalize(normal_and_error.xyz);
     uint side = uint(surface.w + 0.5);
+    // Lifted by a little of the cell's size, since the places rays start from are only as
+    // exact as the differences between pixels they were found from.
+    lift = normal_and_error.w + 0.02 * cell_size;
+
+    // A world cell is in the world's own axes: its middle and its steps are known as they are.
+    if (velk_light_cell_words.data[own + 1u] == kWorldCellObject) {
+        uint world_side = velk_light_cell_words.data[own + 5u] & 7u;
+        uint axis = world_side >> 1u;
+        world_u[(axis + 1u) % 3u] = 1.0;
+        world_v[(axis + 2u) % 3u] = 1.0;
+        middle_world = (vec3(ivec3(velk_light_cell_words.data[own + 2u], velk_light_cell_words.data[own + 3u],
+                                   velk_light_cell_words.data[own + 4u])) + 0.5) * cell_size
+                     - VELK_GLOBALS.cam_pos.xyz;
+        return ids.x != 0u;
+    }
 
     // Where the surface steps along the object's axes in the world comes from how position on
     // the object and in the world change together across the next pixels, if they show the
@@ -2559,9 +2625,6 @@ bool velk_cell_place_from_pixel(uint packed, uint own, float cell_size, out vec3
         }
     }
     middle_world = world_pos + world_u * to_middle.x + world_v * to_middle.y;
-    // Lifted by a little of the cell's size, since the places rays start from are only as
-    // exact as the differences between pixels they were found from.
-    lift = normal_and_error.w + 0.02 * cell_size;
     return ids.x != 0u;
 }
 )";
@@ -2717,6 +2780,25 @@ vec3 world_pos;
 vec3 N;
 uint side;
 vec4 normal_and_error;
+// The radius of the object's bounds, and the pixel's place from the world's origin and the
+// side it faces in the world's axes, for the levels whose cells are world cells.
+float object_radius;
+vec3 world_at;
+uint world_side;
+
+// The pixel's cell at `level`. See velk_point_cell.
+VelkLightCell velk_pixel_cell(int level)
+{
+    return velk_point_cell(object, object_radius, surface.xyz, side, world_at, world_side, level);
+}
+
+// The traced cell `c`, or kNoCell. Nothing is made or kept up.
+uint velk_cell_traced(VelkLightCell c)
+{
+    bool made;
+    uint at = velk_cell_find(c, false, made);
+    return at != kNoCell && (velk_light_cell_words.data[at] & kCellReady) != 0u && velk_cell_is(at, c) ? at : kNoCell;
+}
 
 // The pass runs three times a frame, `pc.mode` saying which round it is. The first
 // lists only the cells kCellUp levels up that were never traced, which pixels waiting for
@@ -3022,15 +3104,18 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     world_pos = rel_pos;
     N = normalize(normal_and_error.xyz);
     side = uint(surface.w + 0.5);
+    object_radius = velk_object_radius(CELLS_OBJECTS, CELLS_OBJECT_SLOTS, object);
+    world_at = world_pos + VELK_GLOBALS.cam_pos.xyz;
+    world_side = velk_cell_side(N);
 
     mat4 vp = VELK_GLOBALS.view_projection;
     float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
     int level = velk_light_cell_level(length(world_pos), pixel_width, float(CELLS_PIXELS));
-    uint own = velk_cell_keep(velk_light_cell(object, surface.xyz, side, level), 0);
+    uint own = velk_cell_keep(velk_pixel_cell(level), 0);
     if (pc.mode == kCellRoundRest && own != kNoCell) velk_cell_arrive(own, world_pos, N);
     // The bounce cell over the pixel, which gathers the light from other surfaces here.
     if (pc.mode == kCellRoundGaps || pc.mode == kCellRoundRest) {
-        uint bounce_cell = velk_cell_keep(velk_light_cell(object, surface.xyz, side, level + kBounceUp), kBounceUp);
+        uint bounce_cell = velk_cell_keep(velk_pixel_cell(level + kBounceUp), kBounceUp);
         if (bounce_cell != kNoCell) velk_bounce_keep(bounce_cell);
     }
 
@@ -3053,13 +3138,14 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     if (pc.mode == kCellRoundCoarse && !waiting) return true;
     if (pc.mode == kCellRoundRest && own == kNoCell) velk_cell_stat(kStatNoSlot, 1u);
     if (pc.mode == kCellRoundRest && waiting) velk_cell_stat(kStatWaiting, 1u);
-    uint axis = side >> 1u;
-    uint ua = (axis + 1u) % 3u;
-    uint va = (axis + 2u) % 3u;
     for (int up = waiting ? kCellUp : 1; up <= (waiting ? kCellUp : up_levels); ++up) {
         // The same three by three a reader blends: around the cell whose middle is nearest.
-        VelkLightCell c = velk_light_cell(object, surface.xyz, side, level + up);
-        ivec3 nearest = ivec3(floor(surface.xyz / velk_light_cell_size(level + up)));
+        VelkLightCell c = velk_pixel_cell(level + up);
+        vec3 key = c.object == kWorldCellObject ? world_at : surface.xyz;
+        uint axis = c.side >> 1u;
+        uint ua = (axis + 1u) % 3u;
+        uint va = (axis + 2u) % 3u;
+        ivec3 nearest = ivec3(floor(key / velk_light_cell_size(level + up)));
         for (int k = 0; k < 9; ++k) {
             c.at[ua] = nearest[ua] + k % 3 - 1;
             c.at[va] = nearest[va] + k / 3 - 1;
@@ -3166,9 +3252,11 @@ void main()
     RayHit hit;
     bool found = trace_closest_hit(ray, 1e30, hit);
     // The back of the cell's own object, close by: the ray started inside the surface rays
-    // see, as on a curved object drawn with flat triangles, so it goes on from there.
+    // see, as on a curved object drawn with flat triangles, so it goes on from there. A world
+    // cell holds the surfaces of any objects in its cube, so for it any object counts.
     uint own_object = velk_light_cell_words.data[cell + 1u];
-    if (found && hit.object == own_object && hit.t < cell_size && dot(hit.normal, dir) > 0.0) {
+    if (found && (hit.object == own_object || own_object == kWorldCellObject) && hit.t < cell_size
+        && dot(hit.normal, dir) > 0.0) {
         velk_cell_stat(kStatBounceSelfHits, 1u);
         ray.origin += dir * (hit.t + 0.01 * cell_size);
         found = trace_closest_hit(ray, 1e30, hit);
@@ -3245,6 +3333,15 @@ void main()
     vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[scratch + 3u]),
                       uintBitsToFloat(velk_light_cell_words.data[scratch + 4u]),
                       uintBitsToFloat(velk_light_cell_words.data[scratch + 5u]));
+    // An object no wider than the cell: the world cell there, if pixels keep it up, gives its
+    // light. Nothing is made or listed for it, and its light is passed on no further.
+    if (velk_cell_in_world(velk_object_radius(CELLS_OBJECTS, CELLS_OBJECT_SLOTS, object), level)) {
+        uint seen = velk_cell_traced(velk_light_cell(kWorldCellObject, world_pos + VELK_GLOBALS.cam_pos.xyz,
+                                                     velk_cell_side(N), level));
+        velk_light_cell_words.data[ray_at] = seen != kNoCell ? seen : kBounceHitNoCell;
+        velk_light_cell_words.data[ray_at + 4u] = kNoCell;
+        return;
+    }
     uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
     velk_light_cell_words.data[ray_at] = kept != kNoCell ? kept : kBounceHitNoCell;
     // The bounce cell over the hit, kBounceUp levels up as over a pixel, whose light arriving
@@ -3383,6 +3480,15 @@ void main()
     vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[rec + 5u]),
                       uintBitsToFloat(velk_light_cell_words.data[rec + 6u]),
                       uintBitsToFloat(velk_light_cell_words.data[rec + 7u]));
+    // An object no wider than the cell: the world cell there, if pixels keep it up, gives its
+    // light. Nothing is made, listed or added to for it.
+    if (velk_cell_in_world(velk_object_radius(CELLS_OBJECTS, CELLS_OBJECT_SLOTS, object), level)) {
+        uint seen = velk_cell_traced(velk_light_cell(kWorldCellObject, world_pos + VELK_GLOBALS.cam_pos.xyz,
+                                                     velk_cell_side(N), level));
+        velk_light_cell_words.data[rec] = seen != kNoCell ? seen : kBounceHitNoCell;
+        velk_light_cell_words.data[rec + 4u] = kNoCell;
+        return;
+    }
     uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
     velk_light_cell_words.data[rec] = kept != kNoCell ? kept : kBounceHitNoCell;
     uint over = velk_cell_keep(velk_light_cell(object, local, side, level + kBounceUp), kBounceUp);
@@ -3921,6 +4027,11 @@ vec3 N;
 uint cells_object;
 vec3 cells_surface;
 uint cells_side;
+// The radius of its object's bounds, and its place from the world's origin and the side it
+// faces in the world's axes, for the levels whose cells are world cells.
+float cells_radius;
+vec3 cells_world;
+uint cells_world_side;
 int cells_level;
 // The level of its own cell, whether or not that is traced.
 int cells_own_level;
@@ -3933,9 +4044,12 @@ float cells_total = 0.0;
 // A reader blends the cells around a point: three by three along the two object axes the
 // surface lies in, weighted by a rounded curve so that no grid shows and an edge comes out
 // about two cells wide, and the nearest two along the third axis. This is where those are
-// at one level, and the weights' parts.
+// at one level, the key its cells have there (the object's or the world's), and the
+// weights' parts.
 struct VelkCellBlend {
     int level;
+    uint object;
+    uint side;
     ivec3 nearest;
     int along_base;
     vec3 curve_u;
@@ -3945,12 +4059,15 @@ struct VelkCellBlend {
 
 VelkCellBlend velk_cell_blend(int level)
 {
-    uint axis = cells_side >> 1u;
-    uint ua = (axis + 1u) % 3u;
-    uint va = (axis + 2u) % 3u;
-    vec3 g = cells_surface / velk_light_cell_size(level) - 0.5;
     VelkCellBlend b;
     b.level = level;
+    bool in_world = velk_cell_in_world(cells_radius, level);
+    b.object = in_world ? kWorldCellObject : cells_object;
+    b.side = in_world ? cells_world_side : cells_side;
+    uint axis = b.side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    vec3 g = (in_world ? cells_world : cells_surface) / velk_light_cell_size(level) - 0.5;
     b.nearest = ivec3(floor(g + 0.5));
     vec3 t = g - vec3(b.nearest);
     b.curve_u = vec3(0.5 * (0.5 - t[ua]) * (0.5 - t[ua]), 0.75 - t[ua] * t[ua], 0.5 * (0.5 + t[ua]) * (0.5 + t[ua]));
@@ -3963,7 +4080,7 @@ VelkCellBlend velk_cell_blend(int level)
 // The `k`th of the cells a blend covers, if traced, and its weight.
 uint velk_cell_blend_at(VelkCellBlend b, int k, out float weight)
 {
-    uint axis = cells_side >> 1u;
+    uint axis = b.side >> 1u;
     uint ua = (axis + 1u) % 3u;
     uint va = (axis + 2u) % 3u;
     int iu = k % 3;
@@ -3971,9 +4088,9 @@ uint velk_cell_blend_at(VelkCellBlend b, int k, out float weight)
     int ia = k / 9;
     weight = b.curve_u[iu] * b.curve_v[iv] * (ia == 0 ? 1.0 - b.along_f : b.along_f);
     VelkLightCell c;
-    c.object = cells_object;
+    c.object = b.object;
     c.level = b.level;
-    c.side = cells_side;
+    c.side = b.side;
     c.at = ivec3(0);
     c.at[ua] = b.nearest[ua] + iu - 1;
     c.at[va] = b.nearest[va] + iv - 1;
@@ -4009,12 +4126,17 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], pixel, 0);
     cells_surface = surface.xyz;
     cells_side = uint(surface.w + 0.5);
+    cells_radius = velk_object_radius(velk_light_cell_words.data[CELLS_HEADER + 12u],
+                                      velk_light_cell_words.data[CELLS_HEADER + 13u], cells_object);
+    cells_world = rel_pos + VELK_GLOBALS.cam_pos.xyz;
+    cells_world_side = velk_cell_side(N);
 
     mat4 vp = VELK_GLOBALS.view_projection;
     float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
     cells_level = velk_light_cell_level(length(rel_pos), pixel_width, float(CELLS_PIXELS));
     cells_own_level = cells_level;
-    cells_own = velk_cell_lookup(velk_light_cell(cells_object, cells_surface, cells_side, cells_level));
+    cells_own = velk_cell_lookup(velk_point_cell(cells_object, cells_radius, cells_surface, cells_side, cells_world,
+                                                 cells_world_side, cells_level));
 
     // With no traced cell around at its own level yet, the pixel reads the cells kCellUp
     // levels larger instead, which light_cells_touch_src keeps up meanwhile.
@@ -4234,20 +4356,27 @@ void main()
             uint level_side = velk_light_cell_words.data[cells_own + 5u];
             float size = velk_light_cell_size(int(level_side >> 3u) - 64);
             shown = vec3(1.0, 0.0, 1.0);
-            if (objects != 0xFFFFFFFFu && object != 0u && slot < slots
-                && velk_light_cell_words.data[objects + slot * 13u + 12u] == (object >> 26u) + 1u) {
-                uint e = objects + slot * 13u;
-                vec4 r0 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e], velk_light_cell_words.data[e + 1u],
-                                                velk_light_cell_words.data[e + 2u], velk_light_cell_words.data[e + 3u]));
-                vec4 r1 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 4u], velk_light_cell_words.data[e + 5u],
-                                                velk_light_cell_words.data[e + 6u], velk_light_cell_words.data[e + 7u]));
-                vec4 r2 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 8u], velk_light_cell_words.data[e + 9u],
-                                                velk_light_cell_words.data[e + 10u], velk_light_cell_words.data[e + 11u]));
-                mat3 m = mat3(vec3(r0.x, r1.x, r2.x), vec3(r0.y, r1.y, r2.y), vec3(r0.z, r1.z, r2.z));
+            // A world cell's place is its cube's middle in the world.
+            bool world = object == kWorldCellObject;
+            if (world || (objects != 0xFFFFFFFFu && object != 0u && slot < slots
+                          && velk_light_cell_words.data[objects + slot * 14u + 12u] == (object >> 26u) + 1u)) {
+                mat3 m = mat3(1.0);
+                vec3 origin = vec3(0.0);
+                if (!world) {
+                    uint e = objects + slot * 14u;
+                    vec4 r0 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e], velk_light_cell_words.data[e + 1u],
+                                                    velk_light_cell_words.data[e + 2u], velk_light_cell_words.data[e + 3u]));
+                    vec4 r1 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 4u], velk_light_cell_words.data[e + 5u],
+                                                    velk_light_cell_words.data[e + 6u], velk_light_cell_words.data[e + 7u]));
+                    vec4 r2 = uintBitsToFloat(uvec4(velk_light_cell_words.data[e + 8u], velk_light_cell_words.data[e + 9u],
+                                                    velk_light_cell_words.data[e + 10u], velk_light_cell_words.data[e + 11u]));
+                    m = mat3(vec3(r0.x, r1.x, r2.x), vec3(r0.y, r1.y, r2.y), vec3(r0.z, r1.z, r2.z));
+                    origin = vec3(r0.w, r1.w, r2.w);
+                }
                 vec3 axis_scale = max(vec3(length(m[0]), length(m[1]), length(m[2])), vec3(1e-12));
                 ivec3 cube = ivec3(int(velk_light_cell_words.data[cells_own + 2u]), int(velk_light_cell_words.data[cells_own + 3u]),
                                    int(velk_light_cell_words.data[cells_own + 4u]));
-                vec3 place = m * ((vec3(cube) + 0.5) * size / axis_scale) + vec3(r0.w, r1.w, r2.w) - VELK_GLOBALS.cam_pos.xyz;
+                vec3 place = m * ((vec3(cube) + 0.5) * size / axis_scale) + origin - VELK_GLOBALS.cam_pos.xyz;
                 float off = length(place - world_pos) / size;
                 shown = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), clamp((off - 1.0) / 2.0, 0.0, 1.0));
                 // Blue where the way the cell faces, as worked out from its side, is not
@@ -4286,7 +4415,8 @@ void main()
 
     if (CELLS_MODE == 7u) {
         vec3 bounce = vec3(1.0, 0.0, 1.0);
-        uint cell = velk_cell_lookup(velk_light_cell(cells_object, cells_surface, cells_side, cells_own_level + kBounceUp));
+        uint cell = velk_cell_lookup(velk_point_cell(cells_object, cells_radius, cells_surface, cells_side, cells_world,
+                                                     cells_world_side, cells_own_level + kBounceUp));
         uint at = cell != kNoCell ? velk_bounce_lookup(cell) : kNoCell;
         if (at != kNoCell && velk_light_cell_words.data[at + 2u] == kBounceTraced) {
             bounce = velk_bounce_irradiance(at, N);

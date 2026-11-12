@@ -1227,6 +1227,7 @@ void DeferredPath::emit_light_cells_debug_pass(ViewState& vs, const RenderView& 
         {
             uint32_t ids_word, surface_id, pos_id, normal_id, output_id, width, height, mode, globals_base;
             float pixels;
+            uint32_t objects, object_slots;
         };
         const auto attachment = [&](GBufferAttachment a) { return vs.gbuffer->attachment(static_cast<uint32_t>(a)); };
         const PushC pc{pixel_ids_word(vs),
@@ -1238,7 +1239,9 @@ void DeferredPath::emit_light_cells_debug_pass(ViewState& vs, const RenderView& 
                        vs.gbuffer_size.y,
                        mode,
                        render_view.view_globals_base,
-                       light_cell_pixels()};
+                       light_cell_pixels(),
+                       render_view.bvh.object_transforms,
+                       render_view.bvh.object_slots};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.gbuffer_size.x + 7u) / 8u;
