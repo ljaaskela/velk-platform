@@ -2307,6 +2307,47 @@ uint velk_cell_mix(uint x)
     return x;
 }
 
+// The direct light `light` brings to a surface at `world_pos`, from the camera, facing `N`, as
+// if nothing were in the way: its falloff, cone and angle to the surface.
+vec3 velk_light_unshadowed(Light light, vec3 world_pos, vec3 N)
+{
+    if (light.flags.x == 3u) {
+        float area = velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N);
+        return area * light.color_intensity.rgb * light.color_intensity.a;
+    }
+    vec3 L = -light.direction.xyz;
+    float atten = 1.0;
+    if (light.flags.x != 0u) {
+        vec3 to_light = light.position.xyz - world_pos;
+        float dist = length(to_light);
+        L = to_light / max(dist, 1e-6);
+        float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);
+        atten = t * t;
+        if (light.flags.x == 2u) atten *= smoothstep(light.params.z, light.params.y, dot(-L, light.direction.xyz));
+    }
+    return max(dot(N, L), 0.0) * light.color_intensity.rgb * light.color_intensity.a * atten;
+}
+
+// Of the lights in `which`, a bit a light, the first 32 in x, those that bring cell `at`, at
+// `world_pos` facing `N`, at least a sixteenth of the direct light arriving there. A cell keeps
+// a light's shadow in fifteenths, so a change to a light that brings less cannot show. All of
+// `which` while the cell has no light arriving worked out yet.
+uvec2 velk_cell_lights_that_matter(uint at, vec3 world_pos, vec3 N, uvec2 which)
+{
+    uint b = velk_light_cell_words.data[at + kCellArrive + 1u];
+    if ((b & 0xFFFFu) == kArriveMade || (b >> 16u) == 0u) return which;
+    const vec3 kLuminance = vec3(0.2126, 0.7152, 0.0722);
+    vec3 arriving = vec3(unpackHalf2x16(velk_light_cell_words.data[at + kCellArrive]), unpackHalf2x16(b).x);
+    float least = dot(arriving, kLuminance) / 16.0;
+    uint lights = min(pc.light_count, kCellLights);
+    for (uint i = 0u; i < lights; ++i) {
+        uvec2 bit = i < 32u ? uvec2(1u << i, 0u) : uvec2(0u, 1u << (i - 32u));
+        if ((which & bit) == uvec2(0u)) continue;
+        if (dot(velk_light_unshadowed(velk_light_at(pc.lights_base + i), world_pos, N), kLuminance) < least) which &= ~bit;
+    }
+    return which;
+}
+
 bool velk_segment_touches(vec3 from, vec3 to, vec3 box_min, vec3 box_max)
 {
     vec3 d = to - from;
@@ -2322,11 +2363,16 @@ bool velk_segment_touches(vec3 from, vec3 to, vec3 box_min, vec3 box_max)
 // Which lights the surface at `world_pos` may see differently for this frame's changes, as a
 // bit a light, the first 32 in x. A change is a box, grown here by `margin`: one that lies on
 // the way to a light. Or it is a light that moved, named in the change's last word, which
-// alters that light alone, wherever it reaches. Every light if everything changed.
-uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
+// alters that light alone, wherever it reaches. Every light if everything changed. `by_box`
+// is those changed by something other than their own light moving.
+uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin, out uvec2 by_box)
 {
+    by_box = uvec2(0u);
     uint count = velk_light_cell_words.data[CELLS_CHANGES];
-    if (velk_light_cell_words.data[CELLS_CHANGES + 1u] != 0u) return uvec2(0xFFFFFFFFu);
+    if (velk_light_cell_words.data[CELLS_CHANGES + 1u] != 0u) {
+        by_box = uvec2(0xFFFFFFFFu);
+        return uvec2(0xFFFFFFFFu);
+    }
     uvec2 changed = uvec2(0u);
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
     uint lights = min(pc.light_count, kCellLights);
@@ -2360,7 +2406,7 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
         vec3 box_max = raw_max + margin;
         for (uint i = 0u; i < lights; ++i) {
             uvec2 bit = i < 32u ? uvec2(1u << i, 0u) : uvec2(0u, 1u << (i - 32u));
-            if ((changed & bit) != uvec2(0u)) continue;
+            if ((by_box & bit) != uvec2(0u)) continue;
             Light light = velk_light_at(pc.lights_base + i);
             if (light.flags.x == 3u) {
                 // A square: the way to its middle and to each corner.
@@ -2375,6 +2421,7 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
                 }
                 if (crossed) {
                     changed |= bit;
+                    by_box |= bit;
                     velk_cell_stat(kStatChangeBoxArea, 1u);
                     if (all(greaterThanEqual(world_pos, box_min)) && all(lessThanEqual(world_pos, box_max))) {
                         velk_cell_stat(kStatChangeInside, 1u);
@@ -2395,6 +2442,7 @@ uvec2 velk_cell_changed_lights(vec3 world_pos, vec3 N, float margin)
             if (dot(N, to - world_pos) <= 0.0) continue;
             if (velk_segment_touches(world_pos, to, box_min - spread, box_max + spread)) {
                 changed |= bit;
+                by_box |= bit;
                 velk_cell_stat(light.flags.x == 0u ? kStatChangeBoxSun : kStatChangeBoxOther, 1u);
                 if (all(greaterThanEqual(world_pos, box_min)) && all(lessThanEqual(world_pos, box_max))) {
                     velk_cell_stat(kStatChangeInside, 1u);
@@ -2860,16 +2908,19 @@ uvec2 velk_cell_live_lights(uint at)
 
 // The class of a cell due now, lower ones listed first (see CELLS_CANDIDATES): what is due,
 // first a cell never traced that pixels waiting for their own show, then another never
-// traced, then one something changed for, then the rest; and within that how far its place
+// traced, then one at a pixel's own level something changed for, then the rest: larger
+// cells something changed for, which only wide soft edges and waiting pixels read, and those
+// due for a refresh or for moving things in the way. Within that, how far its place
 // `world_pos` is, in bands of four times the distance from the near plane each, the view's
-// own scale. A cell something changed for climbs a band for every 8 frames it has waited.
+// own scale. A cell something changed for climbs a band for every 64 frames it has waited,
+// slowly enough that near cells keep their lead when more is due than the list holds.
 uint velk_cell_class(bool traced, bool changed, int up, uint own)
 {
-    uint kind = !traced ? (up == kCellUp ? 0u : 1u) : (changed ? 2u : 3u);
+    uint kind = !traced ? (up == kCellUp ? 0u : 1u) : (changed && up == 0 ? 2u : 3u);
     vec4 clip = VELK_GLOBALS.view_projection * vec4(world_pos, 1.0);
     float depth = clip.w > 0.0 ? clip.z / clip.w : 0.0;
     int band = depth > 0.0 ? int(0.5 * log2(1.0 / min(depth, 1.0))) : 7;
-    if (kind == 2u) band -= int((VELK_GLOBALS.present_counter - velk_light_cell_words.data[own + 6u]) / 8u);
+    if (traced && changed) band -= int((VELK_GLOBALS.present_counter - velk_light_cell_words.data[own + 6u]) / 64u);
     return kind * (kCellClasses / 4u) + uint(clamp(band, 0, int(kCellClasses / 4u) - 1));
 }
 
@@ -3032,26 +3083,8 @@ void velk_cell_arrive(uint at, vec3 world_pos, vec3 N)
     }
     vec3 sum = vec3(0.0);
     for (uint i = 0u; i < pc.light_count; ++i) {
-        Light light = velk_light_at(pc.lights_base + i);
         float through = i < kCellLights ? float(velk_cell_light(at, i) & 15u) / 15.0 : 1.0;
-        if (light.flags.x == 3u) {
-            float area = velk_area_diffuse(light.position.xyz, light.direction.xyz, light.params.w, world_pos, N);
-            sum += area * light.color_intensity.rgb * light.color_intensity.a * through;
-            continue;
-        }
-        vec3 L = -light.direction.xyz;
-        float atten = 1.0;
-        if (light.flags.x != 0u) {
-            vec3 to_light = light.position.xyz - world_pos;
-            float dist = length(to_light);
-            L = to_light / max(dist, 1e-6);
-            float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);
-            atten = t * t;
-            if (light.flags.x == 2u) atten *= smoothstep(light.params.z, light.params.y, dot(-L, light.direction.xyz));
-        }
-        float NdotL = max(dot(N, L), 0.0);
-        if (NdotL <= 0.0 || atten <= 0.0) continue;
-        sum += NdotL * light.color_intensity.rgb * light.color_intensity.a * atten * through;
+        sum += velk_light_unshadowed(velk_light_at(pc.lights_base + i), world_pos, N) * through;
     }
     // Up to 8192 a channel each, so that a thousand places still fit in 32 bits.
     uvec3 fixed_sum = uvec3(clamp(sum * kArriveScale, vec3(0.0), vec3(2097151.0)) + 0.5);
@@ -3635,11 +3668,57 @@ void main()
 
 /// Marks on every traced light cell the lights this frame's changes could alter there, a
 /// thread a slot of the table, from where its object is now: a moved box on the way to a
-/// light, or a light that moved. The marks stay on the cell until it is traced for those
+/// light, or a light that moved, where the cell is at or next to an edge of that light's
+/// shadow. Only lights that bring enough light there for a change to show. The marks stay on the cell until it is traced for those
 /// lights, so a cell read again after a long time knows what changed meanwhile. A cell whose
 /// object's place is not known takes every light. Runs only on frames with changes. Follows
 /// light_cells_src.
 [[maybe_unused]] constexpr string_view light_cells_mark_main_src = R"(
+// Of the lights in `which`, a bit a light, the first 32 in x, those whose shadow is at an edge
+// on traced cell `at` or next to one: the cell lets part of the light through, or one of the 8
+// cells around it, at its level on the same side of the same object, lets a different share
+// through or is not traced. A light that moves a little moves its shadows' edges, so only there
+// can what a cell holds for it change.
+uvec2 velk_cell_lights_at_edges(uint at, uvec2 which)
+{
+    VelkLightCell c;
+    c.object = velk_light_cell_words.data[at + 1u];
+    ivec3 cube = ivec3(int(velk_light_cell_words.data[at + 2u]), int(velk_light_cell_words.data[at + 3u]),
+                       int(velk_light_cell_words.data[at + 4u]));
+    uint level_side = velk_light_cell_words.data[at + 5u];
+    c.level = int(level_side >> 3u) - 64;
+    c.side = level_side & 7u;
+    uint axis = c.side >> 1u;
+    uint ua = (axis + 1u) % 3u;
+    uint va = (axis + 2u) % 3u;
+    uint around[8];
+    for (int k = 0; k < 8; ++k) {
+        int n = k < 4 ? k : k + 1;
+        c.at = cube;
+        c.at[ua] += n % 3 - 1;
+        c.at[va] += n / 3 - 1;
+        bool made;
+        uint found = velk_cell_find(c, false, made);
+        around[k] = found != kNoCell && (velk_light_cell_words.data[found] & kCellReady) != 0u && velk_cell_is(found, c)
+            ? found : kNoCell;
+    }
+    uvec2 edges = uvec2(0u);
+    uint lights = min(pc.light_count, kCellLights);
+    for (uint i = 0u; i < lights; ++i) {
+        uvec2 bit = i < 32u ? uvec2(1u << i, 0u) : uvec2(0u, 1u << (i - 32u));
+        if ((which & bit) == uvec2(0u)) continue;
+        uint word = 8u + (i >> 2u);
+        uint shift = (i & 3u) * 8u;
+        uint held = (velk_light_cell_words.data[at + word] >> shift) & 15u;
+        bool edge = held != 0u && held != 15u;
+        for (int k = 0; k < 8 && !edge; ++k) {
+            edge = around[k] == kNoCell || ((velk_light_cell_words.data[around[k] + word] >> shift) & 15u) != held;
+        }
+        if (edge) edges |= bit;
+    }
+    return edges;
+}
+
 void main()
 {
     velk_cells_load();
@@ -3660,7 +3739,14 @@ void main()
         // The place is the cube's middle, up to 0.87 of a cell off the surface, and the cell's
         // rays start across it, half a cell either way: the margin covers both. The light's
         // own spread is added per light.
-        which = velk_cell_changed_lights(place, facing, 2.0 * velk_light_cell_size(level));
+        uvec2 by_box;
+        which = velk_cell_changed_lights(place, facing, 2.0 * velk_light_cell_size(level), by_box);
+        // Only lights that bring enough there for a change to show.
+        which = velk_cell_lights_that_matter(at, place, facing, which);
+        // A light that only moved itself changes the cell only at its shadows' edges. A moved
+        // box can cast a new shadow anywhere.
+        uvec2 moved_only = which & ~by_box;
+        if ((moved_only.x | moved_only.y) != 0u) which = (which & by_box) | velk_cell_lights_at_edges(at, moved_only);
     } else {
         velk_cell_stat(kStatMarkUnplaced, 1u);
     }
