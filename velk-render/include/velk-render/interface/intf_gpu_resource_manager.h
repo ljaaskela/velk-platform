@@ -98,6 +98,15 @@ public:
     /// a frame always may, so that no group is too large to ever load.
     virtual bool take_geometry_frame(uint64_t bytes) = 0;
 
+    /// How many frames mesh detail may go unused before it can be dropped to make room. 0,
+    /// the default, takes 64.
+    virtual void set_geometry_idle_frames(uint32_t frames) = 0;
+    virtual uint32_t geometry_idle_frames() const = 0;
+
+    /// Whether mesh detail is short of room: something did not fit lately, or more is loaded
+    /// than the budget. While it is, meshes drop detail that has gone unused that long.
+    virtual bool geometry_pressure() const = 0;
+
     /// Has `update_geometry` call the primitive's `update_lod` each frame, for as long as it
     /// lives.
     virtual void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) = 0;

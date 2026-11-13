@@ -57,6 +57,9 @@ public:
     void release_geometry(uint64_t bytes) override;
     void set_geometry_frame_limit(uint64_t bytes) override { geometry_frame_limit_ = bytes; }
     bool take_geometry_frame(uint64_t bytes) override;
+    void set_geometry_idle_frames(uint32_t frames) override { geometry_idle_frames_ = frames; }
+    uint32_t geometry_idle_frames() const override { return geometry_idle_frames_ != 0 ? geometry_idle_frames_ : 64u; }
+    bool geometry_pressure() const override;
     void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) override;
     void update_geometry() override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
@@ -163,6 +166,12 @@ private:
     /// loaded that way.
     uint64_t geometry_asked_ = 0;
     uint64_t geometry_loaded_by_need_ = 0;
+    uint64_t geometry_dropped_ = 0;
+    /// How long detail may go unused as set, 0 for the default, a count of `update_geometry`
+    /// calls, and its value when something last did not fit, or none.
+    uint32_t geometry_idle_frames_ = 0;
+    uint64_t geometry_frame_ = 0;
+    uint64_t geometry_refused_frame_ = ~uint64_t(0);
     /// Primitives whose hierarchies load by need.
     vector<IMeshPrimitiveInternal::WeakPtr> tracked_geometry_;
 

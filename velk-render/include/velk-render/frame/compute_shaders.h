@@ -508,6 +508,11 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 if (mark != kNone && uintBitsToFloat(velk_cluster_words.data[header + 15u]) * lod_scale > max(own_away, lod_least)) {
                     velk_trace_marks.data[mark] = 1u;
                 }
+                // Using it says its own group is wanted, which keeps the group loaded.
+                uint own_mark = velk_cluster_words.data[header + 17u];
+                if (own_mark != kNone) {
+                    velk_trace_marks.data[own_mark] = 1u;
+                }
                 // What its tree's references count from. Everything pushed from here on is
                 // walked before anything under it on the stack, so these hold until then.
                 cur_header = header;

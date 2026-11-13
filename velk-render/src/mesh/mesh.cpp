@@ -113,6 +113,10 @@ void MeshPrimitive::release_lod()
     lod_nodes_region_ = {};
     lod_words_region_ = {};
     lod_marks_region_ = {};
+    lod_group_dependents_.clear();
+    lod_group_idle_.clear();
+    lod_group_order_.clear();
+    lod_watching_ = false;
     lod_groups_missing_ = 0;
     lod_dirty_clusters_.clear();
     lod_dirty_nodes_.clear();
@@ -151,9 +155,52 @@ void MeshPrimitive::flush_lod(IGpuResourceManager& resources)
     lod_dirty_nodes_.clear();
 }
 
+void MeshPrimitive::unload_lod_page(uint32_t group, IGpuResourceManager& resources)
+{
+    LodPage& page = lod_pages_[group];
+    if (!page.loaded) {
+        return;
+    }
+    // Its clusters cannot be chosen any more and have nothing to draw or walk, and the
+    // clusters made from it stand in for them wherever their own parents will not do.
+    for (uint32_t c : lod_page_clusters_[group]) {
+        MeshLodCluster& record = lod_records_[c];
+        record.index_word = 0;
+        record.triangle_count = 0;
+        record.vertex_word = 0;
+        record.uv1_word = kLodNoAttribute;
+        if (!lod_headers_.empty()) {
+            uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
+            header[10] = kBlasLeafRef;
+            header[12] = header[13] = 0;
+            header[14] = lod_empty_leaf_word_;
+        }
+        set_lod_errors(c, record.error, 0.f);
+    }
+    for (uint32_t made : lod_page_made_[group]) {
+        set_lod_errors(made, 0.f, lod_records_[made].parent_error);
+        // Those are about to be used, so their own group is not to go next for having sat
+        // unused behind this one.
+        const uint32_t stands_in = lod_.cluster_group[made];
+        if (stands_in != kLodNoGroup) {
+            lod_group_idle_[stands_in] = 0;
+        }
+    }
+    // The arenas keep freed regions until the frames that may still read them are done.
+    resources.release_geometry(page.bytes);
+    page = LodPage{};
+    ++lod_groups_missing_;
+}
+
 void MeshPrimitive::update_lod(IGpuResourceManager& resources)
 {
-    if (lod_groups_missing_ == 0 || !lod_marks_region_.valid()) {
+    if (lod_.group_count == 0 || !lod_marks_region_.valid()) {
+        return;
+    }
+    // With everything loaded and room to spare there is nothing to ask for or to drop.
+    const bool pressure = resources.geometry_pressure();
+    if (lod_groups_missing_ == 0 && !pressure) {
+        lod_watching_ = false;
         return;
     }
     // Reading the arena back is slow, and a group that is wanted stays wanted, so the marks
@@ -171,13 +218,22 @@ void MeshPrimitive::update_lod(IGpuResourceManager& resources)
     const uint64_t marks_bytes = marks.size() * sizeof(uint32_t);
     culling->read_at(lod_marks_region_.offset(), marks.data(), marks_bytes);
 
+    // How long each group has gone unwanted is counted from when detail got short of room:
+    // before that the marks were not looked at, and say nothing of when.
+    if (pressure && !lod_watching_) {
+        std::fill(lod_group_idle_.begin(), lod_group_idle_.end(), 0u);
+    }
+    lod_watching_ = pressure;
+
     bool any = false;
     bool loaded = false;
     for (uint32_t g = 0; g < lod_.group_count; ++g) {
         if (marks[g] == 0u) {
+            lod_group_idle_[g] += pressure ? 1u : 0u;
             continue;
         }
         any = true;
+        lod_group_idle_[g] = 0;
         if (lod_pages_[g].loaded) {
             continue;
         }
@@ -191,6 +247,26 @@ void MeshPrimitive::update_lod(IGpuResourceManager& resources)
         if (ready && load_lod_page(g, resources, false, true)) {
             loaded = true;
             --lod_groups_missing_;
+        }
+    }
+
+    // Short of room: what nothing has wanted for long enough goes, from the finest, each
+    // once nothing loaded needs it.
+    if (pressure) {
+        const uint32_t looks = std::max(resources.geometry_idle_frames() / kFramesBetween, 1u);
+        for (size_t i = lod_group_order_.size(); i-- > 0;) {
+            const uint32_t g = lod_group_order_[i];
+            if (!lod_pages_[g].loaded || lod_group_idle_[g] < looks) {
+                continue;
+            }
+            bool needed = false;
+            for (uint32_t dependent : lod_group_dependents_[g]) {
+                needed = needed || lod_pages_[dependent].loaded;
+            }
+            if (!needed) {
+                unload_lod_page(g, resources);
+                loaded = true;
+            }
         }
     }
     if (loaded) {
@@ -500,6 +576,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         const auto empty_leaf_word = static_cast<uint32_t>(lod_words_region_.offset() / sizeof(uint32_t)
                                                            + cluster_count * kClusterHeaderWords);
+        lod_empty_leaf_word_ = empty_leaf_word;
         for (uint32_t c = 0; c < cluster_count; ++c) {
             // No triangles either, so that one drawn by mistake draws nothing.
             MeshLodCluster& record = lod_records_[c];
@@ -511,6 +588,9 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             const uint32_t made_from = lod_.cluster_made_from[c];
             record.full_error = lod_.clusters[c].error;
             record.mark_word = made_from != kLodNoGroup ? marks_word + made_from : kLodNoAttribute;
+            // Using it at all says its own group is wanted.
+            const uint32_t group = lod_.cluster_group[c];
+            record.own_mark_word = group != kLodNoGroup ? marks_word + group : kLodNoAttribute;
             if (rays) {
                 uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
                 header[10] = kBlasLeafRef;
@@ -518,6 +598,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
                 header[14] = empty_leaf_word;
                 std::memcpy(header + 15, &record.full_error, sizeof(float));
                 header[16] = record.mark_word;
+                header[17] = record.own_mark_word;
             }
             set_lod_errors(c, lod_.cluster_made_from[c] != kLodNoGroup ? 0.f : lod_.clusters[c].error,
                            lod_.cluster_group[c] != kLodNoGroup ? 0.f : lod_.clusters[c].parent_error);
@@ -529,7 +610,21 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             release_lod();
             return false;
         }
-        vector<uint32_t> order;
+        // A group needs the groups its clusters' stand-ins are in, which then cannot go first.
+        lod_group_dependents_.resize(group_count);
+        lod_group_idle_.resize(group_count, 0u);
+        for (uint32_t g = 0; g < group_count; ++g) {
+            for (uint32_t made : lod_page_made_[g]) {
+                const uint32_t needs = lod_.cluster_group[made];
+                if (needs != kLodNoGroup) {
+                    vector<uint32_t>& dependents = lod_group_dependents_[needs];
+                    if (dependents.empty() || dependents.back() != g) {
+                        dependents.push_back(g);
+                    }
+                }
+            }
+        }
+        vector<uint32_t>& order = lod_group_order_;
         order.reserve(group_count);
         for (uint32_t g = 0; g < group_count; ++g) {
             order.push_back(g);

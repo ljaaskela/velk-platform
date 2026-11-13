@@ -46,10 +46,12 @@ struct MeshLodCluster
     /// are not loaded, so that it is drawn in their place.
     float full_error = 0.f;
     /// The word of a mark in the culling arena, once published, or kLodNoAttribute: whoever
-    /// uses the cluster where its error as built is too large sets the mark, which asks for
-    /// those finer clusters.
+    /// uses the cluster where its error as built is too large sets the mark, which says the
+    /// group of finer clusters it was made from is wanted.
     uint32_t mark_word = 0xFFFFFFFFu;
-    uint32_t spare = 0;
+    /// Likewise the mark of its own group, which whoever uses the cluster sets, so that the
+    /// group is known to be wanted while it is loaded.
+    uint32_t own_mark_word = 0xFFFFFFFFu;
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 

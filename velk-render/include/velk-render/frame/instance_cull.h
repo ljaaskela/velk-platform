@@ -217,7 +217,12 @@ void velk_lod_take(uint entry, uint c, uint slot, float error, mat4 world, float
 {
     // Drawn in place of finer clusters that are not loaded: its record names a mark, set here
     // where its error as built is too large, which asks for them.
+    // Using it also says its own group is wanted, which keeps the group loaded.
     uint taken = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint own_mark = cull_words.data[taken + 23u];
+    if (own_mark != 0xFFFFFFFFu) {
+        cull_words.data[own_mark] = 1u;
+    }
     uint mark = cull_words.data[taken + 22u];
     if (mark != 0xFFFFFFFFu) {
         float from = length(velk_lod_center(taken + 3u, world, cam)) - uintBitsToFloat(cull_words.data[taken + 6u]) * scale;

@@ -189,6 +189,16 @@ private:
     vector<uint32_t> lod_dirty_clusters_;
     vector<uint32_t> lod_dirty_nodes_;
     uint32_t lod_update_count_ = 0;
+    /// By group: the groups that need it, being those some of whose clusters' stand-ins are
+    /// in it; and how many looks at the marks ago it was last wanted, counted while detail is
+    /// short of room.
+    vector<vector<uint32_t>> lod_group_dependents_;
+    vector<uint32_t> lod_group_idle_;
+    bool lod_watching_ = false;
+    vector<uint32_t> lod_group_order_;     ///< The groups from the coarsest.
+    uint32_t lod_empty_leaf_word_ = 0;     ///< The leaf without triangles a cluster not loaded has for a tree.
+    /// Drops a loaded group: the reverse of load_lod_page.
+    void unload_lod_page(uint32_t group, IGpuResourceManager& resources);
     /// Writes the changed records, headers and tree nodes to the GPU.
     void flush_lod(IGpuResourceManager& resources);
     MeshLodInfo lod_info_{};

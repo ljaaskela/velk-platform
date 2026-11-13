@@ -66,7 +66,8 @@ inline constexpr uint32_t kBlasNoChild = 0xFFFFFFFFu;
 /// and leaves' word offsets, and a leaf its first triangle's and first position's. Then, at
 /// 15 and 16, its error as built and the word of a mark in the culling arena, or none: a ray
 /// that uses the cluster where that error is too large sets the mark, which asks for the
-/// finer clusters it was made from. The rest is spare.
+/// finer clusters it was made from. At 17, the mark of the cluster's own group, or none,
+/// which a ray that uses the cluster sets. The rest is spare.
 inline constexpr uint32_t kClusterHeaderWords = 20;
 /// Where a node's parent link says it has none.
 inline constexpr uint32_t kBlasNoParent = 0xFFFFFFFFu;

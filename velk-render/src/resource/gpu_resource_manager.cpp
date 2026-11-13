@@ -373,6 +373,7 @@ bool GpuResourceManager::reserve_geometry(uint64_t bytes, bool always)
 {
     if (!always && geometry_used_ + bytes > geometry_budget()) {
         geometry_refused_ += bytes;
+        geometry_refused_frame_ = geometry_frame_;
         return false;
     }
     geometry_used_ += bytes;
@@ -382,6 +383,16 @@ bool GpuResourceManager::reserve_geometry(uint64_t bytes, bool always)
 void GpuResourceManager::release_geometry(uint64_t bytes)
 {
     geometry_used_ -= bytes < geometry_used_ ? bytes : geometry_used_;
+    geometry_dropped_ += bytes;
+}
+
+bool GpuResourceManager::geometry_pressure() const
+{
+    // For twice as long as detail may go unused, so that what is watched from the first
+    // refusal on can be found unused before the watching stops.
+    const bool refused_lately = geometry_refused_frame_ != ~uint64_t(0)
+        && geometry_frame_ - geometry_refused_frame_ <= uint64_t(geometry_idle_frames()) * 2u;
+    return refused_lately || geometry_used_ > geometry_budget();
 }
 
 bool GpuResourceManager::take_geometry_frame(uint64_t bytes)
@@ -405,6 +416,7 @@ void GpuResourceManager::track_geometry(const IMeshPrimitiveInternal::WeakPtr& p
 void GpuResourceManager::update_geometry()
 {
     geometry_frame_used_ = 0;
+    ++geometry_frame_;
     size_t kept = 0;
     for (size_t i = 0; i < tracked_geometry_.size(); ++i) {
         auto primitive = tracked_geometry_[i].lock();
@@ -445,9 +457,9 @@ void GpuResourceManager::log_arena_memory() const
     if (geometry_used_ != 0 || geometry_refused_ != 0) {
         VELK_LOG(I, "mesh detail loaded=%9.1f MB  left out for the budget=%9.1f MB  budget=%9.1f MB", static_cast<double>(geometry_used_) / 1e6,
                  static_cast<double>(geometry_refused_) / 1e6, static_cast<double>(geometry_budget()) / 1e6);
-        VELK_LOG(I, "mesh detail asked for and within the budget %llu times, loaded by need=%9.1f MB, meshes tracked=%zu",
+        VELK_LOG(I, "mesh detail asked for and within the budget %llu times, loaded by need=%9.1f MB, dropped=%9.1f MB, meshes tracked=%zu",
                  static_cast<unsigned long long>(geometry_asked_), static_cast<double>(geometry_loaded_by_need_) / 1e6,
-                 tracked_geometry_.size());
+                 static_cast<double>(geometry_dropped_) / 1e6, tracked_geometry_.size());
     }
 }
 
