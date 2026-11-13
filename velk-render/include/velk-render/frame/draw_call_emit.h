@@ -164,23 +164,19 @@ inline void emit_draw_calls(
         while (header.triangle_bits < 31u && (uint64_t(1) << header.triangle_bits) < triangles) {
             ++header.triangle_bits;
         }
-        header.index_base = cull_info.cluster_count != 0 ? cull_info.cluster_index_word : index_base;
-        header.cluster_first_base = cull_info.cluster_count != 0
+        // A cluster's record says where its indices are in the arena, and its vertices and
+        // second uvs, which the ones below stand in for only when it is not drawn by cluster.
+        header.index_base = cull_info.cluster_count != 0 ? 0u : index_base;
+        header.cluster_base = cull_info.cluster_count != 0
             ? cull_info.cluster_errors_word + cull_info.cluster_capacity
             : kNoVisibleList;
         // Vertex streams are word bases into the mesh-word arena, the same
         // bytes and the same model RT reads.
         const GpuRef vbo_ref = get_gpu_ref(buffer);
         if (vbo_ref.kind != GpuRef::Kind::Index) continue;
-        header.vbo_base = cull_info.cluster_count != 0 && cull_info.cluster_vertex_word != 0xFFFFFFFFu
-            ? cull_info.cluster_vertex_word
-            : vbo_ref.get_base();
+        header.vbo_base = vbo_ref.get_base();
 
-        if (cull_info.cluster_count != 0 && cull_info.cluster_uv1_word != 0xFFFFFFFFu) {
-            // Clusters with vertices of their own have their second uvs beside them.
-            header.uv1_base = cull_info.cluster_uv1_word;
-            header.uv1_enabled = 1;
-        } else if (auto uv1 = primitive->get_uv1_buffer()) {
+        if (auto uv1 = primitive->get_uv1_buffer()) {
             const GpuRef uv1_ref = get_gpu_ref(uv1);
             if (uv1_ref.kind != GpuRef::Kind::Index) continue;
             header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
@@ -298,7 +294,8 @@ inline void emit_draw_calls(
             if (!index_buffer || !commands) continue;
             call.indexed = true;
             call.index_buffer = index_buffer;
-            call.index_buffer_offset = size_t(cull_info.cluster_index_word) * sizeof(uint32_t);
+            // A command's first index is its cluster's, counted from the start of the arena.
+            call.index_buffer_offset = 0;
             call.args_stride = sizeof(uint32_t) * 5; // VkDrawIndexedIndirectCommand
             call.args_buffer = commands;
             call.args_buffer_offset =

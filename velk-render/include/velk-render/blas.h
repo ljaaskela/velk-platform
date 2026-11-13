@@ -49,19 +49,22 @@ static_assert(sizeof(BlasGpuNode) == 64, "BlasGpuNode layout mismatch");
 
 /// Set on a child reference that is a leaf. Mirrors VELK_BLAS_LEAF.
 inline constexpr uint32_t kBlasLeafRef = 0x80000000u;
-/// Set on a child reference that is a node of the tree over a hierarchy's clusters, which is
-/// two nodes long: its children's boxes and references, then its MeshLodNode. Mirrors
-/// VELK_BLAS_UPPER.
-inline constexpr uint32_t kBlasUpperRef = 0x40000000u;
-/// Set on a child reference that is a cluster of a hierarchy: a word offset to its header.
-/// Mirrors VELK_BLAS_CLUSTER.
-inline constexpr uint32_t kBlasClusterRef = 0x20000000u;
+/// Set on a child reference, without kBlasLeafRef, that is a cluster of a hierarchy: with the
+/// word of its header in the cluster word arena, over four. Mirrors VELK_BLAS_CLUSTER.
+inline constexpr uint32_t kBlasClusterRef = 0x40000000u;
+/// Set on a child reference, without the two above, that is a node of the tree over a
+/// hierarchy's clusters: with its index in the node arena. Such a node is two nodes long, its
+/// children's boxes and references, then its MeshLodNode. Mirrors VELK_BLAS_UPPER.
+inline constexpr uint32_t kBlasUpperRef = 0x20000000u;
 /// A child that is not there. Its box is where no ray reaches.
 inline constexpr uint32_t kBlasNoChild = 0xFFFFFFFFu;
-/// Words in a cluster's header, before its triangles: the sphere and error it is chosen by
-/// (center, radius, error), its parent's, the reference to the tree over its triangles, and
-/// its index in the hierarchy.
-inline constexpr uint32_t kClusterHeaderWords = 12;
+/// Words in a cluster's header, which says where everything rays need of it is, so that it
+/// can be anywhere: the sphere and error it is chosen by (center, radius, error), its
+/// parent's, the reference to the tree over its triangles, its index in the hierarchy, the
+/// word of its vertices in the mesh-word arena, and what the references in its tree count
+/// from, in the node arena and in the cluster word arena. A node there holds node indices
+/// and leaves' word offsets, and a leaf its first triangle's and first position's.
+inline constexpr uint32_t kClusterHeaderWords = 16;
 /// Where a node's parent link says it has none.
 inline constexpr uint32_t kBlasNoParent = 0xFFFFFFFFu;
 
@@ -84,7 +87,7 @@ inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
 /// Words per cluster in a level of detail hierarchy's table and per node of its tree, read by
 /// VELK_LOD_SELECT_GLSL.
-inline constexpr uint32_t kLodClusterWords = 20;
+inline constexpr uint32_t kLodClusterWords = 24;
 inline constexpr uint32_t kLodNodeWords = 16;
 /// Set on a tree node's child that is a cluster, with the cluster's index (VELK_LOD_LEAF).
 inline constexpr uint32_t kLodLeaf = 0x80000000u;
@@ -618,9 +621,9 @@ inline BlasBuild build_mesh_blas(const float* vertices, uint32_t vertex_stride_b
     return out;
 }
 
-/// Builds a tree and clusters over some of a mesh's triangles, as build_mesh_blas does, without
-/// the mesh's surface areas. @p vertices are @p floats_per_vertex floats each, positions
-/// first, then normals if there are six or more.
+/// Builds a tree and clusters over some triangles, as build_mesh_blas does, without the mesh's
+/// surface areas. @p vertices are @p floats_per_vertex floats each, positions first, then
+/// normals if there are six or more, and a cluster's vertex ids count from the first of them.
 inline BlasBuild build_triangles_blas(const float* vertices, uint32_t floats_per_vertex, uint32_t vertex_count,
                                       const uint32_t* indices, uint32_t triangle_count)
 {

@@ -157,6 +157,7 @@ private:
     ArenaRegion lod_nodes_region_;
     ArenaRegion lod_words_region_;
     MeshLodInfo lod_info_{};
+    bool lod_unreadable_ = false;  ///< Its vertices could not be read for the hierarchy, as logged once.
     bool deforming_ = false;
     bool merge_pieces_ = false;
 };

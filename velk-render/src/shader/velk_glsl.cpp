@@ -68,10 +68,12 @@ struct VelkMeshNode {
     uvec4 refs;
 };
 #define VELK_BLAS_LEAF 0x80000000u
-// On a child of a mesh's tree: a node of the tree over its level of detail hierarchy's
-// clusters (kBlasUpperRef), or a word offset to one cluster's header (kBlasClusterRef).
-#define VELK_BLAS_UPPER 0x40000000u
-#define VELK_BLAS_CLUSTER 0x20000000u
+// On a child of a mesh's tree without VELK_BLAS_LEAF: one cluster of its level of detail
+// hierarchy, with the word of its header in velk_cluster_words over four (kBlasClusterRef).
+// Without that either: a node of the tree over those clusters, with its index in
+// velk_mesh_nodes (kBlasUpperRef). Anything else is a node of the tree being walked.
+#define VELK_BLAS_CLUSTER 0x40000000u
+#define VELK_BLAS_UPPER 0x20000000u
 
 // child_count of a node that refers to a partition. Its first_child is the
 // partition's root, and its origin is in the fields read by velk_partition_origin.
@@ -125,7 +127,7 @@ struct RtRecord {
 #define VELK_NO_TREE 0xFFFFFFFFu
 
 // Words per cluster in a level of detail table: kLodClusterWords.
-#define VELK_LOD_CLUSTER_WORDS 20u
+#define VELK_LOD_CLUSTER_WORDS 24u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
 // kLodNodeWords, and rays' node with its children's boxes sits before each.
 #define VELK_LOD_NODE_STRIDE 32u
@@ -292,15 +294,16 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 // main VBO. When a primitive has no UV1, `uv1_base` points at a context-owned
 // single-vertex fallback (vec2(0,0)) and `uv1_enabled` is 0, so this reads
 // vertex 0. Branchless via index multiplication, so there are no variants.
+//
+// A draw by cluster reads the vertices and second uvs of the cluster this instance of the
+// command draws, which its indices count from: see velk_cluster_vertex_word.
 R"(
 #define velk_vertex3d(root) \
-    velk_unpack_vertex3d(velk_draw(root).vbo_base + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
+    velk_unpack_vertex3d(velk_cluster_vertex_word(velk_draw(root), velk_cluster(root)) \
+                         + uint(gl_VertexIndex) * VELK_VERTEX3D_WORDS)
 
-#define velk_uv1(root)                                                           \
-    vec2(velk_vertex_word(velk_draw(root).uv1_base,                                \
-                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u), \
-         velk_vertex_word(velk_draw(root).uv1_base,                                \
-                          velk_draw(root).uv1_enabled * uint(gl_VertexIndex) * 2u + 1u))
+#define velk_uv1(root) \
+    velk_read_uv1(velk_cluster_uv1_word(velk_draw(root), velk_cluster(root), uint(gl_VertexIndex)))
 
 )"
 // Per-view FrameGlobals for this draw. The header's `globals_base` is an index
@@ -385,13 +388,44 @@ struct VelkDrawData {
     uint material_id;
     uint material_words;
     uint index_base;
-    uint cluster_first_base;
+    uint cluster_base;
     uint _pad_draw0;
     uint _pad_draw1;
 };
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
 layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[]; } velk_culling;
+
+// A cluster is the word of its record in its hierarchy's table, in the culling arena, or
+// VELK_NO_CLUSTER for what is not drawn by cluster. The record says where the cluster's
+// indices, vertices and second uvs are in the mesh-word arena; its indices count from its
+// first vertex.
+#define VELK_NO_CLUSTER 0xFFFFFFFFu
+
+// Vertex stage only: the cluster this instance of the command draws.
+#define velk_cluster(root)                                                           \
+    (velk_draw(root).cluster_base == VELK_NO_CLUSTER                                 \
+         ? VELK_NO_CLUSTER                                                           \
+         : velk_culling.data[velk_draw(root).cluster_base + uint(gl_InstanceIndex)])
+
+// The word of the first vertex that indices of `cluster` in draw `d` count from.
+uint velk_cluster_vertex_word(VelkDrawData d, uint cluster)
+{
+    return cluster == VELK_NO_CLUSTER ? d.vbo_base : velk_culling.data[cluster + 18u];
+}
+
+// The word of the second uv of vertex `index`. The draw's own when the cluster has none,
+// which is one for all vertices when the mesh has none either.
+uint velk_cluster_uv1_word(VelkDrawData d, uint cluster, uint index)
+{
+    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 20u];
+    return own == VELK_NO_CLUSTER ? d.uv1_base + d.uv1_enabled * index * 2u : own + index * 2u;
+}
+
+vec2 velk_read_uv1(uint word)
+{
+    return vec2(velk_vertex_word(word, 0u), velk_vertex_word(word, 1u));
+}
 
 // What each pixel shows, two words a pixel, row by row from `ids_word` in the culling arena,
 // as the deferred path's visibility resolve leaves it: 0 for nothing, else its draw data
@@ -438,13 +472,18 @@ uint velk_ids_triangle(VelkDrawData d, uvec2 ids)
     return ids.y & ((1u << d.triangle_bits) - 1u);
 }
 
-// The first index of the cluster a pixel shows, under the draw's index_base. 0 when it is
-// not drawn by cluster.
-uint velk_ids_first_index(VelkDrawData d, uvec2 ids)
+// The cluster a pixel shows, or VELK_NO_CLUSTER when it is not drawn by cluster.
+uint velk_ids_cluster(VelkDrawData d, uvec2 ids)
 {
-    if ((ids.x & VELK_IDS_TINY) != 0u) return velk_culling.data[velk_culling.data[ids.y + 1u]];
-    if (d.cluster_first_base == VELK_NO_VISIBLE_LIST) return 0u;
-    return velk_culling.data[d.cluster_first_base + (ids.y >> d.triangle_bits)];
+    if ((ids.x & VELK_IDS_TINY) != 0u) return velk_culling.data[ids.y + 1u];
+    if (d.cluster_base == VELK_NO_CLUSTER) return VELK_NO_CLUSTER;
+    return velk_culling.data[d.cluster_base + (ids.y >> d.triangle_bits)];
+}
+
+// The word of the first index of `cluster`, under the draw's index_base. 0 for none.
+uint velk_cluster_first_index(uint cluster)
+{
+    return cluster == VELK_NO_CLUSTER ? 0u : velk_culling.data[cluster];
 }
 
 // How far the surface a pixel shows may be from the full mesh, in world units.

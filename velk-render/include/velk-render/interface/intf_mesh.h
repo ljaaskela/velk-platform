@@ -232,13 +232,12 @@ struct MeshRefitInfo
 /// Where a primitive's level of detail hierarchy is. See VELK_LOD_SELECT_GLSL.
 struct MeshLodInfo
 {
-    uint32_t cluster_word = 0;     ///< Its clusters in the culling arena, by level, level 0 first.
+    /// Its clusters in the culling arena, by level, level 0 first. Each says where its own
+    /// indices and vertices are.
+    uint32_t cluster_word = 0;
     uint32_t cluster_count = 0;
     uint32_t level0_clusters = 0;  ///< How many of them are the full mesh.
-    uint32_t node_word = 0;        ///< The tree over its clusters in the culling arena, root first.
-    uint32_t index_word = 0;       ///< Its indices in the mesh-word arena, which clusters' first indices count from.
-    uint32_t vertex_word = 0xFFFFFFFFu;  ///< Its own vertices in that arena, which those indices read, or none for the mesh's.
-    uint32_t uv1_word = 0xFFFFFFFFu;     ///< Those vertices' second uvs in that arena, or none.
+    uint32_t node_word = 0;        ///< The tree over its clusters, as words of the node arena, root first.
     /// The mesh deforms, so its clusters' spheres are where they are at rest: it has level 0
     /// only, and its clusters are not tested for occlusion.
     bool deforming = false;

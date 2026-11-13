@@ -81,10 +81,10 @@ struct InstanceCullInfo
     uint32_t cluster_entry_word = 0;     ///< Its entry, for the passes that fill its commands.
     uint32_t cluster_commands_word = 0;  ///< Its commands in the culling arena.
     uint32_t cluster_draws_word = 0;     ///< How many commands are in use, in the culling arena.
-    uint32_t cluster_vertex_word = 0xFFFFFFFFu;  ///< The hierarchy's own vertices in the mesh-word arena, if it has any.
-    uint32_t cluster_uv1_word = 0xFFFFFFFFu;     ///< Those vertices' second uvs in the mesh-word arena, if the mesh has any.
-    uint32_t cluster_index_word = 0;     ///< Its indices in the mesh-word arena.
-    uint32_t cluster_errors_word = 0;    ///< Each list position's surface error in world units, in the culling arena.
+    /// Each list position's surface error in world units, in the culling arena. Each one's
+    /// cluster, as the word of its record in the hierarchy's table, follows @c cluster_capacity
+    /// words on.
+    uint32_t cluster_errors_word = 0;
     uint32_t cluster_capacity = 0;       ///< How many positions its list has.
     uint32_t cluster_second_commands_word = 0;  ///< The commands of the second occlusion phase.
     uint32_t cluster_second_draws_word = 0;     ///< How many of those are in use.

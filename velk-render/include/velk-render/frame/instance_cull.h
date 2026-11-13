@@ -647,9 +647,9 @@ void main()
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
  * use gets an indexed command, instanced over its own run of the list, so that instances
  * using the same cluster share a draw. An entry is kClusterEntryWords: the word of the list, which
- * is followed by each position's surface error and its cluster's first index, its capacity, the word of the cluster table
- * (kLodClusterWords words per cluster, starting with the cluster's first index and triangle
- * count), the cluster count, the words of the counts, the cursors and the commands, one of
+ * is followed by each position's surface error and its cluster's record, its capacity, the word of the cluster table
+ * (kLodClusterWords words per cluster, starting with the word of the cluster's first index in
+ * the mesh-word arena and its triangle count), the cluster count, the words of the counts, the cursors and the commands, one of
  * each per cluster, how many commands are in use, the word of the tree over its clusters and its flags, how
  * many positions the first phase used, the second phase's commands and how many are in use, and
  * the draw data record its pixels name (kClusterEntryDrawWord).
@@ -750,7 +750,7 @@ void main()
         uint list = cull_words.data[entry];
         cull_words.data[list + at] = cull_words.data[record + 2u];
         cull_words.data[list + capacity + at] = cull_words.data[record + 3u];
-        cull_words.data[list + capacity * 2u + at] = cull_words.data[cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS];
+        cull_words.data[list + capacity * 2u + at] = cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
     }
 }
 )";
@@ -850,7 +850,9 @@ void main()
     uint cluster = tiny_words.data[record + 1u];
     TinyInstance inst = tiny_instances.data[d.instances_base + tiny_words.data[record + 2u]];
     GlobalData g = velk_globals.data[d.globals_base];
-    uint first = d.index_base + tiny_words.data[cluster];
+    // The cluster's record says where its indices are, and the vertices they count from.
+    uint first = tiny_words.data[cluster];
+    uint vertices = tiny_words.data[cluster + 18u];
     uint count = tiny_words.data[cluster + 1u];
     vec2 size = vec2(float(pc.width), float(pc.height));
     uint plane = pc.width * pc.height;
@@ -859,7 +861,7 @@ void main()
         vec3 s[3];
         bool behind = false;
         for (uint k = 0u; k < 3u; ++k) {
-            uint at = d.vbo_base + velk_mesh_words.data[first + t * 3u + k] * VELK_VERTEX3D_WORDS;
+            uint at = vertices + velk_mesh_words.data[first + t * 3u + k] * VELK_VERTEX3D_WORDS;
             vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
                               uintBitsToFloat(velk_mesh_words.data[at + 2u]));
             vec4 clip = g.view_projection

@@ -17,7 +17,9 @@ namespace velk::impl {
 /// of the clusters below it, and an error is never less than theirs.
 struct MeshLodCluster
 {
-    uint32_t first_index = 0;     ///< Into MeshLod::indices.
+    /// The word of its first index. From the start of MeshLod::indices as built, and in the
+    /// mesh-word arena once published. Its indices count from its first vertex.
+    uint32_t index_word = 0;
     uint32_t triangle_count = 0;
     uint32_t level = 0;           ///< 0 is the full mesh.
     float center[3] = {};
@@ -33,10 +35,14 @@ struct MeshLodCluster
     /// The diagonal of the largest box around one of its triangles, so that a cluster with a
     /// triangle too large for compute raster stays with the hardware.
     float largest = 0.f;
-    /// Its own run in MeshLod::vertices, which only its indices name. Both 0 when the
-    /// hierarchy has no vertices of its own.
-    uint32_t first_vertex = 0;
-    uint32_t vertex_count = 0;
+    /// The word of its first vertex: its own run, which only its indices name, from the
+    /// start of MeshLod::vertices as built and in the mesh-word arena once published. For a
+    /// deforming mesh, the mesh's vertices, which all its clusters name.
+    uint32_t vertex_word = 0;
+    uint32_t vertex_count = 0;  ///< In its own run, or 0.
+    /// The word of its first vertex's second uv, likewise, or kLodNoAttribute.
+    uint32_t uv1_word = 0xFFFFFFFFu;
+    uint32_t spare[3] = {};
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
@@ -59,12 +65,12 @@ struct MeshLodNode
 };
 static_assert(sizeof(MeshLodNode) == kLodNodeWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
-/// A mesh's level of detail hierarchy. Built with the mesh's vertices, every cluster has a run
-/// of vertices of its own, so that it needs nothing another cluster holds. Built without, all
-/// clusters name the mesh's vertices, which is how a deforming mesh's follow it.
+/// A mesh's level of detail hierarchy. Every cluster has a run of vertices of its own, so that
+/// it needs nothing another cluster holds. A deforming mesh's clusters name the mesh's
+/// vertices instead, so that they follow it.
 struct MeshLod
 {
-    vector<uint8_t> vertices;  ///< Each cluster's run, one after another, or empty.
+    vector<uint8_t> vertices;  ///< Each cluster's run, one after another. Empty for a deforming mesh.
     vector<float> uv1;         ///< Two floats for each of `vertices`, when the mesh has a second uv.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
@@ -73,12 +79,14 @@ struct MeshLod
     /// under one root, which is the first node. A child comes after its parent.
     vector<MeshLodNode> nodes;
 
-    /// What rays walk, when asked for. `ray_nodes` starts with two for each of `nodes`: the
-    /// boxes of its children with their references (kBlasUpperRef with twice a node's index,
-    /// kBlasClusterRef with the word of a cluster's header, or kBlasNoChild), then the
-    /// MeshLodNode itself. After those come the nodes of the trees over each cluster's
-    /// triangles. `ray_words` holds, per cluster, its header (kClusterHeaderWords) and what
-    /// blas_gpu_tree gives for its triangles. References count from the start of each.
+    /// What rays walk. `ray_nodes` starts with two for each of `nodes`: the boxes of its
+    /// children with their references (kBlasUpperRef with twice a node's index,
+    /// kBlasClusterRef with a cluster's index times kClusterHeaderWords over four, or
+    /// kBlasNoChild), then the MeshLodNode itself. Unless the mesh deforms, the nodes of the
+    /// trees over each cluster's triangles follow, and `ray_words` holds every cluster's
+    /// header (kClusterHeaderWords), in order, and then what blas_gpu_tree gives for each
+    /// one's triangles. As built, everything a reference or a header names counts from the
+    /// start of the vector it is in; publishing adds where that is.
     vector<BlasGpuNode> ray_nodes;
     vector<uint32_t> ray_words;
 };
@@ -87,9 +95,8 @@ struct MeshLod
 inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.
-/// @param vertices The vertices @p blas indexes, which clusters then get runs of their own
-///        of, and whose normals are kept. Null to go by positions alone and name the mesh's,
-///        with no normals for rays to stop by.
+/// @param vertices The vertices @p blas indexes, which clusters get runs of their own of, and
+///        whose normals are kept. Null only for a deforming mesh without them.
 /// @param uv1 Two floats for each of @p vertices, or null.
 /// @param stride Bytes per vertex.
 /// @param normal_offset Bytes to a vertex's normal, three floats, or kLodNoAttribute.

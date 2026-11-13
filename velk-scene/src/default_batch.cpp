@@ -271,7 +271,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryFlagsWord] = (draw.lod.deforming ? kLodDeforming : 0u) | (moved ? kLodMoved : 0u);
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
-        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word, draw.lod.uv1_word});
+        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, errors_word, draw.capacity});
     }
     // Batches culled together keep their records in one place, with the culling pass.
     cull_chosen_word_ = next_list;
@@ -303,11 +303,8 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_draws_word = draw->entry_word + kClusterEntryDrawsWord;
         out.cluster_second_commands_word = draw->commands_word + draw->clusters * 5u;
         out.cluster_second_draws_word = draw->entry_word + kClusterEntrySecondDrawsWord;
-        out.cluster_index_word = draw->index_word;
         out.cluster_errors_word = draw->errors_word;
         out.cluster_capacity = draw->capacity;
-        out.cluster_vertex_word = draw->vertex_word;
-        out.cluster_uv1_word = draw->uv1_word;
     }
     if (cull_second_args_.valid()) {
         out.second_args_word = static_cast<uint32_t>(cull_second_args_.offset() / sizeof(uint32_t));

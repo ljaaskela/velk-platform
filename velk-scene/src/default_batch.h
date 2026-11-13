@@ -138,11 +138,8 @@ private:
         uint32_t entry_word;
         uint32_t list_word;
         uint32_t commands_word;
-        uint32_t index_word;
         uint32_t errors_word;
         uint32_t capacity;
-        uint32_t vertex_word;
-        uint32_t uv1_word;
     };
     const ClusterDraw* find_cluster_draw(uint32_t mesh, const IMeshPrimitive* primitive) const;
 
