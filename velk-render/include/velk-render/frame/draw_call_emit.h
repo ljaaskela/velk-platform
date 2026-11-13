@@ -176,7 +176,11 @@ inline void emit_draw_calls(
             ? cull_info.cluster_vertex_word
             : vbo_ref.get_base();
 
-        if (auto uv1 = primitive->get_uv1_buffer()) {
+        if (cull_info.cluster_count != 0 && cull_info.cluster_uv1_word != 0xFFFFFFFFu) {
+            // Clusters with vertices of their own have their second uvs beside them.
+            header.uv1_base = cull_info.cluster_uv1_word;
+            header.uv1_enabled = 1;
+        } else if (auto uv1 = primitive->get_uv1_buffer()) {
             const GpuRef uv1_ref = get_gpu_ref(uv1);
             if (uv1_ref.kind != GpuRef::Kind::Index) continue;
             header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;

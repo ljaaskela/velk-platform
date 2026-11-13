@@ -147,12 +147,13 @@ private:
     MeshRefitInfo gpu_refit_{};
 
     /// The level of detail hierarchy, once something draws by cluster or a ray may hit it:
-    /// its cluster table in the culling arena, its indices and any vertices of its own in the
-    /// mesh-word arena, the tree over its clusters in the node arena, and, unless the mesh
-    /// deforms, what rays read of each cluster in the cluster word arena.
+    /// its cluster table in the culling arena, its indices and its clusters' own vertices and
+    /// second uvs in the mesh-word arena, the tree over its clusters in the node arena, and,
+    /// unless the mesh deforms, what rays read of each cluster in the cluster word arena.
     ArenaRegion lod_table_region_;
     ArenaRegion lod_index_region_;
     ArenaRegion lod_vertex_region_;
+    ArenaRegion lod_uv1_region_;
     ArenaRegion lod_nodes_region_;
     ArenaRegion lod_words_region_;
     MeshLodInfo lod_info_{};

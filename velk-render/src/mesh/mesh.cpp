@@ -88,8 +88,10 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
     lod_table_region_ = {};
     lod_index_region_ = {};
     lod_vertex_region_ = {};
+    lod_uv1_region_ = {};
     lod_nodes_region_ = {};
     lod_words_region_ = {};
+    lod_info_ = {};
 }
 
 bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out)
@@ -110,11 +112,26 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         uint32_t normal_offset;
         uint32_t uv_offset;
         attribute_offsets(attributes_, normal_offset, uv_offset);
-        const bool read = normal_offset != kLodNoAttribute && buffer && buffer->read_geometry(geometry);
-        // A deforming mesh's coarser levels would be drawn in its rest pose.
-        // A deforming mesh's rays walk the tree that is refit, not the hierarchy.
-        const MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, vertex_stride_, normal_offset,
-                                           merge_pieces_, !deforming_, !deforming_);
+        bool read = buffer && buffer->read_geometry(geometry);
+        // The second uv is a stream of its own, by vertex, so clusters need runs of it too.
+        vector<uint8_t> uv1_bytes;
+        const float* uv1 = nullptr;
+        if (read && uv1_buffer_) {
+            auto* uv1_buffer = interface_cast<IMeshBufferInternal>(uv1_buffer_.get());
+            const size_t needed = size_t(uv1_offset_) + buffer_->get_vbo_size() / vertex_stride_ * sizeof(float) * 2;
+            if (uv1_buffer && uv1_buffer->read_geometry(uv1_bytes) && uv1_bytes.size() >= needed) {
+                uv1 = reinterpret_cast<const float*>(uv1_bytes.data() + uv1_offset_);
+            } else {
+                read = false;
+            }
+        }
+        if (!read && !deforming_) {
+            VELK_LOG(E, "MeshPrimitive: could not read the mesh's vertices, so its clusters share them and it stays loaded whole");
+        }
+        // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
+        // the tree that is refit, not the hierarchy.
+        const MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, vertex_stride_, normal_offset,
+                                           merge_pieces_, deforming_);
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
         if (!nodes_arena || !words_arena) {
@@ -132,11 +149,17 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         if (words_size != 0) {
             lod_words_region_ = words_arena->alloc(words_size);
         }
+        const size_t uv1_size = lod.uv1.size() * sizeof(float);
+        if (uv1_size != 0) {
+            lod_uv1_region_ = mesh_words->alloc(uv1_size);
+        }
         if (!lod_table_region_.valid() || !lod_index_region_.valid() || !lod_nodes_region_.valid()
-            || (!lod.vertices.empty() && !lod_vertex_region_.valid()) || (words_size != 0 && !lod_words_region_.valid())) {
+            || (!lod.vertices.empty() && !lod_vertex_region_.valid()) || (words_size != 0 && !lod_words_region_.valid())
+            || (uv1_size != 0 && !lod_uv1_region_.valid())) {
             lod_table_region_ = {};
             lod_index_region_ = {};
             lod_vertex_region_ = {};
+            lod_uv1_region_ = {};
             lod_nodes_region_ = {};
             lod_words_region_ = {};
             return false;
@@ -144,6 +167,10 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         if (!lod.vertices.empty()) {
             mesh_words->write_at(lod_vertex_region_.offset(), lod.vertices.data(), lod.vertices.size());
             lod_info_.vertex_word = static_cast<uint32_t>(lod_vertex_region_.offset() / sizeof(uint32_t));
+        }
+        if (uv1_size != 0) {
+            mesh_words->write_at(lod_uv1_region_.offset(), lod.uv1.data(), uv1_size);
+            lod_info_.uv1_word = static_cast<uint32_t>(lod_uv1_region_.offset() / sizeof(uint32_t));
         }
         if (words_size != 0) {
             words_arena->write_at(lod_words_region_.offset(), lod.ray_words.data(), words_size);

@@ -202,6 +202,8 @@ struct LodVertices
     vector<uint32_t> remap;
     vector<unsigned char> locks;
     vector<uint8_t> bytes;
+    /// For each vertex, the mesh's vertex it was made from, once any has been added.
+    vector<uint32_t> origin;
     uint32_t stride = 0;
     uint32_t normal_offset = 0;
     bool grown = false;
@@ -377,6 +379,13 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
             v.normals.insert(v.normals.end(), normal, normal + 3);
             v.remap.push_back(new_id);
             v.locks.push_back(0);
+            if (v.origin.empty()) {
+                v.origin.resize(new_id);
+                for (uint32_t id = 0; id < new_id; ++id) {
+                    v.origin[id] = id;
+                }
+            }
+            v.origin.push_back(v.origin[old_id]);
             const size_t first_byte = v.bytes.size();
             v.bytes.resize(first_byte + v.stride);
             std::memcpy(v.bytes.data() + first_byte, v.bytes.data() + size_t(old_id) * v.stride, v.stride);
@@ -592,6 +601,51 @@ struct LodTreeBuilder
     }
 };
 
+/// Gives every cluster of @p lod a run of vertices of its own, copied from @p bytes, and
+/// points its indices at them. @p v follows, so that what is built from it afterwards names
+/// the same vertices.
+void own_vertices(MeshLod& lod, LodVertices& v, const uint8_t* bytes, const float* uv1)
+{
+    const size_t source_count = v.positions.size() / 3;
+    const bool has_normals = v.normals.size() == v.positions.size();
+    constexpr uint32_t kNone = 0xFFFFFFFFu;
+    // Where a vertex went in the cluster that last took it.
+    vector<uint32_t> taken_by;
+    vector<uint32_t> taken_as;
+    taken_by.resize(source_count, kNone);
+    taken_as.resize(source_count, 0u);
+
+    vector<float> positions;
+    vector<float> normals;
+    for (size_t c = 0; c < lod.clusters.size(); ++c) {
+        MeshLodCluster& cluster = lod.clusters[c];
+        cluster.first_vertex = static_cast<uint32_t>(positions.size() / 3);
+        uint32_t* indices = lod.indices.data() + cluster.first_index;
+        for (size_t i = 0; i < size_t(cluster.triangle_count) * 3; ++i) {
+            const uint32_t old_id = indices[i];
+            if (taken_by[old_id] != c) {
+                taken_by[old_id] = static_cast<uint32_t>(c);
+                taken_as[old_id] = static_cast<uint32_t>(positions.size() / 3);
+                positions.insert(positions.end(), v.positions.data() + size_t(old_id) * 3, v.positions.data() + size_t(old_id) * 3 + 3);
+                if (has_normals) {
+                    normals.insert(normals.end(), v.normals.data() + size_t(old_id) * 3, v.normals.data() + size_t(old_id) * 3 + 3);
+                }
+                const size_t first_byte = lod.vertices.size();
+                lod.vertices.resize(first_byte + v.stride);
+                std::memcpy(lod.vertices.data() + first_byte, bytes + size_t(old_id) * v.stride, v.stride);
+                if (uv1) {
+                    const size_t from = v.origin.empty() ? old_id : v.origin[old_id];
+                    lod.uv1.insert(lod.uv1.end(), uv1 + from * 2, uv1 + from * 2 + 2);
+                }
+            }
+            indices[i] = taken_as[old_id];
+        }
+        cluster.vertex_count = static_cast<uint32_t>(positions.size() / 3) - cluster.first_vertex;
+    }
+    v.positions = std::move(positions);
+    v.normals = std::move(normals);
+}
+
 /// Fills `ray_nodes` and `ray_words` of @p lod. With @p rays, each cluster gets a tree over its
 /// triangles, and the nodes of the tree over the clusters get their children's boxes.
 void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
@@ -752,8 +806,8 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
 
 } // namespace
 
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
-                       bool merge_pieces, bool coarser_levels, bool rays)
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, uint32_t stride,
+                       uint32_t normal_offset, bool merge_pieces, bool deforming)
 {
     MeshLod lod;
     if (blas.clusters.empty()) {
@@ -799,7 +853,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
     vector<uint32_t> first_seen;
     locks.resize(vertex_count);
 
-    for (uint32_t level = 1; coarser_levels && level < kMaxLevels && pending.size() > 1; ++level) {
+    for (uint32_t level = 1; !deforming && level < kMaxLevels && pending.size() > 1; ++level) {
         first_seen.resize(vertex_count);
         vector<uint32_t> all_indices;
         vector<uint32_t> index_counts;
@@ -917,10 +971,10 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
         fill_cluster_bounds(cluster, lod.indices, positions);
     }
     LodTreeBuilder{lod}.build();
-    build_rays(lod, lod_vertices, scattered, rays);
-    if (lod_vertices.grown) {
-        lod.vertices = std::move(lod_vertices.bytes);
+    if (vertices && !deforming) {
+        own_vertices(lod, lod_vertices, lod_vertices.bytes.empty() ? vertices : lod_vertices.bytes.data(), uv1);
     }
+    build_rays(lod, lod_vertices, scattered, !deforming);
     return lod;
 }
 

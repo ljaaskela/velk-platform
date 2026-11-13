@@ -33,7 +33,10 @@ struct MeshLodCluster
     /// The diagonal of the largest box around one of its triangles, so that a cluster with a
     /// triangle too large for compute raster stays with the hardware.
     float largest = 0.f;
-    uint32_t spare[2] = {};
+    /// Its own run in MeshLod::vertices, which only its indices name. Both 0 when the
+    /// hierarchy has no vertices of its own.
+    uint32_t first_vertex = 0;
+    uint32_t vertex_count = 0;
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
@@ -56,10 +59,13 @@ struct MeshLodNode
 };
 static_assert(sizeof(MeshLodNode) == kLodNodeWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
-/// Coarse levels hold triangles over the mesh's own vertices, unless separate pieces merged.
+/// A mesh's level of detail hierarchy. Built with the mesh's vertices, every cluster has a run
+/// of vertices of its own, so that it needs nothing another cluster holds. Built without, all
+/// clusters name the mesh's vertices, which is how a deforming mesh's follow it.
 struct MeshLod
 {
-    vector<uint8_t> vertices;  ///< The mesh's vertices and the merged ones, or empty if there are none.
+    vector<uint8_t> vertices;  ///< Each cluster's run, one after another, or empty.
+    vector<float> uv1;         ///< Two floats for each of `vertices`, when the mesh has a second uv.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
     uint32_t level0_clusters = 0;
@@ -81,17 +87,19 @@ struct MeshLod
 inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.
-/// @param vertices The vertices @p blas indexes, so that normals are kept too. Null to go by
-///        positions alone.
+/// @param vertices The vertices @p blas indexes, which clusters then get runs of their own
+///        of, and whose normals are kept. Null to go by positions alone and name the mesh's,
+///        with no normals for rays to stop by.
+/// @param uv1 Two floats for each of @p vertices, or null.
 /// @param stride Bytes per vertex.
 /// @param normal_offset Bytes to a vertex's normal, three floats, or kLodNoAttribute.
 /// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
 ///        IMeshPrimitive::set_merge_pieces. Needs normals.
-/// @param coarser_levels False for level 0 alone.
-/// @param rays Also build what rays walk. Without it `ray_nodes` holds only the two nodes for
-///        each of `nodes`, with no boxes, and `ray_words` is empty.
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
-                       bool merge_pieces, bool coarser_levels, bool rays);
+/// @param deforming The mesh's vertices move: level 0 alone, over the mesh's own vertices, and
+///        nothing for rays, so that `ray_nodes` holds only the two nodes for each of `nodes`,
+///        with no boxes, and `ray_words` is empty.
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, uint32_t stride,
+                       uint32_t normal_offset, bool merge_pieces, bool deforming);
 
 } // namespace velk::impl
 
