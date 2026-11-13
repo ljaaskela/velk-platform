@@ -49,6 +49,19 @@ static_assert(sizeof(BlasGpuNode) == 64, "BlasGpuNode layout mismatch");
 
 /// Set on a child reference that is a leaf. Mirrors VELK_BLAS_LEAF.
 inline constexpr uint32_t kBlasLeafRef = 0x80000000u;
+/// Set on a child reference that is a node of the tree over a hierarchy's clusters, which is
+/// two nodes long: its children's boxes and references, then its MeshLodNode. Mirrors
+/// VELK_BLAS_UPPER.
+inline constexpr uint32_t kBlasUpperRef = 0x40000000u;
+/// Set on a child reference that is a cluster of a hierarchy: a word offset to its header.
+/// Mirrors VELK_BLAS_CLUSTER.
+inline constexpr uint32_t kBlasClusterRef = 0x20000000u;
+/// A child that is not there. Its box is where no ray reaches.
+inline constexpr uint32_t kBlasNoChild = 0xFFFFFFFFu;
+/// Words in a cluster's header, before its triangles: the sphere and error it is chosen by
+/// (center, radius, error), its parent's, the reference to the tree over its triangles, and
+/// its index in the hierarchy.
+inline constexpr uint32_t kClusterHeaderWords = 12;
 /// Where a node's parent link says it has none.
 inline constexpr uint32_t kBlasNoParent = 0xFFFFFFFFu;
 
@@ -598,6 +611,42 @@ inline BlasBuild build_mesh_blas(const float* vertices, uint32_t vertex_stride_b
         out.direction_area[nearest] += area;
     }
 
+    out.nodes.push_back({});
+    out.root_index = 0;
+    detail::blas_fill_node(out, 0, tris, 0, tris.size());
+    detail::ClusterBuilder{out, vertices, floats_per_vertex, indices}.build();
+    return out;
+}
+
+/// Builds a tree and clusters over some of a mesh's triangles, as build_mesh_blas does, without
+/// the mesh's surface areas. @p vertices are @p floats_per_vertex floats each, positions
+/// first, then normals if there are six or more.
+inline BlasBuild build_triangles_blas(const float* vertices, uint32_t floats_per_vertex, uint32_t vertex_count,
+                                      const uint32_t* indices, uint32_t triangle_count)
+{
+    BlasBuild out;
+    if (!vertices || !indices || triangle_count == 0 || floats_per_vertex < 3) {
+        return out;
+    }
+    vector<detail::BlasTriInfo> tris;
+    tris.resize(triangle_count);
+    for (uint32_t t = 0; t < triangle_count; ++t) {
+        auto& ti = tris[t];
+        ti.index = t;
+        for (int j = 0; j < 3; ++j) {
+            float corner[3];
+            for (uint32_t c = 0; c < 3; ++c) {
+                const uint32_t id = indices[t * 3 + c];
+                if (id >= vertex_count) {
+                    return BlasBuild{};
+                }
+                corner[c] = vertices[size_t(id) * floats_per_vertex + j];
+            }
+            ti.aabb_min[j] = std::min({corner[0], corner[1], corner[2]});
+            ti.aabb_max[j] = std::max({corner[0], corner[1], corner[2]});
+            ti.center[j] = (ti.aabb_min[j] + ti.aabb_max[j]) * 0.5f;
+        }
+    }
     out.nodes.push_back({});
     out.root_index = 0;
     detail::blas_fill_node(out, 0, tris, 0, tris.size());

@@ -298,6 +298,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.viewport[1] = static_cast<float>(rv.height);
     globals.viewport[2] = 1.0f / globals.viewport[0];
     globals.viewport[3] = 1.0f / globals.viewport[1];
+    set_lod_scale(globals);
     globals.cam_pos[0] = rv.cam_pos.x;
     globals.cam_pos[1] = rv.cam_pos.y;
     globals.cam_pos[2] = rv.cam_pos.z;

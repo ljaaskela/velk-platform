@@ -5,6 +5,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/api/cached_view_pass.h>
+#include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
@@ -160,9 +161,6 @@ bool velk_behind_pyramid(uint pyramid, mat4 vp, vec3 center, float radius)
 }
 )"
 
-/// How far a level of detail may be from the full mesh on screen, in pixels.
-inline constexpr float kLodMaxErrorPixels = 1.f;
-
 /// Words before the records of the list of clusters drawn in compute (instance_tiny_draw_src):
 /// how many were added, the group counts of the dispatch that draws them, how many of them
 /// are drawn, and three spare. A record is kTinyRecordWords: its draw data record, the word
@@ -192,7 +190,7 @@ bool velk_tiny_add(uint draw, uint cluster, uint slot, float error)
 // sphere holds its children's and its error is not less than theirs, so going up from any
 // triangle the answer changes once, which is what picks one complete surface. The shader
 // declares cull_words, pc.tiny_pixels, velk_lod_use, velk_tiny_add and velk_lod_occluded
-// first; a cluster that is occluded is left out, and one with small triangles goes to
+// and lod_nodes first; a cluster that is occluded is left out, and one with small triangles goes to
 // velk_tiny_add. `entry` is as at instance_cluster_runs_src. Clusters are found through the
 // tree over them, which skips those under a node when none could qualify.
 #define VELK_LOD_SELECT_GLSL R"(
@@ -243,23 +241,26 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ma
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
     // about whether they are hidden.
     bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
-    // A node's child is 8 words: a sphere holding the spheres the clusters under it are
-    // tested with, the smallest of their errors, the largest of their parents', and what it
-    // is. The tree is no deeper than kLodMaxDepth.
+    // The tree's nodes are among the mesh's nodes that rays walk, in lod_nodes. A node's
+    // child is 8 words: a sphere holding the spheres the clusters under it are tested with,
+    // the smallest of their errors, the largest of their parents', and what it is. The tree
+    // is no deeper than kLodMaxDepth.
     uint stack[32];
     int sp = 0;
     stack[sp++] = 0u;
     while (sp > 0) {
-        uint node = nodes + stack[--sp] * VELK_LOD_NODE_WORDS;
+        uint node = nodes + stack[--sp] * VELK_LOD_NODE_STRIDE;
         for (uint k = 0u; k < 2u; ++k) {
             uint child = node + k * 8u;
-            uint ref = cull_words.data[child + 6u];
+            uint ref = lod_nodes.data[child + 6u];
             if (ref == VELK_LOD_NO_CHILD) continue;
             // Skipped when all under it are too coarse, or all have a parent that will do.
-            float dist = length(velk_lod_center(child, world, cam));
-            float reach = uintBitsToFloat(cull_words.data[child + 3u]) * scale;
-            if (uintBitsToFloat(cull_words.data[child + 4u]) * per_error / (dist + reach) > max_pixels) continue;
-            if (uintBitsToFloat(cull_words.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
+            vec3 center = vec3(uintBitsToFloat(lod_nodes.data[child]), uintBitsToFloat(lod_nodes.data[child + 1u]),
+                               uintBitsToFloat(lod_nodes.data[child + 2u]));
+            float dist = length(mat3(world) * center + (world[3].xyz - cam));
+            float reach = uintBitsToFloat(lod_nodes.data[child + 3u]) * scale;
+            if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > max_pixels) continue;
+            if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
             if ((ref & VELK_LOD_LEAF) == 0u) {
                 if (sp < 32) stack[sp++] = ref;
                 continue;
@@ -382,6 +383,7 @@ struct CullInstance {
 
 layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
 layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+layout(set = 1, binding = 12, std430) readonly buffer LodNodes { uint data[]; } lod_nodes;
 
 layout(push_constant) uniform PC {
     uint instances_base;
@@ -550,6 +552,7 @@ struct CullInstance {
 
 layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
 layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+layout(set = 1, binding = 12, std430) readonly buffer LodNodes { uint data[]; } lod_nodes;
 
 layout(push_constant) uniform PC {
     uint retest_word;

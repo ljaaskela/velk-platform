@@ -66,6 +66,15 @@ struct MeshLod
     /// The tree over all clusters, each level's clusters by where they are and the levels
     /// under one root, which is the first node. A child comes after its parent.
     vector<MeshLodNode> nodes;
+
+    /// What rays walk, when asked for. `ray_nodes` starts with two for each of `nodes`: the
+    /// boxes of its children with their references (kBlasUpperRef with twice a node's index,
+    /// kBlasClusterRef with the word of a cluster's header, or kBlasNoChild), then the
+    /// MeshLodNode itself. After those come the nodes of the trees over each cluster's
+    /// triangles. `ray_words` holds, per cluster, its header (kClusterHeaderWords) and what
+    /// blas_gpu_tree gives for its triangles. References count from the start of each.
+    vector<BlasGpuNode> ray_nodes;
+    vector<uint32_t> ray_words;
 };
 
 /// For build_mesh_lod: a vertex has no such attribute.
@@ -79,8 +88,10 @@ inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 /// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
 ///        IMeshPrimitive::set_merge_pieces. Needs normals.
 /// @param coarser_levels False for level 0 alone.
+/// @param rays Also build what rays walk. Without it `ray_nodes` holds only the two nodes for
+///        each of `nodes`, with no boxes, and `ray_words` is empty.
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
-                       bool merge_pieces, bool coarser_levels);
+                       bool merge_pieces, bool coarser_levels, bool rays);
 
 } // namespace velk::impl
 

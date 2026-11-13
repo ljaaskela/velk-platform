@@ -4,6 +4,7 @@
 #include <velk/array_view.h>
 #include <velk/string_view.h>
 
+#include <cmath>
 #include <cstdint>
 
 namespace velk {
@@ -75,13 +76,26 @@ struct FrameGlobals
     uint32_t bvh_root;                     ///< Index of the root BvhNode; 0 if no BVH.
     uint32_t bvh_node_count;               ///< Total BvhNodes; 0 if no BVH.
     uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
-    uint32_t _pad1;
+    float    lod_scale;                    ///< See set_lod_scale.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
     float    cam_moved[3];                 ///< How far the camera moved since the previous frame.
     uint32_t _pad2;
 };
 
 static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
+
+/// How far a level of detail may be from the full mesh on screen, in pixels.
+inline constexpr float kLodMaxErrorPixels = 1.f;
+
+/// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one
+/// unit covers at one unit from the camera, over kLodMaxErrorPixels. Rays choose a mesh's
+/// level of detail by it, as drawing does.
+inline void set_lod_scale(FrameGlobals& globals)
+{
+    const float* m = globals.view_projection;
+    const float pixels_per_unit = std::sqrt(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]) * globals.viewport[1] * 0.5f;
+    globals.lod_scale = pixels_per_unit / kLodMaxErrorPixels;
+}
 
 /// DrawDataHeader::visible_base of a draw with no visible list. Mirrors GLSL VELK_NO_VISIBLE_LIST.
 inline constexpr uint32_t kNoVisibleList = 0xFFFFFFFFu;

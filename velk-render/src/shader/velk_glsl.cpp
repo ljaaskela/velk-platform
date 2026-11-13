@@ -68,6 +68,10 @@ struct VelkMeshNode {
     uvec4 refs;
 };
 #define VELK_BLAS_LEAF 0x80000000u
+// On a child of a mesh's tree: a node of the tree over its level of detail hierarchy's
+// clusters (kBlasUpperRef), or a word offset to one cluster's header (kBlasClusterRef).
+#define VELK_BLAS_UPPER 0x40000000u
+#define VELK_BLAS_CLUSTER 0x20000000u
 
 // child_count of a node that refers to a partition. Its first_child is the
 // partition's root, and its origin is in the fields read by velk_partition_origin.
@@ -122,8 +126,9 @@ struct RtRecord {
 
 // Words per cluster in a level of detail table: kLodClusterWords.
 #define VELK_LOD_CLUSTER_WORDS 20u
-// Words per node of the tree over a level of detail table's clusters: kLodNodeWords.
-#define VELK_LOD_NODE_WORDS 16u
+// Words from one node of the tree over a hierarchy's clusters to the next. A node is
+// kLodNodeWords, and rays' node with its children's boxes sits before each.
+#define VELK_LOD_NODE_STRIDE 32u
 // On a tree node's child: it is a cluster (kLodLeaf), or not there (kLodNoChild).
 #define VELK_LOD_LEAF 0x80000000u
 #define VELK_LOD_NO_CHILD 0xFFFFFFFFu
@@ -181,7 +186,7 @@ struct GlobalData {
     uint bvh_root;
     uint bvh_node_count;
     uint present_counter;
-    uint _pad_globals1;
+    float lod_scale;         // pixels an error of one unit covers at one unit away, over the most a drawn surface may be off by
     mat4 prev_view_projection;
     vec3 cam_moved;          // how far the camera moved since the previous frame
     uint _pad_globals2;

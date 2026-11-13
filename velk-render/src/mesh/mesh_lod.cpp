@@ -592,10 +592,168 @@ struct LodTreeBuilder
     }
 };
 
+/// Fills `ray_nodes` and `ray_words` of @p lod. With @p rays, each cluster gets a tree over its
+/// triangles, and the nodes of the tree over the clusters get their children's boxes.
+void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
+{
+    struct Box
+    {
+        float lo[3] = {1e30f, 1e30f, 1e30f};
+        float hi[3] = {1e30f, 1e30f, 1e30f};
+        bool any = false;
+
+        void add(const float* other_lo, const float* other_hi)
+        {
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = any ? std::min(lo[k], other_lo[k]) : other_lo[k];
+                hi[k] = any ? std::max(hi[k], other_hi[k]) : other_hi[k];
+            }
+            any = true;
+        }
+    };
+
+    const size_t upper = lod.nodes.size();
+    lod.ray_nodes.resize(upper * 2);
+    for (size_t n = 0; n < upper; ++n) {
+        std::memcpy(&lod.ray_nodes[n * 2 + 1], &lod.nodes[n], sizeof(MeshLodNode));
+    }
+    if (!rays) {
+        return;
+    }
+
+    // Positions, and normals where the mesh has them, as the tree builder reads vertices.
+    const size_t vertex_count = v.positions.size() / 3;
+    const bool has_normals = v.normals.size() == v.positions.size();
+    const uint32_t floats_per_vertex = has_normals ? 6u : 3u;
+    vector<float> vertices;
+    vertices.resize(vertex_count * floats_per_vertex);
+    for (size_t i = 0; i < vertex_count; ++i) {
+        std::memcpy(vertices.data() + i * floats_per_vertex, v.positions.data() + i * 3, sizeof(float) * 3);
+        if (has_normals) {
+            std::memcpy(vertices.data() + i * floats_per_vertex + 3, v.normals.data() + i * 3, sizeof(float) * 3);
+        }
+    }
+
+    vector<Box> cluster_boxes;
+    vector<uint32_t> cluster_refs;
+    cluster_boxes.resize(lod.clusters.size());
+    cluster_refs.resize(lod.clusters.size(), kBlasNoChild);
+    for (size_t c = 0; c < lod.clusters.size(); ++c) {
+        const MeshLodCluster& cluster = lod.clusters[c];
+        const BlasBuild blas = build_triangles_blas(vertices.data(), floats_per_vertex, static_cast<uint32_t>(vertex_count),
+                                                    lod.indices.data() + cluster.first_index, cluster.triangle_count);
+        if (blas.nodes.empty()) {
+            continue;
+        }
+        const BlasGpuTree tree = blas_gpu_tree(blas, scattered);
+        const auto node_offset = static_cast<uint32_t>(lod.ray_nodes.size());
+        const auto header = static_cast<uint32_t>(lod.ray_words.size());
+        const uint32_t word_offset = header + kClusterHeaderWords;
+        const auto moved = [&](uint32_t ref) {
+            return (ref & kBlasLeafRef) != 0u ? kBlasLeafRef | ((ref & ~kBlasLeafRef) + word_offset) : ref + node_offset;
+        };
+
+        lod.ray_words.resize(size_t(word_offset) + tree.words.size());
+        uint32_t* words = lod.ray_words.data() + header;
+        std::memcpy(words, cluster.center, sizeof(float) * 5);
+        std::memcpy(words + 5, cluster.parent_center, sizeof(float) * 5);
+        words[10] = moved(tree.root_ref);
+        words[11] = static_cast<uint32_t>(c);
+        std::memcpy(words + kClusterHeaderWords, tree.words.data(), tree.words.size() * sizeof(uint32_t));
+        // A leaf's first triangle word and first position word count from the start too.
+        for (size_t at = blas.cluster_words.size(); at + 2 < tree.words.size(); at += 3) {
+            words[kClusterHeaderWords + at] += word_offset;
+            words[kClusterHeaderWords + at + 2] += word_offset;
+        }
+        for (BlasGpuNode node : tree.nodes) {
+            node.left = moved(node.left);
+            node.right = moved(node.right);
+            lod.ray_nodes.push_back(node);
+        }
+
+        const BlasNode& root = blas.nodes[blas.root_index];
+        cluster_boxes[c].add(root.aabb_min, root.aabb_max);
+        cluster_refs[c] = kBlasClusterRef | header;
+    }
+
+    // A child comes after its parent, so going backwards its box is known.
+    vector<Box> node_boxes;
+    node_boxes.resize(upper);
+    for (size_t n = upper; n-- > 0;) {
+        BlasGpuNode& out = lod.ray_nodes[n * 2];
+        out = {};
+        for (int k = 0; k < 2; ++k) {
+            const uint32_t ref = lod.nodes[n].children[k].ref;
+            Box box;
+            uint32_t ray_ref = kBlasNoChild;
+            if (ref != kLodNoChild && (ref & kLodLeaf) != 0u) {
+                box = cluster_boxes[ref & ~kLodLeaf];
+                ray_ref = cluster_refs[ref & ~kLodLeaf];
+            } else if (ref != kLodNoChild && node_boxes[ref].any) {
+                box = node_boxes[ref];
+                ray_ref = kBlasUpperRef | (ref * 2u);
+            }
+            if (ray_ref == kBlasNoChild) {
+                box = Box{};
+            } else {
+                node_boxes[n].add(box.lo, box.hi);
+            }
+            std::memcpy(k == 0 ? out.left_min : out.right_min, box.lo, sizeof(box.lo));
+            std::memcpy(k == 0 ? out.left_max : out.right_max, box.hi, sizeof(box.hi));
+            (k == 0 ? out.left : out.right) = ray_ref;
+        }
+    }
+
+    // The walk on the GPU has no end but an empty stack, so nothing it follows may lead
+    // back or outside: every node's children come after it, and every word is in range.
+    const auto node_count = static_cast<uint32_t>(lod.ray_nodes.size());
+    const auto word_count = static_cast<uint32_t>(lod.ray_words.size());
+    const auto leads_on = [&](uint32_t ref, uint32_t from) {
+        if ((ref & kBlasLeafRef) != 0u) {
+            const uint32_t leaf = ref & ~kBlasLeafRef;
+            if (leaf + 2u >= word_count) {
+                return false;
+            }
+            const uint32_t triangles = lod.ray_words[leaf + 1] & 0xFFFFu;
+            const uint32_t corners = lod.ray_words[leaf + 1] >> 16;
+            return lod.ray_words[leaf] + triangles <= word_count && lod.ray_words[leaf + 2] + corners * 4u <= word_count;
+        }
+        if ((ref & kBlasClusterRef) != 0u) {
+            const uint32_t header = ref & ~(kBlasClusterRef | kBlasUpperRef);
+            return (ref & kBlasUpperRef) == 0u && header + kClusterHeaderWords <= word_count;
+        }
+        if ((ref & kBlasUpperRef) != 0u) {
+            const uint32_t node = ref & ~kBlasUpperRef;
+            return node > from && node + 1u < upper * 2u;
+        }
+        return ref > from && ref >= upper * 2u && ref < node_count;
+    };
+    bool sound = upper != 0;
+    for (uint32_t n = 0; sound && n < node_count; ++n) {
+        if (n < upper * 2u && (n & 1u) != 0u) {
+            continue;
+        }
+        const BlasGpuNode& node = lod.ray_nodes[n];
+        sound = (node.left == kBlasNoChild || leads_on(node.left, n)) && (node.right == kBlasNoChild || leads_on(node.right, n));
+    }
+    for (size_t c = 0; sound && c < cluster_refs.size(); ++c) {
+        if (cluster_refs[c] == kBlasNoChild) {
+            continue;
+        }
+        const uint32_t root = lod.ray_words[(cluster_refs[c] & ~kBlasClusterRef) + 10u];
+        sound = (root & (kBlasClusterRef | kBlasUpperRef)) == 0u && ((root & kBlasLeafRef) != 0u || root >= upper * 2u)
+            && leads_on(root, 0u);
+    }
+    if (!sound) {
+        VELK_LOG(E, "build_mesh_lod: what rays would walk does not hold together, so rays will not hit this mesh");
+        lod.ray_words.clear();
+    }
+}
+
 } // namespace
 
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
-                       bool merge_pieces, bool coarser_levels)
+                       bool merge_pieces, bool coarser_levels, bool rays)
 {
     MeshLod lod;
     if (blas.clusters.empty()) {
@@ -619,6 +777,8 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
             std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
         }
     }
+    // What rays take a node's surface word for follows the primitive's setting alone.
+    const bool scattered = merge_pieces;
     merge_pieces = merge_pieces && has_normals;
     if (merge_pieces) {
         lod_vertices.bytes.resize(vertex_count * stride);
@@ -757,6 +917,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
         fill_cluster_bounds(cluster, lod.indices, positions);
     }
     LodTreeBuilder{lod}.build();
+    build_rays(lod, lod_vertices, scattered, rays);
     if (lod_vertices.grown) {
         lod.vertices = std::move(lod_vertices.bytes);
     }

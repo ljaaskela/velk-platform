@@ -95,6 +95,8 @@ private:
     /// everything that refers to them. Leaves the current regions on failure.
     /// @param vertices The vertices the tree was built from, or null to read the mesh's own.
     bool publish_tree(IGpuResourceManager& resources, MeshStaticData& out, const uint8_t* vertices = nullptr);
+    /// Fills what does not depend on where the tree is.
+    void fill_static(MeshStaticData& out);
     /// The tree's surface table, from @p vertices, or from the mesh's own when null.
     vector<uint32_t> surface_table(const uint8_t* vertices) const;
 
@@ -144,11 +146,15 @@ private:
     ArenaRegion gpu_refit_region_;
     MeshRefitInfo gpu_refit_{};
 
-    /// The level of detail hierarchy, once something draws by cluster: its tables in the
-    /// culling arena and its indices in the mesh-word arena.
+    /// The level of detail hierarchy, once something draws by cluster or a ray may hit it:
+    /// its cluster table in the culling arena, its indices and any vertices of its own in the
+    /// mesh-word arena, the tree over its clusters in the node arena, and, unless the mesh
+    /// deforms, what rays read of each cluster in the cluster word arena.
     ArenaRegion lod_table_region_;
     ArenaRegion lod_index_region_;
     ArenaRegion lod_vertex_region_;
+    ArenaRegion lod_nodes_region_;
+    ArenaRegion lod_words_region_;
     MeshLodInfo lod_info_{};
     bool deforming_ = false;
     bool merge_pieces_ = false;

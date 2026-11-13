@@ -383,6 +383,10 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     uint positions = 0u;
     float mesh_cone = 0.0;
     float mesh_best = 1e30;
+    // Where the camera is in the mesh's own space, and how many pixels an error of one unit
+    // is at one unit from it, over the most a drawn surface may be off by.
+    vec3 mesh_eye = vec3(0.0);
+    float lod_scale = VELK_GLOBALS.lod_scale;
 
     float best_t = t_max;
     uint best_shape = kNone;
@@ -469,7 +473,34 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 positions = word_base + velk_cluster_words.data[leaf + 2u];
                 continue;
             }
-            VelkMeshNode node = velk_mesh_nodes.data[mesh_base + ref];
+            // In the mesh's units, as far as the least distance an error is measured over.
+            float lod_least = 1e-3 * mesh_scale;
+            if ((ref & VELK_BLAS_CLUSTER) != 0u) {
+                // A cluster of the mesh's level of detail hierarchy, used as it is drawn:
+                // when its error is small enough seen from the camera and its parent's is
+                // not, which leaves one surface whatever the ray.
+                uint header = word_base + (ref & ~VELK_BLAS_CLUSTER);
+                vec3 own = vec3(uintBitsToFloat(velk_cluster_words.data[header]),
+                                uintBitsToFloat(velk_cluster_words.data[header + 1u]),
+                                uintBitsToFloat(velk_cluster_words.data[header + 2u]));
+                float own_away = length(own - mesh_eye) - uintBitsToFloat(velk_cluster_words.data[header + 3u]);
+                if (uintBitsToFloat(velk_cluster_words.data[header + 4u]) * lod_scale > max(own_away, lod_least)) continue;
+                vec3 parent = vec3(uintBitsToFloat(velk_cluster_words.data[header + 5u]),
+                                   uintBitsToFloat(velk_cluster_words.data[header + 6u]),
+                                   uintBitsToFloat(velk_cluster_words.data[header + 7u]));
+                float parent_away = length(parent - mesh_eye) - uintBitsToFloat(velk_cluster_words.data[header + 8u]);
+                if (uintBitsToFloat(velk_cluster_words.data[header + 9u]) * lod_scale <= max(parent_away, lod_least)) continue;
+                if (sp < kStack) stack[sp++] = velk_cluster_words.data[header + 10u];
+                continue;
+            }
+            // A node of the tree over the hierarchy's clusters is two nodes long: its
+            // children's boxes, then for each child a sphere holding the spheres its clusters
+            // are chosen by, the smallest of their errors and the largest of their parents'.
+            bool upper = (ref & VELK_BLAS_UPPER) != 0u;
+            uint node_at = mesh_base + (ref & ~VELK_BLAS_UPPER);
+            VelkMeshNode node = velk_mesh_nodes.data[node_at];
+            VelkMeshNode chosen_by;
+            if (upper) chosen_by = velk_mesh_nodes.data[node_at + 1u];
             float t_l, t_r;
             float limit = VELK_WALK_LIMIT;
             bool h_l = ray_aabb(walk_ray, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
@@ -490,8 +521,18 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 vec3 box_max = left ? vec3(node.a.w, node.b.xy) : node.c.yzw;
 )"
                                                                       R"(
+                // Left out when every cluster under it is too coarse from the camera, or has a
+                // parent that will do. A cluster is tested by its own header.
+                if (upper && (child & VELK_BLAS_CLUSTER) == 0u) {
+                    vec4 sphere = left ? chosen_by.a : chosen_by.c;
+                    vec2 errors = left ? chosen_by.b.xy : uintBitsToFloat(chosen_by.refs.xy);
+                    float away = length(sphere.xyz - mesh_eye);
+                    if (errors.x * lod_scale > away + sphere.w) continue;
+                    if (errors.y * lod_scale <= max(away - sphere.w, lod_least)) continue;
+                }
 #ifdef VELK_TRACE_MEDIUM
-                if (mesh_medium) {
+                // Not above the clusters, where two levels cover the same place.
+                if (mesh_medium && !upper) {
                     vec3 extent = box_max - box_min;
                     float widest = max(max(extent.x, extent.y), extent.z);
                     // In the mesh's units, where its t is the world's times mesh_scale.
@@ -510,8 +551,8 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 }
 #endif
                 // Narrower than the cone: this child is the surface. A real triangle under it
-                // gives the material something to read.
-                if (mesh_cone > 0.0) {
+                // gives the material something to read. Within a cluster only, as above.
+                if (mesh_cone > 0.0 && !upper) {
                     vec3 extent = box_max - box_min;
                     if (max(max(extent.x, extent.y), extent.z) < mesh_cone * t_aabb) {
                         uint under = child;
@@ -577,6 +618,12 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 mesh_scale = scale;
                 mesh_base = st.blas_node_base;
                 word_base = st.cluster_word_base;
+                if ((st.blas_root & VELK_BLAS_UPPER) != 0u) {
+                    // Rays are relative to the camera, so it is at their origin.
+                    Ray eye = ray;
+                    eye.origin = vec3(0.0);
+                    mesh_eye = velk_local_ray(eye, velk_records.data[cur_record]).origin;
+                }
                 mesh_cone = closest && (st.flags & (VELK_MESH_SCATTERED | VELK_MESH_DEFORMING)) == 0u ? velk_ray_cone : 0.0;
 #ifdef VELK_TRACE_MEDIUM
                 mesh_medium = is_medium && (st.flags & VELK_MESH_SCATTERED) != 0u;
