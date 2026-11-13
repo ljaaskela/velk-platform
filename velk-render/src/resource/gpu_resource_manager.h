@@ -55,6 +55,10 @@ public:
     void set_geometry_budget(uint64_t bytes) override { geometry_budget_ = bytes; }
     bool reserve_geometry(uint64_t bytes, bool always = false) override;
     void release_geometry(uint64_t bytes) override;
+    void set_geometry_frame_limit(uint64_t bytes) override { geometry_frame_limit_ = bytes; }
+    bool take_geometry_frame(uint64_t bytes) override;
+    void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) override;
+    void update_geometry() override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;
@@ -152,6 +156,15 @@ private:
     uint64_t geometry_budget_ = 0;
     uint64_t geometry_used_ = 0;
     uint64_t geometry_refused_ = 0;  ///< Bytes asked for that did not fit, for the log.
+    /// The most to load in a frame as set, 0 for the default, and what this frame has loaded.
+    uint64_t geometry_frame_limit_ = 0;
+    uint64_t geometry_frame_used_ = 0;
+    /// For the log: how often a group was asked for with room in the budget, and the bytes
+    /// loaded that way.
+    uint64_t geometry_asked_ = 0;
+    uint64_t geometry_loaded_by_need_ = 0;
+    /// Primitives whose hierarchies load by need.
+    vector<IMeshPrimitiveInternal::WeakPtr> tracked_geometry_;
 
     /// The budget in effect.
     uint64_t geometry_budget() const;

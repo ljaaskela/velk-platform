@@ -215,6 +215,16 @@ float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels
 // while its draw is not known yet, and when its material moves vertices.
 void velk_lod_take(uint entry, uint c, uint slot, float error, mat4 world, float scale, vec3 cam, float pixels_per_unit)
 {
+    // Drawn in place of finer clusters that are not loaded: its record names a mark, set here
+    // where its error as built is too large, which asks for them.
+    uint taken = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint mark = cull_words.data[taken + 22u];
+    if (mark != 0xFFFFFFFFu) {
+        float from = length(velk_lod_center(taken + 3u, world, cam)) - uintBitsToFloat(cull_words.data[taken + 6u]) * scale;
+        if (uintBitsToFloat(cull_words.data[taken + 21u]) * scale * pixels_per_unit / max(from, 1e-3) > pc.lod_max_pixels) {
+            cull_words.data[mark] = 1u;
+        }
+    }
     uint draw = cull_words.data[entry + 13u];
     if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + 9u] & VELK_LOD_MOVED) == 0u) {
         uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;

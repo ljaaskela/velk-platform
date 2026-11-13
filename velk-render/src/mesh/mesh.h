@@ -91,6 +91,7 @@ public:
     void set_gpu_displacement(float max_displacement) override;
     bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
     bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
+    void update_lod(IGpuResourceManager& resources) override;
     void set_deforming() override { deforming_ = true; }
     void set_merge_pieces(bool merge) override { merge_pieces_ = merge; }
 
@@ -164,8 +165,9 @@ private:
 
     /// Loads a group, or what is of no group for one past the last, and makes its clusters
     /// and those made from it chosen by their own errors again. False when the budget has no
-    /// room, unless @p always, or an arena has none.
-    bool load_lod_page(uint32_t page, IGpuResourceManager& resources, bool always);
+    /// room, unless @p always, or an arena has none, or, with @p paced, when this frame has
+    /// loaded its share already.
+    bool load_lod_page(uint32_t page, IGpuResourceManager& resources, bool always, bool paced);
     /// Sets the errors cluster @p c is chosen by, in its record, its header and the tree
     /// above it, as kept here.
     void set_lod_errors(uint32_t c, float error, float parent_error);
@@ -179,6 +181,16 @@ private:
     ArenaRegion lod_table_region_;
     ArenaRegion lod_nodes_region_;
     ArenaRegion lod_words_region_;
+    /// A word a group in the culling arena, which drawing and rays set to ask for the group.
+    ArenaRegion lod_marks_region_;
+    /// How many groups are not loaded, and the clusters and tree nodes whose copies here
+    /// changed since they were last written to the GPU.
+    uint32_t lod_groups_missing_ = 0;
+    vector<uint32_t> lod_dirty_clusters_;
+    vector<uint32_t> lod_dirty_nodes_;
+    uint32_t lod_update_count_ = 0;
+    /// Writes the changed records, headers and tree nodes to the GPU.
+    void flush_lod(IGpuResourceManager& resources);
     MeshLodInfo lod_info_{};
     /// The hierarchy as built, which pages are loaded from.
     MeshLod lod_;

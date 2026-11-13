@@ -7,6 +7,7 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_resource.h>
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_program.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_target.h>
@@ -88,6 +89,22 @@ public:
 
     /// Gives back bytes counted by `reserve_geometry`.
     virtual void release_geometry(uint64_t bytes) = 0;
+
+    /// How many bytes of mesh detail may be loaded in one frame once things are running. 0,
+    /// the default, takes 4 MiB.
+    virtual void set_geometry_frame_limit(uint64_t bytes) = 0;
+
+    /// Whether @p bytes more may be loaded this frame, counting them if so. The first load of
+    /// a frame always may, so that no group is too large to ever load.
+    virtual bool take_geometry_frame(uint64_t bytes) = 0;
+
+    /// Has `update_geometry` call the primitive's `update_lod` each frame, for as long as it
+    /// lives.
+    virtual void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) = 0;
+
+    /// Once a frame, before anything is drawn: lets the tracked primitives load what was
+    /// asked for.
+    virtual void update_geometry() = 0;
 
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last

@@ -63,8 +63,11 @@ inline constexpr uint32_t kBlasNoChild = 0xFFFFFFFFu;
 /// parent's, the reference to the tree over its triangles, its index in the hierarchy, the
 /// word of its vertices in the mesh-word arena, and what the references in its tree count
 /// from, in the node arena and in the cluster word arena. A node there holds node indices
-/// and leaves' word offsets, and a leaf its first triangle's and first position's.
-inline constexpr uint32_t kClusterHeaderWords = 16;
+/// and leaves' word offsets, and a leaf its first triangle's and first position's. Then, at
+/// 15 and 16, its error as built and the word of a mark in the culling arena, or none: a ray
+/// that uses the cluster where that error is too large sets the mark, which asks for the
+/// finer clusters it was made from. The rest is spare.
+inline constexpr uint32_t kClusterHeaderWords = 20;
 /// Where a node's parent link says it has none.
 inline constexpr uint32_t kBlasNoParent = 0xFFFFFFFFu;
 

@@ -342,6 +342,10 @@ BvhNode velk_top_node(uint index)
 // A float of a vertex, by its word in the mesh-word arena.
 #define velk_hit_vertex(word) uintBitsToFloat(velk_mesh_words.data[word])
 
+// The culling arena, for the marks rays set to ask for finer clusters of a mesh: see
+// kClusterHeaderWords. Every thread writes the same value, so no order is needed.
+layout(set = 1, binding = 16, std430) buffer VelkTraceMarks { uint data[]; } velk_trace_marks;
+
 float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_record, RtShape seed, out RayHit hit)
 {
     hit.t = t_max;
@@ -498,6 +502,12 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                                    uintBitsToFloat(velk_cluster_words.data[header + 7u]));
                 float parent_away = length(parent - mesh_eye) - uintBitsToFloat(velk_cluster_words.data[header + 8u]);
                 if (uintBitsToFloat(velk_cluster_words.data[header + 9u]) * lod_scale <= max(parent_away, lod_least)) continue;
+                // Used in place of finer clusters that are not loaded: ask for them where its
+                // error as built is too large.
+                uint mark = velk_cluster_words.data[header + 16u];
+                if (mark != kNone && uintBitsToFloat(velk_cluster_words.data[header + 15u]) * lod_scale > max(own_away, lod_least)) {
+                    velk_trace_marks.data[mark] = 1u;
+                }
                 // What its tree's references count from. Everything pushed from here on is
                 // walked before anything under it on the stack, so these hold until then.
                 cur_header = header;

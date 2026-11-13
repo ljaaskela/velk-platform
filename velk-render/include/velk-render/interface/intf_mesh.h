@@ -296,6 +296,10 @@ public:
     /// since a hierarchy's bounds and errors hold for one shape.
     virtual bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) = 0;
 
+    /// Loads the parts of its hierarchy that drawing or rays asked for since the last call,
+    /// as far as @p resources has room. Called once a frame for a primitive it tracks.
+    virtual void update_lod(IGpuResourceManager& resources) = 0;
+
     /// Marks this primitive as one whose vertices will move.
     virtual void set_deforming() = 0;
 };

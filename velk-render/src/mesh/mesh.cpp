@@ -112,13 +112,101 @@ void MeshPrimitive::release_lod()
     lod_table_region_ = {};
     lod_nodes_region_ = {};
     lod_words_region_ = {};
+    lod_marks_region_ = {};
+    lod_groups_missing_ = 0;
+    lod_dirty_clusters_.clear();
+    lod_dirty_nodes_.clear();
     lod_info_ = {};
+}
+
+void MeshPrimitive::flush_lod(IGpuResourceManager& resources)
+{
+    auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
+    auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
+    if (!culling || !nodes_arena || !words_arena) {
+        return;
+    }
+    const auto once = [](vector<uint32_t>& list) {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    };
+    once(lod_dirty_clusters_);
+    once(lod_dirty_nodes_);
+    // Frames on the GPU may be reading these, so the writes take their place in its order.
+    const uint64_t header_bytes = kClusterHeaderWords * sizeof(uint32_t);
+    for (uint32_t c : lod_dirty_clusters_) {
+        culling->update_at(lod_table_region_.offset() + uint64_t(c) * sizeof(MeshLodCluster), &lod_records_[c],
+                           sizeof(MeshLodCluster));
+        if (lod_words_region_.valid()) {
+            words_arena->update_at(lod_words_region_.offset() + uint64_t(c) * header_bytes,
+                                   lod_headers_.data() + size_t(c) * kClusterHeaderWords, header_bytes);
+        }
+    }
+    for (uint32_t n : lod_dirty_nodes_) {
+        nodes_arena->update_at(lod_nodes_region_.offset() + (uint64_t(n) * 2 + 1) * sizeof(BlasGpuNode), &lod_tree_[n],
+                               sizeof(MeshLodNode));
+    }
+    lod_dirty_clusters_.clear();
+    lod_dirty_nodes_.clear();
+}
+
+void MeshPrimitive::update_lod(IGpuResourceManager& resources)
+{
+    if (lod_groups_missing_ == 0 || !lod_marks_region_.valid()) {
+        return;
+    }
+    // Reading the arena back is slow, and a group that is wanted stays wanted, so the marks
+    // are looked at every few frames.
+    constexpr uint32_t kFramesBetween = 4;
+    if (++lod_update_count_ % kFramesBetween != 0) {
+        return;
+    }
+    auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!culling) {
+        return;
+    }
+    vector<uint32_t> marks;
+    marks.resize(lod_.group_count, 0u);
+    const uint64_t marks_bytes = marks.size() * sizeof(uint32_t);
+    culling->read_at(lod_marks_region_.offset(), marks.data(), marks_bytes);
+
+    bool any = false;
+    bool loaded = false;
+    for (uint32_t g = 0; g < lod_.group_count; ++g) {
+        if (marks[g] == 0u) {
+            continue;
+        }
+        any = true;
+        if (lod_pages_[g].loaded) {
+            continue;
+        }
+        // A mark comes from a cluster made from the group, so those are loaded; checked all
+        // the same, since loading without them would leave holes.
+        bool ready = true;
+        for (uint32_t made : lod_page_made_[g]) {
+            const uint32_t needs = lod_.cluster_group[made];
+            ready = ready && (needs == kLodNoGroup || lod_pages_[needs].loaded);
+        }
+        if (ready && load_lod_page(g, resources, false, true)) {
+            loaded = true;
+            --lod_groups_missing_;
+        }
+    }
+    if (loaded) {
+        flush_lod(resources);
+    }
+    if (any) {
+        std::fill(marks.begin(), marks.end(), 0u);
+        culling->update_at(lod_marks_region_.offset(), marks.data(), marks_bytes);
+    }
 }
 
 void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
 {
     lod_records_[c].error = error;
     lod_records_[c].parent_error = parent_error;
+    lod_dirty_clusters_.push_back(c);
     if (!lod_headers_.empty()) {
         uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
         std::memcpy(header + 4, &error, sizeof(float));
@@ -141,6 +229,7 @@ void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
         }
         child.min_error = least;
         child.max_parent_error = largest;
+        lod_dirty_nodes_.push_back(n);
         link = lod_node_link_[n];
         if (link == kLodNoGroup) {
             return;
@@ -156,7 +245,7 @@ void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
     }
 }
 
-bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& resources, bool always)
+bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& resources, bool always, bool paced)
 {
     LodPage& page = lod_pages_[page_index];
     if (page.loaded) {
@@ -182,6 +271,10 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
     }
     const uint64_t bytes = geometry_bytes + node_count * sizeof(BlasGpuNode) + word_count * sizeof(uint32_t);
     if (!resources.reserve_geometry(bytes, always)) {
+        return false;
+    }
+    if (paced && !resources.take_geometry_frame(bytes)) {
+        resources.release_geometry(bytes);
         return false;
     }
 
@@ -221,6 +314,7 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
     for (uint32_t c : clusters) {
         const MeshLodCluster& source = lod_.clusters[c];
         MeshLodCluster& record = lod_records_[c];
+        lod_dirty_clusters_.push_back(c);
         if (deforming_) {
             record.vertex_word = lod_live_vertex_word_;
             record.uv1_word = lod_live_uv1_word_;
@@ -356,11 +450,21 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             // A reference to a cluster's header holds its word over four.
             lod_words_region_ = words_arena->alloc(headers_size, sizeof(uint32_t) * 4);
         }
-        if (!lod_table_region_.valid() || !lod_nodes_region_.valid() || (rays && !lod_words_region_.valid())) {
+        if (group_count != 0) {
+            lod_marks_region_ = culling->alloc(size_t(group_count) * sizeof(uint32_t));
+        }
+        if (!lod_table_region_.valid() || !lod_nodes_region_.valid() || (rays && !lod_words_region_.valid())
+            || (group_count != 0 && !lod_marks_region_.valid())) {
             release_lod();
             return false;
         }
         lod_resources_ = ::velk::get_self<IGpuResourceManager>(&resources);
+        const auto marks_word = static_cast<uint32_t>(lod_marks_region_.offset() / sizeof(uint32_t));
+        if (group_count != 0) {
+            vector<uint32_t> no_marks;
+            no_marks.resize(group_count, 0u);
+            culling->write_at(lod_marks_region_.offset(), no_marks.data(), no_marks.size() * sizeof(uint32_t));
+        }
 
         // Which clusters each group holds and which were made from it, and where each cluster
         // and node hangs in the tree.
@@ -403,11 +507,17 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             record.triangle_count = 0;
             record.vertex_word = 0;
             record.uv1_word = kLodNoAttribute;
+            // Using it where its error as built is too large asks for the group it was made from.
+            const uint32_t made_from = lod_.cluster_made_from[c];
+            record.full_error = lod_.clusters[c].error;
+            record.mark_word = made_from != kLodNoGroup ? marks_word + made_from : kLodNoAttribute;
             if (rays) {
                 uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
                 header[10] = kBlasLeafRef;
                 header[12] = header[13] = 0;
                 header[14] = empty_leaf_word;
+                std::memcpy(header + 15, &record.full_error, sizeof(float));
+                header[16] = record.mark_word;
             }
             set_lod_errors(c, lod_.cluster_made_from[c] != kLodNoGroup ? 0.f : lod_.clusters[c].error,
                            lod_.cluster_group[c] != kLodNoGroup ? 0.f : lod_.clusters[c].parent_error);
@@ -415,7 +525,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
 
         // What nothing replaces is always loaded. Then groups from the coarsest, while the
         // budget has room, each once the groups of the clusters made from it are there.
-        if (!load_lod_page(group_count, resources, true)) {
+        if (!load_lod_page(group_count, resources, true, false)) {
             release_lod();
             return false;
         }
@@ -432,10 +542,13 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
                 const uint32_t needs = lod_.cluster_group[made];
                 ready = ready && (needs == kLodNoGroup || lod_pages_[needs].loaded);
             }
-            if (ready) {
-                load_lod_page(g, resources, false);
+            if (!ready || !load_lod_page(g, resources, false, false)) {
+                ++lod_groups_missing_;
             }
         }
+        // Everything is written whole below, so nothing is left to bring up to date.
+        lod_dirty_clusters_.clear();
+        lod_dirty_nodes_.clear();
 
         // The tree: what rays read of a node, with its references by where they lead in the
         // arenas, then what says which children to skip.
@@ -459,6 +572,10 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         nodes_arena->write_at(lod_nodes_region_.offset(), tree.data(), nodes_size);
         if (rays) {
             words_arena->write_at(lod_words_region_.offset(), lod_headers_.data(), headers_size);
+        }
+
+        if (group_count != 0) {
+            resources.track_geometry(::velk::get_self<IMeshPrimitiveInternal>(this));
         }
 
         lod_info_.cluster_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));

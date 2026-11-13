@@ -384,6 +384,42 @@ void GpuResourceManager::release_geometry(uint64_t bytes)
     geometry_used_ -= bytes < geometry_used_ ? bytes : geometry_used_;
 }
 
+bool GpuResourceManager::take_geometry_frame(uint64_t bytes)
+{
+    constexpr uint64_t kDefaultFrameLimit = uint64_t(4) << 20;
+    const uint64_t limit = geometry_frame_limit_ != 0 ? geometry_frame_limit_ : kDefaultFrameLimit;
+    ++geometry_asked_;
+    if (geometry_frame_used_ != 0 && geometry_frame_used_ + bytes > limit) {
+        return false;
+    }
+    geometry_frame_used_ += bytes;
+    geometry_loaded_by_need_ += bytes;
+    return true;
+}
+
+void GpuResourceManager::track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive)
+{
+    tracked_geometry_.push_back(primitive);
+}
+
+void GpuResourceManager::update_geometry()
+{
+    geometry_frame_used_ = 0;
+    size_t kept = 0;
+    for (size_t i = 0; i < tracked_geometry_.size(); ++i) {
+        auto primitive = tracked_geometry_[i].lock();
+        if (!primitive) {
+            continue;
+        }
+        primitive->update_lod(*this);
+        if (kept != i) {
+            tracked_geometry_[kept] = tracked_geometry_[i];
+        }
+        ++kept;
+    }
+    tracked_geometry_.resize(kept);
+}
+
 void GpuResourceManager::log_arena_memory() const
 {
     static constexpr const char* kNames[IRenderBackend::kGlobalBufferSlotCount] = {
@@ -407,9 +443,11 @@ void GpuResourceManager::log_arena_memory() const
     VELK_LOG(I, "gpu arena %-16s used=%9.1f MB  capacity=%9.1f MB", "total", static_cast<double>(total_used) / 1e6,
              static_cast<double>(total_capacity) / 1e6);
     if (geometry_used_ != 0 || geometry_refused_ != 0) {
-        VELK_LOG(I, "mesh detail loaded=%9.1f MB  left out for the budget=%9.1f MB  budget=%9.1f MB",
-                 static_cast<double>(geometry_used_) / 1e6, static_cast<double>(geometry_refused_) / 1e6,
-                 static_cast<double>(geometry_budget()) / 1e6);
+        VELK_LOG(I, "mesh detail loaded=%9.1f MB  left out for the budget=%9.1f MB  budget=%9.1f MB", static_cast<double>(geometry_used_) / 1e6,
+                 static_cast<double>(geometry_refused_) / 1e6, static_cast<double>(geometry_budget()) / 1e6);
+        VELK_LOG(I, "mesh detail asked for and within the budget %llu times, loaded by need=%9.1f MB, meshes tracked=%zu",
+                 static_cast<unsigned long long>(geometry_asked_), static_cast<double>(geometry_loaded_by_need_) / 1e6,
+                 tracked_geometry_.size());
     }
 }
 

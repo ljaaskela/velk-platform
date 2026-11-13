@@ -64,6 +64,7 @@
 // rocks:    a forest's mesh is a lumpy rock of about 25,000 triangles instead of a tree.
 // budget=MB: limits the GPU memory a forest's instances use.
 // geometry=MB: limits the GPU memory meshes' levels of detail use, beyond their coarsest.
+// grow=FRAME,MB: at that frame that limit becomes MB, so that what was left out loads when asked for.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
 // grass=N:  nature has N patches of grass, 1,000,000 by default, fewer on steep or high ground.
@@ -1222,6 +1223,8 @@ int main(int argc, char* argv[])
     bool real_trees = false;
     uint32_t residency_mb = 0;
     uint32_t geometry_mb = 0;
+    long grow_frame = 0;
+    uint32_t grow_mb = 0;
     bool low_sun = false;
     bool dense = false;
     bool blocks = false;
@@ -1272,6 +1275,14 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         if (std::strncmp(argv[i], "geometry=", 9) == 0) geometry_mb = static_cast<uint32_t>(std::atoi(argv[i] + 9));
+        if (std::strncmp(argv[i], "grow=", 5) == 0) {
+            long at = 0;
+            unsigned mb = 0;
+            if (std::sscanf(argv[i] + 5, "%ld,%u", &at, &mb) == 2) {
+                grow_frame = at;
+                grow_mb = mb;
+            }
+        }
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
         if (std::strncmp(argv[i], "lodtest=", 8) == 0) {
@@ -2171,6 +2182,13 @@ VelkVertex3D velk_mesh_deform(VelkVertex3D rest, uint index, vec4 params)
             const float start_above = ground_y(view[0], view[2]) - view[1];
             const float above = path_above < 0.f ? start_above : start_above + (path_above - start_above) * along;
             focus_trs.set_translate({x, ground_y(x, z) - above, z});
+        }
+
+        if (grow_frame > 0 && frame == grow_frame) {
+            if (auto* resources = render_context->resources()) {
+                resources->set_geometry_budget(uint64_t(grow_mb) * 1000000u);
+                VELK_LOG(I, "scale: frame %ld, the geometry budget is now %u MB", frame, grow_mb);
+            }
         }
 
         if (frame_limit > 0 && frame >= frame_limit) {

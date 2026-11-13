@@ -42,7 +42,14 @@ struct MeshLodCluster
     uint32_t vertex_count = 0;  ///< In its own run, or 0.
     /// The word of its first vertex's second uv, likewise, or kLodNoAttribute.
     uint32_t uv1_word = 0xFFFFFFFFu;
-    uint32_t spare[3] = {};
+    /// Its error as built. `error` is 0 instead while the finer clusters it was made from
+    /// are not loaded, so that it is drawn in their place.
+    float full_error = 0.f;
+    /// The word of a mark in the culling arena, once published, or kLodNoAttribute: whoever
+    /// uses the cluster where its error as built is too large sets the mark, which asks for
+    /// those finer clusters.
+    uint32_t mark_word = 0xFFFFFFFFu;
+    uint32_t spare = 0;
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 

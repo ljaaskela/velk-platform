@@ -1154,6 +1154,12 @@ Frame Renderer::prepare(const FrameDesc& desc)
     // Prepare the staging buffer once for all views
     frame_buffer_->ensure_capacity(*backend_, *resources_);
 
+    // Meshes load the levels of detail the last frames asked for, before anything reads them.
+    {
+        VELK_PERF_SCOPE("renderer.geometry");
+        resources_->update_geometry();
+    }
+
     if ((slot->id % 10000) == 0) {
         VELK_LOG(I,
                  "Renderer: frame %llu, frame buffer %zu KB, peak usage %zu KB",
