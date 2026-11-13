@@ -138,6 +138,8 @@ void add_cluster(MeshLod& lod, const vector<uint32_t>& indices, const vector<flo
     }
     lod.indices.insert(lod.indices.end(), indices.begin(), indices.end());
     lod.clusters.push_back(cluster);
+    lod.cluster_group.push_back(kLodNoGroup);
+    lod.cluster_made_from.push_back(kLodNoGroup);
 }
 
 /// Clusters are made for rays, and can split a separate piece. That would lock its vertices as
@@ -690,20 +692,12 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
         }
     }
 
-    // Where a cluster's tree is: its nodes, and its words, of which the leaves are last.
-    struct Block
-    {
-        uint32_t node_first = 0;
-        uint32_t node_count = 0;
-        uint32_t word_first = 0;
-        uint32_t word_count = 0;
-        uint32_t root = 0;
-    };
+    using Block = MeshLod::Block;
     const size_t cluster_count = lod.clusters.size();
     const uint32_t words_per_vertex = v.stride / 4u;
     vector<Box> cluster_boxes;
     vector<uint32_t> cluster_refs;
-    vector<Block> blocks;
+    vector<Block>& blocks = lod.blocks;
     cluster_boxes.resize(cluster_count);
     cluster_refs.resize(cluster_count, kBlasNoChild);
     blocks.resize(cluster_count);
@@ -727,7 +721,6 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
         block.node_count = static_cast<uint32_t>(tree.nodes.size());
         block.word_first = static_cast<uint32_t>(lod.ray_words.size());
         block.word_count = static_cast<uint32_t>(tree.words.size());
-        block.root = tree.root_ref;
         lod.ray_nodes.insert(lod.ray_nodes.end(), tree.nodes.begin(), tree.nodes.end());
         lod.ray_words.insert(lod.ray_words.end(), tree.words.begin(), tree.words.end());
 
@@ -738,7 +731,7 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
         std::memcpy(header + 5, cluster.parent_center, sizeof(float) * 3);
         std::memcpy(header + 8, &cluster.parent_radius, sizeof(float));
         std::memcpy(header + 9, &cluster.parent_error, sizeof(float));
-        header[10] = block.root;
+        header[10] = tree.root_ref;
         header[11] = static_cast<uint32_t>(c);
         header[12] = cluster.vertex_word;
         header[13] = block.node_first;
@@ -823,7 +816,7 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
             continue;
         }
         const Block& block = blocks[c];
-        sound = block_leads_on(block, block.root, kBlasNoChild);
+        sound = block_leads_on(block, lod.ray_words[c * kClusterHeaderWords + 10u], kBlasNoChild);
         for (uint32_t n = 0; sound && n < block.node_count; ++n) {
             const BlasGpuNode& node = lod.ray_nodes[block.node_first + n];
             sound = block_leads_on(block, node.left, n) && block_leads_on(block, node.right, n);
@@ -966,11 +959,13 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
                                      merged_bounds.radius};
             // Errors add up, since each step is measured against the one before.
             const float group_error = children_error + error;
+            const uint32_t group_id = lod.group_count++;
             for (uint32_t c : group) {
                 MeshLodCluster& child = lod.clusters[c];
                 std::memcpy(child.parent_center, sphere, sizeof(float) * 3);
                 child.parent_radius = sphere[3];
                 child.parent_error = group_error;
+                lod.cluster_group[c] = group_id;
             }
 
             const size_t bound = meshopt_buildMeshletsBound(kept, kClusterMaxVertices, kClusterMaxTriangles);
@@ -992,6 +987,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
                 }
                 next.push_back(static_cast<uint32_t>(lod.clusters.size()));
                 add_cluster(lod, indices, positions, level, sphere, group_error);
+                lod.cluster_made_from.back() = group_id;
                 lists.push_back(std::move(indices));
             }
         }

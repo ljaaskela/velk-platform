@@ -77,6 +77,18 @@ public:
     /// Logs how much of each shared arena is in use.
     virtual void log_arena_memory() const = 0;
 
+    /// How many bytes of mesh detail may be on the GPU at once: the levels of detail that
+    /// meshes load by need. 0, the default, takes a quarter of the device's own memory. A mesh
+    /// always keeps its coarsest level, whatever the budget.
+    virtual void set_geometry_budget(uint64_t bytes) = 0;
+
+    /// Counts @p bytes of mesh detail against the budget. False, counting nothing, when they
+    /// do not fit, unless @p always.
+    virtual bool reserve_geometry(uint64_t bytes, bool always = false) = 0;
+
+    /// Gives back bytes counted by `reserve_geometry`.
+    virtual void release_geometry(uint64_t bytes) = 0;
+
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last
     /// reference drops, the backend handle is auto-deferred for destroy

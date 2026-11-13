@@ -1456,6 +1456,22 @@ void VkBackend::destroy_swapchain(SurfaceData& sd)
 // GPU Memory
 // ============================================================================
 
+uint64_t VkBackend::device_memory_bytes() const
+{
+    if (physical_device_ == VK_NULL_HANDLE) {
+        return 0;
+    }
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(physical_device_, &memory);
+    uint64_t bytes = 0;
+    for (uint32_t h = 0; h < memory.memoryHeapCount; ++h) {
+        if ((memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+            bytes += memory.memoryHeaps[h].size;
+        }
+    }
+    return bytes;
+}
+
 IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
 {
     VkBufferCreateInfo buf_ci{};

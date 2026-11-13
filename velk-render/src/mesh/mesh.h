@@ -8,8 +8,11 @@
 #include <velk-render/blas.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_gpu_arena.h>
+#include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/plugin.h>
+
+#include "mesh/mesh_lod.h"
 
 #include <mutex>
 
@@ -31,6 +34,7 @@ public:
     VELK_CLASS_UID(::velk::ClassId::MeshPrimitive, "MeshPrimitive");
 
     MeshPrimitive() = default;
+    ~MeshPrimitive() override { release_lod(); }
 
     /// Internal: populates the primitive from a pre-uploaded or
     /// pre-filled IMeshBuffer. Reached via interface_cast on
@@ -146,17 +150,51 @@ private:
     ArenaRegion gpu_refit_region_;
     MeshRefitInfo gpu_refit_{};
 
-    /// The level of detail hierarchy, once something draws by cluster or a ray may hit it:
-    /// its cluster table in the culling arena, its indices and its clusters' own vertices and
-    /// second uvs in the mesh-word arena, the tree over its clusters in the node arena, and,
-    /// unless the mesh deforms, what rays read of each cluster in the cluster word arena.
+    /// What one group of the hierarchy's clusters has on the GPU: their vertices, second uvs
+    /// and indices in the mesh-word arena, and the trees over their triangles in the node
+    /// and cluster word arenas.
+    struct LodPage
+    {
+        ArenaRegion geometry;
+        ArenaRegion nodes;
+        ArenaRegion words;
+        uint64_t bytes = 0;
+        bool loaded = false;
+    };
+
+    /// Loads a group, or what is of no group for one past the last, and makes its clusters
+    /// and those made from it chosen by their own errors again. False when the budget has no
+    /// room, unless @p always, or an arena has none.
+    bool load_lod_page(uint32_t page, IGpuResourceManager& resources, bool always);
+    /// Sets the errors cluster @p c is chosen by, in its record, its header and the tree
+    /// above it, as kept here.
+    void set_lod_errors(uint32_t c, float error, float parent_error);
+    /// Drops everything of the hierarchy, and gives its bytes back to the budget.
+    void release_lod();
+
+    /// The level of detail hierarchy, once something draws by cluster or a ray may hit it.
+    /// Always on the GPU: its cluster table in the culling arena, the tree over its clusters
+    /// in the node arena, and, unless the mesh deforms, each cluster's header for rays in the
+    /// cluster word arena. A group's own data is in its page, when loaded.
     ArenaRegion lod_table_region_;
-    ArenaRegion lod_index_region_;
-    ArenaRegion lod_vertex_region_;
-    ArenaRegion lod_uv1_region_;
     ArenaRegion lod_nodes_region_;
     ArenaRegion lod_words_region_;
     MeshLodInfo lod_info_{};
+    /// The hierarchy as built, which pages are loaded from.
+    MeshLod lod_;
+    /// The cluster table, the headers and the tree as they are on the GPU: with where each
+    /// loaded cluster's data is, and errors that keep what is not loaded from being chosen.
+    vector<MeshLodCluster> lod_records_;
+    vector<uint32_t> lod_headers_;
+    vector<MeshLodNode> lod_tree_;
+    vector<LodPage> lod_pages_;                        ///< By group, then one for what is of no group.
+    vector<vector<uint32_t>> lod_page_clusters_;       ///< Likewise: the clusters in it.
+    vector<vector<uint32_t>> lod_page_made_;           ///< By group: the clusters made from it.
+    vector<uint32_t> lod_cluster_link_;                ///< By cluster: twice its tree node, plus which child.
+    vector<uint32_t> lod_node_link_;                   ///< By node: the same for its parent, or kLodNoGroup.
+    uint32_t lod_live_vertex_word_ = 0;                ///< A deforming mesh's vertices and second uvs.
+    uint32_t lod_live_uv1_word_ = 0xFFFFFFFFu;
+    IGpuResourceManager::WeakPtr lod_resources_;       ///< Whose budget the pages count against.
     bool lod_unreadable_ = false;  ///< Its vertices could not be read for the hierarchy, as logged once.
     bool deforming_ = false;
     bool merge_pieces_ = false;

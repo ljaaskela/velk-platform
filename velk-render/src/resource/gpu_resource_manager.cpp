@@ -359,6 +359,31 @@ void GpuResourceManager::on_resource_destroyed(IGpuResource* resource,
     (void)completion_marker;
 }
 
+uint64_t GpuResourceManager::geometry_budget() const
+{
+    if (geometry_budget_ != 0) {
+        return geometry_budget_;
+    }
+    // Detail shares the device with textures and everything else that is always there.
+    const uint64_t device = backend_ ? backend_->device_memory_bytes() : 0;
+    return device != 0 ? device / 4 : ~uint64_t(0);
+}
+
+bool GpuResourceManager::reserve_geometry(uint64_t bytes, bool always)
+{
+    if (!always && geometry_used_ + bytes > geometry_budget()) {
+        geometry_refused_ += bytes;
+        return false;
+    }
+    geometry_used_ += bytes;
+    return true;
+}
+
+void GpuResourceManager::release_geometry(uint64_t bytes)
+{
+    geometry_used_ -= bytes < geometry_used_ ? bytes : geometry_used_;
+}
+
 void GpuResourceManager::log_arena_memory() const
 {
     static constexpr const char* kNames[IRenderBackend::kGlobalBufferSlotCount] = {
@@ -381,6 +406,11 @@ void GpuResourceManager::log_arena_memory() const
     }
     VELK_LOG(I, "gpu arena %-16s used=%9.1f MB  capacity=%9.1f MB", "total", static_cast<double>(total_used) / 1e6,
              static_cast<double>(total_capacity) / 1e6);
+    if (geometry_used_ != 0 || geometry_refused_ != 0) {
+        VELK_LOG(I, "mesh detail loaded=%9.1f MB  left out for the budget=%9.1f MB  budget=%9.1f MB",
+                 static_cast<double>(geometry_used_) / 1e6, static_cast<double>(geometry_refused_) / 1e6,
+                 static_cast<double>(geometry_budget()) / 1e6);
+    }
 }
 
 void GpuResourceManager::shutdown()

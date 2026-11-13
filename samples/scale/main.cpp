@@ -63,6 +63,7 @@
 // blocks:   a forest's mesh is a flat red box instead of a tree.
 // rocks:    a forest's mesh is a lumpy rock of about 25,000 triangles instead of a tree.
 // budget=MB: limits the GPU memory a forest's instances use.
+// geometry=MB: limits the GPU memory meshes' levels of detail use, beyond their coarsest.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
 //           with `distance=N` and `pitch=N` replacing the stop's own.
 // grass=N:  nature has N patches of grass, 1,000,000 by default, fewer on steep or high ground.
@@ -1220,6 +1221,7 @@ int main(int argc, char* argv[])
     bool heavy = false;
     bool real_trees = false;
     uint32_t residency_mb = 0;
+    uint32_t geometry_mb = 0;
     bool low_sun = false;
     bool dense = false;
     bool blocks = false;
@@ -1269,6 +1271,7 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "distance=", 9) == 0) hold_distance = static_cast<float>(std::atof(argv[i] + 9));
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
         if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
+        if (std::strncmp(argv[i], "geometry=", 9) == 0) geometry_mb = static_cast<uint32_t>(std::atoi(argv[i] + 9));
         no_shadow = no_shadow || std::strcmp(argv[i], "noshadow") == 0;
         no_wind = no_wind || std::strcmp(argv[i], "nowind") == 0;
         if (std::strncmp(argv[i], "lodtest=", 8) == 0) {
@@ -1349,6 +1352,13 @@ int main(int argc, char* argv[])
     auto backend = render_context->backend();
     if (backend) {
         backend->set_gpu_timing_enabled(true);
+    }
+    if (geometry_mb != 0) {
+        if (auto* resources = render_context->resources()) {
+            resources->set_geometry_budget(uint64_t(geometry_mb) * 1000000u);
+        } else {
+            VELK_LOG(E, "scale: no resource manager yet to set the geometry budget on");
+        }
     }
 
     auto scene = velk::create_scene();

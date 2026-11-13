@@ -52,6 +52,9 @@ public:
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;
     void log_arena_memory() const override;
+    void set_geometry_budget(uint64_t bytes) override { geometry_budget_ = bytes; }
+    bool reserve_geometry(uint64_t bytes, bool always = false) override;
+    void release_geometry(uint64_t bytes) override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;
@@ -143,6 +146,15 @@ private:
 
     /// Bumped on every bindless id assignment / drop; see texture_generation().
     uint64_t texture_generation_ = 0;
+
+    /// The budget for mesh detail as set, 0 for a share of the device's memory, and how
+    /// much of it is counted as in use.
+    uint64_t geometry_budget_ = 0;
+    uint64_t geometry_used_ = 0;
+    uint64_t geometry_refused_ = 0;  ///< Bytes asked for that did not fit, for the log.
+
+    /// The budget in effect.
+    uint64_t geometry_budget() const;
 
     /// Arenas vended by shared_arena, one per set = 1 slot. Strong: no single
     /// caller owns a slot, so the manager outlives every user of it.

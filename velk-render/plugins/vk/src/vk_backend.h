@@ -43,6 +43,7 @@ public:
                           int width, int height) override;
     IRenderTarget::Ptr acquire_swapchain_texture(uint64_t surface_id) override;
 
+    uint64_t device_memory_bytes() const override;
     IGpuBuffer::Ptr create_gpu_buffer(const GpuBufferDesc& desc) override;
     void defer_destroy_gpu_buffer(IGpuBuffer* gb,
                                   uint64_t completion_marker) override;

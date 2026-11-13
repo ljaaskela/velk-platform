@@ -309,6 +309,10 @@ public:
     /// @name GPU Memory
     /// @{
 
+    /// How much memory the device has of its own, in bytes, for sizing what is loaded by
+    /// need. 0 when it cannot say.
+    virtual uint64_t device_memory_bytes() const = 0;
+
     /**
      * @brief Low-level GPU buffer allocation. Producers should use
      *        `IGpuResourceManager::create_gpu_buffer` so the manager

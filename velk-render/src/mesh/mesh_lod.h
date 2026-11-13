@@ -89,7 +89,28 @@ struct MeshLod
     /// start of the vector it is in; publishing adds where that is.
     vector<BlasGpuNode> ray_nodes;
     vector<uint32_t> ray_words;
+
+    /// Where the tree over one cluster's triangles is in `ray_nodes` and `ray_words`.
+    struct Block
+    {
+        uint32_t node_first = 0;
+        uint32_t node_count = 0;
+        uint32_t word_first = 0;
+        uint32_t word_count = 0;
+    };
+    vector<Block> blocks;  ///< By cluster. Empty counts for one without a tree.
+
+    /// A group is the clusters that were simplified together, which share a parent. It is
+    /// what loads as one: with all of a group there, or none of it, what is drawn has no
+    /// cracks. A cluster is of no group (kLodNoGroup) when nothing replaces it, and was made
+    /// from none at level 0. A group needs the clusters made from it, and so their groups.
+    vector<uint32_t> cluster_group;      ///< By cluster: the group it is in.
+    vector<uint32_t> cluster_made_from;  ///< By cluster: the group it was simplified from.
+    uint32_t group_count = 0;
 };
+
+/// For MeshLod: no group.
+inline constexpr uint32_t kLodNoGroup = 0xFFFFFFFFu;
 
 /// For build_mesh_lod: a vertex has no such attribute.
 inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;

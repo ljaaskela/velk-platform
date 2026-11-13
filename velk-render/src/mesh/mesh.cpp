@@ -14,7 +14,9 @@
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace velk::impl {
 
@@ -85,13 +87,191 @@ void MeshPrimitive::set_rt_blas(BlasBuild blas)
     rt_cluster_words_region_ = {};
     rt_surface_region_ = {};
     rt_static_base_ = kInvalidMeshStaticBase;
+    release_lod();
+}
+
+void MeshPrimitive::release_lod()
+{
+    if (auto resources = lod_resources_.lock()) {
+        for (const LodPage& page : lod_pages_) {
+            if (page.loaded) {
+                resources->release_geometry(page.bytes);
+            }
+        }
+    }
+    lod_resources_ = IGpuResourceManager::WeakPtr{};
+    lod_pages_.clear();
+    lod_page_clusters_.clear();
+    lod_page_made_.clear();
+    lod_cluster_link_.clear();
+    lod_node_link_.clear();
+    lod_records_.clear();
+    lod_headers_.clear();
+    lod_tree_.clear();
+    lod_ = MeshLod{};
     lod_table_region_ = {};
-    lod_index_region_ = {};
-    lod_vertex_region_ = {};
-    lod_uv1_region_ = {};
     lod_nodes_region_ = {};
     lod_words_region_ = {};
     lod_info_ = {};
+}
+
+void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
+{
+    lod_records_[c].error = error;
+    lod_records_[c].parent_error = parent_error;
+    if (!lod_headers_.empty()) {
+        uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
+        std::memcpy(header + 4, &error, sizeof(float));
+        std::memcpy(header + 9, &parent_error, sizeof(float));
+    }
+
+    // Up the tree: each node says of a child the least error and the largest parent error
+    // under it, which is what lets a walk skip it.
+    uint32_t link = lod_cluster_link_[c];
+    if (link == kLodNoGroup) {
+        return;
+    }
+    float least = error;
+    float largest = parent_error;
+    for (;;) {
+        const uint32_t n = link >> 1;
+        MeshLodNode::Child& child = lod_tree_[n].children[link & 1u];
+        if (child.min_error == least && child.max_parent_error == largest) {
+            return;
+        }
+        child.min_error = least;
+        child.max_parent_error = largest;
+        link = lod_node_link_[n];
+        if (link == kLodNoGroup) {
+            return;
+        }
+        least = std::numeric_limits<float>::max();
+        largest = 0.f;
+        for (const MeshLodNode::Child& of : lod_tree_[n].children) {
+            if (of.ref != kLodNoChild) {
+                least = std::min(least, of.min_error);
+                largest = std::max(largest, of.max_parent_error);
+            }
+        }
+    }
+}
+
+bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& resources, bool always)
+{
+    LodPage& page = lod_pages_[page_index];
+    if (page.loaded) {
+        return true;
+    }
+    const vector<uint32_t>& clusters = lod_page_clusters_[page_index];
+    const bool rays = lod_words_region_.valid();
+    const bool is_group = page_index < lod_.group_count;
+
+    uint64_t geometry_bytes = 0;
+    uint64_t node_count = 0;
+    uint64_t word_count = 0;
+    for (uint32_t c : clusters) {
+        const MeshLodCluster& source = lod_.clusters[c];
+        geometry_bytes += uint64_t(source.vertex_count) * vertex_stride_ + uint64_t(source.triangle_count) * 3u * sizeof(uint32_t);
+        if (source.uv1_word != kLodNoAttribute) {
+            geometry_bytes += uint64_t(source.vertex_count) * 2u * sizeof(float);
+        }
+        if (rays) {
+            node_count += lod_.blocks[c].node_count;
+            word_count += lod_.blocks[c].word_count;
+        }
+    }
+    const uint64_t bytes = geometry_bytes + node_count * sizeof(BlasGpuNode) + word_count * sizeof(uint32_t);
+    if (!resources.reserve_geometry(bytes, always)) {
+        return false;
+    }
+
+    auto mesh_words = resources.shared_arena(IRenderBackend::kGlobalMeshWords, sizeof(uint32_t), true);
+    auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
+    auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
+    if (mesh_words && geometry_bytes != 0) {
+        page.geometry = mesh_words->alloc(geometry_bytes);
+    }
+    if (nodes_arena && node_count != 0) {
+        page.nodes = nodes_arena->alloc(node_count * sizeof(BlasGpuNode), sizeof(BlasGpuNode));
+    }
+    if (words_arena && word_count != 0) {
+        page.words = words_arena->alloc(word_count * sizeof(uint32_t));
+    }
+    if ((geometry_bytes != 0 && !page.geometry.valid()) || (node_count != 0 && !page.nodes.valid())
+        || (word_count != 0 && !page.words.valid())) {
+        page = LodPage{};
+        resources.release_geometry(bytes);
+        return false;
+    }
+
+    // Its clusters' data, one after another, and in each one's record and header where it went.
+    vector<uint8_t> geometry;
+    vector<BlasGpuNode> nodes;
+    vector<uint32_t> words;
+    geometry.reserve(geometry_bytes);
+    nodes.reserve(node_count);
+    words.reserve(word_count);
+    const auto geometry_word = static_cast<uint32_t>(page.geometry.offset() / sizeof(uint32_t));
+    const auto node_base = static_cast<uint32_t>(page.nodes.offset() / sizeof(BlasGpuNode));
+    const auto word_base = static_cast<uint32_t>(page.words.offset() / sizeof(uint32_t));
+    const auto append = [&geometry](const void* from, size_t size) {
+        const auto* first = static_cast<const uint8_t*>(from);
+        geometry.insert(geometry.end(), first, first + size);
+    };
+    for (uint32_t c : clusters) {
+        const MeshLodCluster& source = lod_.clusters[c];
+        MeshLodCluster& record = lod_records_[c];
+        if (deforming_) {
+            record.vertex_word = lod_live_vertex_word_;
+            record.uv1_word = lod_live_uv1_word_;
+        } else {
+            record.vertex_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
+            append(lod_.vertices.data() + size_t(source.vertex_word) * sizeof(uint32_t), size_t(source.vertex_count) * vertex_stride_);
+            if (source.uv1_word != kLodNoAttribute) {
+                record.uv1_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
+                append(lod_.uv1.data() + source.uv1_word, size_t(source.vertex_count) * 2u * sizeof(float));
+            }
+        }
+        record.index_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
+        record.triangle_count = source.triangle_count;
+        append(lod_.indices.data() + source.index_word, size_t(source.triangle_count) * 3u * sizeof(uint32_t));
+
+        if (rays) {
+            const MeshLod::Block& block = lod_.blocks[c];
+            uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
+            header[10] = lod_.ray_words[size_t(c) * kClusterHeaderWords + 10u];
+            header[12] = record.vertex_word;
+            header[13] = node_base + static_cast<uint32_t>(nodes.size());
+            header[14] = word_base + static_cast<uint32_t>(words.size());
+            nodes.insert(nodes.end(), lod_.ray_nodes.begin() + block.node_first,
+                         lod_.ray_nodes.begin() + block.node_first + block.node_count);
+            words.insert(words.end(), lod_.ray_words.begin() + block.word_first,
+                         lod_.ray_words.begin() + block.word_first + block.word_count);
+        }
+    }
+    if (!geometry.empty()) {
+        mesh_words->write_at(page.geometry.offset(), geometry.data(), geometry.size());
+    }
+    if (!nodes.empty()) {
+        nodes_arena->write_at(page.nodes.offset(), nodes.data(), nodes.size() * sizeof(BlasGpuNode));
+    }
+    if (!words.empty()) {
+        words_arena->write_at(page.words.offset(), words.data(), words.size() * sizeof(uint32_t));
+    }
+
+    // Its clusters can be chosen again where their parent will not do, and the clusters made
+    // from it give way to them where their own error is too large.
+    if (is_group) {
+        for (uint32_t c : clusters) {
+            set_lod_errors(c, lod_records_[c].error, lod_.clusters[c].parent_error);
+        }
+        for (uint32_t made : lod_page_made_[page_index]) {
+            set_lod_errors(made, lod_.clusters[made].error, lod_records_[made].parent_error);
+        }
+    }
+    page.bytes = bytes;
+    page.loaded = true;
+    return true;
 }
 
 bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out)
@@ -127,20 +307,20 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         // A deforming mesh's clusters name its live vertices, which must be on the GPU by now.
         // Any other mesh's get copies of their own, which takes reading them.
-        uint32_t live_vertex_word = 0;
-        uint32_t live_uv1_word = kLodNoAttribute;
+        lod_live_vertex_word_ = 0;
+        lod_live_uv1_word_ = kLodNoAttribute;
         if (deforming_) {
             const GpuRef live = get_gpu_ref(buffer_);
             if (live.kind != GpuRef::Kind::Index) {
                 return false;
             }
-            live_vertex_word = live.get_base();
+            lod_live_vertex_word_ = live.get_base();
             if (uv1_buffer_) {
                 const GpuRef live_uv1 = get_gpu_ref(uv1_buffer_);
                 if (live_uv1.kind != GpuRef::Kind::Index) {
                     return false;
                 }
-                live_uv1_word = live_uv1.get_base() + uv1_offset_ / 4u;
+                lod_live_uv1_word_ = live_uv1.get_base() + uv1_offset_ / 4u;
             }
         } else if (!read) {
             if (!lod_unreadable_) {
@@ -151,91 +331,139 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
         // the tree that is refit, not the hierarchy.
-        MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, vertex_stride_, normal_offset,
-                                     merge_pieces_, deforming_);
+        lod_ = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, vertex_stride_, normal_offset,
+                              merge_pieces_, deforming_);
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
-        if (!nodes_arena || !words_arena) {
+        if (!nodes_arena || !words_arena || lod_.clusters.empty() || lod_.nodes.empty()) {
+            release_lod();
             return false;
         }
-        const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
-        const size_t nodes_size = lod.ray_nodes.size() * sizeof(BlasGpuNode);
-        const size_t words_size = lod.ray_words.size() * sizeof(uint32_t);
+        const bool rays = !lod_.ray_words.empty();
+        const size_t cluster_count = lod_.clusters.size();
+        const size_t upper = lod_.nodes.size();
+        const uint32_t group_count = lod_.group_count;
+
+        // Always there: every cluster's record and header, and the tree over the clusters.
+        const size_t clusters_size = cluster_count * sizeof(MeshLodCluster);
+        const size_t nodes_size = upper * 2 * sizeof(BlasGpuNode);
+        // After the headers, a leaf without triangles, which a cluster that is not loaded has
+        // for a tree: should one ever be walked, the walk finds nothing there and goes on.
+        const size_t headers_size = (cluster_count * kClusterHeaderWords + 4) * sizeof(uint32_t);
         lod_table_region_ = culling->alloc(clusters_size);
-        lod_index_region_ = mesh_words->alloc(lod.indices.size() * sizeof(uint32_t));
         lod_nodes_region_ = nodes_arena->alloc(nodes_size, sizeof(BlasGpuNode));
-        if (!lod.vertices.empty()) {
-            lod_vertex_region_ = mesh_words->alloc(lod.vertices.size());
-        }
-        if (words_size != 0) {
+        if (rays) {
             // A reference to a cluster's header holds its word over four.
-            lod_words_region_ = words_arena->alloc(words_size, sizeof(uint32_t) * 4);
+            lod_words_region_ = words_arena->alloc(headers_size, sizeof(uint32_t) * 4);
         }
-        const size_t uv1_size = lod.uv1.size() * sizeof(float);
-        if (uv1_size != 0) {
-            lod_uv1_region_ = mesh_words->alloc(uv1_size);
-        }
-        if (!lod_table_region_.valid() || !lod_index_region_.valid() || !lod_nodes_region_.valid()
-            || (!lod.vertices.empty() && !lod_vertex_region_.valid()) || (words_size != 0 && !lod_words_region_.valid())
-            || (uv1_size != 0 && !lod_uv1_region_.valid())) {
-            lod_table_region_ = {};
-            lod_index_region_ = {};
-            lod_vertex_region_ = {};
-            lod_uv1_region_ = {};
-            lod_nodes_region_ = {};
-            lod_words_region_ = {};
+        if (!lod_table_region_.valid() || !lod_nodes_region_.valid() || (rays && !lod_words_region_.valid())) {
+            release_lod();
             return false;
         }
-        // What was built counts from the start of each vector. Clusters, their headers and the
-        // references above them say where things are in the arenas.
-        const auto index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
-        const auto vertex_word = static_cast<uint32_t>(lod_vertex_region_.offset() / sizeof(uint32_t));
-        const auto uv1_word = static_cast<uint32_t>(lod_uv1_region_.offset() / sizeof(uint32_t));
+        lod_resources_ = ::velk::get_self<IGpuResourceManager>(&resources);
+
+        // Which clusters each group holds and which were made from it, and where each cluster
+        // and node hangs in the tree.
+        lod_page_clusters_.resize(size_t(group_count) + 1);
+        lod_page_made_.resize(group_count);
+        lod_pages_.resize(size_t(group_count) + 1);
+        for (uint32_t c = 0; c < cluster_count; ++c) {
+            const uint32_t group = lod_.cluster_group[c];
+            lod_page_clusters_[group == kLodNoGroup ? group_count : group].push_back(c);
+            if (lod_.cluster_made_from[c] != kLodNoGroup) {
+                lod_page_made_[lod_.cluster_made_from[c]].push_back(c);
+            }
+        }
+        lod_cluster_link_.resize(cluster_count, kLodNoGroup);
+        lod_node_link_.resize(upper, kLodNoGroup);
+        for (uint32_t n = 0; n < upper; ++n) {
+            for (uint32_t k = 0; k < 2; ++k) {
+                const uint32_t ref = lod_.nodes[n].children[k].ref;
+                if (ref == kLodNoChild) {
+                    continue;
+                }
+                ((ref & kLodLeaf) != 0u ? lod_cluster_link_[ref & ~kLodLeaf] : lod_node_link_[ref]) = n * 2u + k;
+            }
+        }
+
+        // With nothing loaded, no cluster of a group can be chosen, and every cluster made
+        // from a group is chosen wherever its own parent will not do.
+        lod_records_.assign(lod_.clusters.begin(), lod_.clusters.end());
+        lod_tree_.assign(lod_.nodes.begin(), lod_.nodes.end());
+        if (rays) {
+            lod_headers_.assign(lod_.ray_words.begin(), lod_.ray_words.begin() + cluster_count * kClusterHeaderWords);
+            lod_headers_.resize(cluster_count * kClusterHeaderWords + 4, 0u);
+        }
+        const auto empty_leaf_word = static_cast<uint32_t>(lod_words_region_.offset() / sizeof(uint32_t)
+                                                           + cluster_count * kClusterHeaderWords);
+        for (uint32_t c = 0; c < cluster_count; ++c) {
+            // No triangles either, so that one drawn by mistake draws nothing.
+            MeshLodCluster& record = lod_records_[c];
+            record.index_word = 0;
+            record.triangle_count = 0;
+            record.vertex_word = 0;
+            record.uv1_word = kLodNoAttribute;
+            if (rays) {
+                uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
+                header[10] = kBlasLeafRef;
+                header[12] = header[13] = 0;
+                header[14] = empty_leaf_word;
+            }
+            set_lod_errors(c, lod_.cluster_made_from[c] != kLodNoGroup ? 0.f : lod_.clusters[c].error,
+                           lod_.cluster_group[c] != kLodNoGroup ? 0.f : lod_.clusters[c].parent_error);
+        }
+
+        // What nothing replaces is always loaded. Then groups from the coarsest, while the
+        // budget has room, each once the groups of the clusters made from it are there.
+        if (!load_lod_page(group_count, resources, true)) {
+            release_lod();
+            return false;
+        }
+        vector<uint32_t> order;
+        order.reserve(group_count);
+        for (uint32_t g = 0; g < group_count; ++g) {
+            order.push_back(g);
+        }
+        const auto level_of = [this](uint32_t g) { return lod_.clusters[lod_page_clusters_[g].front()].level; };
+        std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return level_of(a) > level_of(b); });
+        for (uint32_t g : order) {
+            bool ready = true;
+            for (uint32_t made : lod_page_made_[g]) {
+                const uint32_t needs = lod_.cluster_group[made];
+                ready = ready && (needs == kLodNoGroup || lod_pages_[needs].loaded);
+            }
+            if (ready) {
+                load_lod_page(g, resources, false);
+            }
+        }
+
+        // The tree: what rays read of a node, with its references by where they lead in the
+        // arenas, then what says which children to skip.
         const auto node_base = static_cast<uint32_t>(lod_nodes_region_.offset() / sizeof(BlasGpuNode));
-        const auto word_base = static_cast<uint32_t>(lod_words_region_.offset() / sizeof(uint32_t));
-        for (MeshLodCluster& cluster : lod.clusters) {
-            cluster.index_word += index_word;
-            if (deforming_) {
-                cluster.vertex_word = live_vertex_word;
-                cluster.uv1_word = live_uv1_word;
-            } else {
-                cluster.vertex_word += vertex_word;
-                if (cluster.uv1_word != kLodNoAttribute) {
-                    cluster.uv1_word += uv1_word;
-                }
-            }
-        }
-        if (words_size != 0) {
-            for (size_t n = 0; n < lod.nodes.size(); ++n) {
-                BlasGpuNode& node = lod.ray_nodes[n * 2];
+        const auto header_base = static_cast<uint32_t>(lod_words_region_.offset() / sizeof(uint32_t));
+        vector<BlasGpuNode> tree;
+        tree.resize(upper * 2);
+        for (size_t n = 0; n < upper; ++n) {
+            BlasGpuNode& node = tree[n * 2];
+            node = lod_.ray_nodes[n * 2];
+            if (rays) {
                 for (uint32_t* ref : {&node.left, &node.right}) {
-                    if (*ref == kBlasNoChild) {
-                        continue;
+                    if (*ref != kBlasNoChild) {
+                        *ref += (*ref & kBlasClusterRef) != 0u ? header_base / 4u : node_base;
                     }
-                    *ref += (*ref & kBlasClusterRef) != 0u ? word_base / 4u : node_base;
                 }
             }
-            for (size_t c = 0; c < lod.clusters.size(); ++c) {
-                uint32_t* header = lod.ray_words.data() + c * kClusterHeaderWords;
-                header[12] = lod.clusters[c].vertex_word;
-                header[13] += node_base;
-                header[14] += word_base;
-            }
-            words_arena->write_at(lod_words_region_.offset(), lod.ray_words.data(), words_size);
+            std::memcpy(&tree[n * 2 + 1], &lod_tree_[n], sizeof(MeshLodNode));
         }
-        if (!lod.vertices.empty()) {
-            mesh_words->write_at(lod_vertex_region_.offset(), lod.vertices.data(), lod.vertices.size());
+        culling->write_at(lod_table_region_.offset(), lod_records_.data(), clusters_size);
+        nodes_arena->write_at(lod_nodes_region_.offset(), tree.data(), nodes_size);
+        if (rays) {
+            words_arena->write_at(lod_words_region_.offset(), lod_headers_.data(), headers_size);
         }
-        if (uv1_size != 0) {
-            mesh_words->write_at(lod_uv1_region_.offset(), lod.uv1.data(), uv1_size);
-        }
-        culling->write_at(lod_table_region_.offset(), lod.clusters.data(), clusters_size);
-        nodes_arena->write_at(lod_nodes_region_.offset(), lod.ray_nodes.data(), nodes_size);
-        mesh_words->write_at(lod_index_region_.offset(), lod.indices.data(), lod.indices.size() * sizeof(uint32_t));
 
         lod_info_.cluster_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));
-        lod_info_.cluster_count = static_cast<uint32_t>(lod.clusters.size());
-        lod_info_.level0_clusters = lod.level0_clusters;
+        lod_info_.cluster_count = static_cast<uint32_t>(cluster_count);
+        lod_info_.level0_clusters = lod_.level0_clusters;
         // The tree's nodes are every second one, after the one rays read first.
         lod_info_.node_word = static_cast<uint32_t>((lod_nodes_region_.offset() + sizeof(BlasGpuNode)) / sizeof(uint32_t));
         lod_info_.deforming = deforming_;
