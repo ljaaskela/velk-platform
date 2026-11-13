@@ -6,6 +6,8 @@
 #include <cstring>
 #include <limits>
 
+#include <velk/api/velk.h>
+
 #include "meshoptimizer.h"
 
 namespace velk::impl {
@@ -422,6 +424,174 @@ void fill_cluster_bounds(MeshLodCluster& cluster, const vector<uint32_t>& indice
     }
 }
 
+/// Builds the tree over a hierarchy's clusters.
+struct LodTreeBuilder
+{
+    MeshLod& lod;
+    vector<uint32_t> order;  ///< Cluster indices, sorted within a level as its tree splits them.
+
+    /// The smallest sphere holding both, a little larger, so that rounding cannot leave
+    /// either outside.
+    static void hold(MeshLodNode::Child& out, const float* center, float radius)
+    {
+        float between[3];
+        float distance = 0.f;
+        for (int k = 0; k < 3; ++k) {
+            between[k] = center[k] - out.center[k];
+            distance += between[k] * between[k];
+        }
+        distance = std::sqrt(distance);
+        if (out.radius >= distance + radius) {
+            return;
+        }
+        if (radius >= distance + out.radius) {
+            std::memcpy(out.center, center, sizeof(float) * 3);
+            out.radius = radius;
+            return;
+        }
+        const float merged = 0.5f * (distance + out.radius + radius);
+        const float along = (merged - out.radius) / distance;
+        for (int k = 0; k < 3; ++k) {
+            out.center[k] += between[k] * along;
+        }
+        out.radius = merged * 1.0001f;
+    }
+
+    static void hold(MeshLodNode::Child& out, const MeshLodNode::Child& other)
+    {
+        if (other.ref == kLodNoChild) {
+            return;
+        }
+        if (out.radius < 0.f) {
+            const uint32_t ref = out.ref;
+            out = other;
+            out.ref = ref;
+            return;
+        }
+        hold(out, other.center, other.radius);
+        out.min_error = std::min(out.min_error, other.min_error);
+        out.max_parent_error = std::max(out.max_parent_error, other.max_parent_error);
+    }
+
+    /// What a node says of the child @p ref, from that node's or cluster's own contents.
+    MeshLodNode::Child describe(uint32_t ref) const
+    {
+        MeshLodNode::Child child;
+        child.ref = ref;
+        if ((ref & kLodLeaf) != 0u) {
+            const MeshLodCluster& cluster = lod.clusters[ref & ~kLodLeaf];
+            std::memcpy(child.center, cluster.center, sizeof(float) * 3);
+            child.radius = cluster.radius;
+            child.min_error = cluster.error;
+            child.max_parent_error = cluster.parent_error;
+            if (cluster.parent_error < std::numeric_limits<float>::max()) {
+                hold(child, cluster.parent_center, cluster.parent_radius);
+            }
+            return child;
+        }
+        child.radius = -1.f;
+        hold(child, lod.nodes[ref].children[0]);
+        hold(child, lod.nodes[ref].children[1]);
+        return child;
+    }
+
+    uint32_t add_node()
+    {
+        lod.nodes.push_back({});
+        return static_cast<uint32_t>(lod.nodes.size() - 1);
+    }
+
+    /// A tree over the clusters at @p begin to @p end of `order`, halved along the axis they
+    /// spread most on. Returns its reference.
+    uint32_t build_clusters(size_t begin, size_t end)
+    {
+        if (end - begin == 1) {
+            return kLodLeaf | order[begin];
+        }
+        float lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (size_t i = begin; i < end; ++i) {
+            const float* center = lod.clusters[order[i]].own_center;
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = std::min(lo[k], center[k]);
+                hi[k] = std::max(hi[k], center[k]);
+            }
+        }
+        int axis = 0;
+        for (int k = 1; k < 3; ++k) {
+            if (hi[k] - lo[k] > hi[axis] - lo[axis]) {
+                axis = k;
+            }
+        }
+        const size_t middle = begin + (end - begin) / 2;
+        std::nth_element(order.begin() + begin, order.begin() + middle, order.begin() + end, [&](uint32_t a, uint32_t b) {
+            const float ca = lod.clusters[a].own_center[axis];
+            const float cb = lod.clusters[b].own_center[axis];
+            return ca != cb ? ca < cb : a < b;
+        });
+        const uint32_t node = add_node();
+        const uint32_t left = build_clusters(begin, middle);
+        const uint32_t right = build_clusters(middle, end);
+        lod.nodes[node].children[0] = describe(left);
+        lod.nodes[node].children[1] = describe(right);
+        return node;
+    }
+
+    /// A tree over the levels at @p begin to @p end of @p firsts, which holds where in
+    /// `order` each level starts and, last, where they all end.
+    uint32_t build_levels(const vector<size_t>& firsts, size_t begin, size_t end)
+    {
+        if (end - begin == 1) {
+            return build_clusters(firsts[begin], firsts[begin + 1]);
+        }
+        const size_t middle = begin + (end - begin) / 2;
+        const uint32_t node = add_node();
+        const uint32_t left = build_levels(firsts, begin, middle);
+        const uint32_t right = build_levels(firsts, middle, end);
+        lod.nodes[node].children[0] = describe(left);
+        lod.nodes[node].children[1] = describe(right);
+        return node;
+    }
+
+    uint32_t depth(uint32_t ref) const
+    {
+        if ((ref & kLodLeaf) != 0u) {
+            return 0;
+        }
+        uint32_t deepest = 0;
+        for (const auto& child : lod.nodes[ref].children) {
+            if (child.ref != kLodNoChild) {
+                deepest = std::max(deepest, depth(child.ref));
+            }
+        }
+        return deepest + 1;
+    }
+
+    void build()
+    {
+        const size_t count = lod.clusters.size();
+        order.resize(count);
+        vector<size_t> firsts;
+        for (size_t i = 0; i < count; ++i) {
+            order[i] = static_cast<uint32_t>(i);
+            if (i == 0 || lod.clusters[i].level != lod.clusters[i - 1].level) {
+                firsts.push_back(i);
+            }
+            lod.level0_clusters += lod.clusters[i].level == 0 ? 1u : 0u;
+        }
+        firsts.push_back(count);
+
+        const uint32_t root = build_levels(firsts, 0, firsts.size() - 1);
+        // A single cluster still gets a node, so that the walk always starts at one.
+        if ((root & kLodLeaf) != 0u) {
+            lod.nodes[add_node()].children[0] = describe(root);
+        }
+        if (depth(0) > kLodMaxDepth) {
+            VELK_LOG(E, "build_mesh_lod: the cluster tree is deeper than its walk reaches, parts will not be drawn");
+        }
+    }
+};
+
 } // namespace
 
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t stride, uint32_t normal_offset,
@@ -583,36 +753,10 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, uint32_t 
         pending = std::move(next);
     }
 
-    for (size_t first = 0; first < lod.clusters.size();) {
-        MeshLodLevel level;
-        level.first_cluster = static_cast<uint32_t>(first);
-        level.min_error = lod.clusters[first].error;
-        vector<float> spheres;
-        const auto add_sphere = [&spheres](const float* center, float radius) {
-            spheres.insert(spheres.end(), center, center + 3);
-            spheres.push_back(radius);
-        };
-        size_t end = first;
-        for (; end < lod.clusters.size() && lod.clusters[end].level == lod.clusters[first].level; ++end) {
-            const MeshLodCluster& cluster = lod.clusters[end];
-            level.min_error = std::min(level.min_error, cluster.error);
-            level.max_parent_error = std::max(level.max_parent_error, cluster.parent_error);
-            add_sphere(cluster.center, cluster.radius);
-            if (cluster.parent_error < std::numeric_limits<float>::max()) {
-                add_sphere(cluster.parent_center, cluster.parent_radius);
-            }
-        }
-        level.cluster_count = static_cast<uint32_t>(end - first);
-        const meshopt_Bounds bounds = meshopt_computeSphereBounds(spheres.data(), spheres.size() / 4, sizeof(float) * 4,
-                                                                  spheres.data() + 3, sizeof(float) * 4);
-        std::memcpy(level.center, bounds.center, sizeof(float) * 3);
-        level.radius = bounds.radius;
-        lod.levels.push_back(level);
-        first = end;
-    }
     for (MeshLodCluster& cluster : lod.clusters) {
         fill_cluster_bounds(cluster, lod.indices, positions);
     }
+    LodTreeBuilder{lod}.build();
     if (lod_vertices.grown) {
         lod.vertices = std::move(lod_vertices.bytes);
     }

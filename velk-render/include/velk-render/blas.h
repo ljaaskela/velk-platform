@@ -69,13 +69,19 @@ struct BlasGpuTree
 /// Most triangles and vertices in one cluster. Local vertex indices are 8 bits.
 inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
-/// Words per cluster and per level in a level of detail hierarchy's tables, read by
+/// Words per cluster in a level of detail hierarchy's table and per node of its tree, read by
 /// VELK_LOD_SELECT_GLSL.
 inline constexpr uint32_t kLodClusterWords = 20;
-inline constexpr uint32_t kLodLevelWords = 8;
-/// Set in a cluster draw entry's level count when the mesh deforms (VELK_LOD_DEFORMING).
+inline constexpr uint32_t kLodNodeWords = 16;
+/// Set on a tree node's child that is a cluster, with the cluster's index (VELK_LOD_LEAF).
+inline constexpr uint32_t kLodLeaf = 0x80000000u;
+/// A tree node's child that is not there (VELK_LOD_NO_CHILD).
+inline constexpr uint32_t kLodNoChild = 0xFFFFFFFFu;
+/// The deepest a tree may be for VELK_LOD_SELECT_GLSL to walk all of it.
+inline constexpr uint32_t kLodMaxDepth = 31;
+/// Set in a cluster draw entry's flags when the mesh deforms (VELK_LOD_DEFORMING).
 inline constexpr uint32_t kLodDeforming = 0x80000000u;
-/// Set in a cluster draw entry's level count when its material moves vertices, which compute
+/// Set in a cluster draw entry's flags when its material moves vertices, which compute
 /// raster does not (VELK_LOD_MOVED).
 inline constexpr uint32_t kLodMoved = 0x40000000u;
 

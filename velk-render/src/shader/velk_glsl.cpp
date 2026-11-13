@@ -122,9 +122,14 @@ struct RtRecord {
 
 // Words per cluster in a level of detail table: kLodClusterWords.
 #define VELK_LOD_CLUSTER_WORDS 20u
-// In a cluster draw entry's level count: the mesh deforms (kLodDeforming).
+// Words per node of the tree over a level of detail table's clusters: kLodNodeWords.
+#define VELK_LOD_NODE_WORDS 16u
+// On a tree node's child: it is a cluster (kLodLeaf), or not there (kLodNoChild).
+#define VELK_LOD_LEAF 0x80000000u
+#define VELK_LOD_NO_CHILD 0xFFFFFFFFu
+// In a cluster draw entry's flags: the mesh deforms (kLodDeforming).
 #define VELK_LOD_DEFORMING 0x80000000u
-// In a cluster draw entry's level count: its material moves vertices (kLodMoved).
+// In a cluster draw entry's flags: its material moves vertices (kLodMoved).
 #define VELK_LOD_MOVED 0x40000000u
 
 )"

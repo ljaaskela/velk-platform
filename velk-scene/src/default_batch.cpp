@@ -66,8 +66,8 @@ constexpr uint32_t kClusterEntryCountsWord = 4;
 constexpr uint32_t kClusterEntryCursorsWord = 5;
 constexpr uint32_t kClusterEntryCommandsWord = 6;
 constexpr uint32_t kClusterEntryDrawsWord = 7;
-constexpr uint32_t kClusterEntryLevelsWord = 8;
-constexpr uint32_t kClusterEntryLevelCountWord = 9;
+constexpr uint32_t kClusterEntryNodesWord = 8;
+constexpr uint32_t kClusterEntryFlagsWord = 9;
 constexpr uint32_t kClusterEntrySecondCommandsWord = 11;
 constexpr uint32_t kClusterEntrySecondDrawsWord = 12;
 /// Words per cluster: its count, its cursor and a command for each occlusion phase.
@@ -267,9 +267,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCountsWord] = counts_word;
         entry[kClusterEntryCursorsWord] = cursors_word;
         entry[kClusterEntryCommandsWord] = commands_word;
-        entry[kClusterEntryLevelsWord] = draw.lod.level_word;
-        entry[kClusterEntryLevelCountWord] = draw.lod.level_count | (draw.lod.deforming ? kLodDeforming : 0u)
-            | (moved ? kLodMoved : 0u);
+        entry[kClusterEntryNodesWord] = draw.lod.node_word;
+        entry[kClusterEntryFlagsWord] = (draw.lod.deforming ? kLodDeforming : 0u) | (moved ? kLodMoved : 0u);
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, draw.lod.index_word, errors_word, draw.capacity, draw.lod.vertex_word});

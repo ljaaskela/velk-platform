@@ -6,6 +6,7 @@
 #include <velk-render/blas.h>
 
 #include <cstdint>
+#include <limits>
 
 namespace velk::impl {
 
@@ -36,18 +37,24 @@ struct MeshLodCluster
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
-/// What holds for all clusters of a level, so that a level none of them would be chosen
-/// from can be skipped without testing them.
-struct MeshLodLevel
+/// A node of the tree over a hierarchy's clusters. What it says of a child holds for all
+/// clusters under that child, so that a child none of them would be chosen from is skipped
+/// without testing them.
+struct MeshLodNode
 {
-    uint32_t first_cluster = 0;
-    uint32_t cluster_count = 0;
-    float min_error = 0.f;
-    float max_parent_error = 0.f;
-    float center[3] = {};  ///< With radius, a sphere holding the spheres its clusters are tested with.
-    float radius = 0.f;
+    struct Child
+    {
+        float center[3] = {};  ///< With radius, a sphere holding the spheres its clusters are tested with.
+        float radius = 0.f;
+        float min_error = std::numeric_limits<float>::max();
+        float max_parent_error = 0.f;
+        /// A node's index, a cluster's with kLodLeaf, or kLodNoChild.
+        uint32_t ref = kLodNoChild;
+        uint32_t spare = 0;
+    };
+    Child children[2];
 };
-static_assert(sizeof(MeshLodLevel) == kLodLevelWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
+static_assert(sizeof(MeshLodNode) == kLodNodeWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
 /// Coarse levels hold triangles over the mesh's own vertices, unless separate pieces merged.
 struct MeshLod
@@ -55,7 +62,10 @@ struct MeshLod
     vector<uint8_t> vertices;  ///< The mesh's vertices and the merged ones, or empty if there are none.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
-    vector<MeshLodLevel> levels;
+    uint32_t level0_clusters = 0;
+    /// The tree over all clusters, each level's clusters by where they are and the levels
+    /// under one root, which is the first node. A child comes after its parent.
+    vector<MeshLodNode> nodes;
 };
 
 /// For build_mesh_lod: a vertex has no such attribute.

@@ -112,8 +112,8 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         const MeshLod lod = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, vertex_stride_, normal_offset,
                                            merge_pieces_, !deforming_);
         const size_t clusters_size = lod.clusters.size() * sizeof(MeshLodCluster);
-        const size_t levels_size = lod.levels.size() * sizeof(MeshLodLevel);
-        lod_table_region_ = culling->alloc(clusters_size + levels_size);
+        const size_t nodes_size = lod.nodes.size() * sizeof(MeshLodNode);
+        lod_table_region_ = culling->alloc(clusters_size + nodes_size);
         lod_index_region_ = mesh_words->alloc(lod.indices.size() * sizeof(uint32_t));
         if (!lod.vertices.empty()) {
             lod_vertex_region_ = mesh_words->alloc(lod.vertices.size());
@@ -129,14 +129,13 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             lod_info_.vertex_word = static_cast<uint32_t>(lod_vertex_region_.offset() / sizeof(uint32_t));
         }
         culling->write_at(lod_table_region_.offset(), lod.clusters.data(), clusters_size);
-        culling->write_at(lod_table_region_.offset() + clusters_size, lod.levels.data(), levels_size);
+        culling->write_at(lod_table_region_.offset() + clusters_size, lod.nodes.data(), nodes_size);
         mesh_words->write_at(lod_index_region_.offset(), lod.indices.data(), lod.indices.size() * sizeof(uint32_t));
 
         lod_info_.cluster_word = static_cast<uint32_t>(lod_table_region_.offset() / sizeof(uint32_t));
         lod_info_.cluster_count = static_cast<uint32_t>(lod.clusters.size());
-        lod_info_.level0_clusters = lod.levels[0].cluster_count;
-        lod_info_.level_word = lod_info_.cluster_word + lod_info_.cluster_count * kLodClusterWords;
-        lod_info_.level_count = static_cast<uint32_t>(lod.levels.size());
+        lod_info_.level0_clusters = lod.level0_clusters;
+        lod_info_.node_word = lod_info_.cluster_word + lod_info_.cluster_count * kLodClusterWords;
         lod_info_.index_word = static_cast<uint32_t>(lod_index_region_.offset() / sizeof(uint32_t));
         lod_info_.deforming = deforming_;
     }

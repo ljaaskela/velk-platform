@@ -193,8 +193,8 @@ bool velk_tiny_add(uint draw, uint cluster, uint slot, float error)
 // triangle the answer changes once, which is what picks one complete surface. The shader
 // declares cull_words, pc.tiny_pixels, velk_lod_use, velk_tiny_add and velk_lod_occluded
 // first; a cluster that is occluded is left out, and one with small triangles goes to
-// velk_tiny_add. `entry` is as at instance_cluster_runs_src, and a level's bound skips its
-// clusters when none could qualify.
+// velk_tiny_add. `entry` is as at instance_cluster_runs_src. Clusters are found through the
+// tree over them, which skips those under a node when none could qualify.
 #define VELK_LOD_SELECT_GLSL R"(
 vec3 velk_lod_center(uint word, mat4 world, vec3 cam)
 {
@@ -237,23 +237,35 @@ void velk_lod_take(uint entry, uint c, uint slot, float error, mat4 world, float
 void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, mat4 vp, float height, float max_pixels)
 {
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
+    float per_error = scale * pixels_per_unit;
     uint clusters = cull_words.data[entry + 2u];
-    uint levels = cull_words.data[entry + 8u];
-    uint level_count = cull_words.data[entry + 9u] & ~(VELK_LOD_DEFORMING | VELK_LOD_MOVED);
+    uint nodes = cull_words.data[entry + 8u];
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
     // about whether they are hidden.
     bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
-    for (uint l = 0u; l < level_count; ++l) {
-        uint level = levels + l * 8u;
-        float dist = length(velk_lod_center(level + 4u, world, cam));
-        float reach = uintBitsToFloat(cull_words.data[level + 7u]) * scale;
-        float per_error = scale * pixels_per_unit;
-        if (uintBitsToFloat(cull_words.data[level + 2u]) * per_error / (dist + reach) > max_pixels) continue;
-        if (uintBitsToFloat(cull_words.data[level + 3u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
+    // A node's child is 8 words: a sphere holding the spheres the clusters under it are
+    // tested with, the smallest of their errors, the largest of their parents', and what it
+    // is. The tree is no deeper than kLodMaxDepth.
+    uint stack[32];
+    int sp = 0;
+    stack[sp++] = 0u;
+    while (sp > 0) {
+        uint node = nodes + stack[--sp] * VELK_LOD_NODE_WORDS;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint child = node + k * 8u;
+            uint ref = cull_words.data[child + 6u];
+            if (ref == VELK_LOD_NO_CHILD) continue;
+            // Skipped when all under it are too coarse, or all have a parent that will do.
+            float dist = length(velk_lod_center(child, world, cam));
+            float reach = uintBitsToFloat(cull_words.data[child + 3u]) * scale;
+            if (uintBitsToFloat(cull_words.data[child + 4u]) * per_error / (dist + reach) > max_pixels) continue;
+            if (uintBitsToFloat(cull_words.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
+            if ((ref & VELK_LOD_LEAF) == 0u) {
+                if (sp < 32) stack[sp++] = ref;
+                continue;
+            }
 
-        uint first = cull_words.data[level];
-        uint count = cull_words.data[level + 1u];
-        for (uint c = first; c < first + count; ++c) {
+            uint c = ref & ~VELK_LOD_LEAF;
             uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
             if (velk_lod_pixels(cluster + 3u, world, scale, cam, pixels_per_unit) <= max_pixels
                 && velk_lod_pixels(cluster + 8u, world, scale, cam, pixels_per_unit) > max_pixels) {
@@ -635,7 +647,7 @@ void main()
  * is followed by each position's surface error and its cluster's first index, its capacity, the word of the cluster table
  * (kLodClusterWords words per cluster, starting with the cluster's first index and triangle
  * count), the cluster count, the words of the counts, the cursors and the commands, one of
- * each per cluster, how many commands are in use, the word of its levels and how many, how
+ * each per cluster, how many commands are in use, the word of the tree over its clusters and its flags, how
  * many positions the first phase used, the second phase's commands and how many are in use, and
  * the draw data record its pixels name (kClusterEntryDrawWord).
  *
