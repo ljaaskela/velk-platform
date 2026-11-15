@@ -944,33 +944,6 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 
 layout(set = 1, binding = 16, std430) buffer ResolveWords { uint data[]; } resolve_words;
 
-struct ResolveVertex {
-    vec3 local;
-    vec3 rel;
-    vec3 normal;
-    vec2 uv;
-    vec2 uv1;
-    vec4 tangent;
-    vec4 color;
-    uint shape_param;
-};
-
-ResolveVertex resolve_vertex(VelkDrawData d, uint cluster, ElementInstance inst, GlobalData g, uint index)
-{
-    VelkVertex3D v = velk_unpack_vertex3d(velk_cluster_vertex_word(d, cluster) + index * VELK_VERTEX3D_WORDS);
-    VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
-    ResolveVertex r;
-    r.local = inst.offset.xyz + v.position * inst.size.xyz;
-    r.rel = s.rel_pos;
-    r.normal = s.world_normal;
-    r.uv = s.local_uv;
-    r.uv1 = velk_read_uv1(velk_cluster_uv1_word(d, cluster, index));
-    r.tangent = s.world_tangent;
-    r.color = s.color;
-    r.shape_param = s.shape_param;
-    return r;
-}
-
 // Where the view ray through a point of the screen, in pixels, meets a triangle's plane. A
 // ray rather than dividing by each corner's w, which fails for corners behind the camera. It
 // starts on the near plane so that it also suits orthographic views. Leaves the results
@@ -995,24 +968,6 @@ void resolve_hit(GlobalData g, vec2 pixel, vec3 p0, vec3 e1, vec3 e2, inout vec3
         // the point towards or away from the camera.
         point = origin + dir * (dot(e2, q) / det);
     }
-}
-
-EvalContext resolve_context(VelkDrawData d, ElementInstance inst, GlobalData g, ResolveVertex v0, ResolveVertex v1,
-                            ResolveVertex v2, vec3 weights, vec3 rel)
-{
-    EvalContext ctx;
-    ctx.material_base = d.material_words;
-    ctx.texture_id = d.texture_id;
-    ctx.shape_param = v0.shape_param;
-    ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
-    ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
-    ctx.base = v0.color * weights.x + v1.color * weights.y + v2.color * weights.z;
-    ctx.ray_dir = normalize(rel);
-    ctx.normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
-    ctx.hit_pos = rel + g.cam_pos.xyz;
-    ctx.rel_pos = rel;
-    ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
-    return ctx;
 }
 
 vec3 resolve_shading_normal(MaterialEval e, EvalContext ctx)
@@ -1063,16 +1018,11 @@ void main()
     ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
     GlobalData g = velk_globals.data[d.globals_base];
 
-    // A triangle strip's triangles start one vertex apart.
-    uvec3 corners = uvec3(triangle) + uvec3(0u, 1u, 2u);
     uint cluster = velk_ids_cluster(d, ids);
-    if (d.index_base != VELK_NO_VISIBLE_LIST) {
-        uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
-        corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
-    }
-    ResolveVertex v0 = resolve_vertex(d, cluster, inst, g, corners.x);
-    ResolveVertex v1 = resolve_vertex(d, cluster, inst, g, corners.y);
-    ResolveVertex v2 = resolve_vertex(d, cluster, inst, g, corners.z);
+    uvec3 corners = velk_surface_corners(d, cluster, triangle);
+    VelkSurfaceVertex v0 = velk_surface_vertex(d, cluster, inst, g, corners.x);
+    VelkSurfaceVertex v1 = velk_surface_vertex(d, cluster, inst, g, corners.y);
+    VelkSurfaceVertex v2 = velk_surface_vertex(d, cluster, inst, g, corners.z);
 
     vec3 e1 = v1.rel - v0.rel;
     vec3 e2 = v2.rel - v0.rel;
@@ -1095,7 +1045,7 @@ void main()
     velk_uv_dx[1] = uv1s * (weights_x - weights);
     velk_uv_dy[1] = uv1s * (weights_y - weights);
 
-    EvalContext ctx = resolve_context(d, inst, g, v0, v1, v2, weights, rel);
+    EvalContext ctx = velk_surface_context(d, g, v0, v1, v2, weights, rel);
     velk_uv_set = 0u;
     MaterialEval e = velk_eval_material(d.material_id, ctx);
     vec3 N = resolve_shading_normal(e, ctx);
@@ -1103,10 +1053,10 @@ void main()
     // Widens roughness where the shading normal changes quickly between pixels, so that a
     // tight highlight does not alias (Tokuyoshi 2019). The next pixels are taken on this
     // triangle, so an edge between surfaces does not count.
-    EvalContext ctx_x = resolve_context(d, inst, g, v0, v1, v2, weights_x, rel_x);
+    EvalContext ctx_x = velk_surface_context(d, g, v0, v1, v2, weights_x, rel_x);
     velk_uv_set = 0u;
     vec3 dndx = resolve_shading_normal(velk_eval_material(d.material_id, ctx_x), ctx_x) - N;
-    EvalContext ctx_y = resolve_context(d, inst, g, v0, v1, v2, weights_y, rel_y);
+    EvalContext ctx_y = velk_surface_context(d, g, v0, v1, v2, weights_y, rel_y);
     velk_uv_set = 0u;
     vec3 dndy = resolve_shading_normal(velk_eval_material(d.material_id, ctx_y), ctx_y) - N;
     float variance = 0.25 * (dot(dndx, dndx) + dot(dndy, dndy));
@@ -6142,6 +6092,70 @@ inline void append_rt_intersect_shape(string& src, const IFrameSnippetRegistry& 
 }
 
 /**
+ * A point on a drawn triangle, the same for a pixel and a ray: from the draw (VelkDrawData),
+ * the instance, the cluster and the triangle, then the weights of its corners, what its
+ * material is given. Part of compose_rt_compute's shared body, after velk_material_varyings.
+ */
+inline constexpr string_view velk_surface_src = R"(
+// A corner of a drawn triangle, as its material's vertex function gives it.
+struct VelkSurfaceVertex {
+    vec3 local;     // in the instance's own space, before its size
+    vec3 rel;       // in world space, from the camera
+    vec3 normal;
+    vec2 uv;
+    vec2 uv1;
+    vec4 tangent;
+    vec4 color;
+    uint shape_param;
+};
+
+VelkSurfaceVertex velk_surface_vertex(VelkDrawData d, uint cluster, ElementInstance inst, GlobalData g, uint index)
+{
+    VelkVertex3D v = velk_unpack_vertex3d(velk_cluster_vertex_word(d, cluster) + index * VELK_VERTEX3D_WORDS);
+    VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
+    VelkSurfaceVertex r;
+    r.local = inst.offset.xyz + v.position * inst.size.xyz;
+    r.rel = s.rel_pos;
+    r.normal = s.world_normal;
+    r.uv = s.local_uv;
+    r.uv1 = velk_read_uv1(velk_cluster_uv1_word(d, cluster, index));
+    r.tangent = s.world_tangent;
+    r.color = s.color;
+    r.shape_param = s.shape_param;
+    return r;
+}
+
+// The vertex indices of a triangle of a draw's cluster. A triangle strip's triangles start
+// one vertex apart.
+uvec3 velk_surface_corners(VelkDrawData d, uint cluster, uint triangle)
+{
+    if (d.index_base == VELK_NO_VISIBLE_LIST) return uvec3(triangle) + uvec3(0u, 1u, 2u);
+    uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
+    return uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+}
+
+// What the material is given at the point with corner weights @p weights, at @p rel from the
+// camera of @p g.
+EvalContext velk_surface_context(VelkDrawData d, GlobalData g, VelkSurfaceVertex v0, VelkSurfaceVertex v1,
+                                 VelkSurfaceVertex v2, vec3 weights, vec3 rel)
+{
+    EvalContext ctx;
+    ctx.material_base = d.material_words;
+    ctx.texture_id = d.texture_id;
+    ctx.shape_param = v0.shape_param;
+    ctx.uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
+    ctx.uv1 = v0.uv1 * weights.x + v1.uv1 * weights.y + v2.uv1 * weights.z;
+    ctx.base = v0.color * weights.x + v1.color * weights.y + v2.color * weights.z;
+    ctx.ray_dir = normalize(rel);
+    ctx.normal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
+    ctx.hit_pos = rel + g.cam_pos.xyz;
+    ctx.rel_pos = rel;
+    ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
+    return ctx;
+}
+)";
+
+/**
  * @brief Composes the full RT compute pipeline source from registered
  *        material / shadow / intersect snippets.
  *
@@ -6236,6 +6250,7 @@ inline string compose_rt_compute(const IFrameSnippetRegistry& snippets,
     append_literal("        default: return velk_default_varyings(v, inst, g);\n");
     append_literal("    }\n");
     append_literal("}\n");
+    src += velk_surface_src;
 
     // velk_eval_material: dispatch by material id, without shading.
     append_literal("MaterialEval velk_eval_material(uint mid, EvalContext ctx) {\n");
