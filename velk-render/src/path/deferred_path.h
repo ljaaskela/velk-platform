@@ -104,6 +104,7 @@ public:
         bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
+        IRenderPass::Ptr partition_bounds_pass;
         IRenderPass::Ptr light_cells_debug_pass;
         IRenderPass::Ptr light_cells_pass;
         IRenderPass::Ptr light_cells_update_pass;
@@ -264,6 +265,10 @@ private:
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
+    /// Draws the bounds of partitioned visuals' partitions over the final image, coloured by
+    /// whether they chose again this frame (DebugView::Partition).
+    void emit_partition_bounds_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                    FrameContext& ctx, IRenderGraph& graph);
     /// Draws the edges of the chooser's view over the final image (ICamera::choose_as).
     void emit_chooser_frustum_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                    FrameContext& ctx, IRenderGraph& graph);

@@ -6,12 +6,12 @@
 //
 // The camera starts at a fixed view under free control: right drag turns, W, A, S and D move,
 // the wheel moves along the view. Keys:
-//   V  next debug view (lit, cluster, level, cluster size, instance, triangle size)
+//   V  next debug view (lit, cluster, level, cluster size, instance, triangle size, partition)
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
 //
 // Arguments, so that a run can be repeated without the controls:
-//   view=NAME   starts in that debug view: lit, cluster, level, size, instance or triangles
+//   view=NAME   starts in that debug view: lit, cluster, level, size, instance, triangles or partition
 //   at=...      starts at that place instead of the fixed view
 //   path        starts on the scripted path; path=FRAME starts it at that frame of it
 // With VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE the window is saved and the app exits.
@@ -297,6 +297,8 @@ constexpr NamedView kViews[] = {
     {velk::DebugView::Instance, "instance", "instance", "a colour per instance"},
     {velk::DebugView::TriangleSize, "triangles", "triangle size",
      "triangle size on screen: magenta drawn in compute, red <0.5 px, yellow <1, green <2, cyan <8, blue more"},
+    {velk::DebugView::Partition, "partition", "partition",
+     "partition bounds: red while a partition chooses its levels of detail again, cyan while it keeps them"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -474,7 +476,7 @@ int main(int argc, char* argv[])
         char buf[768];
         std::snprintf(buf, sizeof(buf),
                       "view: %s (V for next)\n%s\n"
-                      "top right: what the main camera draws, seen from above; yellow lines: its view\n"
+                      "top right, from above: all the main camera's kept cut holds, dimmed outside its view (yellow lines)\n"
                       "camera: %s (P), at %.0f, %.0f, %.0f, yaw %.0f, pitch %.0f\n"
                       "right drag turns, W A S D move, wheel moves along the view, C logs the place",
                       kViews[view_index].name, kViews[view_index].legend, scripted ? "scripted path" : "free", at.x, at.y,

@@ -1188,12 +1188,76 @@ void main()
 }
 )";
 
+/// Draws the bounds of a visual's partitions over a view's image (DebugView::Partition): red for
+/// a partition that chooses its levels of detail again this frame, cyan for one that keeps
+/// them. `table_word` is the visual's partition table (kCullEntryWords a partition), `cut_word`
+/// its kept cut in this view (kCutHeaderWords). A thread per point along an edge,
+/// kPartitionEdgeSteps of them per edge, 12 edges a partition.
+inline constexpr uint32_t kPartitionEdgeSteps = 256;
+inline constexpr string_view partition_bounds_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+layout(push_constant) uniform PC {
+    uint output_id;
+    uint width;
+    uint height;
+    uint view_globals;
+    uint table_word;
+    uint partition_count;
+    uint cut_word;
+} pc;
+
+const uint kSteps = 256u;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    uint partition_index = index / (12u * kSteps);
+    if (partition_index >= pc.partition_count) return;
+    uint edge = (index / kSteps) % 12u;
+    float t = float(index % kSteps) / float(kSteps - 1u);
+
+    uint entry = pc.table_word + partition_index * 8u;
+    if (velk_culling.data[entry + 7u] == 0u) return;
+    vec3 lo = vec3(uintBitsToFloat(velk_culling.data[entry]), uintBitsToFloat(velk_culling.data[entry + 1u]),
+                   uintBitsToFloat(velk_culling.data[entry + 2u]));
+    vec3 hi = vec3(uintBitsToFloat(velk_culling.data[entry + 3u]), uintBitsToFloat(velk_culling.data[entry + 4u]),
+                   uintBitsToFloat(velk_culling.data[entry + 5u]));
+    uint state = velk_culling.data[pc.cut_word + 22u] + partition_index * 12u;
+    bool choosing = velk_culling.data[state + 8u] != 0u;
+
+    // Edges 0..3 along x, 4..7 along y, 8..11 along z, at the four corners of the other two.
+    uint axis = edge / 4u;
+    uint corner = edge % 4u;
+    vec3 other = vec3((corner & 1u) != 0u ? 1.0 : 0.0, (corner & 2u) != 0u ? 1.0 : 0.0, 0.0);
+    vec3 at;
+    if (axis == 0u) at = vec3(t, other.x, other.y);
+    else if (axis == 1u) at = vec3(other.x, t, other.y);
+    else at = vec3(other.x, other.y, t);
+    vec3 point = mix(lo, hi, at);
+
+    GlobalData view = velk_globals.data[pc.view_globals];
+    vec4 clip = view.view_projection * vec4(point - view.cam_pos.xyz, 1.0);
+    if (clip.w <= 1e-5) return;
+    vec2 pixel = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(pc.width), float(pc.height));
+    if (any(lessThan(pixel, vec2(0.0))) || pixel.x >= float(pc.width) || pixel.y >= float(pc.height)) return;
+    vec3 color = choosing ? vec3(1.0, 0.15, 0.1) : vec3(0.1, 0.8, 0.9);
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], ivec2(pixel), vec4(color, 1.0));
+}
+)";
+
 /// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per instance, 3 per
 /// triangle. Mode 4 shows the depth pyramid's fourth level.
 /// Modes 5 and 6 show what compute drew and how large triangles are on screen
 /// (triangle_size_color). Modes 7 to 9 show level of detail clusters (cluster_color): one
 /// colour per cluster of each instance, by level, and by width on screen as the camera that
-/// chooses sees it (FrameGlobals at chooser_globals). The numbers are DebugView's.
+/// chooses sees it (FrameGlobals at chooser_globals). Mode 10 shows instances dimmed, for
+/// partition_bounds_compute_src to draw over. With `dim_outside`, clusters outside the
+/// chooser's view are dimmed. The numbers are DebugView's.
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
 #include "velk.glsl"
@@ -1209,6 +1273,7 @@ layout(push_constant) uniform PC {
     uint mode;
     uint pyramid_word;
     uint chooser_globals;
+    uint dim_outside;
 } pc;
 
 vec3 id_color(uint id)
@@ -1301,6 +1366,31 @@ vec3 cluster_color(uvec2 ids)
          : vec3(1.0, 0.0, 0.0);
 }
 
+// Whether the cluster a pixel shows is outside the view of the camera that chose it.
+bool outside_chooser(uvec2 ids)
+{
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint cluster = velk_ids_cluster(d, ids);
+    if (cluster == VELK_NO_CLUSTER) return false;
+    DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    GlobalData g = velk_globals.data[pc.chooser_globals];
+    vec3 local = vec3(uintBitsToFloat(velk_culling.data[cluster + 13u]), uintBitsToFloat(velk_culling.data[cluster + 14u]),
+                      uintBitsToFloat(velk_culling.data[cluster + 15u]));
+    mat3 to_world = mat3(inst.world_matrix);
+    float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)), length(to_world[2] * inst.size.z));
+    float radius = uintBitsToFloat(velk_culling.data[cluster + 16u]) * scale;
+    vec3 center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
+    mat4 vp = g.view_projection;
+    vec4 clip = vp * vec4(center, 1.0);
+    vec3 r0 = vec3(vp[0][0], vp[1][0], vp[2][0]);
+    vec3 r1 = vec3(vp[0][1], vp[1][1], vp[2][1]);
+    vec3 r2 = vec3(vp[0][2], vp[1][2], vp[2][2]);
+    vec3 r3 = vec3(vp[0][3], vp[1][3], vp[2][3]);
+    float w_reach = radius * length(r3);
+    return abs(clip.x) > clip.w + w_reach + radius * length(r0) || abs(clip.y) > clip.w + w_reach + radius * length(r1)
+        || abs(clip.z) > clip.w + w_reach + radius * length(r2);
+}
+
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -1319,7 +1409,12 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode >= 7u) {
+    if (pc.mode == 10u) {
+        if (ids.x != 0u) {
+            uint draw = velk_ids_draw(ids);
+            color = id_color(draw * 16381u + velk_ids_slot(velk_draw_data.data[draw], ids) * 8191u) * 0.4;
+        }
+    } else if (pc.mode >= 7u) {
         if (ids.x != 0u) color = cluster_color(ids);
     } else if (pc.mode >= 5u) {
         if (ids.x != 0u) color = triangle_size_color(ids);
@@ -1333,6 +1428,7 @@ void main()
         if (pc.mode >= 3u) id += velk_ids_triangle(d, ids) * 131u;
         color = id_color(id);
     }
+    if (pc.dim_outside != 0u && ids.x != 0u && outside_chooser(ids)) color *= 0.3;
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], coord, vec4(color, 1.0));
 }
 )";

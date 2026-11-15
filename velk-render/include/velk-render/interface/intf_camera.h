@@ -31,6 +31,9 @@ enum class DebugView : uint8_t
     Cluster,       ///< A flat colour per level of detail cluster of each instance.
     Level,         ///< Each cluster coloured by its level of detail, full detail first.
     ClusterSize,   ///< How wide each cluster is on screen.
+    /// Instances dimmed, under the bounds of their visual's partitions: red while a partition
+    /// chooses its levels of detail again this frame, cyan while it keeps them.
+    Partition,
 };
 
 /**

@@ -150,7 +150,7 @@ uint32_t env_uint(const char* name, long lo, long hi)
 }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 9); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 10); }
 
 // Diagnostic: the cut-off for clusters drawn in compute, in pixels, in place of the camera's
 // tiny_cluster_pixels. 0 when not set.
@@ -824,7 +824,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
     vs.instance_cull.tiny_capacity = vs.tiny_capacity;
     vs.instance_cull.tiny_pixels = tiny_pixels;
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph, !chosen,
-                            occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot);
+                            occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot,
+                            chosen);
     if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
@@ -865,6 +866,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     if (visibility_mode != 0) {
         emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
+    }
+    if (visibility_mode == static_cast<uint32_t>(DebugView::Partition)) {
+        emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph);
     }
     if (chosen) {
         emit_chooser_frustum_pass(vs, render_view, color_target, ctx, graph);
@@ -1141,13 +1145,14 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (!cmd) return;
         struct PushC
         {
-            uint32_t ids_id, output_id, width, height, mode, pyramid_word, chooser_globals;
+            uint32_t ids_id, output_id, width, height, mode, pyramid_word, chooser_globals, dim_outside;
         };
         const PushC pc{pixel_ids_word(vs),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
                        vs.visibility_size.x, vs.visibility_size.y, mode,
                        static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)),
-                       render_view.chosen_by_other ? render_view.cull_globals_base : render_view.view_globals_base};
+                       render_view.chosen_by_other ? render_view.cull_globals_base : render_view.view_globals_base,
+                       render_view.chosen_by_other ? 1u : 0u};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
@@ -1168,6 +1173,87 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
+}
+
+void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                              FrameContext& ctx, IRenderGraph& graph)
+{
+    if (!vs.deferred_output || !render_view.batches) return;
+
+    // Each partitioned visual with a kept cut in this view, once.
+    struct Visual
+    {
+        uint32_t table_word;
+        uint32_t partition_count;
+        uint32_t cut_word;
+    };
+    vector<Visual> visuals;
+    vector<const void*> seen;
+    for (const auto& batch : *render_view.batches) {
+        InstanceCullInfo info{};
+        if (!batch || !batch->get_instance_cull(info) || info.partition_count == 0
+            || std::find(seen.begin(), seen.end(), info.key) != seen.end()) {
+            continue;
+        }
+        seen.push_back(info.key);
+        const uint32_t cut = instance_cut_word(vs.instance_cull, info.key);
+        if (cut != kCullNoSlot) {
+            visuals.push_back({info.partition_table_word, info.partition_count, cut});
+        }
+    }
+    if (visuals.empty()) return;
+
+    constexpr uint64_t kKey = 0x5041'5254'4253'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(partition_bounds_compute_src, kKey);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.partition_bounds_pass, dirty, "deferred.partition_bounds", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        struct PushC
+        {
+            uint32_t output_id, width, height, view_globals, table_word, partition_count, cut_word;
+        };
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: partition bounds");
+        cmd->record_global_barrier();
+        for (const Visual& visual : visuals) {
+            const PushC pc{static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
+                           vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base, visual.table_word,
+                           visual.partition_count, visual.cut_word};
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = (visual.partition_count * 12u * kPartitionEdgeSteps + 63u) / 64u;
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            cmd->record_dispatch(dc);
+        }
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
