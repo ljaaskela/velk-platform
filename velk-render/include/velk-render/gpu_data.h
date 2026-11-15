@@ -86,6 +86,12 @@ static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.
 
 /// How far a level of detail may be from the full mesh on screen, in pixels.
 inline constexpr float kLodMaxErrorPixels = 1.f;
+/// How wide on screen the sphere a level of detail cluster is chosen by may be, in multiples
+/// of kLodMaxErrorPixels. Built into the hierarchy: a cluster's error is never less than its
+/// sphere's width over this, so a coarse cluster of a flat area, which simplifies at no error,
+/// still gives way to finer ones once it is this wide. Chosen clusters are then a similar size
+/// on screen near and far.
+inline constexpr float kLodClusterWidth = 64.f;
 
 /// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one
 /// unit covers at one unit from the camera, over kLodMaxErrorPixels. Rays choose a mesh's

@@ -14,7 +14,9 @@ namespace velk::impl {
 /// small enough on screen and its parent group's error is not, which picks one consistent
 /// set of clusters with no cracks between them. Errors are in the mesh's units, and each is
 /// measured against a sphere, so that it can be projected. A sphere always holds the spheres
-/// of the clusters below it, and an error is never less than theirs.
+/// of the clusters below it, and an error is never less than theirs. Above level 0 an error
+/// is never less than its sphere's width over kLodClusterWidth either, so that what is chosen
+/// is never wider on screen than that many times the error limit.
 struct MeshLodCluster
 {
     /// The word of its first index. From the start of MeshLod::indices as built, and in the

@@ -7,6 +7,7 @@
 #include <limits>
 
 #include <velk/api/velk.h>
+#include <velk-render/gpu_data.h>
 
 #include "meshoptimizer.h"
 
@@ -869,9 +870,13 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
         gather_pieces(lists, remap);
     }
     vector<uint32_t> pending;
+    // By cluster: how far it is from the full mesh, which coarser levels add to. Its error in
+    // the hierarchy may be larger (kLodClusterWidth).
+    vector<float> simplified_error;
     for (size_t i = 0; i < lists.size(); ++i) {
         add_cluster(lod, lists[i], positions, 0, nullptr, 0.f);
         pending.push_back(static_cast<uint32_t>(i));
+        simplified_error.push_back(0.f);
     }
 
     vector<uint32_t> first_seen;
@@ -924,7 +929,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
             for (uint32_t c : group) {
                 merged.insert(merged.end(), lists[c].begin(), lists[c].end());
                 const MeshLodCluster& child = lod.clusters[c];
-                children_error = std::max(children_error, child.error);
+                children_error = std::max(children_error, simplified_error[c]);
                 spheres.push_back(child.center[0]);
                 spheres.push_back(child.center[1]);
                 spheres.push_back(child.center[2]);
@@ -957,14 +962,17 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
                                                                              spheres.data() + 3, sizeof(float) * 4);
             const float sphere[4] = {merged_bounds.center[0], merged_bounds.center[1], merged_bounds.center[2],
                                      merged_bounds.radius};
-            // Errors add up, since each step is measured against the one before.
+            // Errors add up, since each step is measured against the one before. What the
+            // group's clusters are chosen by is never less than its sphere's share of the
+            // width limit; the floor does not add up, only the simplification does.
             const float group_error = children_error + error;
+            const float chosen_by = std::max(group_error, 2.f * sphere[3] / kLodClusterWidth);
             const uint32_t group_id = lod.group_count++;
             for (uint32_t c : group) {
                 MeshLodCluster& child = lod.clusters[c];
                 std::memcpy(child.parent_center, sphere, sizeof(float) * 3);
                 child.parent_radius = sphere[3];
-                child.parent_error = group_error;
+                child.parent_error = chosen_by;
                 lod.cluster_group[c] = group_id;
             }
 
@@ -986,7 +994,8 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
                     indices.push_back(meshlet_vertices[meshlet.vertex_offset + meshlet_triangles[meshlet.triangle_offset + i]]);
                 }
                 next.push_back(static_cast<uint32_t>(lod.clusters.size()));
-                add_cluster(lod, indices, positions, level, sphere, group_error);
+                add_cluster(lod, indices, positions, level, sphere, chosen_by);
+                simplified_error.push_back(group_error);
                 lod.cluster_made_from.back() = group_id;
                 lists.push_back(std::move(indices));
             }
