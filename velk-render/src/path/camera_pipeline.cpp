@@ -140,7 +140,17 @@ void CameraPipeline::emit(::velk::IViewEntry& view,
             return;
         }
         path_target->set_depth_format(::velk::DepthFormat::Default);
-        path->build_passes(view, render_view, path_target, ctx, graph);
+        // The path draws into a target of the view's own size, so there the view starts at the
+        // corner; the blit below puts it where it is on the surface.
+        ::velk::RenderView local_view;
+        const ::velk::RenderView* path_view = &render_view;
+        if (render_view.viewport.x != 0.f || render_view.viewport.y != 0.f) {
+            local_view = render_view;
+            local_view.viewport.x = 0.f;
+            local_view.viewport.y = 0.f;
+            path_view = &local_view;
+        }
+        path->build_passes(view, *path_view, path_target, ctx, graph);
         seen_post_[post.get()] = post;
         post->emit(view, path_target, post_target, ctx, graph);
 
