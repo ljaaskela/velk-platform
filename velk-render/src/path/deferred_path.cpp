@@ -846,6 +846,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     const uint32_t cells_mode = light_cells_debug_mode();
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    ensure_deferred_output(vs, static_cast<int>(vs.gbuffer_size.x), static_cast<int>(vs.gbuffer_size.y), graph);
     // A debug view covers every pixel, so nothing is lit under it.
     if (visibility_mode == 0 || cells_mode != 0) {
         if (prepare_light_cells(vs, render_view, ctx)) {
@@ -2024,6 +2025,26 @@ void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render
     });
 }
 
+void DeferredPath::ensure_deferred_output(ViewState& vs, int w, int h, IRenderGraph& graph)
+{
+    // Persistent: the same Ptr across frames, so that bindless ids recorded in cached passes
+    // stay valid. Recreated only on a size change, which the lighting pass then re-records for.
+    const uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+    if (vs.deferred_output && vs.deferred_output_size == want) return;
+    TextureDesc td{};
+    td.width = w;
+    td.height = h;
+    // The lighting pass and the debug views write raw HDR linear radiance via
+    // gStorageImagesF16 (binding 3). Tonemap, if requested, is a separate post-process
+    // effect attached to the camera pipeline.
+    td.format = PixelFormat::RGBA16F;
+    td.usage = TextureUsage::Storage;
+    vs.deferred_output = graph.resources().create_render_texture(td);
+    vs.deferred_output_tex = graph.resources().find_texture(vs.deferred_output.get());
+    vs.deferred_output_size = want;
+    vs.lighting_dirty = true;
+}
+
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       const RenderView& render_view,
                                       IRenderTarget::Ptr color_target,
@@ -2036,19 +2057,6 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     // stable. Recreate only on size change (or first-time). Recreation
     // invalidates the cached lighting pass (PushC ids change).
     uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-    if (!vs.deferred_output || vs.output_size != want) {
-        TextureDesc td{};
-        td.width = w;
-        td.height = h;
-        // Lighting compute shader writes raw HDR linear radiance via
-        // gStorageImagesF16 (binding 3). Tonemap, if requested, is a
-        // separate post-process effect attached to the camera pipeline.
-        td.format = PixelFormat::RGBA16F;
-        td.usage = TextureUsage::Storage;
-        vs.deferred_output = graph.resources().create_render_texture(td);
-        vs.deferred_output_tex = graph.resources().find_texture(vs.deferred_output.get());
-        vs.lighting_dirty = true;
-    }
     if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
 
     if (!vs.surface_light || vs.output_size != want) {

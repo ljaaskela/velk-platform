@@ -82,6 +82,7 @@ public:
         /// The lit image, HDR. Recreated on size change.
         IRenderTarget::Ptr deferred_output;
         IGpuTexture* deferred_output_tex = nullptr;
+        uvec2 deferred_output_size{};
         /// The light on the surface, for far instances in front of it: indirect light in
         /// rgb, and in alpha the share of direct light that gets through. Same size.
         IRenderTarget::Ptr surface_light;
@@ -234,6 +235,9 @@ private:
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);
 
+    /// Makes deferred_output the size of the G-buffer, which the lighting pass and the debug
+    /// views write.
+    void ensure_deferred_output(ViewState& vs, int w, int h, IRenderGraph& graph);
     /// Lights the G-buffer into deferred_output, shadows from the light cells, and blits
     /// it to @p color_target.
     void emit_lighting_pass(IViewEntry& view, ViewState& vs,
