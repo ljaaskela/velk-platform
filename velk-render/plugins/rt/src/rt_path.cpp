@@ -6,6 +6,7 @@
 
 #include <velk-render/api/cached_view_pass.h>
 #include <velk-render/frame/compute_shaders.h>
+#include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/gpu_data.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/plugin.h>
@@ -100,11 +101,6 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
 
-    // Make a working copy of the shapes so we can plane-sort without
-    // affecting other consumers of render_view.shapes (today nobody
-    // else uses it, but RenderView is immutable from a path's POV).
-    vector<RtShape> shapes(render_view.shapes);
-
     auto rt_pipeline = ensure_pipeline(ctx);
     if (!rt_pipeline) {
         return;
@@ -114,124 +110,29 @@ void RtPath::build_passes(IViewEntry& entry,
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
                             kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
-
-    // Plane-grouped back-to-front painter sort for the primary buffer.
-    // Shapes that share a plane stay in enumeration order via
-    // stable_sort, preserving authored layering on a flat UI panel.
-    // Shapes on different planes sort by NDC depth of a representative
-    // origin so stacked 3D panels composite back-to-front.
-    const mat4& vp_mat = render_view.view_projection;
-    if (shapes.size() > 1) {
-        const auto& planes = render_view.shape_planes;
-        auto plane_key = [](const RenderView::ShapePlane& s) -> uint64_t {
-            float ux = s.u_axis[0], uy = s.u_axis[1], uz = s.u_axis[2];
-            float vx = s.v_axis[0], vy = s.v_axis[1], vz = s.v_axis[2];
-            float nx_r = uy * vz - uz * vy;
-            float ny_r = uz * vx - ux * vz;
-            float nz_r = ux * vy - uy * vx;
-            float nlen = std::sqrt(nx_r * nx_r + ny_r * ny_r + nz_r * nz_r);
-            if (nlen < 1e-6f) nlen = 1.f;
-            float nx = nx_r / nlen;
-            float ny = ny_r / nlen;
-            float nz = nz_r / nlen;
-            float offset = s.origin[0] * nx + s.origin[1] * ny + s.origin[2] * nz;
-            int32_t qnx = static_cast<int32_t>(std::round(nx * 1000.f));
-            int32_t qny = static_cast<int32_t>(std::round(ny * 1000.f));
-            int32_t qnz = static_cast<int32_t>(std::round(nz * 1000.f));
-            int32_t qo  = static_cast<int32_t>(std::round(offset * 100.f));
-            uint64_t h = 0xcbf29ce484222325ULL;
-            auto mix = [&h](uint32_t v) { h = (h ^ v) * 0x100000001b3ULL; };
-            mix(static_cast<uint32_t>(qnx));
-            mix(static_cast<uint32_t>(qny));
-            mix(static_cast<uint32_t>(qnz));
-            mix(static_cast<uint32_t>(qo));
-            return h;
-        };
-
-        vector<uint64_t> keys(shapes.size());
-        std::unordered_map<uint64_t, float> plane_depth;
-        for (size_t i = 0; i < shapes.size(); ++i) {
-            keys[i] = plane_key(planes[i]);
-            if (plane_depth.count(keys[i])) continue;
-            const auto& s = planes[i];
-            float x = s.origin[0], y = s.origin[1], z = s.origin[2];
-            float cz = vp_mat(2, 0) * x + vp_mat(2, 1) * y + vp_mat(2, 2) * z + vp_mat(2, 3);
-            float cw = vp_mat(3, 0) * x + vp_mat(3, 1) * y + vp_mat(3, 2) * z + vp_mat(3, 3);
-            plane_depth[keys[i]] = (cw != 0.f) ? (cz / cw) : 0.f;
-        }
-
-        vector<size_t> order(shapes.size());
-        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-        std::stable_sort(order.begin(), order.end(),
-            [&](size_t a, size_t b) {
-                uint64_t ka = keys[a];
-                uint64_t kb = keys[b];
-                if (ka == kb) return false;
-                // Depth is reversed, so further is smaller.
-                return plane_depth[ka] < plane_depth[kb];
-            });
-
-        vector<RtShape> sorted_shapes(shapes.size());
-        for (size_t i = 0; i < order.size(); ++i) sorted_shapes[i] = shapes[order[i]];
-        shapes = std::move(sorted_shapes);
-    }
-
-    // Suballocate a persistent region in the shared primary-shapes arena and
-    // write the painter-sorted list. The base is stable across frames and RT
-    // reads it fresh from RtRoot each dispatch, so only a shape-count change
-    // (region realloc) needs a re-record; camera-move re-sorts are written in
-    // place and picked up without one.
-    const uint64_t shapes_bytes = shapes.size() * sizeof(RtShape);
-    if (ctx.primary_shapes_arena) {
-        if (vs.shapes_region.size() != shapes_bytes) {
-            if (shapes_bytes == 0) {
-                vs.shapes_region = {};
-            } else {
-                auto region = ctx.primary_shapes_arena->alloc(shapes_bytes);
-                const uint64_t off = region.offset();
-                const bool ok = region.valid();
-                vs.shapes_region = std::move(region);
-                if (ok) ctx.primary_shapes_arena->write_at(off, shapes.data(), shapes_bytes);
-            }
-            vs.rt_dirty = true;  // shape count changed -> re-record
-        } else if (shapes_bytes > 0) {
-            ctx.primary_shapes_arena->update_at(vs.shapes_region.offset(),
-                                                shapes.data(), shapes_bytes);
-        }
-    }
-    const uint32_t shapes_base = (shapes_bytes > 0 && vs.shapes_region.valid())
-        ? static_cast<uint32_t>(vs.shapes_region.offset() / sizeof(RtShape))
-        : 0u;
-
-    // Catch BVH / shape-count drift that doesn't flow through view notify
-    // (BVH lives at scene scope, not view). Bases (shapes/bvh) are excluded:
-    // they are read fresh from RtRoot / FrameGlobals, so they must not force
-    // a re-record.
-    if (vs.rt_change.changed({
-            render_view.bvh.root,
-            render_view.bvh.node_count,
-            static_cast<uint32_t>(shapes.size())})) {
-        vs.rt_dirty = true;
+    // Rays name draws, whose records a path that draws would write.
+    if (render_view.batches) {
+        const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
+        write_draw_data(*render_view.batches, *ctx.resources, ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get(),
+                        render_view.view_globals_base, ctx.snippets, &resolve_ctx);
     }
 
     // Per-dispatch root struct mirroring the GLSL `PC` push-constant block
     // (compute_shaders.h). Pushed inline (memcpy'd into the dispatch's root
-    // constants), no device address. Camera matrices, BVH root/counts/bases
-    // and present_counter are read from the bound FrameGlobals record
-    // (globals_base) rather than duplicated here; every remaining field is an
-    // index or inline value (no device addresses left in the struct).
+    // constants), no device address. Camera matrices, the view's top tree for
+    // rays and present_counter are read from the bound FrameGlobals record
+    // (globals_base) rather than duplicated here.
     VELK_GPU_STRUCT RtRoot {
-        uint32_t shapes_base;      // primary shape index (set = 1 slot 6)
+        uint32_t shapes_base;      // unused here
         uint32_t globals_base;     // FrameGlobals index (set = 1 slot 2)
         uint32_t light_count;
         uint32_t lights_base;      // light array index (set = 1 slot 5)
         float    env_params[2];    // x = intensity, y = rotation_rad (inline)
-        uint32_t extras[4];        // image_index, width, height, shape_count
+        uint32_t extras[4];        // image_index, width, height, _
         uint32_t env[4];           // env_material_id, env_texture_id, _, _
     };
 
     RtRoot root{};
-    root.shapes_base = shapes_base;
     root.env_params[0] = render_view.env.intensity;
     root.env_params[1] = render_view.env.rotation_rad;
     root.globals_base = render_view.view_globals_base;
@@ -240,7 +141,6 @@ void RtPath::build_passes(IViewEntry& entry,
     root.extras[0] = static_cast<uint32_t>(vs.rt_output->get_gpu_handle(GpuResourceKey::Default));
     root.extras[1] = static_cast<uint32_t>(vp_w);
     root.extras[2] = static_cast<uint32_t>(vp_h);
-    root.extras[3] = static_cast<uint32_t>(shapes.size());
     root.env[0] = render_view.env.material_id;
     root.env[1] = render_view.env.texture_id;
     root.env[2] = 0;

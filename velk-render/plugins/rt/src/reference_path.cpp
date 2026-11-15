@@ -5,6 +5,7 @@
 
 #include <velk-render/api/cached_view_pass.h>
 #include <velk-render/frame/compute_shaders.h>
+#include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/gpu_data.h>
 
 #include <cstring>
@@ -125,6 +126,12 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
                             kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
+    // Rays name draws, whose records a path that draws would write.
+    if (render_view.batches) {
+        const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
+        write_draw_data(*render_view.batches, *ctx.resources, ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get(),
+                        render_view.view_globals_base, ctx.snippets, &resolve_ctx);
+    }
 
     IGpuTexture* shown_tex = graph.resources().find_texture(vs.shown.get());
     IGpuTexture* dst_tex = nullptr;

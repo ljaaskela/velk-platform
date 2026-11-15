@@ -6,6 +6,7 @@
 
 #include <velk-render/interface/intf_frame_snippet_registry.h>
 #include <velk-render/frame/raster_shaders.h>
+#include <velk-render/frame/ray_walk.h>
 
 #include <cstdio>
 #include <cstring>
@@ -30,13 +31,51 @@ struct RayHit {
     float t;
     vec2 uv;
     vec3 normal;
-    uint shape_index; // only set by trace_closest_hit
     uint object;      // the object id of what was hit, only set by trace_closest_hit
     // Where on its object the hit is, and which of its axes the surface faces, as the
     // G-buffer's surface attachment has them. Only set by trace_closest_hit.
     vec3 local;
     uint side;
+    // What was hit, as the visibility buffer names a pixel, for velk_hit_context: its draw,
+    // its instance's index, its cluster (VELK_NO_CLUSTER for none), the vertex indices of its
+    // triangle's corners, and the weights of the second and third. corners.x is
+    // VELK_NO_CORNERS where an analytic shape was hit, whose uv and normal are the surface's.
+    // Only set by trace_closest_hit.
+    uint draw;
+    uint instance;
+    uint cluster;
+    uvec3 corners;
+    vec2 weights;
 };
+
+#define VELK_NO_CORNERS 0xFFFFFFFFu
+
+// What a hit was, as 7 words for a pass after the trace (velk_hit_context): its draw, its
+// instance, its cluster and its corners, then the corners' weights, or for an analytic shape
+// its uv, packed. The draw is first, so that a word for a miss can stand in its place.
+void velk_hit_words(RayHit hit, out uvec4 a, out uvec3 b)
+{
+    a = uvec4(hit.draw, hit.instance, hit.cluster, hit.corners.x);
+    b = uvec3(hit.corners.y, hit.corners.z,
+              hit.corners.x == VELK_NO_CORNERS ? packHalf2x16(hit.uv) : packUnorm2x16(hit.weights));
+}
+
+RayHit velk_hit_from_words(uvec4 a, uvec3 b)
+{
+    RayHit hit;
+    hit.t = 0.0;
+    hit.normal = vec3(0.0);
+    hit.object = 0u;
+    hit.local = vec3(0.0);
+    hit.side = 0u;
+    hit.draw = a.x;
+    hit.instance = a.y;
+    hit.cluster = a.z;
+    hit.corners = uvec3(a.w, b.x, b.y);
+    hit.uv = a.w == VELK_NO_CORNERS ? unpackHalf2x16(b.z) : vec2(0.0);
+    hit.weights = a.w == VELK_NO_CORNERS ? vec2(0.0) : unpackUnorm2x16(b.z);
+    return hit;
+}
 
 // Ray vs. oriented rect parameterised by (origin + s*u_axis + t*v_axis) for
 // s,t in [0,1]. |u_axis|, |v_axis| carry the extents.
@@ -182,742 +221,6 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
     return true;
 }
 )";
-
-// Ray tracing over the scene's records, shared by every compute shader that
-// traces. Registered as the "velk_trace.glsl" include. The including shader
-// includes velk_intersect.glsl, defines VELK_TRACE_STACK_SIZE, declares velk_bvh_nodes,
-// velk_bvh_shapes, velk_records, velk_mesh_static_records, velk_blas_nodes,
-// velk_cluster_words and VELK_GLOBALS.
-//
-// A record places shapes in the world: rays are moved into its local space, and
-// shapes and meshes are intersected there. Origin and direction move by the same
-// transform with no renormalising, so a hit's t is the same in both spaces.
-//
-// A partition's nodes and records are relative to its origin. Entering one subtracts
-// the origin from the ray, and returning to the stack depth it was entered at
-// restores it. Partitions do not nest.
-[[maybe_unused]] constexpr string_view velk_trace_src = R"(
-// Ray-vs-AABB slab test. Returns true if ray intersects the box within
-// [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
-{
-    vec3 inv_d = 1.0 / ray.dir;
-    vec3 t0 = (bmin - ray.origin) * inv_d;
-    vec3 t1 = (bmax - ray.origin) * inv_d;
-    vec3 tmn = min(t0, t1);
-    vec3 tmx = max(t0, t1);
-    float tnear = max(max(tmn.x, tmn.y), tmn.z);
-    float tfar  = min(min(tmx.x, tmx.y), tmx.z);
-    if (tfar < max(tnear, 0.0) || tnear > t_max) return false;
-    t_hit = max(tnear, 0.0);
-    return true;
-}
-
-// Where a ray that enters the box leaves it.
-float ray_aabb_exit(Ray ray, vec3 bmin, vec3 bmax)
-{
-    vec3 inv_d = 1.0 / ray.dir;
-    vec3 t0 = (bmin - ray.origin) * inv_d;
-    vec3 t1 = (bmax - ray.origin) * inv_d;
-    vec3 tmx = max(t0, t1);
-    return min(min(tmx.x, tmx.y), tmx.z);
-}
-
-// How wide the area a visibility ray stands for is, in world units, for the shader to
-// set before tracing one. 0 means a single line, which tests every instance.
-float velk_ray_footprint = 0.0;
-// How much wider that gets per unit along the ray, for a light that is not a point.
-float velk_ray_spread = 0.0;
-// For a closest-hit ray that stands for a cone: the tangent of its half angle, for the
-// shader to set. A part of a solid mesh narrower than the cone where the ray reaches it
-// counts as the surface there. 0 for an exact ray.
-float velk_ray_cone = 0.0;
-// How far the surface a ray starts from may be from the full mesh rays are tested against,
-// in world units, when it is drawn at a coarser level of detail. For the shader to set.
-float velk_ray_lift = 0.0;
-// Set when a ray is tested against something that a motion function moves, which could
-// stand in its way at another time. For the shader to clear before tracing and read after.
-bool velk_ray_met_motion = false;
-// What a closest-hit ray passed through in nodes too fine for it, for the shader to clear
-// before tracing and use after: optical depth, and colour times depth.
-float velk_ray_medium_depth = 0.0;
-vec3 velk_ray_medium_color = vec3(0.0);
-// What the coordinates of the tree being walked are relative to, from where rays are: the
-// camera, or inside a partition, the camera taken from the partition's origin.
-vec3 velk_ray_frame = vec3(0.0);
-
-// How many footprints wide a node can be and still count as a medium. It varies per node
-// so that same-sized nodes do not all change over at one distance, which shows as a ring,
-// and it stays the same while the camera moves, so nothing crawls.
-float velk_medium_reach(uint node_index)
-{
-    return 4.0 * (0.5 + float((node_index * 2654435761u) >> 16u) / 65536.0);
-}
-
-// The composer generates the body after intersect snippets have been included.
-// Built-in kinds forward to the functions the shader defines; visual-registered
-// kinds call their snippets.
-bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
-
-// The origin is made relative to the record before it is rotated, so its error
-// follows the size of the object and not its distance from the world origin.
-Ray velk_local_ray(Ray ray, RtRecord rec)
-{
-    vec3 rel = ray.origin - (vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w) - velk_ray_frame);
-    Ray local;
-    local.origin = vec3(dot(rec.inv_row0.xyz, rel),
-                        dot(rec.inv_row1.xyz, rel),
-                        dot(rec.inv_row2.xyz, rel));
-    local.dir = vec3(dot(rec.inv_row0.xyz, ray.dir),
-                     dot(rec.inv_row1.xyz, ray.dir),
-                     dot(rec.inv_row2.xyz, ray.dir));
-    return local;
-}
-
-// Which of its object's six axis directions a surface facing `n`, in the object's own space,
-// faces: 0 and 1 for +x and -x, then y, then z, as the G-buffer's surface attachment has it.
-uint velk_facing_side(vec3 n)
-{
-    vec3 across = abs(n);
-    return across.x >= across.y && across.x >= across.z ? (n.x < 0.0 ? 1u : 0u)
-         : across.y >= across.z ? (n.y < 0.0 ? 3u : 2u) : (n.z < 0.0 ? 5u : 4u);
-}
-
-// Normals transform by the transpose of the inverse.
-vec3 velk_world_normal(RtRecord rec, vec3 n)
-{
-    return normalize(rec.inv_row0.xyz * n.x + rec.inv_row1.xyz * n.y + rec.inv_row2.xyz * n.z);
-}
-
-#ifdef VELK_RAY_MOTION
-// The motion at the point of the ray nearest the shape's middle, taken off the ray, moves
-// the shape for this ray. Rays wider than the motion would not show it.
-Ray velk_moved_ray(Ray local, RtRecord rec, uint shape_index)
-{
-    if ((rec.shape_count & VELK_RECORD_RAY_MOTION) == 0u || velk_ray_footprint >= VELK_RAY_MOTION_REACH) return local;
-    velk_ray_met_motion = true;
-    RtShape moved = velk_bvh_shapes.data[shape_index];
-    vec3 middle = (moved.origin.xyz + moved.u_axis.xyz) * 0.5;
-    vec3 nearest = local.origin + local.dir * (dot(middle - local.origin, local.dir) / dot(local.dir, local.dir));
-    Ray out_ray = local;
-    out_ray.origin -= VELK_RAY_MOTION(nearest, vec3(rec.inv_row0.w, rec.inv_row1.w, rec.inv_row2.w),
-                                      float(VELK_GLOBALS.present_counter) / 60.0);
-    return out_ray;
-}
-#endif
-
-)"
-                                                                      R"(
-// A node of the top tree, moved to where rays are.
-BvhNode velk_top_node(uint index)
-{
-    BvhNode node = velk_bvh_nodes.data[index];
-    node.aabb_min.xyz -= velk_ray_frame;
-    node.aabb_max.xyz -= velk_ray_frame;
-    return node;
-}
-
-// The walk behind every ray: one loop that does one piece of work per iteration, a triangle, a
-// node of a mesh or of a record's small tree, a shape, a record, or a node of the scene. Each
-// lane of a wave works from its own state, so none waits for another's inner loop. With
-// @p closest it finds the nearest hit, and otherwise how much light gets through within t_max.
-// With @p seeded it tests only @p seed, a shape placed by record @p seed_record.
-//
-// Mesh hits keep only what identifies them, and the surface is worked out once, for the winner.
-//
-// With VELK_TRACE_MEDIUM, for scenes with instances that have a far form: a node of instances
-// not much wider than the ray's footprint counts as a medium, since one line through it would
-// hit or miss one instance at random. Light falls off with distance through it, by its density
-// of instances' area per volume. A node's area is in aabb_max.w, 0 for one not made of
-// instances, and its average colour is in the bits of aabb_min.w, as unorm RGB. Compiled out
-// otherwise, since registers are paid for by the whole pass.
-#ifdef VELK_TRACE_MEDIUM
-// A mesh counted as a medium keeps going past what other shapes hit, as far as this record's
-// limit, since what it holds in front of that still dims the ray.
-#define VELK_WALK_LIMIT (mesh_medium ? min(mesh_best, medium_far * mesh_scale) : min(mesh_best, best_t * mesh_scale))
-#else
-#define VELK_WALK_LIMIT min(mesh_best, best_t * mesh_scale)
-#endif
-
-// A float of a vertex, by its word in the mesh-word arena.
-#define velk_hit_vertex(word) uintBitsToFloat(velk_mesh_words.data[word])
-
-// Inside velk_walk: where the camera is in the space of the mesh being walked.
-#define VELK_WALK_EYE vec3(uintBitsToFloat(stack[kStack + 3]), uintBitsToFloat(stack[kStack + 4]), uintBitsToFloat(stack[kStack + 5]))
-
-// The culling arena, for the marks rays set to ask for finer clusters of a mesh: see
-// kClusterHeaderWords. Every thread writes the same value, so no order is needed.
-layout(set = 1, binding = 16, std430) buffer VelkTraceMarks { uint data[]; } velk_trace_marks;
-
-float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_record, RtShape seed, out RayHit hit)
-{
-    hit.t = t_max;
-    hit.shape_index = 0xFFFFFFFFu;
-    hit.uv = vec2(0.0);
-    hit.normal = vec3(0.0);
-    if (VELK_GLOBALS.bvh_node_count == 0u && !seeded) return closest ? 0.0 : 1.0;
-
-    const int kStack = VELK_TRACE_STACK_SIZE + 64;
-    const uint kScene = 0u;
-    const uint kMesh = 1u;
-    const uint kTree = 2u;
-    const uint kNone = 0xFFFFFFFFu;
-
-    // The three words past kStack hold the frame of the nearest hit so far, which only the
-    // hit's own record needs at the end, and registers cannot spare.
-    // Then, for a mesh with a level of detail hierarchy, where the camera is in the mesh's own
-    // space (3 words), the header of the cluster being walked, and the header of the nearest
-    // hit's cluster, or none. Kept here for the same reason: each is read at a few places,
-    // and a register would be held through every step of every pass.
-    uint stack[kStack + 8];
-    stack[kStack + 6] = 0xFFFFFFFFu;
-    stack[kStack + 7] = 0xFFFFFFFFu;
-    int sp = 0;
-    if (!seeded) stack[sp++] = VELK_GLOBALS.bvh_root;
-    velk_ray_frame = VELK_GLOBALS.cam_pos.xyz;
-    int partition_sp = -1;
-
-    uint level = kScene;
-    uint level_after_mesh = kScene;
-    int mesh_scope = 0;
-    int tree_scope = 0;
-
-    uint record_at = 0u;
-    uint records_left = 0u;
-    uint shape_at = 0u;
-    uint shapes_left = seeded ? 1u : 0u;
-    uint triangle_at = 0u;
-    // A leaf's shape_count: triangles left in the low half, its vertices in the high half.
-    uint leaf_counts = 0u;
-
-    uint cur_record = seeded ? seed_record : kNone;
-    uint cur_shape = kNone;
-    Ray walk_ray = ray;
-    float mesh_scale = 1.0;
-    uint mesh_base = 0u;
-    uint word_base = 0u;
-    uint positions = 0u;
-    float mesh_cone = 0.0;
-    float mesh_best = 1e30;
-
-    float best_t = t_max;
-    uint best_shape = kNone;
-    uint best_record = kNone;
-    uint best_triangle = 0u;
-    uint best_vertex_ids = 0u;
-    float best_u = 0.0;
-    float best_v = 0.0;
-    bool best_stopped = false;
-    uint best_stop_normal = 0u;
-
-#ifdef VELK_TRACE_MEDIUM
-    float footprint = velk_ray_footprint;
-    float spread = closest ? 0.0 : velk_ray_spread;
-    bool record_medium = false;
-    bool mesh_medium = false;
-    float medium_far = t_max;
-    uint mesh_color_word = 0u;
-    float medium_depth = 0.0;
-    vec3 medium_color = vec3(0.0);
-    float visibility = 1.0;
-#endif
-
-    while (true) {
-        if ((leaf_counts & 0xFFFFu) != 0u) {
-            uint tri = velk_cluster_words.data[triangle_at];
-            ++triangle_at;
-            --leaf_counts;
-            uint p0 = positions + (tri & 0xFFu) * 3u;
-            uint p1 = positions + ((tri >> 8u) & 0xFFu) * 3u;
-            uint p2 = positions + ((tri >> 16u) & 0xFFu) * 3u;
-            vec3 v0 = vec3(uintBitsToFloat(velk_cluster_words.data[p0]),
-                           uintBitsToFloat(velk_cluster_words.data[p0 + 1u]),
-                           uintBitsToFloat(velk_cluster_words.data[p0 + 2u]));
-            vec3 v1 = vec3(uintBitsToFloat(velk_cluster_words.data[p1]),
-                           uintBitsToFloat(velk_cluster_words.data[p1 + 1u]),
-                           uintBitsToFloat(velk_cluster_words.data[p1 + 2u]));
-            vec3 v2 = vec3(uintBitsToFloat(velk_cluster_words.data[p2]),
-                           uintBitsToFloat(velk_cluster_words.data[p2 + 1u]),
-                           uintBitsToFloat(velk_cluster_words.data[p2 + 2u]));
-            // Moller-Trumbore, with thresholds that scale with the triangle, so that meshes
-            // with tiny local coordinates are not all filtered out as near-parallel.
-            vec3 e1 = v1 - v0;
-            vec3 e2 = v2 - v0;
-            vec3 pv = cross(walk_ray.dir, e2);
-            float det = dot(e1, pv);
-            if (abs(det) < 1e-7 * max(length(e1) * length(pv), 1e-30)) continue;
-            float inv_det = 1.0 / det;
-            vec3 to_v0 = walk_ray.origin - v0;
-            float u = dot(to_v0, pv) * inv_det;
-            if (u < 0.0 || u > 1.0) continue;
-            vec3 q = cross(to_v0, e1);
-            float v = dot(walk_ray.dir, q) * inv_det;
-            if (v < 0.0 || u + v > 1.0) continue;
-            float tt = dot(e2, q) * inv_det;
-            if (tt < 1e-4 * max(length(e1), length(e2)) || tt >= mesh_best) continue;
-            mesh_best = tt;
-            float world_t = tt / mesh_scale;
-            if (world_t < best_t) {
-                if (!closest) return 0.0;
-                best_t = world_t;
-                best_shape = cur_shape;
-                best_record = cur_record;
-                best_u = u;
-                best_v = v;
-                best_triangle = tri;
-                best_vertex_ids = positions + (leaf_counts >> 16u) * 3u;
-                stack[kStack + 7] = stack[kStack + 6];
-                best_stopped = false;
-                stack[kStack] = floatBitsToUint(velk_ray_frame.x);
-                stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
-                stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
-            }
-        } else if (level == kMesh) {
-            if (sp == mesh_scope) {
-                level = level_after_mesh;
-                if (level == kTree) walk_ray = velk_local_ray(ray, velk_records.data[cur_record]);
-                continue;
-            }
-            uint ref = stack[--sp];
-            if ((ref & VELK_BLAS_LEAF) != 0u) {
-                uint leaf = word_base + (ref & ~VELK_BLAS_LEAF);
-                triangle_at = word_base + velk_cluster_words.data[leaf];
-                leaf_counts = velk_cluster_words.data[leaf + 1u];
-                positions = word_base + velk_cluster_words.data[leaf + 2u];
-                continue;
-            }
-            // In the mesh's units, as far as the least distance an error is measured over.
-            float lod_least = 1e-3 * mesh_scale;
-            if ((ref & VELK_BLAS_CLUSTER) != 0u) {
-                // A cluster of the mesh's level of detail hierarchy, used as it is drawn:
-                // when its error is small enough seen from the camera and its parent's is
-                // not, which leaves one surface whatever the ray.
-                uint header = (ref & ~VELK_BLAS_CLUSTER) * 4u;
-                vec3 mesh_eye = VELK_WALK_EYE;
-                float lod_scale = VELK_GLOBALS.lod_scale;
-                vec3 own = vec3(uintBitsToFloat(velk_cluster_words.data[header]),
-                                uintBitsToFloat(velk_cluster_words.data[header + 1u]),
-                                uintBitsToFloat(velk_cluster_words.data[header + 2u]));
-                float own_away = length(own - mesh_eye) - uintBitsToFloat(velk_cluster_words.data[header + 3u]);
-                if (uintBitsToFloat(velk_cluster_words.data[header + 4u]) * lod_scale > max(own_away, lod_least)) continue;
-                vec3 parent = vec3(uintBitsToFloat(velk_cluster_words.data[header + 5u]),
-                                   uintBitsToFloat(velk_cluster_words.data[header + 6u]),
-                                   uintBitsToFloat(velk_cluster_words.data[header + 7u]));
-                float parent_away = length(parent - mesh_eye) - uintBitsToFloat(velk_cluster_words.data[header + 8u]);
-                if (uintBitsToFloat(velk_cluster_words.data[header + 9u]) * lod_scale <= max(parent_away, lod_least)) continue;
-                // Used in place of finer clusters that are not loaded: ask for them where its
-                // error as built is too large.
-                uint mark = velk_cluster_words.data[header + 16u];
-                if (mark != kNone && uintBitsToFloat(velk_cluster_words.data[header + 15u]) * lod_scale > max(own_away, lod_least)) {
-                    velk_trace_marks.data[mark] = 1u;
-                }
-                // Using it says its own group is wanted, which keeps the group loaded.
-                uint own_mark = velk_cluster_words.data[header + 17u];
-                if (own_mark != kNone) {
-                    velk_trace_marks.data[own_mark] = 1u;
-                }
-                // What its tree's references count from. Everything pushed from here on is
-                // walked before anything under it on the stack, so these hold until then.
-                stack[kStack + 6] = header;
-                mesh_base = velk_cluster_words.data[header + 13u];
-                word_base = velk_cluster_words.data[header + 14u];
-                if (sp < kStack) stack[sp++] = velk_cluster_words.data[header + 10u];
-                continue;
-            }
-            // A node of the tree over the hierarchy's clusters, named by where it is, is two
-            // nodes long: its children's boxes, then for each child a sphere holding the
-            // spheres its clusters are chosen by, the smallest of their errors and the largest
-            // of their parents'.
-            bool upper = (ref & VELK_BLAS_UPPER) != 0u;
-            uint node_at = upper ? (ref & ~VELK_BLAS_UPPER) : mesh_base + ref;
-            VelkMeshNode node = velk_mesh_nodes.data[node_at];
-            float t_l, t_r;
-            float limit = VELK_WALK_LIMIT;
-            bool h_l = ray_aabb(walk_ray, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
-            bool h_r = ray_aabb(walk_ray, vec3(node.b.zw, node.c.x), node.c.yzw, limit, t_r);
-            bool left_first = h_l && (!h_r || t_l <= t_r);
-            uint near_ref = kNone;
-            uint far_ref = kNone;
-            // The nearer child first, so a near stop can cull the far one, and it goes on top
-            // of the stack so that a near hit or a blocker is found sooner.
-            for (uint k = 0u; k < 2u; ++k) {
-                bool left = (k == 0u) == left_first;
-                if (!(left ? h_l : h_r)) continue;
-                float t_aabb = left ? t_l : t_r;
-                if (t_aabb > VELK_WALK_LIMIT) continue;
-                uint child = left ? node.refs.x : node.refs.y;
-                uint surface = left ? node.refs.z : node.refs.w;
-                vec3 box_min = left ? node.a.xyz : vec3(node.b.zw, node.c.x);
-                vec3 box_max = left ? vec3(node.a.w, node.b.xy) : node.c.yzw;
-)"
-                                                                      R"(
-                // Left out when every cluster under it is too coarse from the camera, or has a
-                // parent that will do. A cluster is tested by its own header.
-                if (upper && (child & VELK_BLAS_CLUSTER) == 0u) {
-                    // Only this child's part of the second node is read, where it is needed.
-                    vec4 sphere;
-                    vec2 errors;
-                    if (left) {
-                        sphere = velk_mesh_nodes.data[node_at + 1u].a;
-                        errors = velk_mesh_nodes.data[node_at + 1u].b.xy;
-                    } else {
-                        sphere = velk_mesh_nodes.data[node_at + 1u].c;
-                        errors = uintBitsToFloat(velk_mesh_nodes.data[node_at + 1u].refs.xy);
-                    }
-                    float lod_scale = VELK_GLOBALS.lod_scale;
-                    float away = length(sphere.xyz - VELK_WALK_EYE);
-                    if (errors.x * lod_scale > away + sphere.w) continue;
-                    if (errors.y * lod_scale <= max(away - sphere.w, lod_least)) continue;
-                }
-#ifdef VELK_TRACE_MEDIUM
-                // Not above the clusters, where two levels cover the same place.
-                if (mesh_medium && !upper) {
-                    vec3 extent = box_max - box_min;
-                    float widest = max(max(extent.x, extent.y), extent.z);
-                    // In the mesh's units, where its t is the world's times mesh_scale.
-                    if (widest < (footprint * mesh_scale + spread * t_aabb) * velk_medium_reach(mesh_base + child)) {
-                        vec3 sides = max(extent, vec3(widest * 1e-3));
-                        float leave = min(min(ray_aabb_exit(walk_ray, box_min, box_max), medium_far * mesh_scale), mesh_best);
-                        float amount = uintBitsToFloat(surface) / (sides.x * sides.y * sides.z) * max(leave - t_aabb, 0.0);
-                        if (closest) {
-                            medium_depth += amount;
-                            medium_color += amount * unpackUnorm4x8(mesh_color_word).rgb;
-                        } else {
-                            visibility *= exp(-amount);
-                        }
-                        continue;
-                    }
-                }
-#endif
-                // Narrower than the cone: this child is the surface. A real triangle under it
-                // gives the material something to read. Within a cluster only, as above.
-                if (mesh_cone > 0.0 && !upper) {
-                    vec3 extent = box_max - box_min;
-                    if (max(max(extent.x, extent.y), extent.z) < mesh_cone * t_aabb) {
-                        uint under = child;
-                        while ((under & VELK_BLAS_LEAF) == 0u) {
-                            under = velk_mesh_nodes.data[mesh_base + under].refs.x;
-                        }
-                        uint leaf = word_base + (under & ~VELK_BLAS_LEAF);
-                        mesh_best = t_aabb;
-                        best_t = t_aabb / mesh_scale;
-                        best_shape = cur_shape;
-                        best_record = cur_record;
-                        best_u = 1.0 / 3.0;
-                        best_v = best_u;
-                        best_triangle = velk_cluster_words.data[word_base + velk_cluster_words.data[leaf]];
-                        best_vertex_ids = word_base + velk_cluster_words.data[leaf + 2u] + (velk_cluster_words.data[leaf + 1u] >> 16u) * 3u;
-                        stack[kStack + 7] = stack[kStack + 6];
-                        best_stopped = true;
-                        best_stop_normal = surface;
-                        stack[kStack] = floatBitsToUint(velk_ray_frame.x);
-                        stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
-                        stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
-                        continue;
-                    }
-                }
-                if (k == 0u) {
-                    near_ref = child;
-                } else {
-                    far_ref = child;
-                }
-            }
-            if (far_ref != kNone && sp < kStack) stack[sp++] = far_ref;
-            if (near_ref != kNone && sp < kStack) stack[sp++] = near_ref;
-        } else if (shapes_left > 0u) {
-            uint index = shape_at;
-            ++shape_at;
-            --shapes_left;
-            Ray shape_ray = walk_ray;
-            if (level == kScene) {
-                RtRecord shape_rec = velk_records.data[cur_record];
-                shape_ray = velk_local_ray(ray, shape_rec);
-#ifdef VELK_RAY_MOTION
-                if (!seeded) shape_ray = velk_moved_ray(shape_ray, shape_rec, index);
-#endif
-            }
-            RtShape shape = seeded ? seed : velk_bvh_shapes.data[index];
-            if (shape.shape_kind == 255u) {
-                if (shape.mesh_static_base == VELK_INVALID_MESH_STATIC) continue;
-#ifdef VELK_TRACE_MEDIUM
-                bool is_medium = record_medium;
-                float reach = is_medium ? medium_far : best_t;
-#else
-                float reach = best_t;
-#endif
-                float t_box;
-                if (!ray_aabb(shape_ray, shape.origin.xyz, shape.u_axis.xyz, reach, t_box)) continue;
-                MeshStaticData st = velk_mesh_static(shape);
-                if (st.triangle_count == 0u || st.vertex_stride == 0u || st.blas_node_count == 0u) continue;
-                // Normalized so that the triangle thresholds do not depend on how much an
-                // instance is scaled. The length converts hits back to the ray's t.
-                float scale = length(shape_ray.dir);
-                if (scale < 1e-30) continue;
-                walk_ray.origin = shape_ray.origin;
-                walk_ray.dir = shape_ray.dir / scale;
-                mesh_scale = scale;
-                mesh_base = st.blas_node_base;
-                word_base = st.cluster_word_base;
-                stack[kStack + 6] = kNone;
-                if ((st.blas_root & (VELK_BLAS_LEAF | VELK_BLAS_CLUSTER | VELK_BLAS_UPPER)) == VELK_BLAS_UPPER) {
-                    // Rays are relative to the camera, so it is at their origin.
-                    Ray eye = ray;
-                    eye.origin = vec3(0.0);
-                    vec3 mesh_eye = velk_local_ray(eye, velk_records.data[cur_record]).origin;
-                    stack[kStack + 3] = floatBitsToUint(mesh_eye.x);
-                    stack[kStack + 4] = floatBitsToUint(mesh_eye.y);
-                    stack[kStack + 5] = floatBitsToUint(mesh_eye.z);
-                }
-                mesh_cone = closest && (st.flags & (VELK_MESH_SCATTERED | VELK_MESH_DEFORMING)) == 0u ? velk_ray_cone : 0.0;
-#ifdef VELK_TRACE_MEDIUM
-                mesh_medium = is_medium && (st.flags & VELK_MESH_SCATTERED) != 0u;
-#endif
-                mesh_best = 1e30;
-                cur_shape = index;
-                level_after_mesh = level;
-                level = kMesh;
-                mesh_scope = sp;
-                if (sp < kStack) stack[sp++] = st.blas_root;
-            } else {
-                RayHit h;
-                if (intersect_shape(shape_ray, shape, h) && h.t > 0.0 && h.t < best_t) {
-                    if (!closest) return 0.0;
-                    best_t = h.t;
-                    best_shape = index;
-                    best_record = cur_record;
-                    stack[kStack] = floatBitsToUint(velk_ray_frame.x);
-                    stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
-                    stack[kStack + 2] = floatBitsToUint(velk_ray_frame.z);
-                }
-            }
-        } else if (level == kTree) {
-            if (sp == tree_scope) {
-                level = kScene;
-                continue;
-            }
-            BvhNode node = velk_blas_nodes.data[stack[--sp]];
-            float t_enter;
-            if (!ray_aabb(walk_ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_enter)) continue;
-            shape_at = node.first_shape;
-            shapes_left = node.shape_count;
-            for (uint c = 0u; c < node.child_count; ++c) {
-                if (sp < kStack) stack[sp++] = node.first_child + c;
-            }
-        } else if (records_left > 0u) {
-            cur_record = record_at;
-            ++record_at;
-            --records_left;
-            RtRecord rec = velk_records.data[cur_record];
-#ifdef VELK_TRACE_MEDIUM
-            record_medium = footprint > 0.0 && (rec.shape_count & VELK_RECORD_MEDIUM) != 0u && (closest || rec.tree_root == VELK_NO_TREE);
-            medium_far = best_t;
-#endif
-            if (rec.tree_root == VELK_NO_TREE) {
-                shape_at = rec.first_shape;
-                shapes_left = rec.shape_count & VELK_RECORD_SHAPE_COUNT;
-            } else {
-                walk_ray = velk_local_ray(ray, rec);
-                level = kTree;
-                tree_scope = sp;
-                if (sp < kStack) stack[sp++] = rec.tree_root;
-            }
-        } else {
-            if (sp == 0) break;
-            if (sp == partition_sp) {
-                velk_ray_frame = VELK_GLOBALS.cam_pos.xyz;
-                partition_sp = -1;
-            }
-            uint ni = stack[--sp];
-            BvhNode node = velk_top_node(ni);
-            float t_enter;
-            if (!ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, t_enter)) continue;
-            // The reference's box already covers the partition's root, so the root needs
-            // no test of its own.
-            if (node.child_count == VELK_PARTITION_REF) {
-                partition_sp = sp;
-                velk_ray_frame = VELK_GLOBALS.cam_pos.xyz - velk_partition_origin(node);
-                ni = node.first_child;
-                node = velk_top_node(ni);
-            }
-)"
-                                                                      R"(
-#ifdef VELK_TRACE_MEDIUM
-            if (footprint > 0.0 && node.aabb_max.w > 0.0) {
-                vec3 extent = node.aabb_max.xyz - node.aabb_min.xyz;
-                float widest = max(max(extent.x, extent.y), extent.z);
-                // The leaf of a partition without its instances has nothing else to offer.
-                if (widest < (footprint + spread * max(t_enter, 0.0)) * velk_medium_reach(ni) || (node.child_count == 0u && node.shape_count == 0u)) {
-                    float enter;
-                    if (ray_aabb(ray, node.aabb_min.xyz, node.aabb_max.xyz, best_t, enter)) {
-                        vec3 sides = max(extent, vec3(widest * 1e-3));
-                        float leave = min(ray_aabb_exit(ray, node.aabb_min.xyz, node.aabb_max.xyz), best_t);
-                        float amount = node.aabb_max.w / (sides.x * sides.y * sides.z) * max(leave - enter, 0.0);
-                        if (closest) {
-                            medium_depth += amount;
-                            medium_color += amount * unpackUnorm4x8(floatBitsToUint(node.aabb_min.w)).rgb;
-                        } else {
-                            visibility *= exp(-amount);
-                        }
-                    }
-                    continue;
-                }
-            }
-            mesh_color_word = floatBitsToUint(node.aabb_min.w);
-#endif
-            record_at = node.first_shape;
-            records_left = node.shape_count;
-#ifdef VELK_TRACE_ORDERED_ANY_HIT
-            // Front to back for a shadow ray, since the near child is the likelier blocker.
-            if (!closest && node.child_count == 2u) {
-                BvhNode l = velk_top_node(node.first_child);
-                BvhNode r = velk_top_node(node.first_child + 1u);
-                float t_l, t_r;
-                bool h_l = ray_aabb(ray, l.aabb_min.xyz, l.aabb_max.xyz, best_t, t_l);
-                bool h_r = ray_aabb(ray, r.aabb_min.xyz, r.aabb_max.xyz, best_t, t_r);
-                if (h_l && h_r) {
-                    uint near_child = t_l <= t_r ? node.first_child : node.first_child + 1u;
-                    uint far_child = t_l <= t_r ? node.first_child + 1u : node.first_child;
-                    if (sp < kStack) stack[sp++] = far_child;
-                    if (sp < kStack) stack[sp++] = near_child;
-                } else if (h_l) {
-                    if (sp < kStack) stack[sp++] = node.first_child;
-                } else if (h_r) {
-                    if (sp < kStack) stack[sp++] = node.first_child + 1u;
-                }
-                continue;
-            }
-#endif
-            for (uint i = 0u; i < node.child_count; ++i) {
-                if (sp < kStack) stack[sp++] = node.first_child + i;
-            }
-        }
-    }
-
-    if (!closest) {
-#ifdef VELK_TRACE_MEDIUM
-        return visibility;
-#else
-        return 1.0;
-#endif
-    }
-
-#ifdef VELK_TRACE_MEDIUM
-    velk_ray_medium_depth = medium_depth;
-    velk_ray_medium_color = medium_color;
-#endif
-    if (best_shape == kNone) return 0.0;
-
-    hit.t = best_t;
-    hit.shape_index = best_shape;
-    RtRecord rec = velk_records.data[best_record];
-    hit.object = rec.object;
-    RtShape shape = seeded ? seed : velk_bvh_shapes.data[best_shape];
-    if (shape.shape_kind == 255u) {
-        // Vertex layout: pos[0..2], normal[3..5], uv[6..7]. (u, v) from the triangle test
-        // make (1-u-v, u, v) the weights for its three vertices.
-        MeshStaticData st = velk_mesh_static(shape);
-        uint floats_per_vert = st.vertex_stride >> 2u;
-        float w = 1.0 - best_u - best_v;
-        // Vertex ids count from the cluster's own vertices, or from the mesh's.
-        uint best_header = stack[kStack + 7];
-        uint vertices = best_header != kNone ? velk_cluster_words.data[best_header + 12u] : st.vbo_base;
-        uint o0 = vertices + velk_cluster_words.data[best_vertex_ids + (best_triangle & 0xFFu)] * floats_per_vert;
-        uint o1 = vertices + velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 8u) & 0xFFu)] * floats_per_vert;
-        uint o2 = vertices + velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 16u) & 0xFFu)] * floats_per_vert;
-        vec2 uv0 = vec2(velk_hit_vertex(o0 + 6u), velk_hit_vertex(o0 + 7u));
-        vec2 uv1 = vec2(velk_hit_vertex(o1 + 6u), velk_hit_vertex(o1 + 7u));
-        vec2 uv2 = vec2(velk_hit_vertex(o2 + 6u), velk_hit_vertex(o2 + 7u));
-        hit.uv = uv0 * w + uv1 * best_u + uv2 * best_v;
-        vec3 n;
-        if (best_stopped) {
-            // The less the node's surface agrees on a direction, the more it faces the ray.
-            vec3 ld = normalize(vec3(dot(rec.inv_row0.xyz, ray.dir), dot(rec.inv_row1.xyz, ray.dir), dot(rec.inv_row2.xyz, ray.dir)));
-            vec3 stop_normal = unpackSnorm4x8(best_stop_normal).xyz;
-            vec3 bent = stop_normal - ld * (1.0 - min(length(stop_normal), 1.0));
-            float bent_length = length(bent);
-            n = bent_length > 1e-4 ? bent / bent_length : -ld;
-        } else {
-            vec3 n0 = vec3(velk_hit_vertex(o0 + 3u), velk_hit_vertex(o0 + 4u), velk_hit_vertex(o0 + 5u));
-            vec3 n1 = vec3(velk_hit_vertex(o1 + 3u), velk_hit_vertex(o1 + 4u), velk_hit_vertex(o1 + 5u));
-            vec3 n2 = vec3(velk_hit_vertex(o2 + 3u), velk_hit_vertex(o2 + 4u), velk_hit_vertex(o2 + 5u));
-            n = normalize(n0 * w + n1 * best_u + n2 * best_v);
-        }
-        hit.normal = velk_world_normal(rec, n);
-        hit.side = velk_facing_side(n);
-    } else {
-        velk_ray_frame = vec3(uintBitsToFloat(stack[kStack]), uintBitsToFloat(stack[kStack + 1]), uintBitsToFloat(stack[kStack + 2]));
-        Ray shape_ray = velk_local_ray(ray, rec);
-#ifdef VELK_RAY_MOTION
-        if (!seeded && rec.tree_root == VELK_NO_TREE) shape_ray = velk_moved_ray(shape_ray, rec, best_shape);
-#endif
-        RayHit h;
-        intersect_shape(shape_ray, shape, h);
-        hit.uv = h.uv;
-        hit.normal = velk_world_normal(rec, h.normal);
-        hit.side = velk_facing_side(h.normal);
-    }
-    // Where on its object, from the ray in the object's own space. Its axes in world units, as
-    // the G-buffer has it: the inverse's rows are as long as one over each axis's scale.
-    velk_ray_frame = vec3(uintBitsToFloat(stack[kStack]), uintBitsToFloat(stack[kStack + 1]), uintBitsToFloat(stack[kStack + 2]));
-    Ray local_ray = velk_local_ray(ray, rec);
-#ifdef VELK_RAY_MOTION
-    if (!seeded) local_ray = velk_moved_ray(local_ray, rec, best_shape);
-#endif
-    vec3 axis_scale = 1.0 / max(vec3(length(rec.inv_row0.xyz), length(rec.inv_row1.xyz), length(rec.inv_row2.xyz)), vec3(1e-20));
-    hit.local = (local_ray.origin + local_ray.dir * best_t) * axis_scale;
-    return 1.0;
-}
-#undef VELK_WALK_LIMIT
-
-// How much light gets through along a shadow ray within t_max: 0 at the first blocker,
-// otherwise what is too fine for the ray to resolve lets some through.
-float trace_visibility(Ray ray, float t_max)
-{
-    RayHit h;
-    RtShape none;
-    return velk_walk(ray, t_max, false, false, 0u, none, h);
-}
-
-// Whether anything blocks the ray within t_max.
-bool trace_any_hit(Ray ray, float t_max)
-{
-    return trace_visibility(ray, t_max) <= 0.0;
-}
-
-// The nearest hit within t_max, with its normal in world space. `hit.shape_index` indexes
-// velk_bvh_shapes.
-bool trace_closest_hit(Ray ray, float t_max, out RayHit hit)
-{
-    RtShape none;
-    return velk_walk(ray, t_max, true, false, 0u, none, hit) > 0.5;
-}
-
-// Unbounded closest hit. On a miss `hit.t` stays at 1e30, which callers that
-// shade the miss rely on.
-bool trace_closest_hit(Ray ray, out RayHit hit)
-{
-    return trace_closest_hit(ray, 1e30, hit);
-}
-
-// The nearest hit on one shape placed by @p record, with its normal in world space.
-bool trace_shape(Ray ray, uint record, RtShape shape, out RayHit hit)
-{
-    return velk_walk(ray, 1e30, true, true, record, shape, hit) > 0.5;
-}
-)";
-
-/// @p source with the medium traversals of velk_trace_src compiled in, for a scene with
-/// instances that have a far form.
-inline string velk_with_trace_medium(string_view source)
-{
-    const size_t version = source.find(string_view("#version"));
-    const size_t after = source.find('\n', version) + 1;
-    string out;
-    out += source.substr(0, after);
-    out += string_view("#define VELK_TRACE_MEDIUM\n");
-    out += source.substr(after);
-    return out;
-}
 
 /**
  * Fills the G-buffer from the visibility buffer: for each pixel, finds its triangle, where
@@ -1695,19 +998,29 @@ const uint kBounceFromRay = 2u;
 const uint kBounceHitNoCell = 0xFFFFFFFEu;
 // In place of the cell hit: something was hit, and the cell is not found yet.
 const uint kBounceHitPending = 0xFFFFFFFDu;
+// A bounce ray's scratch (velk_bounce_scratch): what it hit (velk_hit_words, its first word
+// kNoCell for a miss), the object id, where on the object, 3 words, and which side of it.
+const uint kBounceScratchWords = 12u;
+const uint kBounceScratchHit = 0u;
+const uint kBounceScratchObject = 7u;
+const uint kBounceScratchLocal = 8u;
+const uint kBounceScratchSide = 11u;
 
 // A pixel's reflection ray, kReflectWords at the pixel's place in a run of words, row by
 // row (CELLS_REFLECT). Its passes reuse words once done with them:
 //   0  what it hit: the cell there, kNoCell for a miss, kBounceHitPending until found,
 //      kBounceHitNoCell with no room, or kReflectSkip for a pixel that traces none
 //   1  the normal hit in the low 16 bits (velk_oct8) and which side of the object above
-//   2  the shape hit
-//   3  the uv there, as halves
-//   4  the object hit; then the bounce cell over the hit, or kNoCell
-//   5  where on the object, 3 words, x first; then the albedo there and the emission
+//   2  what it hit, 7 words (velk_hit_words)
+//   9  the object hit; then the bounce cell over the hit, or kNoCell
+//   10 where on the object, 3 words, x first; then the albedo there and the emission
 //      there (velk_pack_rgbe) in the first two
-//   8  the distance, as a float
-const uint kReflectWords = 9u;
+//   13 the distance, as a float
+const uint kReflectWords = 14u;
+const uint kReflectHit = 2u;
+const uint kReflectCell = 9u;
+const uint kReflectLocal = 10u;
+const uint kReflectDistance = 13u;
 const uint kReflectSkip = 0xFFFFFFFCu;
 // An entry unused this many frames gives way to a new one.
 const uint kBounceUnusedFrames = 16u;
@@ -1884,22 +1197,6 @@ void main()
 }
 )";
 
-/// @p source with a scene's ray motion compiled in. See IInstancedMeshVisual::set_ray_motion.
-inline string velk_with_ray_motion(string_view source, string_view motion, float reach)
-{
-    const size_t version = source.find(string_view("#version"));
-    const size_t after = source.find('\n', version) + 1;
-    string out;
-    out += source.substr(0, after);
-    out += string_view("#define VELK_RAY_MOTION(p, at, t) (");
-    out += motion;
-    char buffer[64];
-    const int length = std::snprintf(buffer, sizeof(buffer), ")\n#define VELK_RAY_MOTION_REACH %f\n", double(reach));
-    out += string_view(buffer, static_cast<size_t>(length));
-    out += source.substr(after);
-    return out;
-}
-
 // Default compute shader for the deferred lighting pass. Samples the
 // G-buffer attachments + light buffer and writes the shaded color to
 // the per-view output storage image.
@@ -1913,6 +1210,7 @@ inline string velk_with_ray_motion(string_view source, string_view motion, float
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
 #version 450
 #include "velk.glsl"
+#include "velk-ui.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -1920,12 +1218,6 @@ layout(set = 0, binding = 1, rgba8)   uniform writeonly image2D gStorageImages[]
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
 
-// Scene TLAS, bound by index (set = 1) instead of chased through a
-// buffer_device_address in globals. The renderer stamps the same
-// scene-wide BVH buffers into set_global_buffer each frame. Node and record
-// indices are absolute in these buffers.
-layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
-layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
 // velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
 // selects this view's record.
 #define VELK_GLOBALS velk_globals.data[pc.globals_base]
@@ -1949,15 +1241,9 @@ layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; 
 // glyph-data bases from it) at the word base carried on the shape.
 layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
 
-// Records placing shapes in the world (set = 1 slot 10). Same buffer the RT
-// compute reads.
-layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord data[]; } velk_records;
-
-// Per-primitive RT geometry metadata (set = 1 slot 11), read via
-// velk_mesh_static(shape), plus the BLAS runs it points at (slots 12 / 13).
+// Per-primitive ray geometry (set = 1 slot 11), plus the trees it points at (slots 12 / 13).
 // A primitive's runs are allocated once at load and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
@@ -2011,7 +1297,6 @@ Light velk_light_at(uint index)
 #include "velk_intersect.glsl"
 
 #define VELK_TRACE_STACK_SIZE 96
-#define VELK_TRACE_ORDERED_ANY_HIT
 #include "velk_trace.glsl"
 )"
                                                                       R"(
@@ -2486,12 +1771,11 @@ const uint kCandidateOnlyLive = 1u << 18u;
 // (velk_bounce_asking) and two spare words, then 2 words an entry:
 // its word in the table, and the pixel that asked, x in the low half and y in the high. Then,
 // for each entry, kBounceScratchWords a ray, what the trace found for the passes after it:
-// the shape hit, or kNoCell; the hit's uv as halves; the object id; where on the object, 3
-// words; which side of it.
+// what it hit (velk_hit_words, its first word kNoCell for a miss), the object id, where on
+// the object, 3 words, and which side of it.
 #define CELLS_BOUNCE_LIST cells_header[10]
 // How many bounce cells a frame may trace.
 #define CELLS_BOUNCE_LIST_MAX cells_header[11]
-const uint kBounceScratchWords = 8u;
 uint velk_bounce_scratch(uint listed, uint ray)
 {
     return CELLS_BOUNCE_LIST + 4u + CELLS_BOUNCE_LIST_MAX * 2u + (listed * kBounceRays + ray) * kBounceScratchWords;
@@ -3379,11 +2663,8 @@ void main()
                                          : 2.0 * size * to_blocker / max(to_light - to_blocker, 1e-3);
         half_levels = uint(clamp(2.0 * log2(max(edge, 1e-6) / (kCellsPerEdge * cell_size)) + 0.5, 0.0, 7.0));
     }
-    // Motion smaller than the cell would not show in it.
-    uint live = 0u;
-#ifdef VELK_RAY_MOTION
-    if (moving && VELK_RAY_MOTION_REACH >= cell_size) live = kCellLive;
-#endif
+    // Its rays met instances that move, so what they found holds only for now.
+    uint live = moving ? kCellLive : 0u;
     // Traced now: nothing changed for this light since. The slot is this group's alone.
     uint word = velk_light_cell_words.data[own + 8u + s];
     velk_light_cell_words.data[own + 8u + s] = (word & ~(255u | kSlotChanged)) | fifteenths | (half_levels << 4u) | live;
@@ -4068,9 +3349,6 @@ void main()
     Ray ray;
     ray.origin = middle + cell_n * lift + dir * 0.005;
     ray.dir = dir;
-    // Each ray stands for a cone, and for the cell it leaves from.
-    velk_ray_cone = kBounceConeTan;
-    velk_ray_footprint = cell_size * 0.5;
     RayHit hit;
     bool found = trace_closest_hit(ray, 1e30, hit);
     // The back of the cell's own object, close by: the ray started inside the surface rays
@@ -4083,8 +3361,6 @@ void main()
         ray.origin += dir * (hit.t + 0.01 * cell_size);
         found = trace_closest_hit(ray, 1e30, hit);
     }
-    velk_ray_cone = 0.0;
-    velk_ray_footprint = 0.0;
     velk_light_cell_words.data[ray_at + 2u] = 0u;
     velk_light_cell_words.data[ray_at + 3u] = 0u;
     velk_light_cell_words.data[ray_at + 4u] = kNoCell;
@@ -4104,13 +3380,16 @@ void main()
     }
     velk_light_cell_words.data[ray_at] = kBounceHitPending;
     velk_light_cell_words.data[ray_at + 1u] = (packHalf2x16(vec2(min(hit.t, 60000.0), 0.0)) & 0xFFFFu) | (velk_oct8(hit_n) << 16u);
-    velk_light_cell_words.data[scratch] = hit.shape_index;
-    velk_light_cell_words.data[scratch + 1u] = packHalf2x16(hit.uv);
-    velk_light_cell_words.data[scratch + 2u] = hit.object;
-    velk_light_cell_words.data[scratch + 3u] = floatBitsToUint(hit.local.x);
-    velk_light_cell_words.data[scratch + 4u] = floatBitsToUint(hit.local.y);
-    velk_light_cell_words.data[scratch + 5u] = floatBitsToUint(hit.local.z);
-    velk_light_cell_words.data[scratch + 6u] = hit_side;
+    uvec4 words_a;
+    uvec3 words_b;
+    velk_hit_words(hit, words_a, words_b);
+    for (uint k = 0u; k < 4u; ++k) velk_light_cell_words.data[scratch + kBounceScratchHit + k] = words_a[k];
+    for (uint k = 0u; k < 3u; ++k) velk_light_cell_words.data[scratch + kBounceScratchHit + 4u + k] = words_b[k];
+    velk_light_cell_words.data[scratch + kBounceScratchObject] = hit.object;
+    velk_light_cell_words.data[scratch + kBounceScratchLocal] = floatBitsToUint(hit.local.x);
+    velk_light_cell_words.data[scratch + kBounceScratchLocal + 1u] = floatBitsToUint(hit.local.y);
+    velk_light_cell_words.data[scratch + kBounceScratchLocal + 2u] = floatBitsToUint(hit.local.z);
+    velk_light_cell_words.data[scratch + kBounceScratchSide] = hit_side;
 }
 )";
 
@@ -4149,12 +3428,12 @@ void main()
     cells_from_pixel = false;
     world_pos = from + dir * t;
     N = velk_unoct8(packed >> 16u);
-    object = velk_light_cell_words.data[scratch + 2u];
-    side = velk_light_cell_words.data[scratch + 6u];
+    object = velk_light_cell_words.data[scratch + kBounceScratchObject];
+    side = velk_light_cell_words.data[scratch + kBounceScratchSide];
     coord = ivec2(0);
-    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[scratch + 3u]),
-                      uintBitsToFloat(velk_light_cell_words.data[scratch + 4u]),
-                      uintBitsToFloat(velk_light_cell_words.data[scratch + 5u]));
+    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[scratch + kBounceScratchLocal]),
+                      uintBitsToFloat(velk_light_cell_words.data[scratch + kBounceScratchLocal + 1u]),
+                      uintBitsToFloat(velk_light_cell_words.data[scratch + kBounceScratchLocal + 2u]));
     // An object no wider than the cell: the world cell there, if pixels keep it up, gives its
     // light. Nothing is made or listed for it, and its light is passed on no further.
     if (velk_cell_in_world(velk_object_radius(CELLS_OBJECTS, CELLS_OBJECT_SLOTS, object), level)) {
@@ -4211,13 +3490,16 @@ void main()
     }
     velk_light_cell_words.data[rec] = kBounceHitPending;
     velk_light_cell_words.data[rec + 1u] = velk_oct8(hit_n) | (hit_side << 16u);
-    velk_light_cell_words.data[rec + 2u] = hit.shape_index;
-    velk_light_cell_words.data[rec + 3u] = packHalf2x16(hit.uv);
-    velk_light_cell_words.data[rec + 4u] = hit.object;
-    velk_light_cell_words.data[rec + 5u] = floatBitsToUint(hit.local.x);
-    velk_light_cell_words.data[rec + 6u] = floatBitsToUint(hit.local.y);
-    velk_light_cell_words.data[rec + 7u] = floatBitsToUint(hit.local.z);
-    velk_light_cell_words.data[rec + 8u] = floatBitsToUint(hit.t);
+    uvec4 words_a;
+    uvec3 words_b;
+    velk_hit_words(hit, words_a, words_b);
+    for (uint k = 0u; k < 4u; ++k) velk_light_cell_words.data[rec + kReflectHit + k] = words_a[k];
+    for (uint k = 0u; k < 3u; ++k) velk_light_cell_words.data[rec + kReflectHit + 4u + k] = words_b[k];
+    velk_light_cell_words.data[rec + kReflectCell] = hit.object;
+    velk_light_cell_words.data[rec + kReflectLocal] = floatBitsToUint(hit.local.x);
+    velk_light_cell_words.data[rec + kReflectLocal + 1u] = floatBitsToUint(hit.local.y);
+    velk_light_cell_words.data[rec + kReflectLocal + 2u] = floatBitsToUint(hit.local.z);
+    velk_light_cell_words.data[rec + kReflectDistance] = floatBitsToUint(hit.t);
 }
 )";
 
@@ -4288,7 +3570,7 @@ void main()
     uint packed = velk_light_cell_words.data[rec + 1u];
     // In full: the cell made here is traced from this place, and a half's error at a
     // distance can put it under the surface hit, in that surface's own shadow.
-    float t = uintBitsToFloat(velk_light_cell_words.data[rec + 8u]);
+    float t = uintBitsToFloat(velk_light_cell_words.data[rec + kReflectDistance]);
 
     mat4 vp = VELK_GLOBALS.view_projection;
     float pixel_width = 2.0 / (length(vec3(vp[0][1], vp[1][1], vp[2][1])) * float(pc.height));
@@ -4296,25 +3578,25 @@ void main()
     cells_from_pixel = false;
     world_pos = pos + dir * t;
     N = velk_unoct8(packed);
-    object = velk_light_cell_words.data[rec + 4u];
+    object = velk_light_cell_words.data[rec + kReflectCell];
     side = packed >> 16u;
     coord = ivec2(0);
-    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[rec + 5u]),
-                      uintBitsToFloat(velk_light_cell_words.data[rec + 6u]),
-                      uintBitsToFloat(velk_light_cell_words.data[rec + 7u]));
+    vec3 local = vec3(uintBitsToFloat(velk_light_cell_words.data[rec + kReflectLocal]),
+                      uintBitsToFloat(velk_light_cell_words.data[rec + kReflectLocal + 1u]),
+                      uintBitsToFloat(velk_light_cell_words.data[rec + kReflectLocal + 2u]));
     // An object no wider than the cell: the world cell there, if pixels keep it up, gives its
     // light. Nothing is made, listed or added to for it.
     if (velk_cell_in_world(velk_object_radius(CELLS_OBJECTS, CELLS_OBJECT_SLOTS, object), level)) {
         uint seen = velk_cell_traced(velk_light_cell(kWorldCellObject, world_pos + VELK_GLOBALS.cam_pos.xyz,
                                                      velk_cell_side(N), level));
         velk_light_cell_words.data[rec] = seen != kNoCell ? seen : kBounceHitNoCell;
-        velk_light_cell_words.data[rec + 4u] = kNoCell;
+        velk_light_cell_words.data[rec + kReflectCell] = kNoCell;
         return;
     }
     uint kept = velk_cell_keep(velk_light_cell(object, local, side, level), 0);
     velk_light_cell_words.data[rec] = kept != kNoCell ? kept : kBounceHitNoCell;
     uint over = velk_cell_keep(velk_light_cell(object, local, side, level + kBounceUp), kBounceUp);
-    velk_light_cell_words.data[rec + 4u] = over;
+    velk_light_cell_words.data[rec + kReflectCell] = over;
     // Many of the cells reflections hit are seen by no pixel directly, so the light arriving
     // at them comes from here: each ray adds a sample where it hit.
     if (kept != kNoCell) velk_cell_arrive(kept, world_pos, N);
@@ -4665,9 +3947,12 @@ void main()
     uint at = bounce_words.data[list + 4u + n * 2u];
     if (bounce_words.data[at + 2u] != kBounceTraced) return;
     // See velk_bounce_scratch.
-    uint scratch = list + 4u + most * 2u + (n * kBounceRays + lane) * 8u;
-    uint shape_index = bounce_words.data[scratch];
-    if (shape_index == 0xFFFFFFFFu) return;
+    uint scratch = list + 4u + most * 2u + (n * kBounceRays + lane) * kBounceScratchWords;
+    uint h = scratch + kBounceScratchHit;
+    if (bounce_words.data[h] == 0xFFFFFFFFu) return;
+    RayHit hit = velk_hit_from_words(uvec4(bounce_words.data[h], bounce_words.data[h + 1u], bounce_words.data[h + 2u],
+                                           bounce_words.data[h + 3u]),
+                                     uvec3(bounce_words.data[h + 4u], bounce_words.data[h + 5u], bounce_words.data[h + 6u]));
     uint ray_at = at + kBounceHeader + lane * kBounceRayWords;
 
     vec3 middle = vec3(uintBitsToFloat(bounce_words.data[at + 10u]), uintBitsToFloat(bounce_words.data[at + 11u]),
@@ -4677,20 +3962,9 @@ void main()
     uint packed = bounce_words.data[ray_at + 1u];
     float t = unpackHalf2x16(packed).x;
 
-    RtShape s = velk_bvh_shapes.data[shape_index];
-    EvalContext ectx;
-    ectx.material_base = s.material_base;
-    ectx.texture_id = s.texture_id;
-    ectx.shape_param = s.shape_param;
-    ectx.uv = unpackHalf2x16(bounce_words.data[scratch + 1u]);
-    ectx.uv1 = ectx.uv;
-    ectx.base = s.color;
-    ectx.ray_dir = dir;
-    ectx.normal = velk_unoct8(packed >> 16u);
-    ectx.rel_pos = middle + dir * t;
-    ectx.hit_pos = ectx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-    ectx.tangent = vec4(0.0);
-    MaterialEval e = velk_eval_material(s.material_id, ectx);
+    uint material;
+    EvalContext ectx = velk_hit_context(hit, dir, middle + dir * t, velk_unoct8(packed >> 16u), material);
+    MaterialEval e = velk_eval_material(material, ectx);
     bool lit = e.lighting_mode == VELK_LIGHTING_STANDARD;
     vec3 albedo = lit ? e.color.rgb * (1.0 - clamp(e.metallic, 0.0, 1.0)) : vec3(0.0);
     vec3 emission = e.emissive + (lit ? vec3(0.0) : e.color.rgb);
@@ -4734,22 +4008,15 @@ void main()
     vec3 n = normalize(texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], at_pixel, 0).xyz);
     vec3 dir = reflect(normalize(pos), n);
     uint packed = reflect_words.data[rec + 1u];
-    float t = uintBitsToFloat(reflect_words.data[rec + 8u]);
+    float t = uintBitsToFloat(reflect_words.data[rec + kReflectDistance]);
 
-    RtShape s = velk_bvh_shapes.data[reflect_words.data[rec + 2u]];
-    EvalContext ectx;
-    ectx.material_base = s.material_base;
-    ectx.texture_id = s.texture_id;
-    ectx.shape_param = s.shape_param;
-    ectx.uv = unpackHalf2x16(reflect_words.data[rec + 3u]);
-    ectx.uv1 = ectx.uv;
-    ectx.base = s.color;
-    ectx.ray_dir = dir;
-    ectx.normal = velk_unoct8(packed);
-    ectx.rel_pos = pos + dir * t;
-    ectx.hit_pos = ectx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-    ectx.tangent = vec4(0.0);
-    MaterialEval e = velk_eval_material(s.material_id, ectx);
+    uint h = rec + kReflectHit;
+    RayHit found = velk_hit_from_words(uvec4(reflect_words.data[h], reflect_words.data[h + 1u], reflect_words.data[h + 2u],
+                                             reflect_words.data[h + 3u]),
+                                       uvec3(reflect_words.data[h + 4u], reflect_words.data[h + 5u], reflect_words.data[h + 6u]));
+    uint material;
+    EvalContext ectx = velk_hit_context(found, dir, pos + dir * t, velk_unoct8(packed), material);
+    MaterialEval e = velk_eval_material(material, ectx);
     bool lit = e.lighting_mode == VELK_LIGHTING_STANDARD;
     float metallic = clamp(e.metallic, 0.0, 1.0);
     vec3 albedo = lit ? e.color.rgb * (1.0 - metallic) : vec3(0.0);
@@ -4765,8 +4032,8 @@ void main()
         vec3 F = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
         emission += F * velk_reflect_env(reflect(dir, ectx.normal), roughness);
     }
-    reflect_words.data[rec + 5u] = packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), 1.0));
-    reflect_words.data[rec + 6u] = velk_pack_rgbe(emission);
+    reflect_words.data[rec + kReflectLocal] = packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), 1.0));
+    reflect_words.data[rec + kReflectLocal + 1u] = velk_pack_rgbe(emission);
 }
 )";
 
@@ -5153,7 +4420,7 @@ vec4 velk_cells_reflection(ivec2 pixel, uint width)
     // Light from other surfaces and the sky, from the bounce cell over the hit, or, where it
     // has none, the environment along the hit's normal, as the lighting takes for a pixel.
     vec3 hit_n = velk_unoct8(velk_light_cell_words.data[rec + 1u]);
-    uint over = velk_light_cell_words.data[rec + 4u];
+    uint over = velk_light_cell_words.data[rec + kReflectCell];
     uint entry = over != kNoCell ? velk_bounce_lookup(over) : kNoCell;
     if (entry != kNoCell && velk_light_cell_words.data[entry + 2u] == kBounceTraced) {
         arriving += velk_bounce_irradiance(entry, hit_n);
@@ -5161,8 +4428,8 @@ vec4 velk_cells_reflection(ivec2 pixel, uint width)
         float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
         arriving += env_miss_color_lod(hit_n, env_max_lod);
     }
-    vec3 albedo = unpackUnorm4x8(velk_light_cell_words.data[rec + 5u]).rgb;
-    return vec4(albedo * arriving + velk_unpack_rgbe(velk_light_cell_words.data[rec + 6u]), 1.0);
+    vec3 albedo = unpackUnorm4x8(velk_light_cell_words.data[rec + kReflectLocal]).rgb;
+    return vec4(albedo * arriving + velk_unpack_rgbe(velk_light_cell_words.data[rec + kReflectLocal + 1u]), 1.0);
 }
 )";
 
@@ -5376,14 +4643,9 @@ layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF1
 // Float storage, for targets carrying HDR rather than display values.
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
 
-// Scene TLAS bound by index (set = 1); same buffers as the deferred
-// pass. Replaces the RtRoot BDA fields bvh_nodes / bvh_shapes for the
-// array reads (bvh_root / bvh_node_count scalars still come from RtRoot).
-layout(set = 1, binding = 0, std430) readonly buffer VelkBvhNodes { BvhNode data[]; } velk_bvh_nodes;
-layout(set = 1, binding = 1, std430) readonly buffer VelkBvhShapes { RtShape data[]; } velk_bvh_shapes;
-// The rest of the per-view frame state (inv-VP, cam, bvh root and count,
-// present_counter) comes from the bound FrameGlobals record, indexed by
-// pc.globals_base. See VELK_GLOBALS below.
+// The per-view frame state (inv-VP, cam, the view's top tree for rays, present_counter)
+// comes from the bound FrameGlobals record, indexed by pc.globals_base. See VELK_GLOBALS
+// below.
 
 // Scene light. Mirrors the C++ GpuLight struct (80 bytes).
 struct Light {
@@ -5398,22 +4660,10 @@ struct Light {
 // pc.lights_base. Same buffer the deferred-lighting compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
-// Primary-ray painter-sorted RtShape list bound by index (set = 1 slot 6);
-// this view's run starts at pc.shapes_base. Separate from velk_bvh_shapes
-// (slot 1): the BVH holds build-order shapes for bounce/shadow traversal,
-// this holds the back-to-front sort the primary loop composites.
-layout(set = 1, binding = 6, std430) readonly buffer VelkShapes { RtShape data[]; } velk_shapes;
-
-// Records placing shapes in the world (set = 1 slot 10). Same buffer the
-// deferred pass reads.
-layout(set = 1, binding = 10, std430) readonly buffer VelkRecords { RtRecord data[]; } velk_records;
-
-// Per-primitive RT geometry metadata (set = 1 slot 11), read via
-// velk_mesh_static(shape). A primitive's record is allocated once at load and
-// never moves.
+// Per-primitive ray geometry (set = 1 slot 11), plus the trees it points at (slots 12 / 13),
+// the same buffers the deferred prelude reads. A primitive's runs are allocated once at load
+// and never move.
 layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-// Per-mesh BLAS, same buffers the deferred prelude reads.
-layout(set = 1, binding = 12, std430) readonly buffer VelkBlasNodes { BvhNode data[]; } velk_blas_nodes;
 layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
@@ -5447,12 +4697,12 @@ layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint da
 // globals_base rotates with the globals ring but the cached pass re-records
 // on view change, and static globals match across ring slots.
 layout(push_constant, scalar) uniform PC {
-    uint shapes_base;           // index into velk_shapes (set = 1 slot 6)
+    uint shapes_base;           // the main's own: the reference path's restart, unused otherwise
     uint globals_base;          // FrameGlobals index (set = 1 slot 2)
     uint light_count;
     uint lights_base;           // index into velk_lights (set = 1 slot 5)
     vec2 env_params;            // x = intensity, y = rotation_rad (inline)
-    uvec4 extras;               // x=image_index, y=width, z=height, w=shape_count
+    uvec4 extras;               // the main's own: for the RT path x=image_index, y=width, z=height
     uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
 } pc;
 // This view's FrameGlobals, read by index from the bound globals buffer
@@ -5712,22 +4962,9 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             acc += throughput * env_miss_color(ray.dir);
             return acc;
         }
-        RtShape s = velk_bvh_shapes.data[hit.shape_index];
-        EvalContext ctx;
-        ctx.material_base = s.material_base;
-        ctx.texture_id = s.texture_id;
-        ctx.shape_param = s.shape_param;
-        ctx.uv = hit.uv;
-        // Analytic RT shapes have one UV set by construction; triangle-mesh RT
-        // (and its second UV stream) lands with the broader BLAS refactor.
-        ctx.uv1 = hit.uv;
-        ctx.base = s.color;
-        ctx.ray_dir = ray.dir;
-        ctx.normal = hit.normal;
-        ctx.rel_pos = ray.origin + hit.t * ray.dir;
-        ctx.hit_pos = ctx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-        ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
-        BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
+        uint material;
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
+        BrdfSample bs = velk_resolve_fill(material, ctx);
 
         float a = clamp(bs.emission.a, 0.0, 1.0);
         acc += throughput * bs.emission.rgb * a;
@@ -5749,19 +4986,61 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
     return acc;
 }
 
+// What a primary ray sees: the nearest surface lit, and through a translucent one what is
+// behind it, blended by its alpha.
+vec3 trace_primary(Ray ray)
+{
+    const int kMaxLayers = 8;
+    vec3 accum = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    for (int layer = 0; layer < kMaxLayers; ++layer) {
+        RayHit hit;
+        if (!trace_closest_hit(ray, hit)) {
+            return accum + throughput * env_miss_color(ray.dir);
+        }
+        uint material;
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
+        BrdfSample bs = velk_resolve_fill(material, ctx);
+
+        vec3 rgb = bs.emission.rgb;
+        if (!bs.terminate) {
+            // Per-hit sample count: material's preferred count (scales with roughness / lobe
+            // width), clamped by the tracer's global cap. Mirror surfaces collapse to 1; rough
+            // surfaces spend the budget to flatten GGX noise.
+            const uint kSppCap = 12u;
+            uint spp = clamp(bs.sample_count_hint, 1u, kSppCap);
+            vec3 bounce = vec3(0.0);
+            Ray refl;
+            refl.origin = ctx.rel_pos + hit.normal * 1e-3;
+            refl.dir = bs.next_dir;
+            bounce += trace_bounce(refl, bs.throughput);
+            for (uint sp = 1u; sp < spp; ++sp) {
+                BrdfSample bs2 = velk_resolve_fill(material, ctx);
+                refl.dir = bs2.next_dir;
+                bounce += trace_bounce(refl, bs2.throughput);
+            }
+            rgb += bounce * (1.0 / float(spp));
+        }
+        float a = clamp(bs.emission.a, 0.0, 1.0);
+        accum += throughput * rgb * a;
+        if (a >= 0.999) return accum;
+        throughput *= 1.0 - a;
+        ray.origin = ctx.rel_pos + ray.dir * 1e-3;
+    }
+    return accum;
+}
+
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     uint w = pc.extras.y;
     uint h = pc.extras.z;
-    uint shape_count = pc.extras.w;
     if (coord.x >= int(w) || coord.y >= int(h)) return;
 
     rng_init(uvec2(coord), VELK_GLOBALS.present_counter);
 
     // Per-pixel primary sample count. Each sample fires one jittered
-    // primary ray through the painter-sorted loop; the results are
-    // averaged. Reduces edge-aliasing on shape boundaries and damps
+    // primary ray; the results are averaged. Reduces edge-aliasing on shape boundaries and damps
     // bounce noise from rough specular hits. Cost scales linearly
     // with kPrimarySamples; 1 = no AA (raw stochastic output),
     // 4 = typical quality / cost balance.
@@ -5784,74 +5063,7 @@ void main()
         Ray primary;
         primary.origin = near_w;
         primary.dir = normalize(far_w - near_w);
-
-        // Painter-sorted back-to-front iteration over the primary
-        // buffer. Co-planar UI shapes (cards, text, overlays stacked
-        // at z=0) need this to composite in authored layer order;
-        // closest-hit BVH would advance past a whole plane after the
-        // first hit and drop every other shape sharing that t. BVH
-        // is used for bounces + shadows where closest-hit is the
-        // right semantics.
-        //
-        // Future: a proper front-to-back BVH walk for primary is
-        // possible once each BVH node can be flagged "coplanar group"
-        // at build time (all its shapes share a plane within
-        // tolerance) - the walker would iterate the group's shapes
-        // painter-style instead of doing closest-hit inside it, and
-        // fall back to closest-hit between groups. Parked while
-        // primary cost is still O(shapes) * cheap-intersect; revisit
-        // if profiling shows the primary pass is hot.
-        vec3 accum = env_miss_color(primary.dir);
-        velk_ray_frame = VELK_GLOBALS.cam_pos.xyz;
-
-        for (uint i = 0u; i < shape_count; ++i) {
-            RtShape s = velk_shapes.data[pc.shapes_base + i];
-            RayHit hit;
-            if (!trace_shape(primary, s.primary_record, s, hit)) continue;
-
-            EvalContext ctx;
-            ctx.material_base = s.material_base;
-            ctx.texture_id = s.texture_id;
-            ctx.shape_param = s.shape_param;
-            ctx.uv = hit.uv;
-            // Analytic RT shapes have one UV set by construction; triangle-mesh RT
-            // (and its second UV stream) lands with the broader BLAS refactor.
-            ctx.uv1 = hit.uv;
-            ctx.base = s.color;
-            ctx.ray_dir = primary.dir;
-            ctx.normal = hit.normal;
-            ctx.rel_pos = primary.origin + hit.t * primary.dir;
-            ctx.hit_pos = ctx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-            ctx.tangent = vec4(0.0); // RT has no tangent basis (no normal mapping)
-            BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
-
-            vec3 shape_rgb = bs.emission.rgb;
-            if (!bs.terminate) {
-                // Per-hit sample count: material's preferred count
-                // (scales with roughness / lobe width), clamped by
-                // the tracer's global cap. Mirror surfaces collapse
-                // to 1; rough surfaces spend the budget to flatten
-                // GGX noise.
-                const uint kSppCap = 12u;
-                uint spp = clamp(bs.sample_count_hint, 1u, kSppCap);
-                vec3 bounce = vec3(0.0);
-                Ray refl;
-                refl.origin = ctx.rel_pos +hit.normal * 1e-3;
-                refl.dir = bs.next_dir;
-                bounce += trace_bounce(refl, bs.throughput);
-                for (uint sp = 1u; sp < spp; ++sp) {
-                    BrdfSample bs2 = velk_resolve_fill(s.material_id, ctx);
-                    refl.origin = ctx.rel_pos +hit.normal * 1e-3;
-                    refl.dir = bs2.next_dir;
-                    bounce += trace_bounce(refl, bs2.throughput);
-                }
-                shape_rgb += bounce * (1.0 / float(spp));
-            }
-            float a = clamp(bs.emission.a, 0.0, 1.0);
-            accum = shape_rgb * a + accum * (1.0 - a);
-        }
-
-        final += accum;
+        final += trace_primary(primary);
     }
 
     imageStore(gStorageImages[nonuniformEXT(pc.extras.x)], coord,
@@ -5934,23 +5146,12 @@ vec3 reference_path(Ray ray, out vec3 first)
             if (bounce == 0u) first = total;
             break;
         }
-        RtShape s = velk_bvh_shapes.data[hit.shape_index];
-        EvalContext ctx;
-        ctx.material_base = s.material_base;
-        ctx.texture_id = s.texture_id;
-        ctx.shape_param = s.shape_param;
-        ctx.uv = hit.uv;
-        ctx.uv1 = hit.uv;
-        ctx.base = s.color;
-        ctx.ray_dir = ray.dir;
-        ctx.normal = hit.normal;
-        ctx.rel_pos = ray.origin + hit.t * ray.dir;
-        ctx.hit_pos = ctx.rel_pos + VELK_GLOBALS.cam_pos.xyz;
-        ctx.tangent = vec4(0.0);
+        uint material;
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
 
         reference_pick_light(ctx.rel_pos, hit.normal);
         velk_hit_diffuse = vec3(0.0);
-        BrdfSample bs = velk_resolve_fill(s.material_id, ctx);
+        BrdfSample bs = velk_resolve_fill(material, ctx);
 
         // Partly transparent: either the ray goes straight through, or the surface counts in full.
         if (rng_next_float() >= clamp(bs.emission.a, 0.0, 1.0)) {
@@ -6232,6 +5433,45 @@ EvalContext velk_surface_context(VelkDrawData d, GlobalData g, VelkSurfaceVertex
     ctx.hit_pos = rel + g.cam_pos.xyz;
     ctx.rel_pos = rel;
     ctx.tangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
+    return ctx;
+}
+
+// What the material of what a ray hit is given, as a pixel's is: from the hit's draw,
+// instance, cluster and corners (RayHit, velk_hit_from_words), with the ray's direction,
+// where it hit from the camera, and the surface's normal there for an analytic shape.
+// `material` is the id velk_eval_material takes, 0 when the hit names no draw.
+EvalContext velk_hit_context(RayHit hit, vec3 ray_dir, vec3 rel, vec3 normal, out uint material)
+{
+    EvalContext ctx;
+    ctx.material_base = 0u;
+    ctx.texture_id = 0u;
+    ctx.shape_param = 0u;
+    ctx.uv = hit.uv;
+    ctx.uv1 = hit.uv;
+    ctx.base = vec4(1.0);
+    ctx.normal = normal;
+    ctx.tangent = vec4(0.0);
+    material = 0u;
+    if (hit.draw != 0xFFFFFFFFu && hit.instance != 0xFFFFFFFFu) {
+        VelkDrawData d = velk_draw_data.data[hit.draw];
+        ElementInstance inst = velk_instances.data[hit.instance];
+        material = d.material_id;
+        if (hit.corners.x == VELK_NO_CORNERS) {
+            ctx.material_base = d.material_words;
+            ctx.texture_id = d.texture_id;
+            ctx.shape_param = inst.params.x;
+            ctx.base = inst.color;
+        } else {
+            GlobalData g = VELK_GLOBALS;
+            VelkSurfaceVertex v0 = velk_surface_vertex(d, hit.cluster, inst, g, hit.corners.x);
+            VelkSurfaceVertex v1 = velk_surface_vertex(d, hit.cluster, inst, g, hit.corners.y);
+            VelkSurfaceVertex v2 = velk_surface_vertex(d, hit.cluster, inst, g, hit.corners.z);
+            ctx = velk_surface_context(d, g, v0, v1, v2, vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights), rel);
+        }
+    }
+    ctx.ray_dir = ray_dir;
+    ctx.rel_pos = rel;
+    ctx.hit_pos = rel + VELK_GLOBALS.cam_pos.xyz;
     return ctx;
 }
 )";

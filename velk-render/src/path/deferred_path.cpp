@@ -216,9 +216,6 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
                                                     uint64_t variant_tag,
                                                     bool with_area_lights = false,
-                                                    bool with_medium = false,
-                                                    string_view ray_motion = {},
-                                                    float ray_motion_reach = 0.f,
                                                     uint32_t cells = 0)
 {
     // `cells`, what of the light cells' code a shader is built with: 1 what reads them; 2 what
@@ -247,11 +244,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     // Distinct variants: the two differ in source, so they must not share a
     // cache entry.
     key = (key ^ (with_area_lights ? 0x41726561ULL : 0x4e6f6e65ULL)) * kFnvPrime;
-    key = (key ^ (with_medium ? 0x4d656469ULL : 0x4e6f6e65ULL)) * kFnvPrime;
     key = (key ^ (0x43656c6cULL + cells)) * kFnvPrime;
-    for (char c : ray_motion) {
-        key = (key ^ static_cast<uint8_t>(c)) * kFnvPrime;
-    }
     key |= 0x4000000000000000ULL;
 
     // The weak pipeline cache is the source of truth: if the pipeline for
@@ -335,23 +328,14 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
     append_literal("    }\n");
     append_literal("}\n");
 
-    if (!ray_motion.empty()) {
-        src = velk_with_ray_motion(string_view(src), ray_motion, ray_motion_reach);
-    }
-    if (with_medium) {
-        const string with_define = velk_with_trace_medium(string_view(src));
-        return ctx.render_ctx->pipelines().compile_compute(string_view(with_define), key);
-    }
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
 } // namespace
 
-IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool with_medium,
-                                                string_view ray_motion, float ray_motion_reach)
+IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights)
 {
-    return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull,
-                                             with_area_lights, with_medium, ray_motion, ray_motion_reach, 1u);
+    return compose_deferred_compute_pipeline(ctx, deferred_lighting_main_src, 0ull, with_area_lights, 1u);
 }
 
 namespace {
@@ -376,7 +360,7 @@ constexpr uint32_t kCellClasses = 32;
 constexpr uint32_t kCellCandidateHeader = 4 + kCellClasses;
 constexpr uint32_t kCellCandidateWords = 10;
 // The words of each pixel's reflection ray. See kReflectWords.
-constexpr uint32_t kReflectWords = 9;
+constexpr uint32_t kReflectWords = 14;
 // The bounce cells' table: its entries, a power of two, and the words of each. See
 // VELK_BOUNCE_GLSL.
 constexpr uint32_t kBounceEntries = 1u << 15;
@@ -386,7 +370,7 @@ constexpr uint32_t kBounceWords = 16 + kBounceRays * 5;
 // again, two spare, 2 words an entry, 8 words a ray of each, then 2 words each of those asking
 // again. See CELLS_BOUNCE_LIST.
 constexpr uint32_t kBounceListMax = 256;
-constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 8 + kBounceListMax * 2;
+constexpr uint32_t kBounceListWords = 4 + kBounceListMax * 2 + kBounceListMax * kBounceRays * 12 + kBounceListMax * 2;
 // What can be listed for tracing in a frame at most, one light for one cell an entry, the
 // words of each, and the header's words before them, counters for the log among them. See
 // CELLS_WORK in light_cells_src.
@@ -1816,16 +1800,12 @@ void DeferredPath::emit_light_cells_update_pass(ViewState& vs, const RenderView&
 {
     if (!vs.gbuffer || !vs.light_cell_header.valid()) return;
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false, has_medium,
-                                                      render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 2u);
-    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false, has_medium,
-                                                            render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 3u);
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_update_main_src, 0x4c43'5550'4454ULL, false, 2u);
+    auto trace_pipeline = compose_deferred_compute_pipeline(ctx, light_cells_trace_main_src, 0x4c43'5452'4143ULL, false, 3u);
     // The bounce cells' passes, each built with only what it needs: the trace with the walk and
     // nothing else, the passes that find and keep cells without it.
     const auto bounce_pipeline = [&](string_view main_src, uint64_t tag, uint32_t cells) {
-        return compose_deferred_compute_pipeline(ctx, main_src, tag, false, has_medium, render_view.bvh.ray_motion,
-                                                 render_view.bvh.ray_motion_reach, cells);
+        return compose_deferred_compute_pipeline(ctx, main_src, tag, false, cells);
     };
     auto bounce_trace_pipeline = bounce_pipeline(light_cells_bounce_trace_main_src, 0x4c43'4254'5243ULL, 3u);
     auto hits_pipeline = bounce_pipeline(light_cells_bounce_hits_main_src, 0x4c43'4248'4954ULL, 2u);
@@ -2095,9 +2075,7 @@ void DeferredPath::emit_light_cells_pass(ViewState& vs, const RenderView& render
 {
     if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_main_src, 0x4c43'454c'4c53ULL, false, has_medium,
-                                                      render_view.bvh.ray_motion, render_view.bvh.ray_motion_reach, 1u);
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_cells_main_src, 0x4c43'454c'4c53ULL, false, 1u);
     if (!pipeline) return;
 
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
@@ -2236,14 +2214,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.lighting_dirty = true;
     }
 
-    const bool has_medium = render_view.bvh.has_medium != 0u;
-    if (has_medium != vs.had_medium) {
-        vs.had_medium = has_medium;
-        vs.lighting_dirty = true;
-    }
-
-    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light, has_medium, render_view.bvh.ray_motion,
-                                             render_view.bvh.ray_motion_reach);
+    auto lighting_pipeline = ensure_pipeline(ctx, has_area_light);
     if (!lighting_pipeline) return;
 
     auto albedo_id   = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Albedo));

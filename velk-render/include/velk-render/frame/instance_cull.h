@@ -43,6 +43,8 @@ inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
 inline constexpr uint32_t kPlainItemWords = 6;
 /// A plain item's shape kind for a mesh. Mirrors RtShape's 255.
 inline constexpr uint32_t kRayShapeMesh = 255;
+/// A plain item's shape kind for a rect over its instance's extent. Mirrors RtShape's 0.
+inline constexpr uint32_t kRayShapeRect = 0;
 /// How far the camera may get from where a partition's levels of detail were chosen before
 /// they are chosen again, as a share of its distance from the partition.
 inline constexpr float kCutRefresh = 1.f / 16.f;
@@ -982,7 +984,8 @@ void main()
 /// A view's top tree for rays, over the partitions of all its kept cuts, in the culling arena:
 /// kRayTopHeaderWords (how many cuts, leaves and nodes, and the root node's index), then a
 /// cut each, kRayTopCutWords (its word, its instances_base, its plain items' word or
-/// kCullNoSlot, its partition count, its first leaf), then a leaf each, two words (the cut's
+/// kCullNoSlot, its partition count, its first leaf, 1 if a motion function moves its
+/// instances), then a leaf each, two words (the cut's
 /// index, the partition's), then the nodes, kCutNodeWords each as a partition's are, but a
 /// reference with kCutLeaf names a leaf, and without a node of this tree by its index.
 inline constexpr uint32_t kRayTopHeaderWords = 4;
@@ -2274,6 +2277,15 @@ struct InstanceCullPass
     uint32_t together_entries = 0;
     uint32_t together_chosen = 0;  ///< How many records fit.
     uint32_t together_object_slots = 0;  ///< Object slots the first items are by.
+    /// Items whose mesh had no ray data yet when they were made (kPlainItemWords): asked again
+    /// each frame until it has.
+    struct PendingMesh
+    {
+        IMeshPrimitive::Ptr primitive;
+        uint32_t first_item = 0;
+        uint32_t count = 0;
+    };
+    vector<PendingMesh> pending_meshes;
     ArenaRegion retest;            ///< What failed the first occlusion test.
     uint32_t retest_capacity = 0;
     /// Where clusters with triangles too small on screen for the hardware go, set by the path
@@ -2459,6 +2471,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         state.dirty = false;
         record = true;
         state.count_words.clear();
+        state.pending_meshes.clear();
         vector<uint32_t> items;
         vector<uint32_t> item_objects;  ///< By item: its object id.
         vector<uint32_t> entries;
@@ -2474,14 +2487,23 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const uint32_t draw = batch.draw_data_region_size() != 0
                                       ? static_cast<uint32_t>(batch.draw_data_region_offset() / sizeof(DrawDataHeader))
                                       : kCullNoSlot;
-            uint32_t kind = kRayShapeMesh;
+            // A triangle mesh is tested as one; anything else as its instance's rect, unless its
+            // visual names an analytic shape of its own.
+            auto primitive_ptr = batch.primitive();
+            const bool triangles = primitive_ptr && primitive_ptr->get_topology() == MeshTopology::TriangleList
+                                && primitive_ptr->get_index_count() != 0;
+            uint32_t kind = triangles ? kRayShapeMesh : kRayShapeRect;
             if (auto* analytic = interface_cast<IAnalyticShape>(batch.shader_source().get())) {
                 const uint32_t registered = ctx.snippets ? ctx.snippets->register_intersect(analytic, *ctx.render_ctx) : 0u;
                 kind = registered != 0 ? registered : analytic->get_shape_kind();
             }
             uint32_t mesh = kInvalidMeshStaticBase;
-            if (auto* primitive = interface_cast<IMeshPrimitiveInternal>(batch.primitive().get())) {
+            if (auto* primitive = kind == kRayShapeMesh ? interface_cast<IMeshPrimitiveInternal>(primitive_ptr.get()) : nullptr) {
                 mesh = primitive->ensure_rt_data(*ctx.resources);
+                if (mesh == kInvalidMeshStaticBase && slot_count != 0) {
+                    state.pending_meshes.push_back(
+                        {primitive_ptr, static_cast<uint32_t>(items.size() / kPlainItemWords), slot_count});
+                }
             }
             for (uint32_t slot = 0; slot < slot_count; ++slot) {
                 items.push_back(instances_base + slot);
@@ -2566,6 +2588,26 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                                     * sizeof(uint32_t));
         if (!state.retest.valid()) {
             state.retest_capacity = 0;
+        }
+    }
+    // Meshes whose ray data has come since their items were made.
+    if (!state.pending_meshes.empty() && state.together.valid()) {
+        const uint64_t items_byte = state.together.offset()
+            + (uint64_t(kCullChosenHeaderWords) + uint64_t(state.together_chosen) * kCullChosenRecordWords
+               + state.together_entries) * sizeof(uint32_t);
+        for (size_t i = 0; i < state.pending_meshes.size();) {
+            const auto& pending = state.pending_meshes[i];
+            auto* primitive = interface_cast<IMeshPrimitiveInternal>(pending.primitive.get());
+            const uint32_t mesh = primitive ? primitive->ensure_rt_data(*ctx.resources) : kInvalidMeshStaticBase;
+            if (mesh == kInvalidMeshStaticBase && primitive) {
+                ++i;
+                continue;
+            }
+            for (uint32_t k = 0; k < pending.count; ++k) {
+                arena->update_at(items_byte + (uint64_t(pending.first_item + k) * kPlainItemWords + 5u) * sizeof(uint32_t),
+                                 &mesh, sizeof(mesh));
+            }
+            state.pending_meshes.erase(state.pending_meshes.begin() + static_cast<ptrdiff_t>(i));
         }
     }
     if (state.count_words.empty() && state.together_items == 0) {
@@ -2976,7 +3018,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint64_t layout = 0xcbf29ce484222325ULL;
             uint32_t leaves = 0;
             for (const CutJob& job : jobs) {
-                for (uint32_t v : {job.cut, job.instances_base, job.items_word, job.partition_count}) {
+                for (uint32_t v : {job.cut, job.instances_base, job.items_word, job.partition_count,
+                                   job.pad > 0.f ? 1u : 0u}) {
                     layout = (layout ^ v) * 0x100000001b3ULL;
                 }
                 leaves += job.partition_count;
@@ -3000,6 +3043,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                     cut[2] = job.items_word;
                     cut[3] = job.partition_count;
                     cut[4] = leaf;
+                    cut[5] = job.pad > 0.f ? 1u : 0u;
                     for (uint32_t p = 0; p < job.partition_count; ++p, ++leaf) {
                         uint32_t* at = words.data() + kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaf) * 2u;
                         at[0] = c;

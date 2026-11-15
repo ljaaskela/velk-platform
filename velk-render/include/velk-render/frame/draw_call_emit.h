@@ -23,6 +23,172 @@
 
 namespace velk {
 
+/// What write_draw_data found of a batch that a draw of it needs.
+struct WrittenDrawData
+{
+    IMeshPrimitive::Ptr primitive;
+    IGpuBuffer* index_buffer = nullptr;  ///< Null for a draw without indices.
+    size_t index_offset = 0;
+    InstanceCullInfo cull_info{};
+    uint32_t draw_base = 0;  ///< The record's index, which the draw and its pixels name.
+};
+
+/**
+ * @brief Writes @p batch's draw record (DrawDataHeader) in its region of the shared draw data
+ *        arena: where its instances, vertices, indices, texture and material are. What a pixel
+ *        or a ray that names the draw reads (VelkDrawData). Also tells a batch drawn by cluster
+ *        which record its clusters name (kClusterEntryDrawWord). Returns false for a batch with
+ *        nothing to draw yet.
+ */
+inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources, IBuffer* default_uv1,
+                            uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
+                            const FrameResolveContext* resolve_ctx, WrittenDrawData& out)
+{
+    // Instance data lives in the shared instance arena (set = 1 slot 3),
+    // suballocated per batch by the upload sweep. The header carries the
+    // element base (region offset / stride) the vertex shader adds to
+    // gl_InstanceIndex. Batches with no instance data (e.g. env) get 0.
+    uint32_t instances_base = 0;
+    if (batch.instance_stride() != 0 && batch.instance_region_size() != 0) {
+        instances_base = static_cast<uint32_t>(
+            batch.instance_region_offset() / batch.instance_stride());
+    }
+    uint32_t texture_id = 0;
+    if (batch.texture_key() != 0) {
+        auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
+        if (auto* gt = resources.find_texture(tex)) {
+            texture_id = get_texture_id(gt);
+        }
+        if (texture_id == 0) {
+            uint64_t rt_id = get_render_target_id(tex);
+            if (rt_id != 0) texture_id = static_cast<uint32_t>(rt_id);
+        }
+    }
+
+    out.primitive = batch.primitive();
+    IMeshPrimitive* primitive = out.primitive.get();
+    if (!primitive) return false;
+    auto buffer = primitive->get_buffer();
+    if (!buffer) return false;
+
+    // IBO half is optional: indexed draw when ibo_size > 0, plain
+    // vkCmdDraw when 0 (e.g. TriangleStrip unit quad). The indices live in
+    // the shared mesh-word arena, so the bound buffer is the arena's
+    // backing buffer and the offset is this mesh's region plus the IBO
+    // half's position within it. The arena handle is re-asked rather than
+    // cached because growth replaces the backing buffer.
+    uint32_t index_base = kNoVisibleList;
+    if (buffer->get_ibo_size() > 0) {
+        const GpuRef geometry = get_gpu_ref(buffer);
+        if (geometry.kind != GpuRef::Kind::Index) return false;
+        auto arena = resources.shared_arena(geometry.get_slot(), 4);
+        if (!arena) return false;
+        out.index_buffer = arena->buffer();
+        if (!out.index_buffer) return false;
+        out.index_offset = size_t(geometry.get_base()) * 4u + buffer->get_ibo_offset();
+        index_base = static_cast<uint32_t>(out.index_offset / 4u);
+    }
+
+    DrawDataHeader header{};
+    header.globals_base = view_globals_base;
+    header.instances_base = instances_base;
+    header.texture_id = texture_id;
+    InstanceCullInfo& cull_info = out.cull_info;
+    header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
+    header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
+    // A draw by cluster numbers triangles within its cluster, of up to 256.
+    const uint32_t triangles = cull_info.cluster_count != 0 ? 256u
+        : primitive->get_index_count() != 0                 ? primitive->get_index_count() / 3u
+                                                            : primitive->get_vertex_count();
+    while (header.triangle_bits < 31u && (uint64_t(1) << header.triangle_bits) < triangles) {
+        ++header.triangle_bits;
+    }
+    // A cluster's record says where its indices are in the arena, and its vertices and
+    // second uvs, which the ones below stand in for only when it is not drawn by cluster.
+    header.index_base = cull_info.cluster_count != 0 ? 0u : index_base;
+    header.cluster_base = cull_info.cluster_count != 0
+        ? cull_info.cluster_errors_word + cull_info.cluster_capacity
+        : kNoVisibleList;
+    // Vertex streams are word bases into the mesh-word arena, the same
+    // bytes and the same model RT reads.
+    const GpuRef vbo_ref = get_gpu_ref(buffer);
+    if (vbo_ref.kind != GpuRef::Kind::Index) return false;
+    header.vbo_base = vbo_ref.get_base();
+
+    if (auto uv1 = primitive->get_uv1_buffer()) {
+        const GpuRef uv1_ref = get_gpu_ref(uv1);
+        if (uv1_ref.kind != GpuRef::Kind::Index) return false;
+        header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
+        header.uv1_enabled = 1;
+    } else {
+        const GpuRef uv1_ref = get_gpu_ref(default_uv1);
+        if (uv1_ref.kind != GpuRef::Kind::Index) return false;
+        header.uv1_base = uv1_ref.get_base();
+        header.uv1_enabled = 0;
+    }
+
+    // Material draw-data lives in the shared material arena (set = 1 slot
+    // 4), suballocated + written by ViewPreparer's upload sweep. The header
+    // carries the element base (region offset / record size) the fragment
+    // shader adds to reach velk_materials.data[material_base]. Materials
+    // with no draw data (record size 0) get base 0.
+    auto material_ptr = batch.material();
+    if (snippets && resolve_ctx && material_ptr) {
+        const auto ref = snippets->resolve_material(material_ptr.get(), *resolve_ctx);
+        header.material_id = ref.mat_id;
+        header.material_words = ref.mat_base;
+    }
+    if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
+        if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
+            const size_t rec = dd->get_draw_data_size();
+            auto buf = mi->material_buffer();
+            if (rec != 0 && buf) {
+                header.material_base =
+                    static_cast<uint32_t>(get_gpu_ref(buf).get_base() / rec);
+            }
+        }
+    }
+
+    // The header goes to this batch's persistent region of the shared
+    // draw-data arena, allocated by the upload sweep. Persistent rather
+    // than per-frame because the base below is baked into the recorded
+    // draw call: a rotating region would go stale on any frame the command
+    // buffer is reused rather than re-recorded.
+    if (batch.draw_data_region_size() != sizeof(DrawDataHeader)) return false;
+    auto draw_arena = resources.shared_arena(IRenderBackend::kGlobalDrawData,
+                                             sizeof(DrawDataHeader));
+    if (!draw_arena) return false;
+    const uint64_t draw_data_offset = batch.draw_data_region_offset();
+    draw_arena->update_at(draw_data_offset, &header, sizeof(header));
+    const uint32_t draw_base =
+        static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
+    out.draw_base = draw_base;
+    if (cull_info.cluster_count != 0) {
+        if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+            culling->update_at(uint64_t(cull_info.cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
+                               &draw_base, sizeof(draw_base));
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Writes the draw record of each of @p batches (write_draw_data), for a path that
+ *        draws none of them but traces rays, which name draws. Each frame, as a path that
+ *        draws them writes them.
+ */
+inline void write_draw_data(const vector<IBatch::Ptr>& batches, IGpuResourceManager& resources, IBuffer* default_uv1,
+                            uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
+                            const FrameResolveContext* resolve_ctx)
+{
+    for (const auto& batch : batches) {
+        WrittenDrawData written;
+        if (batch) {
+            write_draw_data(*batch, resources, default_uv1, view_globals_base, snippets, resolve_ctx, written);
+        }
+    }
+}
+
 /**
  * @brief Iterates batches and emits a `DrawCall` per batch.
  *
@@ -103,132 +269,14 @@ inline void emit_draw_calls(
         // A resolved, still-live IGpuBuffer is exactly the residency question:
         // the manager only registers an entry once the allocation succeeded.
         const bool has_storage = (storage_gb != nullptr);
-        // Instance data lives in the shared instance arena (set = 1 slot 3),
-        // suballocated per batch by the upload sweep. The header carries the
-        // element base (region offset / stride) the vertex shader adds to
-        // gl_InstanceIndex. Batches with no instance data (e.g. env) get 0.
-        uint32_t instances_base = 0;
-        if (batch.instance_stride() != 0 && batch.instance_region_size() != 0) {
-            instances_base = static_cast<uint32_t>(
-                batch.instance_region_offset() / batch.instance_stride());
+        WrittenDrawData written;
+        if (!write_draw_data(batch, resources, default_uv1, view_globals_base, snippets, resolve_ctx, written)) {
+            continue;
         }
-        uint32_t texture_id = 0;
-        if (batch.texture_key() != 0) {
-            auto* tex = reinterpret_cast<ISurface*>(batch.texture_key());
-            if (auto* gt = resources.find_texture(tex)) {
-                texture_id = get_texture_id(gt);
-            }
-            if (texture_id == 0) {
-                uint64_t rt_id = get_render_target_id(tex);
-                if (rt_id != 0) texture_id = static_cast<uint32_t>(rt_id);
-            }
-        }
-
-        auto primitive_ptr = batch.primitive();
-        IMeshPrimitive* primitive = primitive_ptr.get();
-        if (!primitive) continue;
-        auto buffer = primitive->get_buffer();
-        if (!buffer) continue;
-
-        // IBO half is optional: indexed draw when ibo_size > 0, plain
-        // vkCmdDraw when 0 (e.g. TriangleStrip unit quad). The indices live in
-        // the shared mesh-word arena, so the bound buffer is the arena's
-        // backing buffer and the offset is this mesh's region plus the IBO
-        // half's position within it. The arena handle is re-asked rather than
-        // cached because growth replaces the backing buffer.
-        IGpuBuffer* ibo_gb = nullptr;
-        size_t ibo_offset = 0;
-        uint32_t index_base = kNoVisibleList;
-        if (buffer->get_ibo_size() > 0) {
-            const GpuRef geometry = get_gpu_ref(buffer);
-            if (geometry.kind != GpuRef::Kind::Index) continue;
-            auto arena = resources.shared_arena(geometry.get_slot(), 4);
-            if (!arena) continue;
-            ibo_gb = arena->buffer();
-            if (!ibo_gb) continue;
-            ibo_offset = size_t(geometry.get_base()) * 4u + buffer->get_ibo_offset();
-            index_base = static_cast<uint32_t>(ibo_offset / 4u);
-        }
-
-        DrawDataHeader header{};
-        header.globals_base = view_globals_base;
-        header.instances_base = instances_base;
-        header.texture_id = texture_id;
-        InstanceCullInfo cull_info{};
-        header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
-        header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
-        // A draw by cluster numbers triangles within its cluster, of up to 256.
-        const uint32_t triangles = cull_info.cluster_count != 0 ? 256u
-            : primitive->get_index_count() != 0                 ? primitive->get_index_count() / 3u
-                                                                : primitive->get_vertex_count();
-        while (header.triangle_bits < 31u && (uint64_t(1) << header.triangle_bits) < triangles) {
-            ++header.triangle_bits;
-        }
-        // A cluster's record says where its indices are in the arena, and its vertices and
-        // second uvs, which the ones below stand in for only when it is not drawn by cluster.
-        header.index_base = cull_info.cluster_count != 0 ? 0u : index_base;
-        header.cluster_base = cull_info.cluster_count != 0
-            ? cull_info.cluster_errors_word + cull_info.cluster_capacity
-            : kNoVisibleList;
-        // Vertex streams are word bases into the mesh-word arena, the same
-        // bytes and the same model RT reads.
-        const GpuRef vbo_ref = get_gpu_ref(buffer);
-        if (vbo_ref.kind != GpuRef::Kind::Index) continue;
-        header.vbo_base = vbo_ref.get_base();
-
-        if (auto uv1 = primitive->get_uv1_buffer()) {
-            const GpuRef uv1_ref = get_gpu_ref(uv1);
-            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
-            header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
-            header.uv1_enabled = 1;
-        } else {
-            const GpuRef uv1_ref = get_gpu_ref(default_uv1);
-            if (uv1_ref.kind != GpuRef::Kind::Index) continue;
-            header.uv1_base = uv1_ref.get_base();
-            header.uv1_enabled = 0;
-        }
-
-        // Material draw-data lives in the shared material arena (set = 1 slot
-        // 4), suballocated + written by ViewPreparer's upload sweep. The header
-        // carries the element base (region offset / record size) the fragment
-        // shader adds to reach velk_materials.data[material_base]. Materials
-        // with no draw data (record size 0) get base 0.
-        auto material_ptr = batch.material();
-        if (snippets && resolve_ctx && material_ptr) {
-            const auto ref = snippets->resolve_material(material_ptr.get(), *resolve_ctx);
-            header.material_id = ref.mat_id;
-            header.material_words = ref.mat_base;
-        }
-        if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
-            if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {
-                const size_t rec = dd->get_draw_data_size();
-                auto buf = mi->material_buffer();
-                if (rec != 0 && buf) {
-                    header.material_base =
-                        static_cast<uint32_t>(get_gpu_ref(buf).get_base() / rec);
-                }
-            }
-        }
-
-        // The header goes to this batch's persistent region of the shared
-        // draw-data arena, allocated by the upload sweep. Persistent rather
-        // than per-frame because the base below is baked into the recorded
-        // draw call: a rotating region would go stale on any frame the command
-        // buffer is reused rather than re-recorded.
-        if (batch.draw_data_region_size() != sizeof(DrawDataHeader)) continue;
-        auto draw_arena = resources.shared_arena(IRenderBackend::kGlobalDrawData,
-                                                 sizeof(DrawDataHeader));
-        if (!draw_arena) continue;
-        const uint64_t draw_data_offset = batch.draw_data_region_offset();
-        draw_arena->update_at(draw_data_offset, &header, sizeof(header));
-        const uint32_t draw_base =
-            static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
-        if (cull_info.cluster_count != 0) {
-            if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
-                culling->update_at(uint64_t(cull_info.cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
-                                   &draw_base, sizeof(draw_base));
-            }
-        }
+        IMeshPrimitive* primitive = written.primitive.get();
+        IGpuBuffer* ibo_gb = written.index_buffer;
+        const size_t ibo_offset = written.index_offset;
+        const InstanceCullInfo& cull_info = written.cull_info;
 
         // Always-indirect: pull args + count from the batch's own
         // storage buffer when available; fall back to writing a record
@@ -313,7 +361,7 @@ inline void emit_draw_calls(
         }
 
         call.root_constants_size = sizeof(uint32_t);
-        std::memcpy(call.root_constants, &draw_base, sizeof(uint32_t));
+        std::memcpy(call.root_constants, &written.draw_base, sizeof(uint32_t));
 
         out_calls.push_back(call);
     }
