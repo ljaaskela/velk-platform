@@ -2,13 +2,19 @@
 // lit picture: levels of detail clusters, their size on screen, and, in a second view from
 // above, everything the main camera chooses to draw.
 //
-// velk_ui_inspect
+// velk_ui_inspect [view=NAME] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
 //
 // The camera starts at a fixed view under free control: right drag turns, W, A, S and D move,
 // the wheel moves along the view. Keys:
 //   V  next debug view (lit, cluster, level, cluster size, instance, triangle size)
 //   P  scripted path on or off, the same motion every time
-//   C  logs the camera's place
+//   C  logs the camera's place, as at= takes it
+//
+// Arguments, so that a run can be repeated without the controls:
+//   view=NAME   starts in that debug view: lit, cluster, level, size, instance or triangles
+//   at=...      starts at that place instead of the fixed view
+//   path        starts on the scripted path; path=FRAME starts it at that frame of it
+// With VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE the window is saved and the app exits.
 //
 // Up is -y, as in the other samples.
 
@@ -41,6 +47,8 @@
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -273,26 +281,62 @@ velk::vec3 forward_of(float yaw_degrees, float pitch_degrees)
 struct NamedView
 {
     velk::DebugView view;
+    const char* key;     ///< As view= takes it.
     const char* name;
     const char* legend;  ///< What the colours mean.
 };
 
 constexpr NamedView kViews[] = {
-    {velk::DebugView::None, "lit", "the lit image"},
-    {velk::DebugView::Cluster, "cluster", "a colour per level of detail cluster of each instance; grey: not drawn by cluster"},
-    {velk::DebugView::Level, "level",
+    {velk::DebugView::None, "lit", "lit", "the lit image"},
+    {velk::DebugView::Cluster, "cluster", "cluster",
+     "a colour per level of detail cluster of each instance; grey: not drawn by cluster"},
+    {velk::DebugView::Level, "level", "level",
      "level of detail: red full detail, then orange, yellow, green, cyan, blue, purple, pink"},
-    {velk::DebugView::ClusterSize, "cluster size",
+    {velk::DebugView::ClusterSize, "size", "cluster size",
      "cluster width on the main camera's screen: blue <8 px, cyan <16, green <32, yellow <64, orange <128, red more"},
-    {velk::DebugView::Instance, "instance", "a colour per instance"},
-    {velk::DebugView::TriangleSize, "triangle size",
+    {velk::DebugView::Instance, "instance", "instance", "a colour per instance"},
+    {velk::DebugView::TriangleSize, "triangles", "triangle size",
      "triangle size on screen: magenta drawn in compute, red <0.5 px, yellow <1, green <2, cyan <8, blue more"},
 };
+constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
 } // namespace
 
-int main(int /*argc*/, char* /*argv*/[])
+int main(int argc, char* argv[])
 {
+    size_t start_view = 0;
+    bool has_place = false;
+    float place[5] = {};
+    bool start_scripted = false;
+    long start_frame = 0;
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (std::strncmp(arg, "view=", 5) == 0) {
+            bool known = false;
+            for (size_t v = 0; v < kViewCount; ++v) {
+                if (std::strcmp(arg + 5, kViews[v].key) == 0) {
+                    start_view = v;
+                    known = true;
+                }
+            }
+            if (!known) {
+                VELK_LOG(E, "inspect: unknown view '%s'", arg + 5);
+            }
+        } else if (std::strncmp(arg, "at=", 3) == 0) {
+            has_place = std::sscanf(arg + 3, "%f,%f,%f,%f,%f", &place[0], &place[1], &place[2], &place[3], &place[4]) == 5;
+            if (!has_place) {
+                VELK_LOG(E, "inspect: at= takes X,Y,Z,YAW,PITCH");
+            }
+        } else if (std::strcmp(arg, "path") == 0) {
+            start_scripted = true;
+        } else if (std::strncmp(arg, "path=", 5) == 0) {
+            start_scripted = true;
+            start_frame = std::atol(arg + 5);
+        } else {
+            VELK_LOG(E, "inspect: unknown argument '%s'", arg);
+        }
+    }
+
     velk::ApplicationConfig config;
     velk::WindowConfig wc;
     wc.width = 1280;
@@ -329,9 +373,9 @@ int main(int /*argc*/, char* /*argv*/[])
     const velk::vec3 start_at{0.f, -60.f, 300.f};
     constexpr float kStartYaw = 0.f;
     constexpr float kStartPitch = -8.f;
-    main_camera.focus.set_translate(start_at);
-    main_camera.orbit.set_yaw(kStartYaw);
-    main_camera.orbit.set_pitch(kStartPitch);
+    main_camera.focus.set_translate(has_place ? velk::vec3{place[0], place[1], place[2]} : start_at);
+    main_camera.orbit.set_yaw(has_place ? place[3] : kStartYaw);
+    main_camera.orbit.set_pitch(has_place ? place[4] : kStartPitch);
     overview.orbit.set_pitch(-89.f);
 
     // Sun, fixed.
@@ -421,7 +465,7 @@ int main(int /*argc*/, char* /*argv*/[])
     app.add_view(window, overlay_camera);
 
     size_t view_index = 0;
-    bool scripted = false;
+    bool scripted = start_scripted;
     bool text_stale = true;
     velk::vec3 shown_at{};
     float shown_yaw = 0.f;
@@ -441,14 +485,14 @@ int main(int /*argc*/, char* /*argv*/[])
         shown_pitch = pitch;
     };
     const auto show_view = [&](size_t index) {
-        view_index = index % (sizeof(kViews) / sizeof(kViews[0]));
+        view_index = index % kViewCount;
         text_stale = true;
         main_camera.camera.set_debug_view(kViews[view_index].view);
         overview.camera.set_debug_view(kViews[view_index].view);
         VELK_LOG(I, "inspect: view %s", kViews[view_index].name);
     };
 
-    long scripted_frame = 0;
+    long scripted_frame = start_frame;
     bool turning = false;
     float last_x = 0.f;
     float last_y = 0.f;
@@ -514,13 +558,13 @@ int main(int /*argc*/, char* /*argv*/[])
         } else if (e.key == 67) {  // C
             auto [orbit_state, focus_state] = camera_state();
             if (orbit_state && focus_state) {
-                VELK_LOG(I, "inspect: at %.1f,%.1f,%.1f yaw %.1f pitch %.1f", focus_state->translate.x, focus_state->translate.y,
+                VELK_LOG(I, "inspect: at=%.1f,%.1f,%.1f,%.1f,%.1f", focus_state->translate.x, focus_state->translate.y,
                          focus_state->translate.z, orbit_state->yaw, orbit_state->pitch);
             }
         }
     });
 
-    show_view(0);
+    show_view(start_view);
     while (app.poll()) {
         if (scripted) {
             // Out along the view and back, rising and falling, the same every time.
