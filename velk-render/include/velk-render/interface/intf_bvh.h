@@ -98,6 +98,20 @@ public:
     virtual uint32_t get_object_transforms(uint32_t& slots) const = 0;
 
     /**
+     * @brief Its plain objects' partitions, for culling: everything it holds that is not an
+     *        instance of an instanced visual, in spatial groups, the objects that moved
+     *        lately in one of their own.
+     *
+     * Returns the word in the culling arena of a table as an instanced visual's partitions
+     * have (see instance_partition_cull_src: per partition its world bounds, the word of its
+     * first chunk and its chunk count, 0 for an unused entry), or 0xFFFFFFFF if there is
+     * none, and sets @p count to its entries. A chunk holds kCullChunkSlots object ids,
+     * filled out with 0xFFFFFFFF. A partition whose members change gets a new first chunk.
+     * Valid after the update.
+     */
+    virtual uint32_t get_plain_partitions(uint32_t& count) const = 0;
+
+    /**
      * @brief Marks the BVH as stale so the next access rebuilds.
      *
      * Implementations rebuild lazily: `invalidate()` only flags the

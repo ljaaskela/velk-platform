@@ -30,6 +30,8 @@ inline constexpr uint32_t kCullEntryWords = 8;
 inline constexpr uint32_t kCullChunkListHeaderWords = 4;
 /// Words per chunk in a chunk list: the word of its first slot, and the partition it is from.
 inline constexpr uint32_t kCullChunkListWords = 2;
+/// The slot an object id names, in tables by object (IScene::get_object_ids).
+inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
 /// How far the camera may get from where a partition's levels of detail were chosen before
 /// they are chosen again, as a share of its distance from the partition.
 inline constexpr float kCutRefresh = 1.f / 16.f;
@@ -451,7 +453,7 @@ void main()
     if (pc.cut_word != 0xFFFFFFFFu) {
         velk_cut_decide(index, entry, chunks, globals.cam_pos.xyz, away);
     }
-    if (chunks == 0u) return;
+    if (chunks == 0u || pc.list_word == 0xFFFFFFFFu) return;
 
     if (pc.max_distance > 0.0 && length(away) > pc.max_distance) return;
 
@@ -537,6 +539,12 @@ void main()
  * from its partition's viewpoint. With `write` 0, adds how many there are to the partition's
  * count; with 1, writes them into the partition's range, which the count gave it room for. A
  * mesh without clusters gives one record for the whole instance. A work group per chunk.
+ *
+ * With items_word set, the chunks hold object ids, as the scene's plain partitions have them,
+ * and each object is drawn by its plain items (InstanceCullPass::together): an item is its
+ * instance's index, its slot and its table; objects_word holds each item's object id,
+ * next_word each item's next item of the same object, and head_word by object slot its first.
+ * A record then names the item in place of a slot.
  */
 inline constexpr string_view instance_cut_choose_src = R"(
 #version 450
@@ -564,6 +572,11 @@ layout(push_constant) uniform PC {
     uint globals_base;
     float lod_max_pixels;
     uint write;
+    uint items_word;
+    uint objects_word;
+    uint next_word;
+    uint head_word;
+    uint object_slots;
 } pc;
 )" VELK_CUT_GLSL R"(
 uint g_count;
@@ -608,29 +621,48 @@ void velk_cut_choose(uint slot, uint instance, vec3 viewpoint, mat4 world, float
     }
 }
 
-void main()
+// Chooses for one instance; `named` is what its records name: its slot, or a plain item.
+void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoint)
 {
-    uint cut = pc.cut_word;
-    uint chunk = cull_words.data[cut + 21u] + gl_WorkGroupID.x * 2u;
-    uint slot = cull_words.data[cull_words.data[chunk] + gl_LocalInvocationIndex];
-    uint state = velk_cut_state(cut, cull_words.data[chunk + 1u]);
-    if (slot >= pc.slot_count) return;
-    // A partition that found no room chooses on the next frame.
-    if (pc.write != 0u && cull_words.data[state + 8u] == 0u) return;
-
-    uint instance = pc.instances_base + slot;
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
-    uint table = pc.table_word + cull_instances.data[instance].params.y * 12u;
+    uint table = table_word + cull_instances.data[instance].params.y * 12u;
+    velk_cut_choose(named, instance, viewpoint, world, scale, table);
+}
+
+void main()
+{
+    uint cut = pc.cut_word;
+    uint chunk = cull_words.data[cut + 21u] + gl_WorkGroupID.x * 2u;
+    uint member = cull_words.data[cull_words.data[chunk] + gl_LocalInvocationIndex];
+    uint state = velk_cut_state(cut, cull_words.data[chunk + 1u]);
+    if (member == 0xFFFFFFFFu) return;
+    // A partition that found no room chooses on the next frame.
+    if (pc.write != 0u && cull_words.data[state + 8u] == 0u) return;
     vec3 viewpoint = vec3(uintBitsToFloat(cull_words.data[state]), uintBitsToFloat(cull_words.data[state + 1u]),
                           uintBitsToFloat(cull_words.data[state + 2u]));
 
     g_count = 0u;
     g_state = state;
     g_store = velk_cut_store(cut, true);
-    velk_cut_choose(slot, instance, viewpoint, world, scale, table);
+    if (pc.items_word == 0xFFFFFFFFu) {
+        if (member >= pc.slot_count) return;
+        velk_cut_instance(member, pc.instances_base + member, pc.table_word, viewpoint);
+    } else {
+        // An object: each of its plain items. An object has a few at most; the bound only
+        // keeps a broken chain from running on.
+        uint object_slot = member & 0x3FFFFFFu;
+        uint item = object_slot < pc.object_slots ? cull_words.data[pc.head_word + object_slot] : 0xFFFFFFFFu;
+        for (uint n = 0u; n < 64u && item != 0xFFFFFFFFu; ++n) {
+            if (cull_words.data[pc.objects_word + item] == member) {
+                uint at = pc.items_word + item * 3u;
+                velk_cut_instance(item, cull_words.data[at], cull_words.data[at + 2u], viewpoint);
+            }
+            item = cull_words.data[pc.next_word + item];
+        }
+    }
     if (pc.write == 0u && g_count != 0u) atomicAdd(cull_words.data[state + 6u], g_count);
 }
 )";
@@ -739,6 +771,7 @@ layout(push_constant) uniform PC {
     uint tiny_capacity;
     float tiny_pixels;
     uint whole;            // 1 to draw every record, in view or not (ICamera::choose_as)
+    uint items_word;       // plain items records name in place of slots, or 0xFFFFFFFF (instance_cut_choose_src)
 } pc;
 )" VELK_CUT_GLSL VELK_INSTANCE_FAR_GLSL VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL R"(
 uint g_instance;
@@ -806,10 +839,18 @@ void main()
     uint slot = cull_words.data[record + 2u];
     float error = uintBitsToFloat(cull_words.data[record + 3u]);
 
+    // A plain object's record names its item: the instance, its slot and its table.
     uint instance = pc.instances_base + slot;
+    uint table_word = pc.table_word;
+    if (pc.items_word != 0xFFFFFFFFu) {
+        uint at = pc.items_word + slot * 3u;
+        instance = cull_words.data[at];
+        slot = cull_words.data[at + 1u];
+        table_word = cull_words.data[at + 2u];
+    }
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
-    uint table = pc.table_word + cull_instances.data[instance].params.y * 12u;
+    uint table = table_word + cull_instances.data[instance].params.y * 12u;
     GlobalData globals = velk_globals.data[pc.globals_base];
     vec3 cam = globals.cam_pos.xyz;
     mat4 vp = globals.view_projection;
@@ -827,7 +868,7 @@ void main()
         if (velk_instance_is_far(cull_instances.data[instance].params.z, area, clip.w, vp, globals.viewport.y)) return;
     }
     g_instance = instance;
-    g_table = pc.table_word;
+    g_table = table_word;
 
     if (entry == 0xFFFFFFFFu) {
         if (pc.whole == 0u && velk_cut_outside(vp, center, radius)) return;
@@ -1826,12 +1867,14 @@ struct InstanceCullPass
     size_t arena_size = 0;
     uint32_t arena_generation = 0;  ///< Changes when the arena's buffer is replaced, which draws naming it must follow.
     uint64_t partition_tables = 0;  ///< Which tables the recording uses.
-    /// The batches culled together: see instance_cull_compute_src. Holds the clusters chosen,
-    /// then the entries, then the items.
+    /// The batches culled together, plain objects: see instance_cull_compute_src. Holds the
+    /// clusters chosen, the entries, the items (instance index, slot, table), each item's
+    /// object id, each item's next item of the same object, and by object slot its first item.
     ArenaRegion together;
     uint32_t together_items = 0;
     uint32_t together_entries = 0;
     uint32_t together_chosen = 0;  ///< How many records fit.
+    uint32_t together_object_slots = 0;  ///< Object slots the first items are by.
     ArenaRegion retest;            ///< What failed the first occlusion test.
     uint32_t retest_capacity = 0;
     /// Where clusters with triangles too small on screen for the hardware go, set by the path
@@ -1939,6 +1982,9 @@ inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, const v
     cmd.record_global_barrier();
 }
 
+/// What the kept cut of a view's plain objects is found by, among the visuals' (InstanceCullPass::Cut::key).
+inline constexpr int kPlainCutKey = 0;
+
 /// The word of @p state's kept cut of the visual @p key, or kCullNoSlot when it has none.
 inline uint32_t instance_cut_word(const InstanceCullPass& state, const void* key)
 {
@@ -1955,10 +2001,14 @@ inline uint32_t instance_cut_word(const InstanceCullPass& state, const void* key
  *        before the passes that draw them. With @p far_form, instances too small to draw
  *        are left out, for the path to add with instance_splat_src. With @p whole_cut, all of
  *        each kept cut is drawn, in view or not, for a view that shows another camera's choice.
+ *        @p plain_table_word and @p plain_count are the scene's plain partitions
+ *        (IBvh::get_plain_partitions): plain objects get a kept cut over them; without, plain
+ *        objects are chosen every frame.
  */
 inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
                                     uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph,
-                                    bool far_form = false, uint32_t pyramid_word = kCullNoSlot, bool whole_cut = false)
+                                    bool far_form = false, uint32_t pyramid_word = kCullNoSlot, bool whole_cut = false,
+                                    uint32_t plain_table_word = kCullNoSlot, uint32_t plain_count = 0)
 {
     if (!batches || !ctx.resources || !ctx.backend || !ctx.render_ctx) {
         return;
@@ -1976,6 +2026,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         record = true;
         state.count_words.clear();
         vector<uint32_t> items;
+        vector<uint32_t> item_objects;  ///< By item: its object id.
         vector<uint32_t> entries;
         uint64_t chosen = 0;
         uint64_t retest_records = 0;
@@ -1992,10 +2043,18 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             if (info.cull_together) {
                 chosen += info.cluster_capacity;
                 entries.push_back(info.cluster_entry_word);
+                // Each instance's object id is the last word of its ElementInstance.
+                const array_view<const uint8_t> instances = batch->instance_data();
+                const uint32_t stride = batch->instance_stride();
                 for (uint32_t slot = 0; slot < info.slot_count; ++slot) {
                     items.push_back(info.instances_base + slot);
                     items.push_back(slot);
                     items.push_back(info.table_word);
+                    uint32_t object = kCullNoSlot;
+                    if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
+                        std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
+                    }
+                    item_objects.push_back(object);
                 }
             } else if (std::find(state.count_words.begin(), state.count_words.end(), info.count_word)
                        == state.count_words.end()) {
@@ -2006,14 +2065,33 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         state.together_entries = static_cast<uint32_t>(entries.size());
         state.together_chosen = static_cast<uint32_t>(chosen);
         state.together = {};
+        // Which items each object has, by the slot of its id: the first, then each one's next.
+        uint32_t object_slots = 0;
+        for (uint32_t object : item_objects) {
+            if (object != kCullNoSlot) {
+                object_slots = std::max(object_slots, (object & kObjectSlotMask) + 1u);
+            }
+        }
+        vector<uint32_t> heads(object_slots, kCullNoSlot);
+        vector<uint32_t> nexts(item_objects.size(), kCullNoSlot);
+        for (uint32_t item = static_cast<uint32_t>(item_objects.size()); item-- > 0;) {
+            const uint32_t object = item_objects[item];
+            if (object != kCullNoSlot) {
+                nexts[item] = heads[object & kObjectSlotMask];
+                heads[object & kObjectSlotMask] = item;
+            }
+        }
+        state.together_object_slots = object_slots;
         if (!items.empty()) {
             const uint64_t list_words = kCullChosenHeaderWords + chosen * kCullChosenRecordWords;
-            state.together = arena->alloc((list_words + entries.size() + items.size()) * sizeof(uint32_t));
+            const uint64_t words = list_words + entries.size() + items.size() + item_objects.size() * 2u + heads.size();
+            state.together = arena->alloc(words * sizeof(uint32_t));
             if (state.together.valid()) {
-                const uint64_t base = state.together.offset();
-                arena->write_at(base + list_words * sizeof(uint32_t), entries.data(), entries.size() * sizeof(uint32_t));
-                arena->write_at(base + (list_words + entries.size()) * sizeof(uint32_t), items.data(),
-                                items.size() * sizeof(uint32_t));
+                uint64_t at = state.together.offset() + list_words * sizeof(uint32_t);
+                for (const vector<uint32_t>* part : {&entries, &items, &item_objects, &nexts, &heads}) {
+                    arena->write_at(at, part->data(), part->size() * sizeof(uint32_t));
+                    at += part->size() * sizeof(uint32_t);
+                }
             } else {
                 state.together_items = 0;
                 state.together_entries = 0;
@@ -2040,6 +2118,10 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             partition_tables = partition_tables * 31u + info.chunk_list_word;
         }
     }
+    partition_tables = partition_tables * 31u + plain_table_word;
+    partition_tables = partition_tables * 31u + plain_count;
+    // Plain objects get a kept cut when the scene has their partitions.
+    const bool plain_cut = plain_table_word != kCullNoSlot && plain_count != 0 && state.together_items != 0;
     const bool tables_changed = partition_tables != state.partition_tables;
     record = record || tables_changed;
     state.partition_tables = partition_tables;
@@ -2064,35 +2146,50 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
     // carry over. (`dirty` also follows the camera, so it alone says nothing about partitions.)
     if (batches_changed || tables_changed || !state.cut_growth.empty()) {
         record = true;
-        vector<InstanceCullPass::Cut> kept;
+        // What gets a cut: each partitioned visual, by its slots, and the plain objects, by
+        // their items, whose indices change with the batches.
+        struct Wants
+        {
+            const void* key;
+            uint32_t partitions;
+            uint32_t members;  ///< Slots or objects, which its partitions' chunks hold.
+            bool by_item;
+        };
+        vector<Wants> wants;
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
-            if (!batch || !batch->get_instance_cull(info) || info.cull_together || info.partition_count == 0
-                || std::find_if(kept.begin(), kept.end(), [&](const InstanceCullPass::Cut& c) { return c.key == info.key; })
-                       != kept.end()) {
-                continue;
+            if (batch && batch->get_instance_cull(info) && !info.cull_together && info.partition_count != 0
+                && std::find_if(wants.begin(), wants.end(), [&](const Wants& w) { return w.key == info.key; }) == wants.end()) {
+                wants.push_back({info.key, info.partition_count, info.slot_count, false});
             }
+        }
+        if (plain_cut) {
+            wants.push_back({&kPlainCutKey, plain_count, state.together_items, true});
+        }
+        vector<InstanceCullPass::Cut> kept;
+        for (const Wants& info : wants) {
             uint32_t wanted = 0;
             for (const auto& [key, records] : state.cut_growth) {
                 wanted = key == info.key ? std::max(wanted, records) : wanted;
             }
             auto old = std::find_if(state.cuts.begin(), state.cuts.end(),
                                     [&](const InstanceCullPass::Cut& c) { return c.key == info.key; });
-            if (!tables_changed && wanted == 0 && old != state.cuts.end() && old->partitions == info.partition_count) {
+            if (!tables_changed && wanted == 0 && !(info.by_item && batches_changed) && old != state.cuts.end()
+                && old->partitions == info.partitions) {
                 kept.push_back(std::move(*old));
                 continue;
             }
             InstanceCullPass::Cut cut;
             cut.key = info.key;
-            cut.partitions = info.partition_count;
-            cut.capacity = std::max({info.slot_count * 2u + 4096u, wanted + wanted / 2u,
+            cut.partitions = info.partitions;
+            cut.capacity = std::max({info.members * 2u + 4096u, wanted + wanted / 2u,
                                      old != state.cuts.end() ? old->capacity : 0u});
-            // Every partition's chunks at most: each one's slots, and a part-filled chunk each.
-            const uint32_t chunks = (info.slot_count + kCullChunkSlots - 1u) / kCullChunkSlots + info.partition_count;
+            // Every partition's chunks at most: each one's members, and a part-filled chunk each.
+            const uint32_t chunks = (info.members + kCullChunkSlots - 1u) / kCullChunkSlots + info.partitions;
             const uint32_t keep_word = kCutHeaderWords;
-            const uint32_t choose_word = keep_word + info.partition_count;
+            const uint32_t choose_word = keep_word + info.partitions;
             const uint32_t state_word = choose_word + chunks * kCullChunkListWords;
-            const uint32_t store_word = state_word + info.partition_count * kCutPartitionWords;
+            const uint32_t store_word = state_word + info.partitions * kCutPartitionWords;
             const size_t words = size_t(store_word) + size_t(cut.capacity) * kCutRecordWords * 2u;
             cut.region = arena->alloc(words * sizeof(uint32_t));
             if (!cut.region.valid()) {
@@ -2109,7 +2206,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             initial[16] = cut.capacity;
             initial[17] = base + store_word;
             initial[18] = base + store_word + cut.capacity * kCutRecordWords;
-            initial[19] = info.partition_count;
+            initial[19] = info.partitions;
             initial[20] = base + keep_word;
             initial[21] = base + choose_word;
             initial[22] = base + state_word;
@@ -2117,7 +2214,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             constexpr float kFar = 1e30f;
             uint32_t far_bits;
             std::memcpy(&far_bits, &kFar, sizeof(far_bits));
-            for (uint32_t p = 0; p < info.partition_count; ++p) {
+            for (uint32_t p = 0; p < info.partitions; ++p) {
                 uint32_t* partition = initial.data() + state_word + p * kCutPartitionWords;
                 partition[0] = partition[1] = partition[2] = far_bits;
                 partition[3] = kCullNoSlot;
@@ -2276,51 +2373,78 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
         };
 
-        // Partitioned visuals with a kept cut: a frame of it begins.
-        vector<std::pair<InstanceCullInfo, uint32_t>> kept;
+        // Every kept cut: each partitioned visual's, by slot, and the plain objects', by item.
+        struct CutJob
+        {
+            uint32_t cut;
+            uint32_t partition_table;
+            uint32_t partition_count;
+            uint32_t list_word;  ///< Visible chunks, for the far instance splat, or none.
+            float max_distance;
+            uint32_t instances_base;
+            uint32_t slot_count;
+            uint32_t table_word;
+            uint32_t chosen_word;
+            uint32_t chosen_capacity;
+            bool far_form;
+            uint32_t items_word;  ///< The plain items, for the plain objects' cut, else none.
+        };
+        const uint32_t together_objects_word = together_items_word + state.together_items * 3u;
+        const uint32_t together_next_word = together_objects_word + state.together_items;
+        const uint32_t together_head_word = together_next_word + state.together_items;
+        vector<CutJob> jobs;
         for (const auto& info : visuals) {
             const uint32_t cut = info.partition_count != 0 ? cut_word(info.key) : kCullNoSlot;
             if (cut != kCullNoSlot) {
-                kept.push_back({info, cut});
-                dispatch(begin_pipeline.get(), &cut, sizeof(cut), 1u);
+                jobs.push_back({cut, info.partition_table_word, info.partition_count, info.chunk_list_word, info.max_distance,
+                                info.instances_base, info.slot_count, info.table_word, info.chosen_word, info.chosen_capacity,
+                                far_form, kCullNoSlot});
             }
         }
+        const uint32_t plain_cut_word = plain_cut ? cut_word(&kPlainCutKey) : kCullNoSlot;
+        if (plain_cut_word != kCullNoSlot) {
+            jobs.push_back({plain_cut_word, plain_table_word, plain_count, kCullNoSlot, 0.f, 0u, 0u, 0u, together_word,
+                            state.together_chosen, false, together_items_word});
+        }
+        for (const CutJob& job : jobs) {
+            dispatch(begin_pipeline.get(), &job.cut, sizeof(job.cut), 1u);
+        }
 
-        // Partitions next: their visible chunks for the far instance splat, and for those with a
-        // cut whether they keep their records.
-        bool any_partitions = false;
+        // Partitions next: whether they keep their records, and for visuals their visible
+        // chunks for the far instance splat. Visuals without a cut only the latter.
         for (const auto& info : visuals) {
             if (info.partition_count != 0) {
-                any_partitions = true;
                 cmd->record_clear_buffer(arena_buffer, uint64_t(info.chunk_list_word) * sizeof(uint32_t), sizeof(uint32_t));
             }
         }
-        if (any_partitions) {
-            cmd->record_global_barrier();
-            struct PartitionPushC
-            {
-                uint32_t table_word;
-                uint32_t entry_count;
-                uint32_t list_word;
-                uint32_t globals_base;
-                float max_distance;
-                uint32_t cut_word;
-                float refresh;
-            };
-            for (const auto& info : visuals) {
-                if (info.partition_count == 0) {
-                    continue;
-                }
+        cmd->record_global_barrier();
+        struct PartitionPushC
+        {
+            uint32_t table_word;
+            uint32_t entry_count;
+            uint32_t list_word;
+            uint32_t globals_base;
+            float max_distance;
+            uint32_t cut_word;
+            float refresh;
+        };
+        for (const auto& info : visuals) {
+            if (info.partition_count != 0 && cut_word(info.key) == kCullNoSlot) {
                 const PartitionPushC pc{info.partition_table_word, info.partition_count, info.chunk_list_word,
-                                        view_globals_base, info.max_distance, cut_word(info.key), kCutRefresh};
+                                        view_globals_base, info.max_distance, kCullNoSlot, kCutRefresh};
                 dispatch(partition_pipeline.get(), &pc, sizeof(pc), (info.partition_count + 63u) / 64u);
             }
-            cmd->record_global_barrier();
         }
+        for (const CutJob& job : jobs) {
+            const PartitionPushC pc{job.partition_table, job.partition_count, job.list_word, view_globals_base,
+                                    job.max_distance, job.cut, kCutRefresh};
+            dispatch(partition_pipeline.get(), &pc, sizeof(pc), (job.partition_count + 63u) / 64u);
+        }
+        cmd->record_global_barrier();
 
         // The kept cuts: records copied for partitions that keep them, counted for those that
         // choose again, placed, written, then drawn from.
-        if (!kept.empty()) {
+        if (!jobs.empty()) {
             struct ChoosePushC
             {
                 uint32_t cut_word;
@@ -2330,26 +2454,33 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 uint32_t globals_base;
                 float lod_max_pixels;
                 uint32_t write;
+                uint32_t items_word;
+                uint32_t objects_word;
+                uint32_t next_word;
+                uint32_t head_word;
+                uint32_t object_slots;
             };
-            for (const auto& [info, cut] : kept) {
-                dispatch(copy_pipeline.get(), &cut, sizeof(cut), 1u, cut);
-                const ChoosePushC pc{cut, info.instances_base, info.slot_count, info.table_word, view_globals_base,
-                                     kLodMaxErrorPixels, 0u};
-                dispatch(choose_pipeline.get(), &pc, sizeof(pc), 1u, cut + 4u);
+            const auto choose = [&](const CutJob& job, uint32_t write) {
+                const ChoosePushC pc{job.cut, job.instances_base, job.slot_count, job.table_word, view_globals_base,
+                                     kLodMaxErrorPixels, write, job.items_word, together_objects_word, together_next_word,
+                                     together_head_word, state.together_object_slots};
+                dispatch(choose_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + 4u);
+            };
+            for (const CutJob& job : jobs) {
+                dispatch(copy_pipeline.get(), &job.cut, sizeof(job.cut), 1u, job.cut);
+                choose(job, 0u);
             }
             cmd->record_global_barrier();
-            for (const auto& [info, cut] : kept) {
-                dispatch(place_pipeline.get(), &cut, sizeof(cut), (info.partition_count + 63u) / 64u);
+            for (const CutJob& job : jobs) {
+                dispatch(place_pipeline.get(), &job.cut, sizeof(job.cut), (job.partition_count + 63u) / 64u);
             }
             cmd->record_global_barrier();
-            for (const auto& [info, cut] : kept) {
-                const ChoosePushC pc{cut, info.instances_base, info.slot_count, info.table_word, view_globals_base,
-                                     kLodMaxErrorPixels, 1u};
-                dispatch(choose_pipeline.get(), &pc, sizeof(pc), 1u, cut + 4u);
+            for (const CutJob& job : jobs) {
+                choose(job, 1u);
             }
             cmd->record_global_barrier();
-            for (const auto& [info, cut] : kept) {
-                dispatch(args_pipeline.get(), &cut, sizeof(cut), 1u);
+            for (const CutJob& job : jobs) {
+                dispatch(args_pipeline.get(), &job.cut, sizeof(job.cut), 1u);
             }
             cmd->record_global_barrier();
         }
@@ -2392,15 +2523,17 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t tiny_capacity;
             float tiny_pixels;
             uint32_t whole;
+            uint32_t items_word;
         };
-        for (const auto& [info, cut] : kept) {
-            const DrawPushC pc{cut, info.instances_base, info.table_word, view_globals_base, info.max_distance,
-                               far_form ? 1u : 0u, kLodMaxErrorPixels, info.chosen_word, info.chosen_capacity,
+        for (const CutJob& job : jobs) {
+            const DrawPushC pc{job.cut, job.instances_base, job.table_word, view_globals_base, job.max_distance,
+                               job.far_form ? 1u : 0u, kLodMaxErrorPixels, job.chosen_word, job.chosen_capacity,
                                pyramid_word, retest_word, state.retest_capacity,
-                               state.tiny_word, state.tiny_capacity, state.tiny_pixels, whole_cut ? 1u : 0u};
-            dispatch(draw_pipeline.get(), &pc, sizeof(pc), 1u, cut + 8u);
+                               state.tiny_word, state.tiny_capacity, state.tiny_pixels, whole_cut ? 1u : 0u, job.items_word};
+            dispatch(draw_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + 8u);
         }
-        if (together) {
+        // Without the scene's plain partitions, plain objects are chosen every frame.
+        if (together && plain_cut_word == kCullNoSlot) {
             const PushC pc{0u, state.together_items, 0u, view_globals_base, 0.f, 0u, kLodMaxErrorPixels,
                            together_items_word, together_word, state.together_chosen,
                            pyramid_word, retest_word, state.retest_capacity,

@@ -1002,6 +1002,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 ctx.bvh.ray_motion = b->get_ray_motion(ctx.bvh.ray_motion_reach);
                 ctx.bvh.changed = b->changed_bounds(ctx.bvh.changed_all);
                 ctx.bvh.object_transforms = b->get_object_transforms(ctx.bvh.object_slots);
+                ctx.bvh.plain_partitions = b->get_plain_partitions(ctx.bvh.plain_partition_count);
                 // The BVH writes its node/shape data into the shared set = 1
                 // arenas during rebuild; nothing to bind here.
             } else {

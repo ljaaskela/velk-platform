@@ -53,6 +53,10 @@ struct BvhBinding
     /// IBvh::get_object_transforms.
     uint32_t object_transforms = 0xFFFFFFFFu;
     uint32_t object_slots = 0;
+    /// Its plain objects' partitions and how many entries their table has. See
+    /// IBvh::get_plain_partitions.
+    uint32_t plain_partitions = 0xFFFFFFFFu;
+    uint32_t plain_partition_count = 0;
 
     bool operator==(const BvhBinding& o) const
     {

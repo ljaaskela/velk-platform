@@ -825,7 +825,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     vs.instance_cull.tiny_pixels = tiny_pixels;
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph, !chosen,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot,
-                            chosen);
+                            chosen, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
@@ -1206,6 +1206,11 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         if (cut != kCullNoSlot) {
             visuals.push_back({info.partition_table_word, info.partition_count, cut});
         }
+    }
+    // And the plain objects' partitions.
+    const uint32_t plain_cut = instance_cut_word(vs.instance_cull, &kPlainCutKey);
+    if (plain_cut != kCullNoSlot && render_view.bvh.plain_partitions != kCullNoSlot) {
+        visuals.push_back({render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count, plain_cut});
     }
     if (visuals.empty()) return;
 

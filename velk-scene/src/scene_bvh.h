@@ -102,6 +102,12 @@ public:
         return object_transforms_word_;
     }
 
+    uint32_t get_plain_partitions(uint32_t& count) const override
+    {
+        count = plain_cull_.valid() ? plain_cull_capacity_ : 0u;
+        return plain_cull_.valid() ? static_cast<uint32_t>(plain_cull_.offset() / sizeof(uint32_t)) : 0xFFFFFFFFu;
+    }
+
     void invalidate() override { needs_full_build_ = true; }
 
 private:
@@ -195,8 +201,10 @@ private:
         /// until `dirty` is handled.
         vector<uint32_t> members;
         InstanceGroup* group = nullptr;  ///< Set when this partition holds instances.
-        ArenaRegion cull_members;           ///< Its slots, in chunks.
-        uint32_t cull_entry = kUnplaced;    ///< Its entry in the group's table.
+        /// Its slots in chunks, or for plain records their objects' ids.
+        ArenaRegion cull_members;
+        /// Its entry in the group's table, or for plain records in the plain table.
+        uint32_t cull_entry = kUnplaced;
         uint32_t cull_chunks = 0;
         BvhItemBounds cull_bounds{};
         ArenaRegion gpu_build_items;    ///< This frame's items, when the GPU builds the tree.
@@ -244,6 +252,11 @@ private:
     /// Takes @p partition out of what culling reads. For one about to be freed.
     void release_partition_cull(Partition& partition, FrameContext& ctx);
     void write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh_table);
+    /// Lists a plain partition's objects for culling, in the plain table: see
+    /// IBvh::get_plain_partitions.
+    void write_plain_cull(Partition& partition, FrameContext& ctx, const float* lo, const float* hi);
+    /// Takes a plain partition out of the plain table.
+    void release_plain_cull(Partition& partition, FrameContext& ctx);
     /// Moves @p slot to its group's dynamic partition.
     void promote_instance(InstanceGroup& group, uint32_t slot);
     /// Sends instances that have been still for a while back where they came from.
@@ -293,6 +306,11 @@ private:
     uint32_t live_records_ = 0;
 
     vector<Partition> partitions_;
+    /// Plain partitions for culling, kCullEntryWords each: see IBvh::get_plain_partitions.
+    ArenaRegion plain_cull_;
+    uint32_t plain_cull_capacity_ = 0;
+    uint32_t plain_cull_next_ = 0;
+    vector<uint32_t> plain_cull_free_;
     vector<uint32_t> free_partitions_;
     Partition dynamic_;
     bool dynamic_transforms_dirty_ = false;
