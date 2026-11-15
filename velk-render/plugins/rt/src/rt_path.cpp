@@ -110,6 +110,11 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
 
+    // What rays walk: the view's kept cut, as every path has it.
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
+                            kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
+    publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
+
     // Plane-grouped back-to-front painter sort for the primary buffer.
     // Shapes that share a plane stay in enumeration order via
     // stable_sort, preserving authored layering on a flat UI panel.
@@ -305,13 +310,18 @@ RtPath::~RtPath()
 }
 
 void RtPath::on_render_state_changed(::velk::IRenderState* source,
-                                     ::velk::RenderStateChange /*flags*/)
+                                     ::velk::RenderStateChange flags)
 {
     auto* view = interface_cast<IViewEntry>(source);
     if (!view) return;
     auto it = view_states_.find(view);
     if (it != view_states_.end()) {
         it->second.rt_dirty = true;
+        // Culling records nothing that follows the camera: only another set of batches
+        // records it again.
+        if (has_change(flags, RenderStateChange::Batches)) {
+            it->second.instance_cull.dirty = true;
+        }
     }
 }
 

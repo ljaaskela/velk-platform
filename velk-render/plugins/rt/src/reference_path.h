@@ -2,8 +2,10 @@
 #define VELK_UI_REFERENCE_PATH_H
 
 #include <velk-render/ext/render_path.h>
+#include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_render_pass.h>
 #include <velk-render/interface/intf_render_path.h>
+#include <velk-render/interface/intf_render_state.h>
 #include <velk-render/interface/intf_view_entry.h>
 #include <velk-render/plugin.h>
 #include <velk-render/render_path/frame_context.h>
@@ -17,10 +19,12 @@ namespace velk {
  *
  * Starts over when the camera, lights or environment change.
  */
-class ReferencePath : public ext::RenderPath<ReferencePath>
+class ReferencePath : public ext::RenderPath<ReferencePath, IRenderStateObserver>
 {
 public:
     VELK_CLASS_UID(ClassId::Path::Reference, "ReferencePath");
+
+    ~ReferencePath() override;
 
     Needs needs() const override
     {
@@ -35,9 +39,14 @@ public:
     void on_view_removed(IViewEntry& view, FrameContext& ctx) override;
     void shutdown(FrameContext& ctx) override;
 
+    /// Another set of batches records the view's culling again.
+    void on_render_state_changed(IRenderState* source, RenderStateChange flags) override;
+
 private:
     struct ViewState
     {
+        /// The view's kept cut, and the trees over it that rays walk.
+        InstanceCullPass instance_cull;
         IRenderTarget::Ptr sum;
         IRenderTarget::Ptr shown;
         uvec2 size{};

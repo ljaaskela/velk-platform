@@ -11,17 +11,16 @@ namespace {
 constexpr uint64_t kPipelineKey = make_hash64("RoundedRectVisual");
 
 // RT shape-intersect snippet: SDF-clipped rounded rect. Matches the
-// signature expected by the composed intersect_shape dispatcher.
-// shape.params[0] carries the corner radius set by scene_collector.
+// signature expected by the composed intersect_shape dispatcher. The
+// corner radius follows the size, as kDiscardSrc's does.
 constexpr string_view kIntersectSrc = R"(
 bool velk_intersect_rounded_rect(Ray ray, RtShape shape, out RayHit hit)
 {
     if (!intersect_rect(ray, shape, hit)) return false;
-    float radius = shape.params.x;
-    if (radius <= 0.0) return true;
     float u_len = length(shape.u_axis.xyz);
     float v_len = length(shape.v_axis.xyz);
     vec2 size_w = vec2(u_len, v_len);
+    float radius = min(min(u_len, v_len) * 0.5, 12.0);
     vec2 p_w = hit.uv * size_w;
     vec2 half_size = size_w * 0.5;
     vec2 centered = p_w - half_size;

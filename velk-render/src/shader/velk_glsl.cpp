@@ -126,8 +126,9 @@ struct RtRecord {
 
 #define VELK_NO_TREE 0xFFFFFFFFu
 
-// Words per plain item in a view's culling (instance index, slot, table, draw): kPlainItemWords.
-#define VELK_PLAIN_ITEM_WORDS 4u
+// Words per plain item in a view's culling (instance index, slot, table, draw, shape kind,
+// mesh ray data): kPlainItemWords.
+#define VELK_PLAIN_ITEM_WORDS 6u
 // Words per cluster draw entry: kClusterEntryWords.
 #define VELK_CLUSTER_ENTRY_WORDS 16u
 // Words per cluster in a level of detail table: kLodClusterWords.
@@ -195,7 +196,7 @@ struct GlobalData {
     float lod_scale;         // pixels an error of one unit covers at one unit away, over the most a drawn surface may be off by
     mat4 prev_view_projection;
     vec3 cam_moved;          // how far the camera moved since the previous frame
-    uint _pad_globals2;
+    uint ray_top;            // the view's top tree for rays in the culling arena, or 0xFFFFFFFF
 };
 
 // Shaders position things relative to the camera, so that large world coordinates

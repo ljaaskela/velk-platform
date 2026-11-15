@@ -71,7 +71,11 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     if (!ctx.backend || !ctx.render_ctx || !ctx.resources || render_view.width <= 0 || render_view.height <= 0) {
         return;
     }
-    auto& vs = view_states_[&entry];
+    auto [found, inserted] = view_states_.try_emplace(&entry);
+    auto& vs = found->second;
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
     const int w = render_view.width;
     const int h = render_view.height;
     const uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
@@ -116,6 +120,11 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     if (!pipeline) {
         return;
     }
+
+    // What rays walk: the view's kept cut, as every path has it.
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
+                            kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
+    publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
 
     IGpuTexture* shown_tex = graph.resources().find_texture(vs.shown.get());
     IGpuTexture* dst_tex = nullptr;
@@ -171,13 +180,34 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     });
 }
 
+ReferencePath::~ReferencePath()
+{
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
+}
+
+void ReferencePath::on_render_state_changed(IRenderState* source, RenderStateChange flags)
+{
+    auto* view = interface_cast<IViewEntry>(source);
+    auto it = view ? view_states_.find(view) : view_states_.end();
+    if (it != view_states_.end() && has_change(flags, RenderStateChange::Batches)) {
+        it->second.instance_cull.dirty = true;
+    }
+}
+
 void ReferencePath::on_view_removed(IViewEntry& entry, FrameContext& /*ctx*/)
 {
-    view_states_.erase(&entry);
+    if (view_states_.erase(&entry) != 0) {
+        entry.remove_render_state_observer(this);
+    }
 }
 
 void ReferencePath::shutdown(FrameContext& /*ctx*/)
 {
+    for (auto& [view, _] : view_states_) {
+        view->remove_render_state_observer(this);
+    }
     view_states_.clear();
 }
 

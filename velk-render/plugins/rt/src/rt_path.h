@@ -9,6 +9,7 @@
 #include <velk/api/change.h>
 
 #include <velk-render/plugin.h>
+#include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/ext/render_path.h>
 #include <velk-render/interface/intf_buffer.h>
@@ -42,6 +43,7 @@ public:
     Needs needs() const override
     {
         Needs n;
+        n.batches = true;
         n.shapes = true;
         n.lights = true;
         return n;
@@ -63,6 +65,8 @@ public:
 private:
     struct ViewState
     {
+        /// The view's kept cut, and the trees over it that rays walk.
+        InstanceCullPass instance_cull;
         ::velk::IRenderTarget::Ptr rt_output;
         // Cached size for rt_output. Recreate only on size change so
         // downstream RtRoot bindless ids and `add_write` resource refs

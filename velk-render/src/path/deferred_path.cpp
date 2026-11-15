@@ -826,6 +826,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph, !chosen,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot,
                             chosen, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
+    publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
     if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;

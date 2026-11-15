@@ -136,6 +136,7 @@ void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_build
         rt_globals.bvh_root = ctx.bvh.root;
         rt_globals.bvh_node_count = ctx.bvh.node_count;
         rt_globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
+        rt_globals.ray_top = 0xFFFFFFFFu;  // The render path's, once it has culled.
         RenderView rt_view{};
         rt_view.batches = &rtp.batches;
         rt_view.viewport = {0, 0,

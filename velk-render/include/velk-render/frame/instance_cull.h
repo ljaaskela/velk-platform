@@ -7,14 +7,18 @@
 
 #include <velk-render/api/cached_view_pass.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_frame_snippet_registry.h>
 #include <velk-render/interface/intf_gpu_arena.h>
+#include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/interface/intf_render_backend.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/render_path/frame_context.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <utility>
 
@@ -33,8 +37,12 @@ inline constexpr uint32_t kCullChunkListWords = 2;
 /// The slot an object id names, in tables by object (IScene::get_object_ids).
 inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
 /// Words per plain item (InstanceCullPass::together): its instance's index, its slot, its
-/// table, and its draw's index in the draw data. Mirrors VELK_PLAIN_ITEM_WORDS.
-inline constexpr uint32_t kPlainItemWords = 4;
+/// table, its draw's index in the draw data, what rays test it as (an RtShape kind: 255 its
+/// mesh, else its visual's analytic shape, see IAnalyticShape), and its mesh's ray data
+/// (MeshStaticData's index, kInvalidMeshStaticBase for none). Mirrors VELK_PLAIN_ITEM_WORDS.
+inline constexpr uint32_t kPlainItemWords = 6;
+/// A plain item's shape kind for a mesh. Mirrors RtShape's 255.
+inline constexpr uint32_t kRayShapeMesh = 255;
 /// How far the camera may get from where a partition's levels of detail were chosen before
 /// they are chosen again, as a share of its distance from the partition.
 inline constexpr float kCutRefresh = 1.f / 16.f;
@@ -2398,6 +2406,19 @@ inline uint32_t instance_ray_top_word(const InstanceCullPass& state)
     return state.ray_top.valid() ? static_cast<uint32_t>(state.ray_top.offset() / sizeof(uint32_t)) : kCullNoSlot;
 }
 
+/// Tells the shaders of the view at @p view_globals_base where its top tree for rays is
+/// (FrameGlobals::ray_top). The globals are written again every frame before the render path
+/// runs, so this goes after every culling.
+inline void publish_ray_top(const InstanceCullPass& state, uint32_t view_globals_base, FrameContext& ctx)
+{
+    if (!ctx.globals_arena) {
+        return;
+    }
+    const uint32_t word = instance_ray_top_word(state);
+    ctx.globals_arena->update_at(uint64_t(view_globals_base) * sizeof(FrameGlobals) + offsetof(FrameGlobals, ray_top), &word,
+                                 sizeof(word));
+}
+
 /// How many tree nodes a node store of @p state's kept cut of @p key holds, 0 without one.
 inline uint32_t instance_cut_node_capacity(const InstanceCullPass& state, const void* key)
 {
@@ -2445,18 +2466,30 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         uint64_t retest_records = 0;
         vector<const void*> counted;
         // A plain item for each instance of @p batch: its index, its slot, its table, its
-        // draw, and its object id, the last word of its ElementInstance.
-        const auto add_items = [&](const IBatch& batch, uint32_t instances_base, uint32_t slot_count, uint32_t table_word) {
+        // draw, what rays test it as and its mesh's ray data (kPlainItemWords), and its object
+        // id, the last word of its ElementInstance.
+        const auto add_items = [&](IBatch& batch, uint32_t instances_base, uint32_t slot_count, uint32_t table_word) {
             const array_view<const uint8_t> instances = batch.instance_data();
             const uint32_t stride = batch.instance_stride();
             const uint32_t draw = batch.draw_data_region_size() != 0
                                       ? static_cast<uint32_t>(batch.draw_data_region_offset() / sizeof(DrawDataHeader))
                                       : kCullNoSlot;
+            uint32_t kind = kRayShapeMesh;
+            if (auto* analytic = interface_cast<IAnalyticShape>(batch.shader_source().get())) {
+                const uint32_t registered = ctx.snippets ? ctx.snippets->register_intersect(analytic, *ctx.render_ctx) : 0u;
+                kind = registered != 0 ? registered : analytic->get_shape_kind();
+            }
+            uint32_t mesh = kInvalidMeshStaticBase;
+            if (auto* primitive = interface_cast<IMeshPrimitiveInternal>(batch.primitive().get())) {
+                mesh = primitive->ensure_rt_data(*ctx.resources);
+            }
             for (uint32_t slot = 0; slot < slot_count; ++slot) {
                 items.push_back(instances_base + slot);
                 items.push_back(slot);
                 items.push_back(table_word);
                 items.push_back(draw);
+                items.push_back(kind);
+                items.push_back(mesh);
                 uint32_t object = kCullNoSlot;
                 if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
                     std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));

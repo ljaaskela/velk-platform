@@ -323,6 +323,7 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
     globals.bvh_root = rv.bvh.root;
     globals.bvh_node_count = rv.bvh.node_count;
     globals.present_counter = static_cast<uint32_t>(ctx.present_counter);
+    globals.ray_top = 0xFFFFFFFFu;  // The render path's, once it has culled.
 
     auto& cache = view_caches_[&entry];
     // Previous frame's VP for temporal reprojection. On the first frame use

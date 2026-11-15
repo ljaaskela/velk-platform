@@ -83,7 +83,9 @@ struct FrameGlobals
     float    lod_scale;                    ///< See set_lod_scale.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
     float    cam_moved[3];                 ///< How far the camera moved since the previous frame.
-    uint32_t _pad2;
+    /// The word of the view's top tree for rays in the culling arena (kRayTopHeaderWords),
+    /// which its render path writes after culling; 0xFFFFFFFF for none.
+    uint32_t ray_top;
 };
 
 static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.glsl");
