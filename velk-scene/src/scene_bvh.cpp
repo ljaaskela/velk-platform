@@ -668,7 +668,7 @@ void SceneBvh::alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint
         return;
     }
     group.cull_table = arena->alloc(uint64_t(table_capacity) * kCullEntryWords * sizeof(uint32_t));
-    group.cull_list = arena->alloc((uint64_t(list_capacity) + kCullChunkListHeaderWords) * sizeof(uint32_t));
+    group.cull_list = arena->alloc((uint64_t(list_capacity) * kCullChunkListWords + kCullChunkListHeaderWords) * sizeof(uint32_t));
     if (!group.cull_table.valid() || !group.cull_list.valid()) {
         group.cull_table = {};
         group.cull_list = {};
