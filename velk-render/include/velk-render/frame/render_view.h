@@ -54,6 +54,14 @@ struct RenderView
     ::velk::render::Frustum frustum{};
     bool has_frustum = false;
 
+    /// With ICamera::choose_as: the camera that chooses what this view draws, which culling
+    /// and levels of detail follow instead of this view's own. `frustum` is then its frustum.
+    bool chosen_by_other = false;
+    mat4 chooser_relative_view_projection = mat4::identity();
+    vec3 chooser_cam_pos = {};
+    float chooser_width = 0.f;   ///< The size of the view it chooses through, in pixels.
+    float chooser_height = 0.f;
+
     /// Viewport rect in pixels (origin + extent within the view's surface).
     rect viewport{};
     /// Width / height of the viewport in pixels (== viewport.width/height
@@ -67,6 +75,9 @@ struct RenderView
     /// velk_globals.data[view_globals_base] instead of a device address.
     /// Derived as region.offset / sizeof(FrameGlobals) at prepare time.
     uint32_t view_globals_base = 0;
+    /// The FrameGlobals culling and level of detail selection read: view_globals_base, or
+    /// with chosen_by_other the chooser's, from its own position and view.
+    uint32_t cull_globals_base = 0;
 
     /// How this view reaches the scene BVH (empty when no BVH).
     BvhBinding bvh{};

@@ -272,6 +272,24 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
         }
         rv.frustum = ::velk::render::extract_frustum(rv.view_projection);
         rv.has_frustum = true;
+
+        // Choosing as another camera: what that camera sees through a view of this
+        // surface's size decides what is drawn.
+        rv.chosen_by_other = false;
+        auto cam_state = read_state<ICamera>(camera.get());
+        auto chooser_element = cam_state && cam_state->choose_as ? cam_state->choose_as.get<IElement>() : IElement::Ptr{};
+        auto chooser = chooser_element ? ::velk::find_attachment<ICamera>(chooser_element) : ICamera::Ptr{};
+        if (chooser && chooser != camera) {
+            auto chooser_es = read_state<IElement>(chooser_element);
+            mat4 chooser_world = chooser_es ? chooser_es->world_matrix : mat4::identity();
+            rv.frustum = ::velk::render::extract_frustum(chooser->get_view_projection(chooser_world, sw, sh));
+            rv.chooser_cam_pos = {chooser_world(0, 3), chooser_world(1, 3), chooser_world(2, 3)};
+            chooser_world.m[12] = chooser_world.m[13] = chooser_world.m[14] = 0.f;
+            rv.chooser_relative_view_projection = chooser->get_view_projection(chooser_world, sw, sh);
+            rv.chooser_width = sw;
+            rv.chooser_height = sh;
+            rv.chosen_by_other = true;
+        }
     } else {
         float ortho[16];
         build_ortho_projection(ortho, vp_w, vp_h);
@@ -339,6 +357,36 @@ void ViewPreparer::prepare_frame_globals(IViewEntry& entry, FrameContext& ctx, R
                 cache.globals_region.offset() / sizeof(FrameGlobals));
         } else {
             rv.view_globals_base = 0u;
+        }
+        rv.cull_globals_base = rv.view_globals_base;
+
+        // The chooser's: its position and view, at this view's size, with no history, since
+        // nothing that reads them reprojects.
+        if (rv.chosen_by_other) {
+            FrameGlobals chooser = globals;
+            std::memcpy(chooser.view_projection, rv.chooser_relative_view_projection.m,
+                        sizeof(rv.chooser_relative_view_projection.m));
+            const mat4 inverse = mat4::inverse(rv.chooser_relative_view_projection);
+            std::memcpy(chooser.inverse_view_projection, inverse.m, sizeof(inverse.m));
+            std::memcpy(chooser.prev_view_projection, rv.chooser_relative_view_projection.m,
+                        sizeof(rv.chooser_relative_view_projection.m));
+            chooser.viewport[0] = rv.chooser_width;
+            chooser.viewport[1] = rv.chooser_height;
+            chooser.viewport[2] = 1.0f / rv.chooser_width;
+            chooser.viewport[3] = 1.0f / rv.chooser_height;
+            set_lod_scale(chooser);
+            chooser.cam_pos[0] = rv.chooser_cam_pos.x;
+            chooser.cam_pos[1] = rv.chooser_cam_pos.y;
+            chooser.cam_pos[2] = rv.chooser_cam_pos.z;
+            chooser.cam_moved[0] = chooser.cam_moved[1] = chooser.cam_moved[2] = 0.f;
+            if (cache.chooser_globals_region.size() != need) {
+                cache.chooser_globals_region = ctx.globals_arena->alloc(need);
+            }
+            if (cache.chooser_globals_region.valid()) {
+                ctx.globals_arena->update_at(cache.chooser_globals_region.offset(), &chooser, need);
+                rv.cull_globals_base = static_cast<uint32_t>(
+                    cache.chooser_globals_region.offset() / sizeof(FrameGlobals));
+            }
         }
     }
 }

@@ -102,6 +102,7 @@ public:
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
         IRenderPass::Ptr visibility_debug_pass;
+        IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr light_cells_debug_pass;
         IRenderPass::Ptr light_cells_pass;
         IRenderPass::Ptr light_cells_update_pass;
@@ -259,6 +260,9 @@ private:
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
+    /// Draws the edges of the chooser's view over the final image (ICamera::choose_as).
+    void emit_chooser_frustum_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                   FrameContext& ctx, IRenderGraph& graph);
     /// Logs how a frame differs from the last, for render tests. See test_diagnostics_compute_src.
     void emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, IRenderGraph& graph);

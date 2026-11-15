@@ -16,6 +16,24 @@ enum class Projection : uint8_t
 };
 
 /**
+ * @brief What a deferred view shows in place of its lit image, to see the state of the
+ * renderer's structures.
+ */
+enum class DebugView : uint8_t
+{
+    None,
+    Draw,          ///< A flat colour per draw.
+    Instance,      ///< Per instance.
+    Triangle,      ///< Per triangle.
+    Pyramid,       ///< The occlusion depth pyramid.
+    Compute,       ///< What compute raster drew.
+    TriangleSize,  ///< How large triangles are on screen.
+    Cluster,       ///< A flat colour per level of detail cluster of each instance.
+    Level,         ///< Each cluster coloured by its level of detail, full detail first.
+    ClusterSize,   ///< How wide each cluster is on screen.
+};
+
+/**
  * @brief Camera render-trait defining how a scene is observed.
  *
  * Attached to a scene element. The world transform is supplied at
@@ -43,7 +61,15 @@ public:
         /// Clusters whose mean triangle is smaller than this on screen, in pixels across, are
         /// rasterized in compute instead of by the hardware, by the deferred path. 0 for none.
         (PROP, float, tiny_cluster_pixels, 2.f),
-        (PROP, ObjectRef, environment, {}) ///< Optional IEnvironment for skybox/background.
+        (PROP, ObjectRef, environment, {}), ///< Optional IEnvironment for skybox/background.
+        /// What the deferred path shows in place of the lit image. VELK_VISIBILITY_DEBUG overrides it.
+        (PROP, DebugView, debug_view, DebugView::None),
+        /// Another camera's element. When set, the deferred path draws what that camera would
+        /// draw (its view, its levels of detail) as seen from this one, and draws its view's
+        /// edges, so that what another view holds can be looked at from outside. Occlusion
+        /// culling, compute raster and far instances are left out of such a view, since they
+        /// only hold for the camera that chooses.
+        (PROP, ObjectRef, choose_as, {})
     )
 
     /**

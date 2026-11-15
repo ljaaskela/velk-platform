@@ -169,6 +169,8 @@ private:
         /// frames: the compute shaders that bake it (RT / deferred / denoise /
         /// spatial) then read this frame's globals, not a rotating ring slot.
         ArenaRegion globals_region;
+        /// Likewise for the chooser's globals, while ICamera::choose_as names one.
+        ArenaRegion chooser_globals_region;
 
         /// Per-view region in the shared record arena (set = 1 slot 10), holding
         /// the RtRecords for this view's primary shapes. `prepare_shapes` stamps

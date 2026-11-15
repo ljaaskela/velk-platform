@@ -9,6 +9,7 @@
 #include <velk-scene/api/post_process.h>
 #include <velk-scene/api/render_path.h>
 #include <velk-scene/api/render_trait.h>
+#include <velk-scene/interface/intf_element.h>
 #include <velk-scene/interface/intf_environment.h>
 #include <velk-scene/plugin.h>
 
@@ -89,6 +90,16 @@ public:
     void set_environment(const IEnvironment::Ptr& env)
     {
         write_state<ICamera>([&](ICamera::State& s) { set_object_ref(s.environment, env); });
+    }
+
+    /// Sets what the deferred path shows in place of the lit image. See DebugView.
+    void set_debug_view(DebugView v) { write_state_value<ICamera>(&ICamera::State::debug_view, v); }
+
+    /// Makes this camera's view draw what the camera on @p chooser would draw, seen from here,
+    /// with that camera's view edges drawn in. Null to draw what this camera sees again.
+    void set_choose_as(const IElement::Ptr& chooser)
+    {
+        write_state<ICamera>([&](ICamera::State& s) { set_object_ref(s.choose_as, chooser); });
     }
 };
 

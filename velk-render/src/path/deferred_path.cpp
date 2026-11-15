@@ -150,7 +150,7 @@ uint32_t env_uint(const char* name, long lo, long hi)
 }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 6); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 9); }
 
 // Diagnostic: the cut-off for clusters drawn in compute, in pixels, in place of the camera's
 // tiny_cluster_pixels. 0 when not set.
@@ -808,8 +808,14 @@ void DeferredPath::build_passes(IViewEntry& entry,
     const uint32_t culling_generation = vs.instance_cull.arena_generation;
     auto* camera = interface_cast<ICamera>(ctx.view_camera_trait);
     auto camera_state = camera ? read_state<ICamera>(camera) : decltype(read_state<ICamera>(camera)){};
-    const bool occlusion = (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid() && !no_occlusion_culling();
-    const float tiny_pixels = tiny_pixels_override() != 0u ? static_cast<float>(tiny_pixels_override())
+    // Chosen as another camera: culling and levels of detail follow that camera, and what
+    // holds only for the camera that chooses (occlusion, compute raster, far instances) is off.
+    const bool chosen = render_view.chosen_by_other;
+    const uint32_t cull_globals = chosen ? render_view.cull_globals_base : render_view.view_globals_base;
+    const bool occlusion = !chosen && (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid()
+                        && !no_occlusion_culling();
+    const float tiny_pixels = chosen ? 0.f
+                            : tiny_pixels_override() != 0u ? static_cast<float>(tiny_pixels_override())
                             : camera_state ? std::max(camera_state->tiny_cluster_pixels, 0.f)
                                            : 2.f;
     vs.instance_cull.tiny_word = vs.tiny_list.valid() && vs.pixel_words.valid() && tiny_pixels > 0.f
@@ -817,7 +823,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         : kCullNoSlot;
     vs.instance_cull.tiny_capacity = vs.tiny_capacity;
     vs.instance_cull.tiny_pixels = tiny_pixels;
-    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, true,
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph, !chosen,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot);
     if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
@@ -826,7 +832,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_visibility_pass(vs, render_view, ctx, graph, false);
     emit_depth_pyramid_pass(vs, ctx, graph, false);
     if (occlusion && vs.instance_cull.pyramid_word != kCullNoSlot) {
-        emit_instance_retest_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
+        emit_instance_retest_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph);
         emit_visibility_pass(vs, render_view, ctx, graph, true);
     }
     emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
@@ -834,24 +840,34 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
-    const uint32_t visibility_mode = visibility_debug_mode();
+    const uint32_t visibility_mode = visibility_debug_mode() != 0u ? visibility_debug_mode()
+                                   : camera_state ? static_cast<uint32_t>(camera_state->debug_view)
+                                                  : 0u;
+    const uint32_t cells_mode = light_cells_debug_mode();
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
-    if (prepare_light_cells(vs, render_view, ctx)) {
-        emit_light_cells_update_pass(vs, render_view, ctx, graph);
-    }
-    emit_lighting_pass(entry, vs, render_view, color_target, ctx,
-                       static_cast<int>(vs.gbuffer_size.x),
-                       static_cast<int>(vs.gbuffer_size.y), graph);
-    emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
+    // A debug view covers every pixel, so nothing is lit under it.
+    if (visibility_mode == 0 || cells_mode != 0) {
+        if (prepare_light_cells(vs, render_view, ctx)) {
+            emit_light_cells_update_pass(vs, render_view, ctx, graph);
+        }
+        emit_lighting_pass(entry, vs, render_view, color_target, ctx,
+                           static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
+        if (!chosen) {
+            emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
+                                   static_cast<int>(vs.gbuffer_size.y), graph);
+        }
+    }
     if (test_diagnostics_enabled()) {
         emit_test_diagnostics_pass(vs, render_view, color_target, ctx, graph);
     }
     if (visibility_mode != 0) {
         emit_visibility_debug_pass(vs, render_view, color_target, ctx, visibility_mode, graph);
     }
-    const uint32_t cells_mode = light_cells_debug_mode();
+    if (chosen) {
+        emit_chooser_frustum_pass(vs, render_view, color_target, ctx, graph);
+    }
     if (cells_mode >= 4) {
         emit_light_cells_pass(vs, render_view, color_target, ctx, cells_mode, graph);
     } else if (cells_mode != 0) {
@@ -1124,12 +1140,13 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (!cmd) return;
         struct PushC
         {
-            uint32_t ids_id, output_id, width, height, mode, pyramid_word;
+            uint32_t ids_id, output_id, width, height, mode, pyramid_word, chooser_globals;
         };
         const PushC pc{pixel_ids_word(vs),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
                        vs.visibility_size.x, vs.visibility_size.y, mode,
-                       static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t))};
+                       static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)),
+                       render_view.chosen_by_other ? render_view.cull_globals_base : render_view.view_globals_base};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
@@ -1150,6 +1167,68 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
+        if (color_target) {
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
+        }
+        rec.held.push_back(pipeline);
+    });
+}
+
+void DeferredPath::emit_chooser_frustum_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                             FrameContext& ctx, IRenderGraph& graph)
+{
+    if (!vs.deferred_output) return;
+
+    constexpr uint64_t kKey = 0x4348'4F4F'5345'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(chooser_frustum_compute_src, kKey);
+    if (!pipeline) return;
+
+    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
+    if (!src_tex) src_tex = vs.deferred_output_tex;
+    IGpuTexture* dst_tex = nullptr;
+    if (color_target) {
+        dst_tex = interface_cast<IGpuTexture>(color_target.get());
+        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
+        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
+    }
+
+    // Out to twice the distance between the two cameras, so that the edges cross this view.
+    const vec3 between = render_view.chooser_cam_pos - render_view.cam_pos;
+    const float reach = std::max(2.f * std::sqrt(between.x * between.x + between.y * between.y + between.z * between.z), 1.f);
+
+    bool dirty = true;
+    emit_cached_view_pass(vs.chooser_frustum_pass, dirty, "deferred.chooser_frustum", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        struct PushC
+        {
+            uint32_t output_id, width, height, view_globals, chooser_globals;
+            float reach;
+        };
+        const PushC pc{static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
+                       vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base,
+                       render_view.cull_globals_base, reach};
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (8u * kChooserEdgeSteps + 63u) / 64u;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: chooser frustum");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        if (src_tex && dst_tex) {
+            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
+        }
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
