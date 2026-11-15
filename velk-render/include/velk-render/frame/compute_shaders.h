@@ -342,6 +342,9 @@ BvhNode velk_top_node(uint index)
 // A float of a vertex, by its word in the mesh-word arena.
 #define velk_hit_vertex(word) uintBitsToFloat(velk_mesh_words.data[word])
 
+// Inside velk_walk: where the camera is in the space of the mesh being walked.
+#define VELK_WALK_EYE vec3(uintBitsToFloat(stack[kStack + 3]), uintBitsToFloat(stack[kStack + 4]), uintBitsToFloat(stack[kStack + 5]))
+
 // The culling arena, for the marks rays set to ask for finer clusters of a mesh: see
 // kClusterHeaderWords. Every thread writes the same value, so no order is needed.
 layout(set = 1, binding = 16, std430) buffer VelkTraceMarks { uint data[]; } velk_trace_marks;
@@ -362,7 +365,13 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
 
     // The three words past kStack hold the frame of the nearest hit so far, which only the
     // hit's own record needs at the end, and registers cannot spare.
-    uint stack[kStack + 3];
+    // Then, for a mesh with a level of detail hierarchy, where the camera is in the mesh's own
+    // space (3 words), the header of the cluster being walked, and the header of the nearest
+    // hit's cluster, or none. Kept here for the same reason: each is read at a few places,
+    // and a register would be held through every step of every pass.
+    uint stack[kStack + 8];
+    stack[kStack + 6] = 0xFFFFFFFFu;
+    stack[kStack + 7] = 0xFFFFFFFFu;
     int sp = 0;
     if (!seeded) stack[sp++] = VELK_GLOBALS.bvh_root;
     velk_ray_frame = VELK_GLOBALS.cam_pos.xyz;
@@ -390,14 +399,6 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
     uint positions = 0u;
     float mesh_cone = 0.0;
     float mesh_best = 1e30;
-    // Where the camera is in the mesh's own space, and how many pixels an error of one unit
-    // is at one unit from it, over the most a drawn surface may be off by.
-    vec3 mesh_eye = vec3(0.0);
-    float lod_scale = VELK_GLOBALS.lod_scale;
-    // The header of the cluster being walked, and of the nearest hit's, or none for a mesh
-    // without a hierarchy for rays.
-    uint cur_header = 0xFFFFFFFFu;
-    uint best_header = 0xFFFFFFFFu;
 
     float best_t = t_max;
     uint best_shape = kNone;
@@ -465,7 +466,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 best_v = v;
                 best_triangle = tri;
                 best_vertex_ids = positions + (leaf_counts >> 16u) * 3u;
-                best_header = cur_header;
+                stack[kStack + 7] = stack[kStack + 6];
                 best_stopped = false;
                 stack[kStack] = floatBitsToUint(velk_ray_frame.x);
                 stack[kStack + 1] = floatBitsToUint(velk_ray_frame.y);
@@ -492,6 +493,8 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 // when its error is small enough seen from the camera and its parent's is
                 // not, which leaves one surface whatever the ray.
                 uint header = (ref & ~VELK_BLAS_CLUSTER) * 4u;
+                vec3 mesh_eye = VELK_WALK_EYE;
+                float lod_scale = VELK_GLOBALS.lod_scale;
                 vec3 own = vec3(uintBitsToFloat(velk_cluster_words.data[header]),
                                 uintBitsToFloat(velk_cluster_words.data[header + 1u]),
                                 uintBitsToFloat(velk_cluster_words.data[header + 2u]));
@@ -515,7 +518,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 }
                 // What its tree's references count from. Everything pushed from here on is
                 // walked before anything under it on the stack, so these hold until then.
-                cur_header = header;
+                stack[kStack + 6] = header;
                 mesh_base = velk_cluster_words.data[header + 13u];
                 word_base = velk_cluster_words.data[header + 14u];
                 if (sp < kStack) stack[sp++] = velk_cluster_words.data[header + 10u];
@@ -528,8 +531,6 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
             bool upper = (ref & VELK_BLAS_UPPER) != 0u;
             uint node_at = upper ? (ref & ~VELK_BLAS_UPPER) : mesh_base + ref;
             VelkMeshNode node = velk_mesh_nodes.data[node_at];
-            VelkMeshNode chosen_by;
-            if (upper) chosen_by = velk_mesh_nodes.data[node_at + 1u];
             float t_l, t_r;
             float limit = VELK_WALK_LIMIT;
             bool h_l = ray_aabb(walk_ray, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
@@ -553,9 +554,18 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 // Left out when every cluster under it is too coarse from the camera, or has a
                 // parent that will do. A cluster is tested by its own header.
                 if (upper && (child & VELK_BLAS_CLUSTER) == 0u) {
-                    vec4 sphere = left ? chosen_by.a : chosen_by.c;
-                    vec2 errors = left ? chosen_by.b.xy : uintBitsToFloat(chosen_by.refs.xy);
-                    float away = length(sphere.xyz - mesh_eye);
+                    // Only this child's part of the second node is read, where it is needed.
+                    vec4 sphere;
+                    vec2 errors;
+                    if (left) {
+                        sphere = velk_mesh_nodes.data[node_at + 1u].a;
+                        errors = velk_mesh_nodes.data[node_at + 1u].b.xy;
+                    } else {
+                        sphere = velk_mesh_nodes.data[node_at + 1u].c;
+                        errors = uintBitsToFloat(velk_mesh_nodes.data[node_at + 1u].refs.xy);
+                    }
+                    float lod_scale = VELK_GLOBALS.lod_scale;
+                    float away = length(sphere.xyz - VELK_WALK_EYE);
                     if (errors.x * lod_scale > away + sphere.w) continue;
                     if (errors.y * lod_scale <= max(away - sphere.w, lod_least)) continue;
                 }
@@ -597,7 +607,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                         best_v = best_u;
                         best_triangle = velk_cluster_words.data[word_base + velk_cluster_words.data[leaf]];
                         best_vertex_ids = word_base + velk_cluster_words.data[leaf + 2u] + (velk_cluster_words.data[leaf + 1u] >> 16u) * 3u;
-                        best_header = cur_header;
+                        stack[kStack + 7] = stack[kStack + 6];
                         best_stopped = true;
                         best_stop_normal = surface;
                         stack[kStack] = floatBitsToUint(velk_ray_frame.x);
@@ -648,12 +658,15 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
                 mesh_scale = scale;
                 mesh_base = st.blas_node_base;
                 word_base = st.cluster_word_base;
-                cur_header = kNone;
+                stack[kStack + 6] = kNone;
                 if ((st.blas_root & (VELK_BLAS_LEAF | VELK_BLAS_CLUSTER | VELK_BLAS_UPPER)) == VELK_BLAS_UPPER) {
                     // Rays are relative to the camera, so it is at their origin.
                     Ray eye = ray;
                     eye.origin = vec3(0.0);
-                    mesh_eye = velk_local_ray(eye, velk_records.data[cur_record]).origin;
+                    vec3 mesh_eye = velk_local_ray(eye, velk_records.data[cur_record]).origin;
+                    stack[kStack + 3] = floatBitsToUint(mesh_eye.x);
+                    stack[kStack + 4] = floatBitsToUint(mesh_eye.y);
+                    stack[kStack + 5] = floatBitsToUint(mesh_eye.z);
                 }
                 mesh_cone = closest && (st.flags & (VELK_MESH_SCATTERED | VELK_MESH_DEFORMING)) == 0u ? velk_ray_cone : 0.0;
 #ifdef VELK_TRACE_MEDIUM
@@ -806,6 +819,7 @@ float velk_walk(Ray ray, float t_max, bool closest, bool seeded, uint seed_recor
         uint floats_per_vert = st.vertex_stride >> 2u;
         float w = 1.0 - best_u - best_v;
         // Vertex ids count from the cluster's own vertices, or from the mesh's.
+        uint best_header = stack[kStack + 7];
         uint vertices = best_header != kNone ? velk_cluster_words.data[best_header + 12u] : st.vbo_base;
         uint o0 = vertices + velk_cluster_words.data[best_vertex_ids + (best_triangle & 0xFFu)] * floats_per_vert;
         uint o1 = vertices + velk_cluster_words.data[best_vertex_ids + ((best_triangle >> 8u) & 0xFFu)] * floats_per_vert;
