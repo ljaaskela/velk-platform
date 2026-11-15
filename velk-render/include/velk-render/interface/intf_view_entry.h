@@ -62,10 +62,10 @@ public:
     virtual void set_cached_native_handle(uint64_t handle) = 0;
 
     /// Producer-side: fires `IRenderState::on_render_state_changed` on
-    /// all subscribers. Called by `ViewPreparer` when anything that
+    /// all subscribers with @p what. Called by `ViewPreparer` when anything that
     /// affects the cached pass changes — structural batch rebuild or
     /// camera move (frustum-cull output + FrameGlobals contents).
-    virtual void notify_view_changed() = 0;
+    virtual void notify_view_changed(RenderStateChange what) = 0;
 };
 
 } // namespace velk

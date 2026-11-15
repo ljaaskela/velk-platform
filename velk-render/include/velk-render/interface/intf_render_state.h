@@ -18,8 +18,23 @@ namespace velk {
 enum class RenderStateChange : uint32_t
 {
     None = 0,
+    Batches = 1u << 0,      ///< A view's batches were rebuilt.
+    Camera = 1u << 1,       ///< A view's camera moved or its projection changed.
+    Lights = 1u << 2,       ///< A view's lights were laid out again.
+    Environment = 1u << 3,  ///< A view's environment changed.
     All  = 0xffffffffu,
 };
+
+inline constexpr RenderStateChange operator|(RenderStateChange a, RenderStateChange b)
+{
+    return static_cast<RenderStateChange>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+/// Whether @p flags says @p what changed.
+inline constexpr bool has_change(RenderStateChange flags, RenderStateChange what)
+{
+    return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(what)) != 0u;
+}
 
 class IRenderState;
 

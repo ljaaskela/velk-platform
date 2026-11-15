@@ -2450,7 +2450,7 @@ DeferredPath::~DeferredPath()
 }
 
 void DeferredPath::on_render_state_changed(IRenderState* source,
-                                           RenderStateChange /*flags*/)
+                                           RenderStateChange flags)
 {
     auto* view = interface_cast<IViewEntry>(source);
     if (!view) return;
@@ -2459,7 +2459,11 @@ void DeferredPath::on_render_state_changed(IRenderState* source,
         it->second.visibility_dirty = true;
         it->second.lighting_dirty = true;
         it->second.transparent_dirty = true;
-        it->second.instance_cull.dirty = true;
+        // Culling records nothing that follows the camera: only another set of batches
+        // records it again.
+        if (has_change(flags, RenderStateChange::Batches)) {
+            it->second.instance_cull.dirty = true;
+        }
     }
 }
 

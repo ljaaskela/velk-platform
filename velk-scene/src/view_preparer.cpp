@@ -106,7 +106,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             batch_builder.rebuild_batches(scene_state, cache.batches,
                                           cache.element_slots, cache.rtt_roots);
             entry.set_batches_dirty(false);
-            entry.notify_view_changed();
+            entry.notify_view_changed(RenderStateChange::Batches);
         }
     }
 
@@ -300,7 +300,7 @@ void ViewPreparer::prepare_camera(IViewEntry& entry, const IElement::Ptr& camera
 
     auto& cache = view_caches_[&entry];
     if (cache.camera_change.changed({rv.view_projection, rv.cam_pos})) {
-        entry.notify_view_changed();
+        entry.notify_view_changed(RenderStateChange::Camera);
     }
 }
 
@@ -429,7 +429,7 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
             cache.lights_region = std::move(region);
             if (ok) ctx.lights_arena->write_at(off, rv.lights.data(), need);
         }
-        entry.notify_view_changed();  // base + light_count changed
+        entry.notify_view_changed(RenderStateChange::Lights);  // base + light_count changed
     } else if (need > 0) {
         ctx.lights_arena->update_at(cache.lights_region.offset(),
                                     rv.lights.data(), need);
@@ -622,7 +622,7 @@ void ViewPreparer::prepare_env(IViewEntry& entry,
     auto& cache = view_caches_[&entry];
     if (cache.env_change.changed({rv.env.texture_id, rv.env.material_id,
                                   rv.env.intensity, rv.env.rotation_rad})) {
-        entry.notify_view_changed();
+        entry.notify_view_changed(RenderStateChange::Environment);
     }
 }
 

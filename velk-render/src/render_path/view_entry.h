@@ -43,9 +43,9 @@ public:
         cached_native_handle_ = handle;
     }
 
-    void notify_view_changed() override
+    void notify_view_changed(::velk::RenderStateChange what) override
     {
-        notify_render_state_changed(::velk::RenderStateChange::All);
+        notify_render_state_changed(what);
     }
 
 private:
