@@ -52,7 +52,8 @@ public:
         MeshTopology topology,
         const aabb& bounds,
         IMeshBuffer::Ptr uv1_buffer = nullptr,
-        uint32_t uv1_offset = 0) override;
+        uint32_t uv1_offset = 0,
+        IMeshBuffer::Ptr color_buffer = nullptr) override;
 
     IMesh::Ptr build(array_view<IMeshPrimitive::Ptr> primitives) override;
 

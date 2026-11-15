@@ -32,6 +32,7 @@ private:
     IRenderBackend::Ptr backend_;
     IMeshBuilder::Ptr mesh_builder_;
     IMeshBuffer::Ptr default_uv1_;
+    IMeshBuffer::Ptr default_color_;
     IShaderManager::Ptr shader_manager_;
     IPipelineManager::Ptr pipeline_manager_;
     /// Installed by the renderer, which owns it. Raw: the renderer outlives

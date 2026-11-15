@@ -309,6 +309,7 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
         buf->clear_dirty();
     };
     upload_default(render_ctx_->get_default_buffer(DefaultBufferType::Uv1));
+    upload_default(render_ctx_->get_default_buffer(DefaultBufferType::Color));
 }
 
 void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface,

@@ -91,7 +91,7 @@ inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
 /// Words per cluster in a level of detail hierarchy's table and per node of its tree, read by
 /// VELK_LOD_SELECT_GLSL.
-inline constexpr uint32_t kLodClusterWords = 24;
+inline constexpr uint32_t kLodClusterWords = 28;
 inline constexpr uint32_t kLodNodeWords = 16;
 /// Set on a tree node's child that is a cluster, with the cluster's index (VELK_LOD_LEAF).
 inline constexpr uint32_t kLodLeaf = 0x80000000u;

@@ -104,6 +104,9 @@ void BatchBuilder::rebuild_commands(IElement* element, IRenderContext* render_ct
             if (auto uv1 = interface_pointer_cast<IBuffer>(p->get_uv1_buffer())) {
                 cache.gpu_resources.push_back(uv1);
             }
+            if (auto color = interface_pointer_cast<IBuffer>(p->get_color_buffer())) {
+                cache.gpu_resources.push_back(color);
+            }
         };
         push_primitive_buffer(quad_primitive.get());
         for (auto& entry : vc.entries) {

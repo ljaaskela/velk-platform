@@ -5400,7 +5400,7 @@ VelkSurfaceVertex velk_surface_vertex(VelkDrawData d, uint cluster, ElementInsta
     r.uv = s.local_uv;
     r.uv1 = velk_read_uv1(velk_cluster_uv1_word(d, cluster, index));
     r.tangent = s.world_tangent;
-    r.color = s.color;
+    r.color = s.color * velk_read_color(velk_cluster_color_word(d, cluster, index));
     r.shape_param = s.shape_param;
     return r;
 }

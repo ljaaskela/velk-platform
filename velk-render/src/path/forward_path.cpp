@@ -110,8 +110,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
         [&](CachedPassRecording& rec) {
             const ::velk::render::Frustum* frustum_ptr =
                 render_view.has_frustum ? &render_view.frustum : nullptr;
-            auto* default_uv1 =
-                ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             auto target_format = ctx.target_format;
 
             // Pair-depth allocation: only when the color_target is tagged
@@ -156,7 +155,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                 emit_draw_calls(
                     draw_calls,
                     env_batches, *ctx.frame_buffer, *ctx.resources,
-                    default_uv1, render_view.view_globals_base,
+                    default_stream_buffers, render_view.view_globals_base,
                     resolve, /*frustum=*/nullptr);
             }
 
@@ -165,7 +164,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
                 emit_draw_calls(
                     draw_calls,
                     *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-                    default_uv1, render_view.view_globals_base,
+                    default_stream_buffers, render_view.view_globals_base,
                     resolve, frustum_ptr);
             }
 

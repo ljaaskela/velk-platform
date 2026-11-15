@@ -97,6 +97,16 @@ bool RenderContextImpl::init(const RenderConfig& config)
             return false;
         }
     }
+    // Default colour buffer: one white word, likewise for draws whose primitive has no colours.
+    {
+        const uint32_t white = 0xFFFFFFFFu;
+        default_color_ = mesh_builder_->build_buffer(&white, sizeof(white), nullptr, 0);
+        if (!default_color_) {
+            VELK_LOG(E, "RenderContext::init: failed to create default colour buffer");
+            backend_ = nullptr;
+            return false;
+        }
+    }
 
     initialized_ = true;
     VELK_LOG(I, "RenderContext initialized (Vulkan, bindless)");
@@ -153,6 +163,8 @@ IBuffer::Ptr RenderContextImpl::get_default_buffer(DefaultBufferType type) const
     switch (type) {
     case DefaultBufferType::Uv1:
         return interface_pointer_cast<IBuffer>(default_uv1_);
+    case DefaultBufferType::Color:
+        return interface_pointer_cast<IBuffer>(default_color_);
     }
     return nullptr;
 }

@@ -109,8 +109,8 @@ void RtPath::build_passes(IViewEntry& entry,
     // materials known, which the pipeline below is composed with.
     if (render_view.batches) {
         const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
-        write_draw_data(*render_view.batches, *ctx.resources, ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get(),
-                        render_view.view_globals_base, ctx.snippets, &resolve_ctx);
+        write_draw_data(*render_view.batches, *ctx.resources, default_streams(*ctx.render_ctx), render_view.view_globals_base,
+                        ctx.snippets, &resolve_ctx);
     }
 
     auto rt_pipeline = ensure_pipeline(ctx);

@@ -91,6 +91,7 @@ enum class FrontFace : uint8_t
 enum class DefaultBufferType : uint8_t
 {
     Uv1,  ///< One vec2 (0, 0); paired with DrawDataHeader::uv1_enabled == 0 so the vertex shader reads index 0 only.
+    Color,  ///< One white RGBA8 word; paired with DrawDataHeader::color_enabled == 0 likewise.
 };
 
 /// Texture addressing mode for coordinates outside [0, 1]. Matches

@@ -23,6 +23,14 @@
 
 namespace velk {
 
+/// The context-owned buffers a draw record points at for the optional vertex streams a
+/// primitive does not have (DefaultBufferType). See default_streams.
+struct DefaultStreams
+{
+    IBuffer* uv1 = nullptr;
+    IBuffer* color = nullptr;
+};
+
 /// What write_draw_data found of a batch that a draw of it needs.
 struct WrittenDrawData
 {
@@ -40,7 +48,7 @@ struct WrittenDrawData
  *        which record its clusters name (kClusterEntryDrawWord). Returns false for a batch with
  *        nothing to draw yet.
  */
-inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources, IBuffer* default_uv1,
+inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources, const DefaultStreams& defaults,
                             uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
                             const FrameResolveContext* resolve_ctx, WrittenDrawData& out)
 {
@@ -121,11 +129,17 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
         header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
         header.uv1_enabled = 1;
     } else {
-        const GpuRef uv1_ref = get_gpu_ref(default_uv1);
+        const GpuRef uv1_ref = get_gpu_ref(defaults.uv1);
         if (uv1_ref.kind != GpuRef::Kind::Index) return false;
         header.uv1_base = uv1_ref.get_base();
         header.uv1_enabled = 0;
     }
+    // A colour for each vertex of the vertex buffer, indexed as the indices index it.
+    const auto color = primitive->get_color_buffer();
+    const GpuRef color_ref = get_gpu_ref(color ? interface_cast<IBuffer>(color.get()) : defaults.color);
+    if (color_ref.kind != GpuRef::Kind::Index) return false;
+    header.color_base = color_ref.get_base();
+    header.color_enabled = color ? 1u : 0u;
 
     // Material draw-data lives in the shared material arena (set = 1 slot
     // 4), suballocated + written by ViewPreparer's upload sweep. The header
@@ -177,14 +191,14 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
  *        draws none of them but traces rays, which name draws. Each frame, as a path that
  *        draws them writes them.
  */
-inline void write_draw_data(const vector<IBatch::Ptr>& batches, IGpuResourceManager& resources, IBuffer* default_uv1,
-                            uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
+inline void write_draw_data(const vector<IBatch::Ptr>& batches, IGpuResourceManager& resources,
+                            const DefaultStreams& defaults, uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
                             const FrameResolveContext* resolve_ctx)
 {
     for (const auto& batch : batches) {
         WrittenDrawData written;
         if (batch) {
-            write_draw_data(*batch, resources, default_uv1, view_globals_base, snippets, resolve_ctx, written);
+            write_draw_data(*batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written);
         }
     }
 }
@@ -202,9 +216,9 @@ inline void write_draw_data(const vector<IBatch::Ptr>& batches, IGpuResourceMana
  * The resolver runs once per surviving batch and returns the backend
  * `PipelineId` to bind. Returning 0 skips the batch.
  *
- * @param default_uv1 Fallback UV1 buffer (read as index 0). Pass the
- *        renderer's context-owned default; null skips batches without
- *        their own UV1 stream.
+ * @param defaults The context-owned buffers for vertex streams a primitive
+ *        does not have (default_streams); a batch without its own UV1 or
+ *        colours is skipped when they are null.
  *
  * Template parameter inlines the resolver call per call site so
  * captureful lambdas don't pay a virtual-dispatch tax in the hot loop.
@@ -221,7 +235,7 @@ inline void emit_draw_calls(
     const vector<IBatch::Ptr>& batches,
     IFrameDataManager& frame_data,
     IGpuResourceManager& resources,
-    IBuffer* default_uv1,
+    const DefaultStreams& defaults,
     uint32_t view_globals_base,
     ResolvePipelineFn resolve_pipeline,
     const ::velk::render::Frustum* frustum = nullptr,
@@ -270,7 +284,7 @@ inline void emit_draw_calls(
         // the manager only registers an entry once the allocation succeeded.
         const bool has_storage = (storage_gb != nullptr);
         WrittenDrawData written;
-        if (!write_draw_data(batch, resources, default_uv1, view_globals_base, snippets, resolve_ctx, written)) {
+        if (!write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written)) {
             continue;
         }
         IMeshPrimitive* primitive = written.primitive.get();

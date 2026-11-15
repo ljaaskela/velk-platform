@@ -48,7 +48,8 @@ public:
               MeshTopology topology,
               const aabb& bounds,
               const IMeshBuffer::Ptr& uv1_buffer,
-              uint32_t uv1_offset) override;
+              uint32_t uv1_offset,
+              const IMeshBuffer::Ptr& color_buffer) override;
 
     IMeshBuffer::Ptr get_buffer() const override { return buffer_; }
     uint32_t get_vertex_offset() const override { return vertex_offset_; }
@@ -64,6 +65,7 @@ public:
     aabb get_bounds() const override { return bounds_; }
     IMeshBuffer::Ptr get_uv1_buffer() const override { return uv1_buffer_; }
     uint32_t get_uv1_offset() const override { return uv1_offset_; }
+    IMeshBuffer::Ptr get_color_buffer() const override { return color_buffer_; }
 
     // IMeshPrimitiveInternal: publishes MeshStaticData + the BLAS into the
     // shared arenas. Triangle-list primitives backed by an indexed buffer
@@ -120,6 +122,7 @@ private:
     aabb bounds_{};
     IMeshBuffer::Ptr uv1_buffer_;
     uint32_t uv1_offset_ = 0;
+    IMeshBuffer::Ptr color_buffer_;
 
     /// This primitive's regions in the shared RT arenas (set = 1 slots
     /// 11 / 12 / 13), allocated together on the first successful
@@ -216,6 +219,7 @@ private:
     vector<uint32_t> lod_node_link_;                   ///< By node: the same for its parent, or kLodNoGroup.
     uint32_t lod_live_vertex_word_ = 0;                ///< A deforming mesh's vertices and second uvs.
     uint32_t lod_live_uv1_word_ = 0xFFFFFFFFu;
+    uint32_t lod_live_color_word_ = 0xFFFFFFFFu;  ///< Likewise for its colours.
     IGpuResourceManager::WeakPtr lod_resources_;       ///< Whose budget the pages count against.
     bool lod_unreadable_ = false;  ///< Its vertices could not be read for the hierarchy, as logged once.
     bool deforming_ = false;

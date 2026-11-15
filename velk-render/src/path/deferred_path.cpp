@@ -898,7 +898,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         second_phase ? vs.cached_visibility_second_pass : vs.cached_visibility_pass,
         second_phase ? vs.visibility_second_dirty : vs.visibility_dirty,
         second_phase ? "deferred.visibility2" : "deferred.visibility", graph, [&](CachedPassRecording& rec) {
-            auto* default_uv1 = ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
                 if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
                     return nullptr;
@@ -911,7 +911,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             };
             vector<DrawCall> draw_calls;
             const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
-            emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_uv1,
+            emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_stream_buffers,
                             render_view.view_globals_base, resolve,
                             render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase);
 
@@ -2486,8 +2486,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.cached_transparent_pass, vs.transparent_dirty, "deferred.transparent",
         graph,
         [&](CachedPassRecording& rec) {
-            auto* default_uv1 =
-                ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get();
+            const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             const PixelFormat target_format = ctx.target_format;
             const DepthFormat depth_format = color_target->get_depth_format();
 
@@ -2511,7 +2510,7 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
             vector<DrawCall> draw_calls;
             emit_draw_calls(
                 draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
-                default_uv1, render_view.view_globals_base, resolve,
+                default_stream_buffers, render_view.view_globals_base, resolve,
                 render_view.has_frustum ? &render_view.frustum : nullptr);
 
             // No transparent geometry this view: leave an empty (no-op) pass.

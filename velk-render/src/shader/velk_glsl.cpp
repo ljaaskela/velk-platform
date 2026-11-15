@@ -104,7 +104,7 @@ R"(
 // Words per cluster draw entry: kClusterEntryWords.
 #define VELK_CLUSTER_ENTRY_WORDS 16u
 // Words per cluster in a level of detail table: kLodClusterWords.
-#define VELK_LOD_CLUSTER_WORDS 24u
+#define VELK_LOD_CLUSTER_WORDS 28u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
 // kLodNodeWords, and rays' node with its children's boxes sits before each.
 #define VELK_LOD_NODE_STRIDE 32u
@@ -282,6 +282,9 @@ R"(
 #define velk_uv1(root) \
     velk_read_uv1(velk_cluster_uv1_word(velk_draw(root), velk_cluster(root), uint(gl_VertexIndex)))
 
+#define velk_vertex_color(root) \
+    velk_read_color(velk_cluster_color_word(velk_draw(root), velk_cluster(root), uint(gl_VertexIndex)))
+
 )"
 // Per-view FrameGlobals for this draw. The header's `globals_base` is an index
 // into the set = 1 globals buffer; the macro hides the field so callers stay
@@ -335,7 +338,7 @@ R"(
 
 #define velk_material(root) (velk_materials.data[velk_draw(root).material_base])
 )"
-// Per-draw header: 48 bytes of indices and counts, one record per batch in the
+// Per-draw header: 64 bytes of indices and counts, one record per batch in the
 // set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.
 // Shader bodies reach these through accessors that hide the layout rather than
 // naming the fields: velk_global_data(root), velk_instance(root),
@@ -358,8 +361,8 @@ struct VelkDrawData {
     uint material_words;
     uint index_base;
     uint cluster_base;
-    uint _pad_draw0;
-    uint _pad_draw1;
+    uint color_base;
+    uint color_enabled;
 };
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
@@ -394,6 +397,19 @@ uint velk_cluster_uv1_word(VelkDrawData d, uint cluster, uint index)
 vec2 velk_read_uv1(uint word)
 {
     return vec2(velk_vertex_word(word, 0u), velk_vertex_word(word, 1u));
+}
+
+// The word of the colour of vertex `index` (IMeshPrimitive::get_color_buffer). The draw's own
+// when the cluster has none, which is one white word for all vertices when the mesh has none.
+uint velk_cluster_color_word(VelkDrawData d, uint cluster, uint index)
+{
+    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 24u];
+    return own == VELK_NO_CLUSTER ? d.color_base + d.color_enabled * index : own + index;
+}
+
+vec4 velk_read_color(uint word)
+{
+    return unpackUnorm4x8(velk_mesh_words.data[word]);
 }
 
 // What each pixel shows, two words a pixel, row by row from `ids_word` in the culling arena,

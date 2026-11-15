@@ -102,9 +102,8 @@ inline constexpr uint32_t kNoVisibleList = 0xFFFFFFFFu;
 /**
  * @brief Standard draw data header at the start of every draw's GPU data.
  *
- * 48 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
- * now an index or a count: the alignment pads existed only to keep the two
- * 8-byte vertex-stream addresses aligned, and went with them.
+ * 64 bytes via VELK_GPU_STRUCT (16-byte aligned for std430). Every field is
+ * an index or a count.
  *
  * Material data does not trail the header: it lives in the set = 1 material
  * arena, indexed by @c material_base (region offset / material record size).
@@ -130,7 +129,8 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t material_words;    ///< Word base of the material's record, as compute reads it.
     uint32_t index_base;        ///< Word base of the draw's indices in the mesh-word arena, or kNoVisibleList when it has none.
     uint32_t cluster_base;      ///< Word base in the culling arena of each list position's cluster, as the word there of its record in its hierarchy's table, or kNoVisibleList when not drawn by cluster.
-    uint32_t _pad[2];
+    uint32_t color_base;        ///< Word base of the draw's colour stream (IMeshPrimitive::get_color_buffer), or of a context-owned white word when @c color_enabled is 0.
+    uint32_t color_enabled;     ///< 1 = a colour per vertex at @c color_base; 0 = the white word for every vertex.
 };
 
 static_assert(sizeof(DrawDataHeader) == 64, "DrawDataHeader must be 64 bytes for std430 alignment");

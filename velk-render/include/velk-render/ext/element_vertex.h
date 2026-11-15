@@ -23,7 +23,7 @@ void main()
     VelkVaryings s = VELK_VERTEX_FN(velk_vertex3d(root), velk_instance(root), globals);
     gl_Position = globals.view_projection * vec4(s.rel_pos, 1.0);
 
-    v_color        = s.color;
+    v_color        = s.color * velk_vertex_color(root);
     v_local_uv     = s.local_uv;
     v_size         = s.size;
     v_rel_pos      = s.rel_pos;

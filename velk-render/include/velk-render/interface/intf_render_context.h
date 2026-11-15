@@ -100,6 +100,13 @@ public:
     virtual IBuffer::Ptr get_default_buffer(DefaultBufferType type) const = 0;
 };
 
+/// @p ctx's buffers for the optional vertex streams a primitive does not have, as draw records
+/// point at them (write_draw_data, emit_draw_calls).
+inline DefaultStreams default_streams(const IRenderContext& ctx)
+{
+    return {ctx.get_default_buffer(DefaultBufferType::Uv1).get(), ctx.get_default_buffer(DefaultBufferType::Color).get()};
+}
+
 } // namespace velk
 
 #endif // VELK_RENDER_INTF_RENDER_CONTEXT_H

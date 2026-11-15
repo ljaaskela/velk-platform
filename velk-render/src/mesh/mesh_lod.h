@@ -54,6 +54,10 @@ struct MeshLodCluster
     /// Likewise the mark of its own group, which whoever uses the cluster sets, so that the
     /// group is known to be wanted while it is loaded.
     uint32_t own_mark_word = 0xFFFFFFFFu;
+    /// The word of its first vertex's colour, likewise, or kLodNoAttribute. See
+    /// IMeshPrimitive::get_color_buffer.
+    uint32_t color_word = 0xFFFFFFFFu;
+    uint32_t spare[3] = {};
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
 
@@ -83,6 +87,7 @@ struct MeshLod
 {
     vector<uint8_t> vertices;  ///< Each cluster's run, one after another. Empty for a deforming mesh.
     vector<float> uv1;         ///< Two floats for each of `vertices`, when the mesh has a second uv.
+    vector<uint32_t> colors;   ///< A colour for each of `vertices`, when the mesh has colours.
     vector<uint32_t> indices;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
     uint32_t level0_clusters = 0;
@@ -130,6 +135,7 @@ inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 /// @param vertices The vertices @p blas indexes, which clusters get runs of their own of, and
 ///        whose normals are kept. Null only for a deforming mesh without them.
 /// @param uv1 Two floats for each of @p vertices, or null.
+/// @param colors A colour (RGBA8) for each of @p vertices, or null.
 /// @param stride Bytes per vertex.
 /// @param normal_offset Bytes to a vertex's normal, three floats, or kLodNoAttribute.
 /// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
@@ -137,8 +143,8 @@ inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 /// @param deforming The mesh's vertices move: level 0 alone, over the mesh's own vertices, and
 ///        nothing for rays, so that `ray_nodes` holds only the two nodes for each of `nodes`,
 ///        with no boxes, and `ray_words` is empty.
-MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, uint32_t stride,
-                       uint32_t normal_offset, bool merge_pieces, bool deforming);
+MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, const uint32_t* colors,
+                       uint32_t stride, uint32_t normal_offset, bool merge_pieces, bool deforming);
 
 } // namespace velk::impl
 

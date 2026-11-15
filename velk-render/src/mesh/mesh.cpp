@@ -51,7 +51,8 @@ void MeshPrimitive::init(const IMeshBuffer::Ptr& buffer,
                           MeshTopology topology,
                           const aabb& bounds,
                           const IMeshBuffer::Ptr& uv1_buffer,
-                          uint32_t uv1_offset)
+                          uint32_t uv1_offset,
+                          const IMeshBuffer::Ptr& color_buffer)
 {
     buffer_ = buffer;
     vertex_offset_ = vertex_offset;
@@ -64,6 +65,7 @@ void MeshPrimitive::init(const IMeshBuffer::Ptr& buffer,
     bounds_ = bounds;
     uv1_buffer_ = uv1_buffer;
     uv1_offset_ = uv1_offset;
+    color_buffer_ = color_buffer;
 }
 
 void Mesh::init(array_view<IMeshPrimitive::Ptr> primitives,
@@ -169,6 +171,7 @@ void MeshPrimitive::unload_lod_page(uint32_t group, IGpuResourceManager& resourc
         record.triangle_count = 0;
         record.vertex_word = 0;
         record.uv1_word = kLodNoAttribute;
+        record.color_word = kLodNoAttribute;
         if (!lod_headers_.empty()) {
             uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
             header[10] = kBlasLeafRef;
@@ -340,6 +343,9 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
         if (source.uv1_word != kLodNoAttribute) {
             geometry_bytes += uint64_t(source.vertex_count) * 2u * sizeof(float);
         }
+        if (source.color_word != kLodNoAttribute) {
+            geometry_bytes += uint64_t(source.vertex_count) * sizeof(uint32_t);
+        }
         if (rays) {
             node_count += lod_.blocks[c].node_count;
             word_count += lod_.blocks[c].word_count;
@@ -394,12 +400,17 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
         if (deforming_) {
             record.vertex_word = lod_live_vertex_word_;
             record.uv1_word = lod_live_uv1_word_;
+            record.color_word = lod_live_color_word_;
         } else {
             record.vertex_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
             append(lod_.vertices.data() + size_t(source.vertex_word) * sizeof(uint32_t), size_t(source.vertex_count) * vertex_stride_);
             if (source.uv1_word != kLodNoAttribute) {
                 record.uv1_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
                 append(lod_.uv1.data() + source.uv1_word, size_t(source.vertex_count) * 2u * sizeof(float));
+            }
+            if (source.color_word != kLodNoAttribute) {
+                record.color_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
+                append(lod_.colors.data() + source.color_word, size_t(source.vertex_count) * sizeof(uint32_t));
             }
         }
         record.index_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
@@ -475,10 +486,23 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
                 read = false;
             }
         }
+        // Colours likewise, one word for each vertex of the buffer.
+        vector<uint8_t> color_bytes;
+        const uint32_t* colors = nullptr;
+        if (read && color_buffer_) {
+            auto* color_buffer = interface_cast<IMeshBufferInternal>(color_buffer_.get());
+            const size_t needed = buffer_->get_vbo_size() / vertex_stride_ * sizeof(uint32_t);
+            if (color_buffer && color_buffer->read_geometry(color_bytes) && color_bytes.size() >= needed) {
+                colors = reinterpret_cast<const uint32_t*>(color_bytes.data());
+            } else {
+                read = false;
+            }
+        }
         // A deforming mesh's clusters name its live vertices, which must be on the GPU by now.
         // Any other mesh's get copies of their own, which takes reading them.
         lod_live_vertex_word_ = 0;
         lod_live_uv1_word_ = kLodNoAttribute;
+        lod_live_color_word_ = kLodNoAttribute;
         if (deforming_) {
             const GpuRef live = get_gpu_ref(buffer_);
             if (live.kind != GpuRef::Kind::Index) {
@@ -492,6 +516,13 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
                 }
                 lod_live_uv1_word_ = live_uv1.get_base() + uv1_offset_ / 4u;
             }
+            if (color_buffer_) {
+                const GpuRef live_color = get_gpu_ref(color_buffer_);
+                if (live_color.kind != GpuRef::Kind::Index) {
+                    return false;
+                }
+                lod_live_color_word_ = live_color.get_base();
+            }
         } else if (!read) {
             if (!lod_unreadable_) {
                 VELK_LOG(E, "MeshPrimitive: could not read the mesh's vertices, so it cannot be drawn by cluster or hit by rays");
@@ -501,7 +532,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         }
         // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
         // the tree that is refit, not the hierarchy.
-        lod_ = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, vertex_stride_, normal_offset,
+        lod_ = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, colors, vertex_stride_, normal_offset,
                               merge_pieces_, deforming_);
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
@@ -584,6 +615,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             record.triangle_count = 0;
             record.vertex_word = 0;
             record.uv1_word = kLodNoAttribute;
+            record.color_word = kLodNoAttribute;
             // Using it where its error as built is too large asks for the group it was made from.
             const uint32_t made_from = lod_.cluster_made_from[c];
             record.full_error = lod_.clusters[c].error;
@@ -922,7 +954,7 @@ bool DeformingMesh::init(const IMesh& source, IMeshBuilder& builder)
             stream.buffer, primitive->get_vertex_offset(), primitive->get_vertex_count(),
             primitive->get_index_offset(), primitive->get_index_count(), primitive->get_attributes(),
             primitive->get_vertex_stride(), primitive->get_topology(), primitive->get_bounds(),
-            primitive->get_uv1_buffer(), primitive->get_uv1_offset());
+            primitive->get_uv1_buffer(), primitive->get_uv1_offset(), primitive->get_color_buffer());
         if (!copy) {
             return false;
         }

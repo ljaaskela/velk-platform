@@ -186,6 +186,13 @@ public:
     /// exclusively or has no UV1.
     virtual uint32_t get_uv1_offset() const = 0;
 
+    /// Optional colour per vertex: an IMeshBuffer whose VBO region holds one RGBA8 word
+    /// (unorm, red in the low byte) for each vertex of this primitive's vertex buffer,
+    /// indexed as its indices index that buffer. Null when it has none, which reads as
+    /// white. It multiplies the instance colour into what materials get as the base
+    /// colour (EvalContext::base).
+    virtual IMeshBuffer::Ptr get_color_buffer() const = 0;
+
     /// Attaches a pre-built BVH for this primitive's triangles to be
     /// used by the RT/shadow path. Default no-op so primitive impls
     /// that don't participate in RT stay trivially compliant. Concrete
@@ -257,7 +264,8 @@ public:
                       MeshTopology topology,
                       const aabb& bounds,
                       const IMeshBuffer::Ptr& uv1_buffer,
-                      uint32_t uv1_offset) = 0;
+                      uint32_t uv1_offset,
+                      const IMeshBuffer::Ptr& color_buffer) = 0;
 
     /**
      * @brief Makes this primitive's RT geometry data GPU-resident and returns
@@ -479,6 +487,9 @@ public:
     /// second `build_buffer` call). @p uv1_offset is the byte offset
     /// of this primitive's UV1 range within that buffer's VBO region.
     /// Pass null for primitives that do not provide UV1.
+    ///
+    /// Optional @p color_buffer attaches a colour per vertex (see
+    /// IMeshPrimitive::get_color_buffer), one word for each vertex of @p buffer.
     virtual IMeshPrimitive::Ptr build_primitive_in_buffer(
         IMeshBuffer::Ptr buffer,
         uint32_t vertex_offset, uint32_t vertex_count,
@@ -488,7 +499,8 @@ public:
         MeshTopology topology,
         const aabb& bounds,
         IMeshBuffer::Ptr uv1_buffer = nullptr,
-        uint32_t uv1_offset = 0) = 0;
+        uint32_t uv1_offset = 0,
+        IMeshBuffer::Ptr color_buffer = nullptr) = 0;
 
     /// Allocates a fresh mesh wrapping the given primitives. Computes
     /// the aggregate bounds lazily from primitive bounds.

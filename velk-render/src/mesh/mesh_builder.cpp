@@ -25,7 +25,8 @@ IMeshPrimitive::Ptr MeshBuilder::build_primitive_in_buffer(
     MeshTopology topology,
     const aabb& bounds,
     IMeshBuffer::Ptr uv1_buffer,
-    uint32_t uv1_offset)
+    uint32_t uv1_offset,
+    IMeshBuffer::Ptr color_buffer)
 {
     if (!buffer) return nullptr;
 
@@ -38,7 +39,7 @@ IMeshPrimitive::Ptr MeshBuilder::build_primitive_in_buffer(
                index_offset, index_count,
                attributes, vertex_stride,
                topology, bounds,
-               uv1_buffer, uv1_offset);
+               uv1_buffer, uv1_offset, color_buffer);
     return prim_intf;
 }
 
@@ -120,7 +121,7 @@ IMesh::Ptr MeshBuilder::mesh_from_geometry(const CachedGeometry& g)
                g.vertex_stride,
                g.topology,
                g.bounds,
-               /*uv1_buffer*/ nullptr, /*uv1_offset*/ 0);
+               /*uv1_buffer*/ nullptr, /*uv1_offset*/ 0, /*color_buffer*/ nullptr);
 
     auto mesh_intf = ::velk::instance().create<IMesh>(::velk::ClassId::Mesh);
     auto* mesh = interface_cast<IMeshInternal>(mesh_intf.get());
