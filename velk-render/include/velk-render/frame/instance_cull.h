@@ -54,8 +54,13 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///   22     the word of the partitions' states, kCutPartitionWords each:
 ///            0..2 where in the world it chose from, 3 and 4 its table entry's first chunk word
 ///            and chunk count when it chose, 5 its first record and 6 its record count in the
-///            current store, 7 its first record in the last store, or while choosing a cursor,
-///            8 1 while choosing this frame
+///            current store, 7 its first record in the last store, 8 1 while choosing this
+///            frame, 9 while choosing where its chunks start in the choose list
+///   23     the word of the choose list's chunk counts, one a chunk: how many records the
+///          chunk's instances choose, then its first record
+/// A partition's records are in the order of its chunks, each chunk's in the order of its
+/// members, and each instance's in the order its hierarchy's tree is walked, so that records
+/// near in the store are near in the world.
 /// A record is kCutRecordWords: entry, cluster, slot and error, as the chosen lists have them;
 /// for a mesh without clusters the whole instance: entry kCullNoSlot, cluster its mesh's table.
 inline constexpr uint32_t kCutHeaderWords = 24;
@@ -424,6 +429,7 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away)
     cull_words.data[state + 8u] = 1u;
     atomicAdd(cull_words.data[cut + 14u], 1u);
     uint at = atomicAdd(cull_words.data[cut + 4u], chunks);
+    cull_words.data[state + 9u] = at;
     uint list = cull_words.data[cut + 21u];
     uint first_chunk = cull_words.data[entry + 6u];
     for (uint c = 0u; c < chunks; ++c) {
@@ -536,9 +542,10 @@ void main()
 
 /**
  * Chooses the clusters of each instance in the chunks of the choose list, all round the camera,
- * from its partition's viewpoint. With `write` 0, adds how many there are to the partition's
- * count; with 1, writes them into the partition's range, which the count gave it room for. A
- * mesh without clusters gives one record for the whole instance. A work group per chunk.
+ * from its partition's viewpoint. With `write` 0, counts them into the chunk's count and the
+ * partition's; with 1, writes them from the chunk's first record, which instance_cut_place_src
+ * made of its count, each thread after the ones before it in the chunk. A mesh without
+ * clusters gives one record for the whole instance. A work group per chunk.
  *
  * With items_word set, the chunks hold object ids, as the scene's plain partitions have them,
  * and each object is drawn by its plain items (InstanceCullPass::together): an item is its
@@ -583,12 +590,16 @@ layout(push_constant) uniform PC {
 uint g_count;
 uint g_state;
 uint g_store;
+bool g_writing;
+uint g_at;  // where this thread's next record goes, while writing
 
-// Counts a record, or writes it at the next place in its partition's range.
+shared uint s_counts[64];
+
+// Counts a record, or writes it at this thread's next place.
 void velk_cut_record(uint entry, uint cluster, uint slot, float error)
 {
-    if (pc.write != 0u) {
-        uint at = atomicAdd(cull_words.data[g_state + 7u], 1u);
+    if (g_writing) {
+        uint at = g_at++;
         // Never past the range the count gave the partition.
         if (at >= cull_words.data[g_state + 5u] + cull_words.data[g_state + 6u]) return;
         uint record = g_store + at * 4u;
@@ -638,21 +649,9 @@ void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoin
     velk_cut_choose(named, instance, viewpoint, world, scale, table);
 }
 
-void main()
+// Chooses for a member of a chunk: an instance's slot, or an object.
+void velk_cut_member(uint member, vec3 viewpoint)
 {
-    uint cut = pc.cut_word;
-    uint chunk = cull_words.data[cut + 21u] + gl_WorkGroupID.x * 2u;
-    uint member = cull_words.data[cull_words.data[chunk] + gl_LocalInvocationIndex];
-    uint state = velk_cut_state(cut, cull_words.data[chunk + 1u]);
-    if (member == 0xFFFFFFFFu) return;
-    // A partition that found no room chooses on the next frame.
-    if (pc.write != 0u && cull_words.data[state + 8u] == 0u) return;
-    vec3 viewpoint = vec3(uintBitsToFloat(cull_words.data[state]), uintBitsToFloat(cull_words.data[state + 1u]),
-                          uintBitsToFloat(cull_words.data[state + 2u]));
-
-    g_count = 0u;
-    g_state = state;
-    g_store = velk_cut_store(cut, true);
     if (pc.items_word == 0xFFFFFFFFu) {
         if (member >= pc.slot_count) return;
         velk_cut_instance(member, pc.instances_base + member, pc.table_word, viewpoint);
@@ -669,14 +668,54 @@ void main()
             item = cull_words.data[pc.next_word + item];
         }
     }
-    if (pc.write == 0u && g_count != 0u) atomicAdd(cull_words.data[state + 6u], g_count);
+}
+
+void main()
+{
+    uint cut = pc.cut_word;
+    uint chunk_index = gl_WorkGroupID.x;
+    uint chunk = cull_words.data[cut + 21u] + chunk_index * 2u;
+    uint lane = gl_LocalInvocationIndex;
+    uint member = cull_words.data[cull_words.data[chunk] + lane];
+    uint state = velk_cut_state(cut, cull_words.data[chunk + 1u]);
+    uint chunk_word = cull_words.data[cut + 23u] + chunk_index;
+    // A work group is one chunk of one partition, so this is the same for all its threads. A
+    // partition that found no room chooses on the next frame.
+    bool choosing = pc.write == 0u || cull_words.data[state + 8u] != 0u;
+    vec3 viewpoint = vec3(uintBitsToFloat(cull_words.data[state]), uintBitsToFloat(cull_words.data[state + 1u]),
+                          uintBitsToFloat(cull_words.data[state + 2u]));
+
+    g_count = 0u;
+    g_state = state;
+    g_store = velk_cut_store(cut, true);
+    g_writing = false;
+    if (choosing && member != 0xFFFFFFFFu) velk_cut_member(member, viewpoint);
+    s_counts[lane] = g_count;
+    barrier();
+
+    if (pc.write == 0u) {
+        if (lane == 0u) {
+            uint total = 0u;
+            for (uint i = 0u; i < 64u; ++i) total += s_counts[i];
+            cull_words.data[chunk_word] = total;
+            if (total != 0u) atomicAdd(cull_words.data[state + 6u], total);
+        }
+        return;
+    }
+    if (!choosing || g_count == 0u) return;
+    // The same choice again, written after the records of the threads before this one.
+    uint before = 0u;
+    for (uint i = 0u; i < lane; ++i) before += s_counts[i];
+    g_at = cull_words.data[chunk_word] + before;
+    g_writing = true;
+    velk_cut_member(member, viewpoint);
 }
 )";
 
 /**
  * Gives each partition that chose again this frame a range in the current store, as large as
- * its count, with its cursor at the start. One that does not fit gets no records and chooses
- * again on the next frame. A thread per partition.
+ * its count, and each of its chunks its part of that, in order. One that does not fit gets no
+ * records and chooses again on the next frame. A thread per partition.
  */
 inline constexpr string_view instance_cut_place_src = R"(
 #version 450
@@ -706,7 +745,14 @@ void main()
         return;
     }
     cull_words.data[state + 5u] = first;
-    cull_words.data[state + 7u] = first;
+    // Each of its chunks' first record, in the order of its chunks.
+    uint counts = cull_words.data[cut + 23u] + cull_words.data[state + 9u];
+    uint next = first;
+    for (uint c = 0u; c < cull_words.data[state + 4u]; ++c) {
+        uint chunk_records = cull_words.data[counts + c];
+        cull_words.data[counts + c] = next;
+        next += chunk_records;
+    }
 }
 )";
 
@@ -2213,7 +2259,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const uint32_t chunks = (info.members + kCullChunkSlots - 1u) / kCullChunkSlots + info.partitions;
             const uint32_t keep_word = kCutHeaderWords;
             const uint32_t choose_word = keep_word + info.partitions;
-            const uint32_t state_word = choose_word + chunks * kCullChunkListWords;
+            const uint32_t counts_word = choose_word + chunks * kCullChunkListWords;
+            const uint32_t state_word = counts_word + chunks;
             const uint32_t store_word = state_word + info.partitions * kCutPartitionWords;
             const size_t words = size_t(store_word) + size_t(cut.capacity) * kCutRecordWords * 2u;
             cut.region = arena->alloc(words * sizeof(uint32_t));
@@ -2235,6 +2282,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             initial[20] = base + keep_word;
             initial[21] = base + choose_word;
             initial[22] = base + state_word;
+            initial[23] = base + counts_word;
             // Chosen from nowhere, and from a table entry no partition has: all choose.
             constexpr float kFar = 1e30f;
             uint32_t far_bits;
