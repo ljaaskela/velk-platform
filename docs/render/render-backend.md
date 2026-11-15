@@ -206,14 +206,15 @@ Everything the GPU reads lives in a **shared arena**: one large buffer bound to 
 ```
 set = 1 slot   Arena                       Held by
 ────────────   ─────────────────────────   ─────────────────────────────
- 0 / 1         TLAS BVH nodes / shapes     SceneBvh
+ 0             scene BVH nodes             SceneBvh
+ 1             free
  2             per-view FrameGlobals       ViewPreparer, render-target cache
  3             per-batch instance runs     each batch
  4             material records            each material
  5             per-view light arrays       ViewPreparer
- 6             RT primary shape list       ViewPreparer
+ 6             free
  7 / 8 / 9     glyph curves / bands / table each font (velk_text plugin)
-10             per-shape mesh instances    SceneBvh, ViewPreparer
+10             free
 11 / 12 / 13   mesh static / BLAS nodes / cluster words   each IMeshPrimitive
 14             mesh VBO + IBO words        each IMeshBuffer
 15             per-batch DrawDataHeader    each batch
@@ -254,7 +255,7 @@ The `DrawDataHeader` is the root of the shader's data graph. The push constant c
 ```mermaid
 graph LR
     PC["Push Constant<br/><i>4 bytes: draw_base</i>"] -->|index| DDH["velk_draw_data[]<br/>DrawDataHeader"]
-    DDH -->|globals_base| G["velk_globals[]<br/>view_projection, viewport, BVH"]
+    DDH -->|globals_base| G["velk_globals[]<br/>view_projection, viewport, ray tree"]
     DDH -->|instances_base| I["velk_instances[]<br/>world_matrix, offset, size, color"]
     DDH -->|material_base| M["velk_materials[]<br/><i>per-material fields, dirty-tracked</i>"]
     DDH -->|vbo_base| V["velk_mesh_words[]<br/>position, normal, uv, tangent"]
@@ -359,7 +360,7 @@ The shader compiler resolves `#include` directives against built-in virtual incl
 
 | Include | Source | Provides |
 |--|--|--|
-| `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`, `VELK_FRAG_OUT(Name)`, `velk_texture(id, uv)`, BVH / RT / mesh types and their accessors |
+| `velk.glsl` | velk-render (always available) | `VELK_DRAW_DATA(Name)` + `velk_draw(root)`, `GlobalData` / `velk_global_data(root)`, `VelkVertex3D` / `velk_vertex3d(root)` / `velk_uv1(root)`, `VELK_INSTANCES(Type)` / `velk_instance(root)`, `VELK_MATERIAL(Type)` / `velk_material(root)`, `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`, `VELK_FRAG_OUT(Name)`, `velk_texture(id, uv)`, the scene tree's node, analytic shape and mesh ray data types |
 | `velk-ui.glsl` | velk-scene (registered by the renderer on init) | `ElementInstance` (+ `VELK_INSTANCES(ElementInstance)`), `EvalContext`, `MaterialEval`, `velk_default_material_eval()` |
 
 Modules can register additional includes via `IRenderContext::shaders().register_include()`; the text plugin registers `velk_text.glsl` for glyph coverage sampling.

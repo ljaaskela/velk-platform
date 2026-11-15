@@ -16,13 +16,8 @@ const string_view kVelkGlsl = R"(
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
 )"
-// Scene shape, in its record's local space: rect / cube / sphere / mesh with a
-// pointer to material data. Used by the BVH shape buffer and by RT primary rays.
-// shape_kind = 255 is the "complex" sentinel: the shape is a triangle mesh,
-// `origin/u_axis` carry its local AABB and `mesh_static_base` indexes the
-// mesh-static buffer (set = 1 slot 11). The field is 0 for non-mesh kinds.
-// `primary_record` is the shape's record for RT primary rays, which walk a flat
-// list and so have no record of their own to come from.
+// An analytic shape, in its instance's own space: what rays test a visual drawn by its
+// own pass as (velk_instance_shape), and what intersect snippets are given.
 R"(
 struct RtShape {
     vec4 origin;
@@ -35,10 +30,10 @@ struct RtShape {
     uint texture_id;
     uint shape_param;
     uint shape_kind;  // 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint material_base;       // word index of this shape's record in the material arena
-    uint primary_record;      // index into velk_records; RT primary list only
-    uint mesh_static_base;    // shape_kind == 255: index into velk_mesh_static_records
+    uint material_base;       // word index of its material's record in the material arena
+    uint _pad0;
     uint _pad1;
+    uint _pad2;
 };
 
 )"
@@ -75,11 +70,9 @@ struct VelkMeshNode {
 #define VELK_BLAS_CLUSTER 0x40000000u
 #define VELK_BLAS_UPPER 0x20000000u
 
-// child_count of a node that refers to a partition. Its first_child is the
-// partition's root, and its origin is in the fields read by velk_partition_origin.
+// child_count of a node of the scene's tree that stands for a partition with its
+// instances: the far instance splat goes no further.
 #define VELK_PARTITION_REF 0xFFFFFFFFu
-#define velk_partition_origin(node) \
-    vec3((node).aabb_min.w, (node).aabb_max.w, uintBitsToFloat((node).first_shape))
 
 )"
 // Mesh-static metadata, owned by the IMeshPrimitive as a persistent region of
@@ -104,28 +97,7 @@ struct MeshStaticData {
 };
 
 )"
-// Places shapes in the world (set = 1 slot 10). Rays reach a shape through
-// velk_local_ray. The buffer itself is declared by the compute preludes that
-// trace. Mirrors RtRecord in gpu_data.h.
 R"(
-struct RtRecord {
-    vec4 inv_row0;     // xyz: world -> local rotation and scale, by rows. w: world position of local origin
-    vec4 inv_row1;
-    vec4 inv_row2;
-    uint first_shape;  // index into velk_bvh_shapes
-    uint shape_count;  // how many, under VELK_RECORD_SHAPE_COUNT, with VELK_RECORD_RAY_MOTION and VELK_RECORD_MEDIUM above
-    uint tree_root;    // index into velk_blas_nodes, or VELK_NO_TREE to test each shape
-    uint object;       // the object id
-};
-
-// In RtRecord.shape_count: the count's bits; rays follow the scene's ray motion here; wide
-// rays count parts of its meshes as a medium.
-#define VELK_RECORD_SHAPE_COUNT 0x3FFFFFFFu
-#define VELK_RECORD_RAY_MOTION 0x80000000u
-#define VELK_RECORD_MEDIUM 0x40000000u
-
-#define VELK_NO_TREE 0xFFFFFFFFu
-
 // Words per plain item in a view's culling (instance index, slot, table, draw, shape kind,
 // mesh ray data): kPlainItemWords.
 #define VELK_PLAIN_ITEM_WORDS 6u
@@ -362,14 +334,6 @@ R"(
     layout(set = 1, binding = 4, std430) readonly buffer VelkMaterials { MaterialType data[]; } velk_materials;
 
 #define velk_material(root) (velk_materials.data[velk_draw(root).material_base])
-)"
-// Mesh intersector accessors, for the compute preludes that trace meshes.
-// Unlike materials and instances the element type never varies, so there is no
-// declaration macro; those preludes declare velk_mesh_static_records themselves.
-//   MeshStaticData st = velk_mesh_static(shape);
-// Guard with `shape.mesh_static_base != VELK_INVALID_MESH_STATIC`.
-R"(
-#define velk_mesh_static(shape) (velk_mesh_static_records.data[(shape).mesh_static_base])
 )"
 // Per-draw header: 48 bytes of indices and counts, one record per batch in the
 // set = 1 draw-data arena (slot 15). Mirrors DrawDataHeader in gpu_data.h.

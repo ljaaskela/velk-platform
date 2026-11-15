@@ -71,8 +71,7 @@ public:
         string      include_name; ///< Owned include filename registered with IRenderContext.
         /// True when the compute-side include reads this material's record by
         /// index out of the shared material arena (via a generated unpacker)
-        /// instead of chasing a device address. Producers filling RtShape use
-        /// it to decide whether to stamp a word base or an address.
+        /// instead of chasing a device address.
         bool        indexed = false;
         string_view vertex_fn;      ///< The material's vertex function, empty for none.
         string      vertex_include; ///< Owned include filename of that function.
@@ -94,7 +93,7 @@ public:
     {
         uint32_t mat_id = 0;
         /// Word index of the material's record in the set = 1 material arena;
-        /// goes onto the shape as RtShape::material_base.
+        /// goes into a draw's record as DrawDataHeader::material_words.
         uint32_t mat_base = 0;
     };
 

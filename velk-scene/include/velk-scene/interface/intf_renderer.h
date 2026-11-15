@@ -169,15 +169,6 @@ public:
                                                const IWindowSurface::Ptr& surface,
                                                string_view name) const = 0;
 
-    /**
-     * @brief Requests a one-shot dump of every mesh shape's MeshStaticData
-     *        (instance index, geometry base, ibo_offset, triangle_count) to
-     *        the log on the next BVH rebuild. Used together with the F12
-     *        shadow-debug image dump so CPU-emitted values can be compared
-     *        per-pixel against GPU-observed values.
-     */
-    virtual void request_bvh_log() = 0;
-
     /** @brief Releases all GPU resources. */
     virtual void shutdown() = 0;
 };

@@ -353,26 +353,23 @@ public:
     /// slots later. Keep in sync with the set = 1 declarations in the
     /// compute shader preludes.
     enum GlobalBufferSlot : uint32_t {
-        kGlobalBvhNodes  = 0,
-        kGlobalBvhShapes = 1,
+        kGlobalBvhNodes  = 0,  ///< The scene BVH's nodes over its partitions, read by the far instance splat.
+        // 1 is free.
         kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read at velk_globals.data[globals_base].
         kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
         kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
         kGlobalLights    = 5,  ///< Persistent per-view light array, read at velk_lights.data[lights_base + i].
-        kGlobalPrimaryShapes = 6, ///< Persistent per-view painter-sorted RtShape list (RT primary rays), read at velk_shapes.data[shapes_base + i].
+        // 6 is free.
         /// Glyph outline data, one region per font. Claimed by the text
         /// plugin via IGpuResourceManager::shared_arena; listed here because
         /// the slot map is global, not because velk-render uses them.
         kGlobalTextCurves = 7,
         kGlobalTextBands  = 8,
         kGlobalTextGlyphs = 9,
-        kGlobalRecords = 10, ///< RtRecords placing shapes in the world, read at velk_records.data[index].
-        /// Per-primitive RT geometry metadata and its BLAS. Claimed by
+        // 10 is free.
+        /// Per-primitive ray geometry metadata and its trees. Claimed by
         /// MeshPrimitive via IGpuResourceManager::shared_arena, since primitives
-        /// are built outside the render loop. The BLAS keeps its own node arena
-        /// rather than sharing slot 0: BLAS runs are per-primitive and effectively
-        /// permanent, while TLAS runs churn on every rebuild, and one byte
-        /// free-list holding both would fragment.
+        /// are built outside the render loop.
         kGlobalMeshStatic = 11,
         kGlobalBlasNodes  = 12,
         kGlobalClusterWords = 13,

@@ -87,7 +87,6 @@ public:
     IGpuResource::Ptr get_named_output(const IElement::Ptr& camera_element,
                                        const IWindowSurface::Ptr& surface,
                                        string_view name) const override;
-    void request_bvh_log() override { log_bvh_next_ = true; }
     void shutdown() override;
 
 private:
@@ -127,11 +126,10 @@ private:
     IRenderBackend::Ptr backend_;
     IRenderContext* render_ctx_ = nullptr;
 
-    /// Shared BVH arenas (set = 1 slots 0/1), created once and handed to
+    /// Shared BVH node arena (set = 1 slot 0), created once and handed to
     /// every scene's BVH via FrameContext so multiple BVHs suballocate
     /// distinct regions instead of colliding on the slot.
     IGpuArena::Ptr bvh_nodes_arena_;
-    IGpuArena::Ptr bvh_shapes_arena_;
 
     /// Shared per-view FrameGlobals arena (set = 1 slot 2), created once
     /// and handed to every view via FrameContext so multiple views
@@ -162,16 +160,6 @@ private:
     /// persistent region for its light array, so the RT and deferred compute
     /// shaders read velk_lights.data[lights_base + i].
     IGpuArena::Ptr lights_arena_;
-
-    /// Shared primary-shapes arena (set = 1 slot 6): the RT path suballocates
-    /// a persistent per-view region for its painter-sorted RtShape list, read
-    /// at velk_shapes.data[shapes_base + i].
-    IGpuArena::Ptr primary_shapes_arena_;
-
-    /// Shared mesh-instance arena (set = 1 slot 10): every producer of
-    /// mesh-kind shapes suballocates a persistent region for its
-    /// RtRecord array, read at velk_records.data[index].
-    IGpuArena::Ptr records_arena_;
 
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke
@@ -214,11 +202,6 @@ private:
     /// per matched view.
     vector<IViewPipeline::Ptr> pipelines_scratch_;
 
-    // One-shot flag set by request_bvh_log(), consumed in the next
-    // BVH-emit cb. The cb walks every mesh instance and prints
-    // (instance_index, geometry_base, ibo_offset, triangle_count) so the
-    // log can be compared against the F12-dumped shadow_debug image.
-    bool log_bvh_next_ = false;
 
     /// Duration the most recent claim_frame_slot() spent blocked on
     /// `wait_for_frame_completion`. Read-and-cleared by the perf

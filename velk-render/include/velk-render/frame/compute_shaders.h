@@ -773,7 +773,7 @@ void main()
 // size from one level to the next. A reader picks the level by how wide it is there.
 #define VELK_LIGHT_CELL_GLSL R"(
 // The instances drawn, as words: an ElementInstance is 32 of them, and its params[3], the
-// last, is the object id, the same one rays find in RtRecord.flags. See
+// last, is the object id, the same one a ray's hit carries (RayHit::object). See
 // IScene::get_object_ids.
 layout(set = 1, binding = 3, std430) readonly buffer VelkInstanceWords { uint data[]; } velk_instance_words;
 
@@ -1247,10 +1247,8 @@ layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStati
 layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
 layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
 
-// RtShape / BvhNode come from velk.glsl.
-// View-level globals (inverse_view_projection, BVH, present_counter)
-// are dereferenced via `globals.X`; the address is in push-constant
-// slot [0..8) (see velk.glsl GlobalData).
+// RtShape comes from velk.glsl. View-level globals (inverse_view_projection, the
+// view's top tree for rays, present_counter) are read through VELK_GLOBALS.
 )" R"(
 
 // scalar layout: tight packing so the per-dispatch CPU struct (whose

@@ -101,20 +101,26 @@ void RtPath::build_passes(IViewEntry& entry,
         return;
     }
 
-    auto rt_pipeline = ensure_pipeline(ctx);
-    if (!rt_pipeline) {
-        return;
-    }
-
     // What rays walk: the view's kept cut, as every path has it.
     emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
                             kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
-    // Rays name draws, whose records a path that draws would write.
+    // Rays name draws, whose records a path that draws would write. That also makes their
+    // materials known, which the pipeline below is composed with.
     if (render_view.batches) {
         const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
         write_draw_data(*render_view.batches, *ctx.resources, ctx.render_ctx->get_default_buffer(DefaultBufferType::Uv1).get(),
                         render_view.view_globals_base, ctx.snippets, &resolve_ctx);
+    }
+
+    auto rt_pipeline = ensure_pipeline(ctx);
+    if (!rt_pipeline) {
+        return;
+    }
+    // Another set of materials, intersects or shadow techniques makes another pipeline.
+    if (rt_pipeline.get() != vs.last_pipeline) {
+        vs.last_pipeline = rt_pipeline.get();
+        vs.rt_dirty = true;
     }
 
     // Per-dispatch root struct mirroring the GLSL `PC` push-constant block

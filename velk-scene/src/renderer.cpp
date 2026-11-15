@@ -374,10 +374,6 @@ FrameContext Renderer::make_frame_context()
         bvh_nodes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhNodes,
                                                     sizeof(GpuBvhNode));
     }
-    if (resources_ && !bvh_shapes_arena_) {
-        bvh_shapes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhShapes,
-                                                     sizeof(RtShape));
-    }
     if (resources_ && !globals_arena_) {
         globals_arena_ = resources_->create_arena(IRenderBackend::kGlobalGlobals,
                                                   sizeof(FrameGlobals));
@@ -397,17 +393,6 @@ FrameContext Renderer::make_frame_context()
         lights_arena_ = resources_->create_arena(IRenderBackend::kGlobalLights,
                                                  sizeof(GpuLight));
     }
-    // Homogeneous RtShape records; element_size = stride so shapes_base =
-    // region offset / sizeof(RtShape).
-    if (resources_ && !primary_shapes_arena_) {
-        primary_shapes_arena_ = resources_->create_arena(
-            IRenderBackend::kGlobalPrimaryShapes, sizeof(RtShape));
-    }
-    // Homogeneous RtRecords; element_size = stride so a record's index =
-    // region offset / sizeof(RtRecord).
-    if (resources_ && !records_arena_) {
-        records_arena_ = resources_->create_arena(IRenderBackend::kGlobalRecords, sizeof(RtRecord));
-    }
 
     FrameContext ctx{};
     ctx.backend = backend_.get();
@@ -416,13 +401,10 @@ FrameContext Renderer::make_frame_context()
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
     ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
-    ctx.bvh_shapes_arena = bvh_shapes_arena_.get();
     ctx.globals_arena = globals_arena_.get();
     ctx.instance_arena = instance_arena_.get();
     ctx.material_arena = material_arena_.get();
     ctx.lights_arena = lights_arena_.get();
-    ctx.primary_shapes_arena = primary_shapes_arena_.get();
-    ctx.records_arena = records_arena_.get();
     ctx.defer_marker = backend_ ? backend_->pending_frame_completion_marker() : 0;
     ctx.present_counter = present_counter_;
     // ctx.target_format is set per-camera by IViewPipeline::emit before
@@ -835,7 +817,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 for (auto& attachment : camera_storage->find_attachments(pipeline_query)) {
                     if (auto pipeline = interface_pointer_cast<IViewPipeline>(attachment)) {
                         const auto pipeline_needs = pipeline->needs(ctx);
-                        traced = traced || pipeline_needs.lights || pipeline_needs.shapes;
+                        traced = traced || pipeline_needs.lights;
                     }
                 }
                 ctx.view_camera_trait = nullptr;
@@ -868,17 +850,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 scene_bvh_cache_[scene] = bvh;
             }
 
-            // Force a full re-walk so the BVH cb fires for every primitive and the
-            // per-instance log block runs.
-            if (log_bvh_next_) {
-                bvh->invalidate();
-            }
-            struct BvhBuildState {
-                Renderer*               self;
-                FrameContext&           ctx;
-                bool                    log;
-            };
-            BvhBuildState bvh_state{this, ctx, log_bvh_next_};
             vector<vec3> view_points;
             for (const auto& view_slot : views_) {
                 if (auto camera_state = read_state<IElement>(view_slot.camera_element)) {
@@ -887,68 +858,8 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 }
             }
             bvh->set_view_points({view_points.data(), view_points.size()});
-            bvh->update(state, ctx,
-                +[](void* u, ShapeSite& site) {
-                    auto& s = *static_cast<BvhBuildState*>(u);
-                    auto& ctx = s.ctx;
-                    auto& self = *s.self;
-                    auto resolve_ctx = ctx.make_resolve_context();
-                    auto mat = site.paint
-                        ? self.snippets_->resolve_material(site.paint, resolve_ctx)
-                        : IFrameSnippetRegistry::MaterialRef{};
-                    uint32_t tex_id = 0;
-                    if (site.draw_entry && site.draw_entry->texture_key != 0) {
-                        auto* surf = reinterpret_cast<ISurface*>(
-                            static_cast<uintptr_t>(site.draw_entry->texture_key));
-                        if (auto* gt = self.resources_->find_texture(surf)) {
-                            tex_id = get_texture_id(gt);
-                        }
-                        if (tex_id == 0) {
-                            uint64_t rt_id = get_render_target_id(surf);
-                            if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
-                        }
-                    }
-                    site.geometry.material_id = mat.mat_id;
-                    site.geometry.material_base = mat.mat_base;
-                    site.geometry.texture_id = tex_id;
-
-                    if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
-                        uint32_t kind = self.snippets_->register_intersect(analytic, *self.render_ctx_);
-                        if (kind != 0) site.geometry.shape_kind = kind;
-                    }
-
-                    // Mesh-kind shapes: resolve the per-mesh static data
-                    // index (stable across frames).
-                    if (site.has_mesh_data) {
-                        site.geometry.mesh_static_base = kInvalidMeshStaticBase;
-                        auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive);
-                        if (mpi && self.resources_) {
-                            site.geometry.mesh_static_base =
-                                mpi->ensure_rt_data(*self.resources_);
-                        }
-
-                        if (s.log && site.mesh_primitive) {
-                            auto* mp = site.mesh_primitive;
-                            auto buf = mp->get_buffer();
-                            uint32_t i_count = mp->get_index_count();
-                            uint32_t v_stride = mp->get_vertex_stride();
-                            uint32_t triangle_count = i_count / 3u;
-                            uint32_t geometry_base = buf ? get_gpu_ref(buf).get_base() : 0u;
-                            uint32_t ibo_offset = static_cast<uint32_t>(
-                                buf ? buf->get_ibo_offset() : 0);
-                            VELK_LOG(I, "BVH cb: inst=%p mesh_static_base=%u "
-                                        "geometry_base=%u ibo_offset=0x%08x "
-                                        "triangle_count=%u v_stride=%u",
-                                     (void*)mp,
-                                     site.geometry.mesh_static_base,
-                                     geometry_base,
-                                     ibo_offset, triangle_count, v_stride);
-                        }
-                    }
-                }, &bvh_state);
+            bvh->update(state, ctx);
             scene_bvhs[scene] = bvh;
-            // One-shot consumed: clear so subsequent frames don't spam.
-            log_bvh_next_ = false;
         }
 
         // Two-phase view processing so RTT passes can sit ahead of view
@@ -1012,7 +923,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             for (auto& p : pipelines_scratch_) {
                 auto n = p->needs(ctx);
                 needs.batches |= n.batches;
-                needs.shapes  |= n.shapes;
                 needs.lights  |= n.lights;
             }
 
@@ -1041,7 +951,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // target reads them.
         for (auto& [scene, bvh] : scene_bvhs) {
             bvh->emit_instance_motion(ctx, *slot.graph);
-            bvh->emit_gpu_builds(ctx, *slot.graph);
         }
         emit_gpu_deforms(ctx, *slot.graph);
 
@@ -1174,9 +1083,6 @@ Frame Renderer::prepare(const FrameDesc& desc)
     {
         VELK_PERF_SCOPE("renderer.build_frame_passes");
         build_frame_passes(desc, consumed_scenes, *slot);
-        for (auto& [scene, bvh] : scene_bvh_cache_) {
-            bvh->end_frame_gpu_builds();
-        }
         // A mesh not ready to run yet stays for the next frame.
         for (const auto& mesh : gpu_deforms_recorded_) {
             gpu_deforms_.erase(std::remove(gpu_deforms_.begin(), gpu_deforms_.end(), mesh), gpu_deforms_.end());

@@ -30,8 +30,9 @@ struct BvhHit
  * Implementations build and maintain a bounding-volume hierarchy over
  * some shape source (a full scene, a subtree, an element subset). The
  * interface exposes a CPU-side query API for consumers that need hit
- * testing (picking, collision, drag hit-tests) and GPU-buffer accessors
- * for the renderer's ray-traced / deferred paths.
+ * testing (picking, collision, drag hit-tests), and what the renderer
+ * culls and lights by: its partitions' tables, where things changed and
+ * where objects are. Rays do not walk it; they walk each view's kept cut.
  *
  * Multiple IBvh instances can coexist as attachments on the same scene
  * root (e.g. a primary render BVH alongside a coarser picking BVH).
@@ -65,12 +66,6 @@ public:
      * @brief Number of nodes currently live in the BVH.
      */
     virtual uint32_t get_node_count() const = 0;
-
-    /** @brief Whether any instances in it have a far form, for rays too wide to resolve them. */
-    virtual bool has_medium() const = 0;
-
-    /** @brief How rays follow motion it does not hold, and how far that reaches, or empty. */
-    virtual string_view get_ray_motion(float& reach) const = 0;
 
     /**
      * @brief Where what it holds changed in its last update: the world bounds of each thing

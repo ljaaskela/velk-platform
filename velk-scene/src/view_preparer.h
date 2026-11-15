@@ -171,13 +171,6 @@ private:
         ArenaRegion globals_region;
         /// Likewise for the chooser's globals, while ICamera::choose_as names one.
         ArenaRegion chooser_globals_region;
-
-        /// Per-view region in the shared record arena (set = 1 slot 10), holding
-        /// the RtRecords for this view's primary shapes. `prepare_shapes` stamps
-        /// each shape's `primary_record` from it. Re-allocated only when the
-        /// record count changes; the base travels inside the shape array
-        /// (re-uploaded each frame), so no cached pass bakes it.
-        ArenaRegion records_region;
     };
     std::unordered_map<IViewEntry*, ViewCache> view_caches_;
 
@@ -214,19 +207,6 @@ private:
     /// snippet registry, and accumulates GpuLight records into @p rv.
     void prepare_lights(IViewEntry& entry, const SceneState& scene_state,
                         FrameContext& ctx, RenderView& rv);
-
-    /// Walks scene shapes, resolves material / texture / intersect /
-    /// mesh-data per shape, and accumulates RtShape records into @p rv.
-    /// Each shape's RtRecord is uploaded to the shared record arena and its
-    /// element index stamped into the shape.
-    void prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
-                        FrameContext& ctx, RenderView& rv);
-
-    /// Uploads @p records into this view's persistent region of the shared
-    /// record arena and shifts every shape's run-relative `primary_record` onto
-    /// the region's element base.
-    void upload_records(IViewEntry& entry, FrameContext& ctx, RenderView& rv,
-                        array_view<RtRecord> records);
 
     /// Resolves the camera's environment (texture + material) into @p rv.env.
     /// Also stamps @p rv.env_batch from the per-view cache, rebuilding

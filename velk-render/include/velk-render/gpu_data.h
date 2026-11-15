@@ -50,12 +50,6 @@ struct BvhBinding
     /// IBvh::get_plain_partitions.
     uint32_t plain_partitions = 0xFFFFFFFFu;
     uint32_t plain_partition_count = 0;
-
-    bool operator==(const BvhBinding& o) const
-    {
-        return root == o.root && node_count == o.node_count;
-    }
-    bool operator!=(const BvhBinding& o) const { return !(*this == o); }
 };
 
 /// Per-frame global data written by the renderer, read by all shaders.
@@ -145,13 +139,13 @@ static_assert(sizeof(DrawDataHeader) == 64, "DrawDataHeader must be 64 bytes for
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.
 // Plain POD, no scene deps; packed for std430 indexed reads.
 
-/// GPU-side shape, in its record's local space. Mirrors the RtShape struct in
-/// velk.glsl. Geometry + material + texture + shape discriminator in 128 bytes.
+/// A shape in its element's local space, as the scene emits it to make its records and
+/// partitions from. Mirrors the RtShape struct in velk.glsl, which rays build from an
+/// instance to test an analytic visual. 128 bytes.
 ///
 /// shape_kind:
-///   0 = rect, 1 = cube, 2 = sphere — analytic primitives.
-///   255 = mesh — triangle soup; `origin/u_axis` carry the local AABB and
-///   `mesh_static_base` indexes the mesh-static arena.
+///   0 = rect, 1 = cube, 2 = sphere: analytic primitives.
+///   255 = mesh: `origin/u_axis` carry the local AABB.
 ///   3..254 reserved for future analytic kinds.
 VELK_GPU_STRUCT RtShape
 {
@@ -165,10 +159,10 @@ VELK_GPU_STRUCT RtShape
     uint32_t texture_id;      ///< bindless index, 0 when unused
     uint32_t shape_param;     ///< per-shape material data (e.g. glyph index for text)
     uint32_t shape_kind;      ///< 0 = rect, 1 = cube, 2 = sphere, 255 = mesh
-    uint32_t material_base;   ///< Word index of this shape's record in the set = 1 material arena.
-    uint32_t primary_record;  ///< Element index of this shape's record, for RT primary rays' flat list only.
-    uint32_t mesh_static_base;///< for shape_kind == 255: element index into the mesh-static arena, or kInvalidMeshStaticBase when unresolved.
+    uint32_t material_base;   ///< Word index of its material's record in the set = 1 material arena.
+    uint32_t _pad0;
     uint32_t _pad1;
+    uint32_t _pad2;
 };
 static_assert(sizeof(RtShape) == 128, "RtShape layout mismatch");
 
@@ -203,34 +197,9 @@ inline constexpr uint32_t kMeshStaticDoubleSided = 2u;
 /// `MeshStaticData::flags` bit for a primitive whose vertices change. Mirrors GLSL `VELK_MESH_DEFORMING`.
 inline constexpr uint32_t kMeshStaticDeforming = 4u;
 
-/// Sentinel `RtShape::mesh_static_base` for a mesh whose static record is not
-/// resolvable yet (geometry not uploaded, no BLAS built). The intersector skips
-/// the shape; the CPU retries on a later frame.
+/// A mesh's ray data (MeshStaticData's index) that is not there yet: its geometry is not
+/// uploaded or its tree not built. Rays skip it, and the CPU asks again on a later frame.
 inline constexpr uint32_t kInvalidMeshStaticBase = 0xFFFFFFFFu;
-
-/// Sentinel `RtRecord::tree_root` for a record that tests each of its shapes.
-inline constexpr uint32_t kRtRecordNoTree = 0xFFFFFFFFu;
-
-/// Places shapes in the world. Lives in the set = 1 record arena; BVH leaves and
-/// RT primary shapes reach it by index. Mirrors GLSL `RtRecord`.
-VELK_GPU_STRUCT RtRecord
-{
-    /// By rows. Columns 0 to 2: world to local rotation and scale. Column 3: world
-    /// position of the local origin.
-    float    inv_row[3][4];
-    uint32_t first_shape;     ///< Element index of the first shape in the shape arena.
-    uint32_t shape_count;     ///< How many, under kRtRecordShapeCount, with kRtRecordRayMotion and kRtRecordMedium above.
-    uint32_t tree_root;       ///< Element index in the BLAS node arena, or kRtRecordNoTree.
-    uint32_t object;          ///< The object id. See IScene::get_object_ids.
-};
-static_assert(sizeof(RtRecord) == 64, "RtRecord layout mismatch");
-
-/// The bits of RtRecord::shape_count that hold the count.
-inline constexpr uint32_t kRtRecordShapeCount = 0x3FFFFFFFu;
-/// Rays follow the scene's ray motion here. See BvhBinding::ray_motion. In RtRecord::shape_count.
-inline constexpr uint32_t kRtRecordRayMotion = 1u << 31;
-/// Rays wider than parts of its meshes count those parts as a medium. In RtRecord::shape_count.
-inline constexpr uint32_t kRtRecordMedium = 1u << 30;
 
 /// GPU-side scene light. Mirrors the `Light` struct in the compute
 /// shaders (80 bytes). `flags.y` is shadow_tech_id; callers populate

@@ -71,11 +71,8 @@ void emit_mesh_shapes(IVisual* visual, IMesh& mesh, const mat4& world, const col
         s.u_axis[0] = lmaxx; s.u_axis[1] = lmaxy; s.u_axis[2] = lmaxz;
         s.color[0] = tint.r; s.color[1] = tint.g; s.color[2] = tint.b; s.color[3] = tint.a;
         s.shape_kind = kRtShapeKindMesh;
-        s.mesh_static_base = kInvalidMeshStaticBase;  // resolved by the renderer cb.
         site.aabb_min[0] = wmin[0]; site.aabb_min[1] = wmin[1]; site.aabb_min[2] = wmin[2];
         site.aabb_max[0] = wmax[0]; site.aabb_max[1] = wmax[1]; site.aabb_max[2] = wmax[2];
-        site.mesh_primitive = prim_ptr.get();
-        site.has_mesh_data = true;
 
         cb(user, site);
     }
@@ -238,51 +235,6 @@ void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
             cb(user, site);
         }
     }
-}
-
-void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
-                            ShapeCb cb, void* user)
-{
-    if (!scene_state.scene) return;
-    walk_scene_preorder(scene_state.scene, scene_state.scene->root(),
-        [&](IElement* elem) { emit_shapes_for_element(elem, ctx, cb, user); });
-}
-
-void build_local_tree(vector<RtShape>& shapes, vector<BlasNode>& tree)
-{
-    const auto count = static_cast<uint32_t>(shapes.size());
-    vector<detail::BlasTriInfo> infos;
-    infos.resize(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        const RtShape& shape = shapes[i];
-        auto& info = infos[i];
-        info.index = i;
-        for (int axis = 0; axis < 3; ++axis) {
-            const float a = shape.origin[axis];
-            const float b = a + shape.u_axis[axis] + shape.v_axis[axis];
-            info.aabb_min[axis] = std::min(a, b);
-            info.aabb_max[axis] = std::max(a, b);
-            info.center[axis] = (a + b) * 0.5f;
-        }
-        // A flat box has no thickness for a slab test to enter.
-        const float extent = std::max(info.aabb_max[0] - info.aabb_min[0],
-                                      info.aabb_max[1] - info.aabb_min[1]);
-        for (int axis = 0; axis < 3; ++axis) {
-            info.aabb_min[axis] -= extent * 1e-3f;
-            info.aabb_max[axis] += extent * 1e-3f;
-        }
-    }
-
-    BlasBuild build;
-    build.nodes.push_back({});
-    detail::blas_fill_node(build, 0, infos, 0, infos.size());
-
-    const vector<RtShape> original = shapes;
-    shapes.clear();
-    for (uint32_t index : build.triangle_indices) {
-        shapes.push_back(original[index]);
-    }
-    tree = std::move(build.nodes);
 }
 
 BvhTree build_bvh_tree(array_view<const BvhItemBounds> items, uint32_t leaf_size, bool force_split)

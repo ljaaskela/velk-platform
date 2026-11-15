@@ -68,7 +68,7 @@ Shader includes are registered via `IRenderContext::shaders().register_include()
 **velk.glsl** (provided by velk-render, registered automatically):
 - `VELK_DRAW_DATA(Name)`: the one declaration a raster shader makes. Declares the push constant (a single `uint draw_base`) under the name you give it, conventionally `root`; every accessor below takes that handle. See [DrawData struct layout](#drawdata-struct-layout).
 - `velk_draw(root)`: this draw's raw `DrawDataHeader` record, for the fields with no accessor of their own.
-- `GlobalData` / `velk_global_data(root)`: the frame-globals record read by index from the `set = 1` globals arena (view_projection, inverse_view_projection, viewport, cam_pos, BVH metadata).
+- `GlobalData` / `velk_global_data(root)`: the frame-globals record read by index from the `set = 1` globals arena (view_projection, inverse_view_projection, viewport, cam_pos, where the view's tree for rays is).
 - `VelkVertex3D`: the unified vertex layout (`vec3 position`, `vec3 normal`, `vec2 uv`, `vec4 tangent`; 48 B tight scalar packing).
 - `velk_vertex3d(root)` / `velk_uv1(root)`: fetch the current `gl_VertexIndex`'s vertex and TEXCOORD_1 out of the shared mesh-word arena.
 - `VELK_INSTANCES(Type)` / `velk_instance(root)`: declare the set = 1 instance arena as `Type` and read this draw's instance by index.
@@ -76,7 +76,7 @@ Shader includes are registered via `IRenderContext::shaders().register_include()
 - `VELK_VARYINGS_OUT` / `VELK_VARYINGS_IN`: the ten varyings `element_vertex_src` writes and every composed fragment driver reads (`v_color`, `v_local_uv`, `v_size`, `v_rel_pos`, `v_world_normal`, `v_shape_param`, `v_uv1`, `v_world_tangent`, `v_lod_error`, `v_instance`). Declare all of them even when the shader ignores some, so the stage interfaces match.
 - `VELK_FRAG_OUT(Name)`: single-target colour output at location 0. Takes the name so the identifier a shader assigns to is one it declared.
 - `velk_texture(id, uv)`: bindless texture sample helper.
-- `BvhNode`, `RtRecord`, `RtShape`, `MeshStaticData` and their accessor macros: the scene records the ray-trace and deferred compute paths walk. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that own the traversal.)
+- `BvhNode`, `RtShape`, `MeshStaticData`: a node of the scene's tree over its partitions, the analytic shape rays test a visual drawn by its own pass as, and a mesh's ray data. (`Ray` / `RayHit` are not here; they are declared by the compute preludes that trace rays.)
 
 **velk-ui.glsl** (provided by velk-scene, registered on renderer init):
 - `ElementInstance`: the universal per-instance record shared by every visual, holding `mat4 world_matrix`, `vec4 offset`, `vec4 size`, `vec4 color`, `uvec4 params`.

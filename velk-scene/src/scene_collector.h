@@ -45,12 +45,6 @@ struct ShapeSite
     /// text visual's glyphs. Null gives the shape its own record.
     const void* record_group = nullptr;
 
-    /// The mesh primitive backing this shape; the callback publishes the
-    /// per-mesh static data through IMeshPrimitiveInternal::ensure_rt_data and
-    /// stores its index in geometry.mesh_static_base. Null for non-mesh shapes.
-    IMeshPrimitive* mesh_primitive = nullptr;
-    bool has_mesh_data = false;
-
     /// World-space AABB enclosing this shape, which SceneBvh unions into
     /// per-node BVH AABBs (the BVH outer ray_aabb test culls against
     /// these). Independent of geometry.{origin,u_axis,...}, which are
@@ -60,45 +54,6 @@ struct ShapeSite
     float aabb_max[3] = { 0, 0, 0 };
 };
 
-/// Builds a record for shapes local to @p world. Its shape fields are left for
-/// the caller.
-inline RtRecord make_rt_record(const mat4& world)
-{
-    const mat4 inverse = mat4::inverse(world);
-    RtRecord record{};
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            record.inv_row[row][col] = inverse(row, col);
-        }
-        record.inv_row[row][3] = world(row, 3);
-    }
-    record.tree_root = kRtRecordNoTree;
-    return record;
-}
-
-/// The world-space plane of @p site's shape. A mesh has no plane, so it gets its
-/// bounds' minimum corner and zero axes.
-inline RenderView::ShapePlane world_shape_plane(const ShapeSite& site)
-{
-    RenderView::ShapePlane plane{};
-    if (site.geometry.shape_kind == kRtShapeKindMesh) {
-        for (int row = 0; row < 3; ++row) {
-            plane.origin[row] = site.aabb_min[row];
-        }
-        return plane;
-    }
-    const RtShape& shape = site.geometry;
-    const mat4& world = *site.world;
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            plane.origin[row] += world(row, col) * shape.origin[col];
-            plane.u_axis[row] += world(row, col) * shape.u_axis[col];
-            plane.v_axis[row] += world(row, col) * shape.v_axis[col];
-        }
-        plane.origin[row] += world(row, 3);
-    }
-    return plane;
-}
 
 /// GpuBvhNode::child_count of a node that refers to a partition. Its first_child is
 /// the partition's root, and its origin is in aabb_min[3], aabb_max[3] and the bits
@@ -194,25 +149,15 @@ void emit_mesh_shapes(IVisual* visual, IMesh& mesh, const mat4& world, const col
                       ShapeCb cb, void* user);
 
 // Emits shape sites for a single element (one per analytic shape or
-// one per rect draw entry). Shared by enumerate_scene_shapes and SceneBvh.
+// one per rect draw entry): what SceneBvh makes its records and partitions of.
 void emit_shapes_for_element(IElement* element, IRenderContext* ctx,
                              ShapeCb cb, void* user);
-
-// Walks the scene tree and invokes the callback for each geometric
-// shape found. Pre-order traversal; ordering matters only for RT's
-// painter sort which does its own depth sort afterwards.
-void enumerate_scene_shapes(const SceneState& scene_state, IRenderContext* ctx,
-                            ShapeCb cb, void* user);
 
 /// Builds an SAH tree over @p items. Subtrees of at most @p leaf_size items become
 /// leaves. @p force_split keeps splitting down to @p leaf_size even where SAH prefers
 /// a larger leaf or the items' centroids coincide.
 BvhTree build_bvh_tree(array_view<const BvhItemBounds> items, uint32_t leaf_size = 1,
                        bool force_split = false);
-
-/// Reorders flat rect @p shapes into a tree's leaf order and returns the tree in
-/// @p tree, with its root at index 0 and indices relative to @p tree and @p shapes.
-void build_local_tree(vector<RtShape>& shapes, vector<BlasNode>& tree);
 
 // Walks all lights in scene_state and invokes the callback for each
 // ILight attachment found. `base` has every field populated except

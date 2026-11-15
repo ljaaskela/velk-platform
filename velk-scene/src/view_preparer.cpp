@@ -440,100 +440,6 @@ void ViewPreparer::prepare_lights(IViewEntry& entry, const SceneState& scene_sta
         : 0u;
 }
 
-void ViewPreparer::prepare_shapes(IViewEntry& entry, const SceneState& scene_state,
-                                  FrameContext& ctx, RenderView& rv)
-{
-    struct ShapeCollect {
-        FrameContext& ctx;
-        RenderView& rv;
-        vector<RtRecord>& records;
-        const mat4* last_world;
-    };
-    vector<RtRecord> records;
-    ShapeCollect sc{ctx, rv, records, nullptr};
-    enumerate_scene_shapes(scene_state, ctx.render_ctx,
-        +[](void* u, ShapeSite& site) {
-            auto& s = *static_cast<ShapeCollect*>(u);
-            auto& ctx = s.ctx;
-            if (!ctx.snippets || !ctx.resources) return;
-            auto resolve_ctx = ctx.make_resolve_context();
-            auto mat = site.paint
-                ? ctx.snippets->resolve_material(site.paint, resolve_ctx)
-                : IFrameSnippetRegistry::MaterialRef{};
-            if (site.paint && mat.mat_id == 0) {
-                return;
-            }
-            uint32_t tex_id = 0;
-            if (site.draw_entry && site.draw_entry->texture_key != 0) {
-                auto* surf = reinterpret_cast<ISurface*>(
-                    static_cast<uintptr_t>(site.draw_entry->texture_key));
-                if (auto* gt = ctx.resources->find_texture(surf)) {
-                    tex_id = get_texture_id(gt);
-                }
-                if (tex_id == 0) {
-                    uint64_t rt_id = get_render_target_id(surf);
-                    if (rt_id != 0) tex_id = static_cast<uint32_t>(rt_id);
-                }
-            }
-            site.geometry.material_id = mat.mat_id;
-            site.geometry.material_base = mat.mat_base;
-            site.geometry.texture_id = tex_id;
-            if (auto* analytic = interface_cast<IAnalyticShape>(site.visual)) {
-                uint32_t kind = ctx.snippets->register_intersect(analytic, *ctx.render_ctx);
-                if (kind != 0) site.geometry.shape_kind = kind;
-            }
-            if (site.has_mesh_data) {
-                site.geometry.mesh_static_base = kInvalidMeshStaticBase;
-                if (auto* mpi = interface_cast<IMeshPrimitiveInternal>(site.mesh_primitive)) {
-                    site.geometry.mesh_static_base = mpi->ensure_rt_data(*ctx.resources);
-                }
-            }
-            // Shapes of one element share a transform, so they share a record.
-            if (site.world != s.last_world) {
-                s.records.push_back(make_rt_record(*site.world));
-                s.last_world = site.world;
-            }
-            // Index within this view's record run; the arena base is added once
-            // the whole run is uploaded below.
-            site.geometry.primary_record = static_cast<uint32_t>(s.records.size()) - 1u;
-            s.rv.shapes.push_back(site.geometry);
-            s.rv.shape_planes.push_back(world_shape_plane(site));
-        }, &sc);
-
-    upload_records(entry, ctx, rv, {records.data(), records.size()});
-}
-
-void ViewPreparer::upload_records(IViewEntry& entry, FrameContext& ctx, RenderView& rv,
-                                  array_view<RtRecord> records)
-{
-    auto& cache = view_caches_[&entry];
-    if (!ctx.records_arena) return;
-
-    const uint64_t need = records.size() * sizeof(RtRecord);
-    if (cache.records_region.size() != need) {
-        if (need == 0) {
-            cache.records_region = {};  // release
-        } else {
-            auto region = ctx.records_arena->alloc(need);
-            const uint64_t off = region.offset();
-            const bool ok = region.valid();
-            cache.records_region = std::move(region);
-            if (ok) ctx.records_arena->write_at(off, records.begin(), need);
-        }
-    } else if (need > 0) {
-        ctx.records_arena->update_at(cache.records_region.offset(), records.begin(), need);
-    }
-
-    // Shift each shape's run-relative index onto the region's base. The shape
-    // array is re-uploaded every frame, so a moved base needs no invalidation of
-    // anything that caches it.
-    if (need == 0 || !cache.records_region.valid()) return;
-    const uint32_t base = static_cast<uint32_t>(cache.records_region.offset() / sizeof(RtRecord));
-    for (auto& shape : rv.shapes) {
-        shape.primary_record += base;
-    }
-}
-
 void ViewPreparer::prepare_env(IViewEntry& entry,
                                const IElement::Ptr& camera_element,
                                FrameContext& ctx, RenderView& rv)
@@ -667,7 +573,6 @@ RenderView ViewPreparer::prepare(IViewEntry& entry,
     // declare a need for them.
     if (needs.batches) prepare_batches(entry, scene_state, batch_builder, ctx, rv);
     if (needs.lights)  prepare_lights(entry, scene_state, ctx, rv);
-    if (needs.shapes)  prepare_shapes(entry, scene_state, ctx, rv);
 
     return rv;
 }

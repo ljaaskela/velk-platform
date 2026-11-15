@@ -39,8 +39,6 @@ constexpr uint32_t kMediumLeafInstances = 32;
 /// Frames a record of the dynamic partition stays still before it returns to a
 /// static partition.
 constexpr uint32_t kQuietFrames = 120;
-/// Records with more shapes than this get a local tree instead of a linear test.
-constexpr size_t kMaxShapesWithoutTree = 4;
 
 /// Where @p center is along a curve that keeps near points near, within the box @p lo to
 /// @p hi: sorting by it orders things near to near. One grid scale on all axes, so that a flat
@@ -107,26 +105,25 @@ bool alloc_elements(IGpuArena* arena, ArenaRegion& region, size_t count, size_t 
 /// Whether two shapes describe the same geometry, ignoring color and material.
 bool same_geometry(const RtShape& a, const RtShape& b)
 {
-    // A mesh shape's other geometry fields are only its bounds, which a deforming
-    // mesh changes without becoming other geometry.
+    // A mesh shape's geometry fields are only its bounds, which the record's bounds follow,
+    // and which a deforming mesh changes without becoming other geometry.
     if (a.shape_kind == kRtShapeKindMesh && b.shape_kind == kRtShapeKindMesh) {
-        return a.mesh_static_base == b.mesh_static_base;
+        return true;
     }
     return std::memcmp(a.origin, b.origin, sizeof(a.origin)) == 0
         && std::memcmp(a.u_axis, b.u_axis, sizeof(a.u_axis)) == 0
         && std::memcmp(a.v_axis, b.v_axis, sizeof(a.v_axis)) == 0
         && std::memcmp(a.w_axis, b.w_axis, sizeof(a.w_axis)) == 0
         && std::memcmp(a.params, b.params, sizeof(a.params)) == 0
-        && a.shape_kind == b.shape_kind
-        && a.mesh_static_base == b.mesh_static_base;
+        && a.shape_kind == b.shape_kind;
 }
 
 /// Shapes emitted for one record, before they are compared with what the slot holds.
 struct EmittedRecord
 {
-    RtRecord gpu{};
+    mat4 world{};
+    uint32_t object = 0;
     vector<RtShape> shapes;
-    vector<BlasNode> tree;
     BvhItemBounds bounds{};
 };
 
@@ -206,42 +203,6 @@ BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, const mat4& 
     return out;
 }
 
-RtRecord SceneBvh::instance_record(const InstanceGroup& group, uint32_t slot) const
-{
-    RtRecord record = make_rt_record(group.world * group.visual->get_transforms()[slot].to_mat4());
-    const auto& run = group.meshes[group.visual->get_slot_mesh(slot)];
-    record.first_shape = run.first_shape;
-    record.shape_count = run.shape_count | (group.visual->get_ray_motion_source().empty() ? 0u : kRtRecordRayMotion)
-        | (run.far_area > 0.f ? kRtRecordMedium : 0u);
-    record.object = group.object_base + slot;
-    return record;
-}
-
-string_view SceneBvh::get_ray_motion(float& reach) const
-{
-    for (const auto& [element, group] : instance_groups_) {
-        const string_view source = group.visual->get_ray_motion_source();
-        if (!source.empty()) {
-            reach = group.visual->get_ray_motion_reach();
-            return source;
-        }
-    }
-    reach = 0.f;
-    return {};
-}
-
-bool SceneBvh::has_medium() const
-{
-    for (const auto& [element, group] : instance_groups_) {
-        for (const auto& run : group.meshes) {
-            if (run.far_area > 0.f) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 void SceneBvh::free_instance_partitions(InstanceGroup& group)
 {
     for (uint32_t p : group.partitions) {
@@ -259,11 +220,10 @@ void SceneBvh::free_instance_partitions(InstanceGroup& group)
 namespace {
 
 /**
- * Runs a visual's motion function over its instances, writing each one's world matrix
- * for raster and its record for rays. The table at table_word holds params (vec4), the
+ * Runs a visual's motion function over its instances, writing each one's world matrix,
+ * which raster and rays both read. The table at table_word holds params (vec4), the
  * largest allowed displacement, how far the visual's meshes reach from their origins,
- * and a count of instances that moved too far. After it, 4 words per slot: the index of
- * its record, 0xFFFFFFFF for none, and its partition's origin.
+ * and a count of instances that moved too far.
  */
 constexpr string_view instance_motion_prefix_src = R"(
 #version 450
@@ -280,7 +240,6 @@ struct MotionInstance {
 };
 
 layout(set = 1, binding = 3, scalar) buffer MotionInstances { MotionInstance data[]; } motion_instances;
-layout(set = 1, binding = 10, std430) buffer MotionRecords { RtRecord data[]; } motion_records;
 layout(set = 1, binding = 16, std430) buffer MotionWords { uint data[]; } motion_words;
 layout(set = 1, binding = 16, std430) readonly buffer MotionRows { vec4 data[]; } motion_rows;
 
@@ -321,25 +280,13 @@ void main()
     }
 
     motion_instances.data[pc.instances_base + slot].world_matrix = world;
-
-    uint entry = t + 8u + slot * 4u;
-    uint record = motion_words.data[entry];
-    if (record == 0xFFFFFFFFu) return;
-    vec3 origin = vec3(uintBitsToFloat(motion_words.data[entry + 1u]), uintBitsToFloat(motion_words.data[entry + 2u]),
-                       uintBitsToFloat(motion_words.data[entry + 3u]));
-    mat3 inv = inverse(mat3(world));
-    motion_records.data[record].inv_row0 = vec4(inv[0][0], inv[1][0], inv[2][0], world[3][0] - origin.x);
-    motion_records.data[record].inv_row1 = vec4(inv[0][1], inv[1][1], inv[2][1], world[3][1] - origin.y);
-    motion_records.data[record].inv_row2 = vec4(inv[0][2], inv[1][2], inv[2][2], world[3][2] - origin.z);
 }
 )";
 
 constexpr uint32_t kMotionTableWords = 8;
-constexpr uint32_t kMotionSlotWords = 4;
 constexpr uint32_t kMotionMaxDisplacementWord = 4;
 constexpr uint32_t kMotionReachWord = 5;
 constexpr uint32_t kMotionOverrunWord = 6;
-constexpr uint32_t kMotionNoRecord = 0xFFFFFFFFu;
 /// How often, in updates, the count of instances that moved too far is read back.
 constexpr uint32_t kMotionCheckInterval = 120;
 
@@ -358,8 +305,7 @@ void SceneBvh::alloc_instance_motion(InstanceGroup& group, FrameContext& ctx)
     }
     const uint32_t slot_count = group.visual->get_instance_capacity();
     const uint32_t capacity = slot_count + slot_count / 8u + 16u;
-    group.motion_region =
-        arena->alloc((uint64_t(kMotionTableWords) + uint64_t(capacity) * kMotionSlotWords) * sizeof(uint32_t), 16);
+    group.motion_region = arena->alloc(uint64_t(kMotionTableWords) * sizeof(uint32_t), 16);
     auto* words = static_cast<uint32_t*>(group.motion_region.valid() ? arena->mapped_at(group.motion_region.offset())
                                                                      : nullptr);
     if (!words) {
@@ -370,7 +316,7 @@ void SceneBvh::alloc_instance_motion(InstanceGroup& group, FrameContext& ctx)
     group.motion_capacity = capacity;
     group.motion_region_fresh = true;
     group.motion_pass_dirty = true;
-    group.motion_records_dirty = true;
+    group.motion_dirty = true;
 
     float reach2 = 0.f;
     for (uint32_t m = 0; m < group.visual->get_mesh_count(); ++m) {
@@ -393,28 +339,6 @@ void SceneBvh::alloc_instance_motion(InstanceGroup& group, FrameContext& ctx)
     std::memcpy(&table[kMotionMaxDisplacementWord], &max_displacement, sizeof(float));
     std::memcpy(&table[kMotionReachWord], &reach, sizeof(float));
     std::memcpy(words, table, sizeof(table));
-    for (uint32_t slot = 0; slot < capacity; ++slot) {
-        words[kMotionTableWords + size_t(slot) * kMotionSlotWords] = kMotionNoRecord;
-    }
-}
-
-void SceneBvh::write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32_t slot, uint32_t record,
-                                 const float origin[3])
-{
-    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    const uint32_t index = group.visual->get_instance_index(slot);
-    if (!arena || !group.motion_region.valid() || index >= group.motion_capacity) {
-        return;
-    }
-    uint32_t entry[kMotionSlotWords] = {record, 0u, 0u, 0u};
-    std::memcpy(&entry[1], origin, sizeof(float) * 3);
-    const uint64_t offset = group.motion_region.offset()
-        + (uint64_t(kMotionTableWords) + uint64_t(index) * kMotionSlotWords) * sizeof(uint32_t);
-    if (group.motion_region_fresh) {
-        arena->write_at(offset, entry, sizeof(entry));
-    } else {
-        arena->update_at(offset, entry, sizeof(entry));
-    }
 }
 
 void SceneBvh::emit_instance_motion(FrameContext& ctx, IRenderGraph& graph)
@@ -435,8 +359,8 @@ void SceneBvh::emit_instance_motion(FrameContext& ctx, IRenderGraph& graph)
             arena->update_at(group.motion_region.offset(), params, sizeof(params));
         }
         const bool rest_changed = group.visual->take_rest_changed();
-        const bool needed = params_changed || rest_changed || group.motion_records_dirty;
-        group.motion_records_dirty = false;
+        const bool needed = params_changed || rest_changed || group.motion_dirty;
+        group.motion_dirty = false;
         group.motion_region_fresh = false;
 
         if (update_frame_ % kMotionCheckInterval == 0 && !group.motion_error_logged) {
@@ -826,10 +750,10 @@ void SceneBvh::write_plain_cull(Partition& partition, FrameContext& ctx, const f
     vector<Keyed> keyed;
     keyed.reserve(partition.members.size());
     for (uint32_t slot : partition.members) {
-        if (records_[slot].gpu.object != 0u) {
+        if (records_[slot].object != 0u) {
             const BvhItemBounds& b = records_[slot].bounds;
             const float center[3] = {0.5f * (b.min[0] + b.max[0]), 0.5f * (b.min[1] + b.max[1]), 0.5f * (b.min[2] + b.max[2])};
-            keyed.push_back({morton_key(center, lo, hi), records_[slot].gpu.object});
+            keyed.push_back({morton_key(center, lo, hi), records_[slot].object});
         }
     }
     // Each object where its first record is along the curve.
@@ -994,16 +918,13 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
     }
     std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) { return a.key < b.key; });
 
-    // Reserving up front avoids growing these arenas part by part. The margin is for
-    // the other partitions and the top tree.
+    // Reserving up front avoids growing the node arena part by part: the trees of the
+    // partitions without their instances, and the top tree. The margin is for the others.
     const size_t residents = std::min<size_t>(keyed.size(), resident_capacity);
-    const size_t reserve_count = residents + keyed.size() / kPartitionRecords + kPartitionRecords;
-    if (ctx.records_arena) {
-        ctx.records_arena->reserve(reserve_count * sizeof(RtRecord));
-    }
     if (ctx.bvh_nodes_arena) {
         const size_t coarse_nodes = (keyed.size() - residents) / kMediumLeafInstances * 2u;
-        ctx.bvh_nodes_arena->reserve((reserve_count * 2u + coarse_nodes) * sizeof(GpuBvhNode));
+        const size_t partition_count = keyed.size() / kPartitionRecords + kPartitionRecords;
+        ctx.bvh_nodes_arena->reserve((partition_count * 2u + coarse_nodes) * sizeof(GpuBvhNode));
     }
 
     for (size_t begin = 0; begin < keyed.size(); begin += kPartitionRecords) {
@@ -1032,10 +953,9 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     // One run of shapes per mesh, local to each instance.
     struct CollectShapes
     {
-        const EmitContext& emit;
         vector<RtShape> shapes;
     };
-    CollectShapes collect{emit, {}};
+    CollectShapes collect;
     const mat4 identity = mat4::identity();
     vector<InstanceGroup::MeshRun> runs;
     bool unresolved = false;
@@ -1045,9 +965,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         if (auto mesh = visual.get_mesh(m)) {
             emit_mesh_shapes(interface_cast<IVisual>(&visual), *mesh, identity, ::velk::color::white(), nullptr,
                              +[](void* u, ShapeSite& site) {
-                                 auto& c = *static_cast<CollectShapes*>(u);
-                                 c.emit.cb(c.emit.user, site);
-                                 c.shapes.push_back(site.geometry);
+                                 static_cast<CollectShapes*>(u)->shapes.push_back(site.geometry);
                              }, &collect);
             const aabb local = mesh->get_bounds();
             const vec3 lo = local.min();
@@ -1070,27 +988,13 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     const bool new_group = group.visual == nullptr;
     group.visual = &visual;
 
+    // The meshes' shapes, kept to tell when they change.
     bool rebuild = new_group;
-    const size_t shape_bytes = collect.shapes.size() * sizeof(RtShape);
-    uint32_t first_shape = group.meshes.empty() ? 0u : group.meshes[0].first_shape;
     if (group.shapes.size() != collect.shapes.size()) {
-        alloc_elements(emit.frame.bvh_shapes_arena, group.shape_region, collect.shapes.size(), sizeof(RtShape),
-                       first_shape);
-        if (!group.shape_region.valid()) {
-            VELK_LOG(E, "SceneBvh: instance shape allocation failed");
-            return;
-        }
-        emit.frame.bvh_shapes_arena->write_at(group.shape_region.offset(), collect.shapes.data(), shape_bytes);
         group.shapes = std::move(collect.shapes);
         rebuild = true;
-    } else if (std::memcmp(group.shapes.data(), collect.shapes.data(), shape_bytes) != 0) {
-        emit.frame.bvh_shapes_arena->update_at(group.shape_region.offset(), collect.shapes.data(), shape_bytes);
+    } else if (std::memcmp(group.shapes.data(), collect.shapes.data(), collect.shapes.size() * sizeof(RtShape)) != 0) {
         group.shapes = std::move(collect.shapes);
-    }
-
-    // Runs hold absolute shape indices.
-    for (auto& run : runs) {
-        run.first_shape += first_shape;
     }
     if (group.meshes.size() != runs.size()
         || std::memcmp(group.meshes.data(), runs.data(), runs.size() * sizeof(InstanceGroup::MeshRun)) != 0) {
@@ -1223,8 +1127,6 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
                 members.erase(std::remove(members.begin(), members.end(), slot), members.end());
                 group.slot_partition[slot] = kUnplaced;
                 group.movers.erase(slot);
-                const float no_origin[3] = {0.f, 0.f, 0.f};
-                write_motion_slot(group, emit.frame, slot, kMotionNoRecord, no_origin);
             }
         } else if (current != kUnplaced && current == group.dynamic_partition) {
             partitions_[current].dirty = true;
@@ -1258,20 +1160,13 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
 
     struct CollectState
     {
-        SceneBvh& self;
-        const EmitContext& emit;
         vector<EmittedRecord> records;
         const void* open_group = nullptr;
         mat4 world{};  ///< Its object space to the world: every site of an element has the same.
     };
-    CollectState collect{*this, emit};
-    emit_unresolved_ = false;
+    CollectState collect;
     emit_shapes_for_element(element, emit.frame.render_ctx, +[](void* u, ShapeSite& site) {
         auto& s = *static_cast<CollectState*>(u);
-        s.emit.cb(s.emit.user, site);
-        if (site.draw_entry && site.draw_entry->texture_key != 0 && site.geometry.texture_id == 0) {
-            s.self.emit_unresolved_ = true;
-        }
         if (site.record_group && site.record_group == s.open_group) {
             auto& open = s.records.back();
             open.shapes.push_back(site.geometry);
@@ -1282,24 +1177,18 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         s.world = *site.world;
         s.records.emplace_back();
         auto& fresh = s.records.back();
-        fresh.gpu = make_rt_record(*site.world);
+        fresh.world = *site.world;
         fresh.shapes.push_back(site.geometry);
         for (int k = 0; k < 3; ++k) {
             fresh.bounds.min[k] = site.aabb_min[k];
             fresh.bounds.max[k] = site.aabb_max[k];
         }
     }, &collect);
-    if (emit_unresolved_ && std::find(unresolved_.begin(), unresolved_.end(), element) == unresolved_.end()) {
-        unresolved_.push_back(element);
-    }
 
     // All of the element's records are one object.
     const uint32_t object = emit.scene && !collect.records.empty() ? emit.scene->get_object_ids(*element, 1) : 0u;
     for (auto& emitted : collect.records) {
-        emitted.gpu.object = object;
-        if (emitted.shapes.size() > kMaxShapesWithoutTree) {
-            build_local_tree(emitted.shapes, emitted.tree);
-        }
+        emitted.object = object;
     }
 
     auto found = element_records_.find(element);
@@ -1323,12 +1212,12 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
             const uint32_t slot = found->second[i];
             Record& record = records_[slot];
             const auto& emitted = collect.records[i];
-            const bool moved = std::memcmp(record.gpu.inv_row, emitted.gpu.inv_row, sizeof(record.gpu.inv_row)) != 0
+            const bool moved = std::memcmp(&record.world, &emitted.world, sizeof(record.world)) != 0
                 || std::memcmp(&record.bounds, &emitted.bounds, sizeof(record.bounds)) != 0;
             if (moved) {
                 note_changed(record.bounds);
                 note_changed(emitted.bounds);
-                std::memcpy(record.gpu.inv_row, emitted.gpu.inv_row, sizeof(record.gpu.inv_row));
+                record.world = emitted.world;
                 record.bounds = emitted.bounds;
                 record.quiet_frames = 0;
                 if (record.partition == kDynamic) {
@@ -1337,13 +1226,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
                     promote(slot);
                 }
             }
-            const size_t shape_bytes = emitted.shapes.size() * sizeof(RtShape);
-            if (std::memcmp(record.shapes.data(), emitted.shapes.data(), shape_bytes) != 0) {
-                std::memcpy(record.shapes.data(), emitted.shapes.data(), shape_bytes);
-                if (record.partition != kUnplaced) {
-                    shape_updates_.push_back(slot);
-                }
-            }
+            std::memcpy(record.shapes.data(), emitted.shapes.data(), emitted.shapes.size() * sizeof(RtShape));
         }
         set_object_transform(object, collect.world, records_radius(collect.records));
         return;
@@ -1367,10 +1250,9 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         }
         Record& record = records_[slot];
         record.owner = element;
-        record.gpu = emitted.gpu;
-        record.gpu.shape_count = static_cast<uint32_t>(emitted.shapes.size());
+        record.world = emitted.world;
+        record.object = emitted.object;
         record.shapes = std::move(emitted.shapes);
-        record.tree = std::move(emitted.tree);
         record.bounds = emitted.bounds;
         note_changed(record.bounds);
         record.partition = kUnplaced;
@@ -1522,11 +1404,10 @@ void SceneBvh::free_record(uint32_t slot)
     } else if (record.partition != kUnplaced) {
         partitions_[record.partition].dirty = true;
     }
-    clear_object_transforms(record.gpu.object, 1);
+    clear_object_transforms(record.object, 1);
     record.owner = nullptr;
     record.partition = kUnplaced;
     record.shapes.clear();
-    record.tree.clear();
     freed_records_.push_back(slot);
     --live_records_;
 }
@@ -1704,7 +1585,7 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
         }
         if (residency_only) {
             const GpuBvhNode before = partition.ref;
-            upload_partition(partition, ctx, true);
+            upload_partition(partition, ctx);
             // The tree over it still fits as long as the bounds are the same.
             if (std::memcmp(before.aabb_min, partition.ref.aabb_min, sizeof(float) * 3) != 0
                 || std::memcmp(before.aabb_max, partition.ref.aabb_max, sizeof(float) * 3) != 0) {
@@ -1737,14 +1618,14 @@ void SceneBvh::flush_partitions(FrameContext& ctx)
             free_partitions_.push_back(p);
             continue;
         }
-        upload_partition(partition, ctx, true);
+        upload_partition(partition, ctx);
     }
 }
 
 namespace {
 
 /// A node's colour as the bits of a float. The top byte stays fixed, so these bits are
-/// always an ordinary float. Mirrors the GPU build in `lbvh_bounds_src`.
+/// always an ordinary float. See instance_box_splat_src.
 uint32_t pack_node_color(const float rgb[3])
 {
     uint32_t bits = 0x3F000000u;
@@ -1755,9 +1636,8 @@ uint32_t pack_node_color(const float rgb[3])
     return bits;
 }
 
-/// Gives each node of @p tree its area and colour, for rays too wide to resolve its
-/// instances. A child's index is always greater than its parent's, so this goes from the
-/// leaves up.
+/// Gives each node of @p tree its area and colour, which the far instance splat draws.
+/// A child's index is always greater than its parent's, so this goes from the leaves up.
 void add_node_medium(BvhTree& tree, const vector<float>& item_areas, const vector<float>& item_albedos)
 {
     vector<float> node_colors;
@@ -1795,7 +1675,7 @@ void add_node_medium(BvhTree& tree, const vector<float>& item_areas, const vecto
 
 } // namespace
 
-void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool geometry)
+void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx)
 {
     InstanceGroup* group = partition.group;
     vector<BvhItemBounds> items;
@@ -1803,8 +1683,6 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
     for (uint32_t slot : partition.members) {
         items.push_back(group ? instance_bounds(*group, slot) : records_[slot].bounds);
     }
-
-    const bool gpu_build = items.size() >= kGpuBuildMinItems;
 
     float bounds_lo[3];
     float bounds_hi[3];
@@ -1831,6 +1709,10 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
             } else {
                 group->visual->release_instance_index(slot);
             }
+        }
+        // Its instances are written at rest, so the motion runs over them again.
+        if (partition.resident && group->motion_region.valid()) {
+            group->motion_dirty = true;
         }
 
         // A closed shape's area seen from a random direction, averaged, is a quarter of
@@ -1861,10 +1743,6 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
         // Without its instances, what is left is the top of its tree, in world space, whose
         // boxes follow where they are. Its leaves have no shapes, so rays take them as a medium.
         if (!partition.resident) {
-            partition.records = {};
-            partition.gpu_build_items = {};
-            partition.gpu_build_scratch = {};
-            partition.gpu_build_capacity = 0;
             BvhTree coarse = build_bvh_tree({items.data(), items.size()}, kMediumLeafInstances, true);
             add_node_medium(coarse, item_areas, item_albedos);
             uint32_t base = 0;
@@ -1892,348 +1770,16 @@ void SceneBvh::upload_partition(Partition& partition, FrameContext& ctx, bool ge
         }
     }
 
-    // A tree built on the GPU keeps the records in the order of the members.
-    BvhTree tree;
-    if (gpu_build) {
-        tree.order.resize(items.size());
-        for (size_t i = 0; i < items.size(); ++i) {
-            tree.order[i] = static_cast<uint32_t>(i);
-        }
-    } else {
-        tree = build_bvh_tree({items.data(), items.size()});
-        partition.gpu_build_items = {};
-        partition.gpu_build_scratch = {};
-        partition.gpu_build_capacity = 0;
-    }
-
-    if (geometry && !group) {
-        // Shapes in the order of the records. For a tree built here that is leaf order,
-        // so a ray that reaches neighbouring records finds their shapes nearby in memory.
-        size_t shape_count = 0;
-        size_t tree_node_count = 0;
-        for (uint32_t slot : partition.members) {
-            shape_count += records_[slot].shapes.size();
-            tree_node_count += records_[slot].tree.size();
-        }
-
-        uint32_t shape_base = 0;
-        alloc_elements(ctx.bvh_shapes_arena, partition.shapes, shape_count, sizeof(RtShape), shape_base);
-        uint32_t tree_base = 0;
-        IGpuArena::Ptr tree_arena;
-        if (tree_node_count != 0) {
-            tree_arena = ctx.resources->shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
-        }
-        alloc_elements(tree_arena.get(), partition.tree_nodes, tree_node_count, sizeof(BlasNode), tree_base);
-
-        vector<RtShape> shapes;
-        vector<BlasNode> tree_nodes;
-        shapes.reserve(shape_count);
-        tree_nodes.reserve(tree_node_count);
-        for (uint32_t item : tree.order) {
-            Record& record = records_[partition.members[item]];
-            const auto first_shape = shape_base + static_cast<uint32_t>(shapes.size());
-            record.gpu.first_shape = first_shape;
-            record.gpu.shape_count = static_cast<uint32_t>(record.shapes.size());
-            record.gpu.tree_root = kRtRecordNoTree;
-            if (!record.tree.empty() && partition.tree_nodes.valid()) {
-                const auto first_node = tree_base + static_cast<uint32_t>(tree_nodes.size());
-                record.gpu.tree_root = first_node;
-                for (BlasNode node : record.tree) {
-                    if (node.shape_count > 0) {
-                        node.first_shape += first_shape;
-                    } else {
-                        node.first_child += first_node;
-                    }
-                    tree_nodes.push_back(node);
-                }
-            }
-            for (const auto& shape : record.shapes) {
-                shapes.push_back(shape);
-            }
-        }
-        if (partition.shapes.valid()) {
-            ctx.bvh_shapes_arena->write_at(partition.shapes.offset(), shapes.data(), shapes.size() * sizeof(RtShape));
-        }
-        if (partition.tree_nodes.valid()) {
-            tree_arena->write_at(partition.tree_nodes.offset(), tree_nodes.data(),
-                                 tree_nodes.size() * sizeof(BlasNode));
-        }
-    }
-
-    float origin[3];
-    for (int k = 0; k < 3; ++k) {
-        origin[k] = 0.5f * (bounds_lo[k] + bounds_hi[k]);
-    }
-
-    uint32_t record_base = 0;
-    alloc_elements(ctx.records_arena, partition.records, tree.order.size(), sizeof(RtRecord), record_base);
-    if (partition.records.valid()) {
-        vector<RtRecord> gpu_records;
-        gpu_records.reserve(tree.order.size());
-        for (uint32_t item : tree.order) {
-            const uint32_t member = partition.members[item];
-            RtRecord record = group ? instance_record(*group, member) : records_[member].gpu;
-            for (int k = 0; k < 3; ++k) {
-                record.inv_row[k][3] -= origin[k];
-            }
-            if (group && group->motion_region.valid()) {
-                write_motion_slot(*group, ctx, member, record_base + static_cast<uint32_t>(gpu_records.size()), origin);
-                group->motion_records_dirty = true;
-            }
-            gpu_records.push_back(record);
-        }
-        ctx.records_arena->write_at(partition.records.offset(), gpu_records.data(),
-                                    gpu_records.size() * sizeof(RtRecord));
-    }
-
-    const size_t node_count = gpu_build ? items.size() * 2u - 1u : tree.nodes.size();
-    uint32_t node_base = 0;
-    alloc_elements(ctx.bvh_nodes_arena, partition.nodes, node_count, sizeof(GpuBvhNode), node_base);
-    // Indices stamped onto a failed region would point into other trees, where a
-    // cycle would hang the walk. Rays skip the partition instead.
-    if (!partition.nodes.valid() || !partition.records.valid()
-        || (geometry && !group && !partition.shapes.valid())
-        || (gpu_build && !queue_gpu_build(partition, ctx, {items.data(), items.size()}, {item_areas.data(), item_areas.size()},
-                                          {item_albedos.data(), item_albedos.size()}, origin, node_base, record_base))) {
-        VELK_LOG(E, "SceneBvh: partition allocation failed");
-        set_inverted_bounds(partition.ref);
-        partition.node_count = 0;
-        return;
-    }
-
+    // Rays walk the kept cut, and the far instance splat stops at a partition's box, so a
+    // partition with its instances, or of plain records, is its reference alone.
+    partition.nodes = {};
     partition.ref = {};
     for (int k = 0; k < 3; ++k) {
         partition.ref.aabb_min[k] = bounds_lo[k];
         partition.ref.aabb_max[k] = bounds_hi[k];
     }
-    partition.ref.aabb_min[3] = origin[0];
-    partition.ref.aabb_max[3] = origin[1];
-    std::memcpy(&partition.ref.first_shape, &origin[2], sizeof(float));
-    partition.ref.first_child = node_base;
     partition.ref.child_count = kBvhPartitionRef;
-
-    if (gpu_build) {
-        partition.node_count = static_cast<uint32_t>(node_count);
-        return;
-    }
-    if (!item_areas.empty()) {
-        add_node_medium(tree, item_areas, item_albedos);
-    }
-
-    for (auto& node : tree.nodes) {
-        if (node.child_count != 0) {
-            node.first_child += node_base;
-        } else {
-            node.first_shape += record_base;
-        }
-        // Rounds outward, so subtracting the origin never shrinks a box.
-        for (int k = 0; k < 3; ++k) {
-            node.aabb_min[k] = std::nextafter(node.aabb_min[k] - origin[k], -std::numeric_limits<float>::infinity());
-            node.aabb_max[k] = std::nextafter(node.aabb_max[k] - origin[k], std::numeric_limits<float>::infinity());
-        }
-    }
-    ctx.bvh_nodes_arena->write_at(partition.nodes.offset(), tree.nodes.data(),
-                                  tree.nodes.size() * sizeof(GpuBvhNode));
-    partition.node_count = static_cast<uint32_t>(tree.nodes.size());
-}
-
-bool SceneBvh::queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
-                               array_view<const float> areas, array_view<const float> albedos, const float origin[3],
-                               uint32_t node_base, uint32_t record_base)
-{
-    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena) {
-        return false;
-    }
-    const auto count = static_cast<uint32_t>(items.size());
-
-    // Items go in a fresh region each frame, relative to the origin and rounded outward,
-    // so subtracting it never shrinks a box.
-    partition.gpu_build_items = arena->alloc(uint64_t(count) * sizeof(float) * 8);
-    auto* out = static_cast<float*>(partition.gpu_build_items.valid()
-                                        ? arena->mapped_at(partition.gpu_build_items.offset())
-                                        : nullptr);
-    if (!out) {
-        return false;
-    }
-    float lo[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-                   std::numeric_limits<float>::max()};
-    float hi[3] = {-lo[0], -lo[0], -lo[0]};
-    constexpr float kInf = std::numeric_limits<float>::infinity();
-    for (uint32_t i = 0; i < count; ++i) {
-        float item[8];
-        item[6] = areas.empty() ? 0.f : areas[i];
-        const float no_color[3] = {0.f, 0.f, 0.f};
-        const uint32_t color = pack_node_color(albedos.empty() ? no_color : &albedos[size_t(i) * 3]);
-        std::memcpy(&item[7], &color, sizeof(color));
-        for (int k = 0; k < 3; ++k) {
-            item[k] = std::nextafter(items[i].min[k] - origin[k], -kInf);
-            item[3 + k] = std::nextafter(items[i].max[k] - origin[k], kInf);
-            const float center = 0.5f * (item[k] + item[3 + k]);
-            lo[k] = std::min(lo[k], center);
-            hi[k] = std::max(hi[k], center);
-        }
-        std::memcpy(out + size_t(i) * 8, item, sizeof(item));
-    }
-
-    // Scratch outlives the frame, and the pass's first barrier orders its reuse.
-    if (partition.gpu_build_capacity < count) {
-        const uint32_t capacity = count + count / 4u;
-        const uint32_t capacity_blocks = (capacity + kLbvhBlockItems - 1u) / kLbvhBlockItems;
-        // Keys and values twice, histograms and digit bases, parents of all nodes, and
-        // inner nodes, counters and leaves.
-        const uint64_t words = uint64_t(capacity) * 6u + (uint64_t(capacity_blocks) + 1u) * 256u
-            + uint64_t(capacity) * 2u + uint64_t(capacity) * 3u;
-        partition.gpu_build_scratch = arena->alloc(words * sizeof(uint32_t));
-        if (!partition.gpu_build_scratch.valid()) {
-            partition.gpu_build_capacity = 0;
-            return false;
-        }
-        partition.gpu_build_capacity = capacity;
-    }
-
-    // Rays find an empty tree if the build never runs, rather than unwritten nodes.
-    GpuBvhNode empty{};
-    set_inverted_bounds(empty);
-    ctx.bvh_nodes_arena->write_at(uint64_t(node_base) * sizeof(GpuBvhNode), &empty, sizeof(empty));
-
-    const uint32_t capacity = partition.gpu_build_capacity;
-    const uint32_t capacity_blocks = (capacity + kLbvhBlockItems - 1u) / kLbvhBlockItems;
-    uint32_t next = static_cast<uint32_t>(partition.gpu_build_scratch.offset() / sizeof(uint32_t));
-    const auto take = [&next](uint32_t words) {
-        const uint32_t at = next;
-        next += words;
-        return at;
-    };
-
-    LbvhPush build{};
-    build.count = count;
-    build.items = static_cast<uint32_t>(partition.gpu_build_items.offset() / sizeof(uint32_t));
-    build.keys_in = take(capacity * 2u);
-    build.values_in = take(capacity);
-    build.keys_out = take(capacity * 2u);
-    build.values_out = take(capacity);
-    build.histograms = take(capacity_blocks * 256u);
-    build.digit_bases = take(256u);
-    build.parents = take(capacity * 2u);
-    build.inner_nodes = take(capacity);
-    build.counters = take(capacity);
-    build.leaf_nodes = take(capacity);
-    build.node_base = node_base;
-    build.record_base = record_base;
-    float extent = 0.f;
-    for (int k = 0; k < 3; ++k) {
-        build.lo[k] = lo[k];
-        extent = std::max(extent, hi[k] - lo[k]);
-    }
-    build.scale = (kLbvhGridCells - 1.f) / std::max(extent, 1e-20f);
-    gpu_builds_.push_back(build);
-    return true;
-}
-
-void SceneBvh::emit_gpu_builds(FrameContext& ctx, IRenderGraph& graph)
-{
-    if (gpu_builds_.empty()) {
-        return;
-    }
-    VELK_PERF_SCOPE("renderer.gpu_build_record");
-
-    const auto pipeline_for = [&](string_view stage, uint64_t tag) {
-        const uint64_t key = 0x4c42'5648'0000'0000ULL | tag;
-        auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
-        if (!pipeline) {
-            string src(lbvh_prelude_src);
-            src += stage;
-            pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
-        }
-        return pipeline;
-    };
-
-    // The nodes' addresses change every frame, so these commands do too.
-    bool dirty = true;
-    emit_cached_view_pass(gpu_build_pass_, dirty, "bvh.gpu_build", graph, [&](CachedPassRecording& rec) {
-        auto keys = pipeline_for(lbvh_keys_src, 1);
-        auto histogram = pipeline_for(lbvh_histogram_src, 2);
-        auto offsets = pipeline_for(lbvh_offsets_src, 3);
-        auto scatter = pipeline_for(lbvh_scatter_src, 4);
-        auto structure = pipeline_for(lbvh_structure_src, 5);
-        auto bounds = pipeline_for(lbvh_bounds_src, 6);
-        auto digit_bases = pipeline_for(lbvh_digit_bases_src, 7);
-        auto cmd = keys && histogram && offsets && digit_bases && scatter && structure && bounds
-            ? ctx.backend->create_command_buffer()
-            : nullptr;
-        if (!cmd) {
-            VELK_LOG(E, "SceneBvh: cannot build trees on the GPU, rays will not see their items");
-            return;
-        }
-
-        const auto dispatch = [&](IGpuPipeline::Ptr& pipeline, const LbvhPush& pc, uint32_t groups) {
-            DispatchCall dc{};
-            dc.pipeline = pipeline.get();
-            dc.groups_x = groups;
-            dc.groups_y = 1;
-            dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
-            cmd->record_dispatch(dc);
-        };
-
-        cmd->begin_recording();
-        cmd->push_label("BVH build");
-        // Earlier frames may still be reading what this writes.
-        cmd->record_global_barrier();
-        for (const auto& build : gpu_builds_) {
-            dispatch(keys, build, (build.count + 63u) / 64u);
-        }
-        cmd->record_global_barrier();
-
-        // Least significant digit first. An even number of passes ends in `keys_in`.
-        constexpr uint32_t kPasses = 8;
-        static_assert(kLbvhDigitBits * kPasses >= kLbvhKeyBits && kPasses % 2 == 0);
-        for (uint32_t pass = 0; pass < kPasses; ++pass) {
-            for (auto build : gpu_builds_) {
-                if (pass % 2 == 1) {
-                    std::swap(build.keys_in, build.keys_out);
-                    std::swap(build.values_in, build.values_out);
-                }
-                build.shift = pass * kLbvhDigitBits;
-                dispatch(histogram, build, (build.count + kLbvhBlockItems - 1u) / kLbvhBlockItems);
-            }
-            cmd->record_global_barrier();
-            for (const auto& build : gpu_builds_) {
-                dispatch(offsets, build, 256);
-            }
-            cmd->record_global_barrier();
-            for (const auto& build : gpu_builds_) {
-                dispatch(digit_bases, build, 1);
-            }
-            cmd->record_global_barrier();
-            for (auto build : gpu_builds_) {
-                if (pass % 2 == 1) {
-                    std::swap(build.keys_in, build.keys_out);
-                    std::swap(build.values_in, build.values_out);
-                }
-                build.shift = pass * kLbvhDigitBits;
-                dispatch(scatter, build, (build.count + kLbvhBlockItems - 1u) / kLbvhBlockItems);
-            }
-            cmd->record_global_barrier();
-        }
-
-        for (const auto& build : gpu_builds_) {
-            dispatch(structure, build, (build.count - 1u + 63u) / 64u);
-        }
-        cmd->record_global_barrier();
-        for (const auto& build : gpu_builds_) {
-            dispatch(bounds, build, (build.count + 63u) / 64u);
-        }
-        cmd->record_global_barrier();
-        cmd->pop_label();
-        cmd->end_recording();
-        rec.cmd = std::move(cmd);
-        for (auto* pipeline : {&keys, &histogram, &offsets, &digit_bases, &scatter, &structure, &bounds}) {
-            rec.held.push_back(std::move(*pipeline));
-        }
-    });
+    partition.node_count = 1;
 }
 
 void SceneBvh::rebuild_top_tree(FrameContext& ctx)
@@ -2393,7 +1939,6 @@ void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
     release_plain_cull(dynamic_, emit.frame);
     dynamic_ = Partition{};
     dynamic_transforms_dirty_ = false;
-    shape_updates_.clear();
 
     if (scene) {
         walk_scene_preorder(scene, scene->root(), [&](IElement* element) { update_element(element, emit); });
@@ -2402,10 +1947,10 @@ void SceneBvh::full_build(IScene* scene, const EmitContext& emit)
     needs_full_build_ = false;
 }
 
-void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user)
+void SceneBvh::update(const SceneState& state, FrameContext& ctx)
 {
     VELK_PERF_SCOPE("renderer.bvh_rebuild");
-    const EmitContext emit{ctx, shape_cb, shape_user, state.scene};
+    const EmitContext emit{ctx, state.scene};
     changed_.clear();
     changed_all_ = false;
 
@@ -2486,15 +2031,9 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
             if (dynamic_.members.empty()) {
                 release_plain_cull(dynamic_, ctx);
                 dynamic_.nodes = {};
-                dynamic_.records = {};
-                dynamic_.shapes = {};
-                dynamic_.tree_nodes = {};
-                dynamic_.gpu_build_items = {};
-                dynamic_.gpu_build_scratch = {};
-                dynamic_.gpu_build_capacity = 0;
                 dynamic_.node_count = 0;
             } else {
-                upload_partition(dynamic_, ctx, dynamic_.dirty);
+                upload_partition(dynamic_, ctx);
             }
             dynamic_.dirty = false;
             dynamic_transforms_dirty_ = false;
@@ -2509,15 +2048,6 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx, ShapeCb shape_
             }
         }
     }
-
-    for (uint32_t slot : shape_updates_) {
-        const Record& record = records_[slot];
-        if (record.owner && !record.shapes.empty()) {
-            ctx.bvh_shapes_arena->update_at(record.gpu.first_shape * sizeof(RtShape), record.shapes.data(),
-                                            record.shapes.size() * sizeof(RtShape));
-        }
-    }
-    shape_updates_.clear();
 
     for (uint32_t slot : freed_records_) {
         free_records_.push_back(slot);

@@ -2,7 +2,6 @@
 #define VELK_UI_SCENE_BVH_H
 
 #include "scene_collector.h"
-#include "scene_lbvh.h"
 
 #include <velk/api/velk.h>
 #include <velk/ext/object.h>
@@ -47,14 +46,8 @@ public:
 
     SceneBvh() = default;
 
-    /**
-     * @brief Brings the BVH up to date with the changes in @p state.
-     *
-     * The callback fires per emitted shape of each changed element so the caller
-     * can fill material / texture / intersect fields. A shape whose texture is not
-     * resolved yet is emitted again each frame until it is.
-     */
-    void update(const SceneState& state, FrameContext& ctx, ShapeCb shape_cb, void* shape_user);
+    /// Brings the BVH up to date with the changes in @p state.
+    void update(const SceneState& state, FrameContext& ctx);
 
     /// Where the cameras are, for what stays resident.
     void set_view_points(array_view<const vec3> points)
@@ -67,11 +60,6 @@ public:
     /// before every pass that reads instances or records.
     void emit_instance_motion(FrameContext& ctx, IRenderGraph& graph);
 
-    /// Adds the pass that builds this frame's trees on the GPU to @p graph. Comes before
-    /// every pass that traces rays.
-    void emit_gpu_builds(FrameContext& ctx, IRenderGraph& graph);
-    /// Forgets the builds of the frame just recorded.
-    void end_frame_gpu_builds() { gpu_builds_.clear(); }
 
     // IBvh
     bool any_hit(vec3 /*origin*/, vec3 /*dir*/, float /*t_max*/) const override
@@ -88,8 +76,6 @@ public:
 
     uint32_t get_root_index() const override { return root_; }
     uint32_t get_node_count() const override { return node_count_; }
-    bool has_medium() const override;
-    string_view get_ray_motion(float& reach) const override;
     array_view<const WorldBox> changed_bounds(bool& all) const override
     {
         all = changed_all_;
@@ -119,13 +105,9 @@ private:
     struct Record
     {
         IElement* owner = nullptr;  ///< Null when the slot is free. Never dereferenced.
-        /// Its first_shape and tree_root are absolute once its partition uploads. Its
-        /// translation is in world space; the upload makes it relative to the partition.
-        RtRecord gpu{};
-        vector<RtShape> shapes;
-        /// Local tree, when the record has many shapes. Indices relative to this
-        /// vector and to `shapes`.
-        vector<BlasNode> tree;
+        mat4 world{};          ///< Where it is: a change moves it.
+        uint32_t object = 0;   ///< Its element's object id, 0 for none.
+        vector<RtShape> shapes;  ///< What it is: a change in kind makes it again.
         BvhItemBounds bounds{};
         uint32_t partition = kUnplaced;  ///< Index into partitions_, or kDynamic / kUnplaced.
         uint32_t quiet_frames = 0;       ///< Frames since it last moved, in the dynamic partition.
@@ -146,8 +128,7 @@ private:
         };
         IInstancedMeshInternal* visual = nullptr;
         mat4 world{};
-        vector<RtShape> shapes;  ///< All meshes' runs.
-        ArenaRegion shape_region;
+        vector<RtShape> shapes;  ///< All meshes' runs, kept to tell when they change.
         vector<MeshRun> meshes;
         vector<uint32_t> partitions;
         vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
@@ -187,7 +168,7 @@ private:
         uint32_t object_base = 0;      ///< Slot i's object id is this plus i.
         uint32_t object_count = 0;     ///< How many ids from object_base it has placed.
         bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
-        bool motion_records_dirty = false;  ///< Records were written at rest.
+        bool motion_dirty = false;  ///< Instances were written at rest, so the motion runs again.
         bool motion_error_logged = false;
         IRenderPass::Ptr motion_pass;
         bool motion_pass_dirty = true;
@@ -207,14 +188,8 @@ private:
         uint32_t cull_entry = kUnplaced;
         uint32_t cull_chunks = 0;
         BvhItemBounds cull_bounds{};
-        ArenaRegion gpu_build_items;    ///< This frame's items, when the GPU builds the tree.
-        ArenaRegion gpu_build_scratch;  ///< What the build works in. Kept while it is large enough.
-        uint32_t gpu_build_capacity = 0;
-        ArenaRegion nodes;
-        ArenaRegion records;
-        ArenaRegion shapes;
-        ArenaRegion tree_nodes;
-        GpuBvhNode ref{};  ///< World bounds, referring to its root. Copied into the tree above it.
+        ArenaRegion nodes;  ///< Without its instances, the tree over them, for the far instance splat.
+        GpuBvhNode ref{};   ///< World bounds, as a node of the tree above it.
         uint32_t node_count = 0;
         bool active = false;
         bool dirty = false;
@@ -231,8 +206,6 @@ private:
     struct EmitContext
     {
         FrameContext& frame;
-        ShapeCb cb;
-        void* user;
         IScene* scene;  ///< Hands out object ids. Can be null.
     };
 
@@ -264,14 +237,10 @@ private:
     bool is_instance_dynamic(uint32_t partition) const;
     /// Allocates and clears @p group's motion region, if it has a motion function.
     void alloc_instance_motion(InstanceGroup& group, FrameContext& ctx);
-    /// Tells the motion pass where @p slot's record is, or that it has none.
-    void write_motion_slot(InstanceGroup& group, FrameContext& ctx, uint32_t slot, uint32_t record,
-                           const float origin[3]);
     BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
     /// The world bounds of mesh @p mesh of @p group placed by @p t, with the element at @p w.
     BvhItemBounds instance_bounds(const InstanceGroup& group, const mat4& w, const InstanceTransform& t,
                                   uint32_t mesh) const;
-    RtRecord instance_record(const InstanceGroup& group, uint32_t slot) const;
     void free_record(uint32_t slot);
     /// Moves a record to the dynamic partition, leaving its static partition if any.
     void promote(uint32_t slot);
@@ -281,13 +250,9 @@ private:
     void recut(FrameContext& ctx);
     /// Splits partitions grown past their limit, then uploads the changed ones.
     void flush_partitions(FrameContext& ctx);
-    /// Uploads @p partition. With @p geometry, also its shapes and local trees.
-    void upload_partition(Partition& partition, FrameContext& ctx, bool geometry);
-    /// Queues a build of @p partition's tree on the GPU, over @p items in the order of
-    /// its records, which start at @p record_base.
-    bool queue_gpu_build(Partition& partition, FrameContext& ctx, array_view<const BvhItemBounds> items,
-                         array_view<const float> areas, array_view<const float> albedos, const float origin[3],
-                         uint32_t node_base, uint32_t record_base);
+    /// Writes @p partition's culling table entry and its box, and for one without its
+    /// instances, the tree over them that the far instance splat walks.
+    void upload_partition(Partition& partition, FrameContext& ctx);
     void rebuild_top_tree(FrameContext& ctx);
     void upload_root(FrameContext& ctx);
     uint32_t alloc_partition();
@@ -328,15 +293,11 @@ private:
     bool root_dirty_ = true;
 
     vector<uint32_t> unplaced_;       ///< Records waiting for a partition.
-    vector<uint32_t> shape_updates_;  ///< Records whose shapes changed but not their geometry.
-    vector<LbvhPush> gpu_builds_;     ///< Trees to build on the GPU this frame.
-    IRenderPass::Ptr gpu_build_pass_;
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
     vector<WorldBox> changed_;        ///< See changed_bounds. Cleared by each update.
     bool changed_all_ = false;
     void note_changed(const BvhItemBounds& bounds);
     void note_all_changed();
-    bool emit_unresolved_ = false;    ///< Set while emitting if the element has an unresolved shape.
 
     bool needs_full_build_ = true;
 

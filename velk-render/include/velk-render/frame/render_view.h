@@ -104,29 +104,11 @@ struct RenderView
     /// region.offset / sizeof(GpuLight) at prepare time. 0 when no lights.
     uint32_t lights_base = 0;
 
-    /// Raster batch cache for this view. Owned by the preparer; the
-    /// span here is valid for the duration of the path's
-    /// `build_passes` call and invalidated by the next view's prepare.
-    /// Forward and Deferred paths consume; RT does not.
+    /// Batch cache for this view. Owned by the preparer; the span here is valid for the
+    /// duration of the path's `build_passes` call and invalidated by the next view's prepare.
+    /// Every path consumes it: the raster paths draw it, and every path culls it into the
+    /// kept cut its rays walk.
     const vector<IBatch::Ptr>* batches = nullptr;
-
-    /// RT primary-buffer shapes for this view. Each entry has its
-    /// `material_id` / `material_base` / `texture_id` / shape_kind
-    /// fields pre-resolved through the frame snippet registry, and
-    /// `primary_record` set to its record in the shared record arena. Order
-    /// is enumeration-order (no plane sort); RT path back-to-front-sorts a
-    /// local copy.
-    vector<RtShape> shapes;
-
-    /// World-space plane of each entry in `shapes`, for that sort: shapes are in
-    /// local space, and the sort needs to group those sharing a world plane.
-    struct ShapePlane
-    {
-        float origin[3];
-        float u_axis[3];
-        float v_axis[3];
-    };
-    vector<ShapePlane> shape_planes;
 };
 
 } // namespace velk

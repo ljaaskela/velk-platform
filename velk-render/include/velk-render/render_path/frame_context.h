@@ -34,12 +34,11 @@ struct FrameContext
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
 
-    /// Shared BVH arenas (set = 1 slots 0/1), owned by the Renderer and
+    /// Shared BVH node arena (set = 1 slot 0), owned by the Renderer and
     /// reused by every scene's BVH so multiple BVHs suballocate distinct
     /// regions of one buffer instead of fighting over the slot. Null before
-    /// the Renderer assigns them.
+    /// the Renderer assigns it.
     IGpuArena* bvh_nodes_arena = nullptr;
-    IGpuArena* bvh_shapes_arena = nullptr;
 
     /// Shared per-view FrameGlobals arena (set = 1 slot 2), owned by the
     /// Renderer. Each view writes its FrameGlobals here and pushes the
@@ -71,18 +70,6 @@ struct FrameContext
     /// so the base is stable across frames and the cached deferred pass's
     /// baked push constant stays valid. Null before the Renderer assigns it.
     IGpuArena* lights_arena = nullptr;
-
-    /// Shared primary-shapes arena (set = 1 slot 6), owned by the Renderer.
-    /// The RT path suballocates a persistent per-view region for its
-    /// painter-sorted RtShape list; the primary-ray loop reads
-    /// velk_shapes.data[shapes_base + i]. Persistent so the base is stable
-    /// (RT reads it fresh from RtRoot each frame). Null before assignment.
-    IGpuArena* primary_shapes_arena = nullptr;
-
-    /// Shared record arena (set = 1 slot 10), owned by the Renderer. Each
-    /// scene's BVH and each RT view's primary shape list suballocates a region
-    /// for its RtRecords. Null before the Renderer assigns it.
-    IGpuArena* records_arena = nullptr;
 
     /// Color attachment format the active path is writing into.
     /// Pipeline lookups (`render_ctx->pipelines().find`) reconstruct their

@@ -119,9 +119,9 @@ RtShape velk_instance_shape(ElementInstance inst, uint kind, uint draw)
         shape.texture_id = d.texture_id;
         shape.material_base = d.material_words;
     }
-    shape.primary_record = 0u;
-    shape.mesh_static_base = VELK_INVALID_MESH_STATIC;
+    shape._pad0 = 0u;
     shape._pad1 = 0u;
+    shape._pad2 = 0u;
     return shape;
 }
 )"

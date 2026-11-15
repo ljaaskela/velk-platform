@@ -19,7 +19,7 @@ Each instance has a slot, which is its stable index until it is removed. Removed
 
 ## What is drawn
 
-A compute pass culls instances each frame, by frustum and by size on screen, and writes the list of those to draw. Rays see instances through the scene BVH whether or not they are drawn.
+A compute pass culls instances each frame, by frustum and by size on screen, and writes the list of those to draw. Rays see instances through the view's kept cut, which holds them all round the camera, drawn or not.
 
 | Setting | Default | Effect |
 |---|---|---|
@@ -46,7 +46,7 @@ forest.set_motion_params({time, 0.f, 0.f, 0.f});
 
 The function runs for every instance on each frame the params or placements change. It does no CPU work per instance and changes no tree, and rays and raster see the same result.
 
-No point of a mesh may move further than `max_displacement`, since each instance's bounds in the BVH are grown by that much. Going past it is logged as an error, and rays may then miss the instance. An empty string removes the motion.
+No point of a mesh may move further than `max_displacement`, since each instance's bounds, in the scene BVH and in the trees rays walk, are grown by that much. Going past it is logged as an error, and rays may then miss the instance. An empty string removes the motion.
 
 For larger moves use `set_transform`, which updates the BVH.
 
@@ -64,7 +64,6 @@ With `VELK_AUTO_GPU_STATS=1` set, the log reports each arena's use at auto exit.
 
 ## Limits
 
-- The RT path's primary rays do not draw instances, since they walk a flat list of shapes. Its bounces and shadows do see them.
 - Under a render target, which has no GPU culling, every instance draws as mesh 0.
 - AO rays pass through unloaded partitions.
 - A low budget leaves a visible edge where drawn instances meet the average.

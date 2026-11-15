@@ -53,8 +53,7 @@ public:
      */
     struct Needs
     {
-        bool batches = false; ///< Raster batch list (Forward + Deferred).
-        bool shapes  = false; ///< RT primary-buffer shapes (RT).
+        bool batches = false; ///< The batch list: to draw, and to cull into what rays walk.
         bool lights  = false; ///< Scene lights + shadow-tech registration (Deferred + RT).
     };
 

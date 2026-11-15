@@ -81,6 +81,8 @@ private:
         bool rt_dirty = true;
         /// Resize detection: see DeferredPath::ViewState.
         ::velk::IGpuTexture* last_dst_texture = nullptr;
+        /// The pipeline the cached pass was recorded with.
+        const ::velk::IGpuPipeline* last_pipeline = nullptr;
     };
 
     std::unordered_map<IViewEntry*, ViewState> view_states_;

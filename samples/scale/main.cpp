@@ -79,7 +79,6 @@
 // tourhold=N: the tour stops at frame N and the camera stays there.
 // path=from,to,dx,dz,above: with view=, moves the camera by dx, dz between those frames, to
 //           `above` units over the ground, or at its starting height if that is negative.
-// noraywind: rays follow only the whole of nature's trees, not their branches.
 // noshadow: the sun casts no ray-traced shadows.
 // flat:     nature's ground has no height.
 // sun=N:    the sun is N degrees above the horizon.
@@ -1254,7 +1253,6 @@ int main(int argc, char* argv[])
     float path_dz = 0.f;
     float path_above = -1.f;
     long grass_count = 1000000;
-    bool ray_wind = true;
     bool flat_terrain = false;
     float sun_angle = 0.f;
     for (int i = 5; i < argc; ++i) {
@@ -1299,7 +1297,6 @@ int main(int argc, char* argv[])
         }
         if (std::strncmp(argv[i], "tour=", 5) == 0) tour_along = static_cast<float>(std::atof(argv[i] + 5));
         if (std::strncmp(argv[i], "grass=", 6) == 0) grass_count = std::atol(argv[i] + 6);
-        ray_wind = ray_wind && std::strcmp(argv[i], "noraywind") != 0;
         flat_terrain = flat_terrain || std::strcmp(argv[i], "flat") == 0;
         if (std::strncmp(argv[i], "sun=", 4) == 0) sun_angle = static_cast<float>(std::atof(argv[i] + 4));
         if (std::strncmp(argv[i], "leaves=", 7) == 0) leaf_density = static_cast<float>(std::atof(argv[i] + 7));
@@ -1620,13 +1617,6 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
     return mat4(vec4(lean * rest[0].xyz, 0.0), vec4(lean * rest[1].xyz, 0.0), vec4(lean * rest[2].xyz, 0.0), rest[3]);
 }
 )", tree_reach * kMaxTreeSize * kMaxLeanChange);
-            if (ray_wind) {
-                // The bend in the trees' vertex shader, without the leaves' own motion.
-                forest_visual.set_ray_motion(
-                    "vec3(sin(t * 1.3 + dot(at.xz, vec2(0.013, 0.017)) + p.y * 0.05) * length(p.xz) * 0.02, "
-                    "sin(t * 1.9 + dot(at.xz, vec2(0.013, 0.017)) + length(p.xz) * 0.15) * length(p.xz) * 0.03, 0.0)",
-                    4.f);
-            }
         }
         forest_visual.set_mesh(oak);
         const uint32_t birch_index = forest_visual.add_mesh(birch);
