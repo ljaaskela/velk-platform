@@ -34,9 +34,12 @@ enum class DebugView : uint8_t
     /// Instances dimmed, under the bounds of their visual's partitions: red while a partition
     /// chooses its levels of detail again this frame, cyan while it keeps them.
     Partition,
-    /// Instances dimmed, under the boxes of one level of the trees rays walk, the one
-    /// ICamera::debug_level says: 0 for leaves of four records, up to each partition's root.
+    /// Instances dimmed, under the boxes of one level of the trees rays walk over each
+    /// partition, the one ICamera::debug_level says: 0 for leaves of four records, up to each
+    /// partition's root.
     RayTree,
+    /// Likewise for the tree rays walk over the partitions: 0 for one partition each.
+    RayTop,
 };
 
 /**

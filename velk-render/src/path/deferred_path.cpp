@@ -869,8 +869,10 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     if (visibility_mode == static_cast<uint32_t>(DebugView::Partition)) {
         emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph);
-    } else if (visibility_mode == static_cast<uint32_t>(DebugView::RayTree)) {
-        emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph, camera_state ? camera_state->debug_level : 0u);
+    } else if (visibility_mode == static_cast<uint32_t>(DebugView::RayTree)
+               || visibility_mode == static_cast<uint32_t>(DebugView::RayTop)) {
+        emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph, camera_state ? camera_state->debug_level : 0u,
+                                   visibility_mode == static_cast<uint32_t>(DebugView::RayTop));
     }
     if (chosen) {
         emit_chooser_frustum_pass(vs, render_view, color_target, ctx, graph);
@@ -1184,7 +1186,7 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
 }
 
 void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                              FrameContext& ctx, IRenderGraph& graph, uint32_t tree_level)
+                                              FrameContext& ctx, IRenderGraph& graph, uint32_t tree_level, bool top)
 {
     if (!vs.deferred_output || !render_view.batches) return;
     const bool trees = tree_level != kCullNoSlot;
@@ -1250,17 +1252,37 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         cmd->record_global_barrier();
         struct TreePushC
         {
-            uint32_t output_id, width, height, view_globals, cut_word, level;
+            uint32_t output_id, width, height, view_globals, cut_word, level, top_word;
         };
         const auto output_id = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
-        for (const Visual& visual : visuals) {
+        // Or the top tree over them all.
+        const uint32_t top_word = trees && top ? instance_ray_top_word(vs.instance_cull) : kCullNoSlot;
+        DispatchCall top_dispatch{};
+        if (top_word != kCullNoSlot) {
+            uint32_t leaves = 0;
+            for (const Visual& visual : visuals) {
+                leaves += visual.partition_count;
+            }
+            const TreePushC pc{output_id, vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base,
+                               kCullNoSlot, tree_level, top_word};
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_x = static_cast<uint32_t>((uint64_t(top_tree_nodes(leaves)) * 24u * kRayTreeEdgeSteps + 63u) / 64u);
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            top_dispatch = dc;
+        }
+        // The partitions' bounds or trees, each visual's.
+        for (const Visual& visual : top ? vector<Visual>{} : visuals) {
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
             dc.groups_y = 1;
             dc.groups_z = 1;
             if (trees) {
                 const TreePushC pc{output_id, vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base,
-                                   visual.cut_word, tree_level};
+                                   visual.cut_word, tree_level, kCullNoSlot};
                 dc.groups_x = static_cast<uint32_t>((uint64_t(visual.node_capacity) * 24u * kRayTreeEdgeSteps + 63u) / 64u);
                 dc.root_constants_size = sizeof(pc);
                 std::memcpy(dc.root_constants, &pc, sizeof(pc));
@@ -1272,6 +1294,9 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
                 std::memcpy(dc.root_constants, &pc, sizeof(pc));
             }
             cmd->record_dispatch(dc);
+        }
+        if (top_dispatch.pipeline) {
+            cmd->record_dispatch(top_dispatch);
         }
         cmd->record_global_barrier();
         if (src_tex && dst_tex) {

@@ -1203,8 +1203,9 @@ void main()
 /// Draws the boxes of one level of the trees over a kept cut's partitions (DebugView::RayTree)
 /// over a view's image: at `level` 0 its leaves of four records, at higher ones its nodes',
 /// and a partition's root where its tree is not that tall, coloured by level. `cut_word` is
-/// the kept cut (kCutHeaderWords). A thread per point along an edge, kRayTreeEdgeSteps of them
-/// per edge, 12 edges a box, two boxes a node.
+/// the kept cut (kCutHeaderWords). With `top_word` set instead, the view's top tree over the
+/// partitions (kRayTopHeaderWords, DebugView::RayTop): at 0 each partition's box. A thread per
+/// point along an edge, kRayTreeEdgeSteps of them per edge, 12 edges a box, two boxes a node.
 inline constexpr uint32_t kRayTreeEdgeSteps = 32;
 inline constexpr string_view ray_tree_bounds_compute_src = R"(
 #version 450
@@ -1220,6 +1221,7 @@ layout(push_constant) uniform PC {
     uint view_globals;
     uint cut_word;
     uint level;
+    uint top_word;
 } pc;
 
 const uint kSteps = 32u;
@@ -1228,14 +1230,23 @@ void main()
 {
     uint index = gl_GlobalInvocationID.x;
     uint node_index = index / (24u * kSteps);
-    uint cut = pc.cut_word;
-    if (node_index >= velk_culling.data[cut + 24u]) return;
     uint side = (index / (12u * kSteps)) % 2u;
     uint edge = (index / kSteps) % 12u;
     float t = float(index % kSteps) / float(kSteps - 1u);
 
-    uint parity = velk_culling.data[cut + 12u];
-    uint node = velk_culling.data[cut + 26u + parity] + node_index * 16u;
+    bool top = pc.top_word != 0xFFFFFFFFu;
+    uint node;
+    if (top) {
+        uint cuts = velk_culling.data[pc.top_word];
+        uint leaves = velk_culling.data[pc.top_word + 1u];
+        if (node_index >= velk_culling.data[pc.top_word + 2u]) return;
+        node = pc.top_word + 4u + cuts * 8u + leaves * 2u + node_index * 16u;
+    } else {
+        uint cut = pc.cut_word;
+        if (node_index >= velk_culling.data[cut + 24u]) return;
+        uint parity = velk_culling.data[cut + 12u];
+        node = velk_culling.data[cut + 26u + parity] + node_index * 16u;
+    }
     uint level = velk_culling.data[node + 14u];
     bool root = velk_culling.data[node + 15u] != 0u;
     // A node's children are a level below it; a short tree shows its root's.
@@ -1275,7 +1286,7 @@ void main()
 /// Modes 5 and 6 show what compute drew and how large triangles are on screen
 /// (triangle_size_color). Modes 7 to 9 show level of detail clusters (cluster_color): one
 /// colour per cluster of each instance, by level, and by width on screen as the camera that
-/// chooses sees it (FrameGlobals at chooser_globals). Modes 10 and 11 show instances dimmed,
+/// chooses sees it (FrameGlobals at chooser_globals). Modes 10 to 12 show instances dimmed,
 /// for partition_bounds_compute_src and ray_tree_bounds_compute_src to draw over. With `dim_outside`, clusters outside the
 /// chooser's view are dimmed. The numbers are DebugView's.
 inline constexpr string_view visibility_debug_compute_src = R"(
@@ -1429,7 +1440,7 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode == 10u || pc.mode == 11u) {
+    if (pc.mode >= 10u) {
         if (ids.x != 0u) {
             uint draw = velk_ids_draw(ids);
             color = id_color(draw * 16381u + velk_ids_slot(velk_draw_data.data[draw], ids) * 8191u) * 0.4;

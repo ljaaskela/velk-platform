@@ -971,6 +971,123 @@ void main()
 }
 )";
 
+/// A view's top tree for rays, over the partitions of all its kept cuts, in the culling arena:
+/// kRayTopHeaderWords (how many cuts, leaves and nodes, and the root node's index), then a
+/// cut each, kRayTopCutWords (its word, its instances_base, its plain items' word or
+/// kCullNoSlot, its partition count, its first leaf), then a leaf each, two words (the cut's
+/// index, the partition's), then the nodes, kCutNodeWords each as a partition's are, but a
+/// reference with kCutLeaf names a leaf, and without a node of this tree by its index.
+inline constexpr uint32_t kRayTopHeaderWords = 4;
+inline constexpr uint32_t kRayTopCutWords = 8;
+
+/// Nodes in a tree over @p leaves leaves paired level by level. Mirrors velk_top_tree_nodes.
+inline uint32_t top_tree_nodes(uint32_t leaves)
+{
+    if (leaves == 0) {
+        return 0;
+    }
+    uint32_t below = leaves;
+    uint32_t total = 0;
+    do {
+        below = (below + 1u) / 2u;
+        total += below;
+    } while (below > 1u);
+    return total;
+}
+
+/**
+ * Builds a view's top tree for rays (kRayTopHeaderWords) over the trees of its kept cuts'
+ * partitions, as they are this frame: each leaf's box is its partition's root's, empty for one
+ * without records. Leaves are in the order of the cuts and of each cut's partition table, which
+ * is near to near. One work group.
+ */
+inline constexpr string_view instance_cut_top_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint top_word;
+} pc;
+)" VELK_CUT_GLSL R"(
+vec3 velk_load_vec3(uint at)
+{
+    return vec3(uintBitsToFloat(cull_words.data[at]), uintBitsToFloat(cull_words.data[at + 1u]),
+                uintBitsToFloat(cull_words.data[at + 2u]));
+}
+
+void velk_store_box(uint at, vec3 lo, vec3 hi)
+{
+    cull_words.data[at] = floatBitsToUint(lo.x);
+    cull_words.data[at + 1u] = floatBitsToUint(lo.y);
+    cull_words.data[at + 2u] = floatBitsToUint(lo.z);
+    cull_words.data[at + 3u] = floatBitsToUint(hi.x);
+    cull_words.data[at + 4u] = floatBitsToUint(hi.y);
+    cull_words.data[at + 5u] = floatBitsToUint(hi.z);
+}
+
+void main()
+{
+    uint top = pc.top_word;
+    uint cuts = cull_words.data[top];
+    uint leaves = cull_words.data[top + 1u];
+    if (leaves == 0u) return;
+    uint leaf_word = top + 4u + cuts * 8u;
+    uint nodes = leaf_word + leaves * 2u;
+
+    uint below = leaves;
+    uint below_first = 0u;
+    uint level_first = 0u;
+    bool from_leaves = true;
+    uint level = 1u;
+    while (true) {
+        uint here = (below + 1u) / 2u;
+        for (uint i = gl_LocalInvocationIndex; i < here; i += 256u) {
+            uint node = nodes + (level_first + i) * 16u;
+            for (uint k = 0u; k < 2u; ++k) {
+                uint child = i * 2u + k;
+                vec3 lo = vec3(1e30);
+                vec3 hi = vec3(-1e30);
+                uint ref = 0xFFFFFFFFu;
+                if (child < below && from_leaves) {
+                    // A partition: its root's box, if it has records.
+                    uint cut = cull_words.data[top + 4u + cull_words.data[leaf_word + child * 2u] * 8u];
+                    uint state = velk_cut_state(cut, cull_words.data[leaf_word + child * 2u + 1u]);
+                    uint count = cull_words.data[state + 6u];
+                    if (count != 0u) {
+                        uint root = velk_cut_node_store(cut, true)
+                                  + (cull_words.data[state + 10u] + velk_cut_tree_nodes(count) - 1u) * 16u;
+                        lo = min(velk_load_vec3(root), velk_load_vec3(root + 6u));
+                        hi = max(velk_load_vec3(root + 3u), velk_load_vec3(root + 9u));
+                    }
+                    ref = 0x80000000u | child;
+                } else if (child < below) {
+                    uint at = nodes + (below_first + child) * 16u;
+                    lo = min(velk_load_vec3(at), velk_load_vec3(at + 6u));
+                    hi = max(velk_load_vec3(at + 3u), velk_load_vec3(at + 9u));
+                    ref = below_first + child;
+                }
+                velk_store_box(node + k * 6u, lo, hi);
+                cull_words.data[node + 12u + k] = ref;
+            }
+            cull_words.data[node + 14u] = level;
+            cull_words.data[node + 15u] = here == 1u ? 1u : 0u;
+        }
+        memoryBarrierBuffer();
+        barrier();
+        if (here == 1u) break;
+        below_first = level_first;
+        level_first += here;
+        below = here;
+        from_leaves = false;
+        ++level;
+    }
+}
+)";
+
 /**
  * Writes the group counts of the dispatch that draws from the current store: a group per 64
  * records it holds, no more than fit. One thread.
@@ -2172,6 +2289,10 @@ struct InstanceCullPass
         uint32_t node_capacity = 0; ///< Tree nodes a node store holds.
     };
     vector<Cut> cuts;
+    /// The top tree for rays over all the cuts' partitions (kRayTopHeaderWords), and what its
+    /// cuts and leaves were written for.
+    ArenaRegion ray_top;
+    uint64_t ray_top_layout = 0;
     /// Visuals whose stores were too small, with the records they wanted: theirs are made
     /// again with room for those.
     vector<std::pair<const void*, uint32_t>> cut_growth;
@@ -2269,6 +2390,12 @@ inline uint32_t instance_cut_word(const InstanceCullPass& state, const void* key
         }
     }
     return kCullNoSlot;
+}
+
+/// The word of @p state's top tree for rays (kRayTopHeaderWords), or kCullNoSlot.
+inline uint32_t instance_ray_top_word(const InstanceCullPass& state)
+{
+    return state.ray_top.valid() ? static_cast<uint32_t>(state.ray_top.offset() / sizeof(uint32_t)) : kCullNoSlot;
 }
 
 /// How many tree nodes a node store of @p state's kept cut of @p key holds, 0 without one.
@@ -2626,9 +2753,10 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto args_pipeline = pipeline_for(instance_cut_args_src, 0x4375'7441'7267'7320ULL);
         auto draw_pipeline = pipeline_for(instance_cut_draw_src, 0x4375'7444'7261'7720ULL);
         auto tree_pipeline = pipeline_for(instance_cut_tree_src, 0x4375'7454'7265'6520ULL);
+        auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline;
+                                 && tree_pipeline && top_pipeline;
         auto cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
         if (!cmd) {
             return;
@@ -2810,6 +2938,54 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 dispatch(tree_pipeline.get(), &pc, sizeof(pc), job.partition_count);
             }
             cmd->record_global_barrier();
+
+            // And the top tree over them all, its cuts and leaves written when they change.
+            uint64_t layout = 0xcbf29ce484222325ULL;
+            uint32_t leaves = 0;
+            for (const CutJob& job : jobs) {
+                for (uint32_t v : {job.cut, job.instances_base, job.items_word, job.partition_count}) {
+                    layout = (layout ^ v) * 0x100000001b3ULL;
+                }
+                leaves += job.partition_count;
+            }
+            if (layout != state.ray_top_layout || !state.ray_top.valid()) {
+                state.ray_top_layout = layout;
+                const auto cut_count = static_cast<uint32_t>(jobs.size());
+                const uint32_t node_count = top_tree_nodes(leaves);
+                vector<uint32_t> words;
+                words.resize(size_t(kRayTopHeaderWords) + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * 2u, 0u);
+                words[0] = cut_count;
+                words[1] = leaves;
+                words[2] = node_count;
+                words[3] = node_count - 1u;
+                uint32_t leaf = 0;
+                for (uint32_t c = 0; c < cut_count; ++c) {
+                    const CutJob& job = jobs[c];
+                    uint32_t* cut = words.data() + kRayTopHeaderWords + size_t(c) * kRayTopCutWords;
+                    cut[0] = job.cut;
+                    cut[1] = job.instances_base;
+                    cut[2] = job.items_word;
+                    cut[3] = job.partition_count;
+                    cut[4] = leaf;
+                    for (uint32_t p = 0; p < job.partition_count; ++p, ++leaf) {
+                        uint32_t* at = words.data() + kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaf) * 2u;
+                        at[0] = c;
+                        at[1] = p;
+                    }
+                }
+                state.ray_top = arena->alloc((words.size() + size_t(node_count) * kCutNodeWords) * sizeof(uint32_t));
+                if (state.ray_top.valid()) {
+                    arena->write_at(state.ray_top.offset(), words.data(), words.size() * sizeof(uint32_t));
+                }
+            }
+            if (state.ray_top.valid()) {
+                const uint32_t top_word = instance_ray_top_word(state);
+                dispatch(top_pipeline.get(), &top_word, sizeof(top_word), 1u);
+                cmd->record_global_barrier();
+            }
+        } else {
+            state.ray_top = {};
+            state.ray_top_layout = 0;
         }
 
         struct PushC
@@ -2912,6 +3088,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(choose_pipeline));
         rec.held.push_back(std::move(place_pipeline));
         rec.held.push_back(std::move(tree_pipeline));
+        rec.held.push_back(std::move(top_pipeline));
         rec.held.push_back(std::move(args_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
     });

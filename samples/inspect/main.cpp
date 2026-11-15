@@ -7,15 +7,15 @@
 // The camera starts at a fixed view under free control: right drag turns, W, A, S and D move,
 // the wheel moves along the view. Keys:
 //   V  next debug view (lit, cluster, level, cluster size, instance, triangle size, partition,
-//      ray tree)
-//   K, L  the ray tree view's level down and up
+//      ray tree, ray top tree)
+//   K, L  the ray tree views' level down and up
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
 //
 // Arguments, so that a run can be repeated without the controls:
 //   view=NAME   starts in that debug view: lit, cluster, level, size, instance, triangles,
-//               partition or tree
-//   level=N     the ray tree view's level
+//               partition, tree or top
+//   level=N     the ray tree views' level
 //   at=...      starts at that place instead of the fixed view
 //   path        starts on the scripted path; path=FRAME starts it at that frame of it
 // With VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE the window is saved and the app exits.
@@ -305,6 +305,8 @@ constexpr NamedView kViews[] = {
      "partition bounds: red while a partition chooses its levels of detail again, cyan while it keeps them"},
     {velk::DebugView::RayTree, "tree", "ray tree",
      "boxes of one level of the trees rays walk over each partition (K and L for the level): 0 four clusters each"},
+    {velk::DebugView::RayTop, "top", "ray top tree",
+     "boxes of one level of the tree rays walk over the partitions (K and L for the level): 0 one partition each"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -483,7 +485,7 @@ int main(int argc, char* argv[])
     float shown_pitch = 0.f;
     const auto show_text = [&](const velk::vec3& at, float yaw, float pitch) {
         char level[32] = "";
-        if (kViews[view_index].view == velk::DebugView::RayTree) {
+        if (kViews[view_index].view == velk::DebugView::RayTree || kViews[view_index].view == velk::DebugView::RayTop) {
             std::snprintf(level, sizeof(level), ", level %u", tree_level);
         }
         char buf[768];
