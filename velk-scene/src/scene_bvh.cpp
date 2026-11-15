@@ -41,6 +41,27 @@ constexpr uint32_t kMediumLeafInstances = 32;
 constexpr uint32_t kQuietFrames = 120;
 /// Records with more shapes than this get a local tree instead of a linear test.
 constexpr size_t kMaxShapesWithoutTree = 4;
+
+/// Where @p center is along a curve that keeps near points near, within the box @p lo to
+/// @p hi: sorting by it orders things near to near. One grid scale on all axes, so that a flat
+/// spread still gets cells that are square.
+uint64_t morton_key(const float* center, const float* lo, const float* hi)
+{
+    const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1e-20f});
+    const float scale = 2097151.f / extent;
+    const auto spread = [](uint64_t v) {
+        v &= 0x1FFFFFu;
+        v = (v | v << 32) & 0x1F00000000FFFFull;
+        v = (v | v << 16) & 0x1F0000FF0000FFull;
+        v = (v | v << 8) & 0x100F00F00F00F00Full;
+        v = (v | v << 4) & 0x10C30C30C30C30C3ull;
+        return (v | v << 2) & 0x1249249249249249ull;
+    };
+    const auto cell = [&](int k) {
+        return static_cast<uint64_t>(std::clamp((center[k] - lo[k]) * scale, 0.f, 2097151.f));
+    };
+    return spread(cell(0)) | spread(cell(1)) << 1 | spread(cell(2)) << 2;
+}
 /// A full re-cut runs when the top tree's SAH cost grows past this factor.
 constexpr float kRecutDrift = 1.5f;
 /// A partition with at least this many items gets its tree built on the GPU.
@@ -795,16 +816,36 @@ void SceneBvh::write_plain_cull(Partition& partition, FrameContext& ctx, const f
     if (!arena) {
         return;
     }
-    // Its objects, each once: an element's records are one object.
-    vector<uint32_t> objects;
-    objects.reserve(partition.members.size());
+    // Its objects, each once (an element's records are one object), near to near in the world,
+    // which the tree rays walk over the records chosen for them is built in.
+    struct Keyed
+    {
+        uint64_t key;
+        uint32_t object;
+    };
+    vector<Keyed> keyed;
+    keyed.reserve(partition.members.size());
     for (uint32_t slot : partition.members) {
         if (records_[slot].gpu.object != 0u) {
-            objects.push_back(records_[slot].gpu.object);
+            const BvhItemBounds& b = records_[slot].bounds;
+            const float center[3] = {0.5f * (b.min[0] + b.max[0]), 0.5f * (b.min[1] + b.max[1]), 0.5f * (b.min[2] + b.max[2])};
+            keyed.push_back({morton_key(center, lo, hi), records_[slot].gpu.object});
         }
     }
-    std::sort(objects.begin(), objects.end());
-    objects.erase(std::unique(objects.begin(), objects.end()), objects.end());
+    // Each object where its first record is along the curve.
+    std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) {
+        return a.object != b.object ? a.object < b.object : a.key < b.key;
+    });
+    keyed.erase(std::unique(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) { return a.object == b.object; }),
+                keyed.end());
+    std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) {
+        return a.key != b.key ? a.key < b.key : a.object < b.object;
+    });
+    vector<uint32_t> objects;
+    objects.reserve(keyed.size());
+    for (const Keyed& k : keyed) {
+        objects.push_back(k.object);
+    }
 
     // A new list each time, so that culling sees its entry change.
     const auto chunks = static_cast<uint32_t>((objects.size() + kCullChunkSlots - 1u) / kCullChunkSlots);
@@ -948,22 +989,8 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
         return;
     }
 
-    // One grid scale on all axes, so a flat forest still gets cells that are square.
-    const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1e-20f});
-    const float scale = 2097151.f / extent;
-    const auto spread = [](uint64_t v) {
-        v &= 0x1FFFFFu;
-        v = (v | v << 32) & 0x1F00000000FFFFull;
-        v = (v | v << 16) & 0x1F0000FF0000FFull;
-        v = (v | v << 8) & 0x100F00F00F00F00Full;
-        v = (v | v << 4) & 0x10C30C30C30C30C3ull;
-        return (v | v << 2) & 0x1249249249249249ull;
-    };
     for (size_t i = 0; i < keyed.size(); ++i) {
-        const float* c = centers.data() + i * 3;
-        keyed[i].key = spread(static_cast<uint64_t>((c[0] - lo[0]) * scale))
-            | spread(static_cast<uint64_t>((c[1] - lo[1]) * scale)) << 1
-            | spread(static_cast<uint64_t>((c[2] - lo[2]) * scale)) << 2;
+        keyed[i].key = morton_key(centers.data() + i * 3, lo, hi);
     }
     std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) { return a.key < b.key; });
 
