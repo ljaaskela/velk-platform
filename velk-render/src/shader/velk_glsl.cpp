@@ -126,6 +126,10 @@ struct RtRecord {
 
 #define VELK_NO_TREE 0xFFFFFFFFu
 
+// Words per plain item in a view's culling (instance index, slot, table, draw): kPlainItemWords.
+#define VELK_PLAIN_ITEM_WORDS 4u
+// Words per cluster draw entry: kClusterEntryWords.
+#define VELK_CLUSTER_ENTRY_WORDS 16u
 // Words per cluster in a level of detail table: kLodClusterWords.
 #define VELK_LOD_CLUSTER_WORDS 24u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is

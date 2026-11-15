@@ -269,6 +269,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryNodesWord] = draw.lod.node_word;
         entry[kClusterEntryFlagsWord] = (draw.lod.deforming ? kLodDeforming : 0u) | (moved ? kLodMoved : 0u);
+        entry[kClusterEntryRayWord] = draw.lod.ray_word;
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
         cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, errors_word, draw.capacity});
@@ -317,6 +318,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         return true;
     }
     out.max_distance = instance_source_->get_draw_distance();
+    out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
     out.far_form = instance_source_->get_far_form();
     out.has_unloaded = instance_source_->has_residency_budget();
     out.medium_id = instance_source_->get_medium_id();

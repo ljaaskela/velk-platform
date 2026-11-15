@@ -266,9 +266,10 @@ private:
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
     /// Draws the bounds of partitioned visuals' partitions over the final image, coloured by
-    /// whether they chose again this frame (DebugView::Partition).
+    /// whether they chose again this frame (DebugView::Partition), or with @p tree_level set
+    /// the boxes of that level of the trees rays walk over them (DebugView::RayTree).
     void emit_partition_bounds_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                    FrameContext& ctx, IRenderGraph& graph);
+                                    FrameContext& ctx, IRenderGraph& graph, uint32_t tree_level = kCullNoSlot);
     /// Draws the edges of the chooser's view over the final image (ICamera::choose_as).
     void emit_chooser_frustum_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                    FrameContext& ctx, IRenderGraph& graph);

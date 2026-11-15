@@ -57,11 +57,13 @@ struct BatchBufferLayout
 /// an error. See `instance_cluster_fill_src`.
 inline constexpr uint32_t kCullChosenHeaderWords = 4;
 inline constexpr uint32_t kCullChosenRecordWords = 4;
-/// Words in a cluster draw entry: see `instance_cluster_runs_src`.
-inline constexpr uint32_t kClusterEntryWords = 14;
+/// Words in a cluster draw entry: see `instance_cluster_runs_src`. Mirrors VELK_CLUSTER_ENTRY_WORDS.
+inline constexpr uint32_t kClusterEntryWords = 16;
 /// Where in a cluster draw entry the draw data record its pixels name is, written when the
 /// draw is emitted, so that tiny clusters can name it too. 0xFFFFFFFF until then.
 inline constexpr uint32_t kClusterEntryDrawWord = 13;
+/// Where in a cluster draw entry its clusters' ray headers are (MeshLodInfo::ray_word).
+inline constexpr uint32_t kClusterEntryRayWord = 14;
 
 /**
  * @brief What GPU culling needs to know about a batch. Batches with the same @c key
@@ -95,6 +97,7 @@ struct InstanceCullInfo
     /// Culled in one dispatch with the other batches that set this, instead of on its own.
     bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
+    float max_displacement = 0.f; ///< How far a motion function can move an instance from where it rests.
     bool far_form = false;                  ///< Whether instances too small to draw get averaged instead.
     bool has_unloaded = false;              ///< Whether partitions can be without their instances: see `instance_box_splat_src`.
     uint32_t medium_id = 0;                 ///< What those partitions' BVH leaves are marked with.

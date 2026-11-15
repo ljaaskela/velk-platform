@@ -869,6 +869,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
     }
     if (visibility_mode == static_cast<uint32_t>(DebugView::Partition)) {
         emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph);
+    } else if (visibility_mode == static_cast<uint32_t>(DebugView::RayTree)) {
+        emit_partition_bounds_pass(vs, render_view, color_target, ctx, graph, camera_state ? camera_state->debug_level : 0u);
     }
     if (chosen) {
         emit_chooser_frustum_pass(vs, render_view, color_target, ctx, graph);
@@ -1182,9 +1184,10 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
 }
 
 void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                              FrameContext& ctx, IRenderGraph& graph)
+                                              FrameContext& ctx, IRenderGraph& graph, uint32_t tree_level)
 {
     if (!vs.deferred_output || !render_view.batches) return;
+    const bool trees = tree_level != kCullNoSlot;
 
     // Each partitioned visual with a kept cut in this view, once.
     struct Visual
@@ -1192,6 +1195,7 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         uint32_t table_word;
         uint32_t partition_count;
         uint32_t cut_word;
+        uint32_t node_capacity;
     };
     vector<Visual> visuals;
     vector<const void*> seen;
@@ -1204,19 +1208,24 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         seen.push_back(info.key);
         const uint32_t cut = instance_cut_word(vs.instance_cull, info.key);
         if (cut != kCullNoSlot) {
-            visuals.push_back({info.partition_table_word, info.partition_count, cut});
+            visuals.push_back({info.partition_table_word, info.partition_count, cut,
+                               instance_cut_node_capacity(vs.instance_cull, info.key)});
         }
     }
     // And the plain objects' partitions.
     const uint32_t plain_cut = instance_cut_word(vs.instance_cull, &kPlainCutKey);
     if (plain_cut != kCullNoSlot && render_view.bvh.plain_partitions != kCullNoSlot) {
-        visuals.push_back({render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count, plain_cut});
+        visuals.push_back({render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count, plain_cut,
+                           instance_cut_node_capacity(vs.instance_cull, &kPlainCutKey)});
     }
     if (visuals.empty()) return;
 
-    constexpr uint64_t kKey = 0x5041'5254'4253'0001ULL;
-    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
-    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(partition_bounds_compute_src, kKey);
+    const uint64_t key = trees ? 0x5241'5954'5245'0001ULL : 0x5041'5254'4253'0001ULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found
+                          : ctx.render_ctx->pipelines().compile_compute(trees ? ray_tree_bounds_compute_src
+                                                                              : partition_bounds_compute_src,
+                                                                        key);
     if (!pipeline) return;
 
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
@@ -1239,17 +1248,29 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         cmd->begin_recording();
         cmd->push_label("DeferredPath: partition bounds");
         cmd->record_global_barrier();
+        struct TreePushC
+        {
+            uint32_t output_id, width, height, view_globals, cut_word, level;
+        };
+        const auto output_id = static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default));
         for (const Visual& visual : visuals) {
-            const PushC pc{static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-                           vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base, visual.table_word,
-                           visual.partition_count, visual.cut_word};
             DispatchCall dc{};
             dc.pipeline = pipeline.get();
-            dc.groups_x = (visual.partition_count * 12u * kPartitionEdgeSteps + 63u) / 64u;
             dc.groups_y = 1;
             dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            if (trees) {
+                const TreePushC pc{output_id, vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base,
+                                   visual.cut_word, tree_level};
+                dc.groups_x = static_cast<uint32_t>((uint64_t(visual.node_capacity) * 24u * kRayTreeEdgeSteps + 63u) / 64u);
+                dc.root_constants_size = sizeof(pc);
+                std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            } else {
+                const PushC pc{output_id, vs.visibility_size.x, vs.visibility_size.y, render_view.view_globals_base,
+                               visual.table_word, visual.partition_count, visual.cut_word};
+                dc.groups_x = (visual.partition_count * 12u * kPartitionEdgeSteps + 63u) / 64u;
+                dc.root_constants_size = sizeof(pc);
+                std::memcpy(dc.root_constants, &pc, sizeof(pc));
+            }
             cmd->record_dispatch(dc);
         }
         cmd->record_global_barrier();

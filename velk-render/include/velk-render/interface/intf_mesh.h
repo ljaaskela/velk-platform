@@ -238,6 +238,9 @@ struct MeshLodInfo
     uint32_t cluster_count = 0;
     uint32_t level0_clusters = 0;  ///< How many of them are the full mesh.
     uint32_t node_word = 0;        ///< The tree over its clusters, as words of the node arena, root first.
+    /// Its clusters' ray headers in the cluster word arena, kClusterHeaderWords each by
+    /// cluster index, or 0xFFFFFFFF when rays walk the mesh's own tree instead (deforming).
+    uint32_t ray_word = 0xFFFFFFFFu;
     /// The mesh deforms, so its clusters' spheres are where they are at rest: it has level 0
     /// only, and its clusters are not tested for occlusion.
     bool deforming = false;

@@ -1200,13 +1200,83 @@ void main()
 }
 )";
 
+/// Draws the boxes of one level of the trees over a kept cut's partitions (DebugView::RayTree)
+/// over a view's image: at `level` 0 its leaves of four records, at higher ones its nodes',
+/// and a partition's root where its tree is not that tall, coloured by level. `cut_word` is
+/// the kept cut (kCutHeaderWords). A thread per point along an edge, kRayTreeEdgeSteps of them
+/// per edge, 12 edges a box, two boxes a node.
+inline constexpr uint32_t kRayTreeEdgeSteps = 32;
+inline constexpr string_view ray_tree_bounds_compute_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+layout(push_constant) uniform PC {
+    uint output_id;
+    uint width;
+    uint height;
+    uint view_globals;
+    uint cut_word;
+    uint level;
+} pc;
+
+const uint kSteps = 32u;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    uint node_index = index / (24u * kSteps);
+    uint cut = pc.cut_word;
+    if (node_index >= velk_culling.data[cut + 24u]) return;
+    uint side = (index / (12u * kSteps)) % 2u;
+    uint edge = (index / kSteps) % 12u;
+    float t = float(index % kSteps) / float(kSteps - 1u);
+
+    uint parity = velk_culling.data[cut + 12u];
+    uint node = velk_culling.data[cut + 26u + parity] + node_index * 16u;
+    uint level = velk_culling.data[node + 14u];
+    bool root = velk_culling.data[node + 15u] != 0u;
+    // A node's children are a level below it; a short tree shows its root's.
+    if (level != pc.level + 1u && !(root && level < pc.level + 1u)) return;
+    if (velk_culling.data[node + 12u + side] == 0xFFFFFFFFu) return;
+    uint box = node + side * 6u;
+    vec3 lo = vec3(uintBitsToFloat(velk_culling.data[box]), uintBitsToFloat(velk_culling.data[box + 1u]),
+                   uintBitsToFloat(velk_culling.data[box + 2u]));
+    vec3 hi = vec3(uintBitsToFloat(velk_culling.data[box + 3u]), uintBitsToFloat(velk_culling.data[box + 4u]),
+                   uintBitsToFloat(velk_culling.data[box + 5u]));
+    if (any(greaterThan(lo, hi))) return;
+
+    // Edges 0..3 along x, 4..7 along y, 8..11 along z, at the four corners of the other two.
+    uint axis = edge / 4u;
+    uint corner = edge % 4u;
+    vec2 other = vec2((corner & 1u) != 0u ? 1.0 : 0.0, (corner & 2u) != 0u ? 1.0 : 0.0);
+    vec3 at;
+    if (axis == 0u) at = vec3(t, other.x, other.y);
+    else if (axis == 1u) at = vec3(other.x, t, other.y);
+    else at = vec3(other.x, other.y, t);
+    vec3 point = mix(lo, hi, at);
+
+    GlobalData view = velk_globals.data[pc.view_globals];
+    vec4 clip = view.view_projection * vec4(point - view.cam_pos.xyz, 1.0);
+    if (clip.w <= 1e-5) return;
+    vec2 pixel = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(pc.width), float(pc.height));
+    if (any(lessThan(pixel, vec2(0.0))) || pixel.x >= float(pc.width) || pixel.y >= float(pc.height)) return;
+    // Hue by the level the box is at, so roots of short trees stand apart.
+    float shown = float(level - 1u);
+    vec3 color = 0.55 + 0.45 * cos(6.2831853 * (shown * 0.17 + vec3(0.0, 0.33, 0.67)));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_id)], ivec2(pixel), vec4(color, 1.0));
+}
+)";
+
 /// Shows the visibility buffer as flat colours: mode 1 per draw, 2 per instance, 3 per
 /// triangle. Mode 4 shows the depth pyramid's fourth level.
 /// Modes 5 and 6 show what compute drew and how large triangles are on screen
 /// (triangle_size_color). Modes 7 to 9 show level of detail clusters (cluster_color): one
 /// colour per cluster of each instance, by level, and by width on screen as the camera that
-/// chooses sees it (FrameGlobals at chooser_globals). Mode 10 shows instances dimmed, for
-/// partition_bounds_compute_src to draw over. With `dim_outside`, clusters outside the
+/// chooses sees it (FrameGlobals at chooser_globals). Modes 10 and 11 show instances dimmed,
+/// for partition_bounds_compute_src and ray_tree_bounds_compute_src to draw over. With `dim_outside`, clusters outside the
 /// chooser's view are dimmed. The numbers are DebugView's.
 inline constexpr string_view visibility_debug_compute_src = R"(
 #version 450
@@ -1359,7 +1429,7 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode == 10u) {
+    if (pc.mode == 10u || pc.mode == 11u) {
         if (ids.x != 0u) {
             uint draw = velk_ids_draw(ids);
             color = id_color(draw * 16381u + velk_ids_slot(velk_draw_data.data[draw], ids) * 8191u) * 0.4;

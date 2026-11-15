@@ -678,6 +678,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         lod_info_.level0_clusters = lod_.level0_clusters;
         // The tree's nodes are every second one, after the one rays read first.
         lod_info_.node_word = static_cast<uint32_t>((lod_nodes_region_.offset() + sizeof(BlasGpuNode)) / sizeof(uint32_t));
+        lod_info_.ray_word = rays ? header_base : 0xFFFFFFFFu;
         lod_info_.deforming = deforming_;
     }
     out = lod_info_;

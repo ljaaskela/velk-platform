@@ -2,16 +2,20 @@
 // lit picture: levels of detail clusters, their size on screen, and, in a second view from
 // above, everything the main camera chooses to draw.
 //
-// velk_ui_inspect [view=NAME] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
+// velk_ui_inspect [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
 //
 // The camera starts at a fixed view under free control: right drag turns, W, A, S and D move,
 // the wheel moves along the view. Keys:
-//   V  next debug view (lit, cluster, level, cluster size, instance, triangle size, partition)
+//   V  next debug view (lit, cluster, level, cluster size, instance, triangle size, partition,
+//      ray tree)
+//   K, L  the ray tree view's level down and up
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
 //
 // Arguments, so that a run can be repeated without the controls:
-//   view=NAME   starts in that debug view: lit, cluster, level, size, instance, triangles or partition
+//   view=NAME   starts in that debug view: lit, cluster, level, size, instance, triangles,
+//               partition or tree
+//   level=N     the ray tree view's level
 //   at=...      starts at that place instead of the fixed view
 //   path        starts on the scripted path; path=FRAME starts it at that frame of it
 // With VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE the window is saved and the app exits.
@@ -299,6 +303,8 @@ constexpr NamedView kViews[] = {
      "triangle size on screen: magenta drawn in compute, red <0.5 px, yellow <1, green <2, cyan <8, blue more"},
     {velk::DebugView::Partition, "partition", "partition",
      "partition bounds: red while a partition chooses its levels of detail again, cyan while it keeps them"},
+    {velk::DebugView::RayTree, "tree", "ray tree",
+     "boxes of one level of the trees rays walk over each partition (K and L for the level): 0 four clusters each"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -311,9 +317,12 @@ int main(int argc, char* argv[])
     float place[5] = {};
     bool start_scripted = false;
     long start_frame = 0;
+    uint32_t tree_level = 0;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        if (std::strncmp(arg, "view=", 5) == 0) {
+        if (std::strncmp(arg, "level=", 6) == 0) {
+            tree_level = static_cast<uint32_t>(std::atol(arg + 6));
+        } else if (std::strncmp(arg, "view=", 5) == 0) {
             bool known = false;
             for (size_t v = 0; v < kViewCount; ++v) {
                 if (std::strcmp(arg + 5, kViews[v].key) == 0) {
@@ -473,14 +482,18 @@ int main(int argc, char* argv[])
     float shown_yaw = 0.f;
     float shown_pitch = 0.f;
     const auto show_text = [&](const velk::vec3& at, float yaw, float pitch) {
+        char level[32] = "";
+        if (kViews[view_index].view == velk::DebugView::RayTree) {
+            std::snprintf(level, sizeof(level), ", level %u", tree_level);
+        }
         char buf[768];
         std::snprintf(buf, sizeof(buf),
-                      "view: %s (V for next)\n%s\n"
+                      "view: %s%s (V for next)\n%s\n"
                       "top right, from above: all the main camera's kept cut holds, dimmed outside its view (yellow lines)\n"
                       "camera: %s (P), at %.0f, %.0f, %.0f, yaw %.0f, pitch %.0f\n"
                       "right drag turns, W A S D move, wheel moves along the view, C logs the place",
-                      kViews[view_index].name, kViews[view_index].legend, scripted ? "scripted path" : "free", at.x, at.y,
-                      at.z, yaw, pitch);
+                      kViews[view_index].name, level, kViews[view_index].legend, scripted ? "scripted path" : "free", at.x,
+                      at.y, at.z, yaw, pitch);
         text.set_text(velk::string(buf));
         shown_at = at;
         shown_yaw = yaw;
@@ -492,6 +505,12 @@ int main(int argc, char* argv[])
         main_camera.camera.set_debug_view(kViews[view_index].view);
         overview.camera.set_debug_view(kViews[view_index].view);
         VELK_LOG(I, "inspect: view %s", kViews[view_index].name);
+    };
+    const auto show_level = [&](uint32_t level) {
+        tree_level = level;
+        text_stale = true;
+        main_camera.camera.set_debug_level(level);
+        overview.camera.set_debug_level(level);
     };
 
     long scripted_frame = start_frame;
@@ -552,6 +571,10 @@ int main(int argc, char* argv[])
         }
         if (e.key == 86) {  // V
             show_view(view_index + 1);
+        } else if (e.key == 76) {  // L
+            show_level(tree_level + 1);
+        } else if (e.key == 75) {  // K
+            show_level(tree_level > 0 ? tree_level - 1 : 0);
         } else if (e.key == 80) {  // P
             scripted = !scripted;
             scripted_frame = 0;
@@ -567,6 +590,7 @@ int main(int argc, char* argv[])
     });
 
     show_view(start_view);
+    show_level(tree_level);
     while (app.poll()) {
         if (scripted) {
             // Out along the view and back, rising and falling, the same every time.

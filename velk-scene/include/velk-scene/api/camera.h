@@ -94,6 +94,8 @@ public:
 
     /// Sets what the deferred path shows in place of the lit image. See DebugView.
     void set_debug_view(DebugView v) { write_state_value<ICamera>(&ICamera::State::debug_view, v); }
+    /// Sets which level a debug view of a tree shows. See DebugView::RayTree.
+    void set_debug_level(uint32_t level) { write_state_value<ICamera>(&ICamera::State::debug_level, level); }
 
     /// Makes this camera's view draw what the camera on @p chooser would draw, seen from here,
     /// with that camera's view edges drawn in. Null to draw what this camera sees again.

@@ -34,6 +34,9 @@ enum class DebugView : uint8_t
     /// Instances dimmed, under the bounds of their visual's partitions: red while a partition
     /// chooses its levels of detail again this frame, cyan while it keeps them.
     Partition,
+    /// Instances dimmed, under the boxes of one level of the trees rays walk, the one
+    /// ICamera::debug_level says: 0 for leaves of four records, up to each partition's root.
+    RayTree,
 };
 
 /**
@@ -67,6 +70,7 @@ public:
         (PROP, ObjectRef, environment, {}), ///< Optional IEnvironment for skybox/background.
         /// What the deferred path shows in place of the lit image. VELK_VISIBILITY_DEBUG overrides it.
         (PROP, DebugView, debug_view, DebugView::None),
+        (PROP, uint32_t, debug_level, 0u), ///< Which level a debug view of a tree shows. See DebugView::RayTree.
         /// Another camera's element. When set, the deferred path draws what that camera would
         /// draw (its view, its levels of detail) as seen from this one, and draws its view's
         /// edges, so that what another view holds can be looked at from outside. Occlusion
