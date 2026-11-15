@@ -542,7 +542,8 @@ void main()
  *
  * With items_word set, the chunks hold object ids, as the scene's plain partitions have them,
  * and each object is drawn by its plain items (InstanceCullPass::together): an item is its
- * instance's index, its slot and its table; objects_word holds each item's object id,
+ * instance's index, its slot and its table, no table for an item rays see but its own pass
+ * draws, which gives one record for the whole object; objects_word holds each item's object id,
  * next_word each item's next item of the same object, and head_word by object slot its first.
  * A record then names the item in place of a slot.
  */
@@ -626,6 +627,11 @@ void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoin
 {
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
+    // An item for rays only (no table): the whole object.
+    if (table_word == 0xFFFFFFFFu) {
+        velk_cut_record(0xFFFFFFFFu, 0xFFFFFFFFu, named, 0.0);
+        return;
+    }
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
     uint table = table_word + cull_instances.data[instance].params.y * 12u;
@@ -847,6 +853,8 @@ void main()
         instance = cull_words.data[at];
         slot = cull_words.data[at + 1u];
         table_word = cull_words.data[at + 2u];
+        // Rays only: drawn by its own pass.
+        if (table_word == 0xFFFFFFFFu) return;
     }
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
@@ -1034,6 +1042,8 @@ void main()
         instance = cull_words.data[item];
         slot = cull_words.data[item + 1u];
         table_word = cull_words.data[item + 2u];
+        // Rays only: drawn by its own pass.
+        if (table_word == 0xFFFFFFFFu) return;
     }
 
     mat4 world = cull_instances.data[instance].world_matrix;
@@ -1868,7 +1878,8 @@ struct InstanceCullPass
     uint32_t arena_generation = 0;  ///< Changes when the arena's buffer is replaced, which draws naming it must follow.
     uint64_t partition_tables = 0;  ///< Which tables the recording uses.
     /// The batches culled together, plain objects: see instance_cull_compute_src. Holds the
-    /// clusters chosen, the entries, the items (instance index, slot, table), each item's
+    /// clusters chosen, the entries, the items (instance index, slot, table, no table for one
+    /// drawn by its own pass that rays see), each item's
     /// object id, each item's next item of the same object, and by object slot its first item.
     ArenaRegion together;
     uint32_t together_items = 0;
@@ -2031,9 +2042,35 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         uint64_t chosen = 0;
         uint64_t retest_records = 0;
         vector<const void*> counted;
+        // A plain item for each instance of @p batch: its index, its slot, its table, and its
+        // object id, the last word of its ElementInstance.
+        const auto add_items = [&](const IBatch& batch, uint32_t instances_base, uint32_t slot_count, uint32_t table_word) {
+            const array_view<const uint8_t> instances = batch.instance_data();
+            const uint32_t stride = batch.instance_stride();
+            for (uint32_t slot = 0; slot < slot_count; ++slot) {
+                items.push_back(instances_base + slot);
+                items.push_back(slot);
+                items.push_back(table_word);
+                uint32_t object = kCullNoSlot;
+                if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
+                    std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
+                }
+                item_objects.push_back(object);
+            }
+        };
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
-            if (!batch || !batch->get_instance_cull(info)) {
+            if (!batch) {
+                continue;
+            }
+            if (!batch->get_instance_cull(info)) {
+                // Drawn by its own pass, but rays see it: an item without a table, for the
+                // plain objects' kept cut.
+                if (plain_table_word != kCullNoSlot && batch->instance_stride() == 128u && batch->instance_count() != 0
+                    && batch->instance_region_size() != 0) {
+                    add_items(*batch, static_cast<uint32_t>(batch->instance_region_offset() / 128u), batch->instance_count(),
+                              kCullNoSlot);
+                }
                 continue;
             }
             if (std::find(counted.begin(), counted.end(), info.key) == counted.end()) {
@@ -2043,19 +2080,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             if (info.cull_together) {
                 chosen += info.cluster_capacity;
                 entries.push_back(info.cluster_entry_word);
-                // Each instance's object id is the last word of its ElementInstance.
-                const array_view<const uint8_t> instances = batch->instance_data();
-                const uint32_t stride = batch->instance_stride();
-                for (uint32_t slot = 0; slot < info.slot_count; ++slot) {
-                    items.push_back(info.instances_base + slot);
-                    items.push_back(slot);
-                    items.push_back(info.table_word);
-                    uint32_t object = kCullNoSlot;
-                    if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
-                        std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
-                    }
-                    item_objects.push_back(object);
-                }
+                add_items(*batch, info.instances_base, info.slot_count, info.table_word);
             } else if (std::find(state.count_words.begin(), state.count_words.end(), info.count_word)
                        == state.count_words.end()) {
                 state.count_words.push_back(info.count_word);
