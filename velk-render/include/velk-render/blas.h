@@ -711,9 +711,8 @@ inline void refit_mesh_blas(BlasBuild& blas, const float* vertices, uint32_t ver
     }
 }
 
-/// Turns a built tree into the form rays read. With @p scattered, a child's surface word is its
-/// area, otherwise its packed normal, which are what wide rays use on each kind of mesh.
-inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas, bool scattered)
+/// Turns a built tree into the form rays read, a child's surface word its packed normal.
+inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas)
 {
     BlasGpuTree tree;
     const auto node_count = static_cast<uint32_t>(blas.nodes.size());
@@ -750,7 +749,7 @@ inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas, bool scattered)
     };
     const auto surface = [&](const BlasNode& node) {
         uint32_t bits;
-        std::memcpy(&bits, scattered ? &node.aabb_max[3] : &node.aabb_min[3], sizeof(bits));
+        std::memcpy(&bits, &node.aabb_min[3], sizeof(bits));
         return bits;
     };
 

@@ -533,7 +533,7 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
         // the tree that is refit, not the hierarchy.
         lod_ = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, colors, vertex_stride_, normal_offset,
-                              merge_pieces_, deforming_);
+                              deforming_);
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
         if (!nodes_arena || !words_arena || lod_.clusters.empty() || lod_.nodes.empty()) {
@@ -805,7 +805,7 @@ void MeshPrimitive::fill_static(MeshStaticData& out)
     // global vertex indices in our gltf-imported meshes, so the vertex run starts
     // at the region base itself.
     out.vbo_base = get_gpu_ref(buffer_).get_base();
-    out.flags = (merge_pieces_ ? kMeshStaticScattered : 0u) | (deforming_ ? kMeshStaticDeforming : 0u);
+    out.flags = deforming_ ? kMeshStaticDeforming : 0u;
     if (auto state = read_state<IMeshPrimitive>(this); state && state->material) {
         Material material(state->material.get<IObject>());
         if (material && material.has_options() && material.options().get_double_sided()) {
@@ -822,7 +822,7 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
     if (!nodes_arena || !words_arena) return false;
 
-    const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+    const BlasGpuTree tree = blas_gpu_tree(rt_blas_);
     const vector<uint32_t> surfaces = surface_table(vertices);
     const uint64_t nodes_bytes = tree.nodes.size() * sizeof(BlasGpuNode);
     const uint64_t words_bytes = tree.words.size() * sizeof(uint32_t);
@@ -881,7 +881,7 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
 
     if (!rt_static_region_.valid()) return;
 
-    const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+    const BlasGpuTree tree = blas_gpu_tree(rt_blas_);
     const uint64_t nodes_bytes = std::max<uint64_t>(tree.nodes.size() * sizeof(BlasGpuNode), sizeof(BlasGpuNode));
     const uint64_t words_bytes = tree.words.size() * sizeof(uint32_t);
     if (nodes_bytes == rt_blas_nodes_region_.size() && words_bytes == rt_cluster_words_region_.size()) {
@@ -1016,7 +1016,7 @@ bool MeshPrimitive::prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitI
         if (!arena) {
             return false;
         }
-        const BlasGpuTree tree = blas_gpu_tree(rt_blas_, merge_pieces_);
+        const BlasGpuTree tree = blas_gpu_tree(rt_blas_);
         const auto node_count = static_cast<uint32_t>(tree.nodes.size());
         const auto leaf_count = static_cast<uint32_t>(tree.leaf_links.size() / 2u);
         const uint32_t leaf_words = leaf_count * 2u;

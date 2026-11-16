@@ -79,12 +79,11 @@ static_assert(sizeof(FrameGlobals) == 256, "FrameGlobals layout must match velk.
 
 /// How far a level of detail may be from the full mesh on screen, in pixels.
 inline constexpr float kLodMaxErrorPixels = 1.f;
-/// How wide on screen the sphere a level of detail cluster is chosen by may be, in multiples
-/// of kLodMaxErrorPixels. Built into the hierarchy: a cluster's error is never less than its
-/// sphere's width over this, so a coarse cluster of a flat area, which simplifies at no error,
-/// still gives way to finer ones once it is this wide. Chosen clusters are then a similar size
-/// on screen near and far.
-inline constexpr float kLodClusterWidth = 64.f;
+/// The longest a drawn triangle's edge, or a quad's diagonal, may be on screen, in pixels: a
+/// level of detail is taken while its triangles are within it, and a group of instances
+/// becomes one quad once that quad is. Built into the hierarchy as a cluster's error: its
+/// level's longest edge over this, times kLodMaxErrorPixels.
+inline constexpr float kLodElementPixels = 4.f;
 
 /// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one
 /// unit covers at one unit from the camera, over kLodMaxErrorPixels. Rays choose a mesh's
@@ -195,7 +194,7 @@ inline constexpr uint32_t kRtShapeKindMesh = 255;
 VELK_GPU_STRUCT MeshStaticData
 {
     uint32_t vbo_base;        ///< word base of this primitive's first vertex in the mesh-word arena.
-    uint32_t flags;           ///< kMeshStaticScattered: wide rays may count parts of it as a medium. kMeshStaticDoubleSided: it is not a closed solid. kMeshStaticDeforming: its tree's stored normals may be out of date.
+    uint32_t flags;           ///< kMeshStaticDoubleSided: it is not a closed solid. kMeshStaticDeforming: its tree's stored normals may be out of date.
     uint32_t triangle_count;
     uint32_t vertex_stride;   ///< bytes per vertex, from the primitive (48 for VelkVertex3D).
     uint32_t blas_root;       ///< root index within this primitive's BLAS node run.
@@ -207,8 +206,6 @@ VELK_GPU_STRUCT MeshStaticData
 };
 static_assert(sizeof(MeshStaticData) == 48, "MeshStaticData layout mismatch");
 
-/// `MeshStaticData::flags` bit for a primitive of separate pieces. Mirrors GLSL `VELK_MESH_SCATTERED`.
-inline constexpr uint32_t kMeshStaticScattered = 1u;
 /// `MeshStaticData::flags` bit for a primitive seen from both sides. Mirrors GLSL `VELK_MESH_DOUBLE_SIDED`.
 inline constexpr uint32_t kMeshStaticDoubleSided = 2u;
 /// `MeshStaticData::flags` bit for a primitive whose vertices change. Mirrors GLSL `VELK_MESH_DEFORMING`.

@@ -12,11 +12,10 @@ namespace velk::impl {
 
 /// One cluster of a mesh's level of detail hierarchy. It is drawn when its own error is
 /// small enough on screen and its parent group's error is not, which picks one consistent
-/// set of clusters with no cracks between them. Errors are in the mesh's units, and each is
-/// measured against a sphere, so that it can be projected. A sphere always holds the spheres
-/// of the clusters below it, and an error is never less than theirs. Above level 0 an error
-/// is never less than its sphere's width over kLodClusterWidth either, so that what is chosen
-/// is never wider on screen than that many times the error limit.
+/// set of clusters with no cracks between them. An error is the size of what its level draws:
+/// the longest triangle edge of the level over kLodElementPixels, 0 for level 0, in the mesh's
+/// units and measured against a sphere, so that it can be projected. A sphere always holds the
+/// spheres of the clusters below it, and an error is never less than theirs.
 struct MeshLodCluster
 {
     /// The word of its first index. From the start of MeshLod::indices as built, and in the
@@ -131,20 +130,19 @@ inline constexpr uint32_t kLodNoGroup = 0xFFFFFFFFu;
 /// For build_mesh_lod: a vertex has no such attribute.
 inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 
-/// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0.
+/// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0, down to one
+/// quad. Surfaces are simplified; small separate pieces become quads that keep their area.
 /// @param vertices The vertices @p blas indexes, which clusters get runs of their own of, and
 ///        whose normals are kept. Null only for a deforming mesh without them.
 /// @param uv1 Two floats for each of @p vertices, or null.
 /// @param colors A colour (RGBA8) for each of @p vertices, or null.
 /// @param stride Bytes per vertex.
 /// @param normal_offset Bytes to a vertex's normal, three floats, or kLodNoAttribute.
-/// @param merge_pieces Merge its separate pieces rather than simplifying them as a surface. See
-///        IMeshPrimitive::set_merge_pieces. Needs normals.
 /// @param deforming The mesh's vertices move: level 0 alone, over the mesh's own vertices, and
 ///        nothing for rays, so that `ray_nodes` holds only the two nodes for each of `nodes`,
 ///        with no boxes, and `ray_words` is empty.
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, const uint32_t* colors,
-                       uint32_t stride, uint32_t normal_offset, bool merge_pieces, bool deforming);
+                       uint32_t stride, uint32_t normal_offset, bool deforming);
 
 } // namespace velk::impl
 

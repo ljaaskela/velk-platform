@@ -114,7 +114,7 @@ inline constexpr uint32_t kQuadNodeWords = 11;
 inline constexpr uint32_t kCutQuad = 0xFFFFFFFEu;
 /// How wide on screen, in pixels, a partition's quad may be to take the place of the members
 /// under it, seen from where its partition chose. The topmost such quad over a member is chosen.
-inline constexpr float kQuadPixels = 4.f;
+inline constexpr float kQuadPixels = kLodElementPixels;
 
 /// The leaves of the quad tree over @p members members: see kQuadNodeWords.
 inline uint32_t quad_tree_leaves(uint32_t members)

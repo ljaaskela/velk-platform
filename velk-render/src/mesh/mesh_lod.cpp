@@ -17,11 +17,14 @@ namespace {
 
 /// Clusters simplified together. Partitions come out up to a third larger.
 constexpr size_t kGroupClusters = 16;
-/// A group that keeps more than this share of its triangles stops there, and its clusters
-/// are roots of the hierarchy.
+/// A group that keeps more than this share of its triangles is not a level: its clusters go
+/// into the next level's groups instead.
 constexpr float kStopAboveKept = 0.85f;
 constexpr uint32_t kMaxLevels = 32;
 constexpr uint32_t kNoGroup = 0xFFFFFFFFu;
+/// A separate piece of at most this many triangles is small: it is kept in one cluster, and
+/// becomes a quad rather than being simplified as a surface, which would thin it to nothing.
+constexpr uint32_t kSmallPieceTriangles = 64;
 /// A normal turning fully over a distance counts as much as moving by that distance.
 constexpr float kNormalWeights[3] = {1.f, 1.f, 1.f};
 
@@ -143,12 +146,25 @@ void add_cluster(MeshLod& lod, const vector<uint32_t>& indices, const vector<flo
     lod.cluster_made_from.push_back(kLodNoGroup);
 }
 
-/// Clusters are made for rays, and can split a separate piece. That would lock its vertices as
-/// shared between groups, so each piece moves to one cluster.
+/// Clusters can split a separate piece, which would lock its vertices as shared between groups
+/// and keep it from becoming a quad, so each small piece moves to one cluster. A larger piece, a
+/// surface, stays split.
 void gather_pieces(vector<vector<uint32_t>>& lists, const vector<uint32_t>& remap)
 {
+    // Over the points these lists use only.
+    vector<uint32_t> sorted;
+    for (const auto& list : lists) {
+        for (uint32_t id : list) {
+            sorted.push_back(remap[id]);
+        }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    const auto slot = [&sorted, &remap](uint32_t id) {
+        return static_cast<uint32_t>(std::lower_bound(sorted.begin(), sorted.end(), remap[id]) - sorted.begin());
+    };
     vector<uint32_t> parent;
-    parent.resize(remap.size());
+    parent.resize(sorted.size());
     for (size_t i = 0; i < parent.size(); ++i) {
         parent[i] = static_cast<uint32_t>(i);
     }
@@ -161,23 +177,30 @@ void gather_pieces(vector<vector<uint32_t>>& lists, const vector<uint32_t>& rema
     };
     for (const auto& list : lists) {
         for (size_t i = 0; i + 2 < list.size(); i += 3) {
-            const uint32_t a = find(remap[list[i]]);
-            parent[find(remap[list[i + 1]])] = a;
-            parent[find(remap[list[i + 2]])] = a;
+            const uint32_t a = find(slot(list[i]));
+            parent[find(slot(list[i + 1]))] = a;
+            parent[find(slot(list[i + 2]))] = a;
+        }
+    }
+    vector<uint32_t> triangles;
+    triangles.resize(sorted.size(), 0u);
+    for (const auto& list : lists) {
+        for (size_t i = 0; i + 2 < list.size(); i += 3) {
+            ++triangles[find(slot(list[i]))];
         }
     }
     vector<uint32_t> owner;
-    owner.resize(remap.size(), kNoGroup);
+    owner.resize(sorted.size(), kNoGroup);
     vector<vector<uint32_t>> gathered;
     gathered.resize(lists.size());
     for (size_t c = 0; c < lists.size(); ++c) {
         const auto& list = lists[c];
         for (size_t i = 0; i + 2 < list.size(); i += 3) {
-            const uint32_t root = find(remap[list[i]]);
+            const uint32_t root = find(slot(list[i]));
             if (owner[root] == kNoGroup) {
                 owner[root] = static_cast<uint32_t>(c);
             }
-            const size_t target = owner[root];
+            const size_t target = triangles[root] <= kSmallPieceTriangles ? owner[root] : c;
             gathered[target].push_back(list[i]);
             gathered[target].push_back(list[i + 1]);
             gathered[target].push_back(list[i + 2]);
@@ -186,18 +209,7 @@ void gather_pieces(vector<vector<uint32_t>>& lists, const vector<uint32_t>& rema
     lists = std::move(gathered);
 }
 
-float triangle_area(const vector<float>& positions, uint32_t a, uint32_t b, uint32_t c)
-{
-    const float* pa = positions.data() + size_t(a) * 3;
-    const float* pb = positions.data() + size_t(b) * 3;
-    const float* pc = positions.data() + size_t(c) * 3;
-    const float u[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
-    const float v[3] = {pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]};
-    const float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
-    return 0.5f * std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-}
-
-/// The mesh's vertices as a level sees them, which grows as pieces merge.
+/// The mesh's vertices as a level sees them, which grows as pieces become quads.
 struct LodVertices
 {
     vector<float> positions;
@@ -209,19 +221,15 @@ struct LodVertices
     vector<uint32_t> origin;
     uint32_t stride = 0;
     uint32_t normal_offset = 0;
-    bool grown = false;
 };
 
-/// For a primitive whose separate pieces stand for a whole rather than themselves, which a
-/// surface simplifier flattens to slivers at almost no reported error: merges each piece with
-/// its nearest, into one between them with both their areas, so that a level looks like the
-/// one before it. @p kept gets the result, over new vertices, and @p error how far the surface
-/// moved. False if the group has fewer than two pieces, or any locked vertex.
-bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<uint32_t>& kept, float& error)
+/// Numbers the separate pieces of @p list, in the order they first appear: @p piece_of gets each
+/// triangle's. Returns how many there are.
+uint32_t number_pieces(const LodVertices& v, const vector<uint32_t>& list, vector<uint32_t>& piece_of)
 {
     vector<uint32_t> sorted;
-    sorted.reserve(merged.size());
-    for (uint32_t id : merged) {
+    sorted.reserve(list.size());
+    for (uint32_t id : list) {
         sorted.push_back(v.remap[id]);
     }
     std::sort(sorted.begin(), sorted.end());
@@ -241,171 +249,321 @@ bool merge_piece_pairs(LodVertices& v, const vector<uint32_t>& merged, vector<ui
         }
         return s;
     };
-    for (size_t i = 0; i + 2 < merged.size(); i += 3) {
-        const uint32_t a = find(slot(merged[i]));
-        parent[find(slot(merged[i + 1]))] = a;
-        parent[find(slot(merged[i + 2]))] = a;
+    for (size_t i = 0; i + 2 < list.size(); i += 3) {
+        const uint32_t a = find(slot(list[i]));
+        parent[find(slot(list[i + 1]))] = a;
+        parent[find(slot(list[i + 2]))] = a;
     }
-    for (uint32_t point : sorted) {
-        if (v.locks[point] != 0) {
-            return false;
-        }
-    }
-
-    // Pieces numbered in the order they first appear, with their bounds.
     constexpr uint32_t kNone = 0xFFFFFFFFu;
     vector<uint32_t> number;
     number.resize(sorted.size(), kNone);
-    vector<float> bounds;
     uint32_t pieces = 0;
-    for (size_t i = 0; i < merged.size(); ++i) {
-        const uint32_t root = find(slot(merged[i]));
+    piece_of.clear();
+    for (size_t i = 0; i + 2 < list.size(); i += 3) {
+        const uint32_t root = find(slot(list[i]));
         if (number[root] == kNone) {
             number[root] = pieces++;
-            const float* p = v.positions.data() + size_t(merged[i]) * 3;
-            bounds.insert(bounds.end(), p, p + 3);
-            bounds.insert(bounds.end(), p, p + 3);
         }
-        float* box = bounds.data() + size_t(number[root]) * 6;
-        for (int k = 0; k < 3; ++k) {
-            const float value = v.positions[size_t(merged[i]) * 3 + k];
-            box[k] = std::min(box[k], value);
-            box[k + 3] = std::max(box[k + 3], value);
-        }
+        piece_of.push_back(number[root]);
     }
-    if (pieces < 2) {
-        return false;
-    }
+    return pieces;
+}
 
-    // Each piece's middle and area.
-    vector<float> centers;
-    centers.resize(size_t(pieces) * 3, 0.f);
-    vector<float> areas;
-    areas.resize(pieces, 0.f);
-    vector<float> normals;
-    normals.resize(size_t(pieces) * 3, 0.f);
-    for (size_t i = 0; i + 2 < merged.size(); i += 3) {
-        const uint32_t piece = number[find(slot(merged[i]))];
-        const float area = std::max(triangle_area(v.positions, merged[i], merged[i + 1], merged[i + 2]), 1e-12f);
-        areas[piece] += area;
-        for (int k = 0; k < 3; ++k) {
-            const float mid = (v.positions[size_t(merged[i]) * 3 + k] + v.positions[size_t(merged[i + 1]) * 3 + k]
-                               + v.positions[size_t(merged[i + 2]) * 3 + k]) / 3.f;
-            centers[size_t(piece) * 3 + k] += mid * area;
-            normals[size_t(piece) * 3 + k] += v.normals[size_t(merged[i]) * 3 + k] * area;
-        }
-    }
-    for (uint32_t piece = 0; piece < pieces; ++piece) {
-        for (int k = 0; k < 3; ++k) {
-            centers[size_t(piece) * 3 + k] /= areas[piece];
-        }
-    }
+/// Spreads the bits of a 10-bit value three apart, for a Morton key.
+uint32_t spread_bits(uint32_t x)
+{
+    x &= 0x3FFu;
+    x = (x | (x << 16)) & 0x030000FFu;
+    x = (x | (x << 8)) & 0x0300F00Fu;
+    x = (x | (x << 4)) & 0x030C30C3u;
+    x = (x | (x << 2)) & 0x09249249u;
+    return x;
+}
 
-    // Each piece with its nearest free neighbour. The first of a pair stays, and takes on both.
-    vector<uint32_t> mate;
-    mate.resize(pieces, kNone);
-    float width_sum = 0.f;
-    float distance_sum = 0.f;
-    uint32_t pairs = 0;
-    for (uint32_t a = 0; a < pieces; ++a) {
-        const float* box = bounds.data() + size_t(a) * 6;
-        width_sum += std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
-        if (mate[a] != kNone) {
-            continue;
-        }
-        uint32_t nearest = kNone;
-        float nearest2 = std::numeric_limits<float>::max();
-        for (uint32_t b = a + 1; b < pieces; ++b) {
-            if (mate[b] != kNone) {
-                continue;
-            }
-            float d2 = 0.f;
-            for (int k = 0; k < 3; ++k) {
-                const float d = centers[size_t(a) * 3 + k] - centers[size_t(b) * 3 + k];
-                d2 += d * d;
-            }
-            if (d2 < nearest2) {
-                nearest2 = d2;
-                nearest = b;
-            }
-        }
-        if (nearest != kNone) {
-            mate[a] = nearest;
-            mate[nearest] = a;
-            distance_sum += std::sqrt(nearest2);
-            ++pairs;
-        }
-    }
-
+/// One level of a group: its surfaces simplified, and its small separate pieces (each at most
+/// kSmallPieceTriangles, sharing nothing with another group) turned into quads, the smallest
+/// first, until the group has at most half its triangles where it can. A surface simplifier
+/// would thin such pieces to nothing at almost no reported error, so they never go to it. Each
+/// quad stands for neighbouring pieces: across their bounds, with their area, facing as they do
+/// together, with the attributes of one of their vertices. With @p whole, everything becomes
+/// one quad, for a cluster nothing else reduces. @p kept gets the level, over new vertices for
+/// the quads.
+void simplify_group(LodVertices& v, const vector<uint32_t>& merged, bool whole, vector<uint32_t>& kept)
+{
     kept.clear();
-    vector<uint32_t> moved_from;
-    vector<uint32_t> moved_to;
-    for (size_t i = 0; i < merged.size(); ++i) {
-        const uint32_t a = number[find(slot(merged[i / 3 * 3]))];
-        const uint32_t b = mate[a];
-        if (b != kNone && b < a) {
-            continue;  // Taken on by its pair's first.
+    vector<uint32_t> piece_of;
+    const uint32_t pieces = number_pieces(v, merged, piece_of);
+    const size_t triangle_count = merged.size() / 3;
+
+    // Each piece's triangles, area, middle, facing, bounds, and whether a vertex is locked.
+    struct Piece
+    {
+        uint32_t triangles = 0;
+        float area = 0.f;
+        float center[3] = {0.f, 0.f, 0.f};
+        float facing[3] = {0.f, 0.f, 0.f};  ///< Its triangles' normals by area, as wound.
+        float shading[3] = {0.f, 0.f, 0.f}; ///< Its vertices' normals by area.
+        float lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        uint32_t first_vertex = 0;
+        bool locked = false;
+    };
+    vector<Piece> info;
+    info.resize(pieces);
+    const bool has_normals = v.normals.size() == v.positions.size();
+    for (size_t t = 0; t < triangle_count; ++t) {
+        Piece& piece = info[piece_of[t]];
+        const uint32_t* ids = merged.data() + t * 3;
+        if (piece.triangles == 0) {
+            piece.first_vertex = ids[0];
         }
-        const uint32_t old_id = merged[i];
-        if (b == kNone) {
-            kept.push_back(old_id);
-            continue;
+        ++piece.triangles;
+        const float* a = v.positions.data() + size_t(ids[0]) * 3;
+        const float* b = v.positions.data() + size_t(ids[1]) * 3;
+        const float* c = v.positions.data() + size_t(ids[2]) * 3;
+        const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        const float w[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+        const float area = std::max(0.5f * std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]), 1e-12f);
+        piece.area += area;
+        for (int k = 0; k < 3; ++k) {
+            piece.center[k] += (a[k] + b[k] + c[k]) / 3.f * area;
+            piece.facing[k] += 0.5f * n[k];
+            if (has_normals) {
+                piece.shading[k] += v.normals[size_t(ids[0]) * 3 + k] * area;
+            }
         }
-        uint32_t new_id = kNone;
-        for (size_t m = moved_from.size(); m > 0 && moved_from.size() - m < 64u; --m) {
-            if (moved_from[m - 1] == old_id) {
-                new_id = moved_to[m - 1];
+        for (int corner = 0; corner < 3; ++corner) {
+            const uint32_t id = ids[corner];
+            piece.locked = piece.locked || v.locks[v.remap[id]] != 0;
+            for (int k = 0; k < 3; ++k) {
+                piece.lo[k] = std::min(piece.lo[k], v.positions[size_t(id) * 3 + k]);
+                piece.hi[k] = std::max(piece.hi[k], v.positions[size_t(id) * 3 + k]);
+            }
+        }
+    }
+    for (Piece& piece : info) {
+        for (int k = 0; k < 3; ++k) {
+            piece.center[k] /= piece.area;
+        }
+    }
+    const auto is_small = [whole](const Piece& piece) {
+        return whole || (!piece.locked && piece.triangles <= kSmallPieceTriangles);
+    };
+
+    // The surfaces, simplified to half.
+    vector<uint32_t> surface;
+    for (size_t t = 0; t < triangle_count; ++t) {
+        if (!is_small(info[piece_of[t]])) {
+            surface.insert(surface.end(), merged.begin() + t * 3, merged.begin() + t * 3 + 3);
+        }
+    }
+    if (!surface.empty()) {
+        vector<uint32_t> simplified;
+        simplified.resize(surface.size());
+        // Clamped keeps normals' error from overstating how far the surface moved.
+        const size_t count = meshopt_simplifyWithAttributes(
+            simplified.data(), surface.data(), surface.size(), v.positions.data(), v.positions.size() / 3, sizeof(float) * 3,
+            has_normals ? v.normals.data() : nullptr, sizeof(float) * 3, has_normals ? kNormalWeights : nullptr,
+            has_normals ? 3 : 0, v.locks.data(), surface.size() / 6 * 3, FLT_MAX,
+            meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, nullptr);
+        if (count == 0) {
+            kept = surface;
+        } else {
+            kept.assign(simplified.begin(), simplified.begin() + count);
+        }
+    }
+
+    // The small pieces, smallest first. Each quad takes `per_quad` of them, as many as keeps
+    // the quads to at most half the triangles they stand for.
+    vector<uint32_t> small;
+    uint32_t small_triangles = 0;
+    for (uint32_t p = 0; p < pieces; ++p) {
+        if (is_small(info[p])) {
+            small.push_back(p);
+            small_triangles += info[p].triangles;
+        }
+    }
+    if (small.empty()) {
+        return;
+    }
+    std::sort(small.begin(), small.end(), [&info](uint32_t a, uint32_t b) { return info[a].area < info[b].area; });
+    const auto per_quad = [](size_t count, uint32_t triangles) {
+        return std::max<size_t>(1u, (count * 4u + triangles - 1u) / std::max(triangles, 1u));
+    };
+    const auto quad_triangles = [&](size_t count, uint32_t triangles) {
+        return count == 0 ? 0u : static_cast<uint32_t>((count + per_quad(count, triangles) - 1u) / per_quad(count, triangles) * 2u);
+    };
+    // The largest stay as they are while the level still fits in half the group.
+    const auto target = static_cast<uint32_t>(std::max<size_t>(triangle_count / 2, 2u));
+    size_t converted = small.size();
+    uint32_t converted_triangles = small_triangles;
+    uint32_t copied_triangles = 0;
+    const auto kept_triangles = static_cast<uint32_t>(kept.size() / 3);
+    while (!whole && converted > 0) {
+        const Piece& largest = info[small[converted - 1]];
+        const uint32_t rest = converted_triangles - largest.triangles;
+        if (kept_triangles + copied_triangles + largest.triangles + quad_triangles(converted - 1, rest) > target) {
+            break;
+        }
+        copied_triangles += largest.triangles;
+        converted_triangles = rest;
+        --converted;
+    }
+    vector<uint8_t> stays;
+    stays.resize(pieces, 0u);
+    for (size_t i = converted; i < small.size(); ++i) {
+        stays[small[i]] = 1u;
+    }
+    for (size_t t = 0; t < triangle_count; ++t) {
+        if (stays[piece_of[t]] != 0u) {
+            kept.insert(kept.end(), merged.begin() + t * 3, merged.begin() + t * 3 + 3);
+        }
+    }
+    if (converted == 0) {
+        return;
+    }
+
+    // Neighbours together: the converted pieces in Morton order of their middles.
+    float lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (size_t i = 0; i < converted; ++i) {
+        for (int k = 0; k < 3; ++k) {
+            lo[k] = std::min(lo[k], info[small[i]].center[k]);
+            hi[k] = std::max(hi[k], info[small[i]].center[k]);
+        }
+    }
+    vector<std::pair<uint32_t, uint32_t>> order;
+    for (size_t i = 0; i < converted; ++i) {
+        uint32_t key = 0;
+        for (int k = 0; k < 3; ++k) {
+            const float span = hi[k] - lo[k];
+            const float at = span > 0.f ? (info[small[i]].center[k] - lo[k]) / span : 0.f;
+            key |= spread_bits(static_cast<uint32_t>(at * 1023.f)) << k;
+        }
+        order.push_back({key, small[i]});
+    }
+    std::sort(order.begin(), order.end());
+
+    const size_t step = whole ? order.size() : per_quad(converted, converted_triangles);
+    for (size_t first = 0; first < order.size(); first += step) {
+        const size_t last = std::min(order.size(), first + step);
+        float area = 0.f;
+        float center[3] = {0.f, 0.f, 0.f};
+        float facing[3] = {0.f, 0.f, 0.f};
+        float shading[3] = {0.f, 0.f, 0.f};
+        float box_lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float box_hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (size_t i = first; i < last; ++i) {
+            const Piece& piece = info[order[i].second];
+            area += piece.area;
+            for (int k = 0; k < 3; ++k) {
+                center[k] += piece.center[k] * piece.area;
+                facing[k] += piece.facing[k];
+                shading[k] += piece.shading[k];
+                box_lo[k] = std::min(box_lo[k], piece.lo[k]);
+                box_hi[k] = std::max(box_hi[k], piece.hi[k]);
+            }
+        }
+        for (float& c : center) {
+            c /= area;
+        }
+        // Facing as the pieces are wound together, or as the first is where they cancel out.
+        const auto normalize = [](float* x) {
+            const float length = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+            if (length <= 1e-12f) {
+                return false;
+            }
+            for (int k = 0; k < 3; ++k) {
+                x[k] /= length;
+            }
+            return true;
+        };
+        float n[3] = {facing[0], facing[1], facing[2]};
+        if (!normalize(n)) {
+            const Piece& piece = info[order[first].second];
+            std::memcpy(n, piece.facing, sizeof(n));
+            if (!normalize(n)) {
+                n[0] = 0.f;
+                n[1] = -1.f;
+                n[2] = 0.f;
+            }
+        }
+        // Along the bounds' longest side, as the plane holds it, and across.
+        int longest = 0;
+        for (int k = 1; k < 3; ++k) {
+            longest = box_hi[k] - box_lo[k] > box_hi[longest] - box_lo[longest] ? k : longest;
+        }
+        float t[3] = {0.f, 0.f, 0.f};
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            float axis[3] = {0.f, 0.f, 0.f};
+            axis[(longest + attempt) % 3] = 1.f;
+            const float d = axis[0] * n[0] + axis[1] * n[1] + axis[2] * n[2];
+            for (int k = 0; k < 3; ++k) {
+                t[k] = axis[k] - d * n[k];
+            }
+            if (normalize(t)) {
                 break;
             }
         }
-        if (new_id == kNone) {
-            const float total = areas[a] + areas[b];
-            const float scale = std::sqrt(total / areas[a]);
-            float grown[3];
-            float normal[3];
+        const float b[3] = {n[1] * t[2] - n[2] * t[1], n[2] * t[0] - n[0] * t[2], n[0] * t[1] - n[1] * t[0]};
+        float along = 0.f;
+        float across = 0.f;
+        for (int corner = 0; corner < 8; ++corner) {
+            float d[3];
             for (int k = 0; k < 3; ++k) {
-                const float center = centers[size_t(a) * 3 + k];
-                const float together = (center * areas[a] + centers[size_t(b) * 3 + k] * areas[b]) / total;
-                grown[k] = together + (v.positions[size_t(old_id) * 3 + k] - center) * scale;
-                normal[k] = normals[size_t(a) * 3 + k] + normals[size_t(b) * 3 + k];
+                d[k] = ((corner >> k) & 1 ? box_hi[k] : box_lo[k]) - center[k];
             }
-            const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-            if (length > 1e-12f) {
-                for (float& n : normal) {
-                    n /= length;
-                }
-            } else {
-                std::memcpy(normal, v.normals.data() + size_t(old_id) * 3, sizeof(normal));
+            along = std::max(along, std::abs(d[0] * t[0] + d[1] * t[1] + d[2] * t[2]));
+            across = std::max(across, std::abs(d[0] * b[0] + d[1] * b[1] + d[2] * b[2]));
+        }
+        // Shaped as their bounds in the plane, with their area: half sides hu and hv.
+        const float ratio = std::min(std::max(along / std::max(across, 1e-6f), 1.f / 16.f), 16.f);
+        const float quarter = area * 0.25f;
+        const float hu = std::sqrt(quarter * ratio);
+        const float hv = quarter / std::max(hu, 1e-12f);
+
+        float normal[3] = {shading[0], shading[1], shading[2]};
+        if (!normalize(normal)) {
+            std::memcpy(normal, n, sizeof(normal));
+        }
+        const uint32_t source = info[order[first].second].first_vertex;
+        const auto first_new = static_cast<uint32_t>(v.positions.size() / 3);
+        const float signs[4][2] = {{-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f}, {-1.f, 1.f}};
+        for (const auto& s : signs) {
+            float p[3];
+            for (int k = 0; k < 3; ++k) {
+                p[k] = center[k] + t[k] * hu * s[0] + b[k] * hv * s[1];
             }
-            new_id = static_cast<uint32_t>(v.positions.size() / 3);
-            v.positions.insert(v.positions.end(), grown, grown + 3);
-            v.normals.insert(v.normals.end(), normal, normal + 3);
-            v.remap.push_back(new_id);
+            const auto id = static_cast<uint32_t>(v.positions.size() / 3);
+            v.positions.insert(v.positions.end(), p, p + 3);
+            if (has_normals) {
+                v.normals.insert(v.normals.end(), normal, normal + 3);
+            }
+            v.remap.push_back(id);
             v.locks.push_back(0);
             if (v.origin.empty()) {
-                v.origin.resize(new_id);
-                for (uint32_t id = 0; id < new_id; ++id) {
-                    v.origin[id] = id;
+                v.origin.resize(id);
+                for (uint32_t i = 0; i < id; ++i) {
+                    v.origin[i] = i;
                 }
             }
-            v.origin.push_back(v.origin[old_id]);
-            const size_t first_byte = v.bytes.size();
-            v.bytes.resize(first_byte + v.stride);
-            std::memcpy(v.bytes.data() + first_byte, v.bytes.data() + size_t(old_id) * v.stride, v.stride);
-            std::memcpy(v.bytes.data() + first_byte, grown, sizeof(grown));
-            std::memcpy(v.bytes.data() + first_byte + v.normal_offset, normal, sizeof(normal));
-            moved_from.push_back(old_id);
-            moved_to.push_back(new_id);
-            v.grown = true;
+            v.origin.push_back(v.origin[source]);
+            if (!v.bytes.empty()) {
+                const size_t first_byte = v.bytes.size();
+                v.bytes.resize(first_byte + v.stride);
+                std::memcpy(v.bytes.data() + first_byte, v.bytes.data() + size_t(source) * v.stride, v.stride);
+                std::memcpy(v.bytes.data() + first_byte, p, sizeof(p));
+                if (v.normal_offset != kLodNoAttribute && has_normals) {
+                    std::memcpy(v.bytes.data() + first_byte + v.normal_offset, normal, sizeof(normal));
+                }
+            }
         }
-        kept.push_back(new_id);
+        // Wound as the pieces are: t, then b, turn about n.
+        for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            kept.push_back(first_new + i);
+        }
     }
-    // A piece moves half the way to its mate, and changes shape by about its size. The mean is
-    // what makes a level look different, not one piece that happens to be far from the rest.
-    const float mean_width = width_sum / static_cast<float>(pieces);
-    const float mean_distance = distance_sum / static_cast<float>(std::max(pairs, 1u));
-    error = std::max(mean_width, mean_distance) * 0.5f;
-    return true;
 }
 
 /// Fills the sphere around a cluster's own triangles, and the diagonal of the largest box
@@ -657,7 +815,7 @@ void own_vertices(MeshLod& lod, LodVertices& v, const uint8_t* bytes, const floa
 
 /// Fills `ray_nodes` and `ray_words` of @p lod. With @p rays, each cluster gets a tree over its
 /// triangles, and the nodes of the tree over the clusters get their children's boxes.
-void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
+void build_rays(MeshLod& lod, const LodVertices& v, bool rays)
 {
     struct Box
     {
@@ -720,7 +878,7 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
         if (blas.nodes.empty()) {
             continue;
         }
-        const BlasGpuTree tree = blas_gpu_tree(blas, scattered);
+        const BlasGpuTree tree = blas_gpu_tree(blas);
         Block& block = blocks[c];
         block.node_first = static_cast<uint32_t>(lod.ray_nodes.size());
         block.node_count = static_cast<uint32_t>(tree.nodes.size());
@@ -836,7 +994,7 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool scattered, bool rays)
 } // namespace
 
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, const uint32_t* colors,
-                       uint32_t stride, uint32_t normal_offset, bool merge_pieces, bool deforming)
+                       uint32_t stride, uint32_t normal_offset, bool deforming)
 {
     MeshLod lod;
     if (blas.clusters.empty()) {
@@ -860,33 +1018,28 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
             std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
         }
     }
-    // What rays take a node's surface word for follows the primitive's setting alone.
-    const bool scattered = merge_pieces;
-    merge_pieces = merge_pieces && has_normals;
-    if (merge_pieces) {
+    // Quads take their attributes from the vertices they stand for.
+    if (vertices) {
         lod_vertices.bytes.resize(vertex_count * stride);
         std::memcpy(lod_vertices.bytes.data(), vertices, vertex_count * stride);
     }
 
     // Index lists of all clusters so far, parallel to lod.clusters.
     vector<vector<uint32_t>> lists = gather_clusters(blas);
-    if (merge_pieces) {
-        gather_pieces(lists, remap);
-    }
+    gather_pieces(lists, remap);
     vector<uint32_t> pending;
-    // By cluster: how far it is from the full mesh, which coarser levels add to. Its error in
-    // the hierarchy may be larger (kLodClusterWidth).
-    vector<float> simplified_error;
     for (size_t i = 0; i < lists.size(); ++i) {
         add_cluster(lod, lists[i], positions, 0, nullptr, 0.f);
         pending.push_back(static_cast<uint32_t>(i));
-        simplified_error.push_back(0.f);
     }
 
     vector<uint32_t> first_seen;
     locks.resize(vertex_count);
 
-    for (uint32_t level = 1; !deforming && level < kMaxLevels && pending.size() > 1; ++level) {
+    // Down to one quad: one cluster of two triangles.
+    const auto more_to_do = [&]() { return pending.size() > 1 || (pending.size() == 1 && lists[pending[0]].size() > 6); };
+    for (uint32_t level = 1; !deforming && level < kMaxLevels && more_to_do(); ++level) {
+        vertex_count = positions.size() / 3;
         first_seen.resize(vertex_count);
         vector<uint32_t> all_indices;
         vector<uint32_t> index_counts;
@@ -925,52 +1078,40 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
             locks[v] = locks[remap[v]];
         }
 
+        // A group's level: its clusters' parent, made of new clusters that go on to the next.
         vector<uint32_t> next;
-        for (const auto& group : groups) {
-            vector<uint32_t> merged;
-            float children_error = 0.f;
+        const auto add_group = [&](const vector<uint32_t>& group, const vector<uint32_t>& simplified) {
             vector<float> spheres;
             for (uint32_t c : group) {
-                merged.insert(merged.end(), lists[c].begin(), lists[c].end());
                 const MeshLodCluster& child = lod.clusters[c];
-                children_error = std::max(children_error, simplified_error[c]);
                 spheres.push_back(child.center[0]);
                 spheres.push_back(child.center[1]);
                 spheres.push_back(child.center[2]);
                 spheres.push_back(child.radius);
             }
-
-            vector<uint32_t> simplified;
-            simplified.resize(merged.size());
-            float error = 0.f;
-            const size_t target = merged.size() / 6 * 3;
-            size_t kept = 0;
-            vector<uint32_t> alternate;
-            if (merge_pieces && merge_piece_pairs(lod_vertices, merged, alternate, error)) {
-                kept = alternate.size();
-                std::copy(alternate.begin(), alternate.end(), simplified.begin());
-                vertex_count = positions.size() / 3;
-            } else {
-                // Clamped keeps normals' error from overstating how far the surface moved.
-                kept = meshopt_simplifyWithAttributes(
-                    simplified.data(), merged.data(), merged.size(), positions.data(), vertex_count, sizeof(float) * 3,
-                    normals.empty() ? nullptr : normals.data(), sizeof(float) * 3, normals.empty() ? nullptr : kNormalWeights,
-                    normals.empty() ? 0 : 3, locks.data(), target, FLT_MAX,
-                    meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, &error);
-            }
-            if (kept == 0 || static_cast<float>(kept) > kStopAboveKept * static_cast<float>(merged.size())) {
-                continue;
-            }
+            const size_t kept = simplified.size();
+            vertex_count = positions.size() / 3;
 
             const meshopt_Bounds merged_bounds = meshopt_computeSphereBounds(spheres.data(), group.size(), sizeof(float) * 4,
                                                                              spheres.data() + 3, sizeof(float) * 4);
             const float sphere[4] = {merged_bounds.center[0], merged_bounds.center[1], merged_bounds.center[2],
                                      merged_bounds.radius};
-            // Errors add up, since each step is measured against the one before. What the
-            // group's clusters are chosen by is never less than its sphere's share of the
-            // width limit; the floor does not add up, only the simplification does.
-            const float group_error = children_error + error;
-            const float chosen_by = std::max(group_error, 2.f * sphere[3] / kLodClusterWidth);
+            // The cut takes a level by the size of what it draws: its longest triangle edge,
+            // against kLodElementPixels. Never less than its children's, so sizes only grow
+            // going up.
+            float longest = 0.f;
+            for (size_t i = 0; i + 2 < simplified.size(); i += 3) {
+                for (int e = 0; e < 3; ++e) {
+                    const float* a = positions.data() + size_t(simplified[i + e]) * 3;
+                    const float* b = positions.data() + size_t(simplified[i + (e + 1) % 3]) * 3;
+                    const float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                    longest = std::max(longest, d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                }
+            }
+            float chosen_by = std::sqrt(longest) / kLodElementPixels * kLodMaxErrorPixels;
+            for (uint32_t c : group) {
+                chosen_by = std::max(chosen_by, lod.clusters[c].error);
+            }
             const uint32_t group_id = lod.group_count++;
             for (uint32_t c : group) {
                 MeshLodCluster& child = lod.clusters[c];
@@ -990,6 +1131,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
             const size_t meshlet_count = meshopt_buildMeshlets(meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(),
                                                                simplified.data(), kept, positions.data(), vertex_count,
                                                                sizeof(float) * 3, kClusterMaxVertices, kClusterMaxTriangles, 0.f);
+            vector<vector<uint32_t>> made;
             for (size_t m = 0; m < meshlet_count; ++m) {
                 const meshopt_Meshlet& meshlet = meshlets[m];
                 vector<uint32_t> indices;
@@ -997,14 +1139,56 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
                 for (uint32_t i = 0; i < meshlet.triangle_count * 3; ++i) {
                     indices.push_back(meshlet_vertices[meshlet.vertex_offset + meshlet_triangles[meshlet.triangle_offset + i]]);
                 }
+                made.push_back(std::move(indices));
+            }
+            // Clusters split pieces as they please; small ones are kept whole again.
+            gather_pieces(made, remap);
+            for (auto& indices : made) {
+                if (indices.empty()) {
+                    continue;
+                }
                 next.push_back(static_cast<uint32_t>(lod.clusters.size()));
                 add_cluster(lod, indices, positions, level, sphere, chosen_by);
-                simplified_error.push_back(group_error);
                 lod.cluster_made_from.back() = group_id;
                 lists.push_back(std::move(indices));
             }
+        };
+
+        bool reduced = false;
+        for (const auto& group : groups) {
+            vector<uint32_t> merged;
+            for (uint32_t c : group) {
+                merged.insert(merged.end(), lists[c].begin(), lists[c].end());
+            }
+            vector<uint32_t> simplified;
+            simplify_group(lod_vertices, merged, false, simplified);
+            if (simplified.empty() || static_cast<float>(simplified.size()) > kStopAboveKept * static_cast<float>(merged.size())) {
+                // Not here: its clusters go into the next level's groups, whose edges are elsewhere.
+                next.insert(next.end(), group.begin(), group.end());
+                continue;
+            }
+            reduced = true;
+            add_group(group, simplified);
+        }
+        if (!reduced) {
+            // Nothing reduced anywhere: each cluster becomes one quad. One that is a quad
+            // already stays, and when all are, the quads are what the mesh ends in.
+            next.clear();
+            for (uint32_t c : pending) {
+                if (lists[c].size() <= 6) {
+                    next.push_back(c);
+                    continue;
+                }
+                vector<uint32_t> simplified;
+                simplify_group(lod_vertices, lists[c], true, simplified);
+                add_group({c}, simplified);
+                reduced = true;
+            }
         }
         pending = std::move(next);
+        if (!reduced) {
+            break;
+        }
     }
 
     for (MeshLodCluster& cluster : lod.clusters) {
@@ -1014,7 +1198,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
     if (vertices && !deforming) {
         own_vertices(lod, lod_vertices, lod_vertices.bytes.empty() ? vertices : lod_vertices.bytes.data(), uv1, colors);
     }
-    build_rays(lod, lod_vertices, scattered, !deforming);
+    build_rays(lod, lod_vertices, !deforming);
     return lod;
 }
 
