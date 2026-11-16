@@ -103,6 +103,8 @@ public:
         bool visibility_second_dirty = true;
         /// What the view's culling left for draws, which the visibility pass was recorded with.
         CutDrawWords cut_draw_words;
+        IRenderPass::Ptr light_claim_pass;
+        uint32_t light_claim_recorded[4] = {};  ///< What the light claim pass was recorded with.
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
@@ -250,6 +252,9 @@ private:
     /// Builds the depth pyramid from the hardware's depth, or with @p with_compute from that and
     /// what compute raster drew, before the resolve clears it.
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, bool with_compute);
+    /// Gives each kept cut record a pixel shows its light in the view's light pool, the first
+    /// time one does (light_claim_src).
+    void emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);

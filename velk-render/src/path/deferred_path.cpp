@@ -837,6 +837,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
+    emit_light_claim_pass(vs, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode() != 0u ? visibility_debug_mode()
                                    : camera_state ? static_cast<uint32_t>(camera_state->debug_view)
                                                   : 0u;
@@ -1114,6 +1115,47 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
         rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.held.push_back(std::move(pipeline));
+    });
+}
+
+void DeferredPath::emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph)
+{
+    const LightPool& pool = vs.instance_cull.light_pool;
+    if (!vs.visibility || pool.segments.empty() || !vs.pixel_words.valid()) return;
+
+    constexpr uint64_t kKey = 0x4c69'6768'7443'6c6dULL;
+    auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(light_claim_src, kKey);
+    if (!pipeline) return;
+
+    struct PushC
+    {
+        uint32_t ids_word, width, height, pool_word;
+    };
+    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word()};
+    // Recorded again when what it names changes.
+    bool dirty = std::memcmp(&pc, vs.light_claim_recorded, sizeof(pc)) != 0;
+    std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
+    emit_cached_view_pass(vs.light_claim_pass, dirty, "deferred.light_claim", graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
+        dc.groups_y = (vs.visibility_size.y + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light claim");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        rec.held.push_back(pipeline);
     });
 }
 
