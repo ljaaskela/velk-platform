@@ -46,6 +46,9 @@ struct RayHit {
     uint cluster;
     uvec3 corners;
     vec2 weights;
+    // The kept cut record that was hit (VELK_NO_RECORD for none), as velk_ids_record names a
+    // pixel's. Only set by trace_closest_hit, and not kept by velk_hit_words.
+    uint record;
 };
 
 #define VELK_NO_CORNERS 0xFFFFFFFFu
@@ -74,6 +77,7 @@ RayHit velk_hit_from_words(uvec4 a, uvec3 b)
     hit.corners = uvec3(a.w, b.x, b.y);
     hit.uv = a.w == VELK_NO_CORNERS ? unpackHalf2x16(b.z) : vec2(0.0);
     hit.weights = a.w == VELK_NO_CORNERS ? vec2(0.0) : unpackUnorm2x16(b.z);
+    hit.record = VELK_NO_RECORD;
     return hit;
 }
 
@@ -365,7 +369,8 @@ void main()
     float variance = 0.25 * (dot(dndx, dndx) + dot(dndy, dndy));
     float roughness = sqrt(clamp(e.roughness * e.roughness + min(2.0 * variance, 0.18), 0.0, 1.0));
 
-    float lod_error = velk_ids_lod_error(d, ids);
+    mat3 world_axes = mat3(inst.world_matrix);
+    float lod_error = velk_cluster_error(cluster, max(max(length(world_axes[0]), length(world_axes[1])), length(world_axes[2])));
 
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, e.color);
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(N, lod_error));
@@ -745,7 +750,13 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode == 13u) {
+    if (pc.mode == 14u) {
+        // By the kept cut record it is from, white for none.
+        if (ids.x != 0u) {
+            uint record = velk_ids_record(velk_draw_data.data[velk_ids_draw(ids)], ids);
+            color = record == VELK_NO_RECORD ? vec3(1.0) : id_color(record * 2654435761u);
+        }
+    } else if (pc.mode == 13u) {
         // A quad in its colour, darker the more it faces away from overhead, so its shape shows.
         if (ids.x != 0u) {
             VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];

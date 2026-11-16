@@ -121,7 +121,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     for (uint32_t m = 0; m < mesh_count; ++m) {
         // Without a source, visible instances go to the shared list of the batches culled together.
         const uint32_t instances = instance_source_ ? instance_source_->get_mesh_instance_count(m) : instance_count_;
-        words += instance_source_ ? instances : 0u;
+        // Its list: a slot each, then the kept cut record each is from.
+        words += instance_source_ ? uint64_t(instances) * 2u : 0u;
         const auto add_primitive = [&](const IMeshPrimitive::Ptr& primitive) {
             auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get());
             MeshLodInfo lod;
@@ -169,6 +170,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     vector<uint32_t> table;
     table.resize(size_t(mesh_count) * kCullTableWords, 0u);
     cull_list_words_.clear();
+    cull_record_words_.clear();
     uint32_t next_list = table_word + mesh_count * kCullTableWords;
     for (uint32_t m = 0; m < mesh_count; ++m) {
         uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
@@ -187,11 +189,13 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         const uint32_t capacity = instance_source_ ? instance_source_->get_mesh_instance_count(m) : instance_count_;
         cull_list_words_.push_back(next_list);
         if (!instance_source_) {
+            cull_record_words_.push_back(0xFFFFFFFFu);
             continue;
         }
+        cull_record_words_.push_back(next_list + capacity);
         entry[kCullListWord] = next_list;
         entry[kCullCapacityWord] = capacity;
-        next_list += capacity;
+        next_list += capacity * 2u;
     }
 
     // Whether the material moves vertices, which compute raster does not: its clusters then
@@ -222,9 +226,9 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         const uint32_t commands_word = cursors_word + clusters;
         const uint32_t second_commands_word = commands_word + clusters * 5u;
         const uint32_t list_word = second_commands_word + clusters * 5u;
-        const uint32_t errors_word = list_word + draw.capacity;
-        // Each position has its surface error, then its cluster's first index.
-        next_list = errors_word + draw.capacity * 2u;
+        const uint32_t records_word = list_word + draw.capacity;
+        // Each position has the kept cut record it is from, then its cluster.
+        next_list = records_word + draw.capacity * 2u;
 
         vector<uint32_t> zeros;
         zeros.resize(clusters, 0u);
@@ -243,7 +247,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryRayWord] = draw.lod.ray_word;
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
-        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, errors_word, draw.capacity});
+        cull_cluster_draws_.push_back({draw.mesh, draw.primitive, clusters, entry_word, list_word, commands_word, records_word, draw.capacity});
     }
     // Batches culled together keep their records in one place, with the culling pass.
     cull_chosen_word_ = next_list;
@@ -266,6 +270,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     out.slot_count = instance_count_;
     out.table_word = table_word;
     out.visible_word = owner->cull_list_words_[cull_mesh_];
+    out.records_word = owner->cull_record_words_[cull_mesh_];
     out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
     if (const ClusterDraw* draw = owner->find_cluster_draw(cull_mesh_, primitive_.get())) {
         out.visible_word = draw->list_word;
@@ -275,7 +280,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_draws_word = draw->entry_word + kClusterEntryDrawsWord;
         out.cluster_second_commands_word = draw->commands_word + draw->clusters * 5u;
         out.cluster_second_draws_word = draw->entry_word + kClusterEntrySecondDrawsWord;
-        out.cluster_errors_word = draw->errors_word;
+        out.records_word = draw->records_word;
         out.cluster_capacity = draw->capacity;
     }
     if (cull_second_args_.valid()) {

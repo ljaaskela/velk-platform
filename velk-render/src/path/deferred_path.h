@@ -101,8 +101,8 @@ public:
         bool visibility_dirty = true;
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
-        /// The word of the view's quad list the visibility pass was recorded with.
-        uint32_t quads_word = 0xFFFFFFFFu;
+        /// What the view's culling left for draws, which the visibility pass was recorded with.
+        CutDrawWords cut_draw_words;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;

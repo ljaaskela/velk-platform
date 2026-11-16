@@ -141,7 +141,7 @@ private:
         uint32_t entry_word;
         uint32_t list_word;
         uint32_t commands_word;
-        uint32_t errors_word;
+        uint32_t records_word;
         uint32_t capacity;
     };
     const ClusterDraw* find_cluster_draw(uint32_t mesh, const IMeshPrimitive* primitive) const;
@@ -180,6 +180,7 @@ private:
     uint32_t cull_mesh_ = 0;
     ArenaRegion cull_region_;
     vector<uint32_t> cull_list_words_;  ///< Per mesh, on the owner.
+    vector<uint32_t> cull_record_words_;  ///< Per mesh, on the owner: its list's column of records, or none.
     vector<ClusterDraw> cull_cluster_draws_;  ///< On the owner.
     uint32_t cull_chosen_word_ = 0;      ///< On the owner.
     uint32_t cull_chosen_capacity_ = 0;  ///< On the owner.

@@ -31,7 +31,6 @@ void main()
     v_shape_param  = s.shape_param;
     v_uv1          = velk_uv1(root);
     v_world_tangent = s.world_tangent;
-    v_lod_error     = velk_lod_error(root);
     v_instance      = uint(gl_InstanceIndex);
 }
 )"

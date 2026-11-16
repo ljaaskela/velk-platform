@@ -31,6 +31,18 @@ struct DefaultStreams
     IBuffer* color = nullptr;
 };
 
+/// What a view's culling leaves for draws that their own batch's culling does not list: the
+/// view's quads, and the batches drawn by their own pass that the plain objects' kept cut holds
+/// for rays. See instance_cut_draw_words.
+struct CutDrawWords
+{
+    uint32_t quads_word = kNoVisibleList;  ///< The view's quad list (kQuadListHeaderWords).
+    uint32_t quad_capacity = 0;            ///< Quads it holds, which its column of records follows.
+    /// For each batch drawn by its own pass, the word of the kept cut record of its first
+    /// instance, followed by its other instances'. A word is 0 for an instance from no record.
+    vector<std::pair<const IBatch*, uint32_t>> own_records;
+};
+
 /// What write_draw_data found of a batch that a draw of it needs.
 struct WrittenDrawData
 {
@@ -51,8 +63,9 @@ struct WrittenDrawData
 inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources, const DefaultStreams& defaults,
                             uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
                             const FrameResolveContext* resolve_ctx, WrittenDrawData& out,
-                            uint32_t quads_word = kNoVisibleList)
+                            const CutDrawWords* cut_words = nullptr)
 {
+    const uint32_t quads_word = cut_words ? cut_words->quads_word : kNoVisibleList;
     // Instance data lives in the shared instance arena (set = 1 slot 3),
     // suballocated per batch by the upload sweep. The header carries the
     // element base (region offset / stride) the vertex shader adds to
@@ -103,13 +116,21 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     header.instances_base = instances_base;
     header.texture_id = texture_id;
     InstanceCullInfo& cull_info = out.cull_info;
-    header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
-    header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
+    const bool culled = batch.get_instance_cull(cull_info);
+    header.visible_base = culled ? cull_info.visible_word : kNoVisibleList;
+    header.record_base = culled ? cull_info.records_word : kNoVisibleList;
     // The view's quads: their list is the visible list, each an instance of the unit quad.
     if (batch.draws_quads()) {
         if (quads_word == kNoVisibleList) return false;
         header.flags |= kDrawFlagQuads;
         header.visible_base = quads_word + kQuadListHeaderWords;
+        header.record_base = header.visible_base + cut_words->quad_capacity;
+    } else if (!culled && cut_words) {
+        for (const auto& [own, word] : cut_words->own_records) {
+            if (own == &batch) {
+                header.record_base = word;
+            }
+        }
     }
     // A draw by cluster numbers triangles within its cluster, of up to 256.
     const uint32_t triangles = cull_info.cluster_count != 0 ? 256u
@@ -122,7 +143,7 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     // second uvs, which the ones below stand in for only when it is not drawn by cluster.
     header.index_base = cull_info.cluster_count != 0 ? 0u : index_base;
     header.cluster_base = cull_info.cluster_count != 0
-        ? cull_info.cluster_errors_word + cull_info.cluster_capacity
+        ? cull_info.records_word + cull_info.cluster_capacity
         : kNoVisibleList;
     // Vertex streams are word bases into the mesh-word arena, the same
     // bytes and the same model RT reads.
@@ -254,9 +275,10 @@ inline void emit_draw_calls(
     IFrameSnippetRegistry* snippets = nullptr,
     const FrameResolveContext* resolve_ctx = nullptr,
     bool second_phase = false,
-    uint32_t quads_word = kNoVisibleList)
+    const CutDrawWords* cut_words = nullptr)
 {
     VELK_PERF_SCOPE("renderer.emit_draw_calls");
+    const uint32_t quads_word = cut_words ? cut_words->quads_word : kNoVisibleList;
 
     for (auto& batch_ptr : batches) {
         if (!batch_ptr) continue;
@@ -297,7 +319,7 @@ inline void emit_draw_calls(
         // the manager only registers an entry once the allocation succeeded.
         const bool has_storage = (storage_gb != nullptr);
         WrittenDrawData written;
-        if (!write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written, quads_word)) {
+        if (!write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written, cut_words)) {
             continue;
         }
         IMeshPrimitive* primitive = written.primitive.get();

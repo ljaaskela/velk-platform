@@ -120,7 +120,7 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback without kDrawFlagUv1.
     uint32_t flags;             ///< kDrawFlag bits.
     uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
-    uint32_t lod_error_base;    ///< Word base in the culling arena of how far each draw instance's surface may be from the full mesh, in world units, or kNoVisibleList when it is the full mesh.
+    uint32_t record_base;       ///< Word base in the culling arena of the kept cut record each draw instance is from (kCutRecordWords), as the word of the record, kNoVisibleList for an instance from none; or kNoVisibleList when the draw has no such list. Read by velk_ids_record.
     uint32_t triangle_bits;     ///< Low bits of a visibility ID's second word that hold the triangle. The rest hold the draw instance.
     uint32_t material_id;       ///< Which material eval the visibility resolve calls, 0 for the default.
     uint32_t material_words;    ///< Word base of the material's record, as compute reads it.
@@ -146,7 +146,8 @@ inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 /// A view's quad list, in the culling arena: the draw's indirect arguments (4 vertices, the
 /// instance count, 0, 0), then the draw count (1), then the quad draw's record in the draw data
 /// (DrawDataHeader), which rays name, a spare word, the count of quads in the view's cuts in or
-/// out of view (for the culling log), then the word of each quad drawn.
+/// out of view (for the culling log), then the word of each quad drawn, and after the list's
+/// capacity the word of each one's kept cut record.
 inline constexpr uint32_t kQuadListHeaderWords = 8;
 
 // ===== Scene-data GPU structs =====

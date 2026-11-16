@@ -54,7 +54,7 @@ struct BatchBufferLayout
 
 /// The clusters chosen in a cull start with this many words: how many records follow, and the
 /// group counts of the dispatch that sorts them. A record is an entry, a cluster, a slot and
-/// an error. See `instance_cluster_fill_src`.
+/// the word of the kept cut record it is from, 0xFFFFFFFF for none. See `instance_cluster_fill_src`.
 inline constexpr uint32_t kCullChosenHeaderWords = 4;
 inline constexpr uint32_t kCullChosenRecordWords = 4;
 /// Words in a cluster draw entry: see `instance_cluster_runs_src`. Mirrors VELK_CLUSTER_ENTRY_WORDS.
@@ -83,11 +83,12 @@ struct InstanceCullInfo
     uint32_t cluster_entry_word = 0;     ///< Its entry, for the passes that fill its commands.
     uint32_t cluster_commands_word = 0;  ///< Its commands in the culling arena.
     uint32_t cluster_draws_word = 0;     ///< How many commands are in use, in the culling arena.
-    /// Each list position's surface error in world units, in the culling arena. Each one's
-    /// cluster, as the word of its record in the hierarchy's table, follows @c cluster_capacity
-    /// words on.
-    uint32_t cluster_errors_word = 0;
     uint32_t cluster_capacity = 0;       ///< How many positions its list has.
+    /// For each position of the list this batch's draw reads, the word of the kept cut record it
+    /// is from (kCutRecordWords), 0xFFFFFFFF for none, in the culling arena. Drawn by cluster,
+    /// each position's cluster, as the word of its record in the hierarchy's table, follows
+    /// @c cluster_capacity words on. 0xFFFFFFFF when the list has no such column.
+    uint32_t records_word = 0xFFFFFFFFu;
     uint32_t cluster_second_commands_word = 0;  ///< The commands of the second occlusion phase.
     uint32_t cluster_second_draws_word = 0;     ///< How many of those are in use.
     uint32_t second_args_word = 0xFFFFFFFFu;    ///< A plain instanced draw's arguments for that phase, in the culling arena.

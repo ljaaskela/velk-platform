@@ -815,10 +815,15 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
-    // The quad draw names the view's quad list, which culling makes again when batches change.
-    const uint32_t quads_word = instance_quad_word(vs.instance_cull);
-    if (quads_word != vs.quads_word) {
-        vs.quads_word = quads_word;
+    // The draws name the view's quad list and the records of items drawn by their own pass,
+    // which culling makes again when batches change.
+    CutDrawWords cut_draw_words = instance_cut_draw_words(vs.instance_cull);
+    if (cut_draw_words.quads_word != vs.cut_draw_words.quads_word
+        || cut_draw_words.quad_capacity != vs.cut_draw_words.quad_capacity
+        || cut_draw_words.own_records.size() != vs.cut_draw_words.own_records.size()
+        || !std::equal(cut_draw_words.own_records.begin(), cut_draw_words.own_records.end(),
+                       vs.cut_draw_words.own_records.begin())) {
+        vs.cut_draw_words = std::move(cut_draw_words);
         vs.visibility_dirty = true;
     }
     emit_visibility_pass(vs, render_view, ctx, graph, false);
@@ -916,7 +921,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_stream_buffers,
                             render_view.view_globals_base, resolve,
                             render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase,
-                            vs.quads_word);
+                            &vs.cut_draw_words);
 
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;

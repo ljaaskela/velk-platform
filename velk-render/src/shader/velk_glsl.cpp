@@ -323,12 +323,6 @@ R"(
          : velk_culling.data[velk_draw(root).visible_base + uint(gl_InstanceIndex)])
 
 #define velk_instance(root) (velk_instances.data[velk_draw(root).instances_base + velk_instance_slot(root)])
-
-// How far this draw instance's surface may be from the full mesh, in world units.
-#define velk_lod_error(root)                                                         \
-    (velk_draw(root).lod_error_base == VELK_NO_VISIBLE_LIST                          \
-         ? 0.0                                                                       \
-         : uintBitsToFloat(velk_culling.data[velk_draw(root).lod_error_base + uint(gl_InstanceIndex)]))
 )"
 // Per-pipeline typed view of the shared material arena (set = 1 slot 4).
 // Declare once at file scope with this pipeline's material struct:
@@ -364,7 +358,7 @@ struct VelkDrawData {
     uint uv1_base;
     uint flags;
     uint material_base;
-    uint lod_error_base;
+    uint record_base;
     uint triangle_bits;
     uint material_id;
     uint material_words;
@@ -487,12 +481,25 @@ uint velk_cluster_first_index(uint cluster)
     return cluster == VELK_NO_CLUSTER ? 0u : velk_culling.data[cluster];
 }
 
-// How far the surface a pixel shows may be from the full mesh, in world units.
-float velk_ids_lod_error(VelkDrawData d, uvec2 ids)
+// A kept cut record (kCutRecordWords), as the word of it in the culling arena, or none.
+#define VELK_NO_RECORD 0xFFFFFFFFu
+
+// The kept cut record what a pixel shows is from, or VELK_NO_RECORD for what was not drawn from
+// one. Valid for the frame the pixel was drawn in: records move between frames.
+uint velk_ids_record(VelkDrawData d, uvec2 ids)
 {
-    if ((ids.x & VELK_IDS_TINY) != 0u) return uintBitsToFloat(velk_culling.data[ids.y + 3u]);
-    if (d.lod_error_base == VELK_NO_VISIBLE_LIST) return 0.0;
-    return uintBitsToFloat(velk_culling.data[d.lod_error_base + (ids.y >> d.triangle_bits)]);
+    uint record = (ids.x & VELK_IDS_TINY) != 0u ? velk_culling.data[ids.y + 3u]
+                : d.record_base == VELK_NO_VISIBLE_LIST ? VELK_NO_RECORD
+                : velk_culling.data[d.record_base + (ids.y >> d.triangle_bits)];
+    // No record is ever at word 0, which a list that was cleared holds.
+    return record == 0u ? VELK_NO_RECORD : record;
+}
+
+// How far the surface of `cluster` (VELK_NO_CLUSTER for a whole mesh) may be from the full
+// mesh, in world units, for an instance whose largest axis is scaled by `scale`.
+float velk_cluster_error(uint cluster, float scale)
+{
+    return cluster == VELK_NO_CLUSTER ? 0.0 : uintBitsToFloat(velk_culling.data[cluster + 7u]) * scale;
 }
 )"
 // Declares a raster shader's push constant and names it. Put it at file scope,
@@ -519,7 +526,7 @@ R"(
 // The varyings `element_vertex_src` writes and every composed raster fragment
 // driver reads. One declaration each side, so adding a varying is a single edit
 // here rather than one per shader. A fragment may ignore any of them; the
-// vertex stage always writes all ten.
+// vertex stage always writes all nine.
 //
 //   VELK_VARYINGS_OUT   // in a vertex shader
 //   VELK_VARYINGS_IN    // in a fragment shader
@@ -537,8 +544,7 @@ R"(
     layout(location = 5) flat out uint v_shape_param; \
     layout(location = 6) out vec2 v_uv1;              \
     layout(location = 7) out vec4 v_world_tangent;    \
-    layout(location = 8) flat out float v_lod_error;  \
-    layout(location = 9) flat out uint v_instance;
+    layout(location = 8) flat out uint v_instance;
 
 #define VELK_VARYINGS_IN                             \
     layout(location = 0) in vec4 v_color;            \
@@ -549,8 +555,7 @@ R"(
     layout(location = 5) flat in uint v_shape_param; \
     layout(location = 6) in vec2 v_uv1;              \
     layout(location = 7) in vec4 v_world_tangent;    \
-    layout(location = 8) flat in float v_lod_error;  \
-    layout(location = 9) flat in uint v_instance;
+    layout(location = 8) flat in uint v_instance;
 
 )"
 // VELK_FRAG_OUT is the single-target colour output, for forward and any full

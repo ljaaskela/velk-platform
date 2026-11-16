@@ -43,6 +43,9 @@ enum class DebugView : uint8_t
     /// The quads the cut chose, each standing for the members under it, in its colour, and
     /// whatever else is drawn grey.
     Quads,
+    /// A flat colour per kept cut record that what is drawn is from, by where the record is
+    /// this frame, so colours change whenever records move; white for what is from none.
+    Record,
 };
 
 /**

@@ -143,6 +143,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.cluster = VELK_NO_CLUSTER;
     hit.corners = uvec3(VELK_NO_CORNERS);
     hit.weights = vec2(0.0);
+    hit.record = VELK_NO_RECORD;
 
     uint top = VELK_GLOBALS.ray_top;
     if (top == VELK_RAY_NONE || velk_culling.data[top + 1u] == 0u) return closest ? 0.0 : 1.0;
@@ -178,6 +179,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint cur_draw = VELK_RAY_NONE;
     uint cur_instance = VELK_RAY_NONE;
     uint cur_cluster = VELK_NO_CLUSTER;
+    uint cur_record = VELK_NO_RECORD;
     uint cur_key = 0u;
     uint mesh_base = 0u;
     uint word_base = 0u;
@@ -196,6 +198,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint best_draw = VELK_RAY_NONE;
     uint best_instance = VELK_RAY_NONE;
     uint best_cluster = VELK_NO_CLUSTER;
+    uint best_record = VELK_NO_RECORD;
     uvec3 best_corners = uvec3(VELK_NO_CORNERS);
     vec2 best_weights = vec2(0.0);
     vec2 best_uv = vec2(0.0);
@@ -260,6 +263,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 best_draw = cur_draw;
                 best_instance = cur_instance;
                 best_cluster = cur_cluster;
+                best_record = cur_record;
                 best_corners = corners;
                 best_weights = vec2(u, v);
                 best_normal = cross(e1, e2);
@@ -322,6 +326,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     best_draw = quads != VELK_RAY_NONE ? velk_culling.data[quads + 5u] : VELK_RAY_NONE;
                     best_instance = cluster;
                     best_cluster = VELK_NO_CLUSTER;
+                    best_record = r;
                     // The unit quad is a strip: corners 0 (0, 0), 1 (1, 0), 2 (0, 1) and 3 (1, 1),
                     // its triangles 0, 1, 2 and 1, 2, 3.
                     if (a + b <= 1.0) {
@@ -352,6 +357,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             ElementInstance inst = velk_instances.data[instance];
             if (inst.world_matrix[3][3] == 0.0) continue;
             cur_instance = instance;
+            cur_record = r;
             cur_key = key;
             if (entry != VELK_RAY_NONE) {
                 // A cluster of a hierarchy: its triangle tree, or as drawn.
@@ -399,6 +405,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                         best_draw = draw;
                         best_instance = instance;
                         best_cluster = VELK_NO_CLUSTER;
+                        best_record = r;
                         best_corners = uvec3(VELK_NO_CORNERS);
                         best_uv = h.uv;
                         best_normal = h.normal;
@@ -472,6 +479,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.draw = best_draw;
     hit.instance = best_instance;
     hit.cluster = best_cluster;
+    hit.record = best_record;
     hit.corners = best_corners;
     hit.weights = best_weights;
     ElementInstance inst = best_quad ? velk_quad_instance(best_instance) : velk_instances.data[best_instance];

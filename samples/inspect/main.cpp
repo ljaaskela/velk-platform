@@ -346,6 +346,8 @@ constexpr NamedView kViews[] = {
      "boxes of one level of the tree rays walk over the partitions (K and L for the level): 0 one partition each"},
     {velk::DebugView::Quads, "quads", "quads",
      "the quads the cut chose in their colour, everything else grey"},
+    {velk::DebugView::Record, "record", "record",
+     "a colour per kept cut record what is drawn is from, white for none"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
