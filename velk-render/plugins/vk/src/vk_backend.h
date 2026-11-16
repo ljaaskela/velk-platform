@@ -273,6 +273,7 @@ private:
         uint64_t dst_offset = 0;
         uint64_t src_offset = 0;  ///< Into queued_write_bytes_.
         uint64_t size = 0;
+        size_t order = 0;  ///< Its place in the queue: of writes that overlap, the later wins.
     };
     ::velk::vector<QueuedBufferWrite> queued_writes_;
     ::velk::vector<uint8_t> queued_write_bytes_;

@@ -3007,7 +3007,7 @@ void VkBackend::queue_buffer_write(const IGpuBuffer::Ptr& dst, uint64_t offset,
     const uint64_t src_offset = queued_write_bytes_.size();
     queued_write_bytes_.resize(static_cast<size_t>(src_offset + size));
     std::memcpy(queued_write_bytes_.data() + src_offset, data, static_cast<size_t>(size));
-    queued_writes_.push_back({dst, offset, src_offset, size});
+    queued_writes_.push_back({dst, offset, src_offset, size, queued_writes_.size()});
 }
 
 void VkBackend::retarget_buffer_writes(const IGpuBuffer* from, const IGpuBuffer::Ptr& to)
@@ -3041,7 +3041,48 @@ void VkBackend::flush_buffer_writes()
     if (queued_writes_.empty() || !frame_open_) return;
 
     auto& sync = frame_sync_[recording_slot_];
-    const uint64_t total = queued_write_bytes_.size();
+
+    // By destination and offset. The regions of one copy must not overlap, so writes that do
+    // become one, their bytes laid over each other in the order they were queued, after the
+    // queued bytes in the staging buffer.
+    std::sort(queued_writes_.begin(), queued_writes_.end(), [](const QueuedBufferWrite& a, const QueuedBufferWrite& b) {
+        if (a.dst.get() != b.dst.get()) return a.dst.get() < b.dst.get();
+        return a.dst_offset != b.dst_offset ? a.dst_offset < b.dst_offset : a.order < b.order;
+    });
+    const uint64_t queued_total = queued_write_bytes_.size();
+    ::velk::vector<uint8_t> merged;
+    ::velk::vector<std::pair<const ::velk::IGpuBuffer*, VkBufferCopy>> copies;
+    ::velk::vector<const QueuedBufferWrite*> overlapping;
+    const size_t count = queued_writes_.size();
+    for (size_t i = 0; i < count;) {
+        const QueuedBufferWrite& first = queued_writes_[i];
+        uint64_t end = first.dst_offset + first.size;
+        size_t next = i + 1;
+        while (next < count && queued_writes_[next].dst.get() == first.dst.get() && queued_writes_[next].dst_offset < end) {
+            end = std::max(end, queued_writes_[next].dst_offset + queued_writes_[next].size);
+            ++next;
+        }
+        if (next == i + 1) {
+            copies.push_back({first.dst.get(), {first.src_offset, first.dst_offset, first.size}});
+        } else {
+            overlapping.clear();
+            for (size_t k = i; k < next; ++k) {
+                overlapping.push_back(&queued_writes_[k]);
+            }
+            std::sort(overlapping.begin(), overlapping.end(),
+                      [](const QueuedBufferWrite* a, const QueuedBufferWrite* b) { return a->order < b->order; });
+            const size_t at = merged.size();
+            merged.resize(at + static_cast<size_t>(end - first.dst_offset));
+            for (const QueuedBufferWrite* write : overlapping) {
+                std::memcpy(merged.data() + at + (write->dst_offset - first.dst_offset),
+                            queued_write_bytes_.data() + write->src_offset, static_cast<size_t>(write->size));
+            }
+            copies.push_back({first.dst.get(), {queued_total + at, first.dst_offset, end - first.dst_offset}});
+        }
+        i = next;
+    }
+
+    const uint64_t total = queued_total + merged.size();
     if (!sync.write_staging || sync.write_staging_size < total) {
         GpuBufferDesc desc{};
         desc.size = std::max<uint64_t>(total * 2, uint64_t(64) * 1024);
@@ -3058,15 +3099,10 @@ void VkBackend::flush_buffer_writes()
         queued_write_bytes_.clear();
         return;
     }
-    std::memcpy(mapped, queued_write_bytes_.data(), static_cast<size_t>(total));
-
-    // Group by destination. Stable, so of two writes to one range the later
-    // stays last, and that is the one kept below.
-    std::stable_sort(queued_writes_.begin(), queued_writes_.end(),
-                     [](const QueuedBufferWrite& a, const QueuedBufferWrite& b) {
-                         if (a.dst.get() != b.dst.get()) return a.dst.get() < b.dst.get();
-                         return a.dst_offset < b.dst_offset;
-                     });
+    std::memcpy(mapped, queued_write_bytes_.data(), static_cast<size_t>(queued_total));
+    if (!merged.empty()) {
+        std::memcpy(static_cast<uint8_t*>(mapped) + queued_total, merged.data(), merged.size());
+    }
 
     // Earlier frames may still read these ranges. Execution dependency only:
     // the copies wait for those reads on the GPU, not on the CPU.
@@ -3077,18 +3113,12 @@ void VkBackend::flush_buffer_writes()
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
 
     ::velk::vector<VkBufferCopy> regions;
-    const size_t count = queued_writes_.size();
-    for (size_t i = 0; i < count;) {
-        auto* dst = interface_cast<IVkGpuBuffer>(queued_writes_[i].dst.get());
-        const auto* dst_key = queued_writes_[i].dst.get();
+    for (size_t i = 0; i < copies.size();) {
+        const auto* dst_key = copies[i].first;
+        auto* dst = interface_cast<IVkGpuBuffer>(const_cast<::velk::IGpuBuffer*>(dst_key));
         regions.clear();
-        for (; i < count && queued_writes_[i].dst.get() == dst_key; ++i) {
-            const auto& write = queued_writes_[i];
-            const bool superseded = i + 1 < count && queued_writes_[i + 1].dst.get() == dst_key
-                                    && queued_writes_[i + 1].dst_offset == write.dst_offset;
-            if (!superseded) {
-                regions.push_back({write.src_offset, write.dst_offset, write.size});
-            }
+        for (; i < copies.size() && copies[i].first == dst_key; ++i) {
+            regions.push_back(copies[i].second);
         }
         if (dst && dst->vk_buffer() != VK_NULL_HANDLE) {
             vkCmdCopyBuffer(sync.command_buffer, staging->vk_buffer(), dst->vk_buffer(),
