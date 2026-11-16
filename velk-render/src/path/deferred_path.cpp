@@ -102,7 +102,7 @@ namespace {
 // (`layout(push_constant) PC` in deferred_compute_prelude_src).
 VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t globals_base;     // FrameGlobals arena index, GLSL pc.globals_base
-    uint32_t surface_light_id; // lighting's light on the surface, for far instances
+    uint32_t spare0;
     float    cam_pos[4];
     uint32_t output_image_id;
     uint32_t albedo_tex_id;
@@ -847,10 +847,6 @@ void DeferredPath::build_passes(IViewEntry& entry,
         emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
-        if (!chosen) {
-            emit_unloaded_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
-                                   static_cast<int>(vs.gbuffer_size.y), graph);
-        }
     }
     if (test_diagnostics_enabled()) {
         emit_test_diagnostics_pass(vs, render_view, color_target, ctx, graph);
@@ -2182,16 +2178,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     uvec2 want{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
     if (!vs.deferred_output || !vs.light_cell_header.valid()) return;
 
-    if (!vs.surface_light || vs.output_size != want) {
-        TextureDesc td{};
-        td.width = w;
-        td.height = h;
-        td.format = PixelFormat::RGBA16F;
-        td.usage = TextureUsage::Storage;
-        vs.surface_light = graph.resources().create_render_texture(td);
+    if (vs.output_size != want) {
         vs.lighting_dirty = true;
     }
-    if (!vs.surface_light) return;
     vs.output_size = want;
 
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
@@ -2248,7 +2237,6 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.env_texture_id = render_view.env.texture_id;
     pc.cells_header = static_cast<uint32_t>(vs.light_cell_header.offset() / sizeof(uint32_t));
-    pc.surface_light_id = static_cast<uint32_t>(vs.surface_light->get_gpu_handle(GpuResourceKey::Default));
     // Zero means "no table", which the shader reads as diffuse-only area
     // lights rather than as a black highlight.
     const bool ltc_ready = ensure_ltc_tables(ctx, graph);
@@ -2284,151 +2272,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.surface_light));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
             }
             // Hold the lighting compute pipeline strong (cache is weak).
             rec.held.push_back(std::move(lighting_pipeline));
         });
-}
-
-void DeferredPath::emit_unloaded_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                      FrameContext& ctx, int w, int h, IRenderGraph& graph)
-{
-    if (!vs.deferred_output || !vs.gbuffer || !vs.surface_light || !render_view.batches) return;
-    vector<const void*> done;
-    vector<InstanceCullInfo> visuals;
-    for (const auto& batch : *render_view.batches) {
-        InstanceCullInfo info{};
-        if (batch && batch->get_instance_cull(info) && info.has_unloaded
-            && std::find(done.begin(), done.end(), info.key) == done.end()) {
-            done.push_back(info.key);
-            visuals.push_back(info);
-        }
-    }
-    if (visuals.empty()) return;
-
-    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
-    if (!arena) return;
-
-    // Per visual, frame-sized planes of coverage, then of coverage times each colour channel.
-    const uint64_t bytes = uint64_t(w) * uint64_t(h) * sizeof(uint32_t) * 4u;
-    vector<ViewState::UnloadedWords> kept;
-    for (const auto& info : visuals) {
-        ViewState::UnloadedWords entry;
-        entry.key = info.key;
-        for (auto& existing : vs.unloaded_words) {
-            if (existing.key == info.key && existing.words.size() == bytes) {
-                entry.words = std::move(existing.words);
-            }
-        }
-        if (!entry.words.valid()) {
-            entry.words = arena->alloc(bytes);
-        }
-        if (!entry.words.valid()) return;
-        kept.push_back(std::move(entry));
-    }
-    vs.unloaded_words = std::move(kept);
-
-    // The arena's buffer can only have changed above, and is named below.
-    IGpuBuffer* arena_buffer = arena->buffer();
-    if (!arena_buffer) return;
-
-    const auto pipeline_for = [&](string_view src, uint64_t key) {
-        auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
-        return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
-    };
-    auto composite = pipeline_for(instance_splat_composite_src, 0x5350'4c41'5400'0002ULL);
-    auto box_splat = pipeline_for(instance_box_splat_src, 0x5350'4c41'5400'0003ULL);
-    if (!composite || !box_splat) return;
-
-    IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
-    if (!src_tex) src_tex = vs.deferred_output_tex;
-    IGpuTexture* dst_tex = nullptr;
-    if (color_target) {
-        dst_tex = interface_cast<IGpuTexture>(color_target.get());
-        if (!dst_tex) dst_tex = graph.resources().find_texture(color_target.get());
-        if (!dst_tex) dst_tex = ctx.resources->find_texture(color_target.get());
-    }
-
-    const auto words_word = [&](size_t i) {
-        return static_cast<uint32_t>(vs.unloaded_words[i].words.offset() / sizeof(uint32_t));
-    };
-    // Re-recorded each frame: one dispatch per visual and a blit.
-    bool dirty = true;
-    emit_cached_view_pass(vs.unloaded_pass, dirty, "instance.unloaded", graph, [&](CachedPassRecording& rec) {
-        auto cmd = ctx.backend->create_command_buffer();
-        if (!cmd) return;
-        cmd->begin_recording();
-        cmd->push_label("Partitions without their instances");
-        cmd->record_global_barrier();
-        for (const auto& region : vs.unloaded_words) {
-            cmd->record_clear_buffer(arena_buffer, region.words.offset(), bytes);
-        }
-        cmd->record_global_barrier();
-        struct BoxPush
-        {
-            uint32_t globals_base, words_word, width, height, worldpos_id, normal_id, medium_id;
-        };
-        for (size_t i = 0; i < visuals.size(); ++i) {
-            const auto& info = visuals[i];
-            const BoxPush box{render_view.view_globals_base, words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
-                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)), info.medium_id};
-            DispatchCall box_dc{};
-            box_dc.pipeline = box_splat.get();
-            box_dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
-            box_dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
-            box_dc.groups_z = 1;
-            box_dc.root_constants_size = sizeof(box);
-            std::memcpy(box_dc.root_constants, &box, sizeof(box));
-            cmd->record_dispatch(box_dc);
-        }
-        cmd->record_global_barrier();
-        struct CompositePush
-        {
-            uint32_t words_word, width, height, output_id, surface_light_id, normal_id, worldpos_id;
-            uint32_t globals_base, lights_base, light_count;
-            float facing[kSurfaceDirectionCount];
-        };
-        static_assert(sizeof(CompositePush) <= kMaxRootConstantsSize);
-        for (size_t i = 0; i < visuals.size(); ++i) {
-            const auto& info = visuals[i];
-            CompositePush pc{words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                             static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
-                             static_cast<uint32_t>(vs.surface_light->get_gpu_handle(GpuResourceKey::Default)),
-                             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)),
-                             vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
-                             render_view.view_globals_base, render_view.lights_base,
-                             static_cast<uint32_t>(render_view.lights.size()),
-                             {}};
-            std::memcpy(pc.facing, info.far_facing, sizeof(pc.facing));
-            DispatchCall dc{};
-            dc.pipeline = composite.get();
-            dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
-            dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
-            dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
-            cmd->record_dispatch(dc);
-            cmd->record_global_barrier();
-        }
-        if (src_tex && dst_tex) {
-            cmd->record_blit_to_texture(*src_tex, *dst_tex, render_view.viewport);
-        }
-        cmd->pop_label();
-        cmd->end_recording();
-        rec.cmd = std::move(cmd);
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.surface_light));
-        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
-        if (color_target) {
-            rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
-        }
-        rec.held.push_back(std::move(composite));
-        rec.held.push_back(std::move(box_splat));
-    });
 }
 
 void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,

@@ -85,7 +85,6 @@ public:
         uvec2 deferred_output_size{};
         /// The light on the surface, for far instances in front of it: indirect light in
         /// rgb, and in alpha the share of direct light that gets through. Same size.
-        IRenderTarget::Ptr surface_light;
         uvec2 output_size{};
         /// What the lighting pass blits to; a new one re-records it.
         IGpuTexture* last_output_dst = nullptr;
@@ -163,15 +162,6 @@ public:
         IRenderPass::Ptr depth_pyramid_pass;
         IRenderPass::Ptr depth_pyramid_compute_pass;  ///< Built again with compute raster's pixels.
         InstanceCullPass instance_cull;
-        /// Partitions without their instances, drawn as a medium. A region of the frame's size
-        /// per visual.
-        IRenderPass::Ptr unloaded_pass;
-        struct UnloadedWords
-        {
-            const void* key = nullptr;
-            ArenaRegion words;
-        };
-        vector<UnloadedWords> unloaded_words;
 
         /// Cached lighting (compute + blit) pass. Rebuilt only when `lighting_dirty` is set
         /// by `on_render_state_changed` (camera / batch / lights change), by gbuffer /
@@ -249,10 +239,6 @@ private:
                             int w, int h,
                             IRenderGraph& graph);
 
-    /// Adds partitions without their instances over deferred_output, as a medium, and blits it
-    /// again.
-    void emit_unloaded_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                            FrameContext& ctx, int w, int h, IRenderGraph& graph);
 
     /// Draws what GPU culling kept. @p second_phase draws what its second test added, over the first.
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph,

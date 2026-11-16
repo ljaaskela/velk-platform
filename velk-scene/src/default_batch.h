@@ -183,7 +183,6 @@ private:
     vector<ClusterDraw> cull_cluster_draws_;  ///< On the owner.
     uint32_t cull_chosen_word_ = 0;      ///< On the owner.
     uint32_t cull_chosen_capacity_ = 0;  ///< On the owner.
-    float cull_far_facing_[kSurfaceDirectionCount] = {};  ///< On the owner.
     /// Set when instance bytes change (finalize_storage / update_instance_at);
     /// the upload sweep re-uploads the region only when this is set.
     bool instances_dirty_ = true;

@@ -170,7 +170,6 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     table.resize(size_t(mesh_count) * kCullTableWords, 0u);
     cull_list_words_.clear();
     uint32_t next_list = table_word + mesh_count * kCullTableWords;
-    std::fill(std::begin(cull_far_facing_), std::end(cull_far_facing_), 0.f);
     for (uint32_t m = 0; m < mesh_count; ++m) {
         uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
         float sphere[4];
@@ -190,19 +189,9 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         if (!instance_source_) {
             continue;
         }
-        const uint32_t list_capacity = capacity;
         entry[kCullListWord] = next_list;
-        entry[kCullCapacityWord] = list_capacity;
-        next_list += list_capacity;
-
-        // Which way its instances' surface faces, for partitions without their instances.
-        float area = 0.f;
-        float albedo[3];
-        float facing[kSurfaceDirectionCount];
-        instance_source_->get_far_look(m, area, albedo, facing);
-        for (int d = 0; d < kSurfaceDirectionCount; ++d) {
-            cull_far_facing_[d] += facing[d] * static_cast<float>(capacity);
-        }
+        entry[kCullCapacityWord] = capacity;
+        next_list += capacity;
     }
 
     // Whether the material moves vertices, which compute raster does not: its clusters then
@@ -301,12 +290,6 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     }
     out.max_distance = instance_source_->get_draw_distance();
     out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
-    // Partitions without their instances are their trees' quads now, not a medium.
-    out.has_unloaded = false;
-    out.medium_id = instance_source_->get_medium_id();
-    for (int d = 0; d < kSurfaceDirectionCount; ++d) {
-        out.far_facing[d] = owner->cull_far_facing_[d];
-    }
     instance_source_->get_partition_cull(out.partition_table_word, out.partition_count);
     return true;
 }

@@ -1284,7 +1284,7 @@ layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint da
 // subsequent field by 8 bytes vs. what the CPU writes.
 layout(push_constant, scalar) uniform PC {
     uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
-    uint surface_light_id;     // 4         lighting's light on the surface, for far instances
+    uint spare0;               // 4
     vec4 cam_pos;              // 8         (CPU push starts here)
     uint output_image_id;      // 24
     uint albedo_tex_id;        // 28
@@ -1559,9 +1559,7 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 // Lights each pixel: each light's diffuse light and highlight, shadowed by what the light
 // cells hold; indirect light from the bounce cells, or the environment where they have
-// nothing; reflections; area lights in closed form; emission. Writes the finished image,
-// and for instance_splat_composite_src the light on the surface: indirect light in rgb, and
-// in alpha the share of direct light that gets past what is in the way.
+// nothing; reflections; area lights in closed form; emission. Writes the finished image.
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -1582,7 +1580,6 @@ void main()
         vec4 far_h = inv_vp * vec4(ndc, 0.0, 1.0);
         vec3 rd = normalize(far_h.xyz / far_h.w - near_h.xyz / near_h.w);
         imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(env_miss_color(rd), 1.0));
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.surface_light_id)], coord, vec4(0.0, 0.0, 0.0, 1.0));
         return;
     }
 
@@ -1595,7 +1592,6 @@ void main()
     float roughness = clamp(mat.g, 0.04, 1.0);
 
     vec3 color = albedo.rgb;
-    vec4 surface_light = vec4(0.0, 0.0, 0.0, 1.0);
     if (lighting_mode != 0u) {
         vec3 N = normalize(world_n);
         vec3 V = normalize(-world_pos);
@@ -1605,7 +1601,6 @@ void main()
 
         bool cells_here = velk_cells_begin(coord, world_pos, normal_and_error);
         vec3 direct = vec3(0.0);
-        vec3 unshadowed = vec3(0.0);
         vec3 highlights = vec3(0.0);
         vec3 area_irr = vec3(0.0);
         vec3 area_spec = vec3(0.0);
@@ -1667,7 +1662,6 @@ void main()
             vec3 F = fresnel_schlick(VdotH, F0);
             float through = cells_here ? velk_cells_light_through(i) : 1.0;
             direct += NdotL * radiance * through;
-            unshadowed += NdotL * radiance;
             highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
         }
 
@@ -1710,12 +1704,9 @@ void main()
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
-        float lit = dot(unshadowed, kLuma);
-        surface_light = vec4(indirect, lit > 1e-4 ? clamp(dot(direct, kLuma) / lit, 0.0, 1.0) : 1.0);
     }
 
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(color + emissive, albedo.a));
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.surface_light_id)], coord, surface_light);
 }
 )";
 

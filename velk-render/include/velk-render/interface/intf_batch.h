@@ -98,9 +98,6 @@ struct InstanceCullInfo
     bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     float max_displacement = 0.f; ///< How far a motion function can move an instance from where it rests.
-    bool has_unloaded = false;              ///< Whether partitions can be without their instances: see `instance_box_splat_src`.
-    uint32_t medium_id = 0;                 ///< What those partitions' BVH leaves are marked with.
-    float far_facing[kSurfaceDirectionCount] = {};  ///< Their instances' surface area by which way it faces.
     /// The visual's partitions, each with its kept cut: see `instance_partition_cull_src`.
     /// Without them, every slot is tested every frame.
     uint32_t partition_table_word = 0;
