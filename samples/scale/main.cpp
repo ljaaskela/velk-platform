@@ -1597,9 +1597,6 @@ int main(int argc, char* argv[])
             per_mesh[species].push_back(velk::InstanceTransform{{{c, 0.f, s, at.x}, {0.f, size, 0.f, at.y + 1.5f}, {-s, 0.f, c, at.z}}});
         }
         forest_visual = velk::trait::visual::create_instanced_mesh();
-        if (real_trees) {
-            forest_visual.set_far_form(false);
-        }
         if (wind) {
             // The whole tree leans the same way in the world, whatever its turn. The bound is
             // the largest tree's reach at its largest size, by the most the angle changes it.
@@ -1721,10 +1718,6 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
             forest_element.add_trait(forest_trs);
             forest_element.add_trait(forest_visual);
             scene.add(root, forest_element);
-
-            if (real_trees) {
-                forest_visual.set_far_form(false);
-            }
         } else {
             for (long i = 0; i < element_count; ++i) {
                 auto element = velk::create_element();

@@ -720,40 +720,30 @@ void SceneBvh::update_residency(InstanceGroup& group)
     }
 }
 
-void SceneBvh::alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity,
-                                   uint32_t list_capacity)
+void SceneBvh::alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity)
 {
     group.cull_table = {};
-    group.cull_list = {};
     group.cull_table_capacity = 0;
-    group.cull_list_capacity = 0;
     group.cull_next_entry = 0;
     group.cull_free_entries.clear();
-    group.cull_chunks = 0;
-    group.visual->set_partition_cull(0, 0, 0);
+    group.visual->set_partition_cull(0, 0);
 
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) {
         return;
     }
     group.cull_table = arena->alloc(uint64_t(table_capacity) * kCullEntryWords * sizeof(uint32_t));
-    group.cull_list = arena->alloc((uint64_t(list_capacity) * kCullChunkListWords + kCullChunkListHeaderWords) * sizeof(uint32_t));
-    if (!group.cull_table.valid() || !group.cull_list.valid()) {
+    if (!group.cull_table.valid()) {
         group.cull_table = {};
-        group.cull_list = {};
         return;
     }
     group.cull_table_capacity = table_capacity;
-    group.cull_list_capacity = list_capacity;
 
     vector<uint32_t> empty;
     empty.resize(size_t(table_capacity) * kCullEntryWords, 0u);
     arena->write_at(group.cull_table.offset(), empty.data(), empty.size() * sizeof(uint32_t));
-    const uint32_t header[kCullChunkListHeaderWords] = {0u, 1u, 1u, 0u};
-    arena->write_at(group.cull_list.offset(), header, sizeof(header));
 
-    group.visual->set_partition_cull(static_cast<uint32_t>(group.cull_table.offset() / sizeof(uint32_t)), table_capacity,
-                                     static_cast<uint32_t>(group.cull_list.offset() / sizeof(uint32_t)));
+    group.visual->set_partition_cull(static_cast<uint32_t>(group.cull_table.offset() / sizeof(uint32_t)), table_capacity);
 }
 
 void SceneBvh::write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh_table)
@@ -786,7 +776,6 @@ void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
     const uint32_t chunks = partition.resident
         ? static_cast<uint32_t>((partition.members.size() + kCullChunkSlots - 1u) / kCullChunkSlots)
         : 0u;
-    const uint32_t chunks_elsewhere = group.cull_chunks - partition.cull_chunks;
     partition.cull_chunks = 0;
     const size_t words = size_t(chunks) * kCullChunkSlots;
     partition.cull_members = {};
@@ -813,27 +802,15 @@ void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
         partition.quad_leaves = partition.quad_tree.valid() ? leaves : 0u;
     }
     partition.quad_tree_dirty = partition.quad_leaves != 0;
-    group.cull_chunks = chunks_elsewhere + partition.cull_chunks;
 
-    // Replaced lists and tables are fresh, so nothing has read them. The pass that reads
-    // them records again, since the visual reports new words.
-    bool grew = false;
-    uint32_t list_capacity = group.cull_list_capacity;
-    if (group.cull_chunks > list_capacity) {
-        list_capacity = group.cull_chunks + group.cull_chunks / 4u + 16u;
-        grew = true;
-    }
-    uint32_t table_capacity = group.cull_table_capacity;
-    if (partition.cull_entry == kUnplaced && group.cull_free_entries.empty() && group.cull_next_entry == table_capacity) {
-        table_capacity = table_capacity * 2u + 16u;
-        grew = true;
-    }
+    // A replaced table is fresh, so nothing has read it. The pass that reads it records again,
+    // since the visual reports a new word.
+    const bool grew = partition.cull_entry == kUnplaced && group.cull_free_entries.empty()
+                   && group.cull_next_entry == group.cull_table_capacity;
     if (grew) {
-        const uint32_t chunks_now = group.cull_chunks;
         const uint32_t next_entry = group.cull_next_entry;
         vector<uint32_t> free_entries = std::move(group.cull_free_entries);
-        alloc_instance_cull(group, ctx, table_capacity, list_capacity);
-        group.cull_chunks = chunks_now;
+        alloc_instance_cull(group, ctx, group.cull_table_capacity * 2u + 16u);
         group.cull_next_entry = next_entry;
         group.cull_free_entries = std::move(free_entries);
         if (!group.cull_table.valid()) {
@@ -864,7 +841,6 @@ void SceneBvh::release_partition_cull(Partition& partition, FrameContext& ctx)
     if (!arena || !group.cull_table.valid() || partition.cull_entry == kUnplaced) {
         return;
     }
-    group.cull_chunks -= partition.cull_chunks;
     partition.cull_chunks = 0;
     write_cull_entry(partition, *arena, false);
     group.cull_free_entries.push_back(partition.cull_entry);
@@ -1002,7 +978,7 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
     // Room for movers to leave their partitions and for a few new ones, before growing.
     const uint32_t table_capacity = slot_count / kPartitionRecords + slot_count / (kPartitionRecords * 8u) + 16u;
     const uint32_t resident_capacity = group.visual->get_instance_capacity();
-    alloc_instance_cull(group, ctx, table_capacity, resident_capacity / kCullChunkSlots + table_capacity);
+    alloc_instance_cull(group, ctx, table_capacity);
     write_quad_table(group, ctx);
 
     group.slot_partition.clear();

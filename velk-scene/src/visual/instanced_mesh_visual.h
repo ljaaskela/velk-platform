@@ -49,7 +49,7 @@ public:
     uint32_t get_instance_capacity() const override { return instance_capacity_; }
     bool has_residency_budget() const override
     {
-        return residency_bytes_ != 0 && far_form_ && motion_source_.empty();
+        return residency_bytes_ != 0 && motion_source_.empty();
     }
     bool assign_instance_index(uint32_t slot) override;
     void release_instance_index(uint32_t slot) override;
@@ -67,8 +67,6 @@ public:
     }
     void get_cull_sphere(uint32_t index, float out[4]) const override;
     float get_draw_distance() const override { return draw_distance_; }
-    void set_far_form(bool enabled) override;
-    bool get_far_form() const override { return far_form_; }
     void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const override;
     string_view get_motion_source() const override { return motion_source_; }
     float get_max_displacement() const override { return motion_source_.empty() ? 0.f : max_displacement_; }
@@ -85,17 +83,15 @@ public:
             flush_all_ = true;
         }
     }
-    void set_partition_cull(uint32_t table_word, uint32_t count, uint32_t list_word) override
+    void set_partition_cull(uint32_t table_word, uint32_t count) override
     {
         cull_table_word_ = table_word;
         cull_count_ = count;
-        cull_list_word_ = list_word;
     }
-    void get_partition_cull(uint32_t& table_word, uint32_t& count, uint32_t& list_word) const override
+    void get_partition_cull(uint32_t& table_word, uint32_t& count) const override
     {
         table_word = cull_table_word_;
         count = cull_count_;
-        list_word = cull_list_word_;
     }
 
 private:
@@ -134,12 +130,10 @@ private:
 
     uint32_t cull_table_word_ = 0;
     uint32_t cull_count_ = 0;
-    uint32_t cull_list_word_ = 0;
 
     ArenaRegion region_;
     mat4 flushed_world_{};
     float draw_distance_ = 0.f;
-    bool far_form_ = true;
 
     string motion_source_;
     float max_displacement_ = 0.f;

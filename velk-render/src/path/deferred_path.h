@@ -102,9 +102,7 @@ public:
         bool visibility_dirty = true;
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
-        /// What the visibility pass was recorded for: the Quads view, which draws the quad batch
-        /// alone, and the word of the view's quad list it draws.
-        bool quads_view = false;
+        /// The word of the view's quad list the visibility pass was recorded with.
         uint32_t quads_word = 0xFFFFFFFFu;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
@@ -165,14 +163,15 @@ public:
         IRenderPass::Ptr depth_pyramid_pass;
         IRenderPass::Ptr depth_pyramid_compute_pass;  ///< Built again with compute raster's pixels.
         InstanceCullPass instance_cull;
-        /// Instances too small to draw. A region of the frame's size per visual.
-        IRenderPass::Ptr far_instance_pass;
-        struct FarInstanceWords
+        /// Partitions without their instances, drawn as a medium. A region of the frame's size
+        /// per visual.
+        IRenderPass::Ptr unloaded_pass;
+        struct UnloadedWords
         {
             const void* key = nullptr;
             ArenaRegion words;
         };
-        vector<FarInstanceWords> far_instance_words;
+        vector<UnloadedWords> unloaded_words;
 
         /// Cached lighting (compute + blit) pass. Rebuilt only when `lighting_dirty` is set
         /// by `on_render_state_changed` (camera / batch / lights change), by gbuffer /
@@ -250,9 +249,10 @@ private:
                             int w, int h,
                             IRenderGraph& graph);
 
-    /// Adds instances too small to draw over deferred_output and blits it again.
-    void emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                FrameContext& ctx, int w, int h, IRenderGraph& graph);
+    /// Adds partitions without their instances over deferred_output, as a medium, and blits it
+    /// again.
+    void emit_unloaded_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                            FrameContext& ctx, int w, int h, IRenderGraph& graph);
 
     /// Draws what GPU culling kept. @p second_phase draws what its second test added, over the first.
     void emit_visibility_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph,

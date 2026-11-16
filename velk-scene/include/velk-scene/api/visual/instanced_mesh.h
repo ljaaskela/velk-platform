@@ -45,12 +45,6 @@ public:
         with<IInstancedMeshVisual>([&](auto& v) { v.remove_instance(slot); });
     }
 
-    /** @brief Sets whether instances too small on screen are averaged. See IInstancedMeshVisual::set_far_form. */
-    void set_far_form(bool enabled)
-    {
-        with<IInstancedMeshVisual>([&](auto& v) { v.set_far_form(enabled); });
-    }
-
     /** @brief Limits its instances' GPU memory. See IInstancedMeshVisual::set_residency_budget. */
     void set_residency_budget(uint64_t bytes)
     {

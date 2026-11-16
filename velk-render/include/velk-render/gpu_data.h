@@ -147,8 +147,9 @@ inline constexpr uint32_t kDrawFlagColor = 1u << 1;
 inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 
 /// A view's quad list, in the culling arena: the draw's indirect arguments (4 vertices, the
-/// instance count, 0, 0), then the draw count (1), then spare to this many words, then the word
-/// of each quad drawn.
+/// instance count, 0, 0), then the draw count (1), then the quad draw's record in the draw data
+/// (DrawDataHeader), which rays name, a spare word, the count of quads in the view's cuts in or
+/// out of view (for the culling log), then the word of each quad drawn.
 inline constexpr uint32_t kQuadListHeaderWords = 8;
 
 // ===== Scene-data GPU structs =====

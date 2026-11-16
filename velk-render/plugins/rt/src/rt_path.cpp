@@ -102,8 +102,8 @@ void RtPath::build_passes(IViewEntry& entry,
     }
 
     // What rays walk: the view's kept cut, as every path has it.
-    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, false,
-                            kCullNoSlot, false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph, kCullNoSlot,
+                            false, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
     // Rays name draws, whose records a path that draws would write. That also makes their
     // materials known, which the pipeline below is composed with.

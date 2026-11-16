@@ -636,6 +636,8 @@ vec3 triangle_size_color(uvec2 ids)
     if ((ids.x & VELK_IDS_TINY) != 0u) return vec3(1.0, 0.0, 1.0);
     if (pc.mode == 5u) return vec3(0.3);
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    // A quad's slot is its word, not an instance this view's instances hold.
+    if ((d.flags & VELK_DRAW_QUADS) != 0u) return vec3(0.25);
     uint triangle = velk_ids_triangle(d, ids);
     DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
     GlobalData g = velk_globals.data[d.globals_base];
@@ -797,6 +799,13 @@ layout(set = 1, binding = 3, std430) readonly buffer VelkInstanceWords { uint da
 uint velk_object_id(uint instance)
 {
     return velk_instance_words.data[instance * 32u + 31u];
+}
+
+// The object of instance `slot` of draw `d`, as a pixel names it: none for a quad, which stands
+// for many, so that it is lit from world cells.
+uint velk_slot_object_id(VelkDrawData d, uint slot)
+{
+    return (d.flags & VELK_DRAW_QUADS) != 0u ? 0xFFFFFFFFu : velk_object_id(d.instances_base + slot);
 }
 
 // Half of each side of a square area light facing `facing`, `half_size` across from its
@@ -1186,7 +1195,7 @@ void main()
     vec3 color = vec3(0.0);
     if (ids.x != 0u) {
         VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
-        uint object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
+        uint object = velk_slot_object_id(d, velk_ids_slot(d, ids));
 
         vec4 surface = texelFetch(velk_textures[nonuniformEXT(pc.surface_id)], coord, 0);
         vec3 rel = texelFetch(velk_textures[nonuniformEXT(pc.pos_id)], coord, 0).xyz;
@@ -3079,7 +3088,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     if (ids.x == 0u || dot(normal_and_error.xyz, normal_and_error.xyz) < 1e-6) return false;
     d = velk_draw_data.data[velk_ids_draw(ids)];
     position = velk_ids_part(d, ids);
-    object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
+    object = velk_slot_object_id(d, velk_ids_slot(d, ids));
 
     surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], coord, 0);
     world_pos = rel_pos;
@@ -4243,7 +4252,7 @@ bool velk_cells_begin(ivec2 pixel, vec3 rel_pos, vec4 normal_error)
     if (ids.x == 0u || dot(normal_error.xyz, normal_error.xyz) < 1e-6) return false;
     N = normalize(normal_error.xyz);
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
-    cells_object = velk_object_id(d.instances_base + velk_ids_slot(d, ids));
+    cells_object = velk_slot_object_id(d, velk_ids_slot(d, ids));
     vec4 surface = texelFetch(velk_textures[nonuniformEXT(CELLS_SURFACE)], pixel, 0);
     cells_surface = surface.xyz;
     cells_side = uint(surface.w + 0.5);
@@ -5469,7 +5478,8 @@ EvalContext velk_hit_context(RayHit hit, vec3 ray_dir, vec3 rel, vec3 normal, ou
     material = 0u;
     if (hit.draw != 0xFFFFFFFFu && hit.instance != 0xFFFFFFFFu) {
         VelkDrawData d = velk_draw_data.data[hit.draw];
-        ElementInstance inst = velk_instances.data[hit.instance];
+        // A quad's hit names the quad's word, as its pixel does.
+        ElementInstance inst = (d.flags & VELK_DRAW_QUADS) != 0u ? velk_quad_instance(hit.instance) : velk_instances.data[hit.instance];
         material = d.material_id;
         if (hit.corners.x == VELK_NO_CORNERS) {
             ctx.material_base = d.material_words;

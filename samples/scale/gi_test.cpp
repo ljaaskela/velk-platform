@@ -285,9 +285,6 @@ int run_gi_test(const char* test, long frames)
             }
             auto visual = velk::trait::visual::create_instanced_mesh();
             visual.set_mesh(mesh);
-            if (is("dense_ref")) {
-                visual.set_far_form(false);
-            }
             visual.add_instances({transforms.data(), transforms.size()});
             auto element = velk::create_element();
             element.add_trait(visual);

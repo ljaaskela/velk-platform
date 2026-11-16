@@ -157,7 +157,8 @@ Quad leaf(mat4 world, uint mesh_word)
 }
 
 // One quad with both their areas: centre and colour weighted by area, facing the way their
-// surfaces face together, shaped as the larger one. Its sphere holds both of theirs.
+// surfaces face together, shaped as the larger one but with its longer side at least either
+// one's. Its sphere holds both of theirs. So a node's size on screen never shrinks going up.
 Quad merge(Quad a, Quad b)
 {
     if (a.radius < 0.0) return b;
@@ -188,8 +189,21 @@ Quad merge(Quad a, Quad b)
     float lv = length(big.v);
     float ratio = lv > 0.0 ? lu / lv : 1.0;
     // |u| |v| is then the two's quarters together.
-    q.u = along * sqrt(quarter * ratio);
-    q.v = cross(n, along) * sqrt(quarter / max(ratio, 1e-6));
+    float hu = sqrt(quarter * ratio);
+    float hv = sqrt(quarter / max(ratio, 1e-6));
+    // Stretched along its longer side where a child's is longer, the other side shortened to keep the area.
+    float longest = max(max(length(a.u), length(a.v)), max(length(b.u), length(b.v)));
+    if (max(hu, hv) < longest) {
+        if (hu >= hv) {
+            hu = longest;
+            hv = quarter / longest;
+        } else {
+            hv = longest;
+            hu = quarter / longest;
+        }
+    }
+    q.u = along * hu;
+    q.v = cross(n, along) * hv;
     q.radius = max(max(length(a.c - q.c) + a.radius, length(b.c - q.c) + b.radius), length(q.u) + length(q.v));
     return q;
 }

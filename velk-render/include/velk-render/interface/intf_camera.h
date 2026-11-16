@@ -40,7 +40,7 @@ enum class DebugView : uint8_t
     RayTree,
     /// Likewise for the tree rays walk over the partitions: 0 for one partition each.
     RayTop,
-    /// The partitions' quads, each a quad per chunk of their members, in its colour, and
+    /// The quads the cut chose, each standing for the members under it, in its colour, and
     /// whatever else is drawn grey.
     Quads,
 };

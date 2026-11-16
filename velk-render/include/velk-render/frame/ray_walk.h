@@ -167,6 +167,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint nodes = 0u;
     uint instances_base = 0u;
     uint items = VELK_RAY_NONE;
+    uint quads = VELK_RAY_NONE;  // the view's quad list (kQuadListHeaderWords), for a quad record's draw
     // Its records left in the leaf being walked.
     uint record_at = 0u;
     uint records_left = 0u;
@@ -199,6 +200,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     vec2 best_weights = vec2(0.0);
     vec2 best_uv = vec2(0.0);
     vec3 best_normal = vec3(0.0);  // where nothing better is known: in the shape's or mesh's space
+    bool best_quad = false;        // best_instance is a quad's word, not an instance
 
     while (true) {
         bool tested = false;
@@ -261,6 +263,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 best_corners = corners;
                 best_weights = vec2(u, v);
                 best_normal = cross(e1, e2);
+                best_quad = false;
             }
 )"
                                                     R"(
@@ -298,6 +301,41 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             uint entry = velk_culling.data[r];
             uint cluster = velk_culling.data[r + 1u];
             uint named = velk_culling.data[r + 2u];
+            if (entry == VELK_CUT_QUAD) {
+                // A quad: its plane, then where on it along its two sides, 0 to 1 within it.
+                vec3 c = velk_ray_vec3(cluster) - cam;
+                vec3 u = velk_ray_vec3(cluster + 3u);
+                vec3 v = velk_ray_vec3(cluster + 6u);
+                vec3 n = cross(u, v);
+                float facing = dot(ray.dir, n);
+                if (abs(facing) <= 1e-12 * dot(n, n)) continue;
+                float tt = dot(c - ray.origin, n) / facing;
+                if (tt <= 0.0) continue;
+                vec3 from_corner = ray.origin + ray.dir * tt - (c - u - v);
+                float a = dot(from_corner, u) / (2.0 * dot(u, u));
+                float b = dot(from_corner, v) / (2.0 * dot(v, v));
+                if (a < 0.0 || a > 1.0 || b < 0.0 || b > 1.0) continue;
+                if (tt < best_t * 0.99999) {
+                    if (!closest) return 0.0;
+                    best_t = tt;
+                    best_key = 0u;
+                    best_draw = quads != VELK_RAY_NONE ? velk_culling.data[quads + 5u] : VELK_RAY_NONE;
+                    best_instance = cluster;
+                    best_cluster = VELK_NO_CLUSTER;
+                    // The unit quad is a strip: corners 0 (0, 0), 1 (1, 0), 2 (0, 1) and 3 (1, 1),
+                    // its triangles 0, 1, 2 and 1, 2, 3.
+                    if (a + b <= 1.0) {
+                        best_corners = uvec3(0u, 1u, 2u);
+                        best_weights = vec2(a, b);
+                    } else {
+                        best_corners = uvec3(1u, 2u, 3u);
+                        best_weights = vec2(1.0 - a, a + b - 1.0);
+                    }
+                    best_normal = vec3(0.0, 0.0, 1.0);
+                    best_quad = true;
+                }
+                continue;
+            }
             uint instance = instances_base + named;
             uint draw = VELK_RAY_NONE;
             uint kind = 255u;
@@ -364,6 +402,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                         best_corners = uvec3(VELK_NO_CORNERS);
                         best_uv = h.uv;
                         best_normal = h.normal;
+                        best_quad = false;
                     }
                 }
             }
@@ -406,6 +445,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 nodes = velk_culling.data[cut + 26u + parity] + velk_culling.data[state + 10u] * 16u;
                 instances_base = velk_culling.data[cut_entry + 1u];
                 items = velk_culling.data[cut_entry + 2u];
+                quads = velk_culling.data[cut_entry + 6u];
                 if (velk_culling.data[cut_entry + 5u] != 0u) velk_ray_met_motion = true;
                 level = kPartition;
                 partition_scope = sp;
@@ -434,7 +474,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.cluster = best_cluster;
     hit.corners = best_corners;
     hit.weights = best_weights;
-    ElementInstance inst = velk_instances.data[best_instance];
+    ElementInstance inst = best_quad ? velk_quad_instance(best_instance) : velk_instances.data[best_instance];
     hit.object = inst.params.w;
     mat3 to_world = mat3(inst.world_matrix);
     mat3 to_local = inverse(to_world);

@@ -189,6 +189,12 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
                                &draw_base, sizeof(draw_base));
         }
     }
+    // Likewise the quad draw, beside its list (kQuadListHeaderWords), for rays that hit a quad.
+    if (batch.draws_quads()) {
+        if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
+            culling->update_at(uint64_t(quads_word + 5u) * sizeof(uint32_t), &draw_base, sizeof(draw_base));
+        }
+    }
     return true;
 }
 

@@ -52,10 +52,8 @@ constexpr uint32_t kCullTableWords = 12;
 constexpr uint32_t kCullCountWord = 4;
 constexpr uint32_t kCullListWord = 5;
 constexpr uint32_t kCullCapacityWord = 6;
-constexpr uint32_t kCullAreaWord = 7;
 constexpr uint32_t kCullFirstEntryWord = 8;
 constexpr uint32_t kCullEntryCountWord = 9;
-constexpr uint32_t kCullFarAlbedoWord = 10;  ///< The far form's colour, as unorm RGB.
 
 /// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
 constexpr uint32_t kClusterEntryListWord = 0;
@@ -174,8 +172,6 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     table.resize(size_t(mesh_count) * kCullTableWords, 0u);
     cull_list_words_.clear();
     uint32_t next_list = table_word + mesh_count * kCullTableWords;
-    float far_weight = 0.f;
-    float far_sum[3] = {0.f, 0.f, 0.f};
     std::fill(std::begin(cull_far_facing_), std::end(cull_far_facing_), 0.f);
     for (uint32_t m = 0; m < mesh_count; ++m) {
         uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
@@ -201,26 +197,14 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kCullCapacityWord] = list_capacity;
         next_list += list_capacity;
 
+        // Which way its instances' surface faces, for partitions without their instances.
         float area = 0.f;
         float albedo[3];
         float facing[kSurfaceDirectionCount];
         instance_source_->get_far_look(m, area, albedo, facing);
-        std::memcpy(entry + kCullAreaWord, &area, sizeof(area));
-        for (int k = 0; k < 3; ++k) {
-            const float unit = std::min(std::max(albedo[k], 0.f), 1.f);
-            entry[kCullFarAlbedoWord] |= static_cast<uint32_t>(unit * 255.f + 0.5f) << (k * 8);
-        }
-        const float weight = area * static_cast<float>(capacity);
-        far_weight += weight;
-        for (int k = 0; k < 3; ++k) {
-            far_sum[k] += albedo[k] * weight;
-        }
         for (int d = 0; d < kSurfaceDirectionCount; ++d) {
             cull_far_facing_[d] += facing[d] * static_cast<float>(capacity);
         }
-    }
-    for (int k = 0; k < 3; ++k) {
-        cull_far_albedo_[k] = far_weight > 0.f ? far_sum[k] / far_weight : 1.f;
     }
 
     // Whether the material moves vertices, which compute raster does not: its clusters then
@@ -319,16 +303,12 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     }
     out.max_distance = instance_source_->get_draw_distance();
     out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
-    out.far_form = instance_source_->get_far_form();
     out.has_unloaded = instance_source_->has_residency_budget();
     out.medium_id = instance_source_->get_medium_id();
-    for (int k = 0; k < 3; ++k) {
-        out.far_albedo[k] = owner->cull_far_albedo_[k];
-    }
     for (int d = 0; d < kSurfaceDirectionCount; ++d) {
         out.far_facing[d] = owner->cull_far_facing_[d];
     }
-    instance_source_->get_partition_cull(out.partition_table_word, out.partition_count, out.chunk_list_word);
+    instance_source_->get_partition_cull(out.partition_table_word, out.partition_count);
     return true;
 }
 

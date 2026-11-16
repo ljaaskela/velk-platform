@@ -305,16 +305,6 @@ void InstancedMeshVisual::set_draw_distance(float distance)
     invoke_visual_changed();
 }
 
-void InstancedMeshVisual::set_far_form(bool enabled)
-{
-    far_form_ = enabled;
-    reset_instance_indices();
-    flush_all_ = true;
-    // The BVH holds what wide rays use, and it comes from a new cut.
-    all_changed_ = true;
-    invoke_visual_changed();
-}
-
 void InstancedMeshVisual::get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const
 {
     area = 0.f;
@@ -323,7 +313,7 @@ void InstancedMeshVisual::get_far_look(uint32_t index, float& area, float albedo
         std::fill(direction_area, direction_area + kSurfaceDirectionCount, 0.f);
     }
     auto mesh = get_mesh(index);
-    if (!mesh || !far_form_) {
+    if (!mesh) {
         return;
     }
     float total = 0.f;

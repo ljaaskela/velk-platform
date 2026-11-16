@@ -807,7 +807,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         : kCullNoSlot;
     vs.instance_cull.tiny_capacity = vs.tiny_capacity;
     vs.instance_cull.tiny_pixels = tiny_pixels;
-    emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph, !chosen,
+    emit_instance_cull_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot,
                             chosen, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
@@ -815,11 +815,9 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
-    // The Quads view draws the partitions' quads alone; every other view draws no quads.
-    const bool quads_view = camera_state && camera_state->debug_view == DebugView::Quads;
+    // The quad draw names the view's quad list, which culling makes again when batches change.
     const uint32_t quads_word = instance_quad_word(vs.instance_cull);
-    if (quads_view != vs.quads_view || quads_word != vs.quads_word) {
-        vs.quads_view = quads_view;
+    if (quads_word != vs.quads_word) {
         vs.quads_word = quads_word;
         vs.visibility_dirty = true;
     }
@@ -829,9 +827,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         emit_instance_retest_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph);
         emit_visibility_pass(vs, render_view, ctx, graph, true);
     }
-    if (!quads_view) {
-        emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
-    }
+    emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
     // Built again with what compute raster drew, for the next frame's culling. The retest
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
@@ -852,7 +848,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
         if (!chosen) {
-            emit_far_instance_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
+            emit_unloaded_pass(vs, render_view, color_target, ctx, static_cast<int>(vs.gbuffer_size.x),
                                    static_cast<int>(vs.gbuffer_size.y), graph);
         }
     }
@@ -910,7 +906,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         second_phase ? "deferred.visibility2" : "deferred.visibility", graph, [&](CachedPassRecording& rec) {
             const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
-                if (b.pipeline_options().blend_mode == BlendMode::Alpha || b.draws_quads() != vs.quads_view) {
+                if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
                     return nullptr;
                 }
                 auto p = resolve_or_compile_visibility(*ctx.render_ctx, b);
@@ -924,7 +920,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_stream_buffers,
                             render_view.view_globals_base, resolve,
                             render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase,
-                            vs.quads_view ? vs.quads_word : kCullNoSlot);
+                            vs.quads_word);
 
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;
@@ -2297,15 +2293,15 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
         });
 }
 
-void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                          FrameContext& ctx, int w, int h, IRenderGraph& graph)
+void DeferredPath::emit_unloaded_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
+                                      FrameContext& ctx, int w, int h, IRenderGraph& graph)
 {
     if (!vs.deferred_output || !vs.gbuffer || !vs.surface_light || !render_view.batches) return;
     vector<const void*> done;
     vector<InstanceCullInfo> visuals;
     for (const auto& batch : *render_view.batches) {
         InstanceCullInfo info{};
-        if (batch && batch->get_instance_cull(info) && info.far_form
+        if (batch && batch->get_instance_cull(info) && info.has_unloaded
             && std::find(done.begin(), done.end(), info.key) == done.end()) {
             done.push_back(info.key);
             visuals.push_back(info);
@@ -2318,11 +2314,11 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
 
     // Per visual, frame-sized planes of coverage, then of coverage times each colour channel.
     const uint64_t bytes = uint64_t(w) * uint64_t(h) * sizeof(uint32_t) * 4u;
-    vector<ViewState::FarInstanceWords> kept;
+    vector<ViewState::UnloadedWords> kept;
     for (const auto& info : visuals) {
-        ViewState::FarInstanceWords entry;
+        ViewState::UnloadedWords entry;
         entry.key = info.key;
-        for (auto& existing : vs.far_instance_words) {
+        for (auto& existing : vs.unloaded_words) {
             if (existing.key == info.key && existing.words.size() == bytes) {
                 entry.words = std::move(existing.words);
             }
@@ -2333,7 +2329,7 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         if (!entry.words.valid()) return;
         kept.push_back(std::move(entry));
     }
-    vs.far_instance_words = std::move(kept);
+    vs.unloaded_words = std::move(kept);
 
     // The arena's buffer can only have changed above, and is named below.
     IGpuBuffer* arena_buffer = arena->buffer();
@@ -2343,10 +2339,9 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
         return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
     };
-    auto splat = pipeline_for(instance_splat_src, 0x5350'4c41'5400'0001ULL);
     auto composite = pipeline_for(instance_splat_composite_src, 0x5350'4c41'5400'0002ULL);
     auto box_splat = pipeline_for(instance_box_splat_src, 0x5350'4c41'5400'0003ULL);
-    if (!splat || !composite || !box_splat) return;
+    if (!composite || !box_splat) return;
 
     IGpuTexture* src_tex = graph.resources().find_texture(vs.deferred_output.get());
     if (!src_tex) src_tex = vs.deferred_output_tex;
@@ -2358,64 +2353,37 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
     }
 
     const auto words_word = [&](size_t i) {
-        return static_cast<uint32_t>(vs.far_instance_words[i].words.offset() / sizeof(uint32_t));
+        return static_cast<uint32_t>(vs.unloaded_words[i].words.offset() / sizeof(uint32_t));
     };
     // Re-recorded each frame: one dispatch per visual and a blit.
     bool dirty = true;
-    emit_cached_view_pass(vs.far_instance_pass, dirty, "instance.splat", graph, [&](CachedPassRecording& rec) {
+    emit_cached_view_pass(vs.unloaded_pass, dirty, "instance.unloaded", graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         cmd->begin_recording();
-        cmd->push_label("Far instances");
+        cmd->push_label("Partitions without their instances");
         cmd->record_global_barrier();
-        for (const auto& region : vs.far_instance_words) {
+        for (const auto& region : vs.unloaded_words) {
             cmd->record_clear_buffer(arena_buffer, region.words.offset(), bytes);
         }
         cmd->record_global_barrier();
-        struct SplatPush
+        struct BoxPush
         {
-            uint32_t instances_base, slot_count, table_word, globals_base, chunks_word, words_word;
-            uint32_t width, height, worldpos_id, normal_id;
+            uint32_t globals_base, words_word, width, height, worldpos_id, normal_id, medium_id;
         };
         for (size_t i = 0; i < visuals.size(); ++i) {
             const auto& info = visuals[i];
-            const bool partitioned = info.partition_count != 0;
-            const SplatPush pc{info.instances_base, info.slot_count, info.table_word, render_view.view_globals_base,
-                               partitioned ? info.chunk_list_word + kCullChunkListHeaderWords : kCullNoSlot,
-                               words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                               vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
-                               vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal))};
-            DispatchCall dc{};
-            dc.pipeline = splat.get();
-            dc.groups_x = (info.slot_count + 63u) / 64u;
-            dc.groups_y = 1;
-            dc.groups_z = 1;
-            dc.root_constants_size = sizeof(pc);
-            std::memcpy(dc.root_constants, &pc, sizeof(pc));
-            // The cull pass left the count of partitions' chunks in view.
-            if (partitioned) {
-                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(info.chunk_list_word) * sizeof(uint32_t));
-            } else {
-                cmd->record_dispatch(dc);
-            }
-
-            if (info.has_unloaded) {
-                struct BoxPush
-                {
-                    uint32_t globals_base, words_word, width, height, worldpos_id, normal_id, medium_id;
-                };
-                const BoxPush box{render_view.view_globals_base, words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                                  vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
-                                  vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)), info.medium_id};
-                DispatchCall box_dc{};
-                box_dc.pipeline = box_splat.get();
-                box_dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
-                box_dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
-                box_dc.groups_z = 1;
-                box_dc.root_constants_size = sizeof(box);
-                std::memcpy(box_dc.root_constants, &box, sizeof(box));
-                cmd->record_dispatch(box_dc);
-            }
+            const BoxPush box{render_view.view_globals_base, words_word(i), static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos)),
+                              vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal)), info.medium_id};
+            DispatchCall box_dc{};
+            box_dc.pipeline = box_splat.get();
+            box_dc.groups_x = (static_cast<uint32_t>(w) + 7u) / 8u;
+            box_dc.groups_y = (static_cast<uint32_t>(h) + 7u) / 8u;
+            box_dc.groups_z = 1;
+            box_dc.root_constants_size = sizeof(box);
+            std::memcpy(box_dc.root_constants, &box, sizeof(box));
+            cmd->record_dispatch(box_dc);
         }
         cmd->record_global_barrier();
         struct CompositePush
@@ -2458,7 +2426,6 @@ void DeferredPath::emit_far_instance_pass(ViewState& vs, const RenderView& rende
         if (color_target) {
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));
         }
-        rec.held.push_back(std::move(splat));
         rec.held.push_back(std::move(composite));
         rec.held.push_back(std::move(box_splat));
     });

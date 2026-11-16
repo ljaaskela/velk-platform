@@ -151,9 +151,6 @@ private:
         uint32_t cull_table_capacity = 0;
         uint32_t cull_next_entry = 0;
         vector<uint32_t> cull_free_entries;
-        ArenaRegion cull_list;
-        uint32_t cull_list_capacity = 0;
-        uint32_t cull_chunks = 0;  ///< In all its partitions, which the list has to hold.
 
         /// Holds instances that moved recently. It rebuilds each frame it changes, and
         /// joins the root rather than the top tree, so a mover costs only itself.
@@ -233,7 +230,7 @@ private:
     void free_instance_partitions(InstanceGroup& group);
     void update_residency(InstanceGroup& group);
     /// Makes the tables culling reads for @p group, empty, and tells its visual.
-    void alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity, uint32_t list_capacity);
+    void alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity);
     /// Brings culling's view of @p partition up to date with its members and cull_bounds.
     void write_partition_cull(Partition& partition, FrameContext& ctx);
     /// Takes @p partition out of what culling reads. For one about to be freed.
