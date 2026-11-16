@@ -103,6 +103,10 @@ R"(
 #define VELK_PLAIN_ITEM_WORDS 6u
 // Words per cluster draw entry: kClusterEntryWords.
 #define VELK_CLUSTER_ENTRY_WORDS 16u
+// Words per partition in a partition table: kCullEntryWords.
+#define VELK_CULL_ENTRY_WORDS 10u
+// Words per node of a partition's quad tree: kQuadNodeWords.
+#define VELK_QUAD_NODE_WORDS 11u
 // Words per cluster in a level of detail table: kLodClusterWords.
 #define VELK_LOD_CLUSTER_WORDS 28u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
@@ -269,8 +273,8 @@ VelkVertex3D velk_unpack_vertex3d(uint base)
 //
 // velk_uv1 fetches the current vertex's UV1, a vec2 stream parallel to the
 // main VBO. When a primitive has no UV1, `uv1_base` points at a context-owned
-// single-vertex fallback (vec2(0,0)) and `uv1_enabled` is 0, so this reads
-// vertex 0. Branchless via index multiplication, so there are no variants.
+// single-vertex fallback (vec2(0,0)) and the draw's flags lack VELK_DRAW_UV1, so
+// this reads vertex 0.
 //
 // A draw by cluster reads the vertices and second uvs of the cluster this instance of the
 // command draws, which its indices count from: see velk_cluster_vertex_word.
@@ -353,7 +357,7 @@ struct VelkDrawData {
     uint visible_base;
     uint vbo_base;
     uint uv1_base;
-    uint uv1_enabled;
+    uint flags;
     uint material_base;
     uint lod_error_base;
     uint triangle_bits;
@@ -362,8 +366,13 @@ struct VelkDrawData {
     uint index_base;
     uint cluster_base;
     uint color_base;
-    uint color_enabled;
+    uint spare;
 };
+
+// VelkDrawData::flags (kDrawFlag in gpu_data.h).
+#define VELK_DRAW_UV1 1u
+#define VELK_DRAW_COLOR 2u
+#define VELK_DRAW_QUADS 4u
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
 layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[]; } velk_culling;
@@ -391,7 +400,8 @@ uint velk_cluster_vertex_word(VelkDrawData d, uint cluster)
 uint velk_cluster_uv1_word(VelkDrawData d, uint cluster, uint index)
 {
     uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 20u];
-    return own == VELK_NO_CLUSTER ? d.uv1_base + d.uv1_enabled * index * 2u : own + index * 2u;
+    uint each = (d.flags & VELK_DRAW_UV1) != 0u ? index * 2u : 0u;
+    return own == VELK_NO_CLUSTER ? d.uv1_base + each : own + index * 2u;
 }
 
 vec2 velk_read_uv1(uint word)
@@ -404,7 +414,8 @@ vec2 velk_read_uv1(uint word)
 uint velk_cluster_color_word(VelkDrawData d, uint cluster, uint index)
 {
     uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 24u];
-    return own == VELK_NO_CLUSTER ? d.color_base + d.color_enabled * index : own + index;
+    uint each = (d.flags & VELK_DRAW_COLOR) != 0u ? index : 0u;
+    return own == VELK_NO_CLUSTER ? d.color_base + each : own + index;
 }
 
 vec4 velk_read_color(uint word)

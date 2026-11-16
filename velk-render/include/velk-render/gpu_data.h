@@ -120,8 +120,8 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t texture_id;        ///< Bindless texture index (0 = none).
     uint32_t visible_base;      ///< Word base of the list of visible instances in the set = 1 culling arena, or kNoVisibleList when the draw's instances are all drawn in order.
     uint32_t vbo_base;          ///< Word base of the draw's vertex stream in the set = 1 mesh-word arena.
-    uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback when @c uv1_enabled is 0.
-    uint32_t uv1_enabled;       ///< 1 = per-vertex UV1 stream at @c uv1_base; 0 = fallback, vertex shader reads vertex 0 only. Used as a branchless index multiplier in the vertex shader.
+    uint32_t uv1_base;          ///< Word base of the draw's TEXCOORD_1 stream, or of a context-owned single-vertex fallback without kDrawFlagUv1.
+    uint32_t flags;             ///< kDrawFlag bits.
     uint32_t material_base;     ///< Element base into the set = 1 material arena; fragment shader reads velk_materials.data[material_base].
     uint32_t lod_error_base;    ///< Word base in the culling arena of how far each draw instance's surface may be from the full mesh, in world units, or kNoVisibleList when it is the full mesh.
     uint32_t triangle_bits;     ///< Low bits of a visibility ID's second word that hold the triangle. The rest hold the draw instance.
@@ -129,11 +129,27 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t material_words;    ///< Word base of the material's record, as compute reads it.
     uint32_t index_base;        ///< Word base of the draw's indices in the mesh-word arena, or kNoVisibleList when it has none.
     uint32_t cluster_base;      ///< Word base in the culling arena of each list position's cluster, as the word there of its record in its hierarchy's table, or kNoVisibleList when not drawn by cluster.
-    uint32_t color_base;        ///< Word base of the draw's colour stream (IMeshPrimitive::get_color_buffer), or of a context-owned white word when @c color_enabled is 0.
-    uint32_t color_enabled;     ///< 1 = a colour per vertex at @c color_base; 0 = the white word for every vertex.
+    uint32_t color_base;        ///< Word base of the draw's colour stream (IMeshPrimitive::get_color_buffer), or of a context-owned white word without kDrawFlagColor.
+    uint32_t spare;
 };
 
 static_assert(sizeof(DrawDataHeader) == 64, "DrawDataHeader must be 64 bytes for std430 alignment");
+
+/// DrawDataHeader::flags: the draw has a second uv per vertex at `uv1_base`; without, every
+/// vertex reads the one there. Mirrors VELK_DRAW_UV1.
+inline constexpr uint32_t kDrawFlagUv1 = 1u << 0;
+/// DrawDataHeader::flags: the draw has a colour per vertex at `color_base`; without, every vertex
+/// reads the white word there. Mirrors VELK_DRAW_COLOR.
+inline constexpr uint32_t kDrawFlagColor = 1u << 1;
+/// DrawDataHeader::flags: the draw is of a view's quads: its instances are quads (kQuadNodeWords),
+/// its visible list the words of the quads drawn, and each an instance of the unit quad. Mirrors
+/// VELK_DRAW_QUADS.
+inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
+
+/// A view's quad list, in the culling arena: the draw's indirect arguments (4 vertices, the
+/// instance count, 0, 0), then the draw count (1), then spare to this many words, then the word
+/// of each quad drawn.
+inline constexpr uint32_t kQuadListHeaderWords = 8;
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.

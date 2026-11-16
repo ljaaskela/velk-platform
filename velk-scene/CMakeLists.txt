@@ -31,6 +31,8 @@ add_library(velk_scene SHARED
     # Scene-side rendering plumbing
     src/scene_bvh.h
     src/scene_bvh.cpp
+    src/aggregate.h
+    src/aggregate.cpp
     src/scene_collector.h
     src/scene_collector.cpp
     src/batch_builder.h

@@ -20,7 +20,7 @@ VELK_VARYINGS_OUT
 void main()
 {
     GlobalData globals = velk_global_data(root);
-    VelkVaryings s = VELK_VERTEX_FN(velk_vertex3d(root), velk_instance(root), globals);
+    VelkVaryings s = VELK_VERTEX_FN(velk_vertex3d(root), velk_draw_instance(velk_draw(root), velk_instance_slot(root)), globals);
     gl_Position = globals.view_projection * vec4(s.rel_pos, 1.0);
 
     v_color        = s.color * velk_vertex_color(root);

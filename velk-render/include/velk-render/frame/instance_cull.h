@@ -28,8 +28,10 @@ namespace velk {
 /// kCullNoSlot.
 inline constexpr uint32_t kCullChunkSlots = 64;
 inline constexpr uint32_t kCullNoSlot = 0xFFFFFFFFu;
-/// Words per partition in a partition table. See instance_partition_cull_src.
-inline constexpr uint32_t kCullEntryWords = 8;
+/// Words per partition in a partition table: its world bounds (min, max), the word of its first
+/// chunk, its chunk count, the word of its quad tree (kQuadNodeWords, kCullNoSlot for none) and
+/// the tree's leaves. See instance_partition_cull_src. Mirrors VELK_CULL_ENTRY_WORDS.
+inline constexpr uint32_t kCullEntryWords = 10;
 /// Words before the chunks in a chunk list. See instance_partition_cull_src.
 inline constexpr uint32_t kCullChunkListHeaderWords = 4;
 /// Words per chunk in a chunk list: the word of its first slot, and the partition it is from.
@@ -93,6 +95,27 @@ inline constexpr uint32_t kCutPartitionWords = 12;
 inline constexpr uint32_t kCutRecordWords = 4;
 inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
+
+/// A partition's quad tree (VELK_QUAD_NODE_WORDS): its members as quads, and every node above them a quad standing for
+/// the members under it, so that where they are small on screen a few quads take their place.
+/// A complete binary tree over the partition's members in their order, by index with no links:
+/// node 0 is the root, node i's children are 2i + 1 and 2i + 2, and the leaves are the last
+/// `leaves` nodes, leaf k the member at position k of the partition's list (a power of two of
+/// them, the rest empty). A node is kQuadNodeWords: its centre (3 floats), its two half axes
+/// (3 each; its normal is their cross product), its colour (RGBA8, red in the low byte), and
+/// the radius of a sphere at its centre around it and every quad under it, negative for an
+/// empty node. In world space.
+inline constexpr uint32_t kQuadNodeWords = 11;
+
+/// The leaves of the quad tree over @p members members: see kQuadNodeWords.
+inline uint32_t quad_tree_leaves(uint32_t members)
+{
+    uint32_t leaves = 1;
+    while (leaves < members) {
+        leaves *= 2u;
+    }
+    return leaves;
+}
 
 /// Nodes in the tree over a partition of @p records records. Mirrors velk_cut_tree_nodes.
 inline uint32_t cut_tree_nodes(uint32_t records)
@@ -510,7 +533,7 @@ void main()
     uint index = gl_GlobalInvocationID.x;
     if (index >= pc.entry_count) return;
 
-    uint entry = pc.table_word + index * 8u;
+    uint entry = pc.table_word + index * VELK_CULL_ENTRY_WORDS;
     uint chunks = cull_words.data[entry + 7u];
 
     vec3 lo = vec3(uintBitsToFloat(cull_words.data[entry + 0u]), uintBitsToFloat(cull_words.data[entry + 1u]),
@@ -1103,6 +1126,53 @@ void main()
  * Writes the group counts of the dispatch that draws from the current store: a group per 64
  * records it holds, no more than fit. One thread.
  */
+/**
+ * Lists a visual's partitions' quads in the view's quad list (kQuadListHeaderWords), a thread
+ * per partition table entry: each partition's quads a level six above its members, one for a
+ * chunk of kCullChunkSlots, the ones that stand for any member. The list's instance count is
+ * cleared before, and never left past its room.
+ */
+inline constexpr string_view instance_quad_list_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 16, std430) buffer QuadWords { uint data[]; } quad_words;
+
+layout(push_constant) uniform PC {
+    uint table_word;
+    uint entry_count;
+    uint quads_word;
+    uint capacity;
+} pc;
+
+const uint kListHeaderWords = 8u;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= pc.entry_count) return;
+    uint entry = pc.table_word + index * VELK_CULL_ENTRY_WORDS;
+    uint chunks = quad_words.data[entry + 7u];
+    uint tree = quad_words.data[entry + 8u];
+    uint leaves = quad_words.data[entry + 9u];
+    if (chunks == 0u || tree == 0xFFFFFFFFu || leaves < 64u) return;
+
+    uint level = leaves / 64u;
+    for (uint k = 0u; k < level; ++k) {
+        uint node = tree + (level - 1u + k) * VELK_QUAD_NODE_WORDS;
+        if (uintBitsToFloat(quad_words.data[node + 10u]) < 0.0) continue;
+        uint at = atomicAdd(quad_words.data[pc.quads_word + 1u], 1u);
+        if (at < pc.capacity) {
+            quad_words.data[pc.quads_word + kListHeaderWords + at] = node;
+        } else {
+            atomicAdd(quad_words.data[pc.quads_word + 1u], 0xFFFFFFFFu);
+        }
+    }
+}
+)";
+
 inline constexpr string_view instance_cut_args_src = R"(
 #version 450
 #include "velk.glsl"
@@ -2309,6 +2379,10 @@ struct InstanceCullPass
         uint32_t node_capacity = 0; ///< Tree nodes a node store holds.
     };
     vector<Cut> cuts;
+    /// The view's quads drawn (kQuadListHeaderWords), filled each frame from the partitions'
+    /// quad trees, and how many it holds. See instance_quad_list_src.
+    ArenaRegion quads;
+    uint32_t quad_capacity = 0;
     /// The top tree for rays over all the cuts' partitions (kRayTopHeaderWords), and what its
     /// cuts and leaves were written for.
     ArenaRegion ray_top;
@@ -2410,6 +2484,12 @@ inline uint32_t instance_cut_word(const InstanceCullPass& state, const void* key
         }
     }
     return kCullNoSlot;
+}
+
+/// The word of @p state's quad list (kQuadListHeaderWords), or kCullNoSlot.
+inline uint32_t instance_quad_word(const InstanceCullPass& state)
+{
+    return state.quads.valid() ? static_cast<uint32_t>(state.quads.offset() / sizeof(uint32_t)) : kCullNoSlot;
 }
 
 /// The word of @p state's top tree for rays (kRayTopHeaderWords), or kCullNoSlot.
@@ -2743,6 +2823,23 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         }
         state.cuts = std::move(kept);
         state.cut_growth.clear();
+
+        // The view's quad list: room for a quad per member of every partitioned visual, which
+        // no set of quads that each stand for members of their own can pass, and one per
+        // partition, whose chunks may be part filled.
+        uint32_t quads = 0;
+        for (const Wants& info : wants) {
+            quads += info.by_item ? 0u : info.members + info.partitions;
+        }
+        if (quads != state.quad_capacity) {
+            state.quad_capacity = 0;
+            state.quads = quads != 0 ? arena->alloc((uint64_t(kQuadListHeaderWords) + quads) * sizeof(uint32_t)) : ArenaRegion{};
+            if (state.quads.valid()) {
+                const uint32_t header[kQuadListHeaderWords] = {4u, 0u, 0u, 0u, 1u, 0u, 0u, 0u};
+                arena->write_at(state.quads.offset(), header, sizeof(header));
+                state.quad_capacity = quads;
+            }
+        }
     }
     const auto cut_word = [&](const void* key) {
         for (const auto& c : state.cuts) {
@@ -2770,6 +2867,11 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         if (state.cut_moves_known) {
             VELK_LOG(I, "kept cut: %u records; partitions choosing again: %.1f a frame, of %u table entries", records,
                      static_cast<double>(moves - state.cut_moves) / frames, partitions);
+            if (state.quads.valid()) {
+                uint32_t quads = 0;
+                arena->read_at(state.quads.offset() + sizeof(uint32_t), &quads, sizeof(quads));
+                VELK_LOG(I, "quads %u/%u", quads, state.quad_capacity);
+            }
         }
         state.cut_moves = moves;
         state.cut_moves_known = true;
@@ -2829,9 +2931,10 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto draw_pipeline = pipeline_for(instance_cut_draw_src, 0x4375'7444'7261'7720ULL);
         auto tree_pipeline = pipeline_for(instance_cut_tree_src, 0x4375'7454'7265'6520ULL);
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
+        auto quad_list_pipeline = pipeline_for(instance_quad_list_src, 0x4375'7451'7561'6473ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline && top_pipeline;
+                                 && tree_pipeline && top_pipeline && quad_list_pipeline;
         auto cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
         if (!cmd) {
             return;
@@ -2874,9 +2977,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 cmd->record_clear_buffer(arena_buffer, uint64_t(info.chosen_word) * sizeof(uint32_t), sizeof(uint32_t));
             }
         }
+        // The quad list's instance count.
+        const uint32_t quads_word = instance_quad_word(state);
+        if (quads_word != kCullNoSlot) {
+            cmd->record_clear_buffer(arena_buffer, uint64_t(quads_word + 1u) * sizeof(uint32_t), sizeof(uint32_t));
+        }
         cmd->record_global_barrier();
 
-        const auto dispatch = [&](IGpuPipeline* used, const void* pc, uint32_t pc_size, uint32_t groups,
+        const auto dispatch =[&](IGpuPipeline* used, const void* pc, uint32_t pc_size, uint32_t groups,
                                   uint32_t args_word = kCullNoSlot) {
             DispatchCall dc{};
             dc.pipeline = used;
@@ -2959,6 +3067,22 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const PartitionPushC pc{job.partition_table, job.partition_count, job.list_word, view_globals_base,
                                     job.max_distance, job.cut, kCutRefresh};
             dispatch(partition_pipeline.get(), &pc, sizeof(pc), (job.partition_count + 63u) / 64u);
+        }
+        // The view's quads, from every partitioned visual's partitions.
+        if (quads_word != kCullNoSlot) {
+            struct QuadListPushC
+            {
+                uint32_t table_word;
+                uint32_t entry_count;
+                uint32_t quads_word;
+                uint32_t capacity;
+            };
+            for (const auto& info : visuals) {
+                if (info.partition_count != 0) {
+                    const QuadListPushC pc{info.partition_table_word, info.partition_count, quads_word, state.quad_capacity};
+                    dispatch(quad_list_pipeline.get(), &pc, sizeof(pc), (info.partition_count + 63u) / 64u);
+                }
+            }
         }
         cmd->record_global_barrier();
 
@@ -3166,6 +3290,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(place_pipeline));
         rec.held.push_back(std::move(tree_pipeline));
         rec.held.push_back(std::move(top_pipeline));
+        rec.held.push_back(std::move(quad_list_pipeline));
         rec.held.push_back(std::move(args_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
     });

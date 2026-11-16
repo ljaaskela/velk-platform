@@ -815,13 +815,23 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
+    // The Quads view draws the partitions' quads alone; every other view draws no quads.
+    const bool quads_view = camera_state && camera_state->debug_view == DebugView::Quads;
+    const uint32_t quads_word = instance_quad_word(vs.instance_cull);
+    if (quads_view != vs.quads_view || quads_word != vs.quads_word) {
+        vs.quads_view = quads_view;
+        vs.quads_word = quads_word;
+        vs.visibility_dirty = true;
+    }
     emit_visibility_pass(vs, render_view, ctx, graph, false);
     emit_depth_pyramid_pass(vs, ctx, graph, false);
     if (occlusion && vs.instance_cull.pyramid_word != kCullNoSlot) {
         emit_instance_retest_pass(vs.instance_cull, render_view.batches, cull_globals, ctx, graph);
         emit_visibility_pass(vs, render_view, ctx, graph, true);
     }
-    emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
+    if (!quads_view) {
+        emit_tiny_cluster_pass(vs, ctx, graph, tiny_pixels);
+    }
     // Built again with what compute raster drew, for the next frame's culling. The retest
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
@@ -900,7 +910,7 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         second_phase ? "deferred.visibility2" : "deferred.visibility", graph, [&](CachedPassRecording& rec) {
             const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
-                if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
+                if (b.pipeline_options().blend_mode == BlendMode::Alpha || b.draws_quads() != vs.quads_view) {
                     return nullptr;
                 }
                 auto p = resolve_or_compile_visibility(*ctx.render_ctx, b);
@@ -913,7 +923,8 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
             const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
             emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources, default_stream_buffers,
                             render_view.view_globals_base, resolve,
-                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase);
+                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, second_phase,
+                            vs.quads_view ? vs.quads_word : kCullNoSlot);
 
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;

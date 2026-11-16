@@ -87,7 +87,7 @@ bool RenderContextImpl::init(const RenderConfig& config)
     // Default UV1 buffer: one vec2(0, 0) shared by every draw whose
     // primitive has no TEXCOORD_1. The Renderer uploads it once at
     // set_backend time; `velk_uv1` reads index 0 via
-    // DrawDataHeader::uv1_enabled == 0.
+    // DrawDataHeader::flags without kDrawFlagUv1.
     {
         const float zero_uv1[2] = {0.f, 0.f};
         default_uv1_ = mesh_builder_->build_buffer(zero_uv1, sizeof(zero_uv1), nullptr, 0);

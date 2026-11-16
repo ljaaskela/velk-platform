@@ -440,6 +440,130 @@ void SceneBvh::emit_instance_motion(FrameContext& ctx, IRenderGraph& graph)
     }
 }
 
+void SceneBvh::write_quad_table(InstanceGroup& group, FrameContext& ctx)
+{
+    group.quad_table = {};
+    group.quad_meshes = 0;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    const uint32_t meshes = group.visual->get_mesh_count();
+    if (!arena || meshes == 0) {
+        return;
+    }
+    vector<MeshQuad> table;
+    table.resize(meshes);
+    for (uint32_t m = 0; m < meshes; ++m) {
+        if (auto mesh = group.visual->get_mesh(m)) {
+            mesh_quad(*mesh, table[m]);
+        }
+    }
+    group.quad_table = arena->alloc(uint64_t(meshes) * sizeof(MeshQuad));
+    if (group.quad_table.valid()) {
+        arena->write_at(group.quad_table.offset(), table.data(), table.size() * sizeof(MeshQuad));
+        group.quad_meshes = meshes;
+    }
+}
+
+void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
+{
+    auto arena = ctx.resources ? ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t)) : nullptr;
+    if (!arena || !ctx.render_ctx || !ctx.backend) {
+        return;
+    }
+    // The partitions that changed, whose visuals have their instances on the GPU.
+    vector<uint32_t> jobs;
+    uint32_t trees = 0;
+    uint64_t nodes = 0;
+    for (Partition& partition : partitions_) {
+        if (!partition.active || !partition.quad_tree_dirty || !partition.group) {
+            continue;
+        }
+        const InstanceGroup& group = *partition.group;
+        const IInstancedMeshInternal& visual = *group.visual;
+        if (!partition.quad_tree.valid() || !partition.cull_members.valid() || !group.quad_table.valid()
+            || visual.instance_region_size() == 0) {
+            continue;
+        }
+        const bool resting = !visual.get_motion_source().empty() && visual.rest_region_size() != 0;
+        if (!visual.get_motion_source().empty() && !resting) {
+            continue;  // Its resting matrices are not there yet.
+        }
+        jobs.push_back(static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t)));
+        jobs.push_back(partition.cull_chunks * kCullChunkSlots);
+        jobs.push_back(static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)));
+        jobs.push_back(partition.quad_leaves);
+        jobs.push_back(static_cast<uint32_t>(group.quad_table.offset() / sizeof(uint32_t)));
+        jobs.push_back(resting ? static_cast<uint32_t>(visual.rest_region_offset() / (sizeof(float) * 4)) : kCullNoSlot);
+        jobs.push_back(static_cast<uint32_t>(visual.instance_region_offset() / sizeof(ElementInstance)));
+        jobs.push_back(group.quad_meshes);
+        partition.quad_tree_dirty = false;
+        // Culling finds the tree from now on, after this frame's build.
+        if (partition.cull_entry != kUnplaced && group.cull_table.valid()) {
+            const uint32_t words[2] = {static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)),
+                                       partition.quad_leaves};
+            arena->update_at(group.cull_table.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + 8u) * sizeof(uint32_t),
+                             words, sizeof(words));
+        }
+        ++trees;
+        nodes += uint64_t(partition.quad_leaves) * 2u - 1u;
+    }
+    if (jobs.empty()) {
+        // What a round of builds made, once it is over.
+        if (quad_trees_built_ != 0) {
+            VELK_LOG(I, "quad trees: %u built, %llu nodes", quad_trees_built_, static_cast<unsigned long long>(quad_nodes_built_));
+            VELK_LOG(I, "quad trees: %.1f MB", static_cast<double>(quad_nodes_built_) * kQuadNodeWords * 4.0 / (1024.0 * 1024.0));
+            quad_trees_built_ = 0;
+            quad_nodes_built_ = 0;
+        }
+        return;
+    }
+    quad_trees_built_ += trees;
+    quad_nodes_built_ += nodes;
+
+    const auto job_count = static_cast<uint32_t>(jobs.size() / kQuadJobWords);
+    if (job_count > quad_jobs_capacity_) {
+        quad_jobs_capacity_ = job_count + job_count / 2u + 16u;
+        quad_jobs_ = arena->alloc(uint64_t(quad_jobs_capacity_) * kQuadJobWords * sizeof(uint32_t));
+        if (!quad_jobs_.valid()) {
+            quad_jobs_capacity_ = 0;
+            VELK_LOG(E, "SceneBvh: no room for the quad tree jobs");
+            return;
+        }
+    }
+    // A frame on the GPU may still read the list from before, so it is written in order with
+    // this frame's passes.
+    arena->update_at(quad_jobs_.offset(), jobs.data(), jobs.size() * sizeof(uint32_t));
+
+    bool dirty = true;
+    const auto jobs_word = static_cast<uint32_t>(quad_jobs_.offset() / sizeof(uint32_t));
+    emit_cached_view_pass(quad_pass_, dirty, "instance.quad_trees", graph, [&](CachedPassRecording& rec) {
+        constexpr uint64_t kKey = 0x5175616454726565ULL | 0x4000000000000000ULL;
+        auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+        if (!pipeline) {
+            pipeline = ctx.render_ctx->pipelines().compile_compute(quad_tree_build_src, kKey);
+        }
+        auto cmd = pipeline ? ctx.backend->create_command_buffer() : nullptr;
+        if (!cmd) {
+            return;
+        }
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = job_count;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(jobs_word);
+        std::memcpy(dc.root_constants, &jobs_word, sizeof(jobs_word));
+        cmd->begin_recording();
+        cmd->push_label("Quad trees");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.held.push_back(std::move(pipeline));
+    });
+}
+
 bool SceneBvh::is_instance_dynamic(uint32_t partition) const
 {
     const Partition& p = partitions_[partition];
@@ -639,6 +763,10 @@ void SceneBvh::write_cull_entry(const Partition& partition, IGpuArena& arena, bo
     std::memcpy(entry + 3, partition.cull_bounds.max, sizeof(float) * 3);
     entry[6] = static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t));
     entry[7] = partition.cull_chunks;
+    // Its quad tree once a build of it is under way, which emit_quad_trees writes.
+    const bool tree = partition.quad_leaves != 0 && !partition.quad_tree_dirty;
+    entry[8] = tree ? static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)) : kCullNoSlot;
+    entry[9] = tree ? partition.quad_leaves : 0u;
     const uint64_t at = partition.group->cull_table.offset() + uint64_t(partition.cull_entry) * sizeof(entry);
     if (fresh_table) {
         arena.write_at(at, entry, sizeof(entry));
@@ -676,6 +804,15 @@ void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
     } else {
         VELK_LOG(E, "SceneBvh: no room for a partition's culling list");
     }
+    // Its quad tree over that list, built again on the GPU. Not for the dynamic partition.
+    const bool dynamic = group.dynamic_partition != kUnplaced && &partitions_[group.dynamic_partition] == &partition;
+    const uint32_t leaves = partition.cull_chunks != 0 && !dynamic ? quad_tree_leaves(partition.cull_chunks * kCullChunkSlots) : 0u;
+    if (leaves != partition.quad_leaves) {
+        partition.quad_tree = leaves != 0 ? arena->alloc((uint64_t(leaves) * 2u - 1u) * kQuadNodeWords * sizeof(uint32_t))
+                                          : ArenaRegion{};
+        partition.quad_leaves = partition.quad_tree.valid() ? leaves : 0u;
+    }
+    partition.quad_tree_dirty = partition.quad_leaves != 0;
     group.cull_chunks = chunks_elsewhere + partition.cull_chunks;
 
     // Replaced lists and tables are fresh, so nothing has read them. The pass that reads
@@ -796,6 +933,7 @@ void SceneBvh::write_plain_cull(Partition& partition, FrameContext& ctx, const f
         std::memcpy(entry.data() + 3, p.cull_bounds.max, sizeof(float) * 3);
         entry[6] = p.cull_members.valid() ? static_cast<uint32_t>(p.cull_members.offset() / sizeof(uint32_t)) : 0u;
         entry[7] = p.cull_chunks;
+        entry[8] = kCullNoSlot;  // No quad tree.
         return entry;
     };
     if (partition.cull_entry == kUnplaced) {
@@ -865,6 +1003,7 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
     const uint32_t table_capacity = slot_count / kPartitionRecords + slot_count / (kPartitionRecords * 8u) + 16u;
     const uint32_t resident_capacity = group.visual->get_instance_capacity();
     alloc_instance_cull(group, ctx, table_capacity, resident_capacity / kCullChunkSlots + table_capacity);
+    write_quad_table(group, ctx);
 
     group.slot_partition.clear();
     group.slot_partition.resize(slot_count, kUnplaced);

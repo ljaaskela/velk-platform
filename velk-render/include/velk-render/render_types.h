@@ -90,8 +90,8 @@ enum class FrontFace : uint8_t
 /// be added here without growing IRenderContext's API.
 enum class DefaultBufferType : uint8_t
 {
-    Uv1,  ///< One vec2 (0, 0); paired with DrawDataHeader::uv1_enabled == 0 so the vertex shader reads index 0 only.
-    Color,  ///< One white RGBA8 word; paired with DrawDataHeader::color_enabled == 0 likewise.
+    Uv1,  ///< One vec2 (0, 0); for draws without kDrawFlagUv1, whose vertices all read it.
+    Color,  ///< One white RGBA8 word; for draws without kDrawFlagColor likewise.
 };
 
 /// Texture addressing mode for coordinates outside [0, 1]. Matches

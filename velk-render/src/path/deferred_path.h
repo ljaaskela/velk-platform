@@ -102,6 +102,10 @@ public:
         bool visibility_dirty = true;
         IRenderPass::Ptr cached_visibility_second_pass;
         bool visibility_second_dirty = true;
+        /// What the visibility pass was recorded for: the Quads view, which draws the quad batch
+        /// alone, and the word of the view's quad list it draws.
+        bool quads_view = false;
+        uint32_t quads_word = 0xFFFFFFFFu;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;

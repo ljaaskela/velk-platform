@@ -318,7 +318,7 @@ void main()
 
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
     uint triangle = velk_ids_triangle(d, ids);
-    ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    ElementInstance inst = velk_draw_instance(d, velk_ids_slot(d, ids));
     GlobalData g = velk_globals.data[d.globals_base];
 
     uint cluster = velk_ids_cluster(d, ids);
@@ -474,7 +474,7 @@ void main()
     uint edge = (index / kSteps) % 12u;
     float t = float(index % kSteps) / float(kSteps - 1u);
 
-    uint entry = pc.table_word + partition_index * 8u;
+    uint entry = pc.table_word + partition_index * VELK_CULL_ENTRY_WORDS;
     if (velk_culling.data[entry + 7u] == 0u) return;
     vec3 lo = vec3(uintBitsToFloat(velk_culling.data[entry]), uintBitsToFloat(velk_culling.data[entry + 1u]),
                    uintBitsToFloat(velk_culling.data[entry + 2u]));
@@ -743,7 +743,24 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode >= 10u) {
+    if (pc.mode == 13u) {
+        // A quad in its colour, darker the more it faces away from overhead, so its shape shows.
+        if (ids.x != 0u) {
+            VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+            if ((d.flags & VELK_DRAW_QUADS) != 0u) {
+                uint quad = velk_ids_slot(d, ids);
+                vec3 u = vec3(uintBitsToFloat(velk_culling.data[quad + 3u]), uintBitsToFloat(velk_culling.data[quad + 4u]),
+                              uintBitsToFloat(velk_culling.data[quad + 5u]));
+                vec3 v = vec3(uintBitsToFloat(velk_culling.data[quad + 6u]), uintBitsToFloat(velk_culling.data[quad + 7u]),
+                              uintBitsToFloat(velk_culling.data[quad + 8u]));
+                vec3 n = cross(u, v);
+                float facing = dot(n, n) > 0.0 ? abs(normalize(n).y) : 1.0;
+                color = unpackUnorm4x8(velk_culling.data[quad + 9u]).rgb * (0.4 + 0.6 * facing);
+            } else {
+                color = vec3(0.25);
+            }
+        }
+    } else if (pc.mode >= 10u) {
         if (ids.x != 0u) {
             uint draw = velk_ids_draw(ids);
             color = id_color(draw * 16381u + velk_ids_slot(velk_draw_data.data[draw], ids) * 8191u) * 0.4;

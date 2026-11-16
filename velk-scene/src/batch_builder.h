@@ -92,11 +92,14 @@ public:
      *         for the renderer's standard buffer-upload pipeline. Also
      *         populates @p out_slots with per-element batch-slot records
      *         (used by the transform-only fast path) and @p out_rtt_roots
-     *         with elements that introduce an RTT subtree. */
+     *         with elements that introduce an RTT subtree. A scene with a
+     *         BVH also gets the view's quad batch (IBatch::draws_quads),
+     *         drawn with @p render_ctx's unit quad. */
     void rebuild_batches(const SceneState& state,
                          vector<IBatch::Ptr>& out_batches,
                          ElementSlotMap& out_slots,
-                         std::unordered_set<IElement*>& out_rtt_roots);
+                         std::unordered_set<IElement*>& out_rtt_roots,
+                         IRenderContext* render_ctx);
 
     /** @brief Removes an element from the cache. */
     void evict(IElement* element) { element_cache_.erase(element); }
@@ -126,6 +129,9 @@ public:
 private:
     std::unordered_map<IElement*, ElementCache> element_cache_;
     vector<RenderTargetPassData> render_target_passes_;
+    /// What draws the quad batch: a 3D mesh visual of no element, for the shaders and options
+    /// every 3D mesh is drawn with.
+    IShaderSource::Ptr quad_source_;
 };
 
 } // namespace velk

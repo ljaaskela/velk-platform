@@ -249,6 +249,11 @@ public:
     ///        the GPU. Its indirect args then get their instance count from the
     ///        culling pass.
     virtual bool get_instance_cull(InstanceCullInfo& out) const = 0;
+
+    /// @brief Whether it draws its view's quads (kDrawFlagQuads): the unit quad, an instance
+    ///        for each quad in the view's quad list (kQuadListHeaderWords), with that list's
+    ///        draw arguments, rather than instances of its own.
+    virtual bool draws_quads() const = 0;
 };
 
 } // namespace velk

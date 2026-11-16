@@ -104,7 +104,7 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
         } else {
             ++diag_rebuild_count;
             batch_builder.rebuild_batches(scene_state, cache.batches,
-                                          cache.element_slots, cache.rtt_roots);
+                                          cache.element_slots, cache.rtt_roots, ctx.render_ctx);
             entry.set_batches_dirty(false);
             entry.notify_view_changed(RenderStateChange::Batches);
         }

@@ -73,6 +73,9 @@ public:
     /// Allocates the culling arena region, if this batch holds one and has none yet.
     void ensure_instance_cull(IGpuResourceManager& resources);
     bool get_instance_cull(InstanceCullInfo& out) const override;
+    /// Makes it the view's quad draw: see IBatch::draws_quads.
+    void set_draws_quads() { draws_quads_ = true; }
+    bool draws_quads() const override { return draws_quads_; }
 
     /// Producer-side: pack the args + count prefix and instance bytes
     /// into the composed storage buffer's bytes. `indexed` chooses
@@ -172,6 +175,7 @@ private:
     ArenaRegion cull_second_args_;
     IInstancedMeshInternal::Ptr instance_source_;
     bool instance_cull_ = false;
+    bool draws_quads_ = false;
     IBatch::Ptr cull_owner_;
     uint32_t cull_mesh_ = 0;
     ArenaRegion cull_region_;

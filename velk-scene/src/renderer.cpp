@@ -98,6 +98,30 @@ struct ElementInstance {
 // instances simply never reference it.
 VELK_INSTANCES(ElementInstance)
 
+// Instance `slot` of draw `d`: from the instance arena, or for a draw of quads
+// (VELK_DRAW_QUADS) made from the quad at word `slot` of the culling arena
+// (VELK_QUAD_NODE_WORDS): the unit quad's 0 to 1 corners across its two half axes, centred
+// on its centre, facing along their cross product, in its colour, of no object.
+ElementInstance velk_draw_instance(VelkDrawData d, uint slot)
+{
+    if ((d.flags & VELK_DRAW_QUADS) == 0u) return velk_instances.data[d.instances_base + slot];
+    vec3 c = vec3(uintBitsToFloat(velk_culling.data[slot]), uintBitsToFloat(velk_culling.data[slot + 1u]),
+                  uintBitsToFloat(velk_culling.data[slot + 2u]));
+    vec3 u = vec3(uintBitsToFloat(velk_culling.data[slot + 3u]), uintBitsToFloat(velk_culling.data[slot + 4u]),
+                  uintBitsToFloat(velk_culling.data[slot + 5u]));
+    vec3 v = vec3(uintBitsToFloat(velk_culling.data[slot + 6u]), uintBitsToFloat(velk_culling.data[slot + 7u]),
+                  uintBitsToFloat(velk_culling.data[slot + 8u]));
+    vec3 n = cross(u, v);
+    n = dot(n, n) > 0.0 ? normalize(n) : vec3(0.0, 1.0, 0.0);
+    ElementInstance inst;
+    inst.world_matrix = mat4(vec4(2.0 * u, 0.0), vec4(2.0 * v, 0.0), vec4(n, 0.0), vec4(c - u - v, 1.0));
+    inst.offset = vec4(0.0);
+    inst.size = vec4(1.0, 1.0, 1.0, 0.0);
+    inst.color = unpackUnorm4x8(velk_culling.data[slot + 9u]);
+    inst.params = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
+    return inst;
+}
+
 // What a vertex gives the surface. A material moving its vertices supplies a function
 // returning this, usually velk_default_varyings of a changed vertex.
 struct VelkVaryings {
@@ -310,6 +334,10 @@ void Renderer::set_backend(const IRenderBackend::Ptr& backend, IRenderContext* c
     };
     upload_default(render_ctx_->get_default_buffer(DefaultBufferType::Uv1));
     upload_default(render_ctx_->get_default_buffer(DefaultBufferType::Color));
+    // The unit quad, which the quad batch draws even where no element uses it.
+    if (auto quad = render_ctx_->get_mesh_builder().get_unit_quad(); quad && !quad->get_primitives().empty()) {
+        upload_default(interface_pointer_cast<IBuffer>(quad->get_primitives()[0]->get_buffer()));
+    }
 }
 
 void Renderer::add_view(const IElement::Ptr& camera_element, const IWindowSurface::Ptr& surface,
@@ -952,6 +980,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // target reads them.
         for (auto& [scene, bvh] : scene_bvhs) {
             bvh->emit_instance_motion(ctx, *slot.graph);
+            bvh->emit_quad_trees(ctx, *slot.graph);
         }
         emit_gpu_deforms(ctx, *slot.graph);
 

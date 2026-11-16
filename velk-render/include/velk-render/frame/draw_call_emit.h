@@ -50,7 +50,8 @@ struct WrittenDrawData
  */
 inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources, const DefaultStreams& defaults,
                             uint32_t view_globals_base, IFrameSnippetRegistry* snippets,
-                            const FrameResolveContext* resolve_ctx, WrittenDrawData& out)
+                            const FrameResolveContext* resolve_ctx, WrittenDrawData& out,
+                            uint32_t quads_word = kNoVisibleList)
 {
     // Instance data lives in the shared instance arena (set = 1 slot 3),
     // suballocated per batch by the upload sweep. The header carries the
@@ -104,6 +105,12 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     InstanceCullInfo& cull_info = out.cull_info;
     header.visible_base = batch.get_instance_cull(cull_info) ? cull_info.visible_word : kNoVisibleList;
     header.lod_error_base = cull_info.cluster_count != 0 ? cull_info.cluster_errors_word : kNoVisibleList;
+    // The view's quads: their list is the visible list, each an instance of the unit quad.
+    if (batch.draws_quads()) {
+        if (quads_word == kNoVisibleList) return false;
+        header.flags |= kDrawFlagQuads;
+        header.visible_base = quads_word + kQuadListHeaderWords;
+    }
     // A draw by cluster numbers triangles within its cluster, of up to 256.
     const uint32_t triangles = cull_info.cluster_count != 0 ? 256u
         : primitive->get_index_count() != 0                 ? primitive->get_index_count() / 3u
@@ -127,19 +134,18 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
         const GpuRef uv1_ref = get_gpu_ref(uv1);
         if (uv1_ref.kind != GpuRef::Kind::Index) return false;
         header.uv1_base = uv1_ref.get_base() + primitive->get_uv1_offset() / 4u;
-        header.uv1_enabled = 1;
+        header.flags |= kDrawFlagUv1;
     } else {
         const GpuRef uv1_ref = get_gpu_ref(defaults.uv1);
         if (uv1_ref.kind != GpuRef::Kind::Index) return false;
         header.uv1_base = uv1_ref.get_base();
-        header.uv1_enabled = 0;
     }
     // A colour for each vertex of the vertex buffer, indexed as the indices index it.
     const auto color = primitive->get_color_buffer();
     const GpuRef color_ref = get_gpu_ref(color ? interface_cast<IBuffer>(color.get()) : defaults.color);
     if (color_ref.kind != GpuRef::Kind::Index) return false;
     header.color_base = color_ref.get_base();
-    header.color_enabled = color ? 1u : 0u;
+    header.flags |= color ? kDrawFlagColor : 0u;
 
     // Material draw-data lives in the shared material arena (set = 1 slot
     // 4), suballocated + written by ViewPreparer's upload sweep. The header
@@ -241,7 +247,8 @@ inline void emit_draw_calls(
     const ::velk::render::Frustum* frustum = nullptr,
     IFrameSnippetRegistry* snippets = nullptr,
     const FrameResolveContext* resolve_ctx = nullptr,
-    bool second_phase = false)
+    bool second_phase = false,
+    uint32_t quads_word = kNoVisibleList)
 {
     VELK_PERF_SCOPE("renderer.emit_draw_calls");
 
@@ -284,7 +291,7 @@ inline void emit_draw_calls(
         // the manager only registers an entry once the allocation succeeded.
         const bool has_storage = (storage_gb != nullptr);
         WrittenDrawData written;
-        if (!write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written)) {
+        if (!write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, written, quads_word)) {
             continue;
         }
         IMeshPrimitive* primitive = written.primitive.get();
@@ -372,6 +379,18 @@ inline void emit_draw_calls(
             if (!args) continue;
             call.args_buffer = args;
             call.args_buffer_offset = size_t(cull_info.second_args_word) * sizeof(uint32_t);
+        } else if (batch.draws_quads()) {
+            // The view's quad list holds the draw's arguments and count (kQuadListHeaderWords).
+            auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+            IGpuBuffer* args = culling ? culling->buffer() : nullptr;
+            if (!args) continue;
+            call.indexed = false;
+            call.args_stride = sizeof(uint32_t) * 4;  // VkDrawIndirectCommand
+            call.args_buffer = args;
+            call.args_buffer_offset = size_t(quads_word) * sizeof(uint32_t);
+            call.count_buffer = args;
+            call.count_buffer_offset = size_t(quads_word + 4u) * sizeof(uint32_t);
+            call.max_draw_count = 1;
         }
 
         call.root_constants_size = sizeof(uint32_t);

@@ -2,7 +2,11 @@
 
 #include "default_batch.h"
 #include "pipeline_options_helpers.h"
+#include "visual/primitive_shaders.h"
 
+#include <velk-scene/plugin.h>
+
+#include <velk/api/attachment.h>
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
@@ -174,7 +178,8 @@ void BatchBuilder::rebuild_commands(IElement* element, IRenderContext* render_ct
 void BatchBuilder::rebuild_batches(const SceneState& state,
                                    vector<IBatch::Ptr>& out_batches,
                                    ElementSlotMap& out_slots,
-                                   std::unordered_set<IElement*>& out_rtt_roots)
+                                   std::unordered_set<IElement*>& out_rtt_roots,
+                                   IRenderContext* render_ctx)
 {
     VELK_PERF_SCOPE("renderer.rebuild_batches");
     out_batches.clear();
@@ -423,6 +428,37 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
 
     emit_visuals(main_before, VisualPhase::BeforeChildren, out_batches);
     emit_visuals(main_after, VisualPhase::AfterChildren, out_batches);
+
+    // The view's quads (IBatch::draws_quads): the unit quad with the shaders every 3D mesh has,
+    // no material, back faces too, an instance per quad in the view's quad list. Anywhere.
+    auto quad = render_ctx && scene && scene->get_default_bvh() ? render_ctx->get_mesh_builder().get_unit_quad() : nullptr;
+    if (quad && !quad->get_primitives().empty()) {
+        if (!quad_source_) {
+            quad_source_ = ::velk::instance().create<IShaderSource>(ClassId::Visual::Mesh);
+            // A mesh visual's 3D pipeline state, which it otherwise takes on when first drawn.
+            if (quad_source_) {
+                ::velk::find_or_create_attachment<IMaterialOptions>(quad_source_.get(), ClassId::MaterialOptions);
+            }
+        }
+        auto batch_ptr = quad_source_ ? ::velk::instance().create<IBatch>(ClassId::DefaultBatch) : nullptr;
+        if (batch_ptr) {
+            auto* batch = static_cast<impl::DefaultBatch*>(batch_ptr.get());
+            const auto& primitive = quad->get_primitives()[0];
+            batch->set_pipeline_key(impl::kPrimitive3DPipelineKey);
+            batch->set_primitive(primitive);
+            batch->set_shader_source(quad_source_);
+            PipelineOptions po = pipeline_options_from_storage(interface_cast<IObjectStorage>(quad_source_.get()));
+            po.topology = to_backend_topology(primitive->get_topology());
+            po.cull_mode = CullMode::None;
+            batch->set_pipeline_options(po);
+            batch->set_draws_quads();
+            aabb everywhere;
+            everywhere.position = {-1e30f, -1e30f, -1e30f};
+            everywhere.extent = {2e30f, 2e30f, 2e30f};
+            batch->set_world_aabb(everywhere);
+            out_batches.push_back(std::move(batch_ptr));
+        }
+    }
 
     // Per-batch finalize: pack each batch's [args(32)][count(16)]
     // [instance_data] blob into the composed storage IBuffer and mark

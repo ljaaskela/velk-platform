@@ -1,6 +1,7 @@
 #ifndef VELK_UI_SCENE_BVH_H
 #define VELK_UI_SCENE_BVH_H
 
+#include "aggregate.h"
 #include "scene_collector.h"
 
 #include <velk/api/velk.h>
@@ -59,6 +60,10 @@ public:
     /// Adds the passes that run instanced visuals' motion functions to @p graph. Comes
     /// before every pass that reads instances or records.
     void emit_instance_motion(FrameContext& ctx, IRenderGraph& graph);
+
+    /// Adds the pass that builds the quad trees of the partitions that changed (kQuadNodeWords)
+    /// to @p graph. Comes after the instance motion, whose resting matrices it reads.
+    void emit_quad_trees(FrameContext& ctx, IRenderGraph& graph);
 
 
     // IBvh
@@ -170,6 +175,10 @@ private:
         bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
         bool motion_dirty = false;  ///< Instances were written at rest, so the motion runs again.
         bool motion_error_logged = false;
+        /// Its meshes' quads (MeshQuad, kMeshQuadWords each) in the culling arena, which its
+        /// partitions' quad trees are built from. Made with each cut.
+        ArenaRegion quad_table;
+        uint32_t quad_meshes = 0;
         IRenderPass::Ptr motion_pass;
         bool motion_pass_dirty = true;
         uint64_t motion_rest_offset = 0;  ///< What the recorded pass was given.
@@ -201,6 +210,11 @@ private:
         /// keep its shape, and only its node there is rewritten.
         bool residency_changed = false;
         uint32_t top_index = kUnplaced;  ///< Its node in the top tree.
+        /// Its members as a tree of quads (kQuadNodeWords), in the culling arena, built on the
+        /// GPU when its members change. None for a dynamic partition or one without its instances.
+        ArenaRegion quad_tree;
+        uint32_t quad_leaves = 0;
+        bool quad_tree_dirty = false;
     };
 
     struct EmitContext
@@ -254,6 +268,14 @@ private:
     /// instances, the tree over them that the far instance splat walks.
     void upload_partition(Partition& partition, FrameContext& ctx);
     void rebuild_top_tree(FrameContext& ctx);
+    /// Writes @p group's table of mesh quads.
+    void write_quad_table(InstanceGroup& group, FrameContext& ctx);
+    /// The quad tree pass, its jobs, and what it built since that was last logged.
+    IRenderPass::Ptr quad_pass_;
+    ArenaRegion quad_jobs_;
+    uint32_t quad_jobs_capacity_ = 0;
+    uint32_t quad_trees_built_ = 0;
+    uint64_t quad_nodes_built_ = 0;
     void upload_root(FrameContext& ctx);
     uint32_t alloc_partition();
     /// Moves the probe volume only if @p bounds left it or are much smaller, since
