@@ -34,12 +34,6 @@ struct FrameContext
     IGpuResourceManager* resources = nullptr;
     IFrameSnippetRegistry* snippets = nullptr;
 
-    /// Shared BVH node arena (set = 1 slot 0), owned by the Renderer and
-    /// reused by every scene's BVH so multiple BVHs suballocate distinct
-    /// regions of one buffer instead of fighting over the slot. Null before
-    /// the Renderer assigns it.
-    IGpuArena* bvh_nodes_arena = nullptr;
-
     /// Shared per-view FrameGlobals arena (set = 1 slot 2), owned by the
     /// Renderer. Each view writes its FrameGlobals here and pushes the
     /// returned element base so the direct-push compute shaders (deferred

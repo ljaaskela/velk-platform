@@ -53,7 +53,7 @@ struct BvhNode {
 
 // A node of a mesh's tree, in one cache line: the boxes of its two children, packed as left
 // min, left max, right min, right max, then in refs the left and right child and each one's
-// surface: its area for a mesh of separate pieces, otherwise its packed normal. A child with
+// surface, its packed normal. A child with
 // VELK_BLAS_LEAF set is a word offset to a leaf's first triangle word, its counts and its
 // positions.
 struct VelkMeshNode {
@@ -171,8 +171,8 @@ struct GlobalData {
     mat4 inverse_view_projection;
     vec4 viewport;
     vec4 cam_pos;
-    uint bvh_root;
-    uint bvh_node_count;
+    uint spare0;
+    uint spare1;
     uint present_counter;
     float lod_scale;         // pixels an error of one unit covers at one unit away, over the most a drawn surface may be off by
     mat4 prev_view_projection;

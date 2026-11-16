@@ -353,8 +353,7 @@ public:
     /// slots later. Keep in sync with the set = 1 declarations in the
     /// compute shader preludes.
     enum GlobalBufferSlot : uint32_t {
-        kGlobalBvhNodes  = 0,  ///< The scene BVH's nodes over its partitions, read by the far instance splat.
-        // 1 is free.
+        // 0 and 1 are free.
         kGlobalGlobals   = 2,  ///< Per-view FrameGlobals, read at velk_globals.data[globals_base].
         kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
         kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].

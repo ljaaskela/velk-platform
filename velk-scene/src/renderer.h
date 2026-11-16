@@ -129,7 +129,6 @@ private:
     /// Shared BVH node arena (set = 1 slot 0), created once and handed to
     /// every scene's BVH via FrameContext so multiple BVHs suballocate
     /// distinct regions instead of colliding on the slot.
-    IGpuArena::Ptr bvh_nodes_arena_;
 
     /// Shared per-view FrameGlobals arena (set = 1 slot 2), created once
     /// and handed to every view via FrameContext so multiple views

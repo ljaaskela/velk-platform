@@ -50,8 +50,6 @@ public:
     bool assign_instance_index(uint32_t slot) override;
     bool reserve_instances(uint32_t count) override;
     void release_instance_index(uint32_t slot) override;
-    void set_medium_id(uint32_t id) override { medium_id_ = id; }
-    uint32_t get_medium_id() const override { return medium_id_; }
     void flush_instances(IGpuArena& arena, IGpuResourceManager& resources, const mat4& world) override;
     uint64_t instance_region_offset() const override { return region_.offset(); }
     uint64_t instance_region_size() const override { return region_.size(); }
@@ -64,7 +62,6 @@ public:
     }
     void get_cull_sphere(uint32_t index, float out[4]) const override;
     float get_draw_distance() const override { return draw_distance_; }
-    void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const override;
     string_view get_motion_source() const override { return motion_source_; }
     float get_max_displacement() const override { return motion_source_.empty() ? 0.f : max_displacement_; }
     uint64_t rest_region_offset() const override { return rest_region_.offset(); }
@@ -106,7 +103,6 @@ private:
     vector<uint16_t> slot_mesh_;
     vector<uint32_t> slot_index_;      ///< Per slot, its index in the raster region.
     uint32_t instance_capacity_ = 0;
-    uint32_t medium_id_ = 0;
     uint32_t next_index_ = 0;          ///< Below it, indices have been handed out.
     vector<uint32_t> free_indices_;
     vector<uint32_t> cleared_indices_;  ///< Freed, to zero at the next flush.

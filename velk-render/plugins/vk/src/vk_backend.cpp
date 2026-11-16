@@ -992,8 +992,8 @@ bool VkBackend::create_bound_buffer_descriptor()
     // is rewritten only when a buffer's address changes (first bind + the
     // rare growth realloc), so steady state never disturbs in-flight
     // reads. UPDATE_AFTER_BIND because the arena writes the descriptor
-    // during prepare, after the set was bound. PARTIALLY_BOUND lets no-BVH
-    // frames leave the slots unbound (shaders gate on bvh_node_count == 0).
+    // during prepare, after the set was bound. PARTIALLY_BOUND lets slots
+    // nothing has written stay unbound while no shader reads them.
     VkDescriptorSetLayoutBinding bindings[IRenderBackend::kGlobalBufferSlotCount]{};
     VkDescriptorBindingFlags binding_flags[IRenderBackend::kGlobalBufferSlotCount]{};
     for (uint32_t i = 0; i < IRenderBackend::kGlobalBufferSlotCount; ++i) {
@@ -1542,8 +1542,7 @@ void VkBackend::set_global_buffer(uint32_t binding, IGpuBuffer* buffer)
 
     ::VkBuffer vk_buffer = vk_gb ? vk_gb->vk_buffer() : VK_NULL_HANDLE;
     // Null / unresolved: leave the slot as-is. PARTIALLY_BOUND keeps the
-    // descriptor valid as long as the shader does not access it (no-BVH
-    // frames gate on bvh_node_count == 0).
+    // descriptor valid as long as the shader does not access it.
     if (vk_buffer == VK_NULL_HANDLE) return;
 
     VkDescriptorBufferInfo info{};

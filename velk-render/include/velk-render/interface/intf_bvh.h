@@ -58,16 +58,6 @@ public:
     virtual bool closest_hit(vec3 origin, vec3 dir, BvhHit& out) const = 0;
 
     /**
-     * @brief Index of the BVH's root node within the nodes buffer.
-     */
-    virtual uint32_t get_root_index() const = 0;
-
-    /**
-     * @brief Number of nodes currently live in the BVH.
-     */
-    virtual uint32_t get_node_count() const = 0;
-
-    /**
      * @brief Where what it holds changed in its last update: the world bounds of each thing
      *        that moved, before and after, appeared or went away.
      *

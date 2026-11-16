@@ -86,8 +86,6 @@ public:
         return false;
     }
 
-    uint32_t get_root_index() const override { return root_; }
-    uint32_t get_node_count() const override { return node_count_; }
     array_view<const WorldBox> changed_bounds(bool& all) const override
     {
         all = changed_all_;
@@ -136,8 +134,6 @@ private:
             uint32_t first_shape = 0;
             uint32_t shape_count = 0;
             BvhItemBounds bounds{};
-            float far_area = 0.f;      ///< Mean projected area at scale 1. 0 without a far form.
-            float far_albedo[3] = {1.f, 1.f, 1.f};
         };
         IInstancedMeshInternal* visual = nullptr;
         mat4 world{};
@@ -147,10 +143,9 @@ private:
         vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
         uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.
 
-        /// With a residency budget, by what its partitions are worth keeping. What comes in
-        /// goes last to first, and what makes room for it, last to first.
+        /// Loaded by need, the partitions that need their instances, the largest on screen
+        /// last, which come in from the back.
         vector<uint32_t> pending_load;
-        vector<uint32_t> pending_unload;
         uint32_t resident_members = 0;
         uint32_t residency_age = 0;  ///< Updates since those were worked out.
 
@@ -160,8 +155,8 @@ private:
         uint32_t cull_next_entry = 0;
         vector<uint32_t> cull_free_entries;
 
-        /// Holds instances that moved recently. It rebuilds each frame it changes, and
-        /// joins the root rather than the top tree, so a mover costs only itself.
+        /// Holds instances that moved recently. It is written again each frame it changes,
+        /// so a mover costs only itself.
         uint32_t dynamic_partition = kUnplaced;
         struct Mover
         {
@@ -202,20 +197,16 @@ private:
         /// Its entry in the group's table, or for plain records in the plain table.
         uint32_t cull_entry = kUnplaced;
         uint32_t cull_chunks = 0;
-        BvhItemBounds cull_bounds{};
-        ArenaRegion nodes;  ///< Without its instances, the tree over them, for the far instance splat.
-        GpuBvhNode ref{};   ///< World bounds, as a node of the tree above it.
-        uint32_t node_count = 0;
+        BvhItemBounds cull_bounds{};  ///< Its members' bounds in the world.
         bool active = false;
         bool dirty = false;
-        /// Whether its instances have their GPU data. Without, `nodes` is the top of its tree,
-        /// which rays and raster take as a medium.
+        /// Whether its instances have their GPU data. Without, it is its quad tree down to
+        /// `stored_level`.
         bool resident = true;
-        float score = 0.f;  ///< Its worth as `pending_load` was worked out.
-        /// Only whether it is resident changed, which leaves its bounds, so the top tree can
-        /// keep its shape, and only its node there is rewritten.
+        float score = 0.f;  ///< How large its members are on screen, as `pending_load` was worked out.
+        /// Only whether it is resident changed, which leaves its bounds, so the partitions'
+        /// layout stays.
         bool residency_changed = false;
-        uint32_t top_index = kUnplaced;  ///< Its node in the top tree.
         /// Its members as a tree of quads (kQuadNodeWords), in the culling arena, built on the
         /// GPU when its members change. None for a dynamic partition or one without its instances.
         ArenaRegion quad_tree;
@@ -287,10 +278,11 @@ private:
     void recut(FrameContext& ctx);
     /// Splits partitions grown past their limit, then uploads the changed ones.
     void flush_partitions(FrameContext& ctx);
-    /// Writes @p partition's culling table entry and its box, and for one without its
-    /// instances, the tree over them that the far instance splat walks.
+    /// Writes @p partition's bounds and culling table entry.
     void upload_partition(Partition& partition, FrameContext& ctx);
-    void rebuild_top_tree(FrameContext& ctx);
+    /// Cuts the static partitions again once they hold what they hold much more loosely than
+    /// when last cut.
+    void check_recut(FrameContext& ctx);
     /// Writes @p group's table of mesh quads.
     void write_quad_table(InstanceGroup& group, FrameContext& ctx);
     /// The quad tree pass, its jobs, and what it built since that was last logged.
@@ -299,7 +291,6 @@ private:
     uint32_t quad_jobs_capacity_ = 0;
     uint32_t quad_trees_built_ = 0;
     uint64_t quad_nodes_built_ = 0;
-    void upload_root(FrameContext& ctx);
     uint32_t alloc_partition();
     /// Moves the probe volume only if @p bounds left it or are much smaller, since
     /// moving it discards probe history.
@@ -315,7 +306,6 @@ private:
     /// from the device's memory. And how many have places, summed over them each update.
     uint64_t resident_cap_ = 0;
     uint64_t resident_total_ = 0;
-    uint32_t next_medium_id_ = 1;
     uint32_t update_frame_ = 0;
     uint32_t live_records_ = 0;
 
@@ -329,17 +319,9 @@ private:
     Partition dynamic_;
     bool dynamic_transforms_dirty_ = false;
 
-    ArenaRegion top_nodes_;
-    GpuBvhNode top_root_{};
-    uint32_t top_node_count_ = 0;
-    bool has_top_ = false;
-    bool top_dirty_ = false;
-    float cut_cost_ = 0.f;  ///< The top tree's SAH cost when last cut.
-
-    ArenaRegion root_nodes_;
-    uint32_t root_ = 0;
-    uint32_t node_count_ = 0;
-    bool root_dirty_ = true;
+    /// Partitions changed their bounds, so whether to cut again is checked.
+    bool layout_dirty_ = false;
+    float cut_cost_ = 0.f;  ///< How loosely the partitions held their members when last cut.
 
     vector<uint32_t> unplaced_;       ///< Records waiting for a partition.
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.

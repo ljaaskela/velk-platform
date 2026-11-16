@@ -243,9 +243,6 @@ public:
     virtual bool reserve_instances(uint32_t count) = 0;
     /// Frees @p slot's place in the raster region.
     virtual void release_instance_index(uint32_t slot) = 0;
-    /// What the BVH marks this visual's partitions without their instances with.
-    virtual void set_medium_id(uint32_t id) = 0;
-    virtual uint32_t get_medium_id() const = 0;
 
     /// Brings the raster instance data in @p arena up to date, given the element's
     /// @p world matrix.
@@ -262,10 +259,6 @@ public:
     /// Mesh @p index's bounding sphere, as center xyz and radius.
     virtual void get_cull_sphere(uint32_t index, float out[4]) const = 0;
     virtual float get_draw_distance() const = 0;
-    /// Mesh @p index's mean projected area at scale 1, the area-weighted colour of its
-    /// materials, and its surface area by which of kSurfaceDirections it faces: how its
-    /// instances look where their partitions are without them.
-    virtual void get_far_look(uint32_t index, float& area, float albedo[3], float* direction_area) const = 0;
 
     /// The motion function's source, empty when there is none.
     virtual string_view get_motion_source() const = 0;

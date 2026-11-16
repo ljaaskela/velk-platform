@@ -405,10 +405,6 @@ FrameContext Renderer::make_frame_context()
     // Shared arenas, created from the resource manager (which allocates their
     // buffers and drives their deferred region reclaim). One per set = 1 slot,
     // shared by every producer of that data so their regions never collide.
-    if (resources_ && !bvh_nodes_arena_) {
-        bvh_nodes_arena_ = resources_->create_arena(IRenderBackend::kGlobalBvhNodes,
-                                                    sizeof(GpuBvhNode));
-    }
     if (resources_ && !globals_arena_) {
         globals_arena_ = resources_->create_arena(IRenderBackend::kGlobalGlobals,
                                                   sizeof(FrameGlobals));
@@ -435,7 +431,6 @@ FrameContext Renderer::make_frame_context()
     ctx.frame_buffer = frame_buffer_.get();
     ctx.resources = resources_.get();
     ctx.snippets = snippets_.get();
-    ctx.bvh_nodes_arena = bvh_nodes_arena_.get();
     ctx.globals_arena = globals_arena_.get();
     ctx.instance_arena = instance_arena_.get();
     ctx.material_arena = material_arena_.get();
@@ -951,8 +946,6 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             auto bit = scene_bvhs.find(scene);
             if (bit != scene_bvhs.end() && bit->second) {
                 auto* b = bit->second;
-                ctx.bvh.root = b->get_root_index();
-                ctx.bvh.node_count = b->get_node_count();
                 ctx.bvh.changed = b->changed_bounds(ctx.bvh.changed_all);
                 ctx.bvh.object_transforms = b->get_object_transforms(ctx.bvh.object_slots);
                 ctx.bvh.plain_partitions = b->get_plain_partitions(ctx.bvh.plain_partition_count);
