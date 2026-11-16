@@ -6,6 +6,8 @@
 #include <velk-render/interface/material/intf_material.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace velk::impl {
 
@@ -57,6 +59,139 @@ MeshQuad bounds_quad(const float lo[3], const float hi[3], uint32_t color)
     out.v[b] = 0.5f * (hi[b] - lo[b]);
     out.color = color;
     return out;
+}
+
+namespace {
+
+/// A node as quad_tree_build_src holds it: colour as it is stored, radius negative for none.
+struct TreeQuad
+{
+    float c[3] = {0.f, 0.f, 0.f};
+    float u[3] = {0.f, 0.f, 0.f};
+    float v[3] = {0.f, 0.f, 0.f};
+    uint32_t color = 0;
+    float radius = -1.f;
+};
+
+float dot3(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+float length3(const float* a) { return std::sqrt(dot3(a, a)); }
+void cross3(const float* a, const float* b, float* out)
+{
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+/// The shader's merge, step for step, with the colour stored as RGBA8 after each.
+TreeQuad merge_tree_quads(const TreeQuad& a, const TreeQuad& b)
+{
+    if (a.radius < 0.f) return b;
+    if (b.radius < 0.f) return a;
+    float na[3];
+    float nb[3];
+    cross3(a.u, a.v, na);
+    cross3(b.u, b.v, nb);
+    const float quarter_a = length3(na);
+    const float quarter_b = length3(nb);
+    const float quarter = quarter_a + quarter_b;
+    const float wa = quarter > 0.f ? quarter_a / quarter : 0.5f;
+    const TreeQuad& big = quarter_a >= quarter_b ? a : b;
+
+    TreeQuad q;
+    for (int k = 0; k < 3; ++k) {
+        q.c[k] = b.c[k] + (a.c[k] - b.c[k]) * wa;
+    }
+    uint32_t color = 0;
+    for (int k = 0; k < 4; ++k) {
+        const float ca = static_cast<float>((a.color >> (k * 8)) & 0xFFu) / 255.f;
+        const float cb = static_cast<float>((b.color >> (k * 8)) & 0xFFu) / 255.f;
+        const float mixed = std::min(std::max(cb + (ca - cb) * wa, 0.f), 1.f);
+        color |= static_cast<uint32_t>(std::round(mixed * 255.f)) << (k * 8);
+    }
+    q.color = color;
+    float n[3] = {na[0] + nb[0], na[1] + nb[1], na[2] + nb[2]};
+    if (dot3(n, n) <= 1e-12f * quarter * quarter) {
+        cross3(big.u, big.v, n);
+    }
+    const float n_length = length3(n);
+    if (n_length > 0.f) {
+        for (float& x : n) {
+            x /= n_length;
+        }
+    } else {
+        n[0] = 0.f;
+        n[1] = 1.f;
+        n[2] = 0.f;
+    }
+    const float d = dot3(big.u, n);
+    float along[3] = {big.u[0] - d * n[0], big.u[1] - d * n[1], big.u[2] - d * n[2]};
+    if (dot3(along, along) <= 1e-12f * dot3(big.u, big.u)) {
+        const float x_axis[3] = {1.f, 0.f, 0.f};
+        const float y_axis[3] = {0.f, 1.f, 0.f};
+        cross3(n, std::abs(n[0]) < 0.9f ? x_axis : y_axis, along);
+    }
+    const float along_length = length3(along);
+    for (float& x : along) {
+        x /= along_length;
+    }
+    const float lu = length3(big.u);
+    const float lv = length3(big.v);
+    const float ratio = lv > 0.f ? lu / lv : 1.f;
+    float hu = std::sqrt(quarter * ratio);
+    float hv = std::sqrt(quarter / std::max(ratio, 1e-6f));
+    const float longest = std::max(std::max(length3(a.u), length3(a.v)), std::max(length3(b.u), length3(b.v)));
+    if (std::max(hu, hv) < longest) {
+        if (hu >= hv) {
+            hu = longest;
+            hv = quarter / longest;
+        } else {
+            hv = longest;
+            hu = quarter / longest;
+        }
+    }
+    float across[3];
+    cross3(n, along, across);
+    for (int k = 0; k < 3; ++k) {
+        q.u[k] = along[k] * hu;
+        q.v[k] = across[k] * hv;
+    }
+    float to_a[3];
+    float to_b[3];
+    for (int k = 0; k < 3; ++k) {
+        to_a[k] = a.c[k] - q.c[k];
+        to_b[k] = b.c[k] - q.c[k];
+    }
+    q.radius = std::max(std::max(length3(to_a) + a.radius, length3(to_b) + b.radius), length3(q.u) + length3(q.v));
+    return q;
+}
+
+} // namespace
+
+vector<MeshQuad> merge_pairs(const vector<MeshQuad>& quads)
+{
+    // Spheres only tell a quad from none here: what a merge makes does not depend on them.
+    const auto tree_quad = [](const MeshQuad& m) {
+        TreeQuad q;
+        std::memcpy(q.c, m.center, sizeof(q.c));
+        std::memcpy(q.u, m.u, sizeof(q.u));
+        std::memcpy(q.v, m.v, sizeof(q.v));
+        q.color = m.color;
+        q.radius = m.color == 0u ? -1.f : 0.f;
+        return q;
+    };
+    vector<MeshQuad> up;
+    up.resize(quads.size() / 2);
+    for (size_t i = 0; i < up.size(); ++i) {
+        const TreeQuad q = merge_tree_quads(tree_quad(quads[2 * i]), tree_quad(quads[2 * i + 1]));
+        if (q.radius < 0.f) {
+            continue;  // Both none.
+        }
+        std::memcpy(up[i].center, q.c, sizeof(q.c));
+        std::memcpy(up[i].u, q.u, sizeof(q.u));
+        std::memcpy(up[i].v, q.v, sizeof(q.v));
+        up[i].color = q.color;
+    }
+    return up;
 }
 
 bool mesh_quad(const IMesh& mesh, MeshQuad& out)
@@ -169,6 +304,7 @@ Quad leaf(mat4 world, uint mesh_word)
 // One quad with both their areas: centre and colour weighted by area, facing the way their
 // surfaces face together, shaped as the larger one but with its longer side at least either
 // one's. Its sphere holds both of theirs. So a node's size on screen never shrinks going up.
+// Mirrored by merge_tree_quads in C++: change both together.
 Quad merge(Quad a, Quad b)
 {
     if (a.radius < 0.0) return b;

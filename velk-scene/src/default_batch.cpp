@@ -120,9 +120,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     vector<PendingDraw> pending;
     for (uint32_t m = 0; m < mesh_count; ++m) {
         // Without a source, visible instances go to the shared list of the batches culled together.
-        const uint32_t instances = instance_source_
-            ? std::min(instance_source_->get_mesh_instance_count(m), instance_source_->get_instance_capacity())
-            : instance_count_;
+        const uint32_t instances = instance_source_ ? instance_source_->get_mesh_instance_count(m) : instance_count_;
         words += instance_source_ ? instances : 0u;
         const auto add_primitive = [&](const IMeshPrimitive::Ptr& primitive) {
             auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get());
@@ -192,7 +190,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         if (!instance_source_) {
             continue;
         }
-        const uint32_t list_capacity = std::min(capacity, instance_source_->get_instance_capacity());
+        const uint32_t list_capacity = capacity;
         entry[kCullListWord] = next_list;
         entry[kCullCapacityWord] = list_capacity;
         next_list += list_capacity;
@@ -303,7 +301,8 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     }
     out.max_distance = instance_source_->get_draw_distance();
     out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
-    out.has_unloaded = instance_source_->has_residency_budget();
+    // Partitions without their instances are their trees' quads now, not a medium.
+    out.has_unloaded = false;
     out.medium_id = instance_source_->get_medium_id();
     for (int d = 0; d < kSurfaceDirectionCount; ++d) {
         out.far_facing[d] = owner->cull_far_facing_[d];

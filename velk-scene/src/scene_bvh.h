@@ -50,8 +50,15 @@ public:
     /// Brings the BVH up to date with the changes in @p state.
     void update(const SceneState& state, FrameContext& ctx);
 
+    /// A view the scene is seen from: where it is, and how many pixels a unit covers at a unit
+    /// from it, which residency weighs what partitions need by.
+    struct ViewPoint
+    {
+        vec3 at{};
+        float pixels_per_unit = 0.f;
+    };
     /// Where the cameras are, for what stays resident.
-    void set_view_points(array_view<const vec3> points)
+    void set_view_points(array_view<const ViewPoint> points)
     {
         view_points_.clear();
         view_points_.insert(view_points_.end(), points.begin(), points.end());
@@ -177,6 +184,7 @@ private:
         /// partitions' quad trees are built from. Made with each cut.
         ArenaRegion quad_table;
         uint32_t quad_meshes = 0;
+        vector<MeshQuad> mesh_quads;  ///< What quad_table holds, for partitions without their instances.
         IRenderPass::Ptr motion_pass;
         bool motion_pass_dirty = true;
         uint64_t motion_rest_offset = 0;  ///< What the recorded pass was given.
@@ -214,9 +222,16 @@ private:
         uint32_t quad_leaves = 0;
         bool quad_tree_dirty = false;
         /// For plain records, its objects' own quads in the world (MeshQuad each), in the
-        /// order of `cull_members`, which the tree is built from.
+        /// order of `cull_members`, which the tree is built from. For instances without their
+        /// instances, one quad per chunk of members, and the tree's leaves are the finest it has.
         ArenaRegion quad_objects;
         uint32_t quad_object_count = 0;
+        bool quad_leaves_only = false;
+        /// Without its instances: the level of its tree it keeps (0 its members' own quads),
+        /// the coarsest the views allow. And each level's largest quad side, 0 its members, up
+        /// to the root, which that is worked out from; empty until measured.
+        uint32_t stored_level = 0;
+        vector<float> level_sides;
     };
 
     struct EmitContext
@@ -254,6 +269,12 @@ private:
     /// Allocates and clears @p group's motion region, if it has a motion function.
     void alloc_instance_motion(InstanceGroup& group, FrameContext& ctx);
     BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
+    /// @p slot's quad in the world, as the GPU build makes its leaf; a colour of 0 for none.
+    MeshQuad member_quad(const InstanceGroup& group, uint32_t slot) const;
+    /// The quads at @p level (0 its members) of the tree @p partition has over its members, as
+    /// the GPU builds it, and with @p sides each level's largest quad side up to the root.
+    vector<MeshQuad> partition_level(const InstanceGroup& group, const Partition& partition, uint32_t level,
+                                     vector<float>* sides) const;
     /// The world bounds of mesh @p mesh of @p group placed by @p t, with the element at @p w.
     BvhItemBounds instance_bounds(const InstanceGroup& group, const mat4& w, const InstanceTransform& t,
                                   uint32_t mesh) const;
@@ -289,7 +310,11 @@ private:
     vector<uint32_t> freed_records_;
     std::unordered_map<IElement*, vector<uint32_t>> element_records_;
     std::unordered_map<IElement*, InstanceGroup> instance_groups_;
-    vector<vec3> view_points_;
+    vector<ViewPoint> view_points_;
+    /// Instances all loaded-by-need visuals may have places for together: the device-wide cap,
+    /// from the device's memory. And how many have places, summed over them each update.
+    uint64_t resident_cap_ = 0;
+    uint64_t resident_total_ = 0;
     uint32_t next_medium_id_ = 1;
     uint32_t update_frame_ = 0;
     uint32_t live_records_ = 0;

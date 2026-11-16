@@ -109,6 +109,8 @@ R"(
 #define VELK_QUAD_NODE_WORDS 11u
 // A kept cut's record of a quad has this for its entry: kCutQuad.
 #define VELK_CUT_QUAD 0xFFFFFFFEu
+// A partition's tree leaves are the finest it has: kQuadLeavesOnly.
+#define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.
 #define VELK_CUT_PARTITION_WORDS 13u
 // Words per cluster in a level of detail table: kLodClusterWords.

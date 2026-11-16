@@ -6,7 +6,7 @@
 // Usage: velk_ui_scale [elements] [movers] [frames]
 //                      [translate|rotate|group|escape|burst|churn|recolor|deform|scatter
 //                       |forest|forest_elements|forest_shift|forest_churn|forest_cluster|nature]
-//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [rocks] [across] [top] [yaw=N] [distance=N] [pitch=N] [budget=MB]
+//                      [unlimited] [rt] [text] [overlay] [near] [species] [wind] [gpu] [outlier] [mixed] [flyby] [heavy] [real] [lowsun] [dense] [blocks] [rocks] [across] [top] [yaw=N] [distance=N] [pitch=N]
 //
 // elements: visuals in the grid, an equal mix of triangle meshes, rects, cubes
 //           and spheres. Default 1000.
@@ -62,7 +62,6 @@
 // dense:    a forest's trees are 30 apart instead of 80, so the canopy nearly closes.
 // blocks:   a forest's mesh is a flat red box instead of a tree.
 // rocks:    a forest's mesh is a lumpy rock of about 25,000 triangles instead of a tree.
-// budget=MB: limits the GPU memory a forest's instances use.
 // geometry=MB: limits the GPU memory meshes' levels of detail use, beyond their coarsest.
 // grow=FRAME,MB: at that frame that limit becomes MB, so that what was left out loads when asked for.
 // across, top: the camera stays still at that stop of the flyby, facing `yaw=N` degrees,
@@ -1218,7 +1217,6 @@ int main(int argc, char* argv[])
     bool flyby = false;
     bool heavy = false;
     bool real_trees = false;
-    uint32_t residency_mb = 0;
     uint32_t geometry_mb = 0;
     long grow_frame = 0;
     uint32_t grow_mb = 0;
@@ -1269,7 +1267,6 @@ int main(int argc, char* argv[])
         if (std::strncmp(argv[i], "yaw=", 4) == 0) hold_yaw = static_cast<float>(std::atof(argv[i] + 4));
         if (std::strncmp(argv[i], "distance=", 9) == 0) hold_distance = static_cast<float>(std::atof(argv[i] + 9));
         if (std::strncmp(argv[i], "pitch=", 6) == 0) hold_pitch = static_cast<float>(std::atof(argv[i] + 6));
-        if (std::strncmp(argv[i], "budget=", 7) == 0) residency_mb = static_cast<uint32_t>(std::atoi(argv[i] + 7));
         if (std::strncmp(argv[i], "geometry=", 9) == 0) geometry_mb = static_cast<uint32_t>(std::atoi(argv[i] + 9));
         if (std::strncmp(argv[i], "grow=", 5) == 0) {
             long at = 0;
@@ -1675,9 +1672,6 @@ mat4 velk_instance_motion(mat4 rest, uint slot, vec4 params)
             }
             forest_visual = velk::trait::visual::create_instanced_mesh();
             forest_visual.set_mesh(tree_mesh);
-            if (residency_mb != 0) {
-                forest_visual.set_residency_budget(uint64_t(residency_mb) * 1000000u);
-            }
             if (draw_near) {
                 forest_visual.set_draw_distance(3000.f);
             }

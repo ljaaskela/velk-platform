@@ -885,12 +885,21 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 scene_bvh_cache_[scene] = bvh;
             }
 
-            vector<vec3> view_points;
+            // Where each view is, and how many pixels a unit covers at a unit from it.
+            vector<impl::SceneBvh::ViewPoint> view_points;
             for (const auto& view_slot : views_) {
-                if (auto camera_state = read_state<IElement>(view_slot.camera_element)) {
-                    view_points.push_back({camera_state->world_matrix(0, 3), camera_state->world_matrix(1, 3),
-                                           camera_state->world_matrix(2, 3)});
+                auto camera_state = read_state<IElement>(view_slot.camera_element);
+                auto camera = ::velk::find_attachment<ICamera>(view_slot.camera_element);
+                if (!camera_state || !camera || !view_slot.entry) {
+                    continue;
                 }
+                const float height = static_cast<float>(std::max(view_slot.entry->cached_height(), 1));
+                const float width = static_cast<float>(std::max(view_slot.entry->cached_width(), 1));
+                const mat4 vp = camera->get_view_projection(camera_state->world_matrix, width, height);
+                const float row1 = std::sqrt(vp(1, 0) * vp(1, 0) + vp(1, 1) * vp(1, 1) + vp(1, 2) * vp(1, 2));
+                view_points.push_back({{camera_state->world_matrix(0, 3), camera_state->world_matrix(1, 3),
+                                        camera_state->world_matrix(2, 3)},
+                                       row1 * height * 0.5f});
             }
             bvh->set_view_points({view_points.data(), view_points.size()});
             bvh->update(state, ctx);

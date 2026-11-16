@@ -194,11 +194,6 @@ public:
     /// Instances further from the camera than this are not drawn, though rays still
     /// see them. 0, the default, means no limit.
     virtual void set_draw_distance(float distance) = 0;
-    /// Limits the GPU memory its instances use. Those nearest the camera stay as they are,
-    /// and groups of the others are drawn and traced as an average over their volume, until
-    /// the camera brings them near. 0, the default, means no limit. Applies with no motion
-    /// function, and to the deferred path.
-    virtual void set_residency_budget(uint64_t bytes) = 0;
 
     /**
      * @brief Moves instances on the GPU, for motion that stays near where each instance
@@ -237,10 +232,15 @@ public:
     virtual uint32_t get_instance_index(uint32_t slot) const = 0;
     /// How many instances the raster region holds, used or not.
     virtual uint32_t get_instance_capacity() const = 0;
-    /// Whether not all instances have a place in the raster region, so the BVH chooses.
-    virtual bool has_residency_budget() const = 0;
+    /// Whether its instances have a place in the raster region only where the cut needs them,
+    /// which the BVH chooses: with no motion function, which needs every instance in place.
+    virtual bool loads_by_need() const = 0;
     /// Gives @p slot a place in the raster region, written at the next flush. False if full.
     virtual bool assign_instance_index(uint32_t slot) = 0;
+    /// Whether the raster region has room for @p count places. If not, it grows to a new place
+    /// at the next flush and reports the visual changed, so that what names it is made again
+    /// from there: room is then there from the next frame, and false is returned until then.
+    virtual bool reserve_instances(uint32_t count) = 0;
     /// Frees @p slot's place in the raster region.
     virtual void release_instance_index(uint32_t slot) = 0;
     /// What the BVH marks this visual's partitions without their instances with.

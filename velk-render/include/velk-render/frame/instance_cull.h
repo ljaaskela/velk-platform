@@ -32,6 +32,10 @@ inline constexpr uint32_t kCullNoSlot = 0xFFFFFFFFu;
 /// chunk, its chunk count, the word of its quad tree (kQuadNodeWords, kCullNoSlot for none) and
 /// the tree's leaves. See instance_partition_cull_src. Mirrors VELK_CULL_ENTRY_WORDS.
 inline constexpr uint32_t kCullEntryWords = 10;
+/// Set in a partition table entry's leaves word when its tree's leaves are the finest it has (a
+/// partition without its instances, whose list names chunk quads): where no node is small
+/// enough, the leaf itself is taken. Mirrors VELK_QUAD_LEAVES_ONLY.
+inline constexpr uint32_t kQuadLeavesOnly = 0x80000000u;
 /// Words per chunk in a kept cut's choose list: the word of its first slot, and the partition
 /// it is from.
 inline constexpr uint32_t kCullChunkListWords = 2;
@@ -662,6 +666,7 @@ uint g_at;  // where this thread's next record goes, while writing
 uint g_tree;
 uint g_leaves;
 uint g_position;
+bool g_leaves_only;  // the leaves are the finest the partition has: its members are not instances
 
 shared uint s_counts[64];
 
@@ -765,13 +770,17 @@ void velk_cut_member(uint member, vec3 viewpoint)
         mat4 vp = globals.view_projection;
         float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
         uint quad = velk_quad_over(viewpoint, pixels_per_unit);
+        // Where nothing is small enough, a partition without its instances still has its leaf.
+        if (quad == 0xFFFFFFFFu && g_leaves_only) quad = g_leaves - 1u + g_position;
         if (quad != 0xFFFFFFFFu) {
-            if (velk_quad_first(quad) == g_position) {
+            if (velk_quad_first(quad) == g_position
+                && uintBitsToFloat(cull_words.data[g_tree + quad * VELK_QUAD_NODE_WORDS + 10u]) >= 0.0) {
                 velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, member, 0.0);
             }
             return;
         }
     }
+    if (g_leaves_only) return;
     if (pc.items_word == 0xFFFFFFFFu) {
         velk_cut_instance(member, pc.instances_base + member, pc.table_word, viewpoint);
     } else {
@@ -812,14 +821,16 @@ void main()
     g_tree = 0xFFFFFFFFu;
     g_leaves = 0u;
     g_position = 0u;
+    g_leaves_only = false;
     if (pc.partition_table != 0xFFFFFFFFu) {
         uint entry = pc.partition_table + cull_words.data[chunk + 1u] * VELK_CULL_ENTRY_WORDS;
-        uint leaves = cull_words.data[entry + 9u];
+        uint leaves = cull_words.data[entry + 9u] & ~VELK_QUAD_LEAVES_ONLY;
         uint position = cull_words.data[chunk] - cull_words.data[entry + 6u] + lane;
         if (cull_words.data[entry + 8u] != 0xFFFFFFFFu && position < leaves) {
             g_tree = cull_words.data[entry + 8u];
             g_leaves = leaves;
             g_position = position;
+            g_leaves_only = (cull_words.data[entry + 9u] & VELK_QUAD_LEAVES_ONLY) != 0u;
         }
     }
     if (choosing && member != 0xFFFFFFFFu) velk_cut_member(member, viewpoint);

@@ -23,9 +23,6 @@ namespace {
 
 /// Past this share of the slots, all raster instances are rewritten.
 constexpr uint32_t kChangedListDivisor = 4;
-/// What an instance with a place uses on the GPU: its raster data, its record and two BVH
-/// nodes of 48 bytes.
-constexpr uint64_t kResidentInstanceBytes = sizeof(ElementInstance) + 64u + 96u;
 
 ElementInstance make_instance(const mat4& world, const InstanceTransform& transform, uint32_t mesh, uint32_t slot,
                               uint32_t object)
@@ -134,7 +131,7 @@ uint32_t InstancedMeshVisual::place(const InstanceTransform& transform, uint32_t
         transforms_.push_back(transform);
         live_.push_back(1);
         slot_mesh_.push_back(static_cast<uint16_t>(mesh));
-        slot_index_.push_back(has_residency_budget() ? kNoInstanceIndex : next_index_++);
+        slot_index_.push_back(loads_by_need() ? kNoInstanceIndex : next_index_++);
         update_instance_capacity();
     } else {
         slot = free_slots_.back();
@@ -231,7 +228,7 @@ void InstancedMeshVisual::remove_instance(uint32_t slot)
     free_slots_.push_back(slot);
     --mesh_counts_[slot_mesh_[slot]];
     --live_count_;
-    if (has_residency_budget()) {
+    if (loads_by_need()) {
         release_instance_index(slot);
     }
     note_changed(slot);
@@ -240,31 +237,22 @@ void InstancedMeshVisual::remove_instance(uint32_t slot)
 
 void InstancedMeshVisual::update_instance_capacity()
 {
-    const auto slots = static_cast<uint32_t>(transforms_.size());
-    instance_capacity_ = has_residency_budget()
-        ? static_cast<uint32_t>(std::min<uint64_t>(slots, residency_bytes_ / kResidentInstanceBytes))
-        : slots;
+    // Loaded by need, the region grows as places are handed out.
+    if (!loads_by_need()) {
+        instance_capacity_ = static_cast<uint32_t>(transforms_.size());
+    }
 }
 
 void InstancedMeshVisual::reset_instance_indices()
 {
-    const bool budget = has_residency_budget();
+    const bool by_need = loads_by_need();
     free_indices_.clear();
     cleared_indices_.clear();
-    next_index_ = budget ? 0u : static_cast<uint32_t>(transforms_.size());
+    next_index_ = by_need ? 0u : static_cast<uint32_t>(transforms_.size());
     for (uint32_t slot = 0; slot < slot_index_.size(); ++slot) {
-        slot_index_[slot] = budget ? kNoInstanceIndex : slot;
+        slot_index_[slot] = by_need ? kNoInstanceIndex : slot;
     }
-    update_instance_capacity();
-}
-
-void InstancedMeshVisual::set_residency_budget(uint64_t bytes)
-{
-    residency_bytes_ = bytes;
-    reset_instance_indices();
-    flush_all_ = true;
-    all_changed_ = true;
-    invoke_visual_changed();
+    instance_capacity_ = by_need ? 0u : static_cast<uint32_t>(transforms_.size());
 }
 
 bool InstancedMeshVisual::assign_instance_index(uint32_t slot)
@@ -284,6 +272,21 @@ bool InstancedMeshVisual::assign_instance_index(uint32_t slot)
         flush_slots_.push_back(slot);
     }
     return true;
+}
+
+bool InstancedMeshVisual::reserve_instances(uint32_t count)
+{
+    if (count <= instance_capacity_) {
+        return true;
+    }
+    // A larger region, with room for more to come, made at the next flush in a new place.
+    // What names the old one is made again from the new place on the next frame, so the
+    // places are handed out from then.
+    const auto slots = static_cast<uint32_t>(transforms_.size());
+    instance_capacity_ = std::min(slots, std::max(count, instance_capacity_ + instance_capacity_ / 2u + 64u));
+    flush_all_ = true;
+    invoke_visual_changed();
+    return false;
 }
 
 void InstancedMeshVisual::release_instance_index(uint32_t slot)

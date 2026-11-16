@@ -34,6 +34,11 @@ MeshQuad bounds_quad(const float lo[3], const float hi[3], uint32_t color);
 /// The area-weighted colour (RGBA8) of @p mesh's materials, as mesh_quad gives it.
 uint32_t mesh_color(const IMesh& mesh);
 
+/// The level above @p quads (an even count, in the world, a colour of 0 for none): each node
+/// the merge of two neighbours, exactly as quad_tree_build_src merges them, so that a level
+/// made on the CPU is the one a tree built on the GPU over the same leaves has.
+vector<MeshQuad> merge_pairs(const vector<MeshQuad>& quads);
+
 /// Words per job of the quad tree build: the word of the partition's list of members (instance
 /// indices in its visual's raster region, kCullNoSlot for none), its length, the word of its
 /// tree, its leaves, the word of its visual's table of mesh quads, the vec4 index of its

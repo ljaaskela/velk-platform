@@ -32,8 +32,12 @@ constexpr uint32_t kPartitionRecords = 1024;
 constexpr uint32_t kResidencyInterval = 16;
 /// Most partitions coming in per update, since each builds a tree.
 constexpr uint32_t kMaxResidencyChanges = 8;
-/// How much larger on screen a partition has to be to replace a resident one.
+/// How much smaller on screen than kLodElementPixels a resident partition's members have to be
+/// before its instances go, so that one at the edge does not come and go.
 constexpr float kResidencySwapGain = 1.25f;
+/// What an instance with a place uses on the GPU: its raster data, its record and two BVH
+/// nodes of 48 bytes. The device-wide cap counts by it.
+constexpr uint64_t kResidentInstanceBytes = sizeof(ElementInstance) + 64u + 96u;
 /// Most instances under a leaf of what is left of a partition without its instances.
 constexpr uint32_t kMediumLeafInstances = 32;
 /// Frames a record of the dynamic partition stays still before it returns to a
@@ -193,6 +197,98 @@ void set_inverted_bounds(GpuBvhNode& node)
 }
 
 } // namespace
+
+vector<MeshQuad> SceneBvh::partition_level(const InstanceGroup& group, const Partition& partition, uint32_t level,
+                                           vector<float>* sides) const
+{
+    // Its members' quads in the world as the GPU build makes its leaves, padded as its tree
+    // is, then merged in pairs as it merges them, so each level is the one its tree has.
+    const auto chunks = static_cast<uint32_t>((partition.members.size() + kCullChunkSlots - 1u) / kCullChunkSlots);
+    vector<MeshQuad> quads;
+    quads.resize(quad_tree_leaves(std::max(chunks, 1u) * kCullChunkSlots));
+    for (size_t i = 0; i < partition.members.size(); ++i) {
+        quads[i] = member_quad(group, partition.members[i]);
+    }
+    const auto largest_side = [](const vector<MeshQuad>& level_quads) {
+        float side = 0.f;
+        for (const MeshQuad& q : level_quads) {
+            if (q.color != 0u) {
+                const float lu = std::sqrt(q.u[0] * q.u[0] + q.u[1] * q.u[1] + q.u[2] * q.u[2]);
+                const float lv = std::sqrt(q.v[0] * q.v[0] + q.v[1] * q.v[1] + q.v[2] * q.v[2]);
+                side = std::max(side, 2.f * std::max(lu, lv));
+            }
+        }
+        return side;
+    };
+    vector<MeshQuad> wanted;
+    if (sides) {
+        sides->clear();
+    }
+    for (uint32_t at = 0;; ++at) {
+        if (sides) {
+            sides->push_back(largest_side(quads));
+        }
+        if (at == level) {
+            wanted = quads;
+        }
+        if (quads.size() <= 1 || (at >= level && !sides)) {
+            break;
+        }
+        quads = merge_pairs(quads);
+    }
+    return wanted;
+}
+
+MeshQuad SceneBvh::member_quad(const InstanceGroup& group, uint32_t slot) const
+{
+    MeshQuad leaf;
+    const auto transforms = group.visual->get_transforms();
+    const mat4& w = group.world;
+    {
+        const uint32_t mesh = group.visual->get_slot_mesh(slot);
+        if (slot >= transforms.size() || !group.visual->is_live(slot) || mesh >= group.mesh_quads.size()
+            || group.mesh_quads[mesh].color == 0u) {
+            return leaf;
+        }
+        const MeshQuad& local = group.mesh_quads[mesh];
+        const InstanceTransform& t = transforms[slot];
+        // The instance's matrix, then the element's: a point and two directions.
+        float c[3];
+        float u[3];
+        float v[3];
+        for (int row = 0; row < 3; ++row) {
+            float pc = t.rows[row][3];
+            float pu = 0.f;
+            float pv = 0.f;
+            for (int col = 0; col < 3; ++col) {
+                pc += t.rows[row][col] * local.center[col];
+                pu += t.rows[row][col] * local.u[col];
+                pv += t.rows[row][col] * local.v[col];
+            }
+            c[row] = pc;
+            u[row] = pu;
+            v[row] = pv;
+        }
+        float wc[3];
+        float wu[3];
+        float wv[3];
+        for (int row = 0; row < 3; ++row) {
+            wc[row] = w(row, 3);
+            wu[row] = 0.f;
+            wv[row] = 0.f;
+            for (int col = 0; col < 3; ++col) {
+                wc[row] += w(row, col) * c[col];
+                wu[row] += w(row, col) * u[col];
+                wv[row] += w(row, col) * v[col];
+            }
+        }
+        std::memcpy(leaf.center, wc, sizeof(wc));
+        std::memcpy(leaf.u, wu, sizeof(wu));
+        std::memcpy(leaf.v, wv, sizeof(wv));
+        leaf.color = local.color;
+    }
+    return leaf;
+}
 
 BvhItemBounds SceneBvh::instance_bounds(const InstanceGroup& group, uint32_t slot) const
 {
@@ -493,6 +589,7 @@ void SceneBvh::write_quad_table(InstanceGroup& group, FrameContext& ctx)
         arena->write_at(group.quad_table.offset(), table.data(), table.size() * sizeof(MeshQuad));
         group.quad_meshes = meshes;
     }
+    group.mesh_quads = std::move(table);
 }
 
 void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
@@ -509,9 +606,11 @@ void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
         if (!partition.active || !partition.quad_tree_dirty) {
             continue;
         }
-        if (!partition.group) {
-            // Plain objects: the tree from their own quads.
-            if (!partition.quad_tree.valid() || !partition.quad_objects.valid() || !plain_cull_.valid()) {
+        if (!partition.group || partition.quad_leaves_only) {
+            // Plain objects, or instances without their instances: the tree from quads of
+            // their own.
+            const ArenaRegion& table = partition.group ? partition.group->cull_table : plain_cull_;
+            if (!partition.quad_tree.valid() || !partition.quad_objects.valid() || !table.valid()) {
                 continue;
             }
             jobs.push_back(0u);
@@ -524,9 +623,12 @@ void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
             jobs.push_back(0u);
             partition.quad_tree_dirty = false;
             if (partition.cull_entry != kUnplaced) {
-                const uint32_t words[2] = {static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)),
-                                           partition.quad_leaves};
-                arena->update_at(plain_cull_.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + 8u) * sizeof(uint32_t),
+                // Its list and chunks with its tree, which a list of chunk quads waited for.
+                const uint32_t words[4] = {static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t)),
+                                           partition.cull_chunks,
+                                           static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)),
+                                           partition.quad_leaves | (partition.quad_leaves_only ? kQuadLeavesOnly : 0u)};
+                arena->update_at(table.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + 6u) * sizeof(uint32_t),
                                  words, sizeof(words));
             }
             ++trees;
@@ -677,102 +779,98 @@ void SceneBvh::demote_quiet_instances(InstanceGroup& group)
 
 void SceneBvh::update_residency(InstanceGroup& group)
 {
-    if (!group.visual->has_residency_budget() || view_points_.empty()) {
+    if (!group.visual->loads_by_need() || view_points_.empty()) {
         return;
     }
-    const uint32_t capacity = group.visual->get_instance_capacity();
 
+    // Now and then, what each partition needs: its instances where its members' quads are
+    // larger than kLodElementPixels in some view, else its tree down to the coarsest level
+    // whose quads are all within it. Loading goes by how much larger than that it is.
     if (group.residency_age++ % kResidencyInterval == 0) {
-        struct Candidate
-        {
-            float score;
-            uint32_t partition;
-        };
-        vector<Candidate> candidates;
-        candidates.reserve(group.partitions.size());
+        group.pending_load.clear();
         group.resident_members = 0;
         for (uint32_t p : group.partitions) {
             Partition& partition = partitions_[p];
             if (partition.resident) {
                 group.resident_members += static_cast<uint32_t>(partition.members.size());
             }
-            if (p == group.dynamic_partition || partition.cull_entry == kUnplaced) {
+            if (p == group.dynamic_partition || partition.cull_entry == kUnplaced || partition.members.empty()) {
                 continue;
             }
-            // How large its instances are on screen, whichever view they are largest in. They
-            // are alike within a visual, so this goes by how near it is, which also keeps what
-            // stays resident in one piece.
-            float nearest2 = std::numeric_limits<float>::max();
-            for (const vec3& view : view_points_) {
-                const float at[3] = {view.x, view.y, view.z};
+            if (partition.level_sides.empty()) {
+                partition_level(group, partition, 0u, &partition.level_sides);
+            }
+            // The most pixels a unit covers anywhere in it, over the views.
+            float pixels_per_unit = 0.f;
+            for (const ViewPoint& view : view_points_) {
+                const float at[3] = {view.at.x, view.at.y, view.at.z};
                 float dist2 = 0.f;
                 for (int k = 0; k < 3; ++k) {
                     const float away = std::max({partition.cull_bounds.min[k] - at[k], at[k] - partition.cull_bounds.max[k], 0.f});
                     dist2 += away * away;
                 }
-                nearest2 = std::min(nearest2, dist2);
+                pixels_per_unit = std::max(pixels_per_unit, view.pixels_per_unit / std::max(std::sqrt(dist2), 1e-3f));
             }
-            partition.score = 1.f / std::max(std::sqrt(nearest2), 1e-3f);
-            candidates.push_back({partition.score, p});
-        }
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-            return a.score > b.score;
-        });
-
-        group.pending_load.clear();
-        group.pending_unload.clear();
-        uint32_t wanted = group.dynamic_partition != kUnplaced
-            ? static_cast<uint32_t>(partitions_[group.dynamic_partition].members.size())
-            : 0u;
-        for (const Candidate& candidate : candidates) {
-            const Partition& partition = partitions_[candidate.partition];
-            wanted += static_cast<uint32_t>(partition.members.size());
-            if (wanted > capacity) {
-                if (partition.resident) {
-                    group.pending_unload.push_back(candidate.partition);
+            const float allowed = kLodElementPixels / std::max(pixels_per_unit, 1e-12f);
+            const float members_pixels = partition.level_sides[0] * pixels_per_unit;
+            partition.score = members_pixels;
+            // Its instances in, or out once clearly small enough, so that one at the edge
+            // does not come and go.
+            const bool wants_instances = partition.resident ? members_pixels * kResidencySwapGain > kLodElementPixels
+                                                            : members_pixels > kLodElementPixels;
+            if (wants_instances) {
+                if (!partition.resident) {
+                    group.pending_load.push_back(p);
                 }
-            } else if (!partition.resident) {
-                group.pending_load.push_back(candidate.partition);
+                continue;
+            }
+            // Level 0 is its members' own quads, which need no instances.
+            uint32_t level = 0;
+            while (level + 1u < partition.level_sides.size() && partition.level_sides[level + 1u] <= allowed) {
+                ++level;
+            }
+            if (partition.resident || level != partition.stored_level) {
+                if (partition.resident) {
+                    for (uint32_t slot : partition.members) {
+                        group.visual->release_instance_index(slot);
+                    }
+                    group.resident_members -= static_cast<uint32_t>(partition.members.size());
+                    resident_total_ -= std::min<uint64_t>(resident_total_, partition.members.size());
+                }
+                partition.resident = false;
+                partition.stored_level = level;
+                partition.dirty = true;
+                partition.residency_changed = true;
             }
         }
-        std::reverse(group.pending_load.begin(), group.pending_load.end());
+        // The largest on screen first, loaded last from the back.
+        std::sort(group.pending_load.begin(), group.pending_load.end(),
+                  [&](uint32_t a, uint32_t b) { return partitions_[a].score < partitions_[b].score; });
     }
 
+    // Loading builds trees, so a few each update, within the device-wide cap.
     const auto valid = [&](uint32_t p) { return partitions_[p].active && partitions_[p].group == &group; };
     for (uint32_t changes = 0; changes < kMaxResidencyChanges && !group.pending_load.empty(); ++changes) {
         const uint32_t p = group.pending_load.back();
+        group.pending_load.pop_back();
         if (!valid(p) || partitions_[p].resident) {
-            group.pending_load.pop_back();
             continue;
         }
         Partition& partition = partitions_[p];
         const auto need = static_cast<uint32_t>(partition.members.size());
-        while (group.resident_members + need > capacity && !group.pending_unload.empty()) {
-            const uint32_t out = group.pending_unload.back();
-            if (valid(out) && partitions_[out].resident) {
-                // Not for a small gain, or two could keep trading places.
-                if (partition.score < partitions_[out].score * kResidencySwapGain) {
-                    return;
-                }
-                Partition& leaving = partitions_[out];
-                leaving.resident = false;
-                leaving.dirty = true;
-                leaving.residency_changed = true;
-                for (uint32_t slot : leaving.members) {
-                    group.visual->release_instance_index(slot);
-                }
-                group.resident_members -= static_cast<uint32_t>(leaving.members.size());
-            }
-            group.pending_unload.pop_back();
+        if (resident_total_ + need > resident_cap_) {
+            continue;
         }
-        if (group.resident_members + need > capacity) {
-            return;
+        // A region that has to grow moves, so the rest loads once what names it has followed.
+        if (!group.visual->reserve_instances(group.resident_members + need)) {
+            group.pending_load.push_back(p);
+            break;
         }
         partition.resident = true;
         partition.dirty = true;
         partition.residency_changed = true;
         group.resident_members += need;
-        group.pending_load.pop_back();
+        resident_total_ += need;
     }
 }
 
@@ -807,12 +905,13 @@ void SceneBvh::write_cull_entry(const Partition& partition, IGpuArena& arena, bo
     uint32_t entry[kCullEntryWords];
     std::memcpy(entry, partition.cull_bounds.min, sizeof(float) * 3);
     std::memcpy(entry + 3, partition.cull_bounds.max, sizeof(float) * 3);
-    entry[6] = static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t));
-    entry[7] = partition.cull_chunks;
-    // Its quad tree once a build of it is under way, which emit_quad_trees writes.
+    // Its quad tree once a build of it is under way, which emit_quad_trees writes. A list of
+    // chunk quads is nothing to choose from without its tree, so it waits for it too.
     const bool tree = partition.quad_leaves != 0 && !partition.quad_tree_dirty;
+    entry[6] = static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t));
+    entry[7] = partition.quad_leaves_only && !tree ? 0u : partition.cull_chunks;
     entry[8] = tree ? static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)) : kCullNoSlot;
-    entry[9] = tree ? partition.quad_leaves : 0u;
+    entry[9] = tree ? partition.quad_leaves | (partition.quad_leaves_only ? kQuadLeavesOnly : 0u) : 0u;
     const uint64_t at = partition.group->cull_table.offset() + uint64_t(partition.cull_entry) * sizeof(entry);
     if (fresh_table) {
         arena.write_at(at, entry, sizeof(entry));
@@ -829,28 +928,51 @@ void SceneBvh::write_partition_cull(Partition& partition, FrameContext& ctx)
         return;
     }
 
-    const uint32_t chunks = partition.resident
-        ? static_cast<uint32_t>((partition.members.size() + kCullChunkSlots - 1u) / kCullChunkSlots)
-        : 0u;
-    partition.cull_chunks = 0;
-    const size_t words = size_t(chunks) * kCullChunkSlots;
-    partition.cull_members = {};
-    if (!partition.resident) {
-        // Nothing to go through.
-    } else if (partition.cull_members = arena->alloc(uint64_t(words) * sizeof(uint32_t)); partition.cull_members.valid()) {
-        partition.cull_chunks = chunks;
-        vector<uint32_t> list;
-        list.reserve(words);
+    const bool dynamic = group.dynamic_partition != kUnplaced && &partitions_[group.dynamic_partition] == &partition;
+    // Without its instances: its tree's quads at the level it keeps, which its list names
+    // instead. Its members' sizes per level, for what it needs, measured again with them.
+    partition.quad_objects = {};
+    partition.quad_object_count = 0;
+    partition.quad_leaves_only = false;
+    vector<uint32_t> list;
+    if (partition.resident) {
+        list.reserve(partition.members.size());
         for (uint32_t slot : partition.members) {
             list.push_back(group.visual->get_instance_index(slot));
         }
+        if (!dynamic) {
+            partition_level(group, partition, 0u, &partition.level_sides);
+        }
+    } else if (!dynamic && !partition.members.empty()) {
+        vector<MeshQuad> quads = partition_level(group, partition, partition.stored_level, &partition.level_sides);
+        // Only the nodes over its members: those after are none, and the GPU merges the same
+        // pairs without them.
+        const size_t covering = (partition.members.size() + (size_t(1) << partition.stored_level) - 1u) >> partition.stored_level;
+        quads.resize(std::min(quads.size(), covering));
+        partition.quad_objects = quads.empty() ? ArenaRegion{} : arena->alloc(quads.size() * sizeof(MeshQuad));
+        if (partition.quad_objects.valid()) {
+            arena->write_at(partition.quad_objects.offset(), quads.data(), quads.size() * sizeof(MeshQuad));
+            partition.quad_object_count = static_cast<uint32_t>(quads.size());
+            partition.quad_leaves_only = true;
+            for (uint32_t i = 0; i < partition.quad_object_count; ++i) {
+                list.push_back(quads[i].color != 0u ? i : kCullNoSlot);
+            }
+        }
+    }
+    const auto chunks = static_cast<uint32_t>((list.size() + kCullChunkSlots - 1u) / kCullChunkSlots);
+    partition.cull_chunks = 0;
+    const size_t words = size_t(chunks) * kCullChunkSlots;
+    partition.cull_members = {};
+    if (chunks == 0) {
+        // Nothing to go through.
+    } else if (partition.cull_members = arena->alloc(uint64_t(words) * sizeof(uint32_t)); partition.cull_members.valid()) {
+        partition.cull_chunks = chunks;
         list.resize(words, kCullNoSlot);
         arena->write_at(partition.cull_members.offset(), list.data(), words * sizeof(uint32_t));
     } else {
         VELK_LOG(E, "SceneBvh: no room for a partition's culling list");
     }
     // Its quad tree over that list, built again on the GPU. Not for the dynamic partition.
-    const bool dynamic = group.dynamic_partition != kUnplaced && &partitions_[group.dynamic_partition] == &partition;
     const uint32_t leaves = partition.cull_chunks != 0 && !dynamic ? quad_tree_leaves(partition.cull_chunks * kCullChunkSlots) : 0u;
     if (leaves != partition.quad_leaves) {
         partition.quad_tree = leaves != 0 ? arena->alloc((uint64_t(leaves) * 2u - 1u) * kQuadNodeWords * sizeof(uint32_t))
@@ -1112,7 +1234,7 @@ void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
     group.slot_partition.resize(slot_count, kUnplaced);
 
     // Partitions come in from nothing, nearest first.
-    const bool budget = group.visual->has_residency_budget();
+    const bool budget = group.visual->loads_by_need();
     if (group.visual->get_medium_id() == 0) {
         group.visual->set_medium_id(next_medium_id_++);
     }
@@ -1292,7 +1414,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
             }
         }
         // Partitions without their instances are in world space.
-        if (!translated_only || has_motion || visual.has_residency_budget()) {
+        if (!translated_only || has_motion || visual.loads_by_need()) {
             rebuild = true;
         } else if (!rebuild) {
             float delta[3];
@@ -2259,6 +2381,25 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx)
 
     demote_quiet_records();
     ++update_frame_;
+    // The device-wide cap on instances with places, a quarter of the device's memory, and how
+    // many have places now over all visuals.
+    if (ctx.backend) {
+        resident_cap_ = ctx.backend->device_memory_bytes() / 4u / kResidentInstanceBytes;
+    }
+    resident_total_ = 0;
+    uint64_t by_need_total = 0;
+    for (const auto& [element, group] : instance_groups_) {
+        for (uint32_t p : group.partitions) {
+            resident_total_ += partitions_[p].resident && partitions_[p].group == &group ? partitions_[p].members.size() : 0u;
+            by_need_total += group.visual->loads_by_need() ? partitions_[p].members.size() : 0u;
+        }
+    }
+    // Now and then, how much of what loads by need has its instances in.
+    constexpr uint32_t kResidencyLogUpdates = 300;
+    if (by_need_total != 0 && update_frame_ % kResidencyLogUpdates == 0) {
+        VELK_LOG(I, "residency: %llu of %llu instances in", static_cast<unsigned long long>(resident_total_),
+                 static_cast<unsigned long long>(by_need_total));
+    }
     for (auto& [element, group] : instance_groups_) {
         demote_quiet_instances(group);
         update_residency(group);
@@ -2295,7 +2436,7 @@ void SceneBvh::update(const SceneState& state, FrameContext& ctx)
         // What came in has places in the raster region now, for this frame's draws.
         if (ctx.instance_arena) {
             for (auto& [element, group] : instance_groups_) {
-                if (group.visual->has_residency_budget()) {
+                if (group.visual->loads_by_need()) {
                     group.visual->flush_instances(*ctx.instance_arena, *ctx.resources, group.world);
                 }
             }
