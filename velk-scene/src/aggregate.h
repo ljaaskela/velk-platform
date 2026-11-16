@@ -27,12 +27,21 @@ static_assert(sizeof(MeshQuad) == kMeshQuadWords * sizeof(uint32_t), "Mirrors qu
 /// the surface each covers. False when it has no bounds.
 bool mesh_quad(const IMesh& mesh, MeshQuad& out);
 
+/// A quad across the two longer sides of world bounds @p lo to @p hi, facing along the third,
+/// in @p color (RGBA8): a plain object's, in the world.
+MeshQuad bounds_quad(const float lo[3], const float hi[3], uint32_t color);
+
+/// The area-weighted colour (RGBA8) of @p mesh's materials, as mesh_quad gives it.
+uint32_t mesh_color(const IMesh& mesh);
+
 /// Words per job of the quad tree build: the word of the partition's list of members (instance
 /// indices in its visual's raster region, kCullNoSlot for none), its length, the word of its
 /// tree, its leaves, the word of its visual's table of mesh quads, the vec4 index of its
 /// visual's resting matrices (three rows an instance) or kCullNoSlot to read the instances'
 /// own, the element index of its visual's raster region in the instance arena, and its
-/// visual's mesh count.
+/// visual's mesh count. A plain partition's job has kCullNoSlot for that element index, and
+/// the word of its members' own quads in the world (MeshQuad each, in member order) for the
+/// table.
 inline constexpr uint32_t kQuadJobWords = 8;
 
 /// Builds partitions' quad trees, a work group per job (kQuadJobWords, from the culling word

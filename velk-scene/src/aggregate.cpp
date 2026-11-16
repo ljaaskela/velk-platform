@@ -19,18 +19,8 @@ uint32_t pack_color(float r, float g, float b)
 
 } // namespace
 
-bool mesh_quad(const IMesh& mesh, MeshQuad& out)
+uint32_t mesh_color(const IMesh& mesh)
 {
-    out = MeshQuad{};
-    const aabb bounds = mesh.get_bounds();
-    const vec3 lo = bounds.min();
-    const vec3 hi = bounds.max();
-    const float min[3] = {lo.x, lo.y, lo.z};
-    const float max[3] = {hi.x, hi.y, hi.z};
-    if (!(max[0] >= min[0] && max[1] >= min[1] && max[2] >= min[2])) {
-        return false;
-    }
-
     // Its materials' colour, by how much of its surface each covers.
     float total = 0.f;
     float sum[3] = {0.f, 0.f, 0.f};
@@ -47,20 +37,40 @@ bool mesh_quad(const IMesh& mesh, MeshQuad& out)
         sum[1] += tint.g * area;
         sum[2] += tint.b * area;
     }
-    out.color = total > 0.f ? pack_color(sum[0] / total, sum[1] / total, sum[2] / total) : pack_color(1.f, 1.f, 1.f);
+    return total > 0.f ? pack_color(sum[0] / total, sum[1] / total, sum[2] / total) : pack_color(1.f, 1.f, 1.f);
+}
 
+MeshQuad bounds_quad(const float lo[3], const float hi[3], uint32_t color)
+{
     // Across the two longer sides, facing along the thinnest; u cross v points along it.
+    MeshQuad out;
     int thin = 0;
     for (int k = 1; k < 3; ++k) {
-        thin = max[k] - min[k] < max[thin] - min[thin] ? k : thin;
+        thin = hi[k] - lo[k] < hi[thin] - lo[thin] ? k : thin;
     }
     const int a = (thin + 1) % 3;
     const int b = (thin + 2) % 3;
     for (int k = 0; k < 3; ++k) {
-        out.center[k] = 0.5f * (min[k] + max[k]);
+        out.center[k] = 0.5f * (lo[k] + hi[k]);
     }
-    out.u[a] = 0.5f * (max[a] - min[a]);
-    out.v[b] = 0.5f * (max[b] - min[b]);
+    out.u[a] = 0.5f * (hi[a] - lo[a]);
+    out.v[b] = 0.5f * (hi[b] - lo[b]);
+    out.color = color;
+    return out;
+}
+
+bool mesh_quad(const IMesh& mesh, MeshQuad& out)
+{
+    out = MeshQuad{};
+    const aabb bounds = mesh.get_bounds();
+    const vec3 lo = bounds.min();
+    const vec3 hi = bounds.max();
+    const float min[3] = {lo.x, lo.y, lo.z};
+    const float max[3] = {hi.x, hi.y, hi.z};
+    if (!(max[0] >= min[0] && max[1] >= min[1] && max[2] >= min[2])) {
+        return false;
+    }
+    out = bounds_quad(min, max, mesh_color(mesh));
     return true;
 }
 
@@ -230,6 +240,12 @@ void main()
 
     for (uint i = gl_LocalInvocationID.x; i < leaves; i += gl_WorkGroupSize.x) {
         Quad q = no_quad();
+        if (instances_base == kNone) {
+            // Plain objects: their quads in the world already, one each in the table.
+            if (i < member_count) q = leaf(mat4(1.0), table + i * kMeshQuadWords);
+            store_node(tree + (leaves - 1u + i) * kNodeWords, q);
+            continue;
+        }
         uint index = i < member_count ? build_words.data[members + i] : kNone;
         if (index != kNone) {
             BuildInstance inst = build_instances.data[instances_base + index];

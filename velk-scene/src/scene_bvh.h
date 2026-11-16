@@ -112,6 +112,7 @@ private:
         IElement* owner = nullptr;  ///< Null when the slot is free. Never dereferenced.
         mat4 world{};          ///< Where it is: a change moves it.
         uint32_t object = 0;   ///< Its element's object id, 0 for none.
+        uint32_t color = 0;    ///< Its shapes' colour (RGBA8), for its object's quad.
         vector<RtShape> shapes;  ///< What it is: a change in kind makes it again.
         BvhItemBounds bounds{};
         uint32_t partition = kUnplaced;  ///< Index into partitions_, or kDynamic / kUnplaced.
@@ -212,6 +213,10 @@ private:
         ArenaRegion quad_tree;
         uint32_t quad_leaves = 0;
         bool quad_tree_dirty = false;
+        /// For plain records, its objects' own quads in the world (MeshQuad each), in the
+        /// order of `cull_members`, which the tree is built from.
+        ArenaRegion quad_objects;
+        uint32_t quad_object_count = 0;
     };
 
     struct EmitContext

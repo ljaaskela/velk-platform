@@ -480,7 +480,7 @@ void main()
                    uintBitsToFloat(velk_culling.data[entry + 2u]));
     vec3 hi = vec3(uintBitsToFloat(velk_culling.data[entry + 3u]), uintBitsToFloat(velk_culling.data[entry + 4u]),
                    uintBitsToFloat(velk_culling.data[entry + 5u]));
-    uint state = velk_culling.data[pc.cut_word + 22u] + partition_index * 12u;
+    uint state = velk_culling.data[pc.cut_word + 22u] + partition_index * VELK_CUT_PARTITION_WORDS;
     bool choosing = velk_culling.data[state + 8u] != 0u;
 
     // Edges 0..3 along x, 4..7 along y, 8..11 along z, at the four corners of the other two.

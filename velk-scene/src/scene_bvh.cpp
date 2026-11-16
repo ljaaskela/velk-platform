@@ -125,7 +125,39 @@ struct EmittedRecord
     uint32_t object = 0;
     vector<RtShape> shapes;
     BvhItemBounds bounds{};
+    float color_sum[3] = {0.f, 0.f, 0.f};  ///< Its shapes' colours added up, for its quad.
 };
+
+/// What a shape adds to its record's colour: a mesh's materials' colour, or the shape's own,
+/// times its tint.
+void add_shape_color(EmittedRecord& record, const ShapeSite& site)
+{
+    float rgb[3] = {site.geometry.color[0], site.geometry.color[1], site.geometry.color[2]};
+    if (site.visual) {
+        if (auto state = read_state<IVisual3D>(site.visual)) {
+            if (auto mesh = state->mesh.template get<IMesh>()) {
+                const uint32_t c = mesh_color(*mesh);
+                for (int k = 0; k < 3; ++k) {
+                    rgb[k] *= static_cast<float>((c >> (k * 8)) & 0xFFu) / 255.f;
+                }
+            }
+        }
+    }
+    for (int k = 0; k < 3; ++k) {
+        record.color_sum[k] += rgb[k];
+    }
+}
+
+uint32_t record_color(const EmittedRecord& record)
+{
+    const float count = static_cast<float>(std::max<size_t>(record.shapes.size(), 1u));
+    uint32_t packed = 255u << 24;
+    for (int k = 0; k < 3; ++k) {
+        const float unit = std::min(std::max(record.color_sum[k] / count, 0.f), 1.f);
+        packed |= static_cast<uint32_t>(unit * 255.f + 0.5f) << (k * 8);
+    }
+    return packed;
+}
 
 float bounds_radius(const BvhItemBounds& b)
 {
@@ -474,7 +506,31 @@ void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
     uint32_t trees = 0;
     uint64_t nodes = 0;
     for (Partition& partition : partitions_) {
-        if (!partition.active || !partition.quad_tree_dirty || !partition.group) {
+        if (!partition.active || !partition.quad_tree_dirty) {
+            continue;
+        }
+        if (!partition.group) {
+            // Plain objects: the tree from their own quads.
+            if (!partition.quad_tree.valid() || !partition.quad_objects.valid() || !plain_cull_.valid()) {
+                continue;
+            }
+            jobs.push_back(0u);
+            jobs.push_back(partition.quad_object_count);
+            jobs.push_back(static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)));
+            jobs.push_back(partition.quad_leaves);
+            jobs.push_back(static_cast<uint32_t>(partition.quad_objects.offset() / sizeof(uint32_t)));
+            jobs.push_back(kCullNoSlot);
+            jobs.push_back(kCullNoSlot);
+            jobs.push_back(0u);
+            partition.quad_tree_dirty = false;
+            if (partition.cull_entry != kUnplaced) {
+                const uint32_t words[2] = {static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)),
+                                           partition.quad_leaves};
+                arena->update_at(plain_cull_.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + 8u) * sizeof(uint32_t),
+                                 words, sizeof(words));
+            }
+            ++trees;
+            nodes += uint64_t(partition.quad_leaves) * 2u - 1u;
             continue;
         }
         const InstanceGroup& group = *partition.group;
@@ -903,13 +959,79 @@ void SceneBvh::write_plain_cull(Partition& partition, FrameContext& ctx, const f
         partition.cull_bounds.max[k] = hi[k];
     }
 
+    // Its objects' quads, across each one's bounds in its records' colours, and the tree over
+    // them, built again on the GPU. Not for the dynamic partition.
+    partition.quad_objects = {};
+    partition.quad_object_count = 0;
+    const bool dynamic = &partition == &dynamic_;
+    const uint32_t leaves = partition.cull_chunks != 0 && !dynamic ? quad_tree_leaves(partition.cull_chunks * kCullChunkSlots) : 0u;
+    if (leaves != 0) {
+        struct ObjectLook
+        {
+            float lo[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::max()};
+            float hi[3] = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
+                           -std::numeric_limits<float>::max()};
+            float color[3] = {0.f, 0.f, 0.f};
+            float weight = 0.f;
+        };
+        vector<ObjectLook> looks;
+        looks.resize(keyed.size());
+        // Objects by id, to find each record's.
+        vector<std::pair<uint32_t, uint32_t>> by_object;
+        by_object.reserve(keyed.size());
+        for (size_t i = 0; i < keyed.size(); ++i) {
+            by_object.push_back({keyed[i].object, static_cast<uint32_t>(i)});
+        }
+        std::sort(by_object.begin(), by_object.end());
+        for (uint32_t slot : partition.members) {
+            const Record& record = records_[slot];
+            const auto found = std::lower_bound(by_object.begin(), by_object.end(), std::make_pair(record.object, 0u));
+            if (record.object == 0u || found == by_object.end() || found->first != record.object) {
+                continue;
+            }
+            ObjectLook& look = looks[found->second];
+            merge_bounds(look.lo, look.hi, record.bounds.min, record.bounds.max);
+            for (int k = 0; k < 3; ++k) {
+                look.color[k] += static_cast<float>((record.color >> (k * 8)) & 0xFFu) / 255.f;
+            }
+            look.weight += 1.f;
+        }
+        vector<MeshQuad> quads;
+        quads.reserve(looks.size());
+        for (const ObjectLook& look : looks) {
+            uint32_t color = 255u << 24;
+            for (int k = 0; k < 3; ++k) {
+                const float unit = look.weight > 0.f ? look.color[k] / look.weight : 1.f;
+                color |= static_cast<uint32_t>(std::min(std::max(unit, 0.f), 1.f) * 255.f + 0.5f) << (k * 8);
+            }
+            quads.push_back(bounds_quad(look.lo, look.hi, color));
+        }
+        partition.quad_objects = arena->alloc(quads.size() * sizeof(MeshQuad));
+        if (partition.quad_objects.valid()) {
+            arena->write_at(partition.quad_objects.offset(), quads.data(), quads.size() * sizeof(MeshQuad));
+            partition.quad_object_count = static_cast<uint32_t>(quads.size());
+        }
+    }
+    const uint32_t tree_leaves = partition.quad_objects.valid() ? leaves : 0u;
+    if (tree_leaves != partition.quad_leaves) {
+        partition.quad_tree = tree_leaves != 0
+            ? arena->alloc((uint64_t(tree_leaves) * 2u - 1u) * kQuadNodeWords * sizeof(uint32_t))
+            : ArenaRegion{};
+        partition.quad_leaves = partition.quad_tree.valid() ? tree_leaves : 0u;
+    }
+    partition.quad_tree_dirty = partition.quad_leaves != 0;
+
     const auto entry_of = [](const Partition& p) {
         vector<uint32_t> entry(kCullEntryWords, 0u);
         std::memcpy(entry.data(), p.cull_bounds.min, sizeof(float) * 3);
         std::memcpy(entry.data() + 3, p.cull_bounds.max, sizeof(float) * 3);
         entry[6] = p.cull_members.valid() ? static_cast<uint32_t>(p.cull_members.offset() / sizeof(uint32_t)) : 0u;
         entry[7] = p.cull_chunks;
-        entry[8] = kCullNoSlot;  // No quad tree.
+        // Its quad tree once a build of it is under way, which emit_quad_trees writes.
+        const bool tree = p.quad_leaves != 0 && !p.quad_tree_dirty;
+        entry[8] = tree ? static_cast<uint32_t>(p.quad_tree.offset() / sizeof(uint32_t)) : kCullNoSlot;
+        entry[9] = tree ? p.quad_leaves : 0u;
         return entry;
     };
     if (partition.cull_entry == kUnplaced) {
@@ -965,6 +1087,11 @@ void SceneBvh::release_plain_cull(Partition& partition, FrameContext& ctx)
     partition.cull_entry = kUnplaced;
     partition.cull_members = {};
     partition.cull_chunks = 0;
+    partition.quad_objects = {};
+    partition.quad_object_count = 0;
+    partition.quad_tree = {};
+    partition.quad_leaves = 0;
+    partition.quad_tree_dirty = false;
 }
 
 void SceneBvh::cut_instances(InstanceGroup& group, FrameContext& ctx)
@@ -1285,6 +1412,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         if (site.record_group && site.record_group == s.open_group) {
             auto& open = s.records.back();
             open.shapes.push_back(site.geometry);
+            add_shape_color(open, site);
             merge_bounds(open.bounds.min, open.bounds.max, site.aabb_min, site.aabb_max);
             return;
         }
@@ -1294,6 +1422,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         auto& fresh = s.records.back();
         fresh.world = *site.world;
         fresh.shapes.push_back(site.geometry);
+        add_shape_color(fresh, site);
         for (int k = 0; k < 3; ++k) {
             fresh.bounds.min[k] = site.aabb_min[k];
             fresh.bounds.max[k] = site.aabb_max[k];
@@ -1342,6 +1471,14 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
                 }
             }
             std::memcpy(record.shapes.data(), emitted.shapes.data(), emitted.shapes.size() * sizeof(RtShape));
+            // A new colour: its partition's quads again.
+            const uint32_t color = record_color(emitted);
+            if (color != record.color) {
+                record.color = color;
+                if (!moved && record.partition < partitions_.size()) {
+                    partitions_[record.partition].dirty = true;
+                }
+            }
         }
         set_object_transform(object, collect.world, records_radius(collect.records));
         return;
@@ -1367,6 +1504,7 @@ void SceneBvh::update_element(IElement* element, const EmitContext& emit)
         record.owner = element;
         record.world = emitted.world;
         record.object = emitted.object;
+        record.color = record_color(emitted);
         record.shapes = std::move(emitted.shapes);
         record.bounds = emitted.bounds;
         note_changed(record.bounds);

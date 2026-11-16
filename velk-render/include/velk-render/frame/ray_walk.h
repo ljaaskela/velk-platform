@@ -437,7 +437,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * 2u;
                 uint cut_entry = top_cuts + velk_culling.data[leaf] * 8u;
                 uint cut = velk_culling.data[cut_entry];
-                uint state = velk_culling.data[cut + 22u] + velk_culling.data[leaf + 1u] * 12u;
+                uint state = velk_culling.data[cut + 22u] + velk_culling.data[leaf + 1u] * VELK_CUT_PARTITION_WORDS;
                 uint count = velk_culling.data[state + 6u];
                 if (count == 0u) continue;
                 uint parity = velk_culling.data[cut + 12u];

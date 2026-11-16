@@ -70,7 +70,8 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///            and chunk count when it chose, 5 its first record and 6 its record count in the
 ///            current store, 7 its first record in the last store, 8 1 while choosing this
 ///            frame, 9 while choosing where its chunks start in the choose list, 10 its first
-///            tree node in the current node store, 11 in the last
+///            tree node in the current node store, 11 in the last, 12 its table entry's quad
+///            tree word when it chose (a new tree makes it choose again)
 ///   23     the word of the choose list's chunk counts, one a chunk: how many records the
 ///          chunk's instances choose, then its first record
 ///   24     tree nodes in the current node store
@@ -93,7 +94,7 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// how many less one; without, a node's offset from its first node; kCullNoSlot for none. Its
 /// nodes are its levels from the bottom, the root last. See instance_cut_tree_src.
 inline constexpr uint32_t kCutHeaderWords = 32;
-inline constexpr uint32_t kCutPartitionWords = 12;
+inline constexpr uint32_t kCutPartitionWords = 13;  ///< Mirrors VELK_CUT_PARTITION_WORDS.
 inline constexpr uint32_t kCutRecordWords = 4;
 inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
@@ -145,7 +146,7 @@ inline uint32_t cut_tree_nodes(uint32_t records)
 #define VELK_CUT_GLSL R"(
 uint velk_cut_state(uint cut, uint index)
 {
-    return cull_words.data[cut + 22u] + index * 12u;
+    return cull_words.data[cut + 22u] + index * VELK_CUT_PARTITION_WORDS;
 }
 
 // The current store, or the last frame's.
@@ -478,7 +479,8 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away)
     vec3 viewpoint = vec3(uintBitsToFloat(cull_words.data[state]), uintBitsToFloat(cull_words.data[state + 1u]),
                           uintBitsToFloat(cull_words.data[state + 2u]));
     uint count = cull_words.data[state + 6u];
-    bool same = cull_words.data[state + 3u] == cull_words.data[entry + 6u] && cull_words.data[state + 4u] == chunks;
+    bool same = cull_words.data[state + 3u] == cull_words.data[entry + 6u] && cull_words.data[state + 4u] == chunks
+             && cull_words.data[state + 12u] == cull_words.data[entry + 8u];
     if (same && count != 0u && length(cam - viewpoint) <= pc.refresh * length(away)) {
         uint first = atomicAdd(cull_words.data[cut + 13u], count);
         if (first + count <= cull_words.data[cut + 16u]) {
@@ -502,6 +504,7 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away)
     cull_words.data[state + 2u] = floatBitsToUint(cam.z);
     cull_words.data[state + 3u] = cull_words.data[entry + 6u];
     cull_words.data[state + 4u] = chunks;
+    cull_words.data[state + 12u] = cull_words.data[entry + 8u];
     cull_words.data[state + 6u] = 0u;
     cull_words.data[state + 8u] = 1u;
     atomicAdd(cull_words.data[cut + 14u], 1u);
@@ -646,7 +649,7 @@ layout(push_constant) uniform PC {
     uint next_word;
     uint head_word;
     uint object_slots;
-    uint partition_table;  // the visual's partition table, whose entries name their quad trees
+    uint partition_table;  // the cut's partition table, whose entries name their quad trees
     float quad_pixels;     // kQuadPixels
 } pc;
 )" VELK_CUT_GLSL R"(
@@ -755,20 +758,21 @@ uint velk_quad_first(uint node)
 // Chooses for a member of a chunk: an instance's slot, or an object.
 void velk_cut_member(uint member, vec3 viewpoint)
 {
-    if (pc.items_word == 0xFFFFFFFFu) {
-        if (member >= pc.slot_count) return;
-        // Under a quad small enough: the first member under it records the quad, the rest nothing.
-        if (g_tree != 0xFFFFFFFFu) {
-            GlobalData globals = velk_globals.data[pc.globals_base];
-            mat4 vp = globals.view_projection;
-            float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
-            uint quad = velk_quad_over(viewpoint, pixels_per_unit);
-            if (quad != 0xFFFFFFFFu) {
-                if (velk_quad_first(quad) == g_position) {
-                    velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, member, 0.0);                }
-                return;
+    if (pc.items_word == 0xFFFFFFFFu && member >= pc.slot_count) return;
+    // Under a quad small enough: the first member under it records the quad, the rest nothing.
+    if (g_tree != 0xFFFFFFFFu) {
+        GlobalData globals = velk_globals.data[pc.globals_base];
+        mat4 vp = globals.view_projection;
+        float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
+        uint quad = velk_quad_over(viewpoint, pixels_per_unit);
+        if (quad != 0xFFFFFFFFu) {
+            if (velk_quad_first(quad) == g_position) {
+                velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, member, 0.0);
             }
+            return;
         }
+    }
+    if (pc.items_word == 0xFFFFFFFFu) {
         velk_cut_instance(member, pc.instances_base + member, pc.table_word, viewpoint);
     } else {
         // An object: each of its plain items. An object has a few at most; the bound only
@@ -2288,8 +2292,8 @@ struct InstanceCullPass
         uint32_t node_capacity = 0; ///< Tree nodes a node store holds.
     };
     vector<Cut> cuts;
-    /// The view's quads drawn (kQuadListHeaderWords), filled each frame from the partitions'
-    /// quad trees, and how many it holds. See instance_quad_list_src.
+    /// The view's quads drawn (kQuadListHeaderWords), filled each frame by the draw pass from
+    /// the kept cuts' quad records, and how many it holds.
     ArenaRegion quads;
     uint32_t quad_capacity = 0;
     /// The top tree for rays over all the cuts' partitions (kRayTopHeaderWords), and what its
@@ -2730,12 +2734,12 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         state.cuts = std::move(kept);
         state.cut_growth.clear();
 
-        // The view's quad list: room for a quad per member of every partitioned visual, which
-        // no set of quads that each stand for members of their own can pass, and one per
-        // partition, whose chunks may be part filled.
+        // The view's quad list: room for a quad per member of every kept cut, instances and
+        // plain objects alike, which no set of quads that each stand for members of their own
+        // can pass, and one per partition, whose chunks may be part filled.
         uint32_t quads = 0;
         for (const Wants& info : wants) {
-            quads += info.by_item ? 0u : info.members + info.partitions;
+            quads += info.members + info.partitions;
         }
         if (quads != state.quad_capacity) {
             state.quad_capacity = 0;
@@ -2981,8 +2985,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 float quad_pixels;
             };
             const auto choose = [&](const CutJob& job, uint32_t write) {
-                // Plain objects' partitions have no quad trees.
-                const uint32_t partition_table = job.items_word == kCullNoSlot ? job.partition_table : kCullNoSlot;
+                const uint32_t partition_table = job.partition_table;
                 const ChoosePushC pc{job.cut, job.instances_base, job.slot_count, job.table_word, view_globals_base,
                                      kLodMaxErrorPixels, write, job.items_word, together_objects_word, together_next_word,
                                      together_head_word, state.together_object_slots, partition_table, kQuadPixels};
