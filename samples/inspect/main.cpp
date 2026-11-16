@@ -128,6 +128,25 @@ void add_grid(velk::vector<Vertex>& vertices, velk::vector<uint32_t>& indices, c
     }
 }
 
+/// A value from -0.5 to 0.5 that depends only on @p i and @p salt.
+float jitter(long i, float salt)
+{
+    const float x = std::sin(static_cast<float>(i) * 12.9898f + salt * 78.233f) * 43758.5453f;
+    return x - std::floor(x) - 0.5f;
+}
+
+/// Adds an instanced visual of @p mesh to the scene at @p transforms.
+void add_instances(velk::Scene& scene, velk::Element& root, const velk::IMesh::Ptr& mesh,
+                   const velk::vector<velk::InstanceTransform>& transforms)
+{
+    auto visual = velk::trait::visual::create_instanced_mesh();
+    visual.set_mesh(velk::Mesh(mesh));
+    visual.add_instances({transforms.data(), transforms.size()});
+    auto element = velk::create_element();
+    element.add_trait(visual);
+    scene.add(root, element);
+}
+
 /// A flat square on y = 0, @p size across, centered on the origin, facing up (-y).
 velk::IMesh::Ptr build_ground(velk::IRenderContext& ctx, float size, uint32_t cells, const velk::IMaterial::Ptr& material)
 {
@@ -217,12 +236,30 @@ velk::IMesh::Ptr build_rock(velk::IRenderContext& ctx, float size, uint32_t segm
     return build(ctx, vertices, indices, material);
 }
 
-/// A value from -0.5 to 0.5 that depends only on @p i and @p salt.
-float jitter(long i, float salt)
+/// A tuft @p size across standing on y = 0: @p blades separate thin triangles, about 0.5
+/// wide at the base and 3 to 5 tall, leaning a little each its own way.
+velk::IMesh::Ptr build_tuft(velk::IRenderContext& ctx, float size, uint32_t blades, const velk::IMaterial::Ptr& material)
 {
-    const float x = std::sin(static_cast<float>(i) * 12.9898f + salt * 78.233f) * 43758.5453f;
-    return x - std::floor(x) - 0.5f;
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    for (uint32_t b = 0; b < blades; ++b) {
+        const velk::vec3 base{jitter(b, 0.31f) * size, 0.f, jitter(b, 0.57f) * size};
+        const float height = 4.f + jitter(b, 0.83f) * 2.f;
+        const float turn = (jitter(b, 1.19f) + 0.5f) * 2.f * kPi;
+        const velk::vec3 side{std::cos(turn) * 0.25f, 0.f, std::sin(turn) * 0.25f};
+        const velk::vec3 lean{-std::sin(turn) * height * 0.25f, -height, std::cos(turn) * height * 0.25f};
+        const velk::vec3 n = velk::vec3::normalize(velk::vec3{-std::sin(turn), -0.5f, std::cos(turn)});
+        const auto first = static_cast<uint32_t>(vertices.size());
+        for (const velk::vec3& p : {base - side, base + side, base + lean}) {
+            vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, {0.f, 0.f}, {side.x, side.y, side.z, 1.f}});
+        }
+        for (uint32_t i : {first, first + 1u, first + 2u}) {
+            indices.push_back(i);
+        }
+    }
+    return build(ctx, vertices, indices, material);
 }
+
 
 /// Adds a mesh to the scene at @p at.
 void add_mesh(velk::Scene& scene, velk::Element& root, const velk::IMesh::Ptr& mesh, const velk::vec3& at)
@@ -308,7 +345,7 @@ constexpr NamedView kViews[] = {
     {velk::DebugView::RayTop, "top", "ray top tree",
      "boxes of one level of the tree rays walk over the partitions (K and L for the level): 0 one partition each"},
     {velk::DebugView::Quads, "quads", "quads",
-     "the partitions' quads alone, one per chunk of 64 members, in their colour"},
+     "the quads the cut chose in their colour, everything else grey"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -409,9 +446,14 @@ int main(int argc, char* argv[])
     auto rock_material = velk::material::create_standard(velk::color{0.55f, 0.5f, 0.44f, 1.f}, 0.f, 0.8f);
     auto pebble_material = velk::material::create_standard(velk::color{0.35f, 0.42f, 0.25f, 1.f}, 0.f, 0.8f);
     auto wall_material = velk::material::create_standard(velk::color{0.6f, 0.58f, 0.55f, 1.f}, 0.f, 0.7f);
+    auto tree_material = velk::material::create_standard(velk::color{0.12f, 0.3f, 0.1f, 1.f}, 0.f, 0.8f);
+    auto tuft_material = velk::material::create_standard(velk::color{0.5f, 0.6f, 0.15f, 1.f}, 0.f, 0.8f);
+    // Blades are seen from both sides.
+    tuft_material.options().set_double_sided(true);
 
     // A flat ground: flat areas simplify at no error, and its full detail runs out up close.
-    add_mesh(scene, root, build_ground(*render_context, 8000.f, 256, ground_material), {0.f, 0.f, 0.f});
+    // Wide enough that the fields below run out to where their instances are a pixel or two.
+    add_mesh(scene, root, build_ground(*render_context, 32000.f, 512, ground_material), {0.f, 0.f, 0.f});
 
     // Dense rocks at rising distances along the view.
     const velk::IMesh::Ptr rock = build_rock(*render_context, 60.f, 160, 80, rock_material);
@@ -441,6 +483,47 @@ int main(int argc, char* argv[])
         auto element = velk::create_element();
         element.add_trait(field);
         scene.add(root, element);
+    }
+
+    // Large things seen far: tree sized solids, 24 across and 60 tall, left of the view and out
+    // along it to where they are a pixel or two on screen.
+    {
+        constexpr long kColumns = 80;
+        constexpr long kRows = 333;
+        constexpr float kSpacing = 45.f;
+        const velk::vec3 corner{-4000.f, 0.f, -15000.f};
+        velk::vector<velk::InstanceTransform> transforms;
+        transforms.reserve(static_cast<size_t>(kColumns * kRows));
+        for (long i = 0; i < kColumns * kRows; ++i) {
+            const float x = corner.x + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 3.1f)) * kSpacing;
+            const float z = corner.z + (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 5.9f)) * kSpacing;
+            const float s = 1.f + jitter(i, 8.3f) * 0.5f;
+            const float turn = (jitter(i, 9.7f) + 0.5f) * 2.f * kPi;
+            const float c = std::cos(turn) * s;
+            const float n = std::sin(turn) * s;
+            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, s * 2.5f, 0.f, 0.f}, {-n, 0.f, c, z}}});
+        }
+        add_instances(scene, root, build_rock(*render_context, 24.f, 48, 24, tree_material), transforms);
+    }
+
+    // Things made of many separate small parts, which simplifying cannot merge: tufts of 100
+    // thin blades, right of the view and out along it past where the blades are below a pixel.
+    {
+        constexpr long kColumns = 80;
+        constexpr long kRows = 409;
+        constexpr float kSpacing = 22.f;
+        const velk::vec3 corner{2200.f, 0.f, -9000.f};
+        velk::vector<velk::InstanceTransform> transforms;
+        transforms.reserve(static_cast<size_t>(kColumns * kRows));
+        for (long i = 0; i < kColumns * kRows; ++i) {
+            const float x = corner.x + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 2.3f)) * kSpacing;
+            const float z = corner.z + (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 6.1f)) * kSpacing;
+            const float turn = (jitter(i, 4.4f) + 0.5f) * 2.f * kPi;
+            const float c = std::cos(turn);
+            const float n = std::sin(turn);
+            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, 1.f, 0.f, 0.f}, {-n, 0.f, c, z}}});
+        }
+        add_instances(scene, root, build_tuft(*render_context, 20.f, 100, tuft_material), transforms);
     }
 
     // One large wall throwing a shadow across the field and the ground.
