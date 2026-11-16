@@ -526,6 +526,19 @@ int main(int argc, char* argv[])
         add_instances(scene, root, build_tuft(*render_context, 20.f, 100, tuft_material), transforms);
     }
 
+    // Many small things that are each their own element rather than instances: plain rocks
+    // behind the pebbles, out along the view.
+    {
+        const velk::IMesh::Ptr small_rock = build_rock(*render_context, 8.f, 16, 8, rock_material);
+        constexpr long kColumns = 40;
+        constexpr long kRows = 50;
+        for (long i = 0; i < kColumns * kRows; ++i) {
+            const float x = 400.f + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 7.1f)) * 40.f;
+            const float z = -1800.f - (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 8.9f)) * 110.f;
+            add_mesh(scene, root, small_rock, {x, 0.f, z});
+        }
+    }
+
     // One large wall throwing a shadow across the field and the ground.
     add_mesh(scene, root, build_box(*render_context, {900.f, 260.f, 30.f}, 24, wall_material), {500.f, 0.f, -700.f});
 
