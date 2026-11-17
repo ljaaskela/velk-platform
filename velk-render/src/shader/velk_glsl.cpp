@@ -109,10 +109,13 @@ R"(
 #define VELK_QUAD_NODE_WORDS 12u
 // A kept cut's record of a quad has this for its entry: kCutQuad.
 #define VELK_CUT_QUAD 0xFFFFFFFEu
+// A kept cut's record of a patch of small members for rays only: kCutRayQuad.
+#define VELK_CUT_RAY_QUAD 0xFFFFFFFDu
 // A kept cut's record of a cluster that holds light and is not drawn has this on its entry:
-// kCutLightOnly. Test with velk_cut_light_only, since a quad's and a whole mesh's entries have it too.
+// kCutLightOnly. Test with velk_cut_light_only, since a quad's, a ray quad's and a whole mesh's
+// entries have it too.
 #define VELK_CUT_LIGHT_ONLY 0x80000000u
-#define velk_cut_light_only(entry) ((entry) < VELK_CUT_QUAD && ((entry) & VELK_CUT_LIGHT_ONLY) != 0u)
+#define velk_cut_light_only(entry) ((entry) < VELK_CUT_RAY_QUAD && ((entry) & VELK_CUT_LIGHT_ONLY) != 0u)
 // A partition's tree leaves are the finest it has: kQuadLeavesOnly.
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.

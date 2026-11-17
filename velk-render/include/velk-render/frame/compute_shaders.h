@@ -1075,7 +1075,9 @@ Light velk_light_at(uint index)
 
 #include "velk_intersect.glsl"
 
-#define VELK_TRACE_STACK_SIZE 96
+// The walk's stack per thread, in shared memory: 48 for 64 threads is 12 KB. The light trace's
+// log gives the deepest a frame's rays got.
+#define VELK_TRACE_STACK_SIZE 48
 #include "velk_trace.glsl"
 )"
                                                                       R"(
@@ -1402,19 +1404,20 @@ void main()
         vec3 area_spec = vec3(0.0);
         // The lights its points of light keep and what of each gets through; before its points
         // are traced, every light, unshadowed.
-        uint point_lights[16];
-        float point_through[16];
-        uint points = VELK_LIGHT_NONE;
+        uint point_lights[VELK_LIGHT_SLOTS];
+        float point_through[VELK_LIGHT_SLOTS];
+        bool points = false;
         if (pc.spare3 != VELK_LIGHT_NONE) {
             points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord), world_pos,
                                        uintBitsToFloat(pc.spare5), point_lights, point_through);
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
-        if (points == VELK_LIGHT_NONE && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + 83u], 1u);
-        uint light_count = points != VELK_LIGHT_NONE ? points : pc.light_count;
+        if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + 83u], 1u);
+        uint light_count = points ? VELK_LIGHT_SLOTS : pc.light_count;
         for (uint k = 0u; k < light_count; ++k) {
-            uint i = points != VELK_LIGHT_NONE ? point_lights[k] : k;
-            float through = points != VELK_LIGHT_NONE ? point_through[k] : 1.0;
+            if (points && point_lights[k] == VELK_LIGHT_NONE) continue;
+            uint i = points ? point_lights[k] : k;
+            float through = points ? point_through[k] : 1.0;
             Light light = velk_light_at(pc.lights_base + i);
             // Area lights are integrated in closed form, and blocked by what the points say.
             if (light.flags.x == 3u) {
@@ -1609,9 +1612,9 @@ struct BrdfSample {
     uint sample_count_hint;
 };
 
-// Wide scene roots (a grid of 40+ tiles, a dashboard of cards) need more than the
-// deferred pass's 64, since closest-hit pushes both children unordered.
-#define VELK_TRACE_STACK_SIZE 128
+// The walk's stack per thread, in shared memory: 32 for 64 threads is 8 KB. The light trace's
+// log gives the deepest the probes' rays got.
+#define VELK_TRACE_STACK_SIZE 32
 #include "velk_trace.glsl"
 
 )" R"(

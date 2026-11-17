@@ -106,6 +106,17 @@ public:
         IRenderPass::Ptr light_claim_pass;
         IRenderPass::Ptr light_search_pass;
         IRenderPass::Ptr light_trace_pass;
+        /// What changed this frame for the light (kLightChangeWords a change), and the lights as
+        /// each was when last listed as changed. See light_changes_main_src.
+        ArenaRegion light_changes;
+        vector<GpuLight> light_changes_lights;
+        IRenderPass::Ptr light_changes_pass;
+        /// For the log: frames with changes since it last printed, their changes, the times
+        /// everything changed, and the frame it last printed.
+        uint32_t light_change_frames = 0;
+        uint32_t light_change_count = 0;
+        uint32_t light_change_all = 0;
+        uint64_t light_change_log_frame = 0;
         uint32_t light_claim_recorded[5] = {};  ///< What the light claim pass was recorded with.
         /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
         /// how many probes each holds. See light_probes_main_src.
@@ -230,6 +241,9 @@ private:
     /// Gives each kept cut record a pixel shows its light in the view's light pool, the first
     /// time one does (light_claim_src).
     void emit_light_claim_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Lists what changed this frame and makes the light it could alter due again
+    /// (light_changes_main_src), before the claim. Nothing when nothing changed.
+    void emit_light_changes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Gathers the screen probes' bounce light (light_probes_main_src), before the lighting.
     void emit_light_probes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.

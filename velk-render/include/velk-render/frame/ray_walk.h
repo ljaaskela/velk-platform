@@ -44,6 +44,15 @@ bool velk_ray_met_motion = false;
 // The pieces of work (triangles, nodes, records) this thread's walks have done, all of them
 // added up. For the shader to read.
 uint velk_ray_steps = 0u;
+// Of those, the triangles tested and the records.
+uint velk_ray_tris = 0u;
+uint velk_ray_records = 0u;
+// The deepest this thread's walks' stack got, against VELK_TRACE_STACK_SIZE.
+int velk_ray_deepest = 0;
+
+// The walk's stack: a slice of VELK_TRACE_STACK_SIZE for each thread of the work group, which
+// has 64, in shared memory, since as an array of its own it would be in scratch memory.
+shared uint s_walk_stack[64u * uint(VELK_TRACE_STACK_SIZE)];
 
 // Which of its object's six axis directions a surface facing `n`, in the object's own space,
 // faces: 0 and 1 for +x and -x, then y, then z, as the G-buffer's surface attachment has it.
@@ -161,9 +170,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     const uint kPartition = 1u;
     const uint kMesh = 2u;
     const int kStack = VELK_TRACE_STACK_SIZE;
-    uint stack[kStack];
+    // This thread's slice of the work group's stack (s_walk_stack).
+    uint stack_base = gl_LocalInvocationIndex * uint(VELK_TRACE_STACK_SIZE);
     int sp = 0;
-    stack[sp++] = velk_culling.data[top + 3u];
+    s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[top + 3u];
     uint level = kTop;
     int partition_scope = 0;
     int mesh_scope = 0;
@@ -210,11 +220,13 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     vec2 best_uv = vec2(0.0);
     vec3 best_normal = vec3(0.0);  // where nothing better is known: in the shape's or mesh's space
     bool best_quad = false;        // best_instance is a quad's word, not an instance
+    float through = 1.0;           // the light the patches passed so far let through (VELK_CUT_RAY_QUAD)
 
     // At most VELK_WALK_MAX_STEPS pieces of work, whatever the trees it reads say: a walk that
     // runs out ends with what it has found.
     for (uint step = 0u; step < VELK_WALK_MAX_STEPS; ++step) {
         ++velk_ray_steps;
+        velk_ray_deepest = max(velk_ray_deepest, sp);
         bool tested = false;
         vec3 v0, v1, v2;
         uvec3 corners;
@@ -248,6 +260,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             tested = true;
         }
         if (tested) {
+            ++velk_ray_tris;
             // Moller-Trumbore, with thresholds that scale with the triangle, so that meshes
             // with tiny local coordinates are not all filtered out as near-parallel.
             vec3 e1 = v1 - v0;
@@ -285,7 +298,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 level = kPartition;
                 continue;
             }
-            uint ref = stack[--sp];
+            uint ref = s_walk_stack[stack_base + uint(--sp)];
             if ((ref & VELK_BLAS_LEAF) != 0u) {
                 uint leaf = word_base + (ref & ~VELK_BLAS_LEAF);
                 triangle_at = word_base + velk_cluster_words.data[leaf];
@@ -305,15 +318,34 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = left_first ? node.refs.x : node.refs.y;
             uint far_ref = left_first ? node.refs.y : node.refs.x;
-            if (h_l && h_r && sp < kStack) stack[sp++] = far_ref;
-            if ((h_l || h_r) && sp < kStack) stack[sp++] = near_ref;
+            if (h_l && h_r && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
+            if ((h_l || h_r) && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         } else if (records_left > 0u) {
+            ++velk_ray_records;
             uint r = records + velk_culling.data[record_at] * 4u;
             record_at += 1u;
             --records_left;
             uint entry = velk_culling.data[r];
             uint cluster = velk_culling.data[r + 1u];
             uint named = velk_culling.data[r + 2u];
+            // A patch of small members: a shadow ray keeps the part of its light their quads leave,
+            // by the share of the patch's sphere they cover, the node's quad keeping their area,
+            // seen from every way alike (half of it on average). Probe rays pass it.
+            if (entry == VELK_CUT_RAY_QUAD) {
+                if (closest) continue;
+                vec3 c = velk_ray_vec3(cluster) - cam;
+                float radius = uintBitsToFloat(velk_culling.data[cluster + 10u]);
+                if (radius <= 0.0) continue;
+                vec3 to = c - ray.origin;
+                float along = dot(to, ray.dir);
+                float off = dot(to, to) - along * along;
+                if (off > radius * radius || along + radius < 0.0 || along - radius > best_t) continue;
+                float area = 4.0 * length(cross(velk_ray_vec3(cluster + 3u), velk_ray_vec3(cluster + 6u)));
+                float covered = min(0.5 * area / (3.14159265 * radius * radius), 1.0);
+                through *= 1.0 - covered;
+                if (through < 0.01) return 0.0;
+                continue;
+            }
             // A record for light only is traced as the cluster it is.
             if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
             if (entry == VELK_CUT_QUAD) {
@@ -382,7 +414,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     word_base = velk_cluster_words.data[header + 14u];
                     level = kMesh;
                     mesh_scope = sp;
-                    if (sp < kStack) stack[sp++] = velk_cluster_words.data[header + 10u];
+                    if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_cluster_words.data[header + 10u];
                 } else {
                     // Its vertices move, so its triangles are tested as they are drawn.
                     drawn_at = velk_culling.data[cur_cluster];
@@ -401,7 +433,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 word_base = st.cluster_word_base;
                 level = kMesh;
                 mesh_scope = sp;
-                if (sp < kStack) stack[sp++] = st.blas_root;
+                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = st.blas_root;
             } else {
                 // An analytic shape, over the instance's extent.
                 float scale;
@@ -431,7 +463,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 level = kTop;
                 continue;
             }
-            uint ref = stack[--sp];
+            uint ref = s_walk_stack[stack_base + uint(--sp)];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 uint first = (ref & ~VELK_RAY_LEAF) >> 2u;
                 record_at = ray_list + first;
@@ -445,11 +477,11 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? 12u : 13u)];
             uint far_ref = velk_culling.data[node + (left_first ? 13u : 12u)];
-            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) stack[sp++] = far_ref;
-            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) stack[sp++] = near_ref;
+            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
+            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         } else {
             if (sp == 0) break;
-            uint ref = stack[--sp];
+            uint ref = s_walk_stack[stack_base + uint(--sp)];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 // A partition: its tree, whose root's box its leaf here already has.
                 uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * 2u;
@@ -469,7 +501,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (velk_culling.data[cut_entry + 5u] != 0u) velk_ray_met_motion = true;
                 level = kPartition;
                 partition_scope = sp;
-                if (sp < kStack) stack[sp++] = velk_ray_tree_nodes(count) - 1u;
+                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_ray_tree_nodes(count) - 1u;
                 continue;
             }
             uint node = top_nodes + ref * 16u;
@@ -479,14 +511,14 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? 12u : 13u)];
             uint far_ref = velk_culling.data[node + (left_first ? 13u : 12u)];
-            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) stack[sp++] = far_ref;
-            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) stack[sp++] = near_ref;
+            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
+            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         }
     }
 
 )"
                                                     R"(
-    if (!closest || best_instance == VELK_RAY_NONE) return closest ? 0.0 : 1.0;
+    if (!closest || best_instance == VELK_RAY_NONE) return closest ? 0.0 : through;
 
     hit.t = best_t;
     hit.draw = best_draw;

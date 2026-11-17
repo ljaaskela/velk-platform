@@ -446,6 +446,9 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
     if (test_diagnostics_enabled() && !vs.test_words.valid()) {
         vs.test_words = arena->alloc(uint64_t(kTestWords) * kTestSlots * sizeof(uint32_t));
     }
+    if (!vs.light_changes.valid()) {
+        vs.light_changes = arena->alloc(uint64_t(kLightChangeHeaderWords + kLightChanges * kLightChangeWords) * sizeof(uint32_t));
+    }
     // The screen probes' two stores, a probe per kLightProbePixels square of the G-buffer.
     const uint32_t probes = ((vs.gbuffer_size.x + kLightProbePixels - 1u) / kLightProbePixels)
                           * ((vs.gbuffer_size.y + kLightProbePixels - 1u) / kLightProbePixels);
@@ -729,6 +732,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
+    emit_light_changes_pass(vs, render_view, ctx, graph);
     emit_light_claim_pass(vs, render_view, ctx, graph);
     const uint32_t visibility_mode = visibility_debug_mode() != 0u ? visibility_debug_mode()
                                    : camera_state ? static_cast<uint32_t>(camera_state->debug_view)
@@ -1010,6 +1014,151 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
     });
 }
 
+void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    const LightPool& pool = vs.instance_cull.light_pool;
+    const vector<uint32_t>& cuts = vs.instance_cull.ray_top_cuts;
+    if (pool.segments.empty() || !vs.light_changes.valid() || !vs.light_header.valid() || cuts.empty()
+        || !vs.instance_cull.ray_top.valid()) {
+        return;
+    }
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
+    if (!arena_buffer) return;
+
+    vector<uint32_t> words(kLightChangeHeaderWords, 0u);
+    uint32_t count = 0;
+    bool all = render_view.bvh.changed_all;
+    const auto add = [&](const float lo[3], const float hi[3], uint32_t light) {
+        if (count == kLightChanges) {
+            all = true;
+            return;
+        }
+        uint32_t change[kLightChangeWords] = {};
+        std::memcpy(change, lo, sizeof(float) * 3);
+        change[3] = light;
+        std::memcpy(change + 4, hi, sizeof(float) * 3);
+        words.insert(words.end(), change, change + kLightChangeWords);
+        ++count;
+    };
+    // What moved, came or went, as boxes; under a pixel on screen it changes no light that shows.
+    if (!all) {
+        const mat4& vp = render_view.view_projection;
+        const float row = std::sqrt(vp(1, 0) * vp(1, 0) + vp(1, 1) * vp(1, 1) + vp(1, 2) * vp(1, 2));
+        const float pixel = row > 0.f && render_view.height > 0 ? 2.f / (row * static_cast<float>(render_view.height)) : 0.f;
+        const float cam[3] = {render_view.cam_pos.x, render_view.cam_pos.y, render_view.cam_pos.z};
+        for (const auto& box : render_view.bvh.changed) {
+            float extent = 0.f;
+            float distance = 0.f;
+            for (int k = 0; k < 3; ++k) {
+                extent = std::max(extent, box.max[k] - box.min[k]);
+                const float out = std::max(std::max(box.min[k] - cam[k], cam[k] - box.max[k]), 0.f);
+                distance += out * out;
+            }
+            if (extent < pixel * std::sqrt(distance)) continue;
+            add(box.min, box.max, kLightNone);
+        }
+    }
+    // Lights, compared with how each was when last listed, so that one drifting a little each
+    // frame is listed once the drift adds up to something a shadow could show: a quarter of its
+    // size, or for one without a size a five-hundredth of its range; or its brightness by a
+    // sixteenth. One without a place that moved changes everything.
+    const auto& lights = render_view.lights;
+    auto& listed = vs.light_changes_lights;
+    bool all_lights = lights.size() != listed.size();
+    const auto brightness = [](const GpuLight& l) {
+        return (0.2126f * l.color_intensity[0] + 0.7152f * l.color_intensity[1] + 0.0722f * l.color_intensity[2])
+             * l.color_intensity[3];
+    };
+    for (size_t i = 0; !all_lights && i < lights.size(); ++i) {
+        const GpuLight& a = listed[i];
+        const GpuLight& b = lights[i];
+        const bool same_kind = a.flags[0] == b.flags[0] && std::memcmp(a.direction, b.direction, sizeof(a.direction)) == 0
+                            && std::memcmp(a.params, b.params, sizeof(a.params)) == 0;
+        float moved = 0.f;
+        for (int k = 0; k < 3; ++k) moved += (a.position[k] - b.position[k]) * (a.position[k] - b.position[k]);
+        const float least = std::max(0.25f * b.params[3], 0.002f * b.params[0]);
+        const bool still = same_kind && moved <= least * least;
+        const float was = brightness(a);
+        const float now = brightness(b);
+        if (still && std::abs(now - was) <= std::max(was, now) / 16.f) continue;
+        if (!still && (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
+                       || b.flags[0] == static_cast<uint32_t>(LightType::Directional))) {
+            all_lights = true;
+            break;
+        }
+        add(b.position, b.position, static_cast<uint32_t>(i));
+        listed[i] = b;
+    }
+    if (all_lights) {
+        all = true;
+        listed.resize(lights.size());
+        if (!lights.empty()) std::memcpy(listed.data(), lights.data(), lights.size() * sizeof(GpuLight));
+    }
+    // Now and then, how often light changed.
+    if (all || count != 0) {
+        ++vs.light_change_frames;
+        vs.light_change_count += all ? 0u : count;
+        vs.light_change_all += all ? 1u : 0u;
+    }
+    if (ctx.present_counter >= vs.light_change_log_frame + 120u) {
+        if (vs.light_change_frames != 0) {
+            VELK_LOG(I, "light changes: in %u of the last %u frames, %u boxes and lights, %u times everything",
+                     vs.light_change_frames, static_cast<unsigned>(ctx.present_counter - vs.light_change_log_frame),
+                     vs.light_change_count, vs.light_change_all);
+        }
+        vs.light_change_log_frame = ctx.present_counter;
+        vs.light_change_frames = vs.light_change_count = vs.light_change_all = 0;
+    }
+    // Nothing changed: no light is traced again.
+    if (!all && count == 0) return;
+    words[0] = all ? 0u : count;
+    words[1] = all ? 1u : 0u;
+    if (all) words.resize(kLightChangeHeaderWords);
+    arena->update_at(vs.light_changes.offset(), words.data(), words.size() * sizeof(uint32_t));
+
+    auto pipeline = compose_deferred_compute_pipeline(ctx, light_changes_main_src, 0x4c43'4847'4553ULL, false, 5u);
+    if (!pipeline) return;
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.light_count = static_cast<uint32_t>(lights.size());
+    pc.cells_header = static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t));
+    pc.lights_base = render_view.lights_base;
+    pc.spare1 = instance_ray_top_word(vs.instance_cull);
+    pc.spare3 = pool.word();
+    pc.spare4 = static_cast<uint32_t>(vs.light_changes.offset() / sizeof(uint32_t));
+    bool dirty = true;
+    emit_cached_view_pass(vs.light_changes_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.light_changes", "other:deferred.light_changes"),
+                          graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light changes");
+        cmd->record_global_barrier();
+        // Each kept cut's placed records, a group per 64 as the drawing counts them.
+        for (uint32_t c = 0; c < cuts.size(); ++c) {
+            DispatchCall dc{};
+            dc.pipeline = pipeline.get();
+            dc.groups_y = 1;
+            dc.groups_z = 1;
+            DeferredComputePushC cut_pc = pc;
+            cut_pc.spare2 = c;
+            dc.root_constants_size = sizeof(cut_pc);
+            std::memcpy(dc.root_constants, &cut_pc, sizeof(cut_pc));
+            cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(cuts[c] + 8u) * sizeof(uint32_t));
+        }
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.held.push_back(pipeline);
+    });
+}
+
 void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const LightPool& pool = vs.instance_cull.light_pool;
@@ -1044,6 +1193,9 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     trace_pc.cells_header = trace ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
     trace_pc.lights_base = render_view.lights_base;
     trace_pc.spare3 = pool.word();
+    // The light's level, as the culling's error on screen, for the log.
+    const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
+    std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;
