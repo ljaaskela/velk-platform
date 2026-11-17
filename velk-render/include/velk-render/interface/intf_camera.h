@@ -46,8 +46,8 @@ enum class DebugView : uint8_t
     /// A flat colour per kept cut record that what is drawn is from, by what the record is
     /// (entry, cluster, slot), so it stays while the record does; white for what is from none.
     Record,
-    /// The points of light: a record with points dim in its colour, each point a dot, yellow
-    /// until lit, green once lit; one with one value flat in its colour; quads by the node their
+    /// Where light comes from: a colour per point of light, blended as a pixel reads them, so each
+    /// patch is one point's reach, darker for a record's own points than for linked ones; one value flat in its record's colour; quads by the node their
     /// light is on; grey for no light yet, white for no record.
     Light,
 };

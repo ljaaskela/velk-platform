@@ -268,10 +268,11 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         return false;
     }
     const auto table_word = static_cast<uint32_t>(owner->cull_region_.offset() / sizeof(uint32_t));
-    out.key = owner;
+    out.key = instance_source_ ? static_cast<const void*>(instance_source_.get()) : static_cast<const void*>(owner);
     out.instances_base = static_cast<uint32_t>(instance_region_offset() / instance_stride_);
     out.slot_count = instance_count_;
     out.table_word = table_word;
+    out.table_count = static_cast<uint32_t>(owner->cull_list_words_.size());
     out.visible_word = owner->cull_list_words_[cull_mesh_];
     out.records_word = owner->cull_record_words_[cull_mesh_];
     out.records_count = owner->cull_record_counts_[cull_mesh_];

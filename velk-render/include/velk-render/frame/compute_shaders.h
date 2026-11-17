@@ -684,10 +684,11 @@ vec3 triangle_size_color(uvec2 ids)
          : vec3(0.0, 0.0, 1.0);
 }
 
-// Mode 15: the points of light. A record with pages dim in its colour, each of its points a dot
-// where it is on screen, yellow until it is lit and green once it is; one with one value flat in
-// its colour; a quad in the colour of the node its light is on; what has no light yet grey, and
-// what is from no record white.
+// Mode 15: where light comes from. A record with points: a colour per point of light, blended as
+// a pixel reads them (its triangle's corners, each its own point or the three it links to), so
+// each patch is one point's reach, darker where they are the record's own than where they are
+// those of the records for light only it links to; one with one value flat in its colour; a quad in the colour
+// of the node its light is on; what has no light yet grey, and what is from no record white.
 vec3 light_color(uvec2 ids, ivec2 coord)
 {
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
@@ -706,8 +707,6 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     if (light >= VELK_LIGHT_ONE_VALUE) return record_color(record) * 0.8;
     if (pc.pool_word == 0xFFFFFFFFu || light >= velk_culling.data[pc.pool_word + 1u]) return vec3(1.0, 0.0, 0.0);
     uint first = velk_light_page(pc.pool_word, light);
-    uint vertices = velk_culling.data[first];
-    uint n = velk_culling.data[first + 1u];
     vec3 base = record_color(record) * 0.35;
 
     // The pixel's triangle on screen, in pixels.
@@ -737,22 +736,18 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     vec2 q = pixel - p[0];
     float b1 = (q.x * e2.y - q.y * e2.x) / det;
     float b2 = (e1.x * q.y - e1.y * q.x) / det;
-    uvec2 places[3];
-    vec3 weights;
-    velk_light_around(n, vec3(1.0 - b1 - b2, b1, b2), places, weights);
-    uint grid = max(n, 1u);
+    vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
+    vec3 color = vec3(0.0);
     for (int k = 0; k < 3; ++k) {
-        vec3 b = vec3(float(grid - places[k].x - places[k].y), float(places[k].x), float(places[k].y)) / float(grid);
-        vec3 at = local[0] * b.x + local[1] * b.y + local[2] * b.z;
-        vec4 clip = vp * vec4(velk_rel_position(inst.world_matrix, inst.offset.xyz + at * inst.size.xyz, g), 1.0);
-        vec2 s = (clip.xy / clip.w * 0.5 + 0.5) * size;
-        if (length(s - pixel) < 1.5) {
-            uint point = velk_light_grid_point(vertices, grid, triangle, corners, places[k].x, places[k].y);
-            uint value = velk_culling.data[velk_light_point_word(pc.pool_word, first, point)];
-            return value == VELK_LIGHT_NONE ? vec3(1.0, 1.0, 0.0) : vec3(0.0, 1.0, 0.0);
+        uint words[3];
+        vec3 weights;
+        velk_light_points(pc.pool_word, first, corners[k], words, weights);
+        for (int j = 0; j < 3; ++j) {
+            color += b[k] * weights[j] * (words[j] == VELK_LIGHT_NONE ? vec3(1.0, 0.0, 0.0) : id_color(words[j] * 2654435761u));
         }
     }
-    return base;
+    // Darker where the record has its own points, coarse enough itself.
+    return velk_culling.data[first + 1u] == VELK_LIGHT_LINKED ? color : color * 0.45;
 }
 
 const vec3 kLevelColors[8] = vec3[8](

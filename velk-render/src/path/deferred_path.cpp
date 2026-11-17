@@ -1126,7 +1126,10 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRend
     constexpr uint64_t kKey = 0x4c69'6768'7443'6c6dULL;
     auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
     auto pipeline = found ? found : ctx.render_ctx->pipelines().compile_compute(light_claim_src, kKey);
-    if (!pipeline) return;
+    constexpr uint64_t kSearchKey = 0x4c69'6768'7453'7263ULL;
+    auto found_search = ctx.render_ctx->pipelines().find(PipelineCacheKey{kSearchKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    auto search_pipeline = found_search ? found_search : ctx.render_ctx->pipelines().compile_compute(light_search_src, kSearchKey);
+    if (!pipeline || !search_pipeline) return;
 
     struct PushC
     {
@@ -1148,16 +1151,28 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRend
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        // Then the records it put on the search list, a work group each.
+        DispatchCall search{};
+        search.pipeline = search_pipeline.get();
+        search.groups_x = kLightSearchCapacity;
+        search.groups_y = 1;
+        search.groups_z = 1;
+        const uint32_t pool_word = pool.word();
+        search.root_constants_size = sizeof(pool_word);
+        std::memcpy(search.root_constants, &pool_word, sizeof(pool_word));
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light claim");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(search);
         cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
         rec.held.push_back(pipeline);
+        rec.held.push_back(search_pipeline);
     });
 }
 

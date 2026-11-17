@@ -1308,11 +1308,14 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     const bool new_group = group.visual == nullptr;
     group.visual = &visual;
 
-    // The meshes' shapes, kept to tell when they change.
+    // The meshes' shapes, kept to tell when they change. Why its partitions are cut again, for
+    // the log.
     bool rebuild = new_group;
+    const char* why = "";
     if (group.shapes.size() != collect.shapes.size()) {
         group.shapes = std::move(collect.shapes);
         rebuild = true;
+        why = "shapes";
     } else if (std::memcmp(group.shapes.data(), collect.shapes.data(), collect.shapes.size() * sizeof(RtShape)) != 0) {
         group.shapes = std::move(collect.shapes);
     }
@@ -1320,6 +1323,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         || std::memcmp(group.meshes.data(), runs.data(), runs.size() * sizeof(InstanceGroup::MeshRun)) != 0) {
         group.meshes = std::move(runs);
         rebuild = true;
+        why = "meshes";
     }
 
     vector<uint32_t> changed;
@@ -1327,17 +1331,22 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     vector<InstanceBefore> before;
     bool before_complete = true;
     visual.take_changed_slots(changed, all_changed, before, before_complete);
-    rebuild = rebuild || all_changed;
+    if (all_changed) {
+        rebuild = true;
+        why = "all instances changed";
+    }
 
     const float max_displacement = visual.get_max_displacement();
     if (group.max_displacement != max_displacement) {
         group.max_displacement = max_displacement;
         rebuild = true;
+        why = "displacement";
     }
     const bool has_motion = !visual.get_motion_source().empty();
     if (has_motion != group.motion_region.valid()
         || (has_motion && visual.get_instance_capacity() > group.motion_capacity)) {
         rebuild = true;
+        why = "motion";
     }
 
     // An object id per slot. A new range renames every instance, in its records and in
@@ -1349,6 +1358,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         group.object_base = object_base;
         visual.set_object_id_base(object_base);
         rebuild = true;
+        why = "object ids";
     }
     const auto object_count = static_cast<uint32_t>(visual.get_transforms().size());
     if (object_count < group.object_count) {
@@ -1372,6 +1382,7 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
         // Partitions without their instances are in world space.
         if (!translated_only || has_motion || visual.loads_by_need()) {
             rebuild = true;
+            why = "element moved";
         } else if (!rebuild) {
             float delta[3];
             for (int k = 0; k < 3; ++k) {
@@ -1403,6 +1414,9 @@ void SceneBvh::update_instances(IElement* element, IInstancedMeshInternal& visua
     }
 
     if (rebuild) {
+        if (!new_group) {
+            VELK_LOG(I, "instances cut into partitions again: %s", why);
+        }
         note_all_changed();
         cut_instances(group, emit.frame);
         return;

@@ -83,8 +83,8 @@ inline constexpr float kLodMaxErrorPixels = 1.f;
 /// level's longest edge over this, times kLodMaxErrorPixels.
 inline constexpr float kLodElementPixels = 4.f;
 /// How far apart points of light are on screen, in pixels: a cluster smaller than this, and the
-/// quads under a quad tree node this wide, have one value of light; a cluster with triangles
-/// wider than this has points inside them too. See light_pool.h.
+/// quads under a quad tree node this wide, have one value of light; finer clusters read the
+/// points of the coarser ones at this size (kCutLightOnly). See light_pool.h.
 inline constexpr float kLightPixels = 4.f * kLodElementPixels;
 
 /// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one

@@ -71,10 +71,13 @@ inline constexpr uint32_t kClusterEntryRayWord = 14;
  */
 struct InstanceCullInfo
 {
+    /// The same for every batch of one visual, and kept when batches are made again: the
+    /// visual for an instanced one, which its kept cut follows.
     const void* key = nullptr;
     uint32_t instances_base = 0;  ///< Element base of the instances in the instance arena.
     uint32_t slot_count = 0;      ///< Instances to test.
     uint32_t table_word = 0;      ///< The dispatch's table: see `instance_cull_compute_src`.
+    uint32_t table_count = 0;     ///< Meshes in that table, kCullTableWords each.
     uint32_t visible_word = 0;    ///< The list of instance slots this batch's draw reads.
     uint32_t count_word = 0;      ///< How many visible slots its mesh has, once culled.
     /// Set when it is drawn by cluster: one indexed command per cluster in use, each instanced

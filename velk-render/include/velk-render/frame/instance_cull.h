@@ -96,6 +96,9 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///          member's old records
 ///   32     records for light only (kCutLightOnly) in the current store, as the drawing counts them
 ///   33     the same for the last frame, complete, for the log
+///   34, 35 records written by partitions choosing again this frame, and of those how many took
+///          over the light of an old record that was the same
+///   36, 37 the same for the last frame, complete, for the log
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
 /// members, and each instance's in the order its hierarchy's tree is walked, so that records
 /// near in the store are near in the world.
@@ -111,7 +114,7 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// is up to four of its records, the first one's offset from its first record times four plus
 /// how many less one; without, a node's offset from its first node; kCullNoSlot for none. Its
 /// nodes are its levels from the bottom, the root last. See instance_cut_tree_src.
-inline constexpr uint32_t kCutHeaderWords = 34;
+inline constexpr uint32_t kCutHeaderWords = 38;
 inline constexpr uint32_t kCutPartitionWords = 24;  ///< Mirrors VELK_CUT_PARTITION_WORDS.
 /// Light slots in a partition's state, from word kCutLightSlotWord.
 inline constexpr uint32_t kCutLightSlots = 8;
@@ -629,6 +632,10 @@ void main()
     cull_words.data[cut + 29u] = 0u;
     cull_words.data[cut + 33u] = cull_words.data[cut + 32u];
     cull_words.data[cut + 32u] = 0u;
+    cull_words.data[cut + 36u] = cull_words.data[cut + 34u];
+    cull_words.data[cut + 37u] = cull_words.data[cut + 35u];
+    cull_words.data[cut + 34u] = 0u;
+    cull_words.data[cut + 35u] = 0u;
     cull_words.data[cut] = 0u;
     cull_words.data[cut + 4u] = 0u;
 }
@@ -944,6 +951,7 @@ void main()
     cull_words.data[own + 1u] = g_count;
 
     // Each new record takes over the light of the old record of this member that was the same.
+    if (g_count != 0u) atomicAdd(cull_words.data[cut + 34u], g_count);
     if (cull_words.data[state + 15u] == 0u || g_count == 0u) return;
     uint old = velk_cut_member_store(cut, false) + cull_words.data[state + 14u] + place * VELK_CUT_MEMBER_WORDS;
     uint old_count = cull_words.data[old + 1u];
@@ -952,6 +960,7 @@ void main()
         || old_count > cull_words.data[state + 15u] - cull_words.data[old]) return;
     uint old_first = velk_cut_store(cut, false) + (cull_words.data[state + 7u] + cull_words.data[old]) * 4u;
     uint end = min(first + g_count, cull_words.data[state + 5u] + cull_words.data[state + 6u]);
+    uint took = 0u;
     for (uint at = first; at < end; ++at) {
         uint record = g_store + at * 4u;
         for (uint k = 0u; k < old_count; ++k) {
@@ -959,10 +968,12 @@ void main()
             if (cull_words.data[was] == cull_words.data[record] && cull_words.data[was + 1u] == cull_words.data[record + 1u]
                 && cull_words.data[was + 2u] == cull_words.data[record + 2u]) {
                 cull_words.data[record + 3u] = cull_words.data[was + 3u];
+                ++took;
                 break;
             }
         }
     }
+    if (took != 0u) atomicAdd(cull_words.data[cut + 35u], took);
 }
 )";
 
@@ -2189,7 +2200,105 @@ struct InstanceCullPass
     /// The light of the kept cuts' records, which the culling frees each frame what no record
     /// names of, and the path gives records the first time it draws them (light_claim_src).
     LightPool light_pool;
+
+    /// What kept cut records name in the batches, as the batches were last made, so that a cut
+    /// outlives batches made again (instance_cut_rename_src): each batch's tables, by their
+    /// word, with each mesh's first cluster entry and how many, and the visual for one that has
+    /// a kept cut of its own.
+    struct BatchTables
+    {
+        const void* key = nullptr;
+        uint32_t table_word = 0;
+        vector<uint32_t> first_entry;
+        vector<uint32_t> entry_count;
+    };
+    vector<BatchTables> batch_tables;
+    /// The plain items as last made: whose object each is, which mesh (none for one drawn by its
+    /// own pass), which of that object's items with that mesh, and its batch's tables.
+    struct ItemName
+    {
+        uint32_t object = 0;
+        const void* primitive = nullptr;
+        uint32_t ordinal = 0;
+        uint32_t table_word = 0;
+    };
+    vector<ItemName> item_names;
+    /// Kept cuts whose records name the batches made again this frame, and what each old word
+    /// and item becomes, for one frame.
+    struct Rename
+    {
+        const void* key = nullptr;
+        vector<uint32_t> pairs;  ///< Old word, new word, sorted by the old.
+        vector<uint32_t> items;  ///< By old item, the new one: plain items only.
+        uint32_t pairs_word = 0; ///< Where both are in rename_words.
+        uint32_t items_word = 0;
+    };
+    vector<Rename> renames;
+    ArenaRegion rename_words;
+    bool renamed = false;  ///< The recording renames, so the next frame records without.
 };
+
+/// Words per mesh in a batch's culling table, and where its first cluster entry and their count
+/// are in it. Mirror DefaultBatch's table.
+inline constexpr uint32_t kBatchTableWords = 12;
+inline constexpr uint32_t kBatchFirstEntryWord = 8;
+inline constexpr uint32_t kBatchEntryCountWord = 9;
+
+/**
+ * Names a kept cut's records again after their batches were made again: each record of the last
+ * store (the one the copy and the choose read from) gets its cluster entry, or a whole mesh's
+ * table, from `pairs` (old word, new word, sorted by the old), and with `item_count` set its plain
+ * item from `items` (by old item). A thread per record the store holds.
+ */
+inline constexpr string_view instance_cut_rename_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint cut_word;
+    uint pairs_word;
+    uint pair_count;
+    uint items_word;
+    uint item_count;
+} pc;
+)" VELK_CUT_GLSL R"(
+uint velk_rename(uint word)
+{
+    uint lo = 0u;
+    uint hi = pc.pair_count;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2u;
+        uint old = cull_words.data[pc.pairs_word + mid * 2u];
+        if (old == word) return cull_words.data[pc.pairs_word + mid * 2u + 1u];
+        if (old < word) lo = mid + 1u;
+        else hi = mid;
+    }
+    return word;
+}
+
+void main()
+{
+    uint cut = pc.cut_word;
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= cull_words.data[cut + 16u]) return;
+    uint record = velk_cut_store(cut, false) + index * 4u;
+    uint entry = cull_words.data[record];
+    if (entry == VELK_CUT_QUAD) return;
+    if (entry == 0xFFFFFFFFu) {
+        uint table = cull_words.data[record + 1u];
+        if (table != 0xFFFFFFFFu) cull_words.data[record + 1u] = velk_rename(table);
+    } else {
+        uint flag = entry & VELK_CUT_LIGHT_ONLY;
+        cull_words.data[record] = velk_rename(entry & ~VELK_CUT_LIGHT_ONLY) | flag;
+    }
+    uint item = cull_words.data[record + 2u];
+    if (pc.item_count != 0u && item < pc.item_count) cull_words.data[record + 2u] = cull_words.data[pc.items_word + item];
+}
+)";
 
 /**
  * Lays out the runs of draws by cluster and fills them, after a phase of culling.
@@ -2366,13 +2475,43 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
     }
 
     bool record = false;
+    // Last frame's recording named records again; this one does not.
+    if (state.renamed) {
+        state.renamed = false;
+        state.renames.clear();
+        record = true;
+    }
     const bool batches_changed = state.dirty;
+    // What the kept cuts' records named in the batches before they were made again.
+    vector<InstanceCullPass::BatchTables> old_tables;
+    vector<InstanceCullPass::ItemName> old_items;
     if (state.dirty) {
         state.dirty = false;
         record = true;
         state.count_words.clear();
         state.pending_meshes.clear();
         state.own_items.clear();
+        old_tables = std::move(state.batch_tables);
+        old_items = std::move(state.item_names);
+        state.batch_tables.clear();
+        state.item_names.clear();
+        // A batch's tables, read as it wrote them, once each.
+        const auto note_tables = [&](const InstanceCullInfo& info) {
+            for (const auto& t : state.batch_tables) {
+                if (t.table_word == info.table_word) return;
+            }
+            InstanceCullPass::BatchTables t;
+            t.key = info.cull_together ? nullptr : info.key;
+            t.table_word = info.table_word;
+            for (uint32_t m = 0; m < info.table_count; ++m) {
+                uint32_t words[2] = {};
+                arena->read_at((uint64_t(info.table_word) + uint64_t(m) * kBatchTableWords + kBatchFirstEntryWord) * sizeof(uint32_t),
+                               words, sizeof(words));
+                t.first_entry.push_back(words[0]);
+                t.entry_count.push_back(words[1]);
+            }
+            state.batch_tables.push_back(std::move(t));
+        };
         vector<uint32_t> items;
         vector<uint32_t> item_objects;  ///< By item: its object id.
         vector<uint32_t> entries;
@@ -2418,6 +2557,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                     std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
                 }
                 item_objects.push_back(object);
+                // Drawn by its own pass, its mesh is no part of what its record names.
+                state.item_names.push_back({object, table_word != kCullNoSlot ? primitive_ptr.get() : nullptr, 0u, table_word});
             }
         };
         for (const auto& batch : *batches) {
@@ -2441,6 +2582,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 counted.push_back(info.key);
                 retest_records += uint64_t(info.slot_count) + info.chosen_capacity + info.cluster_capacity;
             }
+            note_tables(info);
             if (info.cull_together) {
                 chosen += info.cluster_capacity;
                 entries.push_back(info.cluster_entry_word);
@@ -2450,6 +2592,108 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 state.count_words.push_back(info.count_word);
             }
         }
+        // Which of its object's items with that mesh each item is.
+        {
+            vector<uint32_t> order(state.item_names.size());
+            for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+            const auto& names = state.item_names;
+            std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+                if (names[a].object != names[b].object) return names[a].object < names[b].object;
+                if (names[a].primitive != names[b].primitive) return names[a].primitive < names[b].primitive;
+                return a < b;
+            });
+            for (size_t k = 0; k < order.size(); ++k) {
+                const bool same = k > 0 && names[order[k]].object == names[order[k - 1]].object
+                               && names[order[k]].primitive == names[order[k - 1]].primitive;
+                state.item_names[order[k]].ordinal = same ? state.item_names[order[k - 1]].ordinal + 1u : 0u;
+            }
+        }
+
+        // What each kept cut's records name in the old batches, named in the new: each visual's
+        // tables, and the plain items with theirs. A cut whose names do not all carry over is made
+        // again below.
+        state.renames.clear();
+        const auto find_tables = [](const vector<InstanceCullPass::BatchTables>& all, uint32_t word) {
+            const InstanceCullPass::BatchTables* found = nullptr;
+            for (const auto& t : all) {
+                found = t.table_word == word ? &t : found;
+            }
+            return found;
+        };
+        const auto pair_tables = [](const InstanceCullPass::BatchTables& from, const InstanceCullPass::BatchTables& to,
+                                    vector<std::pair<uint32_t, uint32_t>>& pairs) {
+            if (from.first_entry.size() != to.first_entry.size() || from.entry_count != to.entry_count) return false;
+            for (uint32_t m = 0; m < from.first_entry.size(); ++m) {
+                pairs.push_back({from.table_word + m * kBatchTableWords, to.table_word + m * kBatchTableWords});
+                for (uint32_t e = 0; e < from.entry_count[m]; ++e) {
+                    pairs.push_back({from.first_entry[m] + e * kClusterEntryWords, to.first_entry[m] + e * kClusterEntryWords});
+                }
+            }
+            return true;
+        };
+        const auto add_rename = [&](const void* key, vector<std::pair<uint32_t, uint32_t>>& pairs, vector<uint32_t> item_map) {
+            std::sort(pairs.begin(), pairs.end());
+            InstanceCullPass::Rename rename;
+            rename.key = key;
+            for (const auto& [from, to] : pairs) {
+                rename.pairs.push_back(from);
+                rename.pairs.push_back(to);
+            }
+            rename.items = std::move(item_map);
+            state.renames.push_back(std::move(rename));
+        };
+        for (const auto& from : old_tables) {
+            if (!from.key) continue;
+            for (const auto& to : state.batch_tables) {
+                vector<std::pair<uint32_t, uint32_t>> pairs;
+                if (to.key == from.key && pair_tables(from, to, pairs)) {
+                    add_rename(from.key, pairs, {});
+                    break;
+                }
+            }
+        }
+        if (!old_items.empty()) {
+            // The new items by object, mesh and which of those, to look the old ones up in.
+            vector<uint32_t> by_name(state.item_names.size());
+            for (uint32_t i = 0; i < by_name.size(); ++i) by_name[i] = i;
+            const auto& names = state.item_names;
+            const auto less = [](const InstanceCullPass::ItemName& a, const InstanceCullPass::ItemName& b) {
+                if (a.object != b.object) return a.object < b.object;
+                if (a.primitive != b.primitive) return a.primitive < b.primitive;
+                return a.ordinal < b.ordinal;
+            };
+            std::sort(by_name.begin(), by_name.end(), [&](uint32_t a, uint32_t b) { return less(names[a], names[b]); });
+            vector<uint32_t> item_map(old_items.size(), kCullNoSlot);
+            vector<std::pair<uint32_t, uint32_t>> table_pairs;
+            bool whole = true;
+            for (uint32_t i = 0; i < old_items.size() && whole; ++i) {
+                const auto& name = old_items[i];
+                const auto* at = std::lower_bound(by_name.begin(), by_name.end(), name,
+                                                  [&](uint32_t j, const InstanceCullPass::ItemName& n) { return less(names[j], n); });
+                whole = name.object != kCullNoSlot && at != by_name.end() && !less(name, names[*at]);
+                if (!whole) break;
+                item_map[i] = *at;
+                if (name.table_word == kCullNoSlot) continue;
+                const uint32_t to = names[*at].table_word;
+                const auto* known = std::find_if(table_pairs.begin(), table_pairs.end(),
+                                                 [&](const std::pair<uint32_t, uint32_t>& p) { return p.first == name.table_word; });
+                if (known == table_pairs.end()) {
+                    table_pairs.push_back({name.table_word, to});
+                } else {
+                    whole = known->second == to;
+                }
+            }
+            vector<std::pair<uint32_t, uint32_t>> pairs;
+            for (size_t k = 0; k < table_pairs.size() && whole; ++k) {
+                const auto* from = find_tables(old_tables, table_pairs[k].first);
+                const auto* to = find_tables(state.batch_tables, table_pairs[k].second);
+                whole = from && to && pair_tables(*from, *to, pairs);
+            }
+            if (whole) {
+                add_rename(&kPlainCutKey, pairs, std::move(item_map));
+            }
+        }
+
         state.together_items = static_cast<uint32_t>(items.size() / kPlainItemWords);
         state.together_entries = static_cast<uint32_t>(entries.size());
         state.together_chosen = static_cast<uint32_t>(chosen);
@@ -2518,14 +2762,21 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         return;
     }
 
-    // The BVH replaces a visual's tables when they fill up.
-    uint64_t partition_tables = 0;
+    // The BVH replaces a visual's tables when they fill up. In no order, since batches made
+    // again come in another.
+    vector<std::pair<uint32_t, uint32_t>> table_list;
     for (const auto& batch : *batches) {
         InstanceCullInfo info{};
-        if (batch && batch->get_instance_cull(info)) {
-            partition_tables = partition_tables * 31u + info.partition_table_word;
-            partition_tables = partition_tables * 31u + info.partition_count;
+        if (batch && batch->get_instance_cull(info) && info.partition_count != 0) {
+            table_list.push_back({info.partition_table_word, info.partition_count});
         }
+    }
+    std::sort(table_list.begin(), table_list.end());
+    table_list.erase(std::unique(table_list.begin(), table_list.end()), table_list.end());
+    uint64_t partition_tables = 0;
+    for (const auto& [word, count] : table_list) {
+        partition_tables = partition_tables * 31u + word;
+        partition_tables = partition_tables * 31u + count;
     }
     partition_tables = partition_tables * 31u + plain_table_word;
     partition_tables = partition_tables * 31u + plain_count;
@@ -2576,6 +2827,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             wants.push_back({&kPlainCutKey, plain_count, state.together_items, true});
         }
         vector<InstanceCullPass::Cut> kept;
+        vector<const void*> renamed_keys;  ///< Cuts kept across batches made again.
         for (const Wants& info : wants) {
             uint32_t wanted = 0;
             for (const auto& [key, records] : state.cut_growth) {
@@ -2583,10 +2835,23 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
             auto old = std::find_if(state.cuts.begin(), state.cuts.end(),
                                     [&](const InstanceCullPass::Cut& c) { return c.key == info.key; });
-            if (!tables_changed && wanted == 0 && !(info.by_item && batches_changed) && old != state.cuts.end()
-                && old->partitions == info.partitions) {
+            // Batches made again keep a cut whose records can all be named in the new ones.
+            const bool named = !batches_changed
+                            || std::find_if(state.renames.begin(), state.renames.end(),
+                                            [&](const InstanceCullPass::Rename& r) { return r.key == info.key; })
+                                   != state.renames.end();
+            if (!tables_changed && wanted == 0 && named && old != state.cuts.end() && old->partitions == info.partitions) {
                 kept.push_back(std::move(*old));
+                if (batches_changed) {
+                    renamed_keys.push_back(info.key);
+                }
                 continue;
+            }
+            // Made again from nothing: every record chooses again and its light starts over.
+            if (old != state.cuts.end()) {
+                VELK_LOG(I, "kept cut made again:%s%s%s%s", tables_changed ? " tables changed" : "",
+                         wanted != 0 ? " out of room" : "", !named ? " its batches' words did not carry over" : "",
+                         old->partitions != info.partitions ? " partitions changed" : "");
             }
             InstanceCullPass::Cut cut;
             cut.key = info.key;
@@ -2655,6 +2920,31 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         state.cuts = std::move(kept);
         state.cut_growth.clear();
 
+        // The kept cuts' records named in the new batches, by the recording, this frame only.
+        vector<InstanceCullPass::Rename> renames;
+        uint64_t rename_words = 0;
+        for (auto& rename : state.renames) {
+            if (std::find(renamed_keys.begin(), renamed_keys.end(), rename.key) != renamed_keys.end()) {
+                rename_words += rename.pairs.size() + rename.items.size();
+                renames.push_back(std::move(rename));
+            }
+        }
+        state.renames = std::move(renames);
+        state.rename_words = rename_words != 0 ? arena->alloc(rename_words * sizeof(uint32_t)) : ArenaRegion{};
+        if (!state.rename_words.valid()) {
+            state.renames.clear();
+        }
+        uint64_t at = state.rename_words.valid() ? state.rename_words.offset() / sizeof(uint32_t) : 0u;
+        for (auto& rename : state.renames) {
+            rename.pairs_word = static_cast<uint32_t>(at);
+            arena->write_at(at * sizeof(uint32_t), rename.pairs.data(), rename.pairs.size() * sizeof(uint32_t));
+            at += rename.pairs.size();
+            rename.items_word = static_cast<uint32_t>(at);
+            arena->write_at(at * sizeof(uint32_t), rename.items.data(), rename.items.size() * sizeof(uint32_t));
+            at += rename.items.size();
+        }
+        state.renamed = !state.renames.empty();
+
         // The view's quad list: room for a quad per member of every kept cut, instances and
         // plain objects alike, which no set of quads that each stand for members of their own
         // can pass, and one per partition, whose chunks may be part filled.
@@ -2711,13 +3001,6 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 arena->read_at(state.quads.offset() + 7u * sizeof(uint32_t), &in_cut, sizeof(in_cut));
                 VELK_LOG(I, "quads %u in cut, %u in view", in_cut, quads);
             }
-            if (state.light_pool.header.valid()) {
-                uint32_t pool[9] = {};
-                arena->read_at(state.light_pool.header.offset(), pool, sizeof(pool));
-                const uint32_t free_pages = pool[0] - std::min(pool[8], pool[0]);
-                VELK_LOG(I, "light pg %u/%u", pool[1] - std::min(free_pages, pool[1]), pool[1]);
-                VELK_LOG(I, "light rec %u+%u", pool[3], pool[4]);
-            }
         }
         state.cut_moves = moves;
         state.cut_moves_known = true;
@@ -2738,6 +3021,23 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 const uint32_t added = grow_light_pool(pool, *arena, (wanted + kLightSegmentPages - 1u) / kLightSegmentPages);
                 VELK_LOG(I, "light pool +%u to %u pg", added, pool.pages());
             }
+        }
+        // What it holds, now and then, from the last frame's complete counts.
+        if (pool.header.valid() && ctx.present_counter >= pool.log_frame + 30u) {
+            pool.log_frame = ctx.present_counter;
+            uint32_t counts[16] = {};
+            arena->read_at(pool.header.offset(), counts, sizeof(counts));
+            uint32_t written = 0;
+            uint32_t took = 0;
+            for (const auto& c : state.cuts) {
+                uint32_t words[2] = {};
+                arena->read_at(c.region.offset() + 36u * sizeof(uint32_t), words, sizeof(words));
+                written += words[0];
+                took += words[1];
+            }
+            VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u records "
+                        "chosen again of which %u kept their light",
+                     counts[1], counts[12], counts[14], counts[13], counts[15], written, took);
         }
     }
     const uint32_t light_pool_word = state.light_pool.segments.empty() ? kCullNoSlot : state.light_pool.word();
@@ -2799,9 +3099,10 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
         auto sweep_pipeline = pipeline_for(light_sweep_src, 0x4c69'6768'7453'7770ULL);
+        auto rename_pipeline = pipeline_for(instance_cut_rename_src, 0x4375'7452'656e'616dULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline;
+                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && rename_pipeline;
         auto cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
         if (!cmd) {
             return;
@@ -2910,6 +3211,20 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             dispatch(begin_pipeline.get(), &job.cut, sizeof(job.cut), 1u);
         }
         cmd->record_global_barrier();
+
+        // Records named in batches made again this frame, before anything reads them.
+        if (!state.renames.empty()) {
+            for (const auto& rename : state.renames) {
+                for (const auto& c : state.cuts) {
+                    if (c.key != rename.key) continue;
+                    const uint32_t pc[5] = {static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)), rename.pairs_word,
+                                            static_cast<uint32_t>(rename.pairs.size() / 2u), rename.items_word,
+                                            static_cast<uint32_t>(rename.items.size())};
+                    dispatch(rename_pipeline.get(), pc, sizeof(pc), (c.capacity + 63u) / 64u);
+                }
+            }
+            cmd->record_global_barrier();
+        }
 
         // Partitions next: whether they keep their records.
         struct PartitionPushC
@@ -3159,6 +3474,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(draw_pipeline));
         rec.held.push_back(std::move(mark_pipeline));
         rec.held.push_back(std::move(sweep_pipeline));
+        rec.held.push_back(std::move(rename_pipeline));
     });
 }
 
