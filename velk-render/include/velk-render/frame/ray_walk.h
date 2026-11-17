@@ -44,9 +44,14 @@ bool velk_ray_met_motion = false;
 // The pieces of work (triangles, nodes, records) this thread's walks have done, all of them
 // added up. For the shader to read.
 uint velk_ray_steps = 0u;
-// Of those, the triangles tested and the records.
+// Of those, the triangles tested and the records; the nodes of the top tree, of partitions'
+// trees and of meshes' or clusters' trees; and the partitions entered.
 uint velk_ray_tris = 0u;
 uint velk_ray_records = 0u;
+uint velk_ray_top_nodes = 0u;
+uint velk_ray_partition_nodes = 0u;
+uint velk_ray_mesh_nodes = 0u;
+uint velk_ray_partitions = 0u;
 // The deepest this thread's walks' stack got, against VELK_TRACE_STACK_SIZE.
 int velk_ray_deepest = 0;
 
@@ -308,6 +313,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             }
             // Within a cluster or a mesh without one there are only nodes and leaves.
             if ((ref & (VELK_BLAS_CLUSTER | VELK_BLAS_UPPER)) != 0u) continue;
+            ++velk_ray_mesh_nodes;
             VelkMeshNode node = velk_mesh_nodes.data[mesh_base + ref];
             float limit = best_t * 1.00001 * mesh_scale;
             float t_l, t_r;
@@ -470,6 +476,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 records_left = (ref & 3u) + 1u;
                 continue;
             }
+            ++velk_ray_partition_nodes;
             uint node = nodes + ref * 16u;
             float t_l, t_r;
             bool h_l = ray_aabb(ray, velk_ray_vec3(node) - cam, velk_ray_vec3(node + 3u) - cam, best_t * 1.00001, t_l);
@@ -483,6 +490,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (sp == 0) break;
             uint ref = s_walk_stack[stack_base + uint(--sp)];
             if ((ref & VELK_RAY_LEAF) != 0u) {
+                ++velk_ray_partitions;
                 // A partition: its tree, whose root's box its leaf here already has.
                 uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * 2u;
                 uint cut_entry = top_cuts + velk_culling.data[leaf] * 8u;
@@ -504,6 +512,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_ray_tree_nodes(count) - 1u;
                 continue;
             }
+            ++velk_ray_top_nodes;
             uint node = top_nodes + ref * 16u;
             float t_l, t_r;
             bool h_l = ray_aabb(ray, velk_ray_vec3(node) - cam, velk_ray_vec3(node + 3u) - cam, best_t * 1.00001, t_l);

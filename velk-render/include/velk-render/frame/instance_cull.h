@@ -3599,6 +3599,47 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             arena->read_at(pool.header.offset() + 100u * sizeof(uint32_t), deepest, sizeof(deepest));
             arena->update_at(pool.header.offset() + 100u * sizeof(uint32_t), zeros, sizeof(deepest));
             VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", deepest[0], deepest[1]);
+            // Where a ray's walk spends its steps, since the last log (the same rays as above).
+            uint32_t where[4] = {};
+            arena->read_at(pool.header.offset() + 102u * sizeof(uint32_t), where, sizeof(where));
+            arena->update_at(pool.header.offset() + 102u * sizeof(uint32_t), zeros, sizeof(where));
+            VELK_LOG(I, "light trace: a ray walks %.0f top tree nodes, enters %.1f partitions, walks %.0f of their tree nodes "
+                        "and %.0f mesh tree nodes",
+                     double(where[0]) * 16.0 / rays, double(where[3]) / rays, double(where[1]) * 16.0 / rays,
+                     double(where[2]) * 16.0 / rays);
+            // The top tree's partitions: how many have records for rays, and how much their boxes
+            // overlap, as the sum of their volumes over the volume of the box around them all.
+            if (state.ray_top.valid()) {
+                vector<uint32_t> top(size_t(state.ray_top.size() / sizeof(uint32_t)));
+                arena->read_at(state.ray_top.offset(), top.data(), top.size() * sizeof(uint32_t));
+                const uint32_t cut_count = top[0];
+                const uint32_t leaves = top[1];
+                const uint32_t node_count = top[2];
+                const size_t nodes_at = kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * 2u;
+                double volume = 0.0;
+                double lo[3] = {1e30, 1e30, 1e30};
+                double hi[3] = {-1e30, -1e30, -1e30};
+                uint32_t boxes = 0;
+                for (uint32_t n = 0; n < node_count && nodes_at + (size_t(n) + 1u) * kCutNodeWords <= top.size(); ++n) {
+                    const uint32_t* node = top.data() + nodes_at + size_t(n) * kCutNodeWords;
+                    for (uint32_t k = 0; k < 2; ++k) {
+                        if ((node[12u + k] & kCutLeaf) == 0 || node[12u + k] == 0xFFFFFFFFu) continue;
+                        float b[6];
+                        std::memcpy(b, node + k * 6u, sizeof(b));
+                        if (b[0] > b[3] || b[1] > b[4] || b[2] > b[5]) continue;
+                        volume += double(b[3] - b[0]) * double(b[4] - b[1]) * double(b[5] - b[2]);
+                        for (int a = 0; a < 3; ++a) {
+                            lo[a] = std::min(lo[a], double(b[a]));
+                            hi[a] = std::max(hi[a], double(b[3 + a]));
+                        }
+                        ++boxes;
+                    }
+                }
+                const double around = boxes != 0 ? (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]) : 0.0;
+                VELK_LOG(I, "ray top tree: %u partitions with records for rays of %u, their boxes' volumes %.1f times the "
+                            "box around them all (%.0f by %.0f by %.0f)",
+                         boxes, leaves, around > 0.0 ? volume / around : 0.0, hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+            }
         }
     }
     const uint32_t light_pool_word = state.light_pool.segments.empty() ? kCullNoSlot : state.light_pool.word();

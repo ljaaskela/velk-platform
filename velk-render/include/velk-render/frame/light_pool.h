@@ -68,6 +68,9 @@ namespace velk {
 ///      their points
 ///   100, 101 the deepest the walk's stack got in the trace, and in the screen probes, until the
 ///      log reads and clears them
+///   102 to 105 added up until the log reads and clears them: the trace's walks' nodes of the top
+///      tree, of partitions' trees and of meshes' or clusters' trees (each in sixteens), and the
+///      partitions they entered
 /// A record's first page starts with kLightPageHeaderWords: its cluster's vertices; for its own
 /// points the level of the grid in each of its triangles (1 for none, see velk_light_grid_point),
 /// else kLightLinked; how many point words it has; then its other pages (words 3 to 16), at most
@@ -115,7 +118,7 @@ inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightMaxSegments = 64;
 inline constexpr uint32_t kLightPoolSegmentWord = 16;
 inline constexpr uint32_t kLightPoolTraceWord = kLightPoolSegmentWord + kLightMaxSegments;
-inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 24u;
+inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 28u;
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = 3;
@@ -722,6 +725,12 @@ void velk_points_count(uint pool)
     if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 94u], g_rays);
     if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 95u], (velk_ray_steps + 15u) / 16u);
     if (velk_ray_deepest > 0) atomicMax(VELK_LIGHT_WORDS.data[pool + 100u], uint(velk_ray_deepest));
+    // Where the walks' steps went: top tree nodes, partition tree nodes, mesh tree nodes (in
+    // sixteens) and partitions entered.
+    if (velk_ray_top_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 102u], (velk_ray_top_nodes + 15u) / 16u);
+    if (velk_ray_partition_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 103u], (velk_ray_partition_nodes + 15u) / 16u);
+    if (velk_ray_mesh_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 104u], (velk_ray_mesh_nodes + 15u) / 16u);
+    if (velk_ray_partitions != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 105u], velk_ray_partitions);
 }
 
 // The slot of `slots` to trace once more at `p`, chosen at random by `seed` in proportion to
