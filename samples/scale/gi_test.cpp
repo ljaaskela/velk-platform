@@ -29,7 +29,7 @@
 //   lights_1:  one point light.
 //   lights_64: 64 lights packed around that point, with the same total power.
 //
-// Instances much wider than a light cell, with triangles much smaller:
+// Wide instances with very small triangles:
 //   dense:     the instances, far form on, so wide rays may stop inside their meshes.
 //   dense_ref: far form off, so rays test every triangle.
 //
@@ -229,7 +229,7 @@ int run_gi_test(const char* test, long frames)
     float far_clip = 20000.f;
 
     if (leak_room) {
-        // One wall's thickness: much thinner than a light cell.
+        // One wall's thickness: thin.
         constexpr float kThin = 2.f;
         add_box({-kCourtHalf, 0.f, -kCourtHalf}, {kCourtHalf * 2.f, 4.f, kCourtHalf * 2.f}, grey);
         add_box({-400.f - kThin, -302.f, -202.f}, {kThin, 302.f, 404.f}, white);

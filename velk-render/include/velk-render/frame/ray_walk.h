@@ -58,6 +58,8 @@ bool intersect_shape(Ray ray, RtShape shape, out RayHit hit);
 
 #define VELK_RAY_NONE 0xFFFFFFFFu
 #define VELK_RAY_LEAF 0x80000000u
+// The most pieces of work (triangles, nodes, records) one walk does.
+#define VELK_WALK_MAX_STEPS 65536u
 
 vec3 velk_ray_vec3(uint at)
 {
@@ -170,7 +172,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint items = VELK_RAY_NONE;
     uint quads = VELK_RAY_NONE;  // the view's quad list (kQuadListHeaderWords), for a quad record's draw
     // Its records left in the leaf being walked.
-    uint record_at = 0u;
+    uint record_at = 0u;   // in the partition's ray list
+    uint ray_list = 0u;
     uint records_left = 0u;
 
     // The record being walked, and the ray in its instance's space.
@@ -205,7 +208,9 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     vec3 best_normal = vec3(0.0);  // where nothing better is known: in the shape's or mesh's space
     bool best_quad = false;        // best_instance is a quad's word, not an instance
 
-    while (true) {
+    // At most VELK_WALK_MAX_STEPS pieces of work, whatever the trees it reads say: a walk that
+    // runs out ends with what it has found.
+    for (uint step = 0u; step < VELK_WALK_MAX_STEPS; ++step) {
         bool tested = false;
         vec3 v0, v1, v2;
         uvec3 corners;
@@ -299,14 +304,14 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (h_l && h_r && sp < kStack) stack[sp++] = far_ref;
             if ((h_l || h_r) && sp < kStack) stack[sp++] = near_ref;
         } else if (records_left > 0u) {
-            uint r = record_at;
-            record_at += 4u;
+            uint r = records + velk_culling.data[record_at] * 4u;
+            record_at += 1u;
             --records_left;
             uint entry = velk_culling.data[r];
             uint cluster = velk_culling.data[r + 1u];
             uint named = velk_culling.data[r + 2u];
-            // For light only: not drawn, so not hit either.
-            if (velk_cut_light_only(entry)) continue;
+            // A record for light only is traced as the cluster it is.
+            if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
             if (entry == VELK_CUT_QUAD) {
                 // A quad: its plane, then where on it along its two sides, 0 to 1 within it.
                 vec3 c = velk_ray_vec3(cluster) - cam;
@@ -425,7 +430,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             uint ref = stack[--sp];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 uint first = (ref & ~VELK_RAY_LEAF) >> 2u;
-                record_at = records + first * 4u;
+                record_at = ray_list + first;
                 records_left = (ref & 3u) + 1u;
                 continue;
             }
@@ -447,10 +452,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 uint cut_entry = top_cuts + velk_culling.data[leaf] * 8u;
                 uint cut = velk_culling.data[cut_entry];
                 uint state = velk_culling.data[cut + 22u] + velk_culling.data[leaf + 1u] * VELK_CUT_PARTITION_WORDS;
-                uint count = velk_culling.data[state + 6u];
+                // What rays trace of it: its ray list, over its records.
+                uint count = velk_culling.data[state + 16u];
                 if (count == 0u) continue;
                 uint parity = velk_culling.data[cut + 12u];
                 records = velk_culling.data[cut + 17u + parity] + velk_culling.data[state + 5u] * 4u;
+                ray_list = velk_culling.data[cut + 38u + parity] + velk_culling.data[state + 5u];
                 nodes = velk_culling.data[cut + 26u + parity] + velk_culling.data[state + 10u] * 16u;
                 instances_base = velk_culling.data[cut_entry + 1u];
                 items = velk_culling.data[cut_entry + 2u];

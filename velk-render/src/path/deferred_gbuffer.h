@@ -31,8 +31,7 @@ enum class GBufferAttachment : uint32_t
                         ///  the lighting pass adds this to the lit output before tonemap.
     Surface        = 5, ///< RGBA32F    xyz = position on the object in its own space, in world units, taken
                         ///  before the material moves vertices, so it stays put on a surface that sways.
-                        ///  w = which of the object's six axis directions the surface faces. For finding
-                        ///  the light cells of a pixel; see VELK_LIGHT_CELL_GLSL.
+                        ///  w = which of the object's six axis directions the surface faces.
     Count          = 6
 };
 

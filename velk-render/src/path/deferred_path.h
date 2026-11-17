@@ -105,47 +105,20 @@ public:
         CutDrawWords cut_draw_words;
         IRenderPass::Ptr light_claim_pass;
         uint32_t light_claim_recorded[5] = {};  ///< What the light claim pass was recorded with.
+        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
+        /// how many probes each holds. See light_probes_main_src.
+        ArenaRegion light_probes[2];
+        uint32_t light_probe_count = 0;
+        uint32_t light_probe_parity = 0;
+        IRenderPass::Ptr light_probes_pass;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
-        IRenderPass::Ptr light_cells_debug_pass;
-        IRenderPass::Ptr light_cells_pass;
-        IRenderPass::Ptr light_cells_update_pass;
-        /// The table of light cells, in the culling arena. See light_cells_main_src.
-        ArenaRegion light_cells;
-        /// What changed lately, for the light cells to check their light against: boxes with
-        /// the frame each changed in, oldest first, and their copy in the culling arena.
-        struct LightCellChange
-        {
-            WorldBox box;
-            uint32_t frame;
-            uint32_t light;  ///< Which light moved, or 0xFFFFFFFF for a box something changed in.
-        };
-        vector<LightCellChange> light_cell_changes;
-        ArenaRegion light_cell_change_words;
-        /// The words that say where the table and the list are. See CELLS_HEADER.
-        ArenaRegion light_cell_header;
-        /// The cells to trace this frame. See CELLS_WORK.
-        ArenaRegion light_cell_work;
-        ArenaRegion light_cell_candidates;  ///< Cells due, before the list is decided. See CELLS_CANDIDATES.
-        /// The bounce cells' table, and the list of those to trace this frame. See
-        /// VELK_BOUNCE_GLSL and CELLS_BOUNCE_LIST.
-        ArenaRegion light_bounce;
-        ArenaRegion light_bounce_list;
-        /// The pixels' reflection rays. See kReflectWords.
-        ArenaRegion light_reflect;
+        /// The light header in the culling arena, whose word 18 is where the light grid is.
+        /// See CELLS_HEADER.
+        ArenaRegion light_header;
         /// The lights by where they reach, rebuilt each frame. See VELK_LIGHT_GRID_GLSL.
         ArenaRegion light_grid;
-        /// The lights as each was when last listed as moved, to tell which moved enough since.
-        vector<GpuLight> light_cell_lights;
-        /// The cells' counters when last printed, and the frame. See kStatAsked.
-        uint32_t light_cell_stats[36] = {};
-        /// What joined the cells' change list since the counters were last printed: moved
-        /// boxes listed, moved boxes too small to list, and moved lights.
-        uint32_t light_cell_boxes_listed = 0;
-        uint32_t light_cell_boxes_small = 0;
-        uint32_t light_cell_lights_moved = 0;
-        uint64_t light_cell_stats_frame = 0;
         IRenderPass::Ptr visibility_resolve_pass;
         /// Clusters whose triangles are too small on screen for the hardware, drawn in
         /// compute: their list, with room for one a pixel (kTinyHeaderWords), and a word a
@@ -218,7 +191,7 @@ private:
     /// the caller must keep alive (the lighting pass holds it).
     IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights);
 
-    /// Allocates the light cells' words and the render tests' in the culling arena. Call
+    /// Allocates the screen probes' words and the render tests' in the culling arena. Call
     /// before recording anything that names the culling arena.
     void ensure_arena_words(ViewState& vs, FrameContext& ctx);
     /// Builds the grid of lights by where they reach and writes it to the culling arena,
@@ -232,7 +205,7 @@ private:
     /// Makes deferred_output the size of the G-buffer, which the lighting pass and the debug
     /// views write.
     void ensure_deferred_output(ViewState& vs, int w, int h, IRenderGraph& graph);
-    /// Lights the G-buffer into deferred_output, shadows from the light cells, and blits
+    /// Lights the G-buffer into deferred_output, shadows from the points of light, and blits
     /// it to @p color_target.
     void emit_lighting_pass(IViewEntry& view, ViewState& vs,
                             const RenderView& render_view,
@@ -254,7 +227,9 @@ private:
     void emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, bool with_compute);
     /// Gives each kept cut record a pixel shows its light in the view's light pool, the first
     /// time one does (light_claim_src).
-    void emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph);
+    void emit_light_claim_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Gathers the screen probes' bounce light (light_probes_main_src), before the lighting.
+    void emit_light_probes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
@@ -271,19 +246,6 @@ private:
     /// Logs how a frame differs from the last, for render tests. See test_diagnostics_compute_src.
     void emit_test_diagnostics_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, IRenderGraph& graph);
-    /// Replaces the final image with the light cells under each pixel.
-    void emit_light_cells_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
-    /// Gives the light cells this frame's changes and tells their shaders where they are.
-    /// False if they are not set up.
-    bool prepare_light_cells(ViewState& vs, const RenderView& render_view, FrameContext& ctx);
-    /// Makes, checks and traces the light cells in view, before anything reads them.
-    void emit_light_cells_update_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx,
-                                      IRenderGraph& graph);
-    /// Replaces the final image with direct light read from the light cells (mode 4) or with
-    /// their states (mode 5).
-    void emit_light_cells_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
-                               FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
 
     /// Forward pass for BLEND-mode batches, drawn over the lit composite in
     /// @p color_target with the gbuffer depth bound read-only. No-op when the

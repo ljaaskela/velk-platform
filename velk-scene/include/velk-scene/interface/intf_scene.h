@@ -184,7 +184,7 @@ public:
      * @brief The first of at least @p count object ids for @p element.
      *
      * An object id names one placed object for whatever keeps data about it across
-     * frames, such as the light cells, and is the same in what is drawn and in what rays
+     * frames, and is the same in what is drawn and in what rays
      * hit. A plain element asks for 1; an instanced visual for one per slot, slot `i`
      * being the first id plus `i`. The answer stays the same while @p count fits, and is
      * given back when the element leaves the scene.
