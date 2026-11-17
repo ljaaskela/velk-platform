@@ -41,6 +41,9 @@ float velk_ray_lift = 0.0;
 // Set when a ray is tested against instances that a motion function moves, which could stand
 // in its way at another time. For the shader to clear before tracing and read after.
 bool velk_ray_met_motion = false;
+// The pieces of work (triangles, nodes, records) this thread's walks have done, all of them
+// added up. For the shader to read.
+uint velk_ray_steps = 0u;
 
 // Which of its object's six axis directions a surface facing `n`, in the object's own space,
 // faces: 0 and 1 for +x and -x, then y, then z, as the G-buffer's surface attachment has it.
@@ -211,6 +214,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     // At most VELK_WALK_MAX_STEPS pieces of work, whatever the trees it reads say: a walk that
     // runs out ends with what it has found.
     for (uint step = 0u; step < VELK_WALK_MAX_STEPS; ++step) {
+        ++velk_ray_steps;
         bool tested = false;
         vec3 v0, v1, v2;
         uvec3 corners;

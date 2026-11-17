@@ -77,10 +77,10 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///            current store, 7 its first record in the last store, 8 1 while choosing this
 ///            frame, 9 while choosing where its chunks start in the choose list, 10 its first
 ///            tree node in the current node store, 11 in the last, 12 its table entry's quad
-///            tree word when it chose (a new tree makes it choose again), 13 its first word in
-///            the current member store, 14 in the last, 15 while choosing again how many
-///            records it had, whose light its new records take over (7 and 14 then say where
-///            they are), 0 for none, 16 how many records rays trace (its ray list), 17 to 19
+///            tree word when it chose (a new tree makes it choose again), 13 and 14 unused, 15
+///            while choosing again how many records it had, whose light its new records take
+///            over (7 then says where they are), 0 for none, 16 how many records rays trace (its
+///            ray list), 17 to 19
 ///            which way the camera looked when it chose, 20 1 when it chose some of its clusters
 ///            at the light's level only because they were out of view, so that it chooses
 ///            again when the camera turns
@@ -92,11 +92,11 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///   28     the end of the records placed in the current store, which is all that is read: a
 ///          partition that does not fit leaves its range unwritten, and every one after it fails
 ///          too, so all placed records are before it
-///   29     words in use in the current member store
-///   30, 31 the member stores' words, flipping with the record stores: for each partition, two
-///          words for each place in its chunks, the first of that member's records (from the
-///          partition's first) and how many, so that a partition choosing again finds each
-///          member's old records
+///   29     the frame of the takeover table, counted by the begin pass: a slot of another frame
+///          is empty
+///   30, 31 the takeover table's word and its slots, a power of two, kCutTakeoverWords each:
+///          the old records of the partitions choosing again, by what they are, for each new
+///          record to find the one that was the same and take over its light
 ///   32     records for light only (kCutLightOnly) in the current store, as the drawing counts them
 ///   33     the same for the last frame, complete, for the log
 ///   34, 35 records written by partitions choosing again this frame, and of those how many took
@@ -106,9 +106,12 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///          its first record's place, the places of the records rays trace (those at the light's
 ///          level: records for light only, clusters as coarse as the light, quads, whole objects),
 ///          which its tree is over
+///   40, 41 the most hierarchy nodes one thread walked choosing this frame, and the most records
+///          one walk chose
+///   42, 43 the same for the last frame, complete, for the log
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
-/// members, and each instance's in the order its hierarchy's tree is walked, so that records
-/// near in the store are near in the world.
+/// members, and each instance's in the order its hierarchy's tree is expanded and walked, so
+/// that records near in the store are near in the world.
 /// A record is kCutRecordWords: entry, cluster and slot, as the chosen lists have them, and its
 /// light (kLightNone until it is read, see light_pool.h); for a mesh without clusters the whole instance: entry kCullNoSlot,
 /// cluster its mesh's table; for an item rays see that its own pass draws, entry and cluster
@@ -121,10 +124,10 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// is up to four of its records, the first one's offset from its first record times four plus
 /// how many less one; without, a node's offset from its first node; kCullNoSlot for none. Its
 /// nodes are its levels from the bottom, the root last. See instance_cut_tree_src.
-inline constexpr uint32_t kCutHeaderWords = 40;
+inline constexpr uint32_t kCutHeaderWords = 44;
 inline constexpr uint32_t kCutPartitionWords = 24;  ///< Mirrors VELK_CUT_PARTITION_WORDS.
-/// Words per place in a partition's chunks in a member store.
-inline constexpr uint32_t kCutMemberWords = 2;
+/// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
+inline constexpr uint32_t kCutTakeoverWords = 2;
 inline constexpr uint32_t kCutRecordWords = 4;
 inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
@@ -196,13 +199,6 @@ uint velk_cut_node_store(uint cut, bool current)
 {
     uint parity = cull_words.data[cut + 12u];
     return cull_words.data[cut + 26u + (current ? parity : 1u - parity)];
-}
-
-// The current member store, or the last frame's.
-uint velk_cut_member_store(uint cut, bool current)
-{
-    uint parity = cull_words.data[cut + 12u];
-    return cull_words.data[cut + 30u + (current ? parity : 1u - parity)];
 }
 
 // The current ray list store, or the last frame's.
@@ -388,6 +384,7 @@ bool velk_tiny_add(uint draw, uint cluster, uint slot, uint cut_record)
 #ifdef VELK_LOD_LIGHT
 vec3 g_view_cam;
 bool g_out_of_view;
+uint g_visited;  // hierarchy nodes this thread walked
 
 // Whether a sphere at `center` (world space) of `radius` is out of the camera's view, widened
 // by a quarter on each side, so that turning a little keeps what was chosen.
@@ -415,79 +412,118 @@ float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels
     return uintBitsToFloat(cull_words.data[word + 4u]) * scale * pixels_per_unit / max(away, 1e-3);
 }
 
-// `cam` is the camera, which occlusion and compute raster go by; `lod_cam` where levels of
-// detail are chosen from: the camera, or its partition's viewpoint.
-void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, mat4 vp, float height,
-                    float max_pixels)
+// What child `child` of a hierarchy node is to the choice (VELK_LOD_SKIP, VELK_LOD_DESCEND,
+// VELK_LOD_CHOSEN or VELK_LOD_LIGHT_ONLY), and in `c` the node it is or its cluster.
+// `clusters` is the entry's cluster words.
+#define VELK_LOD_SKIP 0u
+#define VELK_LOD_DESCEND 1u
+#define VELK_LOD_CHOSEN 2u
+#define VELK_LOD_LIGHT_ONLY 3u
+uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod_cam, mat4 vp, float pixels_per_unit,
+                    float max_pixels, out uint c)
 {
-    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
+    c = 0u;
     float per_error = scale * pixels_per_unit;
 #ifdef VELK_LOD_LIGHT
     float coarsest = max(max_pixels, pc.light_pixels);
 #else
     float coarsest = max_pixels;
 #endif
+    // A node's child is 8 words: a sphere holding the spheres the clusters under it are tested
+    // with, the smallest of their errors, the largest of their parents', and what it is.
+    uint ref = lod_nodes.data[child + 6u];
+    if (ref == VELK_LOD_NO_CHILD) return VELK_LOD_SKIP;
+    // Skipped when all under it are too coarse, or all have a parent that will do.
+    vec3 center = vec3(uintBitsToFloat(lod_nodes.data[child]), uintBitsToFloat(lod_nodes.data[child + 1u]),
+                       uintBitsToFloat(lod_nodes.data[child + 2u]));
+    float dist = length(mat3(world) * center + (world[3].xyz - lod_cam));
+    float reach = uintBitsToFloat(lod_nodes.data[child + 3u]) * scale;
+    float finest = max_pixels;
+#ifdef VELK_LOD_LIGHT
+    // Out of view: no finer than the light's level.
+    if (velk_lod_out_of_view(mat3(world) * center + world[3].xyz, reach, vp)) finest = pc.light_pixels;
+#endif
+    if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > coarsest) return VELK_LOD_SKIP;
+    if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= finest) return VELK_LOD_SKIP;
+    if ((ref & VELK_LOD_LEAF) == 0u) {
+        c = ref;
+        return VELK_LOD_DESCEND;
+    }
+
+    c = ref & ~VELK_LOD_LEAF;
+    uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
+    float own = velk_lod_pixels(cluster + 3u, world, scale, lod_cam, pixels_per_unit);
+    float parent = velk_lod_pixels(cluster + 8u, world, scale, lod_cam, pixels_per_unit);
+    float limit = max_pixels;
+#ifdef VELK_LOD_LIGHT
+    // Out of view, the light's level is all there is of it: rays and light use it, and it
+    // is drawn if it comes into view before its partition chooses again.
+    vec3 at = mat3(world) * vec3(uintBitsToFloat(cull_words.data[cluster + 3u]), uintBitsToFloat(cull_words.data[cluster + 4u]),
+                                 uintBitsToFloat(cull_words.data[cluster + 5u])) + world[3].xyz;
+    bool out_of_view = velk_lod_out_of_view(at, uintBitsToFloat(cull_words.data[cluster + 6u]) * scale, vp);
+    if (out_of_view) {
+        limit = pc.light_pixels;
+        g_out_of_view = true;
+    }
+#endif
+    if (own <= limit && parent > limit) return VELK_LOD_CHOSEN;
+#ifdef VELK_LOD_LIGHT
+    if (!out_of_view && own <= pc.light_pixels && parent > pc.light_pixels) return VELK_LOD_LIGHT_ONLY;
+#endif
+    return VELK_LOD_SKIP;
+}
+
+// Walks the tree of `entry` from node `start` down (0 is its root), depth first. `cam` is the
+// camera, which occlusion and compute raster go by; `lod_cam` where levels of detail are chosen
+// from: the camera, or its partition's viewpoint.
+void velk_lod_walk(uint entry, uint start, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, mat4 vp, float height,
+                   float max_pixels)
+{
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
     uint clusters = cull_words.data[entry + 2u];
     uint nodes = cull_words.data[entry + 8u];
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
     // about whether they are hidden.
     bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
-    // The tree's nodes are among the mesh's nodes that rays walk, in lod_nodes. A node's
-    // child is 8 words: a sphere holding the spheres the clusters under it are tested with,
-    // the smallest of their errors, the largest of their parents', and what it is. The tree
-    // is no deeper than kLodMaxDepth.
+    // The tree's nodes are among the mesh's nodes that rays walk, in lod_nodes. The tree is no
+    // deeper than kLodMaxDepth.
     uint stack[32];
     int sp = 0;
-    stack[sp++] = 0u;
+    stack[sp++] = start;
     while (sp > 0) {
         uint node = nodes + stack[--sp] * VELK_LOD_NODE_STRIDE;
+#ifdef VELK_LOD_LIGHT
+        ++g_visited;
+#endif
+        // The second child first on the stack, so that the first child's subtree is walked
+        // first: the order velk_lod_child's callers expand nodes in.
+        uint later = VELK_LOD_NO_CHILD;
         for (uint k = 0u; k < 2u; ++k) {
-            uint child = node + k * 8u;
-            uint ref = lod_nodes.data[child + 6u];
-            if (ref == VELK_LOD_NO_CHILD) continue;
-            // Skipped when all under it are too coarse, or all have a parent that will do.
-            vec3 center = vec3(uintBitsToFloat(lod_nodes.data[child]), uintBitsToFloat(lod_nodes.data[child + 1u]),
-                               uintBitsToFloat(lod_nodes.data[child + 2u]));
-            float dist = length(mat3(world) * center + (world[3].xyz - lod_cam));
-            float reach = uintBitsToFloat(lod_nodes.data[child + 3u]) * scale;
-            float finest = max_pixels;
-#ifdef VELK_LOD_LIGHT
-            // Out of view: no finer than the light's level.
-            if (velk_lod_out_of_view(mat3(world) * center + world[3].xyz, reach, vp)) finest = pc.light_pixels;
-#endif
-            if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > coarsest) continue;
-            if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= finest) continue;
-            if ((ref & VELK_LOD_LEAF) == 0u) {
-                if (sp < 32) stack[sp++] = ref;
-                continue;
-            }
-
-            uint c = ref & ~VELK_LOD_LEAF;
-            uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
-            float own = velk_lod_pixels(cluster + 3u, world, scale, lod_cam, pixels_per_unit);
-            float parent = velk_lod_pixels(cluster + 8u, world, scale, lod_cam, pixels_per_unit);
-            float limit = max_pixels;
-#ifdef VELK_LOD_LIGHT
-            // Out of view, the light's level is all there is of it: rays and light use it, and it
-            // is drawn if it comes into view before its partition chooses again.
-            vec3 at = mat3(world) * vec3(uintBitsToFloat(cull_words.data[cluster + 3u]), uintBitsToFloat(cull_words.data[cluster + 4u]),
-                                         uintBitsToFloat(cull_words.data[cluster + 5u])) + world[3].xyz;
-            bool out_of_view = velk_lod_out_of_view(at, uintBitsToFloat(cull_words.data[cluster + 6u]) * scale, vp);
-            if (out_of_view) {
-                limit = pc.light_pixels;
-                g_out_of_view = true;
-            }
-#endif
-            if (own <= limit && parent > limit) {
+            uint c;
+            uint what = velk_lod_child(node + k * 8u, clusters, world, scale, lod_cam, vp, pixels_per_unit, max_pixels, c);
+            if (what == VELK_LOD_DESCEND) {
+                if (k == 0u) {
+                    later = c;
+                } else if (sp < 32) {
+                    stack[sp++] = c;
+                }
+            } else if (what == VELK_LOD_CHOSEN) {
                 velk_lod_chosen(entry, c, slot, world, scale, cam, lod_cam, pixels_per_unit, deforming);
             }
 #ifdef VELK_LOD_LIGHT
-            else if (!out_of_view && own <= pc.light_pixels && parent > pc.light_pixels) {
+            else if (what == VELK_LOD_LIGHT_ONLY) {
                 velk_lod_light_chosen(entry, c, slot);
             }
 #endif
         }
+        if (later != VELK_LOD_NO_CHILD && sp < 32) stack[sp++] = later;
     }
+}
+
+void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, mat4 vp, float height,
+                    float max_pixels)
+{
+    velk_lod_walk(entry, 0u, slot, world, scale, cam, lod_cam, vp, height, max_pixels);
 }
 )"
 
@@ -596,9 +632,6 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
             // records that fit.
             cull_words.data[state + 11u] = cull_words.data[state + 10u];
             cull_words.data[state + 10u] = atomicAdd(cull_words.data[cut + 24u], velk_cut_tree_nodes(count));
-            // And its members' ranges, which the member stores have room for.
-            cull_words.data[state + 14u] = cull_words.data[state + 13u];
-            cull_words.data[state + 13u] = atomicAdd(cull_words.data[cut + 29u], chunks * 64u * VELK_CUT_MEMBER_WORDS);
             cull_words.data[state + 15u] = 0u;
             cull_words.data[cull_words.data[cut + 20u] + atomicAdd(cull_words.data[cut], 1u)] = index;
             return;
@@ -613,7 +646,6 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
     // ones, which are in the last store.
     if (same && count != 0u) {
         cull_words.data[state + 7u] = cull_words.data[state + 5u];
-        cull_words.data[state + 14u] = cull_words.data[state + 13u];
         cull_words.data[state + 15u] = count;
     } else {
         cull_words.data[state + 15u] = 0u;
@@ -691,13 +723,18 @@ void main()
     cull_words.data[cut + 13u] = 0u;
     cull_words.data[cut + 28u] = 0u;
     cull_words.data[cut + 24u] = 0u;
-    cull_words.data[cut + 29u] = 0u;
+    // A new frame of the takeover table: what it held is gone.
+    cull_words.data[cut + 29u] += 1u;
     cull_words.data[cut + 33u] = cull_words.data[cut + 32u];
     cull_words.data[cut + 32u] = 0u;
     cull_words.data[cut + 36u] = cull_words.data[cut + 34u];
     cull_words.data[cut + 37u] = cull_words.data[cut + 35u];
     cull_words.data[cut + 34u] = 0u;
     cull_words.data[cut + 35u] = 0u;
+    cull_words.data[cut + 42u] = cull_words.data[cut + 40u];
+    cull_words.data[cut + 43u] = cull_words.data[cut + 41u];
+    cull_words.data[cut + 40u] = 0u;
+    cull_words.data[cut + 41u] = 0u;
     cull_words.data[cut] = 0u;
     cull_words.data[cut + 4u] = 0u;
 }
@@ -743,23 +780,19 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < node_words; i += 64u) {
         cull_words.data[node_to + i] = cull_words.data[node_from + i];
     }
-    uint member_words = cull_words.data[state + 4u] * 64u * VELK_CUT_MEMBER_WORDS;
-    uint member_from = velk_cut_member_store(cut, false) + cull_words.data[state + 14u];
-    uint member_to = velk_cut_member_store(cut, true) + cull_words.data[state + 13u];
-    for (uint i = gl_LocalInvocationIndex; i < member_words; i += 64u) {
-        cull_words.data[member_to + i] = cull_words.data[member_from + i];
-    }
 }
 )";
 
 /**
  * Chooses the clusters of each instance in the chunks of the choose list, all round the camera,
  * from its partition's viewpoint. With `write` 0, counts them into the chunk's count and the
- * partition's; with 1, writes them from the chunk's first record, which instance_cut_place_src
- * made of its count, each thread after the ones before it in the chunk. A mesh without
- * clusters gives one record for the whole instance. Writing, each member also writes its range
- * to the member store, and its records take over the light of its old records that were the
- * same (kCutPartitionWords 15). A work group per chunk.
+ * partition's, and lists the chunk's share of the partition's old records in the takeover table;
+ * with 1, writes them from the chunk's first record, which instance_cut_place_src made of its
+ * count, and each takes over the light of the old record that was the same (kCutPartitionWords
+ * 15). A mesh without clusters gives one record for the whole instance. A work group per chunk,
+ * whose threads share the work of all its members' trees: their tops are expanded together,
+ * then each thread walks a few of the smaller trees below, so that no thread walks a large
+ * mesh's whole tree alone. The records stay in member order, each member's together.
  *
  * With items_word set, the chunks hold object ids, as the scene's plain partitions have them,
  * and each object is drawn by its plain items (InstanceCullPass::together): an item is its
@@ -810,16 +843,84 @@ uint g_count;
 uint g_state;
 uint g_store;
 bool g_writing;
-uint g_at;  // where this thread's next record goes, while writing
+uint g_at;        // where this thread's next record goes, while writing
+bool g_takeover;  // writing records that take over the light of the old ones that were the same
+uint g_took;      // how many did
 // The partition's quad tree (kQuadNodeWords), or none, its leaves, and this member's leaf.
 uint g_tree;
 uint g_leaves;
 uint g_position;
 bool g_leaves_only;  // the leaves are the finest the partition has: its members are not instances
+// What a member's roots go to (velk_cut_root): counted, put in the item list from g_root_at, or
+// chosen at once by the thread.
+#define VELK_ROOTS_COUNT 0u
+#define VELK_ROOTS_PUT 1u
+#define VELK_ROOTS_DIRECT 2u
+uint g_root_mode;
+uint g_roots;
+uint g_root_at;
 
+// The chunk's work, shared by its threads: items of 4 words, what a record names in its slot
+// (its member's slot or plain item, or a quad's tree), an entry word, a node of the entry's tree
+// or a record's cluster, and what it is. Two lists, which expanding goes between.
+#define VELK_CHOOSE_ITEMS 256u
+#define VELK_CHOOSE_NODE 0u
+#define VELK_CHOOSE_RECORD 1u
+shared uint s_items[2u * VELK_CHOOSE_ITEMS * 4u];
+shared uint s_item_counts[VELK_CHOOSE_ITEMS];
 shared uint s_counts[64];
+shared uint s_total;
+shared uint s_nodes;
 
-// Counts a record, or writes it at this thread's next place.
+uint velk_takeover_hash(uint entry, uint cluster, uint slot)
+{
+    uint h = (entry * 0x9e3779b1u) ^ (cluster * 0x85ebca77u) ^ (slot * 0xc2b2ae3du);
+    h ^= h >> 16u; h *= 0x7feb352du;
+    h ^= h >> 15u; h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
+}
+
+// The most slots a lookup in the takeover table tries.
+#define VELK_TAKEOVER_PROBES 64u
+
+// Lists the old record at word `was` in the takeover table (kCutHeaderWords 30), for the
+// records chosen again to find by what they are.
+void velk_takeover_put(uint cut, uint was)
+{
+    uint table = cull_words.data[cut + 30u];
+    uint mask = cull_words.data[cut + 31u] - 1u;
+    uint stamp = cull_words.data[cut + 29u];
+    uint h = velk_takeover_hash(cull_words.data[was], cull_words.data[was + 1u], cull_words.data[was + 2u]);
+    for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
+        uint s = table + ((h + p) & mask) * 2u;
+        uint seen = cull_words.data[s];
+        if (seen == stamp) continue;
+        if (atomicCompSwap(cull_words.data[s], seen, stamp) == seen) {
+            cull_words.data[s + 1u] = was;
+            return;
+        }
+    }
+}
+
+// The word of the old record that is (entry, cluster, slot), or 0xFFFFFFFF.
+uint velk_takeover_find(uint cut, uint entry, uint cluster, uint slot)
+{
+    uint table = cull_words.data[cut + 30u];
+    uint mask = cull_words.data[cut + 31u] - 1u;
+    uint stamp = cull_words.data[cut + 29u];
+    uint h = velk_takeover_hash(entry, cluster, slot);
+    for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
+        uint s = table + ((h + p) & mask) * 2u;
+        if (cull_words.data[s] != stamp) return 0xFFFFFFFFu;
+        uint was = cull_words.data[s + 1u];
+        if (cull_words.data[was] == entry && cull_words.data[was + 1u] == cluster && cull_words.data[was + 2u] == slot) return was;
+    }
+    return 0xFFFFFFFFu;
+}
+
+// Counts a record, or writes it at this thread's next place, with the light of the old record
+// that was the same.
 void velk_cut_record(uint entry, uint cluster, uint slot)
 {
     if (g_writing) {
@@ -830,7 +931,15 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
         cull_words.data[record] = entry;
         cull_words.data[record + 1u] = cluster;
         cull_words.data[record + 2u] = slot;
-        cull_words.data[record + 3u] = 0xFFFFFFFFu;
+        uint light = 0xFFFFFFFFu;
+        if (g_takeover) {
+            uint was = velk_takeover_find(pc.cut_word, entry, cluster, slot);
+            if (was != 0xFFFFFFFFu) {
+                light = cull_words.data[was + 3u];
+                ++g_took;
+            }
+        }
+        cull_words.data[record + 3u] = light;
     }
     ++g_count;
 }
@@ -847,20 +956,90 @@ void velk_lod_light_chosen(uint entry, uint c, uint slot)
     velk_cut_record(entry | VELK_CUT_LIGHT_ONLY, c, slot);
 }
 )" VELK_LOD_SELECT_GLSL R"(
-// The same choice both times: what the count found room for is what is written.
-void velk_cut_choose(uint slot, uint instance, vec3 viewpoint, mat4 world, float scale, uint table)
+// The instance a record's `named` is of: a slot's, or a plain item's.
+uint velk_cut_named_instance(uint named)
 {
+    return pc.items_word == 0xFFFFFFFFu ? pc.instances_base + named
+                                        : cull_words.data[pc.items_word + named * VELK_PLAIN_ITEM_WORDS];
+}
+
+float velk_cut_scale(mat4 world)
+{
+    return sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
+}
+
+// Walks the tree of `entry` from `node` down for `named`, choosing what it holds.
+void velk_cut_walk(uint named, uint entry, uint node, vec3 viewpoint)
+{
+    mat4 world = cull_instances.data[velk_cut_named_instance(named)].world_matrix;
     GlobalData globals = velk_globals.data[pc.globals_base];
-    g_view_cam = globals.cam_pos.xyz;
+    velk_lod_walk(entry, node, named, world, velk_cut_scale(world), viewpoint, viewpoint, globals.view_projection,
+                  globals.viewport.y, pc.lod_max_pixels);
+}
+
+// A root of a member's choice: a record, or the root of one of its trees. Counted, put in the
+// item list, or chosen at once, as g_root_mode says.
+void velk_cut_root(uint kind, uint named, uint entry, uint ref, vec3 viewpoint)
+{
+    if (g_root_mode == VELK_ROOTS_COUNT) {
+        ++g_roots;
+    } else if (g_root_mode == VELK_ROOTS_PUT) {
+        uint at = g_root_at++;
+        if (at >= VELK_CHOOSE_ITEMS) return;
+        s_items[at * 4u] = named;
+        s_items[at * 4u + 1u] = entry;
+        s_items[at * 4u + 2u] = ref;
+        s_items[at * 4u + 3u] = kind;
+    } else if (kind == VELK_CHOOSE_RECORD) {
+        velk_cut_record(entry, ref, named);
+    } else {
+        velk_cut_walk(named, entry, ref, viewpoint);
+    }
+}
+
+// The items a node item at word `w` of s_items becomes: each of its children that is not
+// skipped, in order, a node to walk or a record. Counted, or with `put` written from item `to`.
+uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
+{
+    uint named = s_items[w];
+    uint entry = s_items[w + 1u];
+    uint node = s_items[w + 2u];
+    mat4 world = cull_instances.data[velk_cut_named_instance(named)].world_matrix;
+    float scale = velk_cut_scale(world);
+    GlobalData globals = velk_globals.data[pc.globals_base];
+    mat4 vp = globals.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
+    uint clusters = cull_words.data[entry + 2u];
+    uint at = cull_words.data[entry + 8u] + node * VELK_LOD_NODE_STRIDE;
+    if (!put) ++g_visited;
+    uint n = 0u;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint c;
+        uint what = velk_lod_child(at + k * 8u, clusters, world, scale, viewpoint, vp, pixels_per_unit, pc.lod_max_pixels, c);
+        if (what == VELK_LOD_SKIP) continue;
+        if (put) {
+            uint o = (to + n) * 4u;
+            s_items[o] = named;
+            s_items[o + 1u] = what == VELK_LOD_LIGHT_ONLY ? entry | VELK_CUT_LIGHT_ONLY : entry;
+            s_items[o + 2u] = c;
+            s_items[o + 3u] = what == VELK_LOD_DESCEND ? VELK_CHOOSE_NODE : VELK_CHOOSE_RECORD;
+        }
+        ++n;
+    }
+    return n;
+}
+
+// The roots of an instance's choice; `named` is what its records name: its slot, or a plain item.
+void velk_cut_choose(uint named, vec3 viewpoint, uint table)
+{
     uint first_entry = cull_words.data[table + 8u];
     uint entries = cull_words.data[table + 9u];
     if (entries == 0u) {
-        velk_cut_record(0xFFFFFFFFu, table, slot);
+        velk_cut_root(VELK_CHOOSE_RECORD, named, 0xFFFFFFFFu, table, viewpoint);
         return;
     }
     for (uint e = 0u; e < entries; ++e) {
-        velk_lod_visit(first_entry + e * VELK_CLUSTER_ENTRY_WORDS, slot, world, scale, viewpoint, viewpoint, globals.view_projection,
-                       globals.viewport.y, pc.lod_max_pixels);
+        velk_cut_root(VELK_CHOOSE_NODE, named, first_entry + e * VELK_CLUSTER_ENTRY_WORDS, 0u, viewpoint);
     }
 }
 
@@ -871,13 +1050,10 @@ void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoin
     if (world[3][3] == 0.0) return;
     // An item for rays only (no table): the whole object.
     if (table_word == 0xFFFFFFFFu) {
-        velk_cut_record(0xFFFFFFFFu, 0xFFFFFFFFu, named);
+        velk_cut_root(VELK_CHOOSE_RECORD, named, 0xFFFFFFFFu, 0xFFFFFFFFu, viewpoint);
         return;
     }
-    float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
-                           dot(world[2].xyz, world[2].xyz)));
-    uint table = table_word + cull_instances.data[instance].params.y * 12u;
-    velk_cut_choose(named, instance, viewpoint, world, scale, table);
+    velk_cut_choose(named, viewpoint, table_word + cull_instances.data[instance].params.y * 12u);
 }
 
 // The topmost node of the quad tree over this member that is small enough on screen from
@@ -935,7 +1111,7 @@ void velk_cut_member(uint member, vec3 viewpoint)
         if (quad != 0xFFFFFFFFu) {
             if (velk_quad_first(quad) == g_position
                 && uintBitsToFloat(cull_words.data[g_tree + quad * VELK_QUAD_NODE_WORDS + 10u]) >= 0.0) {
-                velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, g_tree);
+                velk_cut_root(VELK_CHOOSE_RECORD, g_tree, VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, viewpoint);
             }
             return;
         }
@@ -978,6 +1154,7 @@ void main()
     g_store = velk_cut_store(cut, true);
     g_writing = false;
     g_out_of_view = false;
+    g_visited = 0u;
     g_view_cam = velk_globals.data[pc.globals_base].cam_pos.xyz;
     // Where this member is in its partition's list, which its quad tree's leaves follow.
     g_tree = 0xFFFFFFFFu;
@@ -995,75 +1172,164 @@ void main()
             g_leaves_only = (cull_words.data[entry + 9u] & VELK_QUAD_LEAVES_ONLY) != 0u;
         }
     }
-    if (choosing && member != 0xFFFFFFFFu) velk_cut_member(member, viewpoint);
-    // Some of it chosen coarse for being out of view: the partition chooses again on a turn.
-    if (g_out_of_view) cull_words.data[state + 20u] = 1u;
-    s_counts[lane] = g_count;
+    // The same for all its threads: a work group is one chunk of one partition.
+    if (!choosing) return;
+
+    // The members' roots, in member order: counted, then put in the item list. A member whose
+    // roots do not fit after the ones before it chooses alone, after the items.
+    g_root_mode = VELK_ROOTS_COUNT;
+    g_roots = 0u;
+    if (member != 0xFFFFFFFFu) velk_cut_member(member, viewpoint);
+    s_counts[lane] = g_roots;
+    barrier();
+    uint before = 0u;
+    for (uint i = 0u; i < lane; ++i) before += s_counts[i];
+    bool alone = g_roots != 0u && before + g_roots > VELK_CHOOSE_ITEMS;
+    uint items = 0u;
+    for (uint i = 0u; i < 64u && items + s_counts[i] <= VELK_CHOOSE_ITEMS; ++i) items += s_counts[i];
+    if (g_roots != 0u && !alone) {
+        g_root_mode = VELK_ROOTS_PUT;
+        g_root_at = before;
+        velk_cut_member(member, viewpoint);
+    }
     barrier();
 
-    if (pc.write == 0u) {
+    // Expanded together, a level at a time, each node item into its children in order, until
+    // there are enough nodes for each thread to walk a few small trees: the longest walk is then
+    // one of those, not a whole large mesh's tree. Both lists stay in member order.
+    uint from_list = 0u;
+    for (uint round = 0u; round < 16u; ++round) {
+        if (lane == 0u) s_nodes = 0u;
+        barrier();
+        for (uint i = lane; i < items; i += 64u) {
+            if (s_items[(from_list * VELK_CHOOSE_ITEMS + i) * 4u + 3u] == VELK_CHOOSE_NODE) atomicAdd(s_nodes, 1u);
+        }
+        barrier();
+        uint nodes = s_nodes;
+        barrier();
+        if (nodes == 0u || nodes >= 128u || items * 2u > VELK_CHOOSE_ITEMS) break;
+        uint to_list = 1u - from_list;
+        for (uint i = lane; i < items; i += 64u) {
+            uint w = (from_list * VELK_CHOOSE_ITEMS + i) * 4u;
+            s_item_counts[i] = s_items[w + 3u] == VELK_CHOOSE_NODE ? velk_cut_expand(w, viewpoint, false, 0u) : 1u;
+        }
+        barrier();
         if (lane == 0u) {
-            uint total = 0u;
-            for (uint i = 0u; i < 64u; ++i) total += s_counts[i];
+            uint run = 0u;
+            for (uint i = 0u; i < items; ++i) {
+                uint n = s_item_counts[i];
+                s_item_counts[i] = run;
+                run += n;
+            }
+            s_total = run;
+        }
+        barrier();
+        for (uint i = lane; i < items; i += 64u) {
+            uint w = (from_list * VELK_CHOOSE_ITEMS + i) * 4u;
+            uint to = to_list * VELK_CHOOSE_ITEMS + s_item_counts[i];
+            if (s_items[w + 3u] == VELK_CHOOSE_NODE) {
+                velk_cut_expand(w, viewpoint, true, to);
+            } else {
+                for (uint k = 0u; k < 4u; ++k) s_items[to * 4u + k] = s_items[w + k];
+            }
+        }
+        items = s_total;
+        from_list = to_list;
+        barrier();
+    }
+
+    // Each item's records, counted: a record is one, a node's tree is walked.
+    uint most = 0u;
+    for (uint i = lane; i < items; i += 64u) {
+        uint w = (from_list * VELK_CHOOSE_ITEMS + i) * 4u;
+        g_count = 0u;
+        if (s_items[w + 3u] == VELK_CHOOSE_RECORD) {
+            velk_cut_record(s_items[w + 1u], s_items[w + 2u], s_items[w]);
+        } else {
+            velk_cut_walk(s_items[w], s_items[w + 1u], s_items[w + 2u], viewpoint);
+        }
+        s_item_counts[i] = g_count;
+        most = max(most, g_count);
+    }
+    uint alone_count = 0u;
+    if (alone) {
+        g_root_mode = VELK_ROOTS_DIRECT;
+        g_count = 0u;
+        velk_cut_member(member, viewpoint);
+        alone_count = g_count;
+        most = max(most, g_count);
+    }
+    barrier();
+    // Where each item's records start, in order, then those of the members alone.
+    if (lane == 0u) {
+        uint run = 0u;
+        for (uint i = 0u; i < items; ++i) {
+            uint n = s_item_counts[i];
+            s_item_counts[i] = run;
+            run += n;
+        }
+        s_total = run;
+    }
+    s_counts[lane] = alone_count;
+    barrier();
+    uint alone_at = s_total;
+    for (uint i = 0u; i < lane; ++i) alone_at += s_counts[i];
+    uint total = s_total;
+    for (uint i = 0u; i < 64u; ++i) total += s_counts[i];
+    // Some of it chosen coarse for being out of view: the partition chooses again on a turn.
+    if (g_out_of_view) cull_words.data[state + 20u] = 1u;
+
+    if (pc.write == 0u) {
+        // The longest walk and the most records of one walk, for the log.
+        if (g_visited != 0u) atomicMax(cull_words.data[cut + 40u], g_visited);
+        if (most != 0u) atomicMax(cull_words.data[cut + 41u], most);
+        if (lane == 0u) {
             cull_words.data[chunk_word] = total;
             if (total != 0u) atomicAdd(cull_words.data[state + 6u], total);
         }
+        // This chunk's share of the partition's old records goes in the takeover table, for its
+        // records written next to find (kCutPartitionWords 7 and 15).
+        uint old = cull_words.data[state + 15u];
+        if (old != 0u) {
+            uint chunks = cull_words.data[state + 4u];
+            uint per = (old + chunks - 1u) / chunks;
+            uint from = (chunk_index - cull_words.data[state + 9u]) * per;
+            uint to = min(from + per, old);
+            uint old_first = velk_cut_store(cut, false) + cull_words.data[state + 7u] * 4u;
+            for (uint i = from + lane; i < to; i += 64u) velk_takeover_put(cut, old_first + i * 4u);
+        }
         return;
     }
-    if (!choosing) return;
-    // The same choice again, written after the records of the threads before this one.
-    uint before = 0u;
-    for (uint i = 0u; i < lane; ++i) before += s_counts[i];
-    uint first = cull_words.data[chunk_word] + before;
-    if (g_count != 0u) {
-        g_at = first;
-        g_writing = true;
-        velk_cut_member(member, viewpoint);
-    }
 
-    // This member's range, by its place in the partition's chunks, which stays while they do.
-    uint place = cull_words.data[chunk] - cull_words.data[state + 3u] + lane;
-    uint own = velk_cut_member_store(cut, true) + cull_words.data[state + 13u] + place * VELK_CUT_MEMBER_WORDS;
-    cull_words.data[own] = first - cull_words.data[state + 5u];
-    cull_words.data[own + 1u] = g_count;
-
-    // Each new record takes over the light of the old record of this member that was the same.
-    if (g_count != 0u) atomicAdd(cull_words.data[cut + 34u], g_count);
-    if (cull_words.data[state + 15u] == 0u || g_count == 0u) return;
-    uint old = velk_cut_member_store(cut, false) + cull_words.data[state + 14u] + place * VELK_CUT_MEMBER_WORDS;
-    uint old_count = cull_words.data[old + 1u];
-    // Never past the records the partition had.
-    if (old_count == 0u || cull_words.data[old] >= cull_words.data[state + 15u]
-        || old_count > cull_words.data[state + 15u] - cull_words.data[old]) return;
-    uint old_first = velk_cut_store(cut, false) + (cull_words.data[state + 7u] + cull_words.data[old]) * 4u;
-    uint end = min(first + g_count, cull_words.data[state + 5u] + cull_words.data[state + 6u]);
-    uint took = 0u;
-    // Both are in the order the member's hierarchy was walked, so the old record that is the same
-    // comes after the last one found: a look a little way ahead of that, not through them all.
-    const uint kAhead = 64u;
-    uint from = 0u;
-    for (uint at = first; at < end; ++at) {
-        uint record = g_store + at * 4u;
-        uint until = min(from + kAhead, old_count);
-        for (uint k = from; k < until; ++k) {
-            uint was = old_first + k * 4u;
-            if (cull_words.data[was] == cull_words.data[record] && cull_words.data[was + 1u] == cull_words.data[record + 1u]
-                && cull_words.data[was + 2u] == cull_words.data[record + 2u]) {
-                cull_words.data[record + 3u] = cull_words.data[was + 3u];
-                ++took;
-                from = k + 1u;
-                break;
-            }
+    // Written: each item from its place in the chunk's range, then the members alone. Each record
+    // takes over the light of the old record that was the same.
+    uint first = cull_words.data[chunk_word];
+    g_writing = true;
+    g_takeover = cull_words.data[state + 15u] != 0u;
+    g_took = 0u;
+    g_count = 0u;
+    for (uint i = lane; i < items; i += 64u) {
+        uint w = (from_list * VELK_CHOOSE_ITEMS + i) * 4u;
+        g_at = first + s_item_counts[i];
+        if (s_items[w + 3u] == VELK_CHOOSE_RECORD) {
+            velk_cut_record(s_items[w + 1u], s_items[w + 2u], s_items[w]);
+        } else {
+            velk_cut_walk(s_items[w], s_items[w + 1u], s_items[w + 2u], viewpoint);
         }
     }
-    if (took != 0u) atomicAdd(cull_words.data[cut + 35u], took);
+    if (alone) {
+        g_root_mode = VELK_ROOTS_DIRECT;
+        g_at = first + alone_at;
+        velk_cut_member(member, viewpoint);
+    }
+    if (g_count != 0u) atomicAdd(cull_words.data[cut + 34u], g_count);
+    if (g_took != 0u) atomicAdd(cull_words.data[cut + 35u], g_took);
 }
 )";
 
 /**
  * Gives each partition that chose again this frame a range in the current store, as large as
- * its count, and each of its chunks its part of that, in order, and its members a range in the
- * current member store. One that does not fit gets no
+ * its count, and each of its chunks its part of that, in order. One that does not fit gets no
  * records and chooses again on the next frame. A thread per partition.
  */
 inline constexpr string_view instance_cut_place_src = R"(
@@ -1096,7 +1362,6 @@ void main()
     atomicMax(cull_words.data[cut + 28u], first + count);
     cull_words.data[state + 5u] = first;
     cull_words.data[state + 10u] = atomicAdd(cull_words.data[cut + 24u], velk_cut_tree_nodes(count));
-    cull_words.data[state + 13u] = atomicAdd(cull_words.data[cut + 29u], cull_words.data[state + 4u] * 64u * VELK_CUT_MEMBER_WORDS);
     // Each of its chunks' first record, in the order of its chunks.
     uint counts = cull_words.data[cut + 23u] + cull_words.data[state + 9u];
     uint next = first;
@@ -2264,14 +2529,29 @@ void main()
 }
 )";
 
+/// The culling's passes, as the GPU timer names them: which partitions keep their records;
+/// for those that do not, counting their records (with the copies for those that do), placing
+/// them and writing them; the trees for rays, the light pages kept, and the draw lists.
+inline constexpr uint32_t kCullStages = 7;
+inline constexpr const char* kCullStageNames[kCullStages] = {
+    "instance.decide", "instance.count", "instance.place", "instance.write",
+    "instance.trees", "instance.light_marks", "instance.draws"};
+/// The same for a view chosen as another camera.
+inline constexpr const char* kCullOtherStageNames[kCullStages] = {
+    "other:instance.decide", "other:instance.count", "other:instance.place", "other:instance.write",
+    "other:instance.trees", "other:instance.light_marks", "other:instance.draws"};
+
 /**
- * @brief One view's GPU culling pass, kept by the render path. Set @c dirty when the
+ * @brief One view's GPU culling passes, kept by the render path. Set @c dirty when the
  *        view's batches change.
  */
 struct InstanceCullPass
 {
-    IRenderPass::Ptr pass;
+    /// The culling, as passes timed apart, in order: kCullStageNames.
+    IRenderPass::Ptr passes[kCullStages];
     bool dirty = true;
+    /// The view is chosen as another camera: its passes are timed under kCullOtherStageNames.
+    bool chosen_by_other = false;
     vector<uint32_t> count_words;  ///< Reset before every cull.
     IGpuBuffer* arena_buffer = nullptr;
     size_t arena_size = 0;
@@ -3010,11 +3290,12 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const uint32_t node_capacity = cut.capacity / 4u + info.partitions * 33u;
             cut.node_capacity = node_capacity;
             const uint32_t node_store_word = store_word + cut.capacity * kCutRecordWords * 2u;
-            // A member store has room for every partition's chunks.
-            const uint32_t member_capacity = chunks * kCullChunkSlots * kCutMemberWords;
-            const uint32_t member_store_word = node_store_word + node_capacity * kCutNodeWords * 2u;
+            // The takeover table: at least two slots a record, so that lookups stay short.
+            uint32_t takeover_slots = 1;
+            while (takeover_slots < cut.capacity * 2u) takeover_slots <<= 1;
+            const uint32_t takeover_word = node_store_word + node_capacity * kCutNodeWords * 2u;
             // A ray list store, a word a record.
-            const uint32_t ray_store_word = member_store_word + member_capacity * 2u;
+            const uint32_t ray_store_word = takeover_word + takeover_slots * kCutTakeoverWords;
             const size_t words = size_t(ray_store_word) + size_t(cut.capacity) * 2u;
             cut.region = arena->alloc(words * sizeof(uint32_t));
             if (!cut.region.valid()) {
@@ -3039,8 +3320,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             initial[25] = node_capacity;
             initial[26] = base + node_store_word;
             initial[27] = base + node_store_word + node_capacity * kCutNodeWords;
-            initial[30] = base + member_store_word;
-            initial[31] = base + member_store_word + member_capacity;
+            initial[30] = base + takeover_word;
+            initial[31] = takeover_slots;
             initial[38] = base + ray_store_word;
             initial[39] = base + ray_store_word + cut.capacity;
             // Chosen from nowhere, and from a table entry no partition has: all choose.
@@ -3053,6 +3334,10 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 partition[3] = kCullNoSlot;
             }
             arena->write_at(cut.region.offset(), initial.data(), initial.size() * sizeof(uint32_t));
+            // The takeover table starts empty: no slot of frame 0, which the begin pass leaves at once.
+            vector<uint32_t> empty_table(size_t(takeover_slots) * kCutTakeoverWords, 0u);
+            arena->write_at(cut.region.offset() + uint64_t(takeover_word) * sizeof(uint32_t), empty_table.data(),
+                            empty_table.size() * sizeof(uint32_t));
             kept.push_back(std::move(cut));
             // The total of the counts is not comparable with the last one any more.
             state.cut_log_frame = ctx.present_counter;
@@ -3181,6 +3466,24 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u traced, "
                         "%u records chosen again of which %u kept their light, %u lit pixels untraced",
                      counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], written, took, extra[4]);
+            uint32_t longest = 0;
+            uint32_t most = 0;
+            for (const auto& c : state.cuts) {
+                uint32_t words[2] = {};
+                arena->read_at(c.region.offset() + 42u * sizeof(uint32_t), words, sizeof(words));
+                longest = std::max(longest, words[0]);
+                most = std::max(most, words[1]);
+            }
+            VELK_LOG(I, "choosing: last frame the longest walk of one thread visited %u hierarchy nodes, the most "
+                        "records one walk chose %u",
+                     longest, most);
+            // The light trace's worst frame since the last log: its rays, and their walks' steps.
+            uint32_t worst[4] = {};
+            arena->read_at(pool.header.offset() + 88u * sizeof(uint32_t), worst, sizeof(worst));
+            const uint32_t cleared[4] = {};
+            arena->update_at(pool.header.offset() + 88u * sizeof(uint32_t), cleared, sizeof(cleared));
+            VELK_LOG(I, "light trace: worst frame %u rays (%u for first traces), %u walk steps, %.0f steps a ray", worst[0],
+                     worst[3], worst[1] * 16u, worst[0] != 0 ? double(worst[1]) * 16.0 / double(worst[0]) : 0.0);
         }
     }
     const uint32_t light_pool_word = state.light_pool.segments.empty() ? kCullNoSlot : state.light_pool.word();
@@ -3223,7 +3526,11 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         arena->update_at(uint64_t(word + 7u) * sizeof(uint32_t), &zero, sizeof(zero));
     }
 
-    emit_cached_view_pass(state.pass, record, "instance.cull", graph, [&](CachedPassRecording& rec) {
+    // All the stages are recorded together, each into its own pass.
+    for (const auto& pass : state.passes) record = record || !pass;
+    CachedPassRecording stage_recs[kCullStages];
+    const auto record_all = [&]() {
+        CachedPassRecording& rec = stage_recs[kCullStages - 1u];
         const auto pipeline_for = [&](string_view src, uint64_t key) {
             auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
             return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
@@ -3246,15 +3553,31 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
                                  && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && rename_pipeline;
-        auto cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
-        if (!cmd) {
-            return;
+        IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
+        for (auto& stage_cmd : stage_cmds) {
+            stage_cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
+            if (!stage_cmd) {
+                return;
+            }
         }
-
-        cmd->begin_recording();
-        cmd->push_label("Instance culling");
-        // Earlier frames may still be drawing from these lists.
-        cmd->record_global_barrier();
+        // The stage being recorded; next_stage ends it and begins the next.
+        uint32_t stage = 0;
+        IGpuCommandBuffer* cmd = stage_cmds[0].get();
+        const auto begin_stage = [&]() {
+            cmd = stage_cmds[stage].get();
+            cmd->begin_recording();
+            cmd->push_label(kCullStageNames[stage]);
+            // Earlier frames may still be drawing from these lists, and the stage before
+            // wrote what this one reads.
+            cmd->record_global_barrier();
+        };
+        const auto next_stage = [&]() {
+            cmd->pop_label();
+            cmd->end_recording();
+            ++stage;
+            begin_stage();
+        };
+        begin_stage();
 
         vector<const void*> done;
         vector<InstanceCullInfo> visuals;
@@ -3382,7 +3705,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             const PartitionPushC pc{job.partition_table, job.partition_count, view_globals_base, job.cut, kCutRefresh};
             dispatch(partition_pipeline.get(), &pc, sizeof(pc), (job.partition_count + 63u) / 64u);
         }
-        cmd->record_global_barrier();
+        next_stage();
 
         // The kept cuts: records copied for partitions that keep them, counted for those that
         // choose again, placed, written, then drawn from.
@@ -3417,15 +3740,15 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 dispatch(copy_pipeline.get(), &job.cut, sizeof(job.cut), 1u, job.cut);
                 choose(job, 0u);
             }
-            cmd->record_global_barrier();
+            next_stage();
             for (const CutJob& job : jobs) {
                 dispatch(place_pipeline.get(), &job.cut, sizeof(job.cut), (job.partition_count + 63u) / 64u);
             }
-            cmd->record_global_barrier();
+            next_stage();
             for (const CutJob& job : jobs) {
                 choose(job, 1u);
             }
-            cmd->record_global_barrier();
+            next_stage();
             // Then the trees for rays over the partitions that chose again.
             struct TreePushC
             {
@@ -3489,8 +3812,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             if (state.ray_top.valid()) {
                 const uint32_t top_word = instance_ray_top_word(state);
                 dispatch(top_pipeline.get(), &top_word, sizeof(top_word), 1u);
-                cmd->record_global_barrier();
             }
+            next_stage();
 
             // The records are what they are this frame: the light pages none of them names are
             // free again.
@@ -3505,11 +3828,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 cmd->record_global_barrier();
                 const uint32_t sweep_pc[2] = {light_pool_word, 0u};
                 dispatch(sweep_pipeline.get(), sweep_pc, sizeof(sweep_pc), (state.light_pool.pages() / 32u + 63u) / 64u);
-                cmd->record_global_barrier();
             }
+            next_stage();
         } else {
             state.ray_top = {};
             state.ray_top_layout = 0;
+            // No kept cuts: their stages are empty.
+            while (stage + 1u < kCullStages) next_stage();
         }
 
         struct PushC
@@ -3605,7 +3930,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
 
         cmd->pop_label();
         cmd->end_recording();
-        rec.cmd = std::move(cmd);
+        for (uint32_t k = 0; k < kCullStages; ++k) stage_recs[k].cmd = std::move(stage_cmds[k]);
+        // The last stage holds the pipelines for all of them.
         rec.held.push_back(std::move(pipeline));
         rec.held.push_back(std::move(partition_pipeline));
         rec.held.push_back(std::move(runs_pipeline));
@@ -3621,7 +3947,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(mark_pipeline));
         rec.held.push_back(std::move(sweep_pipeline));
         rec.held.push_back(std::move(rename_pipeline));
-    });
+    };
+    if (record) record_all();
+    const char* const* names = state.chosen_by_other ? kCullOtherStageNames : kCullStageNames;
+    for (uint32_t k = 0; k < kCullStages; ++k) {
+        bool stage_dirty = record;
+        emit_cached_view_pass(state.passes[k], stage_dirty, names[k], graph,
+                              [&](CachedPassRecording& rec) { rec = std::move(stage_recs[k]); });
+    }
 }
 
 /**
@@ -3641,7 +3974,8 @@ inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBat
         return;
     }
 
-    emit_cached_view_pass(state.retest_pass, state.retest_dirty, "instance.retest", graph, [&](CachedPassRecording& rec) {
+    const char* name = state.chosen_by_other ? "other:instance.retest" : "instance.retest";
+    emit_cached_view_pass(state.retest_pass, state.retest_dirty, name, graph, [&](CachedPassRecording& rec) {
         const auto pipeline_for = [&](string_view src, uint64_t key) {
             auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
             return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);

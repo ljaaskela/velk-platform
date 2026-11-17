@@ -57,6 +57,11 @@ namespace velk {
 ///   83 lit pixels this frame whose light was not traced yet (the lighting pass), 84 the last
 ///      frame's, complete, for the log
 ///   85 points put on the trace list this frame, against kLightTracePointsBudget
+///   86 rays the trace cast this frame, 87 the steps their walks took, in sixteens
+///   88, 89 86 and 87 of the frame whose walks took the most steps since the log read them,
+///      which the log then clears
+///   90 of the rays this frame, those for lights traced for the first time, 91 the same frame's
+///      as 88
 /// A record's first page starts with kLightPageHeaderWords: its cluster's vertices; for its own
 /// points the level of the grid in each of its triangles (1 for none, see velk_light_grid_point),
 /// else kLightLinked; how many point words it has; then its other pages (words 3 to 16), at most
@@ -103,7 +108,7 @@ inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightMaxSegments = 64;
 inline constexpr uint32_t kLightPoolSegmentWord = 16;
 inline constexpr uint32_t kLightPoolTraceWord = kLightPoolSegmentWord + kLightMaxSegments;
-inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 8u;
+inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 12u;
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = 3;
@@ -573,6 +578,9 @@ uint velk_points_hash(uint x)
     return x;
 }
 
+uint g_rays = 0u;        // the rays this thread cast
+uint g_first_rays = 0u;  // of those, for lights traced for the first time
+
 // 1 where something is in the way between `p` (facing `n`, `lift` off its surface) and a point
 // of `light` chosen by `seed`, else 0.
 float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed)
@@ -609,7 +617,16 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed)
     Ray ray;
     ray.origin = p + n * lift;
     ray.dir = dir;
+    ++g_rays;
     return trace_any_hit(ray, max(t_max - lift, 0.0)) ? 1.0 : 0.0;
+}
+
+// This thread's rays and their walks' steps, into the frame's counts (pool header 86 and 87).
+void velk_points_count(uint pool)
+{
+    if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 86u], g_rays);
+    if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 87u], (velk_ray_steps + 15u) / 16u);
+    if (g_first_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 90u], g_first_rays);
 }
 
 // The slot of `slots` to trace once more at `p`, chosen at random by `seed` in proportion to
@@ -732,6 +749,7 @@ void main()
             if (old == VELK_LIGHT_NONE) {
                 for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
                     if (slots[s] == VELK_LIGHT_NONE) continue;
+                    ++g_first_rays;
                     float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, point_lift, seed + s);
                     value |= uint(blocked * 15.0 + 0.5) << (4u * s);
                 }
@@ -754,6 +772,7 @@ void main()
         if (lane == 0u) {
             VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD] = (min(traces + 1u, 15u) << 28u) | (frame & 0x0FFFFFFFu);
         }
+        velk_points_count(pool);
         return;
     }
 
@@ -795,6 +814,7 @@ void main()
             // A single point: its first trace takes a few rays a light, so that it is settled at once.
             float blocked = 0.0;
             for (uint r = 0u; r < 8u; ++r) {
+                ++g_first_rays;
                 blocked += velk_points_blocked(light, center, toward, radius * 1.01 + length(center) * 1e-4, seed + s * 8u + r);
             }
             shades |= uint(blocked / 8.0 * 7.0 + 0.5) << (3u * s);
@@ -811,6 +831,7 @@ void main()
         }
     }
     VELK_LIGHT_WORDS.data[word] = VELK_LIGHT_ONE_VALUE | VELK_LIGHT_ONE_TRACED | (old & (31u << VELK_LIGHT_ONE_QUEUED_SHIFT)) | shades;
+    velk_points_count(pool);
 }
 )";
 
@@ -1749,6 +1770,15 @@ void main()
             light_words.data[pool + 84u] = light_words.data[pool + 83u];
             light_words.data[pool + 83u] = 0u;
             light_words.data[pool + 85u] = 0u;
+            // The frame whose walks took the most steps since the log last read it.
+            if (light_words.data[pool + 87u] > light_words.data[pool + 89u]) {
+                light_words.data[pool + 88u] = light_words.data[pool + 86u];
+                light_words.data[pool + 89u] = light_words.data[pool + 87u];
+                light_words.data[pool + 91u] = light_words.data[pool + 90u];
+            }
+            light_words.data[pool + 86u] = 0u;
+            light_words.data[pool + 87u] = 0u;
+            light_words.data[pool + 90u] = 0u;
             light_words.data[pool] = 0u;
             light_words.data[pool + 2u] = 0u;
             light_words.data[pool + 3u] = 0u;

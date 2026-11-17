@@ -312,6 +312,13 @@ constexpr uint64_t kTestReadBehind = 8;
 
 // CPU mirror of the RT push-constant block (RtRoot in rt_path.cpp), for passes composed by
 // compose_rt_compute, such as the light probes pass.
+// A pass's name for the GPU timer: `other` in a view chosen as another camera, so that the
+// two views' times are told apart. Both static.
+const char* view_pass_name(bool chosen_by_other, const char* own, const char* other)
+{
+    return chosen_by_other ? other : own;
+}
+
 VELK_GPU_STRUCT RtPushC {
     uint32_t shapes_base;
     uint32_t globals_base;
@@ -508,7 +515,8 @@ void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRen
     }
 
     bool dirty = true;
-    emit_cached_view_pass(vs.tiny_pass, dirty, "deferred.tiny", graph, [&](CachedPassRecording& rec) {
+    emit_cached_view_pass(vs.tiny_pass, dirty, view_pass_name(vs.instance_cull.chosen_by_other, "deferred.tiny", "other:deferred.tiny"),
+                          graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         const auto list_word = static_cast<uint32_t>(vs.tiny_list.offset() / sizeof(uint32_t));
@@ -678,6 +686,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // Chosen as another camera: culling and levels of detail follow that camera, and what
     // holds only for the camera that chooses (occlusion, compute raster, far instances) is off.
     const bool chosen = render_view.chosen_by_other;
+    vs.instance_cull.chosen_by_other = chosen;
     const uint32_t cull_globals = chosen ? render_view.cull_globals_base : render_view.view_globals_base;
     const bool occlusion = !chosen && (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid()
                         && !no_occlusion_culling();
@@ -780,7 +789,9 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
     emit_cached_view_pass(
         second_phase ? vs.cached_visibility_second_pass : vs.cached_visibility_pass,
         second_phase ? vs.visibility_second_dirty : vs.visibility_dirty,
-        second_phase ? "deferred.visibility2" : "deferred.visibility", graph, [&](CachedPassRecording& rec) {
+        second_phase ? view_pass_name(vs.instance_cull.chosen_by_other, "deferred.visibility2", "other:deferred.visibility2")
+                     : view_pass_name(vs.instance_cull.chosen_by_other, "deferred.visibility", "other:deferred.visibility"),
+        graph, [&](CachedPassRecording& rec) {
             const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
                 if (b.pipeline_options().blend_mode == BlendMode::Alpha) {
@@ -872,7 +883,11 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
 
     bool dirty = true;
     auto& pass = compute ? vs.depth_pyramid_compute_pass : vs.depth_pyramid_pass;
-    emit_cached_view_pass(pass, dirty, compute ? "deferred.pyramid2" : "deferred.pyramid", graph, [&](CachedPassRecording& rec) {
+    const bool other = vs.instance_cull.chosen_by_other;
+    emit_cached_view_pass(pass, dirty,
+                          compute ? view_pass_name(other, "deferred.pyramid2", "other:deferred.pyramid2")
+                                  : view_pass_name(other, "deferred.pyramid", "other:deferred.pyramid"),
+                          graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         struct PushC
@@ -968,7 +983,9 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
                     handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};
 
     bool dirty = true;
-    emit_cached_view_pass(vs.visibility_resolve_pass, dirty, "deferred.resolve", graph, [&](CachedPassRecording& rec) {
+    emit_cached_view_pass(vs.visibility_resolve_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.resolve", "other:deferred.resolve"), graph,
+                          [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         DispatchCall dc{};
@@ -1028,59 +1045,51 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     trace_pc.lights_base = render_view.lights_base;
     trace_pc.spare3 = pool.word();
     // Recorded every frame: the trace follows the view's globals and lights.
-    bool dirty = true;
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
-    emit_cached_view_pass(vs.light_claim_pass, dirty, "deferred.light_claim", graph, [&](CachedPassRecording& rec) {
-        auto cmd = ctx.backend->create_command_buffer();
-        if (!cmd) return;
-        DispatchCall dc{};
-        dc.pipeline = pipeline.get();
-        dc.groups_x = (vs.visibility_size.x + 7u) / 8u;
-        dc.groups_y = (vs.visibility_size.y + 7u) / 8u;
-        dc.groups_z = 1;
-        dc.root_constants_size = sizeof(pc);
-        std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        // Then the records it put on the search list, a work group each.
-        DispatchCall search{};
-        search.pipeline = search_pipeline.get();
-        search.groups_x = kLightSearchCapacity;
-        search.groups_y = 1;
-        search.groups_z = 1;
-        struct SearchPushC
-        {
-            uint32_t pool_word, globals_base;
-            float light_pixels;
-        };
-        const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels};
-        search.root_constants_size = sizeof(search_pc);
-        std::memcpy(search.root_constants, &search_pc, sizeof(search_pc));
-        cmd->begin_recording();
-        cmd->push_label("DeferredPath: light claim");
-        cmd->record_global_barrier();
-        cmd->record_dispatch(dc);
-        cmd->record_global_barrier();
-        cmd->record_dispatch(search);
-        cmd->record_global_barrier();
-        // Then the lights the claim listed for tracing, a work group each.
-        if (trace) {
-            DispatchCall trace_dc{};
-            trace_dc.pipeline = trace_pipeline.get();
-            trace_dc.groups_x = kLightTraceCapacity;
-            trace_dc.groups_y = 1;
-            trace_dc.groups_z = 1;
-            trace_dc.root_constants_size = sizeof(trace_pc);
-            std::memcpy(trace_dc.root_constants, &trace_pc, sizeof(trace_pc));
-            cmd->record_dispatch(trace_dc);
+    const bool other = vs.instance_cull.chosen_by_other;
+    // One dispatch as its own pass, timed apart: the claim, the search, the trace.
+    const auto emit_one = [&](IRenderPass::Ptr& pass, const char* name, const char* label, const IGpuPipeline::Ptr& used,
+                              const void* used_pc, uint32_t pc_size, uint32_t groups_x, uint32_t groups_y, bool reads_visibility) {
+        bool dirty = true;
+        emit_cached_view_pass(pass, dirty, name, graph, [&](CachedPassRecording& rec) {
+            auto cmd = ctx.backend->create_command_buffer();
+            if (!cmd) return;
+            DispatchCall dc{};
+            dc.pipeline = used.get();
+            dc.groups_x = groups_x;
+            dc.groups_y = groups_y;
+            dc.groups_z = 1;
+            dc.root_constants_size = pc_size;
+            std::memcpy(dc.root_constants, used_pc, pc_size);
+            cmd->begin_recording();
+            cmd->push_label(label);
             cmd->record_global_barrier();
-        }
-        cmd->pop_label();
-        cmd->end_recording();
-        rec.cmd = std::move(cmd);
-        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
-        rec.held.push_back(pipeline);
-        rec.held.push_back(search_pipeline);
-        if (trace_pipeline) rec.held.push_back(trace_pipeline);
-    });
+            cmd->record_dispatch(dc);
+            cmd->record_global_barrier();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            if (reads_visibility) rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+            rec.held.push_back(used);
+        });
+    };
+    emit_one(vs.light_claim_pass, view_pass_name(other, "deferred.light_claim", "other:deferred.light_claim"),
+             "DeferredPath: light claim", pipeline, &pc, sizeof(pc), (vs.visibility_size.x + 7u) / 8u,
+             (vs.visibility_size.y + 7u) / 8u, true);
+    // Then the records it put on the search list, a work group each.
+    struct SearchPushC
+    {
+        uint32_t pool_word, globals_base;
+        float light_pixels;
+    };
+    const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels};
+    emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
+             "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc), kLightSearchCapacity, 1u, false);
+    // Then the lights the claim listed for tracing, a work group each.
+    if (trace) {
+        emit_one(vs.light_trace_pass, view_pass_name(other, "deferred.light_trace", "other:deferred.light_trace"),
+                 "DeferredPath: light trace", trace_pipeline, &trace_pc, sizeof(trace_pc), kLightTraceCapacity, 1u, false);
+    }
 }
 
 void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
@@ -1125,7 +1134,9 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.env[3] = store_word(vs.light_probe_parity ^ 1u);
 
     bool dirty = true;
-    emit_cached_view_pass(vs.light_probes_pass, dirty, "deferred.light_probes", graph, [&](CachedPassRecording& rec) {
+    emit_cached_view_pass(vs.light_probes_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.light_probes", "other:deferred.light_probes"),
+                          graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
         DispatchCall dc{};
@@ -1686,7 +1697,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
 
     // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
-        vs.cached_lighting_pass, vs.lighting_dirty, "deferred.lighting",
+        vs.cached_lighting_pass, vs.lighting_dirty,
+        view_pass_name(vs.instance_cull.chosen_by_other, "deferred.lighting", "other:deferred.lighting"),
         graph,
         [&](CachedPassRecording& rec) {
             DispatchCall dc{};
@@ -1748,7 +1760,8 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
     }
 
     emit_cached_view_pass(
-        vs.cached_transparent_pass, vs.transparent_dirty, "deferred.transparent",
+        vs.cached_transparent_pass, vs.transparent_dirty,
+        view_pass_name(vs.instance_cull.chosen_by_other, "deferred.transparent", "other:deferred.transparent"),
         graph,
         [&](CachedPassRecording& rec) {
             const DefaultStreams default_stream_buffers = default_streams(*ctx.render_ctx);

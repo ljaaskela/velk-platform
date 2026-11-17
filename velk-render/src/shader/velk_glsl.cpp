@@ -117,8 +117,6 @@ R"(
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.
 #define VELK_CUT_PARTITION_WORDS 24u
-// Words per place in a partition's chunks in a kept cut's member store: kCutMemberWords.
-#define VELK_CUT_MEMBER_WORDS 2u
 // Words per cluster in a level of detail table: kLodClusterWords.
 #define VELK_LOD_CLUSTER_WORDS 28u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is

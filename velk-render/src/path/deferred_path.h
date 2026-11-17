@@ -104,6 +104,8 @@ public:
         /// What the view's culling left for draws, which the visibility pass was recorded with.
         CutDrawWords cut_draw_words;
         IRenderPass::Ptr light_claim_pass;
+        IRenderPass::Ptr light_search_pass;
+        IRenderPass::Ptr light_trace_pass;
         uint32_t light_claim_recorded[5] = {};  ///< What the light claim pass was recorded with.
         /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
         /// how many probes each holds. See light_probes_main_src.
