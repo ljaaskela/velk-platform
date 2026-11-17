@@ -305,6 +305,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             uint entry = velk_culling.data[r];
             uint cluster = velk_culling.data[r + 1u];
             uint named = velk_culling.data[r + 2u];
+            // For light only: not drawn, so not hit either.
+            if (velk_cut_light_only(entry)) continue;
             if (entry == VELK_CUT_QUAD) {
                 // A quad: its plane, then where on it along its two sides, 0 to 1 within it.
                 vec3 c = velk_ray_vec3(cluster) - cam;

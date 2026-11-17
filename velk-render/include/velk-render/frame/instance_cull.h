@@ -94,6 +94,8 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///          words for each place in its chunks, the first of that member's records (from the
 ///          partition's first) and how many, so that a partition choosing again finds each
 ///          member's old records
+///   32     records for light only (kCutLightOnly) in the current store, as the drawing counts them
+///   33     the same for the last frame, complete, for the log
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
 /// members, and each instance's in the order its hierarchy's tree is walked, so that records
 /// near in the store are near in the world.
@@ -109,7 +111,7 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// is up to four of its records, the first one's offset from its first record times four plus
 /// how many less one; without, a node's offset from its first node; kCullNoSlot for none. Its
 /// nodes are its levels from the bottom, the root last. See instance_cut_tree_src.
-inline constexpr uint32_t kCutHeaderWords = 32;
+inline constexpr uint32_t kCutHeaderWords = 34;
 inline constexpr uint32_t kCutPartitionWords = 24;  ///< Mirrors VELK_CUT_PARTITION_WORDS.
 /// Light slots in a partition's state, from word kCutLightSlotWord.
 inline constexpr uint32_t kCutLightSlots = 8;
@@ -135,6 +137,10 @@ inline constexpr uint32_t kQuadNodeWords = 12;
 /// A kept cut's record of a quad (kQuadNodeWords) has this for its entry, the node's word for its
 /// cluster, and its tree's word for its slot, which its light is found by. Mirrors VELK_CUT_QUAD.
 inline constexpr uint32_t kCutQuad = 0xFFFFFFFEu;
+/// A kept cut's record of a cluster for light only has this on its entry: a cluster coarse
+/// enough for light (kLightPixels) over drawn ones finer than that. It holds light and is neither
+/// drawn nor seen by rays. Mirrors VELK_CUT_LIGHT_ONLY.
+inline constexpr uint32_t kCutLightOnly = 0x80000000u;
 /// How wide on screen, in pixels, a partition's quad may be to take the place of the members
 /// under it, seen from where its partition chose. The topmost such quad over a member is chosen.
 inline constexpr float kQuadPixels = kLodElementPixels;
@@ -357,7 +363,11 @@ bool velk_tiny_add(uint draw, uint cluster, uint slot, uint cut_record)
 //   void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec3 cam,
 //                        vec3 lod_cam, float pixels_per_unit, bool deforming);
 // first. `entry` is as at instance_cluster_runs_src. Clusters are found through the tree over
-// them, which skips those under a node when none could qualify.
+// them, which skips those under a node when none could qualify. With VELK_LOD_LIGHT defined, it
+// also calls
+//   void velk_lod_light_chosen(uint entry, uint c, uint slot);
+// for each cluster that the same test passes at pc.light_pixels in place of `max_pixels`, the
+// light's level over drawn clusters finer than it, which the shader declares too.
 #define VELK_LOD_SELECT_GLSL R"(
 vec3 velk_lod_center(uint word, mat4 world, vec3 cam)
 {
@@ -380,6 +390,11 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ve
 {
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
     float per_error = scale * pixels_per_unit;
+#ifdef VELK_LOD_LIGHT
+    float coarsest = max(max_pixels, pc.light_pixels);
+#else
+    float coarsest = max_pixels;
+#endif
     uint clusters = cull_words.data[entry + 2u];
     uint nodes = cull_words.data[entry + 8u];
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
@@ -403,7 +418,7 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ve
                                uintBitsToFloat(lod_nodes.data[child + 2u]));
             float dist = length(mat3(world) * center + (world[3].xyz - lod_cam));
             float reach = uintBitsToFloat(lod_nodes.data[child + 3u]) * scale;
-            if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > max_pixels) continue;
+            if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > coarsest) continue;
             if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= max_pixels) continue;
             if ((ref & VELK_LOD_LEAF) == 0u) {
                 if (sp < 32) stack[sp++] = ref;
@@ -412,10 +427,16 @@ void velk_lod_visit(uint entry, uint slot, mat4 world, float scale, vec3 cam, ve
 
             uint c = ref & ~VELK_LOD_LEAF;
             uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
-            if (velk_lod_pixels(cluster + 3u, world, scale, lod_cam, pixels_per_unit) <= max_pixels
-                && velk_lod_pixels(cluster + 8u, world, scale, lod_cam, pixels_per_unit) > max_pixels) {
+            float own = velk_lod_pixels(cluster + 3u, world, scale, lod_cam, pixels_per_unit);
+            float parent = velk_lod_pixels(cluster + 8u, world, scale, lod_cam, pixels_per_unit);
+            if (own <= max_pixels && parent > max_pixels) {
                 velk_lod_chosen(entry, c, slot, world, scale, cam, lod_cam, pixels_per_unit, deforming);
             }
+#ifdef VELK_LOD_LIGHT
+            else if (own <= pc.light_pixels && parent > pc.light_pixels) {
+                velk_lod_light_chosen(entry, c, slot);
+            }
+#endif
         }
     }
 }
@@ -606,6 +627,8 @@ void main()
     cull_words.data[cut + 28u] = 0u;
     cull_words.data[cut + 24u] = 0u;
     cull_words.data[cut + 29u] = 0u;
+    cull_words.data[cut + 33u] = cull_words.data[cut + 32u];
+    cull_words.data[cut + 32u] = 0u;
     cull_words.data[cut] = 0u;
     cull_words.data[cut + 4u] = 0u;
 }
@@ -703,7 +726,10 @@ layout(push_constant) uniform PC {
     uint object_slots;
     uint partition_table;  // the cut's partition table, whose entries name their quad trees
     float quad_pixels;     // kQuadPixels
+    float light_pixels;    // the light's level: lod_max_pixels times kLightPixels over kLodElementPixels
 } pc;
+
+#define VELK_LOD_LIGHT
 )" VELK_CUT_GLSL R"(
 uint g_count;
 uint g_state;
@@ -738,6 +764,12 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
                      bool deforming)
 {
     velk_cut_record(entry, c, slot);
+}
+
+// A cluster at the light's level over drawn ones finer than it: a record for light only.
+void velk_lod_light_chosen(uint entry, uint c, uint slot)
+{
+    velk_cut_record(entry | VELK_CUT_LIGHT_ONLY, c, slot);
 }
 )" VELK_LOD_SELECT_GLSL R"(
 // The same choice both times: what the count found room for is what is written.
@@ -992,6 +1024,8 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
     hi = vec3(-1e30);
     uint entry = cull_words.data[record];
     uint cluster = cull_words.data[record + 1u];
+    // For light only: rays do not see it.
+    if (velk_cut_light_only(entry)) return;
     uint slot = cull_words.data[record + 2u];
     if (entry == VELK_CUT_QUAD) {
         // A quad: around its corners, in the world already.
@@ -1399,6 +1433,12 @@ void main()
     uint entry = cull_words.data[record];
     uint cluster_or_table = cull_words.data[record + 1u];
     uint slot = cull_words.data[record + 2u];
+
+    // For light only: counted, not drawn.
+    if (velk_cut_light_only(entry)) {
+        atomicAdd(cull_words.data[cut + 32u], 1u);
+        return;
+    }
 
     // A quad: in view, it goes to the view's quad list, never past its room, its record in the
     // column after.
@@ -2649,17 +2689,21 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         uint32_t moves = 0;
         uint32_t partitions = 0;
         uint32_t records = 0;
+        uint32_t light_only = 0;
         for (const auto& c : state.cuts) {
             uint32_t header[2] = {};
             arena->read_at(c.region.offset() + 13u * sizeof(uint32_t), header, sizeof(header));
             records += header[0];
             moves += header[1];
             partitions += c.partitions;
+            uint32_t light = 0;
+            arena->read_at(c.region.offset() + 33u * sizeof(uint32_t), &light, sizeof(light));
+            light_only += light;
         }
         const auto frames = static_cast<double>(ctx.present_counter - state.cut_log_frame);
         if (state.cut_moves_known) {
-            VELK_LOG(I, "kept cut: %u records; partitions choosing again: %.1f a frame, of %u table entries", records,
-                     static_cast<double>(moves - state.cut_moves) / frames, partitions);
+            VELK_LOG(I, "kept cut: %u records, %u for light only; partitions choosing again: %.1f a frame, of %u table entries",
+                     records, light_only, static_cast<double>(moves - state.cut_moves) / frames, partitions);
             if (state.quads.valid()) {
                 uint32_t quads = 0;
                 uint32_t in_cut = 0;
@@ -2901,12 +2945,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 uint32_t object_slots;
                 uint32_t partition_table;
                 float quad_pixels;
+                float light_pixels;
             };
             const auto choose = [&](const CutJob& job, uint32_t write) {
                 const uint32_t partition_table = job.partition_table;
                 const ChoosePushC pc{job.cut, job.instances_base, job.slot_count, job.table_word, view_globals_base,
                                      kLodMaxErrorPixels, write, job.items_word, together_objects_word, together_next_word,
-                                     together_head_word, state.together_object_slots, partition_table, kQuadPixels};
+                                     together_head_word, state.together_object_slots, partition_table, kQuadPixels,
+                                     kLodMaxErrorPixels * kLightPixels / kLodElementPixels};
                 dispatch(choose_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + 4u);
             };
             for (const CutJob& job : jobs) {
