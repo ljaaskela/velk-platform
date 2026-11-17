@@ -82,6 +82,10 @@ inline constexpr float kLodMaxErrorPixels = 1.f;
 /// becomes one quad once that quad is. Built into the hierarchy as a cluster's error: its
 /// level's longest edge over this, times kLodMaxErrorPixels.
 inline constexpr float kLodElementPixels = 4.f;
+/// How far apart points of light are on screen, in pixels: a cluster smaller than this, and the
+/// quads under a quad tree node this wide, have one value of light; a cluster with triangles
+/// wider than this has points inside them too. See light_pool.h.
+inline constexpr float kLightPixels = 4.f * kLodElementPixels;
 
 /// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one
 /// unit covers at one unit from the camera, over kLodMaxErrorPixels. Rays choose a mesh's
@@ -127,7 +131,7 @@ VELK_GPU_STRUCT DrawDataHeader
     uint32_t index_base;        ///< Word base of the draw's indices in the mesh-word arena, or kNoVisibleList when it has none.
     uint32_t cluster_base;      ///< Word base in the culling arena of each list position's cluster, as the word there of its record in its hierarchy's table, or kNoVisibleList when not drawn by cluster.
     uint32_t color_base;        ///< Word base of the draw's colour stream (IMeshPrimitive::get_color_buffer), or of a context-owned white word without kDrawFlagColor.
-    uint32_t spare;
+    uint32_t record_count;      ///< How many positions the column at record_base has; a draw instance past it is from no record.
 };
 
 static_assert(sizeof(DrawDataHeader) == 64, "DrawDataHeader must be 64 bytes for std430 alignment");

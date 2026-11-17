@@ -5,6 +5,7 @@
 #include <velk/string_view.h>
 
 #include <velk-render/interface/intf_frame_snippet_registry.h>
+#include <velk-render/frame/light_pool.h>
 #include <velk-render/frame/raster_shaders.h>
 #include <velk-render/frame/ray_walk.h>
 
@@ -613,8 +614,12 @@ layout(push_constant) uniform PC {
     uint pyramid_word;
     uint chooser_globals;
     uint dim_outside;
+    uint pool_word;       // the view's light pool (light_pool.h), for mode 15
+    float light_pixels;   // kLightPixels
 } pc;
 
+#define VELK_LIGHT_WORDS velk_culling
+)" VELK_LIGHT_POOL_GLSL R"(
 vec3 id_color(uint id)
 {
     uint h = (id + 1u) * 2654435761u;
@@ -622,6 +627,14 @@ vec3 id_color(uint id)
     h *= 2246822519u;
     h ^= h >> 13u;
     return vec3(float(h & 255u), float((h >> 8u) & 255u), float((h >> 16u) & 255u)) / 255.0;
+}
+
+// A colour per kept cut record by what it is (entry, cluster, slot), which stays from frame to
+// frame while the record's place in the cut's stores does not.
+vec3 record_color(uint record)
+{
+    return id_color(velk_culling.data[record] * 2654435761u ^ velk_culling.data[record + 1u] * 2246822519u
+                    ^ velk_culling.data[record + 2u] * 3266489917u);
 }
 
 struct DebugInstance {
@@ -669,6 +682,77 @@ vec3 triangle_size_color(uvec2 ids)
          : across < 2.0 ? vec3(0.0, 1.0, 0.0)
          : across < 8.0 ? vec3(0.0, 1.0, 1.0)
          : vec3(0.0, 0.0, 1.0);
+}
+
+// Mode 15: the points of light. A record with pages dim in its colour, each of its points a dot
+// where it is on screen, yellow until it is lit and green once it is; one with one value flat in
+// its colour; a quad in the colour of the node its light is on; what has no light yet grey, and
+// what is from no record white.
+vec3 light_color(uvec2 ids, ivec2 coord)
+{
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint record = velk_ids_record(d, ids);
+    if (record == VELK_NO_RECORD) return vec3(1.0);
+    GlobalData g = velk_globals.data[d.globals_base];
+    mat4 vp = g.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+    if (velk_culling.data[record] == VELK_CUT_QUAD) {
+        uint node = velk_light_quad_node(velk_culling.data[record + 2u], velk_culling.data[record + 1u], g.cam_pos.xyz,
+                                         pixels_per_unit, pc.light_pixels);
+        return velk_culling.data[node + 11u] == VELK_LIGHT_NONE ? vec3(0.25) : id_color(node);
+    }
+    uint light = velk_culling.data[record + 3u];
+    if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return vec3(0.25);
+    if (light >= VELK_LIGHT_ONE_VALUE) return record_color(record) * 0.8;
+    if (pc.pool_word == 0xFFFFFFFFu || light >= velk_culling.data[pc.pool_word + 1u]) return vec3(1.0, 0.0, 0.0);
+    uint first = velk_light_page(pc.pool_word, light);
+    uint vertices = velk_culling.data[first];
+    uint n = velk_culling.data[first + 1u];
+    vec3 base = record_color(record) * 0.35;
+
+    // The pixel's triangle on screen, in pixels.
+    uint triangle = velk_ids_triangle(d, ids);
+    uint cluster = velk_ids_cluster(d, ids);
+    if (cluster == VELK_NO_CLUSTER) return base;
+    DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
+    uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+    vec3 local[3];
+    vec2 p[3];
+    vec2 size = vec2(float(pc.width), float(pc.height));
+    for (int k = 0; k < 3; ++k) {
+        uint at = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
+        local[k] = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
+                        uintBitsToFloat(velk_mesh_words.data[at + 2u]));
+        vec4 clip = vp * vec4(velk_rel_position(inst.world_matrix, inst.offset.xyz + local[k] * inst.size.xyz, g), 1.0);
+        if (clip.w <= 0.0) return base;
+        p[k] = (clip.xy / clip.w * 0.5 + 0.5) * size;
+    }
+    vec2 pixel = vec2(coord) + 0.5;
+    // Where the pixel is in it, on screen: enough to find the points around it.
+    vec2 e1 = p[1] - p[0];
+    vec2 e2 = p[2] - p[0];
+    float det = e1.x * e2.y - e1.y * e2.x;
+    if (abs(det) < 1e-6) return base;
+    vec2 q = pixel - p[0];
+    float b1 = (q.x * e2.y - q.y * e2.x) / det;
+    float b2 = (e1.x * q.y - e1.y * q.x) / det;
+    uvec2 places[3];
+    vec3 weights;
+    velk_light_around(n, vec3(1.0 - b1 - b2, b1, b2), places, weights);
+    uint grid = max(n, 1u);
+    for (int k = 0; k < 3; ++k) {
+        vec3 b = vec3(float(grid - places[k].x - places[k].y), float(places[k].x), float(places[k].y)) / float(grid);
+        vec3 at = local[0] * b.x + local[1] * b.y + local[2] * b.z;
+        vec4 clip = vp * vec4(velk_rel_position(inst.world_matrix, inst.offset.xyz + at * inst.size.xyz, g), 1.0);
+        vec2 s = (clip.xy / clip.w * 0.5 + 0.5) * size;
+        if (length(s - pixel) < 1.5) {
+            uint point = velk_light_grid_point(vertices, grid, triangle, corners, places[k].x, places[k].y);
+            uint value = velk_culling.data[velk_light_point_word(pc.pool_word, first, point)];
+            return value == VELK_LIGHT_NONE ? vec3(1.0, 1.0, 0.0) : vec3(0.0, 1.0, 0.0);
+        }
+    }
+    return base;
 }
 
 const vec3 kLevelColors[8] = vec3[8](
@@ -750,11 +834,13 @@ void main()
 
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, coord);
     vec3 color = vec3(0.0);
-    if (pc.mode == 14u) {
+    if (pc.mode == 15u) {
+        if (ids.x != 0u) color = light_color(ids, coord);
+    } else if (pc.mode == 14u) {
         // By the kept cut record it is from, white for none.
         if (ids.x != 0u) {
             uint record = velk_ids_record(velk_draw_data.data[velk_ids_draw(ids)], ids);
-            color = record == VELK_NO_RECORD ? vec3(1.0) : id_color(record * 2654435761u);
+            color = record == VELK_NO_RECORD ? vec3(1.0) : record_color(record);
         }
     } else if (pc.mode == 13u) {
         // A quad in its colour, darker the more it faces away from overhead, so its shape shows.

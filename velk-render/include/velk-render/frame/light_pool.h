@@ -18,10 +18,17 @@ namespace velk {
 ///   kLightPending   being given its light, for the moment it takes
 ///   below kLightOneValue  the first page of its light points (kLightPageWords each)
 ///   kLightOneValue and up  one value for the whole record, in the bits under kLightOneValue
-/// A record gets its light the first time a pixel shows it (light_claim_src): one value for a
-/// record that is one point of light, pages for one with a point per vertex. Its light goes with
-/// it while its partition keeps its cut, and to its like when the partition chooses again.
-/// Pages no record names any more are found free every frame (light_mark_src, light_sweep_src).
+/// A record gets its light the first time a pixel shows it (light_claim_src), so that points of
+/// light are about kLightPixels apart on screen wherever they are: one value for a cluster
+/// smaller than that on screen, a whole mesh, a shape drawn by its own pass and a cluster of a
+/// mesh that deforms, whose vertices are not its own; else pages, with a point per vertex of its
+/// cluster, and where its largest triangle is wider than kLightPixels a grid of points in each
+/// of its triangles too (velk_light_grid_point). A quad record's light is on the node of its quad
+/// tree that is as wide as kLightPixels over it, one value for all the quads under that node. A
+/// record laid out for a smaller size than it has grown to, twice over, is laid out again. Its
+/// light goes with it while its partition keeps its cut, and to its like when the partition
+/// chooses again. Pages no record names any more are found free every frame (light_mark_src,
+/// light_sweep_src).
 ///
 /// The pool is a header of kLightPoolHeaderWords, then a stack of the free pages, then a bit per
 /// page marking those in use, both for as many pages as the pool may grow to, and its pages in
@@ -38,40 +45,128 @@ namespace velk {
 ///   8  pages taken off the stack this frame, from its top down: the free stack is only read
 ///      while records take pages, so taking needs no more than counting
 ///   16 on, the word of each segment
-/// A record's first page starts with kLightPageHeaderWords: how many points it has, then its
-/// other pages, kLightNone for none. Its points follow, then those of its other pages in order.
+/// A record's first page starts with kLightPageHeaderWords: its cluster's vertices, the level of
+/// the grids in its triangles (below 2 for none), how many points it has, then its other pages,
+/// at most kLightMaxPages in all, kLightNone for none. Its points follow, then those of its other
+/// pages in order: a point per vertex, then each triangle's grid points in turn.
 inline constexpr uint32_t kLightNone = 0xFFFFFFFFu;
 inline constexpr uint32_t kLightPending = 0xFFFFFFFEu;
 inline constexpr uint32_t kLightOneValue = 0x80000000u;
 inline constexpr uint32_t kLightPageWords = 64;
-inline constexpr uint32_t kLightPageHeaderWords = 5;
+inline constexpr uint32_t kLightPageHeaderWords = 18;
+inline constexpr uint32_t kLightMaxPages = 16;
+/// The finest grid in a triangle: that many points along each of its edges.
+inline constexpr uint32_t kLightMaxGrid = 8;
 inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightMaxSegments = 64;
 inline constexpr uint32_t kLightPoolSegmentWord = 16;
 inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolSegmentWord + kLightMaxSegments;
 
-// Reading and writing the pool, for a shader that declares `light_words`, the culling arena,
-// writable.
+// Reading the pool, for a shader that defines VELK_LIGHT_WORDS as the culling arena's buffer.
 #define VELK_LIGHT_POOL_GLSL R"(
 #define VELK_LIGHT_NONE 0xFFFFFFFFu
 #define VELK_LIGHT_PENDING 0xFFFFFFFEu
 #define VELK_LIGHT_ONE_VALUE 0x80000000u
 #define VELK_LIGHT_PAGE_WORDS 64u
-#define VELK_LIGHT_PAGE_HEADER_WORDS 5u
+#define VELK_LIGHT_PAGE_HEADER_WORDS 18u
+#define VELK_LIGHT_MAX_PAGES 16u
+#define VELK_LIGHT_MAX_GRID 8u
 
 // The first word of page `page` of the pool at `pool`.
 uint velk_light_page(uint pool, uint page)
 {
-    return light_words.data[pool + 16u + (page >> 14u)] + (page & 16383u) * VELK_LIGHT_PAGE_WORDS;
+    return VELK_LIGHT_WORDS.data[pool + 16u + (page >> 14u)] + (page & 16383u) * VELK_LIGHT_PAGE_WORDS;
+}
+
+// Points a triangle's grid of level `n` adds to its corners, which are its vertices' points.
+uint velk_light_grid_points(uint n)
+{
+    return n < 2u ? 0u : (n + 1u) * (n + 2u) / 2u - 3u;
+}
+
+// The point at place (i, j) of the grid of level `n` in triangle `t`, with i + j at most n: at
+// weights (1 - (i + j) / n, i / n, j / n) of its corners, whose points are `corners`. The grid's
+// places go row by row in j, each row in i, the three corners left out.
+uint velk_light_grid_point(uint vertices, uint n, uint t, uvec3 corners, uint i, uint j)
+{
+    if (j == 0u && i == 0u) return corners.x;
+    if (j == 0u && i == n) return corners.y;
+    if (j == n) return corners.z;
+    uint along = j * (n + 1u) - (j * (j - 1u)) / 2u + i;
+    return vertices + t * velk_light_grid_points(n) + along - (j == 0u ? 1u : 2u);
+}
+
+// The grid places of the three points of light around weights `w` of a triangle's corners, in
+// its grid of level `n`, and their weights. Without a grid, the corners.
+void velk_light_around(uint n, vec3 w, out uvec2 places[3], out vec3 weights)
+{
+    if (n < 2u) {
+        places[0] = uvec2(0u, 0u);
+        places[1] = uvec2(1u, 0u);
+        places[2] = uvec2(0u, 1u);
+        weights = w;
+        return;
+    }
+    float a = clamp(w.y, 0.0, 1.0) * float(n);
+    float b = clamp(w.z, 0.0, 1.0) * float(n);
+    uint i = min(uint(a), n - 1u);
+    uint j = min(uint(b), n - 1u - i);
+    float fa = clamp(a - float(i), 0.0, 1.0);
+    float fb = clamp(b - float(j), 0.0, 1.0);
+    if (fa + fb > 1.0 && i + j + 2u <= n) {
+        places[0] = uvec2(i + 1u, j + 1u);
+        places[1] = uvec2(i, j + 1u);
+        places[2] = uvec2(i + 1u, j);
+        weights = vec3(fa + fb - 1.0, 1.0 - fa, 1.0 - fb);
+    } else {
+        float s = max(fa + fb, 1.0);
+        places[0] = uvec2(i, j);
+        places[1] = uvec2(i + 1u, j);
+        places[2] = uvec2(i, j + 1u);
+        weights = vec3(1.0 - (fa + fb) / s, fa / s, fb / s);
+    }
+}
+
+// The word of point `p` of the record whose first page starts at word `first`.
+uint velk_light_point_word(uint pool, uint first, uint p)
+{
+    uint at = VELK_LIGHT_PAGE_HEADER_WORDS + p;
+    uint k = at / VELK_LIGHT_PAGE_WORDS;
+    uint page_word = k == 0u ? first : velk_light_page(pool, VELK_LIGHT_WORDS.data[first + 2u + k]);
+    return page_word + at % VELK_LIGHT_PAGE_WORDS;
+}
+
+// The node of the quad tree at `tree` over node `node` whose quad is as wide on screen as
+// `light_pixels`, the light of all the quads under it: the topmost going up from `node` that is
+// not wider. In world space; `cam` the camera.
+uint velk_light_quad_node(uint tree, uint node, vec3 cam, float pixels_per_unit, float light_pixels)
+{
+    uint i = (node - tree) / VELK_QUAD_NODE_WORDS;
+    for (uint step = 0u; step < 32u && i > 0u; ++step) {
+        uint parent = (i - 1u) / 2u;
+        uint w = tree + parent * VELK_QUAD_NODE_WORDS;
+        float radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 10u]);
+        if (radius < 0.0) break;
+        vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 1u]),
+                           uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 2u]));
+        vec3 u = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 3u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 4u]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 5u]));
+        vec3 v = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 6u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 7u]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 8u]));
+        float near = length(center - cam) - radius;
+        if (near <= 0.0 || 2.0 * max(length(u), length(v)) * pixels_per_unit > light_pixels * near) break;
+        i = parent;
+    }
+    return tree + i * VELK_QUAD_NODE_WORDS;
 }
 )"
 
 /**
- * Gives each record a pixel shows its light, the first time one does: one value for a quad, a
- * whole mesh, a shape drawn by its own pass and a cluster of a mesh that deforms, whose vertices
- * are not its own; else a point per vertex of its cluster, in pages from the free stack, each
- * point kLightNone until it is lit. A record the pool has no room for asks again on the next
- * frame, and says how many pages it wanted. A thread per pixel.
+ * Gives each record a pixel shows its light, the first time one does, laid out as kLightNone says
+ * by how large it is on screen now, and lays out again a record that has grown to more than twice
+ * what it was laid out for. Pages come from the free stack, each point kLightNone until it is lit.
+ * A record the pool has no room for keeps what it had, asks again on the next frame, and says how
+ * many pages it wanted. A thread per pixel. `light_pixels` is kLightPixels.
  */
 inline constexpr string_view light_claim_src = R"(
 #version 450
@@ -79,6 +174,15 @@ inline constexpr string_view light_claim_src = R"(
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
+struct LightInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer LightInstances { LightInstance data[]; } light_instances;
 layout(set = 1, binding = 16, std430) buffer LightWords { uint data[]; } light_words;
 
 layout(push_constant) uniform PC {
@@ -86,28 +190,56 @@ layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint pool_word;
+    float light_pixels;
 } pc;
-)" VELK_LIGHT_POOL_GLSL R"(
-// Points of light the record at `record` has.
-uint velk_light_points(uint record)
-{
-    uint entry = light_words.data[record];
-    if (entry == 0xFFFFFFFFu || entry == VELK_CUT_QUAD) return 1u;
-    uint cluster = light_words.data[entry + 2u] + light_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
-    return max(light_words.data[cluster + 19u], 1u);
-}
 
+#define VELK_LIGHT_WORDS light_words
+)" VELK_LIGHT_POOL_GLSL R"(
 // Takes `count` pages off the free stack into `pages`, false when there are not that many.
-bool velk_light_take(uint pool, uint count, out uint pages[5])
+bool velk_light_take(uint pool, uint count, out uint pages[VELK_LIGHT_MAX_PAGES])
 {
     uint taken = atomicAdd(light_words.data[pool + 8u], count);
     uint free_pages = light_words.data[pool];
     if (taken + count > free_pages) return false;
     uint stack = light_words.data[pool + 6u];
-    for (uint k = 0u; k < 5u; ++k) {
+    for (uint k = 0u; k < VELK_LIGHT_MAX_PAGES; ++k) {
         pages[k] = k < count ? light_words.data[stack + free_pages - 1u - taken - k] : VELK_LIGHT_NONE;
     }
     return true;
+}
+
+// The finest grid in the triangles of a cluster of `vertices` and `triangles` whose largest
+// triangle is `largest` pixels wide that fits the pages a record may have: 1 for none.
+uint velk_light_grid(float largest, uint vertices, uint triangles)
+{
+    uint n = uint(clamp(ceil(largest / pc.light_pixels), 1.0, float(VELK_LIGHT_MAX_GRID)));
+    uint room = VELK_LIGHT_MAX_PAGES * VELK_LIGHT_PAGE_WORDS - VELK_LIGHT_PAGE_HEADER_WORDS;
+    while (n > 1u && vertices + triangles * velk_light_grid_points(n) > room) --n;
+    return n;
+}
+
+// Gives `record`, whose light was `was`, pages for `vertices` points and a grid of level `n` in
+// each of its `triangles`; on no room, puts `was` back.
+void velk_light_lay_out(uint record, uint was, uint vertices, uint triangles, uint n)
+{
+    uint points = vertices + triangles * velk_light_grid_points(n);
+    uint count = (VELK_LIGHT_PAGE_HEADER_WORDS + points + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS;
+    uint pages[VELK_LIGHT_MAX_PAGES];
+    if (count > VELK_LIGHT_MAX_PAGES || !velk_light_take(pc.pool_word, count, pages)) {
+        atomicAdd(light_words.data[pc.pool_word + 2u], count);
+        light_words.data[record + 3u] = was;
+        return;
+    }
+    uint first = velk_light_page(pc.pool_word, pages[0]);
+    light_words.data[first] = vertices;
+    light_words.data[first + 1u] = n;
+    light_words.data[first + 2u] = points;
+    for (uint k = 1u; k < VELK_LIGHT_MAX_PAGES; ++k) light_words.data[first + 2u + k] = pages[k];
+    for (uint p = 0u; p < points; ++p) {
+        uint at = VELK_LIGHT_PAGE_HEADER_WORDS + p;
+        light_words.data[velk_light_page(pc.pool_word, pages[at / VELK_LIGHT_PAGE_WORDS]) + at % VELK_LIGHT_PAGE_WORDS] = VELK_LIGHT_NONE;
+    }
+    light_words.data[record + 3u] = pages[0];
 }
 
 void main()
@@ -116,32 +248,67 @@ void main()
     if (coord.x >= pc.width || coord.y >= pc.height) return;
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, ivec2(coord));
     if (ids.x == 0u) return;
-    uint record = velk_ids_record(velk_draw_data.data[velk_ids_draw(ids)], ids);
-    if (record == VELK_NO_RECORD || light_words.data[record + 3u] != VELK_LIGHT_NONE) return;
-    if (atomicCompSwap(light_words.data[record + 3u], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) != VELK_LIGHT_NONE) return;
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint record = velk_ids_record(d, ids);
+    if (record == VELK_NO_RECORD) return;
+    GlobalData g = velk_globals.data[d.globals_base];
+    mat4 vp = g.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+    uint entry = light_words.data[record];
 
-    uint points = velk_light_points(record);
-    if (points == 1u) {
-        light_words.data[record + 3u] = VELK_LIGHT_ONE_VALUE;
+    // A quad: one value on the node over it as wide as the light spacing.
+    if (entry == VELK_CUT_QUAD) {
+        uint node = velk_light_quad_node(light_words.data[record + 2u], light_words.data[record + 1u], g.cam_pos.xyz,
+                                         pixels_per_unit, pc.light_pixels);
+        if (light_words.data[node + 11u] == VELK_LIGHT_NONE) {
+            atomicCompSwap(light_words.data[node + 11u], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
+        }
         return;
     }
-    uint first_room = VELK_LIGHT_PAGE_WORDS - VELK_LIGHT_PAGE_HEADER_WORDS;
-    uint count = 1u + (points > first_room ? (points - first_room + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS : 0u);
-    uint pages[5];
-    if (count > 5u || !velk_light_take(pc.pool_word, count, pages)) {
-        atomicAdd(light_words.data[pc.pool_word + 2u], count);
-        light_words.data[record + 3u] = VELK_LIGHT_NONE;
+
+    uint was = light_words.data[record + 3u];
+    if (was == VELK_LIGHT_PENDING) return;
+    // A whole mesh or a shape drawn by its own pass: one value.
+    if (entry == 0xFFFFFFFFu) {
+        if (was == VELK_LIGHT_NONE) atomicCompSwap(light_words.data[record + 3u], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
         return;
     }
-    uint first = velk_light_page(pc.pool_word, pages[0]);
-    light_words.data[first] = points;
-    for (uint k = 1u; k < 5u; ++k) light_words.data[first + k] = pages[k];
-    for (uint p = 0u; p < points; ++p) {
-        uint at = VELK_LIGHT_PAGE_HEADER_WORDS + p;
-        uint page = at / VELK_LIGHT_PAGE_WORDS;
-        light_words.data[velk_light_page(pc.pool_word, pages[page]) + at % VELK_LIGHT_PAGE_WORDS] = VELK_LIGHT_NONE;
+
+    // A cluster: as wide on screen as it is now.
+    uint cluster = light_words.data[entry + 2u] + light_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
+    uint vertices = light_words.data[cluster + 19u];
+    mat4 world = light_instances.data[d.instances_base + velk_ids_slot(d, ids)].world_matrix;
+    float scale = max(max(length(world[0].xyz), length(world[1].xyz)), length(world[2].xyz));
+    vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + 13u]), uintBitsToFloat(light_words.data[cluster + 14u]),
+                    uintBitsToFloat(light_words.data[cluster + 15u]));
+    float radius = uintBitsToFloat(light_words.data[cluster + 16u]) * scale;
+    float away = length(mat3(world) * own + (world[3].xyz - g.cam_pos.xyz));
+    float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
+    float largest = uintBitsToFloat(light_words.data[cluster + 17u]) * scale * pixels_per_unit / max(away - radius, 1e-3);
+    bool one = vertices == 0u || across < pc.light_pixels;
+
+    if (was == VELK_LIGHT_NONE) {
+        if (atomicCompSwap(light_words.data[record + 3u], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) != VELK_LIGHT_NONE) return;
+        if (one) {
+            light_words.data[record + 3u] = VELK_LIGHT_ONE_VALUE;
+            return;
+        }
+        velk_light_lay_out(record, VELK_LIGHT_NONE, vertices, light_words.data[cluster + 1u],
+                           velk_light_grid(largest, vertices, light_words.data[cluster + 1u]));
+        return;
     }
-    light_words.data[record + 3u] = pages[0];
+    // Grown to more than twice what it was laid out for: laid out again.
+    if (vertices == 0u) return;
+    uint n = velk_light_grid(largest, vertices, light_words.data[cluster + 1u]);
+    if (was >= VELK_LIGHT_ONE_VALUE) {
+        if (across < 2.0 * pc.light_pixels) return;
+    } else {
+        if (was >= light_words.data[pc.pool_word + 1u]) return;
+        uint laid = light_words.data[velk_light_page(pc.pool_word, was) + 1u];
+        if (n <= 2u * max(laid, 1u)) return;
+    }
+    if (atomicCompSwap(light_words.data[record + 3u], was, VELK_LIGHT_PENDING) != was) return;
+    velk_light_lay_out(record, was, vertices, light_words.data[cluster + 1u], n);
 }
 )";
 
@@ -161,6 +328,8 @@ layout(push_constant) uniform PC {
     uint cut_word;
     uint pool_word;
 } pc;
+
+#define VELK_LIGHT_WORDS light_words
 )" VELK_LIGHT_POOL_GLSL R"(
 // Never past the pool's pages, whatever a record says.
 void velk_light_mark(uint page)
@@ -185,8 +354,8 @@ void main()
     atomicAdd(light_words.data[pc.pool_word + 3u], 1u);
     velk_light_mark(light);
     uint first = velk_light_page(pc.pool_word, light);
-    for (uint k = 1u; k < 5u; ++k) {
-        uint page = light_words.data[first + k];
+    for (uint k = 1u; k < VELK_LIGHT_MAX_PAGES; ++k) {
+        uint page = light_words.data[first + 2u + k];
         if (page != VELK_LIGHT_NONE) velk_light_mark(page);
     }
 }

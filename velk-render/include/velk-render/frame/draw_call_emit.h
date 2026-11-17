@@ -38,9 +38,20 @@ struct CutDrawWords
 {
     uint32_t quads_word = kNoVisibleList;  ///< The view's quad list (kQuadListHeaderWords).
     uint32_t quad_capacity = 0;            ///< Quads it holds, which its column of records follows.
-    /// For each batch drawn by its own pass, the word of the kept cut record of its first
-    /// instance, followed by its other instances'. A word is 0 for an instance from no record.
-    vector<std::pair<const IBatch*, uint32_t>> own_records;
+    /// A batch drawn by its own pass: the word of the kept cut record of its first instance,
+    /// followed by its other instances', `count` of them. A word is 0 for an instance from no
+    /// record.
+    struct OwnRecords
+    {
+        const IBatch* batch;
+        uint32_t word;
+        uint32_t count;
+        bool operator==(const OwnRecords& other) const
+        {
+            return batch == other.batch && word == other.word && count == other.count;
+        }
+    };
+    vector<OwnRecords> own_records;
 };
 
 /// What write_draw_data found of a batch that a draw of it needs.
@@ -119,16 +130,19 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     const bool culled = batch.get_instance_cull(cull_info);
     header.visible_base = culled ? cull_info.visible_word : kNoVisibleList;
     header.record_base = culled ? cull_info.records_word : kNoVisibleList;
+    header.record_count = culled ? cull_info.records_count : 0u;
     // The view's quads: their list is the visible list, each an instance of the unit quad.
     if (batch.draws_quads()) {
         if (quads_word == kNoVisibleList) return false;
         header.flags |= kDrawFlagQuads;
         header.visible_base = quads_word + kQuadListHeaderWords;
         header.record_base = header.visible_base + cut_words->quad_capacity;
+        header.record_count = cut_words->quad_capacity;
     } else if (!culled && cut_words) {
-        for (const auto& [own, word] : cut_words->own_records) {
-            if (own == &batch) {
-                header.record_base = word;
+        for (const auto& own : cut_words->own_records) {
+            if (own.batch == &batch) {
+                header.record_base = own.word;
+                header.record_count = own.count;
             }
         }
     }

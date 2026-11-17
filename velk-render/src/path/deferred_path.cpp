@@ -1131,8 +1131,10 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, FrameContext& ctx, IRend
     struct PushC
     {
         uint32_t ids_word, width, height, pool_word;
+        float light_pixels;
     };
-    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word()};
+    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels};
+    static_assert(sizeof(PushC) == sizeof(vs.light_claim_recorded), "What the claim was recorded with");
     // Recorded again when what it names changes.
     bool dirty = std::memcmp(&pc, vs.light_claim_recorded, sizeof(pc)) != 0;
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
@@ -1184,14 +1186,16 @@ void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& r
         if (!cmd) return;
         struct PushC
         {
-            uint32_t ids_id, output_id, width, height, mode, pyramid_word, chooser_globals, dim_outside;
+            uint32_t ids_id, output_id, width, height, mode, pyramid_word, chooser_globals, dim_outside, pool_word;
+            float light_pixels;
         };
+        const LightPool& pool = vs.instance_cull.light_pool;
         const PushC pc{pixel_ids_word(vs),
                        static_cast<uint32_t>(vs.deferred_output->get_gpu_handle(GpuResourceKey::Default)),
                        vs.visibility_size.x, vs.visibility_size.y, mode,
                        static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)),
                        render_view.chosen_by_other ? render_view.cull_globals_base : render_view.view_globals_base,
-                       render_view.chosen_by_other ? 1u : 0u};
+                       render_view.chosen_by_other ? 1u : 0u, pool.segments.empty() ? kCullNoSlot : pool.word(), kLightPixels};
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
         dc.groups_x = (vs.visibility_size.x + 7u) / 8u;

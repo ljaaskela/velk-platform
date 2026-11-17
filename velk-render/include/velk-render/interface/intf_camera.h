@@ -43,9 +43,13 @@ enum class DebugView : uint8_t
     /// The quads the cut chose, each standing for the members under it, in its colour, and
     /// whatever else is drawn grey.
     Quads,
-    /// A flat colour per kept cut record that what is drawn is from, by where the record is
-    /// this frame, so colours change whenever records move; white for what is from none.
+    /// A flat colour per kept cut record that what is drawn is from, by what the record is
+    /// (entry, cluster, slot), so it stays while the record does; white for what is from none.
     Record,
+    /// The points of light: a record with points dim in its colour, each point a dot, yellow
+    /// until lit, green once lit; one with one value flat in its colour; quads by the node their
+    /// light is on; grey for no light yet, white for no record.
+    Light,
 };
 
 /**

@@ -104,7 +104,7 @@ public:
         /// What the view's culling left for draws, which the visibility pass was recorded with.
         CutDrawWords cut_draw_words;
         IRenderPass::Ptr light_claim_pass;
-        uint32_t light_claim_recorded[4] = {};  ///< What the light claim pass was recorded with.
+        uint32_t light_claim_recorded[5] = {};  ///< What the light claim pass was recorded with.
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;

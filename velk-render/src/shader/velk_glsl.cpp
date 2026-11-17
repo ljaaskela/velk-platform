@@ -106,7 +106,7 @@ R"(
 // Words per partition in a partition table: kCullEntryWords.
 #define VELK_CULL_ENTRY_WORDS 10u
 // Words per node of a partition's quad tree: kQuadNodeWords.
-#define VELK_QUAD_NODE_WORDS 11u
+#define VELK_QUAD_NODE_WORDS 12u
 // A kept cut's record of a quad has this for its entry: kCutQuad.
 #define VELK_CUT_QUAD 0xFFFFFFFEu
 // A partition's tree leaves are the finest it has: kQuadLeavesOnly.
@@ -367,7 +367,7 @@ struct VelkDrawData {
     uint index_base;
     uint cluster_base;
     uint color_base;
-    uint spare;
+    uint record_count;
 };
 
 // VelkDrawData::flags (kDrawFlag in gpu_data.h).
@@ -490,9 +490,10 @@ uint velk_cluster_first_index(uint cluster)
 // one. Valid for the frame the pixel was drawn in: records move between frames.
 uint velk_ids_record(VelkDrawData d, uvec2 ids)
 {
+    uint position = ids.y >> d.triangle_bits;
     uint record = (ids.x & VELK_IDS_TINY) != 0u ? velk_culling.data[ids.y + 3u]
-                : d.record_base == VELK_NO_VISIBLE_LIST ? VELK_NO_RECORD
-                : velk_culling.data[d.record_base + (ids.y >> d.triangle_bits)];
+                : d.record_base == VELK_NO_VISIBLE_LIST || position >= d.record_count ? VELK_NO_RECORD
+                : velk_culling.data[d.record_base + position];
     // No record is ever at word 0, which a list that was cleared holds.
     return record == 0u ? VELK_NO_RECORD : record;
 }

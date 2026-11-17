@@ -348,6 +348,8 @@ constexpr NamedView kViews[] = {
      "the quads the cut chose in their colour, everything else grey"},
     {velk::DebugView::Record, "record", "record",
      "a colour per kept cut record what is drawn is from, white for none"},
+    {velk::DebugView::Light, "light", "light points",
+     "dots: points of light (yellow unlit, green lit); flat: one value; quads by light node; grey none"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 

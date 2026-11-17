@@ -181,6 +181,7 @@ private:
     ArenaRegion cull_region_;
     vector<uint32_t> cull_list_words_;  ///< Per mesh, on the owner.
     vector<uint32_t> cull_record_words_;  ///< Per mesh, on the owner: its list's column of records, or none.
+    vector<uint32_t> cull_record_counts_; ///< Per mesh, on the owner: how many positions that column has.
     vector<ClusterDraw> cull_cluster_draws_;  ///< On the owner.
     uint32_t cull_chosen_word_ = 0;      ///< On the owner.
     uint32_t cull_chosen_capacity_ = 0;  ///< On the owner.

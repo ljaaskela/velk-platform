@@ -232,7 +232,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 const uint kNone = 0xFFFFFFFFu;
-const uint kNodeWords = 11u;
+const uint kNodeWords = VELK_QUAD_NODE_WORDS;
 const uint kJobWords = 8u;
 const uint kMeshQuadWords = 10u;
 
@@ -275,6 +275,8 @@ void store_node(uint w, Quad q)
     store3(w + 6u, q.v);
     build_words.data[w + 9u] = packUnorm4x8(q.color);
     build_words.data[w + 10u] = floatBitsToUint(q.radius);
+    // Its light, none until a pixel under it is lit (light_claim_src).
+    build_words.data[w + 11u] = kNone;
 }
 
 Quad no_quad()

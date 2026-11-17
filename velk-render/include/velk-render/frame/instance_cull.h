@@ -128,11 +128,12 @@ inline constexpr uint32_t kCutLeaf = 0x80000000u;
 /// them, the rest empty). A node is kQuadNodeWords: its centre (3 floats), its two half axes
 /// (3 each; its normal is their cross product), its colour (RGBA8, red in the low byte), and
 /// the radius of a sphere at its centre around it and every quad under it, negative for an
-/// empty node. In world space.
-inline constexpr uint32_t kQuadNodeWords = 11;
+/// empty node, in world space, and the light of the members under it where it is as wide on
+/// screen as the light spacing (kLightPixels), one value or kLightNone (see light_pool.h).
+inline constexpr uint32_t kQuadNodeWords = 12;
 
 /// A kept cut's record of a quad (kQuadNodeWords) has this for its entry, the node's word for its
-/// cluster, and the member that wrote it for its slot. Mirrors VELK_CUT_QUAD.
+/// cluster, and its tree's word for its slot, which its light is found by. Mirrors VELK_CUT_QUAD.
 inline constexpr uint32_t kCutQuad = 0xFFFFFFFEu;
 /// How wide on screen, in pixels, a partition's quad may be to take the place of the members
 /// under it, seen from where its partition chose. The topmost such quad over a member is chosen.
@@ -822,7 +823,7 @@ void velk_cut_member(uint member, vec3 viewpoint)
         if (quad != 0xFFFFFFFFu) {
             if (velk_quad_first(quad) == g_position
                 && uintBitsToFloat(cull_words.data[g_tree + quad * VELK_QUAD_NODE_WORDS + 10u]) >= 0.0) {
-                velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, member);
+                velk_cut_record(VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, g_tree);
             }
             return;
         }
@@ -2092,8 +2093,8 @@ struct InstanceCullPass
     /// by item the word of the kept cut record of one drawn by its own pass, 0 for none, written
     /// each frame.
     ArenaRegion together;
-    /// Each batch drawn by its own pass that rays see, and its first item.
-    vector<std::pair<const IBatch*, uint32_t>> own_items;
+    /// Each batch drawn by its own pass that rays see, its first item (in `word`) and its items.
+    vector<CutDrawWords::OwnRecords> own_items;
     uint32_t together_items = 0;
     uint32_t together_entries = 0;
     uint32_t together_chosen = 0;  ///< How many records fit.
@@ -2266,8 +2267,8 @@ inline CutDrawWords instance_cut_draw_words(const InstanceCullPass& state)
     words.quad_capacity = state.quad_capacity;
     const uint32_t records = instance_item_records_word(state);
     if (records != kCullNoSlot) {
-        for (const auto& [batch, first] : state.own_items) {
-            words.own_records.push_back({batch, records + first});
+        for (const auto& own : state.own_items) {
+            words.own_records.push_back({own.batch, records + own.word, own.count});
         }
     }
     return words;
@@ -2389,7 +2390,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 // plain objects' kept cut.
                 if (plain_table_word != kCullNoSlot && batch->instance_stride() == 128u && batch->instance_count() != 0
                     && batch->instance_region_size() != 0) {
-                    state.own_items.push_back({batch.get(), static_cast<uint32_t>(items.size() / kPlainItemWords)});
+                    state.own_items.push_back(
+                        {batch.get(), static_cast<uint32_t>(items.size() / kPlainItemWords), batch->instance_count()});
                     add_items(*batch, static_cast<uint32_t>(batch->instance_region_offset() / 128u), batch->instance_count(),
                               kCullNoSlot);
                 }
@@ -3109,6 +3111,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(top_pipeline));
         rec.held.push_back(std::move(args_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
+        rec.held.push_back(std::move(mark_pipeline));
+        rec.held.push_back(std::move(sweep_pipeline));
     });
 }
 

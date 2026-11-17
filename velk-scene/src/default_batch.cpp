@@ -171,6 +171,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
     table.resize(size_t(mesh_count) * kCullTableWords, 0u);
     cull_list_words_.clear();
     cull_record_words_.clear();
+    cull_record_counts_.clear();
     uint32_t next_list = table_word + mesh_count * kCullTableWords;
     for (uint32_t m = 0; m < mesh_count; ++m) {
         uint32_t* entry = table.data() + size_t(m) * kCullTableWords;
@@ -190,9 +191,11 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         cull_list_words_.push_back(next_list);
         if (!instance_source_) {
             cull_record_words_.push_back(0xFFFFFFFFu);
+            cull_record_counts_.push_back(0u);
             continue;
         }
         cull_record_words_.push_back(next_list + capacity);
+        cull_record_counts_.push_back(capacity);
         entry[kCullListWord] = next_list;
         entry[kCullCapacityWord] = capacity;
         next_list += capacity * 2u;
@@ -271,6 +274,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     out.table_word = table_word;
     out.visible_word = owner->cull_list_words_[cull_mesh_];
     out.records_word = owner->cull_record_words_[cull_mesh_];
+    out.records_count = owner->cull_record_counts_[cull_mesh_];
     out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
     if (const ClusterDraw* draw = owner->find_cluster_draw(cull_mesh_, primitive_.get())) {
         out.visible_word = draw->list_word;
@@ -281,6 +285,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
         out.cluster_second_commands_word = draw->commands_word + draw->clusters * 5u;
         out.cluster_second_draws_word = draw->entry_word + kClusterEntrySecondDrawsWord;
         out.records_word = draw->records_word;
+        out.records_count = draw->capacity;
         out.cluster_capacity = draw->capacity;
     }
     if (cull_second_args_.valid()) {

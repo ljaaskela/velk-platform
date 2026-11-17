@@ -89,6 +89,7 @@ struct InstanceCullInfo
     /// each position's cluster, as the word of its record in the hierarchy's table, follows
     /// @c cluster_capacity words on. 0xFFFFFFFF when the list has no such column.
     uint32_t records_word = 0xFFFFFFFFu;
+    uint32_t records_count = 0;  ///< How many positions that column has.
     uint32_t cluster_second_commands_word = 0;  ///< The commands of the second occlusion phase.
     uint32_t cluster_second_draws_word = 0;     ///< How many of those are in use.
     uint32_t second_args_word = 0xFFFFFFFFu;    ///< A plain instanced draw's arguments for that phase, in the culling arena.
