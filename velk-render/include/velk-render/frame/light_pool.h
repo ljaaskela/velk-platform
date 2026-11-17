@@ -257,6 +257,45 @@ bool velk_light_points_due(uint first)
     return traced == VELK_LIGHT_NONE || (traced >> 28u) < VELK_LIGHT_WARM_TRACES;
 }
 
+// A trace list entry's first word: what it is (VELK_LIGHT_TRACE_KIND bits: a VELK_LIGHT_TRACE_
+// kind, or VELK_LIGHT_TRACE_SKIP for nothing), and for own points VELK_LIGHT_TRACE_NEVER when
+// they were never traced, which trace this is from bit 5 (4 bits), and from bit 9 which
+// VELK_LIGHT_TRACE_CHUNK of its points this entry traces.
+#define VELK_LIGHT_TRACE_KIND 15u
+#define VELK_LIGHT_TRACE_SKIP 15u
+#define VELK_LIGHT_TRACE_NEVER 16u
+#define VELK_LIGHT_TRACE_CHUNK 256u
+
+// Puts the own points whose first page is `page` on the trace list, an entry for each
+// VELK_LIGHT_TRACE_CHUNK of them so that a large record is traced by many work groups at once;
+// all of them or none, within the frame's budget of points and the list's room, else they are
+// listed again on a later frame. The trace is counted now, so that its entries agree on which
+// trace it is.
+void velk_light_list_own(uint pool, uint page, uint instance, uint frame)
+{
+    uint first = velk_light_page(pool, page);
+    uint points = min(VELK_LIGHT_WORDS.data[first + 2u], VELK_LIGHT_MAX_PAGES * VELK_LIGHT_PAGE_WORDS);
+    if (points == 0u) return;
+    if (atomicAdd(VELK_LIGHT_WORDS.data[pool + 85u], points) + points > VELK_LIGHT_TRACE_POINTS_BUDGET) return;
+    uint chunks = (points + VELK_LIGHT_TRACE_CHUNK - 1u) / VELK_LIGHT_TRACE_CHUNK;
+    uint at = atomicAdd(VELK_LIGHT_WORDS.data[pool + 80u], chunks);
+    if (at >= VELK_LIGHT_TRACE_CAPACITY) return;
+    bool whole = at + chunks <= VELK_LIGHT_TRACE_CAPACITY;
+    uint traced = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD];
+    bool never = traced == VELK_LIGHT_NONE;
+    uint traces = never ? 0u : traced >> 28u;
+    uint how = VELK_LIGHT_TRACE_POINTS | (never ? VELK_LIGHT_TRACE_NEVER : 0u) | (traces << 5u);
+    uint cluster = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CLUSTER_WORD];
+    for (uint c = 0u; c < chunks && at + c < VELK_LIGHT_TRACE_CAPACITY; ++c) {
+        uint w = VELK_LIGHT_WORDS.data[pool + 81u] + (at + c) * VELK_LIGHT_TRACE_WORDS;
+        VELK_LIGHT_WORDS.data[w] = whole ? how | (c << 9u) : VELK_LIGHT_TRACE_SKIP;
+        VELK_LIGHT_WORDS.data[w + 1u] = page;
+        VELK_LIGHT_WORDS.data[w + 2u] = instance;
+        VELK_LIGHT_WORDS.data[w + 3u] = cluster;
+    }
+    if (whole) VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD] = (min(traces + 1u, 15u) << 28u) | (frame & 0x0FFFFFFFu);
+}
+
 // Points a triangle's grid of level `n` adds to its corners, which are its vertices' points.
 uint velk_light_grid_points(uint n)
 {
@@ -713,7 +752,9 @@ void main()
     uint lane = gl_LocalInvocationIndex;
     if (index >= min(VELK_LIGHT_WORDS.data[pool + 80u], VELK_LIGHT_TRACE_CAPACITY)) return;
     uint w = VELK_LIGHT_WORDS.data[pool + 81u] + index * VELK_LIGHT_TRACE_WORDS;
-    uint kind = VELK_LIGHT_WORDS.data[w];
+    uint how = VELK_LIGHT_WORDS.data[w];
+    uint kind = how & VELK_LIGHT_TRACE_KIND;
+    if (kind == VELK_LIGHT_TRACE_SKIP) return;
     uint at = VELK_LIGHT_WORDS.data[w + 1u];
     uint instance = VELK_LIGHT_WORDS.data[w + 2u];
     uint table = VELK_LIGHT_WORDS.data[w + 3u];
@@ -729,8 +770,11 @@ void main()
         mat3 to_world = mat3(inst.world_matrix);
         float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)),
                           length(to_world[2] * inst.size.z));
-        bool never = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD] == VELK_LIGHT_NONE;
-        if (lane == 0u) {
+        // Which trace this is, as its listing counted it, and which of its chunks this entry is.
+        bool never = (how & VELK_LIGHT_TRACE_NEVER) != 0u;
+        uint traces = (how >> 5u) & 15u;
+        uint chunk = how >> 9u;
+        if (lane == 0u && chunk == 0u) {
             // For the log: whether its cluster is finer than the light's level (pc.spare5), its
             // parent's error on screen within it, and how many points it has.
             mat4 world = inst.world_matrix;
@@ -750,15 +794,23 @@ void main()
                 atomicAdd(VELK_LIGHT_WORDS.data[pool + 96u], 1u);
                 atomicAdd(VELK_LIGHT_WORDS.data[pool + 97u], record_points);
             }
+        }
+        if (lane == 0u) {
+            // Its lights: chosen at its first trace, at the cluster's centre, by each of its
+            // entries alike, the same inputs giving the same lights; the first entry keeps them.
             if (never) {
                 vec3 own = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 13u]),
                                 uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 14u]),
                                 uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 15u]));
                 uint chosen[VELK_LIGHT_SLOTS];
                 velk_light_slots_at(velk_rel_position(inst.world_matrix, inst.offset.xyz + own * inst.size.xyz, g), chosen);
-                for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s] = chosen[s];
+                for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                    s_slots[s] = chosen[s];
+                    if (chunk == 0u) VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s] = chosen[s];
+                }
+            } else {
+                for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s];
             }
-            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s];
         }
         barrier();
         uint slots[VELK_LIGHT_SLOTS];
@@ -773,12 +825,12 @@ void main()
         // Never more than a record's pages hold, whatever its header says.
         uint points = min(VELK_LIGHT_WORDS.data[first + 2u], VELK_LIGHT_MAX_PAGES * VELK_LIGHT_PAGE_WORDS);
         uint first_index = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_INDEX_WORD] + VELK_LIGHT_WORDS.data[cluster];
-        // How many traces it has had: the first eight make a running mean, later ones move a
-        // quarter of the way, so that a change shows.
-        uint traced = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD];
-        uint traces = never ? 0u : traced >> 28u;
+        // How many traces it had before this one: the first eight make a running mean, later ones
+        // move a quarter of the way, so that a change shows.
         float step = traces < VELK_LIGHT_WARM_TRACES ? 1.0 / float(traces + 1u) : 0.25;
-        for (uint q = lane; q < points; q += 64u) {
+        // This entry's points.
+        uint chunk_end = min(points, (chunk + 1u) * VELK_LIGHT_TRACE_CHUNK);
+        for (uint q = chunk * VELK_LIGHT_TRACE_CHUNK + lane; q < chunk_end; q += 64u) {
             // A vertex, or a grid point in a triangle at weights of its corners.
             vec3 local;
             vec3 normal;
@@ -843,11 +895,7 @@ void main()
             if (value == VELK_LIGHT_NONE) value = 0xEFFFFFFFu;
             VELK_LIGHT_WORDS.data[pw] = value;
         }
-        memoryBarrierBuffer();
-        barrier();
-        if (lane == 0u) {
-            VELK_LIGHT_WORDS.data[first + VELK_LIGHT_TRACED_WORD] = (min(traces + 1u, 15u) << 28u) | (frame & 0x0FFFFFFFu);
-        }
+        // Its count of traces went up when it was listed (velk_light_list_own).
         velk_points_count(pool);
         return;
     }
@@ -1377,8 +1425,7 @@ void velk_light_list_points(uint page, uint instance, uint frame)
     uint first = velk_light_page(pc.pool_word, page);
     if (light_words.data[first + 1u] == VELK_LIGHT_LINKED || !velk_light_points_due(first)) return;
     if (atomicExchange(light_words.data[first + VELK_LIGHT_LISTED_WORD], frame) == frame) return;
-    velk_light_trace(VELK_LIGHT_TRACE_POINTS, page, instance, light_words.data[first + VELK_LIGHT_CLUSTER_WORD],
-                     light_words.data[first + 2u]);
+    velk_light_list_own(pc.pool_word, page, instance, frame);
 }
 
 // Lists the one value at word `at`, once a frame, when it is due: the frame's low bits go into
@@ -1603,18 +1650,12 @@ bool velk_light_lay_out(uint vertices, uint cluster, uint kind, uint table, uint
     return true;
 }
 
-// Puts `points` own points on the trace list, so that they are traced in the frame they are laid
-// out, within the frame's budget of points; past it they wait for the claim to list them.
-void velk_light_trace_now(uint page, uint instance, uint cluster, uint points)
+// Puts the own points just laid out at `page` on the trace list, so that they are traced in the
+// frame they are laid out (velk_light_list_own); past the frame's budget they wait for the claim
+// to list them.
+void velk_light_trace_now(uint page, uint instance)
 {
-    if (atomicAdd(light_words.data[pc.pool_word + 85u], points) + points > VELK_LIGHT_TRACE_POINTS_BUDGET) return;
-    uint i = atomicAdd(light_words.data[pc.pool_word + 80u], 1u);
-    if (i >= VELK_LIGHT_TRACE_CAPACITY) return;
-    uint w = light_words.data[pc.pool_word + 81u] + i * VELK_LIGHT_TRACE_WORDS;
-    light_words.data[w] = VELK_LIGHT_TRACE_POINTS;
-    light_words.data[w + 1u] = page;
-    light_words.data[w + 2u] = instance;
-    light_words.data[w + 3u] = cluster;
+    velk_light_list_own(pc.pool_word, page, instance, velk_globals.data[pc.globals_base].present_counter);
 }
 
 // The grid level of each of `cluster`'s triangles (corners from `first_index`, its vertices at
@@ -1754,7 +1795,7 @@ void main()
                         light_words.data[velk_light_point_word(pool, other_first, p)] = VELK_LIGHT_NONE;
                     }
                     light_words.data[other + 3u] = laid;
-                    velk_light_trace_now(laid, instance, other_cluster, other_vertices);
+                    velk_light_trace_now(laid, instance);
                     light = laid;
                 }
                 if (light == VELK_LIGHT_PENDING) {
@@ -1826,7 +1867,7 @@ void main()
         barrier();
         if (lane == 0u) {
             light_words.data[record + 3u] = s_page;
-            velk_light_trace_now(s_page, instance, cluster, s_points);
+            velk_light_trace_now(s_page, instance);
         }
         return;
     }
