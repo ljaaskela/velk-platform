@@ -674,9 +674,10 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
         cull_words.data[state + 16u] = 0u;
         return;
     }
-    // Choosing again over the same members, its new records take over the light of its old
-    // ones, which are in the last store.
-    if (same && count != 0u) {
+    // Choosing again, its new records take over the light of its old ones that are the same
+    // (entry, cluster and slot), which are in the last store: also when its members changed, as
+    // when one of them moved, so that what stayed keeps its light.
+    if (count != 0u) {
         cull_words.data[state + 7u] = cull_words.data[state + 5u];
         cull_words.data[state + 15u] = count;
     } else {
