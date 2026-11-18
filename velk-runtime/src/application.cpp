@@ -431,16 +431,20 @@ void Application::tick_overlays(double cpu_time, double frame_time,
             float gpu_total = 0.f;
             for (const auto& t : gpu_timings) gpu_total += t.ms;
 
-            char buf[512];
-            int n = std::snprintf(buf, sizeof(buf),
-                "%.0f fps\nframe %.3f ms\ncpu %.3f ms\ngpu %.3f ms",
-                fps, avg_frame_ms, avg_cpu_ms, static_cast<double>(gpu_total));
+            // Formats into `buf` and appends what fits to `text`.
+            string text;
+            char buf[128];
+            const auto add = [&](int n) {
+                if (n > 0) text.append(string_view(buf, std::min(static_cast<size_t>(n), sizeof(buf) - 1)));
+            };
+            add(std::snprintf(buf, sizeof(buf), "%.0f fps\nframe %.3f ms\ncpu %.3f ms\ngpu %.3f ms",
+                              fps, avg_frame_ms, avg_cpu_ms, static_cast<double>(gpu_total)));
             for (const auto& t : gpu_timings) {
-                if (n < 0 || n >= static_cast<int>(sizeof(buf))) break;
-                n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n),
-                                   "\n  %s %.2f", t.label, static_cast<double>(t.ms));
+                text.append("\n  ");
+                text.append(t.label);
+                add(std::snprintf(buf, sizeof(buf), " %.2f", static_cast<double>(t.ms)));
             }
-            ov.text_visual.set_text(string(buf));
+            ov.text_visual.set_text(text);
             ov.frame_count = 0;
             ov.cpu_time_accum = 0.0;
             ov.frame_time_accum = 0.0;
