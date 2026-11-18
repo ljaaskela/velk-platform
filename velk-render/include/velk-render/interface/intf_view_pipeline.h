@@ -51,6 +51,14 @@ public:
     virtual IRenderPath::Needs needs(const FrameContext& ctx) const = 0;
 
     /**
+     * @brief Makes the allocations `emit` needs this frame for @p view.
+     *
+     * Called for every view of the frame before any view emits, so that nothing a recorded
+     * pass names changes while the frame is built (see IRenderPath::reserve).
+     */
+    virtual void reserve(IViewEntry& view, const RenderView& render_view, FrameContext& ctx) = 0;
+
+    /**
      * @brief Emit GPU work for this view into @p out_passes.
      *
      * @param view         Per-view identity (surface + viewport + dirty cache).

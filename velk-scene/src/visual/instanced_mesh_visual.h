@@ -77,16 +77,17 @@ public:
             flush_all_ = true;
         }
     }
-    void set_partition_cull(uint32_t table_word, uint32_t count) override
+    void set_slot_table(uint32_t table_word, uint32_t count) override
     {
         cull_table_word_ = table_word;
         cull_count_ = count;
     }
-    void get_partition_cull(uint32_t& table_word, uint32_t& count) const override
+    void get_slot_table(uint32_t& table_word, uint32_t& count) const override
     {
         table_word = cull_table_word_;
         count = cull_count_;
     }
+    uint32_t get_object_id_base() const override { return object_id_base_; }
 
 private:
     uint32_t place(const InstanceTransform& transform, uint32_t mesh);

@@ -31,10 +31,10 @@ namespace velk {
  * been still for a while. With a stable set of movers, the per-frame cost depends
  * only on the movers.
  *
- * An instanced visual's instances skip the records and sit in partitions of their
- * own, which join the same top tree. A moved instance goes to a dynamic partition of
- * its element, as records do, and a translated element only moves its partitions'
- * origins.
+ * An instanced visual's instances skip the records but are members of the same partitions,
+ * each by itself, so that a partition holds whatever is near, of any visual. A moved
+ * instance goes to the dynamic partition as records do, and so do all of a moved
+ * element's instances, placed again past a limit.
  *
  * All node, record and shape indices on the GPU are absolute in their arenas.
  */
@@ -124,9 +124,9 @@ private:
         uint32_t quiet_frames = 0;       ///< Frames since it last moved, in the dynamic partition.
     };
 
-    /// An element's instances. They have no Records: their partitions hold instance
-    /// slots, and every GPU record is computed from the visual's transforms and points
-    /// at one run of shapes per mesh.
+    /// An element's instances. They have no Records: each instance is a member of the scene's
+    /// partitions by itself (see kMemberInstance), and every GPU record is computed from the
+    /// visual's transforms and points at one run of shapes per mesh.
     struct InstanceGroup
     {
         struct MeshRun
@@ -136,34 +136,35 @@ private:
             BvhItemBounds bounds{};
         };
         IInstancedMeshInternal* visual = nullptr;
+        uint32_t id = kUnplaced;  ///< Its index in groups_, which its members carry.
         mat4 world{};
         vector<RtShape> shapes;  ///< All meshes' runs, kept to tell when they change.
         vector<MeshRun> meshes;
-        vector<uint32_t> partitions;
-        vector<uint32_t> slot_partition;  ///< Per slot, its index in partitions_, or kUnplaced.
-        uint32_t open_partition = kUnplaced;  ///< Takes new instances until it is full.
-
-        /// Loaded by need, the partitions that need their instances, the largest on screen
-        /// last, which come in from the back.
-        vector<uint32_t> pending_load;
+        /// Per slot, its index in partitions_, kDynamic or kUnplaced.
+        vector<uint32_t> slot_partition;
+        /// Loaded by need, how many of its instances have places in the raster region.
         uint32_t resident_members = 0;
-        uint32_t residency_age = 0;  ///< Updates since those were worked out.
 
-        /// What culling reads, in the culling arena. See `instance_partition_cull_src`.
-        ArenaRegion cull_table;
-        uint32_t cull_table_capacity = 0;
-        uint32_t cull_next_entry = 0;
-        vector<uint32_t> cull_free_entries;
-
-        /// Holds instances that moved recently. It is written again each frame it changes,
-        /// so a mover costs only itself.
-        uint32_t dynamic_partition = kUnplaced;
-        struct Mover
+        /// Its slot table for culling (see IInstancedMeshInternal::set_slot_table): each slot's
+        /// place in the raster region, written again when places change: all of it, or the
+        /// slots from slot_dirty_from up to slot_dirty_to.
+        ArenaRegion slot_table;
+        uint32_t slot_table_slots = 0;
+        bool slot_table_dirty = true;
+        uint32_t slot_dirty_from = 0xFFFFFFFFu;
+        uint32_t slot_dirty_to = 0;
+        vector<uint32_t> slot_table_copy;  ///< What slot_table holds, kept to upload a range from.
+        vector<uint32_t> dirty_slots;      ///< Slots whose places may have changed since it was written.
+        /// @p slot's place may have changed: its part of the slot table is written again.
+        void mark_slot(uint32_t slot)
         {
-            uint32_t home;        ///< The partition it left, in partitions_.
-            uint32_t moved_frame; ///< The update it last moved in.
-        };
-        std::unordered_map<uint32_t, Mover> movers;  ///< By slot.
+            slot_dirty_from = slot < slot_dirty_from ? slot : slot_dirty_from;
+            slot_dirty_to = slot + 1u > slot_dirty_to ? slot + 1u : slot_dirty_to;
+            dirty_slots.push_back(slot);
+        }
+
+        /// The update each instance in the dynamic partition last moved in, by slot.
+        std::unordered_map<uint32_t, uint32_t> movers;
 
         /// With a motion function: its table, then per slot its record and partition
         /// origin, in the culling arena. See `instance_motion_compute_src`.
@@ -175,46 +176,56 @@ private:
         bool motion_region_fresh = false;  ///< No frame has read it, so it can be written directly.
         bool motion_dirty = false;  ///< Instances were written at rest, so the motion runs again.
         bool motion_error_logged = false;
-        /// Its meshes' quads (MeshQuad, kMeshQuadWords each) in the culling arena, which its
-        /// partitions' quad trees are built from. Made with each cut.
-        ArenaRegion quad_table;
-        uint32_t quad_meshes = 0;
-        vector<MeshQuad> mesh_quads;  ///< What quad_table holds, for partitions without their instances.
+        /// Its meshes' quads, which its instances' quads are placed from (member_quad).
+        vector<MeshQuad> mesh_quads;
         IRenderPass::Ptr motion_pass;
         bool motion_pass_dirty = true;
         uint64_t motion_rest_offset = 0;  ///< What the recorded pass was given.
         uint64_t motion_instances_offset = 0;
     };
 
+    /// A member of a partition: a plain record's slot, or with kMemberInstance an instance,
+    /// its group's id above kMemberSlotBits and its slot below.
+    static constexpr uint32_t kMemberInstance = 0x80000000u;
+    static constexpr uint32_t kMemberSlotBits = 21;
+    static constexpr uint32_t kMemberSlotMask = (1u << kMemberSlotBits) - 1u;
+    static constexpr uint32_t kMaxGroups = 1u << (31 - kMemberSlotBits);
+
+    /// A part of the scene in which every member is near the others, plain objects and
+    /// instances of any visual alike, which culling keeps a cut of and rays walk as one.
     struct Partition
     {
-        /// Record slots, or instance slots when `group` is set. Can hold stale slots
-        /// until `dirty` is handled.
+        /// Its members (see kMemberInstance). Can hold stale ones until `dirty` is handled.
         vector<uint32_t> members;
-        InstanceGroup* group = nullptr;  ///< Set when this partition holds instances.
-        /// Its slots in chunks, or for plain records their objects' ids.
+        /// Its objects' ids in chunks of kCullChunkSlots, or without its instances the indices
+        /// of its quads.
         ArenaRegion cull_members;
-        /// Its entry in the group's table, or for plain records in the plain table.
+        /// Its entry in the scene's table (plain_cull_).
         uint32_t cull_entry = kUnplaced;
         uint32_t cull_chunks = 0;
         BvhItemBounds cull_bounds{};  ///< Its members' bounds in the world.
+        /// The surface area of its bounds when its members were last cut, against which drift is
+        /// measured.
+        float cut_area = 0.f;
         bool active = false;
         bool dirty = false;
-        /// Whether its instances have their GPU data. Without, it is its quad tree down to
-        /// `stored_level`.
+        /// Whether its members are drawn as themselves. Without, it is its quad tree down to
+        /// `stored_level`, plain objects and instances alike, and its instances of visuals
+        /// loaded by need give up their places.
         bool resident = true;
-        float score = 0.f;  ///< How large its members are on screen, as `pending_load` was worked out.
+        float score = 0.f;  ///< How large its members are on screen, as residency last worked out.
         /// Only whether it is resident changed, which leaves its bounds, so the partitions'
         /// layout stays.
         bool residency_changed = false;
         /// Its members as a tree of quads (kQuadNodeWords), in the culling arena, built on the
-        /// GPU when its members change. None for a dynamic partition or one without its instances.
+        /// GPU when its members change. None for the dynamic partition.
         ArenaRegion quad_tree;
         uint32_t quad_leaves = 0;
         bool quad_tree_dirty = false;
-        /// For plain records, its objects' own quads in the world (MeshQuad each), in the
-        /// order of `cull_members`, which the tree is built from. For instances without their
-        /// instances, one quad per chunk of members, and the tree's leaves are the finest it has.
+        /// Its objects' own quads in the world (MeshQuad each), in the order of `cull_members`,
+        /// which the tree is built from: a plain object's across its bounds, an instance's its
+        /// mesh's placed by its resting matrix. Without its instances, its tree's quads at
+        /// `stored_level`, and the tree's leaves are the finest it has.
         ArenaRegion quad_objects;
         uint32_t quad_object_count = 0;
         bool quad_leaves_only = false;
@@ -223,6 +234,14 @@ private:
         /// to the root, which that is worked out from; empty until measured.
         uint32_t stored_level = 0;
         vector<float> level_sides;
+        /// Its instances of visuals loaded by need, a count per group id, as last uploaded: the
+        /// places it takes when it keeps its members.
+        struct GroupCount
+        {
+            uint32_t group;
+            uint32_t count;
+        };
+        vector<GroupCount> by_need;
     };
 
     struct EmitContext
@@ -236,55 +255,74 @@ private:
     void remove_element(IElement* element);
     /// Brings @p element's instance group up to date with its visual.
     void update_instances(IElement* element, IInstancedMeshInternal& visual, const EmitContext& emit);
-    /// Cuts all of @p group's live instances into new partitions, by Morton order.
-    void cut_instances(InstanceGroup& group, FrameContext& ctx);
-    void free_instance_partitions(InstanceGroup& group);
-    void update_residency(InstanceGroup& group);
-    /// Makes the tables culling reads for @p group, empty, and tells its visual.
-    void alloc_instance_cull(InstanceGroup& group, FrameContext& ctx, uint32_t table_capacity);
+    /// Takes every instance of @p group out of the partitions.
+    void remove_group_members(InstanceGroup& group);
+    /// Places every live instance of @p group in the partitions: a few by insertion, many cut
+    /// into partitions of their own.
+    void place_group(InstanceGroup& group);
+    /// Works out, now and then, which partitions keep their members and which only their quads,
+    /// and loads a few of those that need their members back.
+    void update_residency();
+
+    /// What a member is: its group, or null for a plain record, and its slot.
+    InstanceGroup* member_group(uint32_t member) const;
+    static uint32_t member_slot(uint32_t member) { return member & ((member & kMemberInstance) != 0u ? kMemberSlotMask : ~0u); }
+    /// The member of instance @p slot of @p group.
+    static uint32_t instance_member(const InstanceGroup& group, uint32_t slot)
+    {
+        return kMemberInstance | (group.id << kMemberSlotBits) | slot;
+    }
+    /// Where @p member is: its partition's index in partitions_, kDynamic or kUnplaced.
+    uint32_t member_partition(uint32_t member) const;
+    void set_member_partition(uint32_t member, uint32_t partition);
+    /// Whether @p member is still something: a live record or a live instance.
+    bool member_live(uint32_t member) const;
+    BvhItemBounds member_bounds(uint32_t member) const;
+    /// Its object id, 0 for none.
+    uint32_t member_object(uint32_t member) const;
+
     /// Brings culling's view of @p partition up to date with its members and cull_bounds.
-    void write_partition_cull(Partition& partition, FrameContext& ctx);
+    void write_cull(Partition& partition, FrameContext& ctx);
     /// Takes @p partition out of what culling reads. For one about to be freed.
-    void release_partition_cull(Partition& partition, FrameContext& ctx);
-    void write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh_table);
-    /// Lists a plain partition's objects for culling, in the plain table: see
-    /// IBvh::get_plain_partitions.
-    void write_plain_cull(Partition& partition, FrameContext& ctx, const float* lo, const float* hi);
-    /// Takes a plain partition out of the plain table.
-    void release_plain_cull(Partition& partition, FrameContext& ctx);
-    /// Moves @p slot to its group's dynamic partition.
-    void promote_instance(InstanceGroup& group, uint32_t slot);
-    /// Sends instances that have been still for a while back where they came from.
-    void demote_quiet_instances(InstanceGroup& group);
-    bool is_instance_dynamic(uint32_t partition) const;
+    void release_cull(Partition& partition, FrameContext& ctx);
+    /// Writes @p partition's entry in the scene's table, @p fresh when nothing has read the table.
+    void write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh);
+    /// Writes each group's slot table where places changed.
+    void write_slot_tables(FrameContext& ctx);
     /// Allocates and clears @p group's motion region, if it has a motion function.
     void alloc_instance_motion(InstanceGroup& group, FrameContext& ctx);
     BvhItemBounds instance_bounds(const InstanceGroup& group, uint32_t slot) const;
     /// @p slot's quad in the world, as the GPU build makes its leaf; a colour of 0 for none.
     MeshQuad member_quad(const InstanceGroup& group, uint32_t slot) const;
-    /// The quads at @p level (0 its members) of the tree @p partition has over its members, as
+    /// The quads at @p level (0 its objects') of the tree @p partition has over its objects, as
     /// the GPU builds it, and with @p sides each level's largest quad side up to the root.
-    vector<MeshQuad> partition_level(const InstanceGroup& group, const Partition& partition, uint32_t level,
-                                     vector<float>* sides) const;
+    vector<MeshQuad> partition_level(const Partition& partition, uint32_t level, vector<float>* sides) const;
+    /// @p partition's objects, near to near in the world, and each one's quad: an instance by
+    /// itself, a plain object over all its records.
+    void partition_objects(const Partition& partition, vector<uint32_t>& objects, vector<MeshQuad>& quads) const;
     /// The world bounds of mesh @p mesh of @p group placed by @p t, with the element at @p w.
     BvhItemBounds instance_bounds(const InstanceGroup& group, const mat4& w, const InstanceTransform& t,
                                   uint32_t mesh) const;
     void free_record(uint32_t slot);
-    /// Moves a record to the dynamic partition, leaving its static partition if any.
-    void promote(uint32_t slot);
-    /// Sends quiet records of the dynamic partition back to static partitions.
-    void demote_quiet_records();
-    /// Rebuilds all static partitions from the static and unplaced records.
+    /// Moves @p member to the dynamic partition, leaving its partition if any.
+    void promote(uint32_t member);
+    /// Sends the dynamic partition's members that have been still for a while to partitions.
+    void demote_quiet();
+    /// Puts @p member in the partition whose bounds grow least by it.
+    void insert_member(uint32_t member);
+    /// Cuts @p members into new partitions by a tree over their bounds.
+    void cut_members(const vector<uint32_t>& members);
+    /// Cuts all members again, at a full build or a load large against the scene.
     void recut(FrameContext& ctx);
     /// Splits partitions grown past their limit, then uploads the changed ones.
     void flush_partitions(FrameContext& ctx);
     /// Writes @p partition's bounds and culling table entry.
     void upload_partition(Partition& partition, FrameContext& ctx);
-    /// Cuts the static partitions again once they hold what they hold much more loosely than
-    /// when last cut.
-    void check_recut(FrameContext& ctx);
+    /// Cuts again the partitions whose bounds have drifted far from where they were cut, their
+    /// members together.
+    void check_recut();
     /// Writes @p group's table of mesh quads.
-    void write_quad_table(InstanceGroup& group, FrameContext& ctx);
+    void write_quad_table(InstanceGroup& group);
     /// The quad tree pass, its jobs, and what it built since that was last logged.
     IRenderPass::Ptr quad_pass_;
     ArenaRegion quad_jobs_;
@@ -301,7 +339,14 @@ private:
     vector<uint32_t> freed_records_;
     std::unordered_map<IElement*, vector<uint32_t>> element_records_;
     std::unordered_map<IElement*, InstanceGroup> instance_groups_;
+    /// The groups by id (InstanceGroup::id), null where free. An id freed in an update is given
+    /// out again only after it, once no partition can still hold a member that carries it.
+    vector<InstanceGroup*> groups_;
+    vector<uint32_t> retired_groups_;
     vector<ViewPoint> view_points_;
+    /// The partitions whose members come in ahead of need, the largest on screen last, which
+    /// come in from the back, a few an update.
+    vector<uint32_t> pending_load_;
     /// Instances all loaded-by-need visuals may have places for together: the device-wide cap,
     /// from the device's memory. And how many have places, summed over them each update.
     uint64_t resident_cap_ = 0;
@@ -310,7 +355,7 @@ private:
     uint32_t live_records_ = 0;
 
     vector<Partition> partitions_;
-    /// Plain partitions for culling, kCullEntryWords each: see IBvh::get_plain_partitions.
+    /// The partitions for culling, kCullEntryWords each: see IBvh::get_plain_partitions.
     ArenaRegion plain_cull_;
     uint32_t plain_cull_capacity_ = 0;
     uint32_t plain_cull_next_ = 0;
@@ -321,9 +366,8 @@ private:
 
     /// Partitions changed their bounds, so whether to cut again is checked.
     bool layout_dirty_ = false;
-    float cut_cost_ = 0.f;  ///< How loosely the partitions held their members when last cut.
 
-    vector<uint32_t> unplaced_;       ///< Records waiting for a partition.
+    vector<uint32_t> unplaced_;       ///< Members waiting for a partition.
     vector<IElement*> unresolved_;    ///< Elements to emit again next frame.
     vector<WorldBox> changed_;        ///< See changed_bounds. Cleared by each update.
     bool changed_all_ = false;

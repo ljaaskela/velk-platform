@@ -240,6 +240,7 @@ public:
     /// Whether the raster region has room for @p count places. If not, it grows to a new place
     /// at the next flush and reports the visual changed, so that what names it is made again
     /// from there: room is then there from the next frame, and false is returned until then.
+    /// Without a region yet, nothing names it, and room is there at once.
     virtual bool reserve_instances(uint32_t count) = 0;
     /// Frees @p slot's place in the raster region.
     virtual void release_instance_index(uint32_t slot) = 0;
@@ -283,10 +284,13 @@ public:
     /// the BVH from IScene::get_object_ids.
     virtual void set_object_id_base(uint32_t base) = 0;
 
-    /// Where culling finds this visual's partitions in the culling arena, set by the BVH
-    /// that holds them. See `instance_partition_cull_src`. A count of 0 means none.
-    virtual void set_partition_cull(uint32_t table_word, uint32_t count) = 0;
-    virtual void get_partition_cull(uint32_t& table_word, uint32_t& count) const = 0;
+    /// Where culling finds this visual's slot table in the culling arena: for each of @p count
+    /// slots its place in the raster region, or 0xFFFFFFFF for none, set by the BVH, which
+    /// places its instances in the scene's partitions. A count of 0 means none yet.
+    virtual void set_slot_table(uint32_t table_word, uint32_t count) = 0;
+    virtual void get_slot_table(uint32_t& table_word, uint32_t& count) const = 0;
+    /// The object id of slot 0, as set_object_id_base set it.
+    virtual uint32_t get_object_id_base() const = 0;
 };
 
 } // namespace velk

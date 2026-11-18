@@ -1,6 +1,7 @@
 #ifndef VELK_RENDER_FRAME_INSTANCE_CULL_H
 #define VELK_RENDER_FRAME_INSTANCE_CULL_H
 
+#include <velk/api/perf.h>
 #include <velk/api/velk.h>
 #include <velk/string_view.h>
 #include <velk/vector.h>
@@ -43,11 +44,23 @@ inline constexpr uint32_t kQuadLeavesOnly = 0x80000000u;
 inline constexpr uint32_t kCullChunkListWords = 2;
 /// The slot an object id names, in tables by object (IScene::get_object_ids).
 inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
-/// Words per plain item (InstanceCullPass::together): its instance's index, its slot, its
-/// table, its draw's index in the draw data, what rays test it as (an RtShape kind: 255 its
-/// mesh, else its visual's analytic shape, see IAnalyticShape), and its mesh's ray data
-/// (MeshStaticData's index, kInvalidMeshStaticBase for none). Mirrors VELK_PLAIN_ITEM_WORDS.
-inline constexpr uint32_t kPlainItemWords = 6;
+/// Words per item (InstanceCullPass::together), what a kept cut record names: its instance's
+/// index (kCullNoSlot for an instance without a place in its raster region), its slot in its
+/// batch's instances, its table, its draw's index in the draw data, what rays test it as (an
+/// RtShape kind: 255 its mesh, else its visual's analytic shape, see IAnalyticShape), its mesh's
+/// ray data (MeshStaticData's index, kInvalidMeshStaticBase for none), and how far a motion
+/// function can move it (a float), which its bounds grow by. A plain object's instances are an
+/// item each, first; then each instanced visual's items, an item per slot, which
+/// instance_items_src writes whole each frame, with their objects and next words, so that the
+/// CPU never goes through them. Mirrors VELK_PLAIN_ITEM_WORDS.
+inline constexpr uint32_t kPlainItemWords = 7;
+/// Words per instanced visual in the item descriptors instance_items_src and the choose read:
+/// its first item, its slots, its instances' base, its slot table's word, its mesh count M, its
+/// table, how far it can move (a float) and its first object id (slot i's object is that plus
+/// i), then per mesh its draw, its ray shape kind and its mesh's ray data (kItemMeshWords each).
+/// See InstanceCullPass::item_descriptors. Mirrors VELK_ITEM_DESCRIPTOR_HEADER_WORDS.
+inline constexpr uint32_t kItemDescriptorHeaderWords = 8;
+inline constexpr uint32_t kItemMeshWords = 3;
 /// A plain item's shape kind for a mesh. Mirrors RtShape's 255.
 inline constexpr uint32_t kRayShapeMesh = 255;
 /// A plain item's shape kind for a rect over its instance's extent. Mirrors RtShape's 0.
@@ -158,6 +171,10 @@ inline constexpr uint32_t kCutQuad = 0xFFFFFFFEu;
 /// node's quad keeps their area); probe rays pass it. The members' own records are not traced.
 /// Mirrors VELK_CUT_RAY_QUAD.
 inline constexpr uint32_t kCutRayQuad = 0xFFFFFFFDu;
+/// A kept cut's record whose batch words (entry, table or plain item) did not carry over when its
+/// batches were made again. The rename marks it, and its partition chooses again before anything
+/// reads it (instance_cut_stale_src). Mirrors VELK_CUT_STALE.
+inline constexpr uint32_t kCutStale = 0xFFFFFFFCu;
 /// A kept cut's record of a cluster for light only has this on its entry: a cluster coarse
 /// enough for light (kLightPixels) over drawn ones finer than that. It holds light and is neither
 /// drawn nor seen by rays. Mirrors VELK_CUT_LIGHT_ONLY.
@@ -850,6 +867,8 @@ layout(push_constant) uniform PC {
     uint partition_table;  // the cut's partition table, whose entries name their quad trees
     float quad_pixels;     // kQuadPixels
     float light_pixels;    // the light's level: lod_max_pixels times kLightPixels over kLodElementPixels
+    uint descriptors_word; // the instanced visuals' item descriptors (kItemDescriptorHeaderWords)
+    uint descriptor_count;
 } pc;
 
 #define VELK_LOD_LIGHT
@@ -980,11 +999,10 @@ void velk_lod_light_chosen(uint entry, uint c, uint slot)
     velk_cut_record(entry | VELK_CUT_LIGHT_ONLY, c, slot);
 }
 )" VELK_LOD_SELECT_GLSL R"(
-// The instance a record's `named` is of: a slot's, or a plain item's.
+// The instance a record's `named` is of: its item's.
 uint velk_cut_named_instance(uint named)
 {
-    return pc.items_word == 0xFFFFFFFFu ? pc.instances_base + named
-                                        : cull_words.data[pc.items_word + named * VELK_PLAIN_ITEM_WORDS];
+    return cull_words.data[pc.items_word + named * VELK_PLAIN_ITEM_WORDS];
 }
 
 float velk_cut_scale(mat4 world)
@@ -1054,7 +1072,7 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
     return n;
 }
 
-// The roots of an instance's choice; `named` is what its records name: its slot, or a plain item.
+// The roots of an instance's choice; `named` is what its records name: its item.
 void velk_cut_choose(uint named, vec3 viewpoint, uint table)
 {
     uint first_entry = cull_words.data[table + 8u];
@@ -1068,9 +1086,11 @@ void velk_cut_choose(uint named, vec3 viewpoint, uint table)
     }
 }
 
-// Chooses for one instance; `named` is what its records name: its slot, or a plain item.
+// Chooses for one instance; `named` is what its records name: its item. Nothing for an instance
+// without a place in its raster region.
 void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoint)
 {
+    if (instance == 0xFFFFFFFFu) return;
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
     // An item for rays only (no table): the whole object.
@@ -1153,7 +1173,6 @@ uint velk_quad_first(uint node)
 void velk_cut_member(uint member, vec3 viewpoint)
 {
     g_no_rays = false;
-    if (pc.items_word == 0xFFFFFFFFu && member >= pc.slot_count) return;
     // Under a quad small enough: the first member under it records the quad, the rest nothing.
     if (g_tree != 0xFFFFFFFFu) {
         GlobalData globals = velk_globals.data[pc.globals_base];
@@ -1180,20 +1199,28 @@ void velk_cut_member(uint member, vec3 viewpoint)
         }
     }
     if (g_leaves_only) return;
-    if (pc.items_word == 0xFFFFFFFFu) {
-        velk_cut_instance(member, pc.instances_base + member, pc.table_word, viewpoint);
-    } else {
-        // An object: each of its plain items. An object has a few at most; the bound only
-        // keeps a broken chain from running on.
-        uint object_slot = member & 0x3FFFFFFu;
-        uint item = object_slot < pc.object_slots ? cull_words.data[pc.head_word + object_slot] : 0xFFFFFFFFu;
-        for (uint n = 0u; n < 64u && item != 0xFFFFFFFFu; ++n) {
-            if (cull_words.data[pc.objects_word + item] == member) {
-                uint at = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
-                velk_cut_instance(item, cull_words.data[at], cull_words.data[at + 2u], viewpoint);
-            }
-            item = cull_words.data[pc.next_word + item];
+    // An instanced visual's object: its one item, by its id, through its visual's descriptor.
+    uint at = pc.descriptors_word;
+    for (uint k = 0u; k < pc.descriptor_count && k < 4096u; ++k) {
+        uint base = cull_words.data[at + 7u];
+        if (base != 0xFFFFFFFFu && member >= base && member - base < cull_words.data[at + 1u]) {
+            uint item = cull_words.data[at] + member - base;
+            uint w = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
+            velk_cut_instance(item, cull_words.data[w], cull_words.data[w + 2u], viewpoint);
+            return;
         }
+        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + 4u], 4096u) * 3u;
+    }
+    // A plain object: each of its items. An object has a few at most; the bound only keeps a
+    // broken chain from running on.
+    uint object_slot = member & 0x3FFFFFFu;
+    uint item = object_slot < pc.object_slots ? cull_words.data[pc.head_word + object_slot] : 0xFFFFFFFFu;
+    for (uint n = 0u; n < 64u && item != 0xFFFFFFFFu; ++n) {
+        if (cull_words.data[pc.objects_word + item] == member) {
+            uint at = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
+            velk_cut_instance(item, cull_words.data[at], cull_words.data[at + 2u], viewpoint);
+        }
+        item = cull_words.data[pc.next_word + item];
     }
 }
 
@@ -1473,7 +1500,13 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         return;
     }
     uint instance = instances_base + slot;
-    if (items_word != 0xFFFFFFFFu) instance = cull_words.data[items_word + slot * VELK_PLAIN_ITEM_WORDS];
+    if (items_word != 0xFFFFFFFFu) {
+        uint item = items_word + slot * VELK_PLAIN_ITEM_WORDS;
+        instance = cull_words.data[item];
+        // Grown by how far a motion function can move it, both ways.
+        pad += 2.0 * uintBitsToFloat(cull_words.data[item + 6u]);
+    }
+    if (instance == 0xFFFFFFFFu) return;
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
     if (entry == 0xFFFFFFFFu && cluster == 0xFFFFFFFFu) {
@@ -1561,6 +1594,7 @@ bool velk_ray_record(uint record, uint index, vec3 viewpoint, float pixels_per_u
     uint slot = cull_words.data[record + 2u];
     uint instance = pc.instances_base + slot;
     if (pc.items_word != 0xFFFFFFFFu) instance = cull_words.data[pc.items_word + slot * VELK_PLAIN_ITEM_WORDS];
+    if (instance == 0xFFFFFFFFu) return false;
     mat4 world = cull_instances.data[instance].world_matrix;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
     uint cluster = cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
@@ -1959,7 +1993,8 @@ void main()
         return;
     }
 
-    // A plain object's record names its item: the instance, its slot and its table (kPlainItemWords).
+    // A record names its item: the instance, its slot and its table (kPlainItemWords). An
+    // instance without a place in its raster region is not drawn.
     uint instance = pc.instances_base + slot;
     uint table_word = pc.table_word;
     if (pc.items_word != 0xFFFFFFFFu) {
@@ -1973,6 +2008,7 @@ void main()
             cull_words.data[pc.item_records_word + item] = record;
             return;
         }
+        if (instance == 0xFFFFFFFFu) return;
     }
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
@@ -2157,8 +2193,8 @@ void main()
         instance = cull_words.data[item];
         slot = cull_words.data[item + 1u];
         table_word = cull_words.data[item + 2u];
-        // Rays only: drawn by its own pass.
-        if (table_word == 0xFFFFFFFFu) return;
+        // Rays only: drawn by its own pass. Or an instance without a place in its raster region.
+        if (table_word == 0xFFFFFFFFu || instance == 0xFFFFFFFFu) return;
     }
 
     mat4 world = cull_instances.data[instance].world_matrix;
@@ -2637,6 +2673,13 @@ struct InstanceCullPass
     IGpuBuffer* arena_buffer = nullptr;
     size_t arena_size = 0;
     uint32_t arena_generation = 0;  ///< Changes when the arena's buffer is replaced, which draws naming it must follow.
+    /// What reserve_instance_cull worked out this frame, for emit_instance_cull_pass to record:
+    /// whether it reserved, whether the recording must be made again, whether the scene's
+    /// objects have a kept cut, and the light pool's word.
+    bool reserved = false;
+    bool reserved_record = false;
+    bool reserved_plain_cut = false;
+    uint32_t reserved_light_pool_word = kCullNoSlot;
     uint64_t partition_tables = 0;  ///< Which tables the recording uses.
     /// The batches culled together, plain objects: see instance_cull_compute_src. Holds the
     /// clusters chosen, the entries, the items (kPlainItemWords: instance index, slot, table, draw; no table for one
@@ -2660,6 +2703,18 @@ struct InstanceCullPass
         uint32_t count = 0;
     };
     vector<PendingMesh> pending_meshes;
+    /// The instanced visuals' items, the last of the items: where they start and how many, and
+    /// their descriptors (kItemDescriptorHeaderWords then kItemMeshWords a mesh each), as last
+    /// written, in their region, which instance_items_src reads. And each visual's slots when its
+    /// items were made, by key: more slots make the items again.
+    uint32_t instanced_first_item = 0;
+    uint32_t instanced_items = 0;
+    vector<uint32_t> item_descriptors;
+    uint32_t item_descriptor_count = 0;
+    ArenaRegion item_descriptor_region;
+    vector<std::pair<const void*, uint32_t>> instanced_slots;
+    /// Whether any of the items is moved by a motion function, which rays walking the cut are told.
+    bool items_move = false;
     ArenaRegion retest;            ///< What failed the first occlusion test.
     uint32_t retest_capacity = 0;
     /// Where clusters with triangles too small on screen for the hardware go, set by the path
@@ -2691,6 +2746,7 @@ struct InstanceCullPass
     /// cuts and leaves were written for.
     ArenaRegion ray_top;
     uint64_t ray_top_layout = 0;
+    bool ray_top_fresh = false;  ///< Made this frame for a new layout, its words still to be written.
     /// The top tree's cuts' words, in its order (kRayTopCutWords), for passes over each cut.
     vector<uint32_t> ray_top_cuts;
     /// Visuals whose stores were too small, with the records they wanted: theirs are made
@@ -2716,8 +2772,9 @@ struct InstanceCullPass
         vector<uint32_t> entry_count;
     };
     vector<BatchTables> batch_tables;
-    /// The plain items as last made: whose object each is, which mesh (none for one drawn by its
-    /// own pass), which of that object's items with that mesh, and its batch's tables.
+    /// The items as last made: whose object each is, which mesh (none for one drawn by its own
+    /// pass, an instanced visual's key for its items), which of that object's items with that
+    /// mesh, and its batch's tables.
     struct ItemName
     {
         uint32_t object = 0;
@@ -2733,8 +2790,13 @@ struct InstanceCullPass
         const void* key = nullptr;
         vector<uint32_t> pairs;  ///< Old word, new word, sorted by the old.
         vector<uint32_t> items;  ///< By old item, the new one: plain items only.
-        uint32_t pairs_word = 0; ///< Where both are in rename_words.
+        /// The instanced visuals' blocks of items that carry over, three words each: the old
+        /// first item, how many carry over and the new first item. An item past the plain items
+        /// in none of them is of a visual that went.
+        vector<uint32_t> blocks;
+        uint32_t pairs_word = 0; ///< Where they are in rename_words.
         uint32_t items_word = 0;
+        uint32_t blocks_word = 0;
     };
     vector<Rename> renames;
     ArenaRegion rename_words;
@@ -2748,10 +2810,97 @@ inline constexpr uint32_t kBatchFirstEntryWord = 8;
 inline constexpr uint32_t kBatchEntryCountWord = 9;
 
 /**
+ * Writes the instanced visuals' items (kPlainItemWords), a thread per item from `first_item` on:
+ * its instance's place in the raster region from its visual's slot table (none without a place,
+ * or before the table is there), its instance's index there, and by its instance's mesh
+ * (params.y) that mesh's draw, ray shape kind and ray data. The visual is found in the descriptors
+ * (kItemDescriptorHeaderWords then kItemMeshWords a mesh each), by the items it covers.
+ */
+inline constexpr string_view instance_items_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+struct CullInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint descriptors_word;
+    uint descriptor_count;
+    uint items_word;
+    uint first_item;
+    uint item_count;
+    uint objects_word;  // each item's object id, by item
+    uint next_word;     // each item's next item of the same object, by item
+} pc;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.item_count) return;
+    uint item = pc.first_item + i;
+    uint w = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
+
+    // Its visual: the descriptor whose items it is among.
+    uint found = 0xFFFFFFFFu;
+    uint at = pc.descriptors_word;
+    for (uint k = 0u; k < pc.descriptor_count && k < 4096u; ++k) {
+        uint first = cull_words.data[at];
+        uint slots = cull_words.data[at + 1u];
+        if (item >= first && item - first < slots) {
+            found = at;
+            break;
+        }
+        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + 4u], 4096u) * 3u;
+    }
+    // What does not change with its place: its table, how far it can move, its object, and no
+    // next item, since an instanced object has one item.
+    uint slot = found != 0xFFFFFFFFu ? item - cull_words.data[found] : 0u;
+    cull_words.data[w + 2u] = found != 0xFFFFFFFFu ? cull_words.data[found + 5u] : 0xFFFFFFFFu;
+    cull_words.data[w + 6u] = found != 0xFFFFFFFFu ? cull_words.data[found + 6u] : 0u;
+    uint object_base = found != 0xFFFFFFFFu ? cull_words.data[found + 7u] : 0xFFFFFFFFu;
+    cull_words.data[pc.objects_word + item] = object_base != 0xFFFFFFFFu ? object_base + slot : 0xFFFFFFFFu;
+    cull_words.data[pc.next_word + item] = 0xFFFFFFFFu;
+    uint place = 0xFFFFFFFFu;
+    if (found != 0xFFFFFFFFu && cull_words.data[found + 3u] != 0u) {
+        place = cull_words.data[cull_words.data[found + 3u] + slot];
+    }
+    if (place == 0xFFFFFFFFu) {
+        cull_words.data[w] = 0xFFFFFFFFu;
+        cull_words.data[w + 1u] = 0xFFFFFFFFu;
+        cull_words.data[w + 3u] = 0xFFFFFFFFu;
+        cull_words.data[w + 4u] = 255u;
+        cull_words.data[w + 5u] = 0xFFFFFFFFu;
+        return;
+    }
+    uint instance = cull_words.data[found + 2u] + place;
+    cull_words.data[w] = instance;
+    cull_words.data[w + 1u] = place;
+    uint mesh = cull_instances.data[instance].params.y;
+    if (mesh < cull_words.data[found + 4u]) {
+        uint m = found + VELK_ITEM_DESCRIPTOR_HEADER_WORDS + mesh * 3u;
+        cull_words.data[w + 3u] = cull_words.data[m];
+        cull_words.data[w + 4u] = cull_words.data[m + 1u];
+        cull_words.data[w + 5u] = cull_words.data[m + 2u];
+    }
+}
+)";
+
+/**
  * Names a kept cut's records again after their batches were made again: each record of the last
  * store (the one the copy and the choose read from) gets its cluster entry, or a whole mesh's
- * table, from `pairs` (old word, new word, sorted by the old), and with `item_count` set its plain
- * item from `items` (by old item). A thread per record the store holds.
+ * table, from `pairs` (old word, new word, sorted by the old), its plain item from `items` (by
+ * old item), or its instanced visual's item from `blocks`. A record whose words do not carry
+ * over becomes kCutStale. A thread per record the store holds.
  */
 inline constexpr string_view instance_cut_rename_src = R"(
 #version 450
@@ -2766,9 +2915,12 @@ layout(push_constant) uniform PC {
     uint pairs_word;
     uint pair_count;
     uint items_word;
-    uint item_count;
+    uint item_count;  // the old plain items, which `items` names again one by one
+    uint blocks_word; // past them, the instanced visuals' blocks: old first, how many, new first
+    uint block_count;
 } pc;
 )" VELK_CUT_GLSL R"(
+// `word` named again, or VELK_CUT_STALE when the pairs do not have it.
 uint velk_rename(uint word)
 {
     uint lo = 0u;
@@ -2780,7 +2932,7 @@ uint velk_rename(uint word)
         if (old < word) lo = mid + 1u;
         else hi = mid;
     }
-    return word;
+    return VELK_CUT_STALE;
 }
 
 void main()
@@ -2790,16 +2942,82 @@ void main()
     if (index >= cull_words.data[cut + 16u]) return;
     uint record = velk_cut_store(cut, false) + index * 4u;
     uint entry = cull_words.data[record];
-    if (entry == VELK_CUT_QUAD || entry == VELK_CUT_RAY_QUAD) return;
+    if (entry == VELK_CUT_QUAD || entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE) return;
+    bool stale = false;
     if (entry == 0xFFFFFFFFu) {
         uint table = cull_words.data[record + 1u];
-        if (table != 0xFFFFFFFFu) cull_words.data[record + 1u] = velk_rename(table);
+        if (table != 0xFFFFFFFFu) {
+            uint renamed = velk_rename(table);
+            stale = renamed == VELK_CUT_STALE;
+            cull_words.data[record + 1u] = renamed;
+        }
     } else {
-        uint flag = entry & VELK_CUT_LIGHT_ONLY;
-        cull_words.data[record] = velk_rename(entry & ~VELK_CUT_LIGHT_ONLY) | flag;
+        uint renamed = velk_rename(entry & ~VELK_CUT_LIGHT_ONLY);
+        stale = renamed == VELK_CUT_STALE;
+        cull_words.data[record] = stale ? VELK_CUT_STALE : renamed | (entry & VELK_CUT_LIGHT_ONLY);
     }
     uint item = cull_words.data[record + 2u];
-    if (pc.item_count != 0u && item < pc.item_count) cull_words.data[record + 2u] = cull_words.data[pc.items_word + item];
+    if (item < pc.item_count) {
+        uint renamed = cull_words.data[pc.items_word + item];
+        stale = stale || renamed == 0xFFFFFFFFu;
+        cull_words.data[record + 2u] = renamed;
+    } else if (item != 0xFFFFFFFFu) {
+        // An instanced visual's item: where its block went, or stale with its visual gone.
+        uint renamed = 0xFFFFFFFFu;
+        for (uint b = 0u; b < pc.block_count && b < 4096u; ++b) {
+            uint w = pc.blocks_word + b * 3u;
+            uint first = cull_words.data[w];
+            if (item >= first && item - first < cull_words.data[w + 1u]) {
+                renamed = cull_words.data[w + 2u] + item - first;
+                break;
+            }
+        }
+        stale = stale || renamed == 0xFFFFFFFFu;
+        cull_words.data[record + 2u] = renamed;
+    }
+    // What does not carry over: its partition chooses again (instance_cut_stale_src).
+    if (stale) cull_words.data[record] = VELK_CUT_STALE;
+}
+)";
+
+/**
+ * After a rename, makes each partition holding a record that did not carry over (kCutStale)
+ * choose again this frame: its table entry's chunk word no longer matches, so the decide pass
+ * chooses it from nothing, without taking over its old records' light. A work group per
+ * partition, over its records in the last store, which the decide pass then reads.
+ */
+inline constexpr string_view instance_cut_stale_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint cut_word;
+} pc;
+)" VELK_CUT_GLSL R"(
+shared uint s_stale;
+
+void main()
+{
+    uint cut = pc.cut_word;
+    uint index = gl_WorkGroupID.x;
+    if (index >= cull_words.data[cut + 19u]) return;
+    uint state = velk_cut_state(cut, index);
+    uint first = cull_words.data[state + 5u];
+    uint count = cull_words.data[state + 6u];
+    if (count == 0u) return;
+    if (gl_LocalInvocationIndex == 0u) s_stale = 0u;
+    barrier();
+    uint records = velk_cut_store(cut, false);
+    uint end = min(first + count, cull_words.data[cut + 16u]);
+    for (uint r = first + gl_LocalInvocationIndex; r < end; r += 64u) {
+        if (cull_words.data[records + r * 4u] == VELK_CUT_STALE) s_stale = 1u;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_stale != 0u) cull_words.data[state + 3u] = 0xFFFFFFFFu;
 }
 )";
 
@@ -2807,23 +3025,12 @@ void main()
  * Lays out the runs of draws by cluster and fills them, after a phase of culling.
  */
 template <class Command>
-inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, const vector<IBatch::Ptr>& batches,
-                                  const vector<InstanceCullInfo>& visuals, IGpuPipeline* runs_pipeline,
+inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, IGpuPipeline* runs_pipeline,
                                   IGpuPipeline* fill_pipeline, IGpuBuffer* arena_buffer, uint32_t together_word,
                                   uint32_t together_entries_word, bool second_phase)
 {
     const bool together = state.together_items != 0;
-    vector<InstanceCullInfo> cluster_draws;
-    for (const auto& batch : batches) {
-        InstanceCullInfo info{};
-        if (batch && batch->get_instance_cull(info) && info.cluster_count != 0 && !info.cull_together
-            && std::find_if(cluster_draws.begin(), cluster_draws.end(), [&](const InstanceCullInfo& other) {
-                   return other.cluster_entry_word == info.cluster_entry_word;
-               }) == cluster_draws.end()) {
-            cluster_draws.push_back(info);
-        }
-    }
-    if (cluster_draws.empty() && !together) {
+    if (!together) {
         return;
     }
     struct RunsPushC
@@ -2845,13 +3052,7 @@ inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, const v
         cmd.record_dispatch(dc);
     };
     const uint32_t phase = second_phase ? 1u : 0u;
-    if (together) {
-        record_runs({0u, together_entries_word, state.together_entries, together_word, phase},
-                    (state.together_entries + 63u) / 64u);
-    }
-    for (const auto& info : cluster_draws) {
-        record_runs({info.cluster_entry_word, kCullNoSlot, 1u, info.chosen_word, phase}, 1u);
-    }
+    record_runs({0u, together_entries_word, state.together_entries, together_word, phase}, (state.together_entries + 63u) / 64u);
     cmd.record_global_barrier();
     struct FillPushC
     {
@@ -2868,14 +3069,7 @@ inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, const v
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
         cmd.record_dispatch_indirect(dc, arena_buffer, uint64_t(pc.chosen_word + 1u) * sizeof(uint32_t));
     };
-    if (together) {
-        record_fill({together_word, state.together_chosen});
-    }
-    for (const auto& info : visuals) {
-        if (info.chosen_capacity != 0) {
-            record_fill({info.chosen_word, info.chosen_capacity});
-        }
-    }
+    record_fill({together_word, state.together_chosen});
     cmd.record_global_barrier();
 }
 
@@ -2897,6 +3091,33 @@ inline uint32_t instance_cut_word(const InstanceCullPass& state, const void* key
 inline uint32_t instance_quad_word(const InstanceCullPass& state)
 {
     return state.quads.valid() ? static_cast<uint32_t>(state.quads.offset() / sizeof(uint32_t)) : kCullNoSlot;
+}
+
+/// What the top tree over @p state's kept cuts holds, as a hash: its cut (the scene's objects',
+/// when @p plain_cut, over @p plain_count partitions), where that cut's items are, and the quad
+/// list. Its region is made again when this changes.
+inline uint64_t instance_ray_top_layout(const InstanceCullPass& state, bool plain_cut, uint32_t plain_count)
+{
+    uint64_t layout = 0xcbf29ce484222325ULL;
+    if (!plain_cut) {
+        return layout;
+    }
+    uint32_t cut = kCullNoSlot;
+    for (const auto& c : state.cuts) {
+        if (c.key == &kPlainCutKey) {
+            cut = static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t));
+        }
+    }
+    if (cut == kCullNoSlot) {
+        return layout;
+    }
+    const uint32_t together_word = state.together_items != 0 ? static_cast<uint32_t>(state.together.offset() / sizeof(uint32_t)) : 0u;
+    const uint32_t items_word = together_word + kCullChosenHeaderWords + state.together_chosen * kCullChosenRecordWords
+                              + state.together_entries;
+    for (uint32_t v : {cut, 0u, items_word, plain_count, state.items_move ? 1u : 0u, instance_quad_word(state)}) {
+        layout = (layout ^ v) * 0x100000001b3ULL;
+    }
+    return layout;
 }
 
 /// The word of @p state's records of the items drawn by their own pass (InstanceCullPass::together),
@@ -2956,6 +3177,28 @@ inline uint32_t instance_cut_node_capacity(const InstanceCullPass& state, const 
     return 0;
 }
 
+/// What an item of @p batch says for rays (kPlainItemWords 3 to 5): its draw's index in the draw
+/// data, its ray shape kind (a triangle mesh is tested as one; anything else as its instance's
+/// rect, unless its visual names an analytic shape of its own), and its mesh's ray data,
+/// kInvalidMeshStaticBase until the mesh has it.
+inline void batch_ray_words(IBatch& batch, FrameContext& ctx, uint32_t& draw, uint32_t& kind, uint32_t& mesh)
+{
+    draw = batch.draw_data_region_size() != 0 ? static_cast<uint32_t>(batch.draw_data_region_offset() / sizeof(DrawDataHeader))
+                                              : kCullNoSlot;
+    auto primitive_ptr = batch.primitive();
+    const bool triangles = primitive_ptr && primitive_ptr->get_topology() == MeshTopology::TriangleList
+                        && primitive_ptr->get_index_count() != 0;
+    kind = triangles ? kRayShapeMesh : kRayShapeRect;
+    if (auto* analytic = interface_cast<IAnalyticShape>(batch.shader_source().get())) {
+        const uint32_t registered = ctx.snippets ? ctx.snippets->register_intersect(analytic, *ctx.render_ctx) : 0u;
+        kind = registered != 0 ? registered : analytic->get_shape_kind();
+    }
+    mesh = kInvalidMeshStaticBase;
+    if (auto* primitive = kind == kRayShapeMesh ? interface_cast<IMeshPrimitiveInternal>(primitive_ptr.get()) : nullptr) {
+        mesh = primitive->ensure_rt_data(*ctx.resources);
+    }
+}
+
 /**
  * @brief Adds @p batches' GPU culling to @p graph, if any of them are culled. Runs
  *        before the passes that draw them. With @p whole_cut, all of each kept cut is drawn, in
@@ -2963,11 +3206,17 @@ inline uint32_t instance_cut_node_capacity(const InstanceCullPass& state, const 
  *        @p plain_count are the scene's plain partitions (IBvh::get_plain_partitions): plain
  *        objects get a kept cut over them; without, plain objects are chosen every frame.
  */
-inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
-                                    uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph,
-                                    uint32_t pyramid_word = kCullNoSlot, bool whole_cut = false,
-                                    uint32_t plain_table_word = kCullNoSlot, uint32_t plain_count = 0)
+/**
+ * Everything a view's culling allocates this frame, and the work on the CPU that decides it:
+ * called for every view before any view's passes are recorded (IRenderPath::reserve), since
+ * growing the culling arena replaces the buffer that recorded passes name.
+ * emit_instance_cull_pass then records what this worked out.
+ */
+inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::Ptr>* batches, FrameContext& ctx,
+                                  uint32_t plain_table_word = kCullNoSlot, uint32_t plain_count = 0)
 {
+    VELK_PERF_SCOPE("instance_cull.reserve");
+    state.reserved = false;
     if (!batches || !ctx.resources || !ctx.backend || !ctx.render_ctx) {
         return;
     }
@@ -2984,11 +3233,29 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         state.renames.clear();
         record = true;
     }
+    // An instanced visual with another number of slots than when its items were made: its
+    // items made again.
+    for (const auto& batch : *batches) {
+        InstanceCullInfo info{};
+        if (!batch || !batch->get_instance_cull(info) || !info.instanced) {
+            continue;
+        }
+        const auto known = std::find_if(state.instanced_slots.begin(), state.instanced_slots.end(),
+                                        [&](const auto& k) { return k.first == info.key; });
+        if (known == state.instanced_slots.end() || known->second != info.slot_table_count) {
+            if (!state.dirty) {
+                VELK_LOG(I, "instance culling: items made again, a visual's slots %u, were %u", info.slot_table_count,
+                         known == state.instanced_slots.end() ? 0u : known->second);
+            }
+            state.dirty = true;
+        }
+    }
     const bool batches_changed = state.dirty;
     // What the kept cuts' records named in the batches before they were made again.
     vector<InstanceCullPass::BatchTables> old_tables;
     vector<InstanceCullPass::ItemName> old_items;
     if (state.dirty) {
+        VELK_PERF_SCOPE("instance_cull.items");
         state.dirty = false;
         record = true;
         state.count_words.clear();
@@ -3022,31 +3289,17 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         uint64_t retest_records = 0;
         vector<const void*> counted;
         // A plain item for each instance of @p batch: its index, its slot, its table, its
-        // draw, what rays test it as and its mesh's ray data (kPlainItemWords), and its object
-        // id, the last word of its ElementInstance.
+        // draw, what rays test it as, its mesh's ray data and how far it can move
+        // (kPlainItemWords), and its object id, the last word of its ElementInstance.
         const auto add_items = [&](IBatch& batch, uint32_t instances_base, uint32_t slot_count, uint32_t table_word) {
             const array_view<const uint8_t> instances = batch.instance_data();
             const uint32_t stride = batch.instance_stride();
-            const uint32_t draw = batch.draw_data_region_size() != 0
-                                      ? static_cast<uint32_t>(batch.draw_data_region_offset() / sizeof(DrawDataHeader))
-                                      : kCullNoSlot;
-            // A triangle mesh is tested as one; anything else as its instance's rect, unless its
-            // visual names an analytic shape of its own.
-            auto primitive_ptr = batch.primitive();
-            const bool triangles = primitive_ptr && primitive_ptr->get_topology() == MeshTopology::TriangleList
-                                && primitive_ptr->get_index_count() != 0;
-            uint32_t kind = triangles ? kRayShapeMesh : kRayShapeRect;
-            if (auto* analytic = interface_cast<IAnalyticShape>(batch.shader_source().get())) {
-                const uint32_t registered = ctx.snippets ? ctx.snippets->register_intersect(analytic, *ctx.render_ctx) : 0u;
-                kind = registered != 0 ? registered : analytic->get_shape_kind();
-            }
-            uint32_t mesh = kInvalidMeshStaticBase;
-            if (auto* primitive = kind == kRayShapeMesh ? interface_cast<IMeshPrimitiveInternal>(primitive_ptr.get()) : nullptr) {
-                mesh = primitive->ensure_rt_data(*ctx.resources);
-                if (mesh == kInvalidMeshStaticBase && slot_count != 0) {
-                    state.pending_meshes.push_back(
-                        {primitive_ptr, static_cast<uint32_t>(items.size() / kPlainItemWords), slot_count});
-                }
+            uint32_t draw;
+            uint32_t kind;
+            uint32_t mesh;
+            batch_ray_words(batch, ctx, draw, kind, mesh);
+            if (kind == kRayShapeMesh && mesh == kInvalidMeshStaticBase && slot_count != 0) {
+                state.pending_meshes.push_back({batch.primitive(), static_cast<uint32_t>(items.size() / kPlainItemWords), slot_count});
             }
             for (uint32_t slot = 0; slot < slot_count; ++slot) {
                 items.push_back(instances_base + slot);
@@ -3055,15 +3308,27 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 items.push_back(draw);
                 items.push_back(kind);
                 items.push_back(mesh);
+                items.push_back(0u);
                 uint32_t object = kCullNoSlot;
                 if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
                     std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
                 }
                 item_objects.push_back(object);
                 // Drawn by its own pass, its mesh is no part of what its record names.
-                state.item_names.push_back({object, table_word != kCullNoSlot ? primitive_ptr.get() : nullptr, 0u, table_word});
+                state.item_names.push_back({object, table_word != kCullNoSlot ? batch.primitive().get() : nullptr, 0u, table_word});
             }
         };
+        // The instanced visuals, each once, whose items come after the plain ones: an item per
+        // slot, its object id the visual's base plus the slot.
+        struct InstancedVisual
+        {
+            const void* key;
+            uint32_t slots;
+            uint32_t object_base;
+            uint32_t table_word;
+            float displacement;
+        };
+        vector<InstancedVisual> instanced;
         for (const auto& batch : *batches) {
             InstanceCullInfo info{};
             if (!batch) {
@@ -3086,13 +3351,72 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 retest_records += uint64_t(info.slot_count) + info.chosen_capacity + info.cluster_capacity;
             }
             note_tables(info);
-            if (info.cull_together) {
+            if (info.instanced) {
+                // Its clusters go to the one chosen list and are laid out by their entry's draw;
+                // a mesh without clusters is drawn from its visible list by its count.
+                if (info.cluster_count != 0) {
+                    chosen += info.cluster_capacity;
+                    entries.push_back(info.cluster_entry_word);
+                } else if (std::find(state.count_words.begin(), state.count_words.end(), info.count_word)
+                           == state.count_words.end()) {
+                    state.count_words.push_back(info.count_word);
+                }
+                if (std::find_if(instanced.begin(), instanced.end(), [&](const InstancedVisual& v) { return v.key == info.key; })
+                    == instanced.end()) {
+                    instanced.push_back({info.key, info.slot_table_count, info.object_base, info.table_word, info.max_displacement});
+                }
+            } else if (info.cull_together) {
                 chosen += info.cluster_capacity;
                 entries.push_back(info.cluster_entry_word);
                 add_items(*batch, info.instances_base, info.slot_count, info.table_word);
             } else if (std::find(state.count_words.begin(), state.count_words.end(), info.count_word)
                        == state.count_words.end()) {
                 state.count_words.push_back(info.count_word);
+            }
+        }
+        // The instanced visuals' items, an item per slot after the plain items: instance_items_src
+        // writes them whole each frame, with their objects and next words, from the visuals'
+        // descriptors, so they are only counted here. The visuals keep their order, new ones
+        // after, and each one's block of items is renamed as one.
+        const uint32_t old_plain_items = state.instanced_first_item;
+        const vector<std::pair<const void*, uint32_t>> old_instanced = std::move(state.instanced_slots);
+        vector<std::pair<const void*, uint32_t>> instanced_slots;
+        for (const auto& [key, slots] : old_instanced) {
+            for (const InstancedVisual& v : instanced) {
+                if (v.key == key) instanced_slots.push_back({v.key, v.slots});
+            }
+        }
+        for (const InstancedVisual& v : instanced) {
+            const bool known = std::find_if(instanced_slots.begin(), instanced_slots.end(),
+                                            [&](const std::pair<const void*, uint32_t>& s) { return s.first == v.key; })
+                            != instanced_slots.end();
+            if (!known) instanced_slots.push_back({v.key, v.slots});
+        }
+        state.items_move = false;
+        uint32_t instanced_items = 0;
+        for (const InstancedVisual& v : instanced) {
+            state.items_move = state.items_move || v.displacement > 0.f;
+            instanced_items += v.slots;
+        }
+        state.instanced_slots = std::move(instanced_slots);
+        state.instanced_first_item = static_cast<uint32_t>(items.size() / kPlainItemWords);
+        state.instanced_items = instanced_items;
+        // Each visual still here: its old first item, the slots that carry over, its new first.
+        vector<uint32_t> blocks;
+        {
+            uint32_t old_first = old_plain_items;
+            for (const auto& [key, old_slots] : old_instanced) {
+                uint32_t new_first = state.instanced_first_item;
+                for (const auto& [new_key, new_slots] : state.instanced_slots) {
+                    if (new_key == key) {
+                        blocks.push_back(old_first);
+                        blocks.push_back(std::min(old_slots, new_slots));
+                        blocks.push_back(new_first);
+                        break;
+                    }
+                    new_first += new_slots;
+                }
+                old_first += old_slots;
             }
         }
         // Which of its object's items with that mesh each item is.
@@ -3134,7 +3458,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
             return true;
         };
-        const auto add_rename = [&](const void* key, vector<std::pair<uint32_t, uint32_t>>& pairs, vector<uint32_t> item_map) {
+        const auto add_rename = [&](const void* key, vector<std::pair<uint32_t, uint32_t>>& pairs, vector<uint32_t> item_map,
+                                    vector<uint32_t> blocks) {
             std::sort(pairs.begin(), pairs.end());
             InstanceCullPass::Rename rename;
             rename.key = key;
@@ -3143,6 +3468,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 rename.pairs.push_back(to);
             }
             rename.items = std::move(item_map);
+            rename.blocks = std::move(blocks);
             state.renames.push_back(std::move(rename));
         };
         for (const auto& from : old_tables) {
@@ -3150,12 +3476,15 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             for (const auto& to : state.batch_tables) {
                 vector<std::pair<uint32_t, uint32_t>> pairs;
                 if (to.key == from.key && pair_tables(from, to, pairs)) {
-                    add_rename(from.key, pairs, {});
+                    add_rename(from.key, pairs, {}, {});
                     break;
                 }
             }
         }
-        if (!old_items.empty()) {
+        // The plain items by name; the instanced visuals' items, while those are as they were, as
+        // a block after the plain items, moved by however many more or fewer plain items there
+        // are. Instanced visuals that changed make the cut again.
+        if (!old_items.empty() || !old_instanced.empty()) {
             // The new items by object, mesh and which of those, to look the old ones up in.
             vector<uint32_t> by_name(state.item_names.size());
             for (uint32_t i = 0; i < by_name.size(); ++i) by_name[i] = i;
@@ -3166,15 +3495,17 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 return a.ordinal < b.ordinal;
             };
             std::sort(by_name.begin(), by_name.end(), [&](uint32_t a, uint32_t b) { return less(names[a], names[b]); });
+            // What carries over is named again; what does not (an item gone, a table whose entries
+            // changed) is left out, and the partitions whose records name it choose again
+            // (instance_cut_stale_src).
             vector<uint32_t> item_map(old_items.size(), kCullNoSlot);
             vector<std::pair<uint32_t, uint32_t>> table_pairs;
-            bool whole = true;
-            for (uint32_t i = 0; i < old_items.size() && whole; ++i) {
+            vector<uint32_t> unpaired;  ///< Old tables that went to more than one new table.
+            for (uint32_t i = 0; i < old_items.size(); ++i) {
                 const auto& name = old_items[i];
                 const auto* at = std::lower_bound(by_name.begin(), by_name.end(), name,
                                                   [&](uint32_t j, const InstanceCullPass::ItemName& n) { return less(names[j], n); });
-                whole = name.object != kCullNoSlot && at != by_name.end() && !less(name, names[*at]);
-                if (!whole) break;
+                if (name.object == kCullNoSlot || at == by_name.end() || less(name, names[*at])) continue;
                 item_map[i] = *at;
                 if (name.table_word == kCullNoSlot) continue;
                 const uint32_t to = names[*at].table_word;
@@ -3182,26 +3513,36 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                                                  [&](const std::pair<uint32_t, uint32_t>& p) { return p.first == name.table_word; });
                 if (known == table_pairs.end()) {
                     table_pairs.push_back({name.table_word, to});
-                } else {
-                    whole = known->second == to;
+                } else if (known->second != to) {
+                    unpaired.push_back(name.table_word);
                 }
             }
             vector<std::pair<uint32_t, uint32_t>> pairs;
-            for (size_t k = 0; k < table_pairs.size() && whole; ++k) {
-                const auto* from = find_tables(old_tables, table_pairs[k].first);
-                const auto* to = find_tables(state.batch_tables, table_pairs[k].second);
-                whole = from && to && pair_tables(*from, *to, pairs);
+            for (const auto& [from_word, to_word] : table_pairs) {
+                if (std::find(unpaired.begin(), unpaired.end(), from_word) != unpaired.end()) continue;
+                const auto* from = find_tables(old_tables, from_word);
+                const auto* to = find_tables(state.batch_tables, to_word);
+                if (from && to) pair_tables(*from, *to, pairs);
             }
-            if (whole) {
-                add_rename(&kPlainCutKey, pairs, std::move(item_map));
+            // The instanced visuals' tables, which the block's items name.
+            for (const auto& [key, slots] : state.instanced_slots) {
+                for (const auto& from : old_tables) {
+                    if (from.key != key) continue;
+                    const auto* to = std::find_if(state.batch_tables.begin(), state.batch_tables.end(),
+                                                  [&](const InstanceCullPass::BatchTables& t) { return t.key == key; });
+                    if (to != state.batch_tables.end()) pair_tables(from, *to, pairs);
+                }
             }
+            add_rename(&kPlainCutKey, pairs, std::move(item_map), std::move(blocks));
         }
 
-        state.together_items = static_cast<uint32_t>(items.size() / kPlainItemWords);
+        const uint32_t plain_items = static_cast<uint32_t>(items.size() / kPlainItemWords);
+        state.together_items = plain_items + state.instanced_items;
         state.together_entries = static_cast<uint32_t>(entries.size());
         state.together_chosen = static_cast<uint32_t>(chosen);
         state.together = {};
-        // Which items each object has, by the slot of its id: the first, then each one's next.
+        // Which plain items each object has, by the slot of its id: the first, then each one's
+        // next. An instanced object is found through its visual's descriptor instead.
         uint32_t object_slots = 0;
         for (uint32_t object : item_objects) {
             if (object != kCullNoSlot) {
@@ -3218,17 +3559,24 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
         }
         state.together_object_slots = object_slots;
-        if (!items.empty()) {
+        if (state.together_items != 0) {
             const uint64_t list_words = kCullChosenHeaderWords + chosen * kCullChosenRecordWords;
-            // The item records last, written every frame.
-            const uint64_t words = list_words + entries.size() + items.size() + item_objects.size() * 3u + heads.size();
+            const uint64_t all = state.together_items;
+            // Entries, items, their objects and next words, the heads, then the item records,
+            // written every frame. The instanced visuals' parts are written by instance_items_src.
+            const uint64_t words = list_words + entries.size() + all * (kPlainItemWords + 3u) + heads.size();
             state.together = arena->alloc(words * sizeof(uint32_t));
             if (state.together.valid()) {
-                uint64_t at = state.together.offset() + list_words * sizeof(uint32_t);
-                for (const vector<uint32_t>* part : {&entries, &items, &item_objects, &nexts, &heads}) {
-                    arena->write_at(at, part->data(), part->size() * sizeof(uint32_t));
-                    at += part->size() * sizeof(uint32_t);
-                }
+                const uint64_t entries_at = state.together.offset() + list_words * sizeof(uint32_t);
+                const uint64_t items_at = entries_at + entries.size() * sizeof(uint32_t);
+                const uint64_t objects_at = items_at + all * kPlainItemWords * sizeof(uint32_t);
+                const uint64_t nexts_at = objects_at + all * sizeof(uint32_t);
+                const uint64_t heads_at = nexts_at + all * sizeof(uint32_t);
+                arena->write_at(entries_at, entries.data(), entries.size() * sizeof(uint32_t));
+                arena->write_at(items_at, items.data(), items.size() * sizeof(uint32_t));
+                arena->write_at(objects_at, item_objects.data(), item_objects.size() * sizeof(uint32_t));
+                arena->write_at(nexts_at, nexts.data(), nexts.size() * sizeof(uint32_t));
+                arena->write_at(heads_at, heads.data(), heads.size() * sizeof(uint32_t));
             } else {
                 state.together_items = 0;
                 state.together_entries = 0;
@@ -3261,29 +3609,74 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             state.pending_meshes.erase(state.pending_meshes.begin() + static_cast<ptrdiff_t>(i));
         }
     }
+    // The instanced visuals' descriptors, which instance_items_src reads to write their items:
+    // made each frame from their batches, since a slot table moves as its visual grows and a
+    // mesh's ray data can come late, and written when they change.
+    {
+        VELK_PERF_SCOPE("instance_cull.descriptors");
+        vector<uint32_t> descriptors;
+        uint32_t first = state.instanced_first_item;
+        for (const auto& [key, slots] : state.instanced_slots) {
+            const size_t header = descriptors.size();
+            descriptors.resize(header + kItemDescriptorHeaderWords, 0u);
+            descriptors[header] = first;
+            descriptors[header + 1u] = slots;
+            uint32_t meshes = 0;
+            for (const auto& batch : *batches) {
+                InstanceCullInfo info{};
+                if (!batch || !batch->get_instance_cull(info) || !info.instanced || info.key != key) {
+                    continue;
+                }
+                descriptors[header + 2u] = info.instances_base;
+                descriptors[header + 3u] = info.slot_table_count >= slots ? info.slot_table_word : 0u;
+                descriptors[header + 5u] = info.table_word;
+                std::memcpy(&descriptors[header + 6u], &info.max_displacement, sizeof(uint32_t));
+                descriptors[header + 7u] = info.object_base != 0u ? info.object_base : kCullNoSlot;
+                if (info.mesh_index >= meshes) {
+                    descriptors.resize(header + kItemDescriptorHeaderWords + size_t(info.mesh_index + 1u) * kItemMeshWords, 0u);
+                    for (uint32_t m = meshes; m <= info.mesh_index; ++m) {
+                        uint32_t* words = descriptors.data() + header + kItemDescriptorHeaderWords + size_t(m) * kItemMeshWords;
+                        words[0] = kCullNoSlot;
+                        words[1] = kRayShapeMesh;
+                        words[2] = kInvalidMeshStaticBase;
+                    }
+                    meshes = info.mesh_index + 1u;
+                }
+                uint32_t* words = descriptors.data() + header + kItemDescriptorHeaderWords + size_t(info.mesh_index) * kItemMeshWords;
+                batch_ray_words(*batch, ctx, words[0], words[1], words[2]);
+            }
+            descriptors[header + 4u] = meshes;
+            first += slots;
+        }
+        if (descriptors != state.item_descriptors) {
+            const uint64_t bytes = descriptors.size() * sizeof(uint32_t);
+            const bool fresh = !state.item_descriptor_region.valid() || state.item_descriptor_region.size() < bytes;
+            if (fresh && bytes != 0) {
+                state.item_descriptor_region = arena->alloc(bytes * 2u);
+                record = true;
+            }
+            if (state.item_descriptor_region.valid() && bytes != 0) {
+                if (fresh) {
+                    arena->write_at(state.item_descriptor_region.offset(), descriptors.data(), bytes);
+                } else {
+                    arena->update_at(state.item_descriptor_region.offset(), descriptors.data(), bytes);
+                }
+            }
+            record = record || state.item_descriptor_count != state.instanced_slots.size();
+            state.item_descriptor_count = static_cast<uint32_t>(state.instanced_slots.size());
+            state.item_descriptors = std::move(descriptors);
+        }
+    }
+
     if (state.count_words.empty() && state.together_items == 0) {
         return;
     }
 
-    // The BVH replaces a visual's tables when they fill up. In no order, since batches made
-    // again come in another.
-    vector<std::pair<uint32_t, uint32_t>> table_list;
-    for (const auto& batch : *batches) {
-        InstanceCullInfo info{};
-        if (batch && batch->get_instance_cull(info) && info.partition_count != 0) {
-            table_list.push_back({info.partition_table_word, info.partition_count});
-        }
-    }
-    std::sort(table_list.begin(), table_list.end());
-    table_list.erase(std::unique(table_list.begin(), table_list.end()), table_list.end());
+    // The BVH replaces the scene's table when it fills up.
     uint64_t partition_tables = 0;
-    for (const auto& [word, count] : table_list) {
-        partition_tables = partition_tables * 31u + word;
-        partition_tables = partition_tables * 31u + count;
-    }
     partition_tables = partition_tables * 31u + plain_table_word;
     partition_tables = partition_tables * 31u + plain_count;
-    // Plain objects get a kept cut when the scene has their partitions.
+    // The scene's objects, plain and instanced, get a kept cut when the scene has partitions.
     const bool plain_cut = plain_table_word != kCullNoSlot && plain_count != 0 && state.together_items != 0;
     const bool tables_changed = partition_tables != state.partition_tables;
     record = record || tables_changed;
@@ -3303,29 +3696,22 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         }
     }
 
-    // Each partitioned visual gets a kept cut for this view, every partition choosing on its
-    // first frame. A visual's is made again when its partitions may have been laid out again,
-    // so that none keeps records meant for another, or when its stores need room; the rest
-    // carry over. (`dirty` also follows the camera, so it alone says nothing about partitions.)
+    // The scene's partitions get a kept cut for this view, every partition choosing on its first
+    // frame. It is made again when the partitions may have been laid out again, so that none
+    // keeps records meant for another, or when its stores need room; else it carries over.
+    // (`dirty` also follows the camera, so it alone says nothing about partitions.)
     if (batches_changed || tables_changed || !state.cut_growth.empty()) {
         record = true;
-        // What gets a cut: each partitioned visual, by its slots, and the plain objects, by
-        // their items, whose indices change with the batches.
+        // What gets a cut: the scene's objects, by their items, whose indices change with the
+        // batches.
         struct Wants
         {
             const void* key;
             uint32_t partitions;
-            uint32_t members;  ///< Slots or objects, which its partitions' chunks hold.
+            uint32_t members;  ///< Objects, which its partitions' chunks hold.
             bool by_item;
         };
         vector<Wants> wants;
-        for (const auto& batch : *batches) {
-            InstanceCullInfo info{};
-            if (batch && batch->get_instance_cull(info) && !info.cull_together && info.partition_count != 0
-                && std::find_if(wants.begin(), wants.end(), [&](const Wants& w) { return w.key == info.key; }) == wants.end()) {
-                wants.push_back({info.key, info.partition_count, info.slot_count, false});
-            }
-        }
         if (plain_cut) {
             wants.push_back({&kPlainCutKey, plain_count, state.together_items, true});
         }
@@ -3437,7 +3823,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         uint64_t rename_words = 0;
         for (auto& rename : state.renames) {
             if (std::find(renamed_keys.begin(), renamed_keys.end(), rename.key) != renamed_keys.end()) {
-                rename_words += rename.pairs.size() + rename.items.size();
+                rename_words += rename.pairs.size() + rename.items.size() + rename.blocks.size();
                 renames.push_back(std::move(rename));
             }
         }
@@ -3454,6 +3840,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             rename.items_word = static_cast<uint32_t>(at);
             arena->write_at(at * sizeof(uint32_t), rename.items.data(), rename.items.size() * sizeof(uint32_t));
             at += rename.items.size();
+            rename.blocks_word = static_cast<uint32_t>(at);
+            arena->write_at(at * sizeof(uint32_t), rename.blocks.data(), rename.blocks.size() * sizeof(uint32_t));
+            at += rename.blocks.size();
         }
         state.renamed = !state.renames.empty();
 
@@ -3642,11 +4031,65 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
         }
     }
-    const uint32_t light_pool_word = state.light_pool.segments.empty() ? kCullNoSlot : state.light_pool.word();
     record = record || state.light_pool.pages() != state.light_pool.recorded_pages;
     state.light_pool.recorded_pages = state.light_pool.pages();
 
-    // After everything allocated above, which can grow the arena.
+    // The top tree over the kept cuts rays walk: when what it holds changes, a new region with
+    // room for its header, its cuts, its leaves and its nodes, which emit_instance_cull_pass
+    // writes. A new one, since earlier frames may still read the old.
+    const uint64_t ray_top_layout = instance_ray_top_layout(state, plain_cut, plain_count);
+    if (!plain_cut) {
+        state.ray_top = {};
+        state.ray_top_layout = 0;
+        state.ray_top_fresh = false;
+    } else if (!state.ray_top.valid() || ray_top_layout != state.ray_top_layout) {
+        const uint32_t cut_count = plain_cut ? 1u : 0u;
+        const uint32_t leaves = plain_cut ? plain_count : 0u;
+        const uint64_t words = uint64_t(kRayTopHeaderWords) + uint64_t(cut_count) * kRayTopCutWords + uint64_t(leaves) * 2u
+                             + uint64_t(top_tree_nodes(leaves)) * kCutNodeWords;
+        state.ray_top = arena->alloc(words * sizeof(uint32_t));
+        state.ray_top_layout = ray_top_layout;
+        state.ray_top_fresh = state.ray_top.valid();
+        // The passes name its word.
+        record = true;
+    }
+
+    state.reserved = true;
+    state.reserved_record = record;
+    state.reserved_plain_cut = plain_cut;
+    state.reserved_light_pool_word = state.light_pool.segments.empty() ? kCullNoSlot : state.light_pool.word();
+}
+
+/**
+ * Records a view's culling as reserve_instance_cull worked it out this frame; nothing when it
+ * did not. Allocates nothing, so the culling arena's buffer it names stays the frame's.
+ */
+inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch::Ptr>* batches,
+                                    uint32_t view_globals_base, FrameContext& ctx, IRenderGraph& graph,
+                                    uint32_t pyramid_word = kCullNoSlot, bool whole_cut = false,
+                                    uint32_t plain_table_word = kCullNoSlot, uint32_t plain_count = 0)
+{
+    VELK_PERF_SCOPE("instance_cull.emit");
+    if (!state.reserved || !batches || !ctx.resources || !ctx.backend || !ctx.render_ctx) {
+        return;
+    }
+    state.reserved = false;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) {
+        return;
+    }
+    bool record = state.reserved_record;
+    const bool plain_cut = state.reserved_plain_cut;
+    const uint32_t light_pool_word = state.reserved_light_pool_word;
+    const auto cut_word = [&](const void* key) {
+        for (const auto& c : state.cuts) {
+            if (c.key == key) {
+                return static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t));
+            }
+        }
+        return kCullNoSlot;
+    };
+
     IGpuBuffer* arena_buffer = arena->buffer();
     if (!arena_buffer) {
         return;
@@ -3706,9 +4149,12 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
         auto sweep_pipeline = pipeline_for(light_sweep_src, 0x4c69'6768'7453'7770ULL);
         auto rename_pipeline = pipeline_for(instance_cut_rename_src, 0x4375'7452'656e'616dULL);
+        auto items_pipeline = pipeline_for(instance_items_src, 0x4375'6c6c'4974'656dULL);
+        auto stale_pipeline = pipeline_for(instance_cut_stale_src, 0x4375'7453'7461'6c65ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && rename_pipeline;
+                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && rename_pipeline
+                                 && items_pipeline && stale_pipeline;
         IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
         for (auto& stage_cmd : stage_cmds) {
             stage_cmd = have_pipelines ? ctx.backend->create_command_buffer() : nullptr;
@@ -3735,17 +4181,6 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         };
         begin_stage();
 
-        vector<const void*> done;
-        vector<InstanceCullInfo> visuals;
-        for (const auto& batch : *batches) {
-            InstanceCullInfo info{};
-            if (batch && batch->get_instance_cull(info) && !info.cull_together
-                && std::find(done.begin(), done.end(), info.key) == done.end()) {
-                done.push_back(info.key);
-                visuals.push_back(info);
-            }
-        }
-
         const bool together = state.together_items != 0;
         const auto together_word = together ? static_cast<uint32_t>(state.together.offset() / sizeof(uint32_t)) : 0u;
         const uint32_t together_entries_word =
@@ -3767,11 +4202,6 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         // instance_tiny_args_src writes it again.
         if (state.tiny_word != kCullNoSlot) {
             cmd->record_clear_buffer(arena_buffer, uint64_t(state.tiny_word) * sizeof(uint32_t), sizeof(uint32_t));
-        }
-        for (const auto& info : visuals) {
-            if (info.chosen_capacity != 0) {
-                cmd->record_clear_buffer(arena_buffer, uint64_t(info.chosen_word) * sizeof(uint32_t), sizeof(uint32_t));
-            }
         }
         // The quad list's instance count.
         const uint32_t quads_word = instance_quad_word(state);
@@ -3797,7 +4227,17 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
         };
 
-        // Every kept cut: each partitioned visual's, by slot, and the plain objects', by item.
+        // The instanced visuals' items, from their slot tables, before anything reads them.
+        if (together && state.instanced_items != 0 && state.item_descriptor_region.valid()) {
+            const uint32_t objects_word = together_items_word + state.together_items * kPlainItemWords;
+            const uint32_t items_pc[7] = {static_cast<uint32_t>(state.item_descriptor_region.offset() / sizeof(uint32_t)),
+                                          state.item_descriptor_count, together_items_word, state.instanced_first_item,
+                                          state.instanced_items, objects_word, objects_word + state.together_items};
+            dispatch(items_pipeline.get(), items_pc, sizeof(items_pc), (state.instanced_items + 63u) / 64u);
+            cmd->record_global_barrier();
+        }
+
+        // The kept cut: the scene's objects', by item.
         struct CutJob
         {
             uint32_t cut;
@@ -3809,21 +4249,13 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t table_word;
             uint32_t chosen_word;
             uint32_t chosen_capacity;
-            uint32_t items_word;  ///< The plain items, for the plain objects' cut, else none.
-            float pad;            ///< What its tree's boxes grow by: see instance_cut_tree_src.
+            uint32_t items_word;  ///< The items.
+            float pad;            ///< What its tree's boxes grow by besides each item's own: see instance_cut_tree_src.
         };
         const uint32_t together_objects_word = together_items_word + state.together_items * kPlainItemWords;
         const uint32_t together_next_word = together_objects_word + state.together_items;
         const uint32_t together_head_word = together_next_word + state.together_items;
         vector<CutJob> jobs;
-        for (const auto& info : visuals) {
-            const uint32_t cut = info.partition_count != 0 ? cut_word(info.key) : kCullNoSlot;
-            if (cut != kCullNoSlot) {
-                jobs.push_back({cut, info.partition_table_word, info.partition_count, info.max_distance, info.instances_base,
-                                info.slot_count, info.table_word, info.chosen_word, info.chosen_capacity, kCullNoSlot,
-                                info.max_displacement * 2.f});
-            }
-        }
         const uint32_t plain_cut_word = plain_cut ? cut_word(&kPlainCutKey) : kCullNoSlot;
         if (plain_cut_word != kCullNoSlot) {
             jobs.push_back({plain_cut_word, plain_table_word, plain_count, 0.f, 0u, 0u, 0u, together_word, state.together_chosen,
@@ -3839,10 +4271,20 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             for (const auto& rename : state.renames) {
                 for (const auto& c : state.cuts) {
                     if (c.key != rename.key) continue;
-                    const uint32_t pc[5] = {static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)), rename.pairs_word,
+                    const uint32_t pc[7] = {static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)), rename.pairs_word,
                                             static_cast<uint32_t>(rename.pairs.size() / 2u), rename.items_word,
-                                            static_cast<uint32_t>(rename.items.size())};
+                                            static_cast<uint32_t>(rename.items.size()), rename.blocks_word,
+                                            static_cast<uint32_t>(rename.blocks.size() / 3u)};
                     dispatch(rename_pipeline.get(), pc, sizeof(pc), (c.capacity + 63u) / 64u);
+                }
+            }
+            cmd->record_global_barrier();
+            // Partitions with records that did not carry over choose again.
+            for (const auto& rename : state.renames) {
+                for (const auto& c : state.cuts) {
+                    if (c.key != rename.key || c.partitions == 0) continue;
+                    const uint32_t cut_pc = static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t));
+                    dispatch(stale_pipeline.get(), &cut_pc, sizeof(cut_pc), c.partitions);
                 }
             }
             cmd->record_global_barrier();
@@ -3883,13 +4325,19 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 uint32_t partition_table;
                 float quad_pixels;
                 float light_pixels;
+                uint32_t descriptors_word;
+                uint32_t descriptor_count;
             };
             const auto choose = [&](const CutJob& job, uint32_t write) {
                 const uint32_t partition_table = job.partition_table;
                 const ChoosePushC pc{job.cut, job.instances_base, job.slot_count, job.table_word, view_globals_base,
                                      kLodMaxErrorPixels, write, job.items_word, together_objects_word, together_next_word,
                                      together_head_word, state.together_object_slots, partition_table, kQuadPixels,
-                                     kLodMaxErrorPixels * kLightPixels / kLodElementPixels};
+                                     kLodMaxErrorPixels * kLightPixels / kLodElementPixels,
+                                     state.item_descriptor_region.valid()
+                                         ? static_cast<uint32_t>(state.item_descriptor_region.offset() / sizeof(uint32_t))
+                                         : 0u,
+                                     state.item_descriptor_region.valid() ? state.item_descriptor_count : 0u};
                 dispatch(choose_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + 4u);
             };
             for (const CutJob& job : jobs) {
@@ -3923,18 +4371,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             }
             cmd->record_global_barrier();
 
-            // And the top tree over them all, its cuts and leaves written when they change.
-            uint64_t layout = 0xcbf29ce484222325ULL;
+            // And the top tree over them all, its cuts and leaves written into the region
+            // reserve_instance_cull made when they changed (instance_ray_top_layout).
             uint32_t leaves = 0;
             for (const CutJob& job : jobs) {
-                for (uint32_t v : {job.cut, job.instances_base, job.items_word, job.partition_count,
-                                   job.pad > 0.f ? 1u : 0u, quads_word}) {
-                    layout = (layout ^ v) * 0x100000001b3ULL;
-                }
                 leaves += job.partition_count;
             }
-            if (layout != state.ray_top_layout || !state.ray_top.valid()) {
-                state.ray_top_layout = layout;
+            if (state.ray_top.valid() && state.ray_top_fresh) {
+                state.ray_top_fresh = false;
                 const auto cut_count = static_cast<uint32_t>(jobs.size());
                 const uint32_t node_count = top_tree_nodes(leaves);
                 vector<uint32_t> words;
@@ -3952,7 +4396,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                     cut[2] = job.items_word;
                     cut[3] = job.partition_count;
                     cut[4] = leaf;
-                    cut[5] = job.pad > 0.f ? 1u : 0u;
+                    cut[5] = state.items_move ? 1u : 0u;
                     cut[6] = quads_word;
                     for (uint32_t p = 0; p < job.partition_count; ++p, ++leaf) {
                         uint32_t* at = words.data() + kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaf) * 2u;
@@ -3960,10 +4404,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                         at[1] = p;
                     }
                 }
-                state.ray_top = arena->alloc((words.size() + size_t(node_count) * kCutNodeWords) * sizeof(uint32_t));
-                if (state.ray_top.valid()) {
-                    arena->write_at(state.ray_top.offset(), words.data(), words.size() * sizeof(uint32_t));
-                }
+                arena->write_at(state.ray_top.offset(), words.data(), words.size() * sizeof(uint32_t));
                 state.ray_top_cuts.clear();
                 for (const CutJob& job : jobs) state.ray_top_cuts.push_back(job.cut);
             }
@@ -4054,22 +4495,11 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                            state.tiny_word, state.tiny_capacity, state.tiny_pixels};
             dispatch(pipeline.get(), &pc, sizeof(pc), (state.together_items + 63u) / 64u);
         }
-        // Visuals without a kept cut: every slot, every frame.
-        for (const auto& info : visuals) {
-            if (info.partition_count != 0 && cut_word(info.key) != kCullNoSlot) {
-                continue;
-            }
-            const PushC pc{info.instances_base, info.slot_count, info.table_word, view_globals_base, info.max_distance,
-                           kLodMaxErrorPixels, kCullNoSlot, info.chosen_word, info.chosen_capacity,
-                           pyramid_word, retest_word, state.retest_capacity,
-                           state.tiny_word, state.tiny_capacity, state.tiny_pixels};
-            dispatch(pipeline.get(), &pc, sizeof(pc), (info.slot_count + 63u) / 64u);
-        }
         cmd->record_global_barrier();
 
         // Draws by cluster: lay out each one's runs, then fill them.
-        record_cluster_layout(*cmd, state, *batches, visuals, runs_pipeline.get(), fill_pipeline.get(), arena_buffer,
-                              together_word, together_entries_word, false);
+        record_cluster_layout(*cmd, state, runs_pipeline.get(), fill_pipeline.get(), arena_buffer, together_word,
+                              together_entries_word, false);
 
         // Each other batch's indirect args take the count of its list.
         constexpr uint64_t kInstanceCountOffset = BatchBufferLayout::kArgsOffset + sizeof(uint32_t);
@@ -4106,6 +4536,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(mark_pipeline));
         rec.held.push_back(std::move(sweep_pipeline));
         rec.held.push_back(std::move(rename_pipeline));
+        rec.held.push_back(std::move(items_pipeline));
+        rec.held.push_back(std::move(stale_pipeline));
     };
     if (record) record_all();
     const char* const* names = state.chosen_by_other ? kCullOtherStageNames : kCullStageNames;
@@ -4147,16 +4579,6 @@ inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBat
             return;
         }
 
-        vector<const void*> done;
-        vector<InstanceCullInfo> visuals;
-        for (const auto& batch : *batches) {
-            InstanceCullInfo info{};
-            if (batch && batch->get_instance_cull(info) && !info.cull_together
-                && std::find(done.begin(), done.end(), info.key) == done.end()) {
-                done.push_back(info.key);
-                visuals.push_back(info);
-            }
-        }
         const bool together = state.together_items != 0;
         const auto together_word = together ? static_cast<uint32_t>(state.together.offset() / sizeof(uint32_t)) : 0u;
         const uint32_t together_entries_word =
@@ -4167,11 +4589,6 @@ inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBat
         cmd->record_global_barrier();
         if (together) {
             cmd->record_clear_buffer(arena_buffer, uint64_t(together_word) * sizeof(uint32_t), sizeof(uint32_t));
-        }
-        for (const auto& info : visuals) {
-            if (info.chosen_capacity != 0) {
-                cmd->record_clear_buffer(arena_buffer, uint64_t(info.chosen_word) * sizeof(uint32_t), sizeof(uint32_t));
-            }
         }
         cmd->record_global_barrier();
 
@@ -4198,8 +4615,8 @@ inline void emit_instance_retest_pass(InstanceCullPass& state, const vector<IBat
         cmd->record_dispatch(dc);
         cmd->record_global_barrier();
 
-        record_cluster_layout(*cmd, state, *batches, visuals, runs_pipeline.get(), fill_pipeline.get(), arena_buffer,
-                              together_word, together_entries_word, true);
+        record_cluster_layout(*cmd, state, runs_pipeline.get(), fill_pipeline.get(), arena_buffer, together_word,
+                              together_entries_word, true);
 
         // A plain instanced draw continues its list where the first phase stopped.
         for (const auto& batch : *batches) {

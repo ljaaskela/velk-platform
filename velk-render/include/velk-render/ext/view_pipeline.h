@@ -11,7 +11,7 @@ namespace velk::ext {
  * @brief CRTP base providing empty default impls for `IViewPipeline` hooks.
  *
  * Use when a pipeline implementation has no per-view state to release
- * and wants to inherit `needs() = {}`, `on_view_removed = {}`, and
+ * and wants to inherit `needs() = {}`, `reserve = {}`, `on_view_removed = {}`, and
  * `shutdown = {}` without writing the empty bodies. `emit()` stays
  * pure — every pipeline must implement it.
  *
@@ -26,6 +26,11 @@ public:
     ::velk::IRenderPath::Needs needs(const ::velk::FrameContext& /*ctx*/) const override
     {
         return {};
+    }
+
+    void reserve(::velk::IViewEntry& /*view*/, const ::velk::RenderView& /*render_view*/,
+                 ::velk::FrameContext& /*ctx*/) override
+    {
     }
 
     void on_view_removed(::velk::IViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}

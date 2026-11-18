@@ -61,6 +61,22 @@ IGpuPipeline::Ptr RtPath::ensure_pipeline(FrameContext& ctx)
     return ctx.render_ctx->pipelines().compile_compute(string_view(src), key);
 }
 
+void RtPath::reserve(IViewEntry& entry, const RenderView& render_view, FrameContext& ctx)
+{
+    if (!ctx.backend || !ctx.render_ctx || !ctx.frame_buffer || !ctx.resources) {
+        return;
+    }
+    if (render_view.width <= 0 || render_view.height <= 0) {
+        return;
+    }
+    auto [it, inserted] = view_states_.try_emplace(&entry);
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
+    reserve_instance_cull(it->second.instance_cull, render_view.batches, ctx, render_view.bvh.plain_partitions,
+                          render_view.bvh.plain_partition_count);
+}
+
 void RtPath::build_passes(IViewEntry& entry,
                              const RenderView& render_view,
                              IRenderTarget::Ptr color_target,

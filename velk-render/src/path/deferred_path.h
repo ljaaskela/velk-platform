@@ -51,6 +51,8 @@ public:
         return n;
     }
 
+    void reserve(IViewEntry& view, const RenderView& render_view, FrameContext& ctx) override;
+
     void build_passes(IViewEntry& view,
                       const RenderView& render_view,
                       IRenderTarget::Ptr color_target,
@@ -117,8 +119,7 @@ public:
         uint32_t light_change_count = 0;
         uint32_t light_change_all = 0;
         uint64_t light_change_log_frame = 0;
-        uint32_t light_claim_recorded[5] = {};  ///< What the light claim pass was recorded with.
-        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
+        uint32_t light_claim_recorded[6] = {};  ///< What the light claim pass was recorded with.        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
         /// how many probes each holds. See light_probes_main_src.
         ArenaRegion light_probes[2];
         uint32_t light_probe_count = 0;
@@ -204,13 +205,14 @@ private:
     /// the caller must keep alive (the lighting pass holds it).
     IGpuPipeline::Ptr ensure_pipeline(FrameContext& ctx, bool with_area_lights);
 
-    /// Allocates the screen probes' words and the render tests' in the culling arena. Call
-    /// before recording anything that names the culling arena.
-    void ensure_arena_words(ViewState& vs, FrameContext& ctx);
+    /// Allocates the screen probes' words, the pixel words, compute raster's list and the render
+    /// tests' in the culling arena, for a frame of @p size. From reserve.
+    void ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 size);
     /// Builds the grid of lights by where they reach and writes it to the culling arena,
-    /// growing its region as needed. Call before recording anything that names the culling
-    /// arena. See VELK_LIGHT_GRID_GLSL.
+    /// growing its region as needed. From reserve. See VELK_LIGHT_GRID_GLSL.
     void build_light_grid(ViewState& vs, const RenderView& render_view, FrameContext& ctx);
+    /// The depth pyramid's region in the culling arena, for a frame of @p size. From reserve.
+    void ensure_depth_pyramid(ViewState& vs, FrameContext& ctx, uvec2 size);
 
     IRenderTextureGroup* ensure_gbuffer(ViewState& vs, int width, int height,
                                         FrameContext& ctx, IRenderGraph& graph);

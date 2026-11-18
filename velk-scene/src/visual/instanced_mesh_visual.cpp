@@ -281,12 +281,13 @@ bool InstancedMeshVisual::reserve_instances(uint32_t count)
     }
     // A larger region, with room for more to come, made at the next flush in a new place.
     // What names the old one is made again from the new place on the next frame, so the
-    // places are handed out from then.
+    // places are handed out from then. Without one yet nothing names it, and they are at once.
+    const bool moves = region_.valid();
     const auto slots = static_cast<uint32_t>(transforms_.size());
     instance_capacity_ = std::min(slots, std::max(count, instance_capacity_ + instance_capacity_ / 2u + 64u));
     flush_all_ = true;
     invoke_visual_changed();
-    return false;
+    return !moves;
 }
 
 void InstancedMeshVisual::release_instance_index(uint32_t slot)

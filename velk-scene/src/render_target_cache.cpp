@@ -98,6 +98,32 @@ void RenderTargetCache::ensure(FrameContext& ctx, BatchBuilder& batch_builder)
     }
 }
 
+void RenderTargetCache::reserve(FrameContext& ctx, BatchBuilder& batch_builder)
+{
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx) {
+        return;
+    }
+    if (!forward_path_) {
+        forward_path_ = instance().create<IRenderPath>(ClassId::Path::Forward);
+        if (!forward_path_) return;
+    }
+    for (auto& rtp : batch_builder.render_target_passes()) {
+        auto it = entries_.find(rtp.element);
+        if (it == entries_.end() || !it->second.target.lock()) continue;
+        const auto& rte = it->second;
+        RenderView rt_view{};
+        rt_view.batches = &rtp.batches;
+        rt_view.width = rte.width;
+        rt_view.height = rte.height;
+        rt_view.bvh = ctx.bvh;
+        auto& entry_ptr = view_entries_[rtp.element];
+        if (!entry_ptr) {
+            entry_ptr = ::velk::instance().create<IViewEntry>(ClassId::ViewEntry);
+        }
+        forward_path_->reserve(*entry_ptr, rt_view, ctx);
+    }
+}
+
 void RenderTargetCache::emit_passes(FrameContext& ctx, BatchBuilder& batch_builder,
                                     IRenderGraph& graph)
 {

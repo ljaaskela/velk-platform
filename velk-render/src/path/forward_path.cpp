@@ -55,6 +55,19 @@ void ForwardPath::on_view_removed(IViewEntry& view, FrameContext& /*ctx*/)
     cached_passes_.erase(it);
 }
 
+void ForwardPath::reserve(IViewEntry& entry, const RenderView& render_view, FrameContext& ctx)
+{
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx) {
+        return;
+    }
+    if (render_view.width <= 0 || render_view.height <= 0) return;
+    auto [it, inserted] = cached_passes_.try_emplace(&entry);
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
+    reserve_instance_cull(it->second.instance_cull, render_view.batches, ctx);
+}
+
 void ForwardPath::build_passes(IViewEntry& entry,
                                const RenderView& render_view,
                                IRenderTarget::Ptr color_target,

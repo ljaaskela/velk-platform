@@ -100,7 +100,9 @@ struct MeshStaticData {
 R"(
 // Words per plain item in a view's culling (instance index, slot, table, draw, shape kind,
 // mesh ray data): kPlainItemWords.
-#define VELK_PLAIN_ITEM_WORDS 6u
+#define VELK_PLAIN_ITEM_WORDS 7u
+// Words before an item descriptor's meshes: kItemDescriptorHeaderWords.
+#define VELK_ITEM_DESCRIPTOR_HEADER_WORDS 8u
 // Words per cluster draw entry: kClusterEntryWords.
 #define VELK_CLUSTER_ENTRY_WORDS 16u
 // Words per partition in a partition table: kCullEntryWords.
@@ -111,11 +113,14 @@ R"(
 #define VELK_CUT_QUAD 0xFFFFFFFEu
 // A kept cut's record of a patch of small members for rays only: kCutRayQuad.
 #define VELK_CUT_RAY_QUAD 0xFFFFFFFDu
+// A kept cut's record whose batch words did not carry over when its batches were made again:
+// kCutStale. Its partition chooses again before anything reads it.
+#define VELK_CUT_STALE 0xFFFFFFFCu
 // A kept cut's record of a cluster that holds light and is not drawn has this on its entry:
 // kCutLightOnly. Test with velk_cut_light_only, since a quad's, a ray quad's and a whole mesh's
 // entries have it too.
 #define VELK_CUT_LIGHT_ONLY 0x80000000u
-#define velk_cut_light_only(entry) ((entry) < VELK_CUT_RAY_QUAD && ((entry) & VELK_CUT_LIGHT_ONLY) != 0u)
+#define velk_cut_light_only(entry) ((entry) < VELK_CUT_STALE && ((entry) & VELK_CUT_LIGHT_ONLY) != 0u)
 // A partition's tree leaves are the finest it has: kQuadLeavesOnly.
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.

@@ -403,6 +403,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 mesh = velk_culling.data[item + 5u];
                 key = named + 1u;
             }
+            // An instance without a place in its raster region is nothing to rays.
+            if (instance == VELK_RAY_NONE) continue;
             ElementInstance inst = velk_instances.data[instance];
             if (inst.world_matrix[3][3] == 0.0) continue;
             cur_instance = instance;

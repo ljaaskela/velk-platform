@@ -48,6 +48,7 @@ public:
         return n;
     }
 
+    void reserve(IViewEntry& view, const RenderView& render_view, FrameContext& ctx) override;
     void build_passes(IViewEntry& view,
                       const RenderView& render_view,
                       IRenderTarget::Ptr color_target,

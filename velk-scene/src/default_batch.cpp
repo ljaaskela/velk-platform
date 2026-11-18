@@ -295,13 +295,16 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     }
     out.chosen_word = owner->cull_chosen_word_;
     out.chosen_capacity = owner->cull_chosen_capacity_;
+    out.cull_together = true;
     if (!instance_source_) {
-        out.cull_together = true;
         return true;
     }
+    out.instanced = true;
     out.max_distance = instance_source_->get_draw_distance();
     out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
-    instance_source_->get_partition_cull(out.partition_table_word, out.partition_count);
+    instance_source_->get_slot_table(out.slot_table_word, out.slot_table_count);
+    out.object_base = instance_source_->get_object_id_base();
+    out.mesh_index = cull_mesh_;
     return true;
 }
 

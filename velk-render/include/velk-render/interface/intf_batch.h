@@ -103,10 +103,16 @@ struct InstanceCullInfo
     bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     float max_displacement = 0.f; ///< How far a motion function can move an instance from where it rests.
-    /// The visual's partitions, each with its kept cut: see `instance_partition_cull_src`.
-    /// Without them, every slot is tested every frame.
-    uint32_t partition_table_word = 0;
-    uint32_t partition_count = 0;
+    /// An instanced visual's: its instances are members of the scene's partitions like any
+    /// object, slot i with object id @c object_base plus i, and culled together with the
+    /// plain objects. Its slot table gives each slot's place in the raster region
+    /// (0xFFFFFFFF for none), @c slot_table_count slots; this batch draws the slots whose mesh
+    /// is @c mesh_index. A count of 0 means its instances are not placed yet.
+    bool instanced = false;
+    uint32_t slot_table_word = 0;
+    uint32_t slot_table_count = 0;
+    uint32_t object_base = 0;
+    uint32_t mesh_index = 0;
 };
 
 /**

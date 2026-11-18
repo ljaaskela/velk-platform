@@ -40,6 +40,8 @@ public:
 
     ::velk::IRenderPath::Needs needs(const ::velk::FrameContext& ctx) const override;
 
+    void reserve(::velk::IViewEntry& view, const ::velk::RenderView& render_view, ::velk::FrameContext& ctx) override;
+
     void emit(::velk::IViewEntry& view,
               const ::velk::RenderView& render_view,
               ::velk::IRenderTarget::Ptr color_target,

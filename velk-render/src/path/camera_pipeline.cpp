@@ -81,6 +81,13 @@ void CameraPipeline::release_view_state(ViewState& /*vs*/, ::velk::FrameContext&
     // resource manager observer chain.
 }
 
+void CameraPipeline::reserve(::velk::IViewEntry& view, const ::velk::RenderView& render_view, ::velk::FrameContext& ctx)
+{
+    if (auto* path = resolve_path(ctx)) {
+        path->reserve(view, render_view, ctx);
+    }
+}
+
 void CameraPipeline::emit(::velk::IViewEntry& view,
                           const ::velk::RenderView& render_view,
                           ::velk::IRenderTarget::Ptr color_target,

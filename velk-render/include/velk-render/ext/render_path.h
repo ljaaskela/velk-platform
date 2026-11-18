@@ -12,7 +12,7 @@ namespace velk::ext {
  *
  * Concrete render paths inherit from this instead of `ObjectCore`
  * directly. `build_passes()` stays pure — every path must implement it.
- * Other hooks (`needs`, `on_view_removed`, `shutdown`,
+ * Other hooks (`needs`, `reserve`, `on_view_removed`, `shutdown`,
  * `find_named_output`) get empty defaults so paths only override what
  * they actually produce.
  */
@@ -22,6 +22,11 @@ class RenderPath
 {
 public:
     ::velk::IRenderPath::Needs needs() const override { return {}; }
+
+    void reserve(::velk::IViewEntry& /*view*/, const ::velk::RenderView& /*render_view*/,
+                 ::velk::FrameContext& /*ctx*/) override
+    {
+    }
 
     void on_view_removed(::velk::IViewEntry& /*view*/, ::velk::FrameContext& /*ctx*/) override {}
 

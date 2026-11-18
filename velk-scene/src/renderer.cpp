@@ -984,6 +984,21 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
         // every view's batches have been rebuilt above.
         render_target_cache_.ensure(ctx, batch_builder_);
 
+        // Every allocation the frame's passes need, for every render target and view, before any
+        // pass is emitted: growing a shared arena replaces its buffer, which recorded passes name.
+        render_target_cache_.reserve(ctx, batch_builder_);
+        for (auto& pv : prepared_views_) {
+            ctx.bvh = pv.bvh;
+            ctx.view_camera_trait = pv.camera_trait.get();
+            for (auto& p : pv.pipelines) {
+                p->reserve(*pv.slot->entry, pv.render_view, ctx);
+            }
+            ctx.view_camera_trait = nullptr;
+        }
+        auto culling_arena = resources_ ? resources_->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t)) : nullptr;
+        IGpuBuffer* reserved_buffer = culling_arena ? culling_arena->buffer() : nullptr;
+        const size_t reserved_size = reserved_buffer ? reserved_buffer->size_bytes() : 0u;
+
         // Instance motion and mesh deforms come first of all, since every view and render
         // target reads them.
         for (auto& [scene, bvh] : scene_bvhs) {
@@ -1009,6 +1024,12 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 p->emit(*pv.slot->entry, pv.render_view, color_target, ctx, *slot.graph);
             }
             ctx.view_camera_trait = nullptr;
+        }
+        // Passes recorded before the culling arena grew name its old buffer: something allocated
+        // while emitting instead of in reserve.
+        if (culling_arena && reserved_buffer
+            && (culling_arena->buffer() != reserved_buffer || culling_arena->buffer()->size_bytes() != reserved_size)) {
+            VELK_LOG(E, "Renderer: the culling arena grew while the frame's passes were emitted; allocate in reserve");
         }
 
         // Debug overlays: tail-appended so they blit on top of whatever

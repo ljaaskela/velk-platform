@@ -63,6 +63,15 @@ public:
     virtual Needs needs() const = 0;
 
     /**
+     * @brief Makes the allocations `build_passes` needs this frame for @p view.
+     *
+     * Called for every view of the frame before any view's passes are built, so that nothing
+     * a recorded pass names changes while the frame is built: growing a shared arena replaces
+     * its buffer. `build_passes` then allocates nothing from the shared arenas.
+     */
+    virtual void reserve(IViewEntry& view, const RenderView& render_view, FrameContext& ctx) = 0;
+
+    /**
      * @brief Appends zero or more passes for @p view to @p out_passes.
      *
      * Called once per frame per view by the owning view pipeline. The

@@ -42,6 +42,10 @@ public:
      */
     void ensure(FrameContext& ctx, BatchBuilder& batch_builder);
 
+    /// The allocations each render target's path needs this frame, before any pass is
+    /// emitted (IRenderPath::reserve).
+    void reserve(FrameContext& ctx, BatchBuilder& batch_builder);
+
     /**
      * @brief Emits one Raster pass per RTT subtree into @p graph.
      *

@@ -439,7 +439,7 @@ void DeferredPath::build_light_grid(ViewState& vs, const RenderView& render_view
     }
 }
 
-void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
+void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 size)
 {
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
@@ -450,8 +450,8 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
         vs.light_changes = arena->alloc(uint64_t(kLightChangeHeaderWords + kLightChanges * kLightChangeWords) * sizeof(uint32_t));
     }
     // The screen probes' two stores, a probe per kLightProbePixels square of the G-buffer.
-    const uint32_t probes = ((vs.gbuffer_size.x + kLightProbePixels - 1u) / kLightProbePixels)
-                          * ((vs.gbuffer_size.y + kLightProbePixels - 1u) / kLightProbePixels);
+    const uint32_t probes = ((size.x + kLightProbePixels - 1u) / kLightProbePixels)
+                          * ((size.y + kLightProbePixels - 1u) / kLightProbePixels);
     if (probes != vs.light_probe_count) {
         vs.light_probe_count = 0;
         for (auto& store : vs.light_probes) {
@@ -468,10 +468,10 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx)
     // The list of clusters drawn in compute and the words of each pixel, made again when the
     // frame's size changes. The depth plane compute raster draws to starts clear, and the
     // resolve clears it again after it.
-    const uint64_t pixels = uint64_t(vs.gbuffer_size.x) * vs.gbuffer_size.y;
-    if (pixels > 0 && (!vs.pixel_words.valid() || vs.pixel_words_size != vs.gbuffer_size)) {
+    const uint64_t pixels = uint64_t(size.x) * size.y;
+    if (pixels > 0 && (!vs.pixel_words.valid() || vs.pixel_words_size != size)) {
         vs.pixel_words = arena->alloc(pixels * 3u * sizeof(uint32_t));
-        vs.pixel_words_size = vs.gbuffer_size;
+        vs.pixel_words_size = size;
         if (vs.pixel_words.valid()) {
             vector<uint32_t> clear;
             clear.resize(size_t(pixels));
@@ -647,6 +647,37 @@ IRenderTextureGroup* DeferredPath::ensure_gbuffer(ViewState& vs, int width, int 
     return vs.gbuffer.get();
 }
 
+void DeferredPath::reserve(IViewEntry& entry, const RenderView& render_view, FrameContext& ctx)
+{
+    if (!ctx.backend || !ctx.frame_buffer || !ctx.render_ctx || !ctx.resources) {
+        return;
+    }
+    if (render_view.width <= 0 || render_view.height <= 0) return;
+
+    if (!ctx.backend->supports_primitive_id()) {
+        if (!forward_fallback_) {
+            forward_fallback_ = instance().create<IRenderPath>(ClassId::Path::Forward);
+        }
+        if (forward_fallback_) {
+            forward_fallback_->reserve(entry, render_view, ctx);
+        }
+        return;
+    }
+
+    auto [it, inserted] = view_states_.try_emplace(&entry);
+    auto& vs = it->second;
+    if (inserted) {
+        entry.add_render_state_observer(this);
+    }
+    // The frame's size, which the G-buffer build_passes makes has.
+    const uvec2 size{static_cast<uint32_t>(render_view.width), static_cast<uint32_t>(render_view.height)};
+    ensure_arena_words(vs, ctx, size);
+    build_light_grid(vs, render_view, ctx);
+    ensure_depth_pyramid(vs, ctx, size);
+    reserve_instance_cull(vs.instance_cull, render_view.batches, ctx, render_view.bvh.plain_partitions,
+                          render_view.bvh.plain_partition_count);
+}
+
 void DeferredPath::build_passes(IViewEntry& entry,
                                 const RenderView& render_view,
                                 IRenderTarget::Ptr color_target,
@@ -676,11 +707,6 @@ void DeferredPath::build_passes(IViewEntry& entry,
 
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
-
-    // Before anything is recorded: growing the culling arena replaces the buffer that
-    // recorded commands name.
-    ensure_arena_words(vs, ctx);
-    build_light_grid(vs, render_view, ctx);
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
     const uint32_t culling_generation = vs.instance_cull.arena_generation;
@@ -840,6 +866,41 @@ void DeferredPath::emit_visibility_pass(ViewState& vs, const RenderView& render_
         });
 }
 
+void DeferredPath::ensure_depth_pyramid(ViewState& vs, FrameContext& ctx, uvec2 size)
+{
+    if (size.x == 0 || size.y == 0 || (vs.depth_pyramid_size == size && vs.depth_pyramid.valid())) return;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+    // Starting from half the frame, down to a single texel.
+    uint32_t words = kDepthPyramidHeaderWords;
+    uint32_t width = std::max(size.x / 2u, 1u);
+    uint32_t height = std::max(size.y / 2u, 1u);
+    for (uint32_t level = 0; level < kDepthPyramidMaxLevels; ++level) {
+        words += std::max(width >> level, 1u) * std::max(height >> level, 1u);
+        if ((width >> level) <= 1u && (height >> level) <= 1u) break;
+    }
+    vs.depth_pyramid = arena->alloc(uint64_t(words) * sizeof(uint32_t));
+    if (!vs.depth_pyramid.valid()) return;
+    vs.depth_pyramid_size = size;
+
+    uint32_t header[kDepthPyramidHeaderWords]{};
+    header[1] = width;
+    header[2] = height;
+    uint32_t at = static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) + kDepthPyramidHeaderWords;
+    uint32_t levels = 0;
+    for (; levels < kDepthPyramidMaxLevels; ++levels) {
+        header[3 + levels] = at;
+        at += std::max(width >> levels, 1u) * std::max(height >> levels, 1u);
+        if ((width >> levels) <= 1u && (height >> levels) <= 1u) {
+            ++levels;
+            break;
+        }
+    }
+    // Left at no levels until the first one has been built, so nothing reads it empty.
+    vs.depth_pyramid_levels = levels;
+    arena->write_at(vs.depth_pyramid.offset(), header, sizeof(header));
+}
+
 void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRenderGraph& graph, bool with_compute)
 {
     if (!vs.visibility) return;
@@ -849,36 +910,8 @@ void DeferredPath::emit_depth_pyramid_pass(ViewState& vs, FrameContext& ctx, IRe
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     if (!arena) return;
 
-    if (vs.depth_pyramid_size != vs.visibility_size || !vs.depth_pyramid.valid()) {
-        // Starting from half the frame, down to a single texel.
-        uint32_t words = kDepthPyramidHeaderWords;
-        uint32_t width = std::max(vs.visibility_size.x / 2u, 1u);
-        uint32_t height = std::max(vs.visibility_size.y / 2u, 1u);
-        for (uint32_t level = 0; level < kDepthPyramidMaxLevels; ++level) {
-            words += std::max(width >> level, 1u) * std::max(height >> level, 1u);
-            if ((width >> level) <= 1u && (height >> level) <= 1u) break;
-        }
-        vs.depth_pyramid = arena->alloc(uint64_t(words) * sizeof(uint32_t));
-        if (!vs.depth_pyramid.valid()) return;
-        vs.depth_pyramid_size = vs.visibility_size;
-
-        uint32_t header[kDepthPyramidHeaderWords]{};
-        header[1] = width;
-        header[2] = height;
-        uint32_t at = static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) + kDepthPyramidHeaderWords;
-        uint32_t levels = 0;
-        for (; levels < kDepthPyramidMaxLevels; ++levels) {
-            header[3 + levels] = at;
-            at += std::max(width >> levels, 1u) * std::max(height >> levels, 1u);
-            if ((width >> levels) <= 1u && (height >> levels) <= 1u) {
-                ++levels;
-                break;
-            }
-        }
-        // Left at no levels until the first one has been built, so nothing reads it empty.
-        vs.depth_pyramid_levels = levels;
-        arena->write_at(vs.depth_pyramid.offset(), header, sizeof(header));
-    }
+    // Its region is ensure_depth_pyramid's, for the frame's size.
+    if (vs.depth_pyramid_size != vs.visibility_size || !vs.depth_pyramid.valid()) return;
 
     constexpr uint64_t kKey = 0x4450'5952'414d'0001ULL;
     auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
@@ -1181,8 +1214,11 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     {
         uint32_t ids_word, width, height, pool_word;
         float light_pixels;
+        uint32_t lights;
     };
-    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels};
+    // What a first trace casts a ray a point to: the scene's lights, as many as a point has slots.
+    const auto lights = static_cast<uint32_t>(std::min<size_t>(render_view.lights.size(), kLightSlots));
+    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights};
     static_assert(sizeof(PushC) == sizeof(vs.light_claim_recorded), "What the claim was recorded with");
     DeferredComputePushC trace_pc{};
     trace_pc.globals_base = render_view.view_globals_base;
@@ -1233,8 +1269,9 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     {
         uint32_t pool_word, globals_base;
         float light_pixels;
+        uint32_t lights;
     };
-    const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels};
+    const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights};
     emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
              "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc), kLightSearchCapacity, 1u, false);
     // Then the lights the claim listed for tracing, a work group each.
@@ -1380,7 +1417,7 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
     if (!vs.deferred_output || !render_view.batches) return;
     const bool trees = tree_level != kCullNoSlot;
 
-    // Each partitioned visual with a kept cut in this view, once.
+    // The scene's partitions, with their kept cut in this view.
     struct Visual
     {
         uint32_t table_word;
@@ -1389,21 +1426,6 @@ void DeferredPath::emit_partition_bounds_pass(ViewState& vs, const RenderView& r
         uint32_t node_capacity;
     };
     vector<Visual> visuals;
-    vector<const void*> seen;
-    for (const auto& batch : *render_view.batches) {
-        InstanceCullInfo info{};
-        if (!batch || !batch->get_instance_cull(info) || info.partition_count == 0
-            || std::find(seen.begin(), seen.end(), info.key) != seen.end()) {
-            continue;
-        }
-        seen.push_back(info.key);
-        const uint32_t cut = instance_cut_word(vs.instance_cull, info.key);
-        if (cut != kCullNoSlot) {
-            visuals.push_back({info.partition_table_word, info.partition_count, cut,
-                               instance_cut_node_capacity(vs.instance_cull, info.key)});
-        }
-    }
-    // And the plain objects' partitions.
     const uint32_t plain_cut = instance_cut_word(vs.instance_cull, &kPlainCutKey);
     if (plain_cut != kCullNoSlot && render_view.bvh.plain_partitions != kCullNoSlot) {
         visuals.push_back({render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count, plain_cut,
