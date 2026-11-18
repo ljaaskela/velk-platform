@@ -1274,10 +1274,12 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights};
     emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
              "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc), kLightSearchCapacity, 1u, false);
-    // Then the lights the claim listed for tracing, a work group each.
+    // Then the one values the claim listed for tracing, a work group each, and the points it
+    // listed, a thread each.
     if (trace) {
         emit_one(vs.light_trace_pass, view_pass_name(other, "deferred.light_trace", "other:deferred.light_trace"),
-                 "DeferredPath: light trace", trace_pipeline, &trace_pc, sizeof(trace_pc), kLightTraceCapacity, 1u, false);
+                 "DeferredPath: light trace", trace_pipeline, &trace_pc, sizeof(trace_pc), kLightTraceCapacity + kLightPointGroups,
+                 1u, false);
     }
 }
 

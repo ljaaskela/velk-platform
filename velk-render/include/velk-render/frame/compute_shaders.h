@@ -688,7 +688,8 @@ vec3 triangle_size_color(uvec2 ids)
 // a pixel reads them (its triangle's corners, each its own point or the three it links to), so
 // each patch is one point's reach, darker where they are the record's own than where they are
 // those of the records for light only it links to; one with one value flat in its colour; a quad in the colour
-// of the node its light is on; what has no light yet grey, and what is from no record white.
+// of the node its light is on; magenta as far as that light is not traced yet; what has no light
+// yet grey, and what is from no record white.
 vec3 light_color(uvec2 ids, ivec2 coord)
 {
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
@@ -700,11 +701,15 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     if (velk_culling.data[record] == VELK_CUT_QUAD) {
         uint node = velk_light_quad_node(velk_culling.data[record + 2u], velk_culling.data[record + 1u], g.cam_pos.xyz,
                                          pixels_per_unit, pc.light_pixels);
-        return velk_culling.data[node + 11u] == VELK_LIGHT_NONE ? vec3(0.25) : id_color(node);
+        uint value = velk_culling.data[node + 11u];
+        if (value == VELK_LIGHT_NONE) return vec3(0.25);
+        return (value & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : id_color(node);
     }
     uint light = velk_culling.data[record + 3u];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return vec3(0.25);
-    if (light >= VELK_LIGHT_ONE_VALUE) return record_color(record) * 0.8;
+    if (light >= VELK_LIGHT_ONE_VALUE) {
+        return (light & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : record_color(record) * 0.8;
+    }
     if (pc.pool_word == 0xFFFFFFFFu || light >= velk_culling.data[pc.pool_word + 1u]) return vec3(1.0, 0.0, 0.0);
     uint first = velk_light_page(pc.pool_word, light);
     vec3 base = record_color(record) * 0.35;
@@ -739,13 +744,23 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
     vec3 color = vec3(0.0);
     uint words[9];
+    uint points[9];
     float weights[9];
     uint owners[9];
-    uint read = velk_light_pixel_points(pc.pool_word, first, triangle, corners, b / max(b.x + b.y + b.z, 1e-6), words, weights,
-                                        owners);
-    for (uint k = 0u; k < read; ++k) color += weights[k] * id_color(words[k] * 2654435761u);
+    uint read = velk_light_pixel_points(pc.pool_word, first, triangle, corners, b / max(b.x + b.y + b.z, 1e-6), words, points,
+                                        weights, owners);
+    float untrusted = 0.0;
+    for (uint k = 0u; k < read; ++k) {
+        color += weights[k] * id_color(words[k] * 2654435761u);
+        uint traces = velk_light_point_traces(owners[k], velk_culling.data[words[k] + 1u]);
+        float trust = velk_culling.data[words[k]] == VELK_LIGHT_NONE
+                    ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
+        untrusted += weights[k] * (1.0 - trust);
+    }
     // Darker where the record has its own points, coarse enough itself.
-    return velk_culling.data[first + 1u] == VELK_LIGHT_LINKED ? color : color * 0.45;
+    color = velk_culling.data[first + 1u] == VELK_LIGHT_LINKED ? color : color * 0.45;
+    // Magenta as far as the points it reads are not fully traced yet (VELK_LIGHT_TRUSTED_TRACES).
+    return mix(color, vec3(1.0, 0.0, 1.0), clamp(untrusted, 0.0, 1.0));
 }
 
 const vec3 kLevelColors[8] = vec3[8](

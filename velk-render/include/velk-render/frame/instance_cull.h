@@ -3938,9 +3938,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             uint32_t extra[5] = {};
             arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord) * sizeof(uint32_t), extra, sizeof(extra));
-            VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u traced, "
-                        "%u records chosen again of which %u kept their light, %u lit pixels untraced",
-                     counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], written, took, extra[4]);
+            uint32_t budget[10] = {};
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 26u) * sizeof(uint32_t), budget, sizeof(budget));
+            VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
+                        "traced, %u points listed for a first trace and %u for a later one, %u records chosen again of which "
+                        "%u kept their light, %u lit pixels untraced; budget %u rays",
+                     counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], budget[8], budget[9], written, took,
+                     extra[4], budget[0]);
             uint32_t longest = 0;
             uint32_t most = 0;
             for (const auto& c : state.cuts) {
@@ -3967,10 +3971,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const double rays = sums[2] != 0 ? double(sums[2]) : 1.0;
             const double steps = double(sums[3]) * 16.0;
             const double tris = double(sums[0]) * 16.0;
-            VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records, %.0f nodes; own points traced %u times "
-                        "(%u points), of which %u finer than the light's level (%u points)",
-                     tris / rays, double(sums[1]) / rays, std::max(steps - tris - double(sums[1]), 0.0) / rays, sums[6], sums[7],
-                     sums[4], sums[5]);
+            VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records, %.0f nodes; points traced %u first, %u later",
+                     tris / rays, double(sums[1]) / rays, std::max(steps - tris - double(sums[1]), 0.0) / rays, sums[6], sums[7]);
             // The ray lists: records rays trace against all records, from the partitions' states.
             uint32_t traced_records = 0;
             uint32_t all_records = 0;

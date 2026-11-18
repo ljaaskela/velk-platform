@@ -82,10 +82,11 @@ inline constexpr float kLodMaxErrorPixels = 1.f;
 /// becomes one quad once that quad is. Built into the hierarchy as a cluster's error: its
 /// level's longest edge over this, times kLodMaxErrorPixels.
 inline constexpr float kLodElementPixels = 4.f;
-/// How far apart points of light are on screen, in pixels: a cluster smaller than this, and the
-/// quads under a quad tree node this wide, have one value of light; finer clusters read the
-/// points of the coarser ones at this size (kCutLightOnly). See light_pool.h.
-inline constexpr float kLightPixels = 4.f * kLodElementPixels;
+/// How far apart points of light are on screen, in pixels: one about every 4 by 4 pixels, the
+/// size elements are drawn at, so that light lives at the drawing level. A cluster smaller than
+/// this, and the quads under a quad tree node this wide, have one value of light. See
+/// light_pool.h.
+inline constexpr float kLightPixels = kLodElementPixels;
 
 /// Fills `lod_scale` from the view-projection and viewport: how many pixels an error of one
 /// unit covers at one unit from the camera, over kLodMaxErrorPixels. Rays choose a mesh's
