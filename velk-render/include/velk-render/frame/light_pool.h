@@ -82,6 +82,8 @@ namespace velk {
 ///      room (kLightPointCapacity) when more asked; 112, 113 the words of those lists
 ///      (kLightPointWords a point: its record's first page, its number there, its instance);
 ///      114, 115 110 and 111 of the last frame, complete, for the log
+///   116 records whose light a change made due (light_changes_main_src), added up until the log
+///      reads and clears it; 117 unused
 /// A record's first page starts with kLightPageHeaderWords: its cluster's vertices; for its own
 /// points the level of the grid in each of its triangles (1 for none, see velk_light_grid_point),
 /// else kLightLinked; how many point words it has; then its other pages (words 3 to 16), at most
@@ -133,7 +135,7 @@ inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightMaxSegments = 64;
 inline constexpr uint32_t kLightPoolSegmentWord = 16;
 inline constexpr uint32_t kLightPoolTraceWord = kLightPoolSegmentWord + kLightMaxSegments;
-inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 36u;
+inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 38u;
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = 3;
@@ -261,15 +263,15 @@ uint velk_light_own_word(uint pool, uint first, uint p)
 }
 
 // A point's trace count (its state's top 4 bits): VELK_LIGHT_WARM_TRACES traces warm it up from
-// none, after which it is settled; a change since then makes it VELK_LIGHT_RETRACE, from which
-// it is traced again up to VELK_LIGHT_RETRACED, moving its light toward the new rays while
-// pixels keep showing it.
+// none, after which it is settled; a change after its first trace makes it VELK_LIGHT_RETRACE,
+// from which it is traced again up to VELK_LIGHT_RETRACED, moving its light toward the new rays
+// while pixels keep showing it, so that rays from before the change do not stay in its light.
 #define VELK_LIGHT_RETRACE 9u
 #define VELK_LIGHT_RETRACED 15u
 
 // The trace count of the own point of the record whose first page starts at `first` with trace
 // state `state`: none when its record's lights were chosen again since it was last listed;
-// VELK_LIGHT_RETRACE when it was settled and something else changed what it could get since.
+// VELK_LIGHT_RETRACE when it was traced and something else changed what it could get since.
 uint velk_light_point_traces(uint first, uint state)
 {
     if (state == VELK_LIGHT_NONE) return 0u;
@@ -278,7 +280,7 @@ uint velk_light_point_traces(uint first, uint state)
     if (reset != VELK_LIGHT_NONE && listed < reset) return 0u;
     uint traces = state >> 28u;
     uint changed = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CHANGED_WORD];
-    if (changed != VELK_LIGHT_NONE && listed < changed && traces >= VELK_LIGHT_WARM_TRACES) return VELK_LIGHT_RETRACE;
+    if (changed != VELK_LIGHT_NONE && listed < changed && traces != 0u) return VELK_LIGHT_RETRACE;
     return traces;
 }
 
@@ -1002,17 +1004,21 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         traces = 0u;
         atomicAdd(VELK_LIGHT_WORDS.data[pool + 98u], 1u);
     } else {
-        // Warming up, a running mean of its rays. Traced again after a change, a running mean of
-        // the light it had and the new rays, the first new ray moving it halfway, so that it
-        // follows what changed in a frame or two without jumping to one ray's guess.
+        // Warming up, a running mean of its rays. Traced again after a change, steps of 1/2, 1/2,
+        // 1/3, 1/3, 1/4 and 1/4, the first new ray moving it halfway, so that it follows what
+        // changed in a frame or two without jumping to one ray's guess, and the light it had
+        // keeps a sixteenth.
         float step = traces < VELK_LIGHT_WARM_TRACES ? 1.0 / float(traces + 1u)
-                   : traces >= VELK_LIGHT_RETRACE ? 1.0 / float(traces - VELK_LIGHT_RETRACE + 2u) : 0.25;
+                   : traces >= VELK_LIGHT_RETRACE ? 1.0 / float((traces - VELK_LIGHT_RETRACE) / 2u + 2u) : 0.25;
         value = old;
         uint s = velk_points_pick(slots, p, seed);
         if (slots[s] != VELK_LIGHT_NONE) {
             float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u);
             float was = float((old >> (4u * s)) & 15u);
-            uint now = uint(mix(was, blocked * 15.0, step) + 0.5);
+            // Rounded up as often as the fraction says, so that small steps still arrive and
+            // the mean is not pulled toward the first rays.
+            float dither = float(velk_points_hash(seed ^ 0x51ed270bu) & 0xFFFFu) / 65536.0;
+            uint now = min(uint(mix(was, blocked * 15.0, step) + dither), 15u);
             value = (old & ~(15u << (4u * s))) | (now << (4u * s));
         }
         atomicAdd(VELK_LIGHT_WORDS.data[pool + 99u], 1u);
@@ -1219,7 +1225,8 @@ void main()
     uint cut = VELK_LIGHT_WORDS.data[cut_entry];
     uint instances_base = VELK_LIGHT_WORDS.data[cut_entry + 1u];
     uint items_word = VELK_LIGHT_WORDS.data[cut_entry + 2u];
-    uint index = gl_GlobalInvocationID.x;
+    // A record a thread, 64 a group: the prelude's groups are 8 by 8.
+    uint index = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     // The records placed in the current store, all before this.
     if (index >= VELK_LIGHT_WORDS.data[cut + 28u]) return;
     uint record = VELK_LIGHT_WORDS.data[cut + 17u + VELK_LIGHT_WORDS.data[cut + 12u]] + index * 4u;
@@ -1288,6 +1295,7 @@ void main()
         velk_light_slots_at(center, slots);
     }
     if (!all && !velk_change_alters(changes, center, radius, slots)) return;
+    atomicAdd(VELK_LIGHT_WORDS.data[pool + 116u], 1u);
     if (own_points) {
         // Its coarse light traced again at once, and its settled points traced again as pixels
         // next read them (velk_light_point_traces), moving toward what changed while pixels keep

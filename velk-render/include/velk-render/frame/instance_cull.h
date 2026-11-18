@@ -3939,13 +3939,17 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             uint32_t extra[5] = {};
             arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord) * sizeof(uint32_t), extra, sizeof(extra));
-            uint32_t budget[10] = {};
+            uint32_t budget[12] = {};
             arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 26u) * sizeof(uint32_t), budget, sizeof(budget));
+            const uint32_t no_changes = 0;
+            arena->update_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 36u) * sizeof(uint32_t), &no_changes,
+                             sizeof(no_changes));
             VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
-                        "traced, %u points listed for a first trace and %u for a later one, %u records chosen again of which "
-                        "%u kept their light, %u lit pixels untraced; budget %u rays",
-                     counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], budget[8], budget[9], written, took,
-                     extra[4], budget[0]);
+                        "traced, %u points listed for a first trace and %u for a later one, %u records changed since the "
+                        "last log, %u records "
+                        "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
+                     counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], budget[8], budget[9], budget[10],
+                     written, took, extra[4], budget[0]);
             uint32_t longest = 0;
             uint32_t most = 0;
             for (const auto& c : state.cuts) {
