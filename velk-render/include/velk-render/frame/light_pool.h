@@ -1303,7 +1303,8 @@ inline constexpr uint32_t kLightProbeRays = 16;
 /**
  * Gathers each screen probe's bounce light, four probes a group, a ray a thread: rays over the
  * hemisphere around its surface's normal, turned each frame; a hit brings what the light points
- * there say reaches it, times its albedo, and what it gives off; a miss the environment. Blended
+ * there say reaches it and its indirect light (velk_probe_hit_indirect), times its albedo, and
+ * what it gives off; a miss the environment. Blended
  * with the probe the last frame had where this one was, when that was on the same surface.
  * Composed with the materials by compose_rt_compute. pc.shapes_base is the light pool,
  * pc.env.z the light header (the grid), pc.env.w the last frame's probe store, pc.extras this
@@ -1426,6 +1427,32 @@ vec3 velk_probe_sky(vec3 rd)
     return textureLod(velk_textures[nonuniformEXT(pc.env.y)], uv, lod).rgb * pc.env_params.x;
 }
 
+// The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: the
+// last frame's probe where the hit was on screen, when that probe was on the same surface, so
+// that light bounces once more each frame; else the environment around its normal, unshadowed.
+vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint across)
+{
+    GlobalData g = VELK_GLOBALS;
+    uint was_store = pc.env.w;
+    vec4 clip = g.prev_view_projection * vec4(at + g.cam_moved, 1.0);
+    if (was_store != 0xFFFFFFFFu && clip.w > 1e-5) {
+        vec2 p = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
+        if (all(greaterThanEqual(p, vec2(0.0))) && p.x < float(width) && p.y < float(height)) {
+            uint before = was_store + ((uint(p.y) / VELK_PROBE_PIXELS) * across + uint(p.x) / VELK_PROBE_PIXELS) * VELK_PROBE_WORDS;
+            if (uintBitsToFloat(probe_words.data[before + 7u]) > 0.0) {
+                vec3 then_pos = vec3(uintBitsToFloat(probe_words.data[before + 3u]), uintBitsToFloat(probe_words.data[before + 4u]),
+                                     uintBitsToFloat(probe_words.data[before + 5u])) - g.cam_moved;
+                vec3 then_n = velk_probe_oct_decode(probe_words.data[before + 6u]);
+                if (dot(then_n, n) > 0.9 && abs(dot(then_n, at - then_pos)) < 0.05 * length(at) + 1e-3) {
+                    return vec3(uintBitsToFloat(probe_words.data[before]), uintBitsToFloat(probe_words.data[before + 1u]),
+                                uintBitsToFloat(probe_words.data[before + 2u]));
+                }
+            }
+        }
+    }
+    return velk_probe_sky(n);
+}
+
 void main()
 {
     uint lane = gl_LocalInvocationIndex;
@@ -1474,8 +1501,10 @@ void main()
             bool lit = e.lighting_mode == VELK_LIGHTING_STANDARD;
             vec3 albedo = lit ? e.color.rgb * (1.0 - clamp(e.metallic, 0.0, 1.0)) : vec3(0.0);
             vec3 emission = e.emissive + (lit ? vec3(0.0) : e.color.rgb);
-            // As the lighting pass lights a pixel: albedo times each light's N.L and strength.
-            light = albedo * velk_probe_direct(hit, at, hn) + emission;
+            // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
+            // its indirect light.
+            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, width, height, across) : vec3(0.0);
+            light = albedo * (velk_probe_direct(hit, at, hn) + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);
         }

@@ -65,6 +65,8 @@ IResource::Ptr EnvDecoder::decode(const IResource::Ptr& inner) const
             env->init(inner->uri(), w, h, std::move(pixels));
         }
         stbi_image_free(decoded);
+    } else {
+        VELK_LOG(E, "EnvDecoder: Cannot decode '%s': %s", file->uri(), stbi_failure_reason());
     }
 
     return interface_pointer_cast<IResource>(env);

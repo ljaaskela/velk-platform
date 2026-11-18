@@ -12,6 +12,7 @@
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/shadow_technique.h>
 #include <velk-render/blas.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-scene/api/mesh.h>
 #include <velk-scene/api/trait/light.h>
 #include <velk-scene/api/visual/cube.h>
@@ -363,10 +364,15 @@ void set_sky(SceneBuilder& b, const char* name, float r, float g, float bl)
     }
     char file[64];
     std::snprintf(file, sizeof(file), "inspect_sky_%s.hdr", name);
-    memory->add_file(file, sky.data(), sky.size());
+    memory->add_file(velk::string_view(file, std::strlen(file)), sky.data(), sky.size());
     char url[96];
     std::snprintf(url, sizeof(url), "env:memory://%s", file);
-    b.camera.set_environment(velk::ui::load_environment(velk::string_view(url, std::strlen(url))));
+    auto env = velk::ui::load_environment(velk::string_view(url, std::strlen(url)));
+    auto* surface = interface_cast<velk::ISurface>(env.get());
+    if (!surface || surface->get_dimensions().x == 0) {
+        VELK_LOG(E, "inspect: the sky '%s' did not load", url);
+    }
+    b.camera.set_environment(env);
 }
 
 velk::IMaterial::Ptr standard(float r, float g, float b, float roughness = 0.9f)
@@ -625,7 +631,8 @@ const velk::vector<SceneSpec>& scenes()
 {
     static const velk::vector<SceneSpec> list = {
         {"cube", "one box on a plane, a sun: one hard shadow edge",
-         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"above", {{180.f, -380.f, 220.f}, 35.f, -50.f}}},
+         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"above", {{180.f, -380.f, 220.f}, 35.f, -50.f}},
+          {"close", {{-78.2f, -31.3f, 49.8f}, -10.4f, -35.4f}}},
          build_cube},
         {"cubes", "boxes of several sizes, a sun and a point light: soft, double and contact shadows",
          {{"front", {{0.f, -130.f, 360.f}, 0.f, -18.f}, {{30.f, -120.f, 300.f}, 8.f, -19.f}, 10},
