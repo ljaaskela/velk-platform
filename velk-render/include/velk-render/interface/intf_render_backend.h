@@ -313,6 +313,10 @@ public:
     /// need. 0 when it cannot say.
     virtual uint64_t device_memory_bytes() const = 0;
 
+    /// How much GPU memory this process holds now, in bytes, over all of the device's heaps:
+    /// every buffer and image the backend allocated. 0 when it cannot say.
+    virtual uint64_t memory_in_use() const = 0;
+
     /**
      * @brief Low-level GPU buffer allocation. Producers should use
      *        `IGpuResourceManager::create_gpu_buffer` so the manager

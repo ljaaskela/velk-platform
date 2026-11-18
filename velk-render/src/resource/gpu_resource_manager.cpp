@@ -432,6 +432,19 @@ void GpuResourceManager::update_geometry()
     tracked_geometry_.resize(kept);
 }
 
+void GpuResourceManager::arena_bytes(uint32_t slot, uint64_t& capacity, uint64_t& used) const
+{
+    capacity = 0;
+    used = 0;
+    for (const auto& weak : arenas_) {
+        auto arena = weak.lock();
+        if (arena && arena->slot() == slot) {
+            capacity += arena->capacity();
+            used += arena->capacity() - arena->free_bytes();
+        }
+    }
+}
+
 void GpuResourceManager::log_arena_memory() const
 {
     static constexpr const char* kNames[IRenderBackend::kGlobalBufferSlotCount] = {

@@ -78,6 +78,10 @@ public:
     /// Logs how much of each shared arena is in use.
     virtual void log_arena_memory() const = 0;
 
+    /// The bytes of the arena at @p slot (IRenderBackend::kGlobal*): its buffer's, and those of
+    /// it in regions. 0 for both when there is none.
+    virtual void arena_bytes(uint32_t slot, uint64_t& capacity, uint64_t& used) const = 0;
+
     /// How many bytes of mesh detail may be on the GPU at once: the levels of detail that
     /// meshes load by need. 0, the default, takes a quarter of the device's own memory. A mesh
     /// always keeps its coarsest level, whatever the budget.

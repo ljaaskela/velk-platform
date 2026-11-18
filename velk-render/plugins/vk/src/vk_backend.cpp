@@ -1472,6 +1472,23 @@ uint64_t VkBackend::device_memory_bytes() const
     return bytes;
 }
 
+uint64_t VkBackend::memory_in_use() const
+{
+    if (allocator_ == VK_NULL_HANDLE) {
+        return 0;
+    }
+    // The memory blocks the allocator holds, over every heap: all buffers and images.
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
+    vmaGetHeapBudgets(allocator_, budgets);
+    const VkPhysicalDeviceMemoryProperties* memory = nullptr;
+    vmaGetMemoryProperties(allocator_, &memory);
+    uint64_t bytes = 0;
+    for (uint32_t h = 0; memory && h < memory->memoryHeapCount; ++h) {
+        bytes += budgets[h].statistics.blockBytes;
+    }
+    return bytes;
+}
+
 IGpuBuffer::Ptr VkBackend::create_gpu_buffer(const GpuBufferDesc& desc)
 {
     VkBufferCreateInfo buf_ci{};

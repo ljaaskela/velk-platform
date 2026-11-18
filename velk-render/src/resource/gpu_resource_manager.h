@@ -52,6 +52,7 @@ public:
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;
     void log_arena_memory() const override;
+    void arena_bytes(uint32_t slot, uint64_t& capacity, uint64_t& used) const override;
     void set_geometry_budget(uint64_t bytes) override { geometry_budget_ = bytes; }
     bool reserve_geometry(uint64_t bytes, bool always = false) override;
     void release_geometry(uint64_t bytes) override;
