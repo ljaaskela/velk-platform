@@ -1,278 +1,76 @@
-// A small fixed scene for looking at the state of the renderer's structures rather than at a
-// lit picture: levels of detail clusters, their size on screen, and, in a second view from
-// above, everything the main camera chooses to draw.
+// The verification app: a set of scenes, from one box under a sun to large instanced fields,
+// each with a few fixed views, for looking at the renderer's structures and for checking its
+// images against references.
 //
-// velk_ui_inspect [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
+// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
+// velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [settle=N]
+// velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [frames=N]
 //
-// The camera starts at a fixed view under free control: right drag turns, W, A, S and D move,
-// the wheel moves along the view. Keys:
+// NAMES is a comma separated list of scenes: scene= runs only those, skip= leaves those out.
+//
+// Interactive (the default): one scene (scene=, the field by default) at its first view under
+// free control, with an overview from above drawing what the main camera draws. Right drag
+// turns, W, A, S and D move, the wheel moves along the view. Keys:
 //   V  next debug view (lit, cluster, level, cluster size, instance, triangle size, partition,
-//      ray tree, ray top tree)
+//      ray tree, ray top tree, quads, record, light)
 //   K, L  the ray tree views' level down and up
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
 //
-// Arguments, so that a run can be repeated without the controls:
-//   view=NAME   starts in that debug view: lit, cluster, level, size, instance, triangles,
-//               partition, tree or top
-//   level=N     the ray tree views' level
-//   at=...      starts at that place instead of the fixed view
-//   path        starts on the scripted path; path=FRAME starts it at that frame of it
-// With VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE the window is saved and the app exits.
+// verify: every scene at each of its views: settles for `settle` frames (240), measuring how
+// much changes from frame to frame meanwhile and by which frame it stops; then over 8 more
+// frames how far the image is from the view's reference, how much it still changes, the GPU
+// time and memory. A view with a motion then moves, a step a frame, each step against its own
+// reference, and comes back to be compared with how it looked before. Writes, overwriting the
+// last run, the images, their difference maps and a report to build/verify; then exits.
+//
+// reference: every scene at each of its views, and each step of a view's motion, with the
+// reference path, `frames` frames (128) accumulated each, saved in reference_images/verify;
+// then exits. Make them again only when a scene changes.
 //
 // Up is -y, as in the other samples.
 
 #include <velk/api/velk.h>
 
+#include "scenes.h"
+#include "verify.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <initializer_list>
-#include <utility>
-#include <velk-render/api/material/standard_material.h>
-#include <velk-render/api/render_context.h>
-#include <velk-render/api/shadow_technique.h>
-#include <velk-render/blas.h>
-#include <velk-render/interface/intf_camera.h>
-#include <velk-runtime/api/application.h>
-#include <velk-scene/api/camera.h>
-#include <velk-scene/api/element.h>
-#include <velk-scene/api/mesh.h>
-#include <velk-scene/api/post_process.h>
-#include <velk-scene/api/render_path.h>
-#include <velk-scene/api/scene.h>
-#include <velk-scene/api/trait/light.h>
-#include <velk-scene/api/trait/orbit.h>
-#include <velk-scene/api/trait/trs.h>
-#include <velk-scene/api/visual/instanced_mesh.h>
-#include <velk-scene/api/visual/mesh.h>
-#include <velk-ui/api/trait/fixed_size.h>
-#include <velk-ui/api/visual/rect.h>
-#include <velk-ui/plugins/text/api/font.h>
-#include <velk-ui/plugins/text/api/text_visual.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <utility>
+#include <velk-render/api/render_context.h>
+#include <velk-render/interface/intf_camera.h>
+#include <velk-render/interface/intf_gpu_resource_manager.h>
+#include <velk-render/interface/intf_render_target.h>
+#include <velk-runtime/api/application.h>
+#include <velk-scene/api/camera.h>
+#include <velk-scene/api/element.h>
+#include <velk-scene/api/post_process.h>
+#include <velk-scene/api/render_path.h>
+#include <velk-scene/api/scene.h>
+#include <velk-scene/api/trait/orbit.h>
+#include <velk-scene/api/trait/trs.h>
+#include <velk-ui/api/trait/fixed_size.h>
+#include <velk-ui/api/visual/rect.h>
+#include <velk-ui/plugins/image/plugin.h>
+#include <velk-ui/plugins/text/api/font.h>
+#include <velk-ui/plugins/text/api/text_visual.h>
+
+#ifndef INSPECT_REFERENCE_DIR
+#define INSPECT_REFERENCE_DIR "reference_images/verify"
+#endif
+#ifndef INSPECT_RUN_DIR
+#define INSPECT_RUN_DIR "verify"
+#endif
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-
-struct Vertex
-{
-    float position[3];
-    float normal[3];
-    float uv[2];
-    float tangent[4];
-};
-
-constexpr velk::VertexAttribute kAttributes[] = {
-    {velk::VertexAttributeSemantic::Position, velk::VertexAttributeFormat::Float3, 0},
-    {velk::VertexAttributeSemantic::Normal, velk::VertexAttributeFormat::Float3, 12},
-    {velk::VertexAttributeSemantic::TexCoord0, velk::VertexAttributeFormat::Float2, 24},
-    {velk::VertexAttributeSemantic::Tangent, velk::VertexAttributeFormat::Float4, 32},
-};
-
-velk::IMesh::Ptr build(velk::IRenderContext& ctx, const velk::vector<Vertex>& vertices, const velk::vector<uint32_t>& indices,
-                       const velk::IMaterial::Ptr& material)
-{
-    velk::vec3 lo{1e30f, 1e30f, 1e30f};
-    velk::vec3 hi{-1e30f, -1e30f, -1e30f};
-    for (const Vertex& v : vertices) {
-        lo = {std::min(lo.x, v.position[0]), std::min(lo.y, v.position[1]), std::min(lo.z, v.position[2])};
-        hi = {std::max(hi.x, v.position[0]), std::max(hi.y, v.position[1]), std::max(hi.z, v.position[2])};
-    }
-    velk::aabb bounds{};
-    bounds.position = lo;
-    bounds.extent = {hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
-    const auto vertex_count = static_cast<uint32_t>(vertices.size());
-    const auto index_count = static_cast<uint32_t>(indices.size());
-    auto& builder = ctx.get_mesh_builder();
-    auto primitive = builder.build_primitive({kAttributes, 4}, sizeof(Vertex), vertices.data(), vertex_count, indices.data(),
-                                             index_count, velk::MeshTopology::TriangleList, bounds);
-    primitive->set_rt_blas(velk::build_mesh_blas(reinterpret_cast<const float*>(vertices.data()), sizeof(Vertex), vertex_count,
-                                                 indices.data(), index_count / 3));
-    velk::MeshPrimitive(primitive).set_material(material);
-    velk::IMeshPrimitive::Ptr primitives[] = {primitive};
-    return builder.build({primitives, 1});
-}
-
-/// Adds a flat grid of cells by cells quads, from @p origin along @p u and @p v, facing @p n.
-void add_grid(velk::vector<Vertex>& vertices, velk::vector<uint32_t>& indices, const velk::vec3& origin,
-              const velk::vec3& u, const velk::vec3& v, const velk::vec3& n, uint32_t cells)
-{
-    const auto first = static_cast<uint32_t>(vertices.size());
-    for (uint32_t j = 0; j <= cells; ++j) {
-        for (uint32_t i = 0; i <= cells; ++i) {
-            const float a = static_cast<float>(i) / static_cast<float>(cells);
-            const float b = static_cast<float>(j) / static_cast<float>(cells);
-            const velk::vec3 p = origin + u * a + v * b;
-            vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, {a, b}, {u.x, u.y, u.z, 1.f}});
-        }
-    }
-    // Wound so that the face is seen from where n points.
-    const velk::vec3 c{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x};
-    const bool along = c.x * n.x + c.y * n.y + c.z * n.z > 0.f;
-    const uint32_t stride = cells + 1;
-    for (uint32_t j = 0; j < cells; ++j) {
-        for (uint32_t i = 0; i < cells; ++i) {
-            const uint32_t i00 = first + j * stride + i;
-            const uint32_t i10 = i00 + 1;
-            const uint32_t i01 = i00 + stride;
-            const uint32_t i11 = i01 + 1;
-            for (uint32_t k : along ? std::initializer_list<uint32_t>{i00, i10, i11, i00, i11, i01}
-                                    : std::initializer_list<uint32_t>{i00, i11, i10, i00, i01, i11}) {
-                indices.push_back(k);
-            }
-        }
-    }
-}
-
-/// A value from -0.5 to 0.5 that depends only on @p i and @p salt.
-float jitter(long i, float salt)
-{
-    const float x = std::sin(static_cast<float>(i) * 12.9898f + salt * 78.233f) * 43758.5453f;
-    return x - std::floor(x) - 0.5f;
-}
-
-/// Adds an instanced visual of @p mesh to the scene at @p transforms.
-void add_instances(velk::Scene& scene, velk::Element& root, const velk::IMesh::Ptr& mesh,
-                   const velk::vector<velk::InstanceTransform>& transforms)
-{
-    auto visual = velk::trait::visual::create_instanced_mesh();
-    visual.set_mesh(velk::Mesh(mesh));
-    visual.add_instances({transforms.data(), transforms.size()});
-    auto element = velk::create_element();
-    element.add_trait(visual);
-    scene.add(root, element);
-}
-
-/// A flat square on y = 0, @p size across, centered on the origin, facing up (-y).
-velk::IMesh::Ptr build_ground(velk::IRenderContext& ctx, float size, uint32_t cells, const velk::IMaterial::Ptr& material)
-{
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    add_grid(vertices, indices, {-size * 0.5f, 0.f, -size * 0.5f}, {size, 0.f, 0.f}, {0.f, 0.f, size}, {0.f, -1.f, 0.f}, cells);
-    return build(ctx, vertices, indices, material);
-}
-
-/// A box standing on y = 0, centered on x and z, each face a grid of cells by cells.
-velk::IMesh::Ptr build_box(velk::IRenderContext& ctx, const velk::vec3& size, uint32_t cells, const velk::IMaterial::Ptr& material)
-{
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    const float x0 = -size.x * 0.5f;
-    const float z0 = -size.z * 0.5f;
-    const float y0 = -size.y;
-    const velk::vec3 ex{size.x, 0.f, 0.f};
-    const velk::vec3 ey{0.f, size.y, 0.f};
-    const velk::vec3 ez{0.f, 0.f, size.z};
-    add_grid(vertices, indices, {x0, y0, z0}, ex, ez, {0.f, -1.f, 0.f}, cells);
-    add_grid(vertices, indices, {x0, 0.f, z0}, ex, ez, {0.f, 1.f, 0.f}, cells);
-    add_grid(vertices, indices, {x0, y0, z0}, ex, ey, {0.f, 0.f, -1.f}, cells);
-    add_grid(vertices, indices, {x0, y0, -z0}, ex, ey, {0.f, 0.f, 1.f}, cells);
-    add_grid(vertices, indices, {x0, y0, z0}, ez, ey, {-1.f, 0.f, 0.f}, cells);
-    add_grid(vertices, indices, {-x0, y0, z0}, ez, ey, {1.f, 0.f, 0.f}, cells);
-    return build(ctx, vertices, indices, material);
-}
-
-/// A lumpy rock @p size across standing on y = 0, from @p segments around and @p rings down.
-velk::IMesh::Ptr build_rock(velk::IRenderContext& ctx, float size, uint32_t segments, uint32_t rings,
-                            const velk::IMaterial::Ptr& material)
-{
-    const float radius = size * 0.5f;
-    const auto surface = [&](float theta, float phi) {
-        const velk::vec3 d{std::sin(phi) * std::cos(theta), std::cos(phi), std::sin(phi) * std::sin(theta)};
-        const float lumps = 0.22f * std::sin(d.x * 3.1f + 0.7f) * std::cos(d.z * 2.7f) + 0.11f * std::sin(d.y * 7.3f + d.x * 5.1f)
-                            + 0.05f * std::sin(d.z * 17.f + 1.3f) * std::sin(d.x * 19.f + d.y * 13.f);
-        const float r = radius * (0.8f + lumps);
-        return velk::vec3{d.x * r, -radius + d.y * r, d.z * r};
-    };
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    for (uint32_t r = 0; r <= rings; ++r) {
-        const float phi = static_cast<float>(r) / static_cast<float>(rings) * kPi;
-        for (uint32_t s = 0; s <= segments; ++s) {
-            const float theta = static_cast<float>(s) / static_cast<float>(segments) * kPi * 2.f;
-            const velk::vec3 p = surface(theta, phi);
-            constexpr float kStep = 0.002f;
-            const velk::vec3 a = surface(theta + kStep, phi);
-            const velk::vec3 b = surface(theta - kStep, phi);
-            const velk::vec3 c = surface(theta, std::min(phi + kStep, kPi - kStep));
-            const velk::vec3 d = surface(theta, std::max(phi - kStep, kStep));
-            const velk::vec3 du = a - b;
-            const velk::vec3 dv = c - d;
-            velk::vec3 n{du.y * dv.z - du.z * dv.y, du.z * dv.x - du.x * dv.z, du.x * dv.y - du.y * dv.x};
-            const velk::vec3 out{p.x, p.y + radius, p.z};
-            const float length = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-            const float flip = (n.x * out.x + n.y * out.y + n.z * out.z < 0.f ? -1.f : 1.f) / std::max(length, 1e-9f);
-            n = n * flip;
-            vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, {0.f, 0.f}, {-std::sin(theta), 0.f, std::cos(theta), 1.f}});
-        }
-    }
-    const uint32_t stride = segments + 1;
-    const auto add_triangle = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
-        const velk::vec3 a{vertices[i0].position[0], vertices[i0].position[1], vertices[i0].position[2]};
-        const velk::vec3 b{vertices[i1].position[0], vertices[i1].position[1], vertices[i1].position[2]};
-        const velk::vec3 c{vertices[i2].position[0], vertices[i2].position[1], vertices[i2].position[2]};
-        const velk::vec3 e1 = b - a;
-        const velk::vec3 e2 = c - a;
-        const velk::vec3 n{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
-        if (n.x == 0.f && n.y == 0.f && n.z == 0.f) {
-            return;
-        }
-        const bool outward = n.x * a.x + n.y * (a.y + radius) + n.z * a.z > 0.f;
-        indices.push_back(i0);
-        indices.push_back(outward ? i1 : i2);
-        indices.push_back(outward ? i2 : i1);
-    };
-    for (uint32_t r = 0; r < rings; ++r) {
-        for (uint32_t s = 0; s < segments; ++s) {
-            const uint32_t i00 = r * stride + s;
-            add_triangle(i00, i00 + stride, i00 + stride + 1);
-            add_triangle(i00, i00 + stride + 1, i00 + 1);
-        }
-    }
-    return build(ctx, vertices, indices, material);
-}
-
-/// A tuft @p size across standing on y = 0: @p blades separate thin triangles, about 0.5
-/// wide at the base and 3 to 5 tall, leaning a little each its own way.
-velk::IMesh::Ptr build_tuft(velk::IRenderContext& ctx, float size, uint32_t blades, const velk::IMaterial::Ptr& material)
-{
-    velk::vector<Vertex> vertices;
-    velk::vector<uint32_t> indices;
-    for (uint32_t b = 0; b < blades; ++b) {
-        const velk::vec3 base{jitter(b, 0.31f) * size, 0.f, jitter(b, 0.57f) * size};
-        const float height = 4.f + jitter(b, 0.83f) * 2.f;
-        const float turn = (jitter(b, 1.19f) + 0.5f) * 2.f * kPi;
-        const velk::vec3 side{std::cos(turn) * 0.25f, 0.f, std::sin(turn) * 0.25f};
-        const velk::vec3 lean{-std::sin(turn) * height * 0.25f, -height, std::cos(turn) * height * 0.25f};
-        const velk::vec3 n = velk::vec3::normalize(velk::vec3{-std::sin(turn), -0.5f, std::cos(turn)});
-        const auto first = static_cast<uint32_t>(vertices.size());
-        for (const velk::vec3& p : {base - side, base + side, base + lean}) {
-            vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, {0.f, 0.f}, {side.x, side.y, side.z, 1.f}});
-        }
-        for (uint32_t i : {first, first + 1u, first + 2u}) {
-            indices.push_back(i);
-        }
-    }
-    return build(ctx, vertices, indices, material);
-}
-
-
-/// Adds a mesh to the scene at @p at.
-void add_mesh(velk::Scene& scene, velk::Element& root, const velk::IMesh::Ptr& mesh, const velk::vec3& at)
-{
-    auto element = velk::create_element();
-    auto trs = velk::trait::transform::create_trs();
-    trs.set_translate(at);
-    auto visual = velk::trait::visual::create_mesh();
-    visual.set_mesh(velk::Mesh(mesh));
-    element.add_trait(trs);
-    element.add_trait(visual);
-    scene.add(root, element);
-}
 
 /// A camera that flies: an orbit at distance 1 around a focus that moves.
 struct FlyCamera
@@ -283,7 +81,7 @@ struct FlyCamera
     velk::Trs focus;
 };
 
-FlyCamera add_camera(velk::Scene& scene, velk::Element& root)
+FlyCamera add_camera(velk::Scene& scene, velk::Element& root, bool reference)
 {
     FlyCamera fly;
     fly.element = velk::create_element();
@@ -297,7 +95,7 @@ FlyCamera add_camera(velk::Scene& scene, velk::Element& root)
     fly.camera = velk::Camera(cam_trait);
     fly.camera.set_projection(velk::Projection::Perspective);
     fly.camera.set_fov(50.f);
-    fly.camera.add_render_path(velk::path::create_deferred());
+    fly.camera.add_render_path(reference ? velk::path::create_reference() : velk::path::create_deferred());
     auto post = velk::pp::create_post_process();
     post.add(velk::pp::create_tonemap());
     fly.camera.add_post_process(post);
@@ -311,12 +109,11 @@ FlyCamera add_camera(velk::Scene& scene, velk::Element& root)
     return fly;
 }
 
-/// Where a fly camera looks, from its orbit's yaw and pitch in degrees.
-velk::vec3 forward_of(float yaw_degrees, float pitch_degrees)
+void place_camera(FlyCamera& fly, const inspect::Place& place)
 {
-    const float yaw = yaw_degrees * kPi / 180.f;
-    const float pitch = pitch_degrees * kPi / 180.f;
-    return {-std::sin(yaw) * std::cos(pitch), -std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+    fly.focus.set_translate(place.at);
+    fly.orbit.set_yaw(place.yaw);
+    fly.orbit.set_pitch(place.pitch);
 }
 
 struct NamedView
@@ -353,19 +150,71 @@ constexpr NamedView kViews[] = {
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
+// What a verification run accepts, against the reference and frame to frame. Starting values,
+// to be tightened as the scenes pass.
+constexpr uint32_t kCompareScale = 4;        ///< Images are compared this many pixels to one.
+constexpr float kMaxMean = 0.02f;            ///< Mean luminance difference.
+constexpr float kMaxP95 = 0.08f;             ///< 95th percentile of it.
+constexpr uint32_t kTilePixels = 32;         ///< The squares judged on their own, in the window's pixels.
+constexpr float kMaxTile = 0.04f;            ///< Mean luminance difference over the worst square.
+constexpr float kChangeThreshold = 0.1f;     ///< A pixel this much brighter or darker in a frame has changed.
+constexpr float kMaxChangeShare = 0.0005f;   ///< Share of pixels changing in a frame of a still view.
+constexpr long kMeasureFrames = 8;
+constexpr long kSettleFrom = 10;             ///< Frame changes count from here while a view settles.
+constexpr long kBackFrames = 60;             ///< Frames back at a view after its motion, before it is compared.
+
+/// One scene at one view, as a verification or reference run goes through them.
+struct Job
+{
+    size_t scene;
+    size_t view;
+};
+
+velk::string reference_path(const inspect::SceneSpec& spec, const inspect::ViewSpec& view, const char* ext)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s/%s_%s%s", INSPECT_REFERENCE_DIR, spec.name, view.name, ext);
+    return velk::string(buf);
+}
+
+velk::string run_path(const inspect::SceneSpec& spec, const inspect::ViewSpec& view, const char* ext)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s/%s_%s%s", INSPECT_RUN_DIR, spec.name, view.name, ext);
+    return velk::string(buf);
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    enum class Mode { Interactive, Verify, Reference };
+    Mode mode = Mode::Interactive;
+    const char* only_scene = nullptr;
+    const char* skip_scenes = nullptr;
     size_t start_view = 0;
     bool has_place = false;
     float place[5] = {};
     bool start_scripted = false;
     long start_frame = 0;
     uint32_t tree_level = 0;
+    long settle_frames = 240;
+    long reference_frames = 128;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        if (std::strncmp(arg, "level=", 6) == 0) {
+        if (std::strcmp(arg, "verify") == 0) {
+            mode = Mode::Verify;
+        } else if (std::strcmp(arg, "reference") == 0) {
+            mode = Mode::Reference;
+        } else if (std::strncmp(arg, "scene=", 6) == 0) {
+            only_scene = arg + 6;
+        } else if (std::strncmp(arg, "skip=", 5) == 0) {
+            skip_scenes = arg + 5;
+        } else if (std::strncmp(arg, "settle=", 7) == 0) {
+            settle_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "frames=", 7) == 0) {
+            reference_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "level=", 6) == 0) {
             tree_level = static_cast<uint32_t>(std::atol(arg + 6));
         } else if (std::strncmp(arg, "view=", 5) == 0) {
             bool known = false;
@@ -392,6 +241,7 @@ int main(int argc, char* argv[])
             VELK_LOG(E, "inspect: unknown argument '%s'", arg);
         }
     }
+    const bool interactive = mode == Mode::Interactive;
 
     velk::ApplicationConfig config;
     velk::WindowConfig wc;
@@ -419,134 +269,336 @@ int main(int argc, char* argv[])
     auto root = velk::create_element();
     scene.set_root(root);
 
-    // The main camera starts at a fixed view; the overview hangs above it, looking down, and
-    // draws what the main camera draws.
-    FlyCamera main_camera = add_camera(scene, root);
-    FlyCamera overview = add_camera(scene, root);
+    FlyCamera main_camera = add_camera(scene, root, mode == Mode::Reference);
+    app.add_view(window, main_camera.element);
+
+    // The scenes and views a run goes through, in order: those scene= names (a comma separated
+    // list, all by default), less those skip= names.
+    const auto& specs = inspect::scenes();
+    const auto listed = [](const char* list, const char* name) {
+        const size_t length = std::strlen(name);
+        for (const char* at = list; at && *at;) {
+            const char* end = std::strchr(at, ',');
+            const size_t n = end ? static_cast<size_t>(end - at) : std::strlen(at);
+            if (n == length && std::strncmp(at, name, n) == 0) return true;
+            at = end ? end + 1 : nullptr;
+        }
+        return false;
+    };
+    for (const char* list : {only_scene, skip_scenes}) {
+        for (const char* at = list; at && *at;) {
+            const char* end = std::strchr(at, ',');
+            char name[64] = {};
+            std::strncpy(name, at, std::min<size_t>(end ? static_cast<size_t>(end - at) : std::strlen(at), sizeof(name) - 1));
+            if (!inspect::find_scene(name)) {
+                VELK_LOG(E, "inspect: unknown scene '%s'", name);
+                return 1;
+            }
+            at = end ? end + 1 : nullptr;
+        }
+    }
+    velk::vector<Job> jobs;
+    for (size_t s = 0; s < specs.size(); ++s) {
+        if ((only_scene && !listed(only_scene, specs[s].name)) || listed(skip_scenes, specs[s].name)) continue;
+        for (size_t v = 0; v < specs[s].views.size(); ++v) jobs.push_back({s, v});
+    }
+    const inspect::SceneSpec* interactive_spec = jobs.empty() ? inspect::find_scene("field") : &specs[jobs[0].scene];
+
+    size_t built_index = static_cast<size_t>(-1);
+    inspect::BuiltScene built;
+    const auto show_scene = [&](size_t index) {
+        if (built_index == index) return;
+        inspect::remove_scene(built, scene);
+        built = inspect::build_scene(specs[index], scene, root, ctx, main_camera.camera, mode == Mode::Reference);
+        built_index = index;
+    };
+
+    if (!interactive) {
+        return [&]() {
+            auto backend = render_context->backend();
+            auto writer = velk::instance().create<velk::IImageWriter>(velk::ui::ClassId::ImageEncoder);
+            if (!backend || !writer) {
+                VELK_LOG(E, "inspect: no backend or image writer");
+                return 1;
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(INSPECT_REFERENCE_DIR, ec);
+            if (mode == Mode::Verify) {
+                // The last run's files go, so that what is there is this run's.
+                std::filesystem::remove_all(INSPECT_RUN_DIR, ec);
+                std::filesystem::create_directories(INSPECT_RUN_DIR, ec);
+                backend->set_gpu_timing_enabled(true);
+            }
+            const uint64_t surface_id = velk::get_render_target_id(window.surface());
+
+            velk::IGpuResourceManager* resources = render_context->resources();
+            velk::string report;
+            const auto line = [&](const char* text) {
+                VELK_LOG(I, "verify: %s", text);
+                report.append(text);
+                report.append("\n");
+            };
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8s %7s %8s %7s %7s %7s %7s  %s", "scene/view", "mean", "p95",
+                          "tile", "burst", "settled", "changed", "gpu ms", "gpu MB", "arenas", "culling", "verdict");
+            if (mode == Mode::Verify) line(buf);
+            size_t passed = 0;
+            size_t failed = 0;
+            double peak_mb = 0.0;
+            double peak_arenas_mb = 0.0;
+            double peak_cull_mb = 0.0;
+            char peak_at[64] = "";
+
+            // One frame of the run. False when the window closed.
+            const auto frame = [&]() {
+                if (!app.poll()) {
+                    VELK_LOG(E, "inspect: window closed during the run");
+                    return false;
+                }
+                app.update();
+                app.present();
+                return true;
+            };
+            const auto grab = [&](inspect::Image& out) {
+                if (!inspect::grab_window(*backend, surface_id, out)) {
+                    VELK_LOG(E, "inspect: could not read the window back");
+                    return false;
+                }
+                return true;
+            };
+            // A row's verdict from a comparison, with what else failed.
+            const auto verdict_of = [&](const inspect::Difference& d, const char* also, char* out, size_t size) {
+                char where[48] = "";
+                if (d.worst_tile > kMaxTile) {
+                    std::snprintf(where, sizeof(where), " tile (at %u, %u px)", d.tile_x * kTilePixels, d.tile_y * kTilePixels);
+                }
+                if (d.mean > kMaxMean || d.p95 > kMaxP95 || d.worst_tile > kMaxTile || also[0] != '\0') {
+                    std::snprintf(out, size, "FAIL:%s%s%s%s", d.mean > kMaxMean ? " mean" : "", d.p95 > kMaxP95 ? " p95" : "",
+                                  where, also);
+                } else {
+                    std::snprintf(out, size, "ok");
+                }
+            };
+            const auto count = [&](const char* verdict) { (std::strcmp(verdict, "ok") == 0 ? passed : failed) += 1; };
+            const size_t tile = kTilePixels / kCompareScale;
+
+            for (const Job& job : jobs) {
+                const inspect::SceneSpec& spec = specs[job.scene];
+                const inspect::ViewSpec& view = spec.views[job.view];
+                show_scene(job.scene);
+                place_camera(main_camera, view.place);
+                char name[64];
+                std::snprintf(name, sizeof(name), "%s/%s", spec.name, view.name);
+
+                if (mode == Mode::Reference) {
+                    // The view, then each step of its motion, each accumulated on its own.
+                    for (int k = 0; k <= view.move_frames; ++k) {
+                        place_camera(main_camera, inspect::motion_place(view, k));
+                        for (long f = 0; f < reference_frames; ++f) {
+                            if (built.moves) built.mover.set_translate(built.to);
+                            if (!frame()) return 1;
+                        }
+                        inspect::Image image;
+                        if (!grab(image)) return 1;
+                        char suffix[32];
+                        std::snprintf(suffix, sizeof(suffix), k == 0 ? "" : "_move%d", k);
+                        velk::string ref = reference_path(spec, view, suffix);
+                        velk::string png = ref;
+                        ref.append(".ref");
+                        png.append(".png");
+                        const bool saved = inspect::save_reference(inspect::downscale(image, kCompareScale), ref)
+                                        && inspect::save_png(*writer, image, png);
+                        VELK_LOG(I, "reference: %s%s %s", name, suffix, saved ? "saved" : "FAILED");
+                    }
+                    continue;
+                }
+
+                // Settling: what changes from frame to frame while the light builds up, from
+                // kSettleFrom on, and the frame after which nothing more than kMaxChangeShare does.
+                inspect::Image last;
+                inspect::Image previous;
+                float burst = 0.f;
+                long settled = kSettleFrom;
+                for (long f = 0; f < settle_frames; ++f) {
+                    if (built.moves) {
+                        // The reference is the mover where it ends; a run sees it move there.
+                        built.mover.set_translate(built.from
+                                                  + (built.to - built.from)
+                                                        * std::min(static_cast<float>(f) / static_cast<float>(built.frames), 1.f));
+                    }
+                    if (!frame()) return 1;
+                    if (f < kSettleFrom) continue;
+                    previous = std::move(last);
+                    if (!grab(last)) return 1;
+                    if (!previous.rgb.empty()) {
+                        const float share = inspect::frame_change(previous, last, kChangeThreshold).share;
+                        burst = std::max(burst, share);
+                        if (share > kMaxChangeShare) settled = f + 1;
+                    }
+                }
+                // Then still: frame to frame, the GPU time and memory.
+                float changed = 0.f;
+                double gpu_ms = 0.0;
+                for (long f = 0; f < kMeasureFrames; ++f) {
+                    if (!frame()) return 1;
+                    previous = std::move(last);
+                    if (!grab(last)) return 1;
+                    if (!previous.rgb.empty()) {
+                        changed = std::max(changed, inspect::frame_change(previous, last, kChangeThreshold).share);
+                    }
+                    for (const auto& t : backend->last_gpu_timings()) gpu_ms += t.ms;
+                }
+                gpu_ms /= static_cast<double>(kMeasureFrames);
+                // What the scene holds in the shared arenas, used bytes rather than their
+                // buffers' size, which only grows; and the process's total, which grows with them.
+                uint64_t arenas_used = 0;
+                uint64_t cull_used = 0;
+                for (uint32_t slot = 0; resources && slot < velk::IRenderBackend::kGlobalBufferSlotCount; ++slot) {
+                    uint64_t capacity = 0;
+                    uint64_t used = 0;
+                    resources->arena_bytes(slot, capacity, used);
+                    arenas_used += used;
+                    if (slot == velk::IRenderBackend::kGlobalCulling) cull_used = used;
+                }
+                const double mb = static_cast<double>(backend->memory_in_use()) / 1e6;
+                const double arenas_mb = static_cast<double>(arenas_used) / 1e6;
+                const double cull_mb = static_cast<double>(cull_used) / 1e6;
+                if (arenas_mb > peak_arenas_mb) {
+                    peak_arenas_mb = arenas_mb;
+                    std::snprintf(peak_at, sizeof(peak_at), "%s", name);
+                }
+                peak_mb = std::max(peak_mb, mb);
+                peak_cull_mb = std::max(peak_cull_mb, cull_mb);
+
+                const inspect::Image still = inspect::downscale(last, kCompareScale);
+                inspect::save_png(*writer, last, run_path(spec, view, ".png"));
+                inspect::Image reference;
+                char settled_text[16];
+                std::snprintf(settled_text, sizeof(settled_text), "%ld", settled);
+                if (!inspect::load_reference(reference_path(spec, view, ".ref"), reference)) {
+                    std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8.5f %7s %8.5f %7.2f %7.0f %7.0f %7.0f  no reference", name,
+                                  "-", "-", "-", static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms, mb,
+                                  arenas_mb, cull_mb);
+                    line(buf);
+                    ++failed;
+                } else {
+                    const inspect::Difference d = inspect::compare(still, reference, tile);
+                    inspect::save_png(*writer, inspect::difference_map(still, reference), run_path(spec, view, "_diff.png"));
+                    char also[48];
+                    std::snprintf(also, sizeof(also), "%s%s", burst > kMaxChangeShare ? " burst" : "",
+                                  changed > kMaxChangeShare ? " flicker" : "");
+                    char verdict[160];
+                    verdict_of(d, also, verdict, sizeof(verdict));
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f %8.5f %7s %8.5f %7.2f %7.0f %7.0f %7.0f  %s", name,
+                                  static_cast<double>(d.mean), static_cast<double>(d.p95), static_cast<double>(d.worst_tile),
+                                  static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms, mb, arenas_mb,
+                                  cull_mb, verdict);
+                    line(buf);
+                    count(verdict);
+                }
+                if (view.move_frames <= 0) continue;
+
+                // The motion: each step a frame, each against its own reference; the worst step.
+                inspect::Difference moving{};
+                int worst_step = 0;
+                bool have_references = true;
+                for (int k = 1; k <= view.move_frames; ++k) {
+                    place_camera(main_camera, inspect::motion_place(view, k));
+                    if (!frame()) return 1;
+                    inspect::Image image;
+                    if (!grab(image)) return 1;
+                    char suffix[32];
+                    std::snprintf(suffix, sizeof(suffix), "_move%d", k);
+                    velk::string ref = reference_path(spec, view, suffix);
+                    ref.append(".ref");
+                    velk::string ours = run_path(spec, view, suffix);
+                    ours.append(".png");
+                    inspect::save_png(*writer, image, ours);
+                    inspect::Image step_reference;
+                    if (!inspect::load_reference(ref, step_reference)) {
+                        have_references = false;
+                        continue;
+                    }
+                    const inspect::Image small = inspect::downscale(image, kCompareScale);
+                    const inspect::Difference d = inspect::compare(small, step_reference, tile);
+                    velk::string diff = run_path(spec, view, suffix);
+                    diff.append("_diff.png");
+                    inspect::save_png(*writer, inspect::difference_map(small, step_reference), diff);
+                    moving.mean = std::max(moving.mean, d.mean);
+                    moving.p95 = std::max(moving.p95, d.p95);
+                    if (d.worst_tile > moving.worst_tile) {
+                        moving.worst_tile = d.worst_tile;
+                        moving.tile_x = d.tile_x;
+                        moving.tile_y = d.tile_y;
+                        worst_step = k;
+                    }
+                }
+                char moving_name[64];
+                std::snprintf(moving_name, sizeof(moving_name), "%s moving", name);
+                if (!have_references) {
+                    std::snprintf(buf, sizeof(buf), "%-24s  no reference for every step", moving_name);
+                    line(buf);
+                    ++failed;
+                } else {
+                    char verdict[160];
+                    verdict_of(moving, "", verdict, sizeof(verdict));
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  worst at step %d of %d  %s", moving_name,
+                                  static_cast<double>(moving.mean), static_cast<double>(moving.p95),
+                                  static_cast<double>(moving.worst_tile), worst_step, view.move_frames, verdict);
+                    line(buf);
+                    count(verdict);
+                }
+
+                // There and back: the view again after the motion, against how it looked before.
+                place_camera(main_camera, view.place);
+                for (long f = 0; f < kBackFrames; ++f) {
+                    if (!frame()) return 1;
+                }
+                inspect::Image back;
+                if (!grab(back)) return 1;
+                inspect::save_png(*writer, back, run_path(spec, view, "_back.png"));
+                const inspect::Difference d = inspect::compare(inspect::downscale(back, kCompareScale), still, tile);
+                char verdict[160];
+                verdict_of(d, "", verdict, sizeof(verdict));
+                char back_name[64];
+                std::snprintf(back_name, sizeof(back_name), "%s back", name);
+                std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  against before the motion  %s", back_name,
+                              static_cast<double>(d.mean), static_cast<double>(d.p95), static_cast<double>(d.worst_tile), verdict);
+                line(buf);
+                count(verdict);
+            }
+
+            if (mode == Mode::Verify) {
+                std::snprintf(buf, sizeof(buf),
+                              "memory: arenas in use at most %.0f MB (%s), the culling arena's at most %.0f MB; the process held "
+                              "at most %.0f MB (arenas give none back)",
+                              peak_arenas_mb, peak_at, peak_cull_mb, peak_mb);
+                line(buf);
+                std::snprintf(buf, sizeof(buf), "%zu passed, %zu failed; images in %s", passed, failed, INSPECT_RUN_DIR);
+                line(buf);
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/report.txt", INSPECT_RUN_DIR);
+                if (std::FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(report.c_str(), 1, report.size(), f);
+                    std::fclose(f);
+                }
+            }
+            return 0;
+        }();
+    }
+
+    // Interactive: the chosen scene at its first view, unless at= says where.
+    const size_t interactive_index = static_cast<size_t>(interactive_spec - specs.data());
+    show_scene(interactive_index);
+    const inspect::Place start = has_place ? inspect::Place{{place[0], place[1], place[2]}, place[3], place[4]}
+                                           : interactive_spec->views[0].place;
+    place_camera(main_camera, start);
+
+    // The overview hangs above the main camera, looking down, and draws what the main camera draws.
+    FlyCamera overview = add_camera(scene, root, false);
     overview.camera.set_choose_as(main_camera.element);
     constexpr float kOverviewHeight = 2500.f;
-
-    const velk::vec3 start_at{0.f, -60.f, 300.f};
-    constexpr float kStartYaw = 0.f;
-    constexpr float kStartPitch = -8.f;
-    main_camera.focus.set_translate(has_place ? velk::vec3{place[0], place[1], place[2]} : start_at);
-    main_camera.orbit.set_yaw(has_place ? place[3] : kStartYaw);
-    main_camera.orbit.set_pitch(has_place ? place[4] : kStartPitch);
     overview.orbit.set_pitch(-89.f);
-
-    // Sun, fixed.
-    {
-        auto light = velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, 2.5f);
-        light.add_technique(velk::technique::create_rt_shadow());
-        auto sun = velk::create_element();
-        auto trs = velk::trait::transform::create_trs();
-        trs.set_rotation({35.f, 25.f, 0.f});
-        sun.add_trait(trs);
-        sun.add_trait(light);
-        scene.add(root, sun);
-    }
-
-    auto ground_material = velk::material::create_standard(velk::color{0.45f, 0.42f, 0.38f, 1.f}, 0.f, 0.9f);
-    auto rock_material = velk::material::create_standard(velk::color{0.55f, 0.5f, 0.44f, 1.f}, 0.f, 0.8f);
-    auto pebble_material = velk::material::create_standard(velk::color{0.35f, 0.42f, 0.25f, 1.f}, 0.f, 0.8f);
-    auto wall_material = velk::material::create_standard(velk::color{0.6f, 0.58f, 0.55f, 1.f}, 0.f, 0.7f);
-    auto tree_material = velk::material::create_standard(velk::color{0.12f, 0.3f, 0.1f, 1.f}, 0.f, 0.8f);
-    auto tuft_material = velk::material::create_standard(velk::color{0.5f, 0.6f, 0.15f, 1.f}, 0.f, 0.8f);
-    // Blades are seen from both sides.
-    tuft_material.options().set_double_sided(true);
-
-    // A flat ground: flat areas simplify at no error, and its full detail runs out up close.
-    // Wide enough that the fields below run out to where their instances are a pixel or two.
-    add_mesh(scene, root, build_ground(*render_context, 32000.f, 512, ground_material), {0.f, 0.f, 0.f});
-
-    // Dense rocks at rising distances along the view.
-    const velk::IMesh::Ptr rock = build_rock(*render_context, 60.f, 160, 80, rock_material);
-    for (float z : {150.f, -100.f, -600.f, -1600.f, -3500.f}) {
-        add_mesh(scene, root, rock, {-60.f, 0.f, z});
-    }
-
-    // A field of many small things, the grass case: small pebbles on a jittered grid.
-    {
-        constexpr long kColumns = 200;
-        constexpr float kSpacing = 9.f;
-        const velk::vec3 corner{40.f, 0.f, -1500.f};
-        velk::vector<velk::InstanceTransform> transforms;
-        transforms.reserve(static_cast<size_t>(kColumns * kColumns));
-        for (long i = 0; i < kColumns * kColumns; ++i) {
-            const float x = corner.x + (static_cast<float>(i % kColumns) + jitter(i, 1.3f)) * kSpacing;
-            const float z = corner.z + (static_cast<float>(i / kColumns) + jitter(i, 2.9f)) * kSpacing;
-            const float s = 0.6f + jitter(i, 4.1f) * 0.6f;
-            const float turn = (jitter(i, 7.7f) + 0.5f) * 2.f * kPi;
-            const float c = std::cos(turn) * s;
-            const float n = std::sin(turn) * s;
-            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, s, 0.f, 0.f}, {-n, 0.f, c, z}}});
-        }
-        auto field = velk::trait::visual::create_instanced_mesh();
-        field.set_mesh(velk::Mesh(build_rock(*render_context, 5.f, 16, 8, pebble_material)));
-        field.add_instances({transforms.data(), transforms.size()});
-        auto element = velk::create_element();
-        element.add_trait(field);
-        scene.add(root, element);
-    }
-
-    // Large things seen far: tree sized solids, 24 across and 60 tall, left of the view and out
-    // along it to where they are a pixel or two on screen.
-    {
-        constexpr long kColumns = 80;
-        constexpr long kRows = 333;
-        constexpr float kSpacing = 45.f;
-        const velk::vec3 corner{-4000.f, 0.f, -15000.f};
-        velk::vector<velk::InstanceTransform> transforms;
-        transforms.reserve(static_cast<size_t>(kColumns * kRows));
-        for (long i = 0; i < kColumns * kRows; ++i) {
-            const float x = corner.x + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 3.1f)) * kSpacing;
-            const float z = corner.z + (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 5.9f)) * kSpacing;
-            const float s = 1.f + jitter(i, 8.3f) * 0.5f;
-            const float turn = (jitter(i, 9.7f) + 0.5f) * 2.f * kPi;
-            const float c = std::cos(turn) * s;
-            const float n = std::sin(turn) * s;
-            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, s * 2.5f, 0.f, 0.f}, {-n, 0.f, c, z}}});
-        }
-        add_instances(scene, root, build_rock(*render_context, 24.f, 48, 24, tree_material), transforms);
-    }
-
-    // Things made of many separate small parts, which simplifying cannot merge: tufts of 100
-    // thin blades, right of the view and out along it past where the blades are below a pixel.
-    {
-        constexpr long kColumns = 80;
-        constexpr long kRows = 409;
-        constexpr float kSpacing = 22.f;
-        const velk::vec3 corner{2200.f, 0.f, -9000.f};
-        velk::vector<velk::InstanceTransform> transforms;
-        transforms.reserve(static_cast<size_t>(kColumns * kRows));
-        for (long i = 0; i < kColumns * kRows; ++i) {
-            const float x = corner.x + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 2.3f)) * kSpacing;
-            const float z = corner.z + (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 6.1f)) * kSpacing;
-            const float turn = (jitter(i, 4.4f) + 0.5f) * 2.f * kPi;
-            const float c = std::cos(turn);
-            const float n = std::sin(turn);
-            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, 1.f, 0.f, 0.f}, {-n, 0.f, c, z}}});
-        }
-        add_instances(scene, root, build_tuft(*render_context, 20.f, 100, tuft_material), transforms);
-    }
-
-    // Many small things that are each their own element rather than instances: plain rocks
-    // behind the pebbles, out along the view.
-    {
-        const velk::IMesh::Ptr small_rock = build_rock(*render_context, 8.f, 16, 8, rock_material);
-        constexpr long kColumns = 40;
-        constexpr long kRows = 50;
-        for (long i = 0; i < kColumns * kRows; ++i) {
-            const float x = 400.f + (static_cast<float>(i % kColumns) + 0.8f * jitter(i, 7.1f)) * 40.f;
-            const float z = -1800.f - (static_cast<float>(i / kColumns) + 0.8f * jitter(i, 8.9f)) * 110.f;
-            add_mesh(scene, root, small_rock, {x, 0.f, z});
-        }
-    }
-
-    // One large wall throwing a shadow across the field and the ground.
-    add_mesh(scene, root, build_box(*render_context, {900.f, 260.f, 30.f}, 24, wall_material), {500.f, 0.f, -700.f});
-
-    app.add_view(window, main_camera.element);
     app.add_view(window, overview.element, {0.66f, 0.f, 0.34f, 0.4f});
 
     // What is shown and what its colours mean, in a 2D scene of its own drawn last, over the
@@ -592,12 +644,12 @@ int main(int argc, char* argv[])
         }
         char buf[768];
         std::snprintf(buf, sizeof(buf),
-                      "view: %s%s (V for next)\n%s\n"
+                      "scene: %s, view: %s%s (V for next)\n%s\n"
                       "top right, from above: all the main camera's kept cut holds, dimmed outside its view (yellow lines)\n"
                       "camera: %s (P), at %.0f, %.0f, %.0f, yaw %.0f, pitch %.0f\n"
                       "right drag turns, W A S D move, wheel moves along the view, C logs the place",
-                      kViews[view_index].name, level, kViews[view_index].legend, scripted ? "scripted path" : "free", at.x,
-                      at.y, at.z, yaw, pitch);
+                      interactive_spec->name, kViews[view_index].name, level, kViews[view_index].legend,
+                      scripted ? "scripted path" : "free", at.x, at.y, at.z, yaw, pitch);
         text.set_text(velk::string(buf));
         shown_at = at;
         shown_yaw = yaw;
@@ -635,7 +687,7 @@ int main(int argc, char* argv[])
         }
         // Faster the higher above the ground.
         const float speed = std::max(60.f, -focus_state->translate.y);
-        const velk::vec3 ahead = forward_of(orbit_state->yaw, orbit_state->pitch);
+        const velk::vec3 ahead = inspect::forward_of(orbit_state->yaw, orbit_state->pitch);
         const float yaw = orbit_state->yaw * kPi / 180.f;
         const velk::vec3 side{std::cos(yaw), 0.f, -std::sin(yaw)};
         main_camera.focus.set_translate(focus_state->translate + ahead * (forward * speed) + side * (right * speed));
@@ -695,14 +747,21 @@ int main(int argc, char* argv[])
 
     show_view(start_view);
     show_level(tree_level);
+    long frame = 0;
     while (app.poll()) {
+        if (built.moves) {
+            built.mover.set_translate(built.from
+                                      + (built.to - built.from) * std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f));
+        }
+        ++frame;
         if (scripted) {
-            // Out along the view and back, rising and falling, the same every time.
+            // Out along the view and back, rising and falling, the same every time, from the start.
             const float t = static_cast<float>(scripted_frame++) / 60.f;
             const float along = 0.5f - 0.5f * std::cos(t * 0.15f);
-            main_camera.focus.set_translate({std::sin(t * 0.21f) * 250.f, -60.f - 400.f * along * along, 300.f - 3800.f * along});
-            main_camera.orbit.set_yaw(kStartYaw + std::sin(t * 0.33f) * 40.f);
-            main_camera.orbit.set_pitch(kStartPitch - 12.f * along);
+            main_camera.focus.set_translate({start.at.x + std::sin(t * 0.21f) * 250.f, start.at.y - 400.f * along * along,
+                                             start.at.z - 3800.f * along});
+            main_camera.orbit.set_yaw(start.yaw + std::sin(t * 0.33f) * 40.f);
+            main_camera.orbit.set_pitch(start.pitch - 12.f * along);
         } else {
             constexpr float kStepSeconds = 1.f / 60.f;
             move(((held[0] ? 1.f : 0.f) - (held[1] ? 1.f : 0.f)) * kStepSeconds,
