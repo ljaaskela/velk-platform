@@ -5,6 +5,7 @@
 // velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
 // velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [settle=N]
 // velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [frames=N]
+// velk_ui_inspect trend [scene=NAMES]
 //
 // NAMES is a comma separated list of scenes: scene= runs only those, skip= leaves those out.
 //
@@ -22,7 +23,12 @@
 // frames how far the image is from the view's reference, how much it still changes, the GPU
 // time and memory. A view with a motion then moves, a step a frame, each step against its own
 // reference, and comes back to be compared with how it looked before. Writes, overwriting the
-// last run, the images, their difference maps and a report to build/verify; then exits.
+// last run, the images, their difference maps and a report to build/verify; then exits. GPU
+// times are checked against the median of the view's last runs on committed code in the
+// history (reference_images/verify/timings.tsv), and a run of every scene adds its times to
+// it, with the commits of velk-ui and velk.
+//
+// trend: each view's times in the history, oldest first, marking where they stepped.
 //
 // reference: every scene at each of its views, and each step of a view's motion, with the
 // reference path, `frames` frames (128) accumulated each, saved in reference_images/verify;
@@ -33,6 +39,7 @@
 #include <velk/api/velk.h>
 
 #include "scenes.h"
+#include "timings.h"
 #include "verify.h"
 
 #include <algorithm>
@@ -41,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <utility>
 #include <velk-render/api/render_context.h>
@@ -67,6 +75,16 @@
 #ifndef INSPECT_RUN_DIR
 #define INSPECT_RUN_DIR "verify"
 #endif
+#ifndef INSPECT_SOURCE_DIR
+#define INSPECT_SOURCE_DIR "."
+#endif
+#ifndef INSPECT_VELK_DIR
+#define INSPECT_VELK_DIR "../velk"
+#endif
+/// The parts of each repository whose changes count as code verify measures: a run with
+/// changes elsewhere still counts as on committed code.
+#define INSPECT_MEASURED_PATHS "velk-render velk-runtime velk-scene velk-ui plugins samples/inspect"
+#define INSPECT_VELK_MEASURED_PATHS "velk"
 
 namespace {
 
@@ -162,6 +180,7 @@ constexpr float kMaxChangeShare = 0.0005f;   ///< Share of pixels changing in a 
 constexpr long kMeasureFrames = 8;
 constexpr long kSettleFrom = 10;             ///< Frame changes count from here while a view settles.
 constexpr long kBackFrames = 60;             ///< Frames back at a view after its motion, before it is compared.
+constexpr size_t kBaselineRuns = 5;          ///< Runs on committed code a view's times are measured against.
 
 /// One scene at one view, as a verification or reference run goes through them.
 struct Job
@@ -184,11 +203,28 @@ velk::string run_path(const inspect::SceneSpec& spec, const inspect::ViewSpec& v
     return velk::string(buf);
 }
 
+/// `s` as a view of its characters, without the terminating zero.
+velk::string_view view_of(const char* s)
+{
+    return velk::string_view(s, std::strlen(s));
+}
+
+/// The history of verification runs' GPU times.
+constexpr const char* kTimingsPath = INSPECT_REFERENCE_DIR "/timings.tsv";
+
+/// A frame's GPU time, all passes.
+double frame_ms(velk::IRenderBackend& backend)
+{
+    double ms = 0.0;
+    for (const auto& t : backend.last_gpu_timings()) ms += t.ms;
+    return ms;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
-    enum class Mode { Interactive, Verify, Reference };
+    enum class Mode { Interactive, Verify, Reference, Trend };
     Mode mode = Mode::Interactive;
     const char* only_scene = nullptr;
     const char* skip_scenes = nullptr;
@@ -206,6 +242,8 @@ int main(int argc, char* argv[])
             mode = Mode::Verify;
         } else if (std::strcmp(arg, "reference") == 0) {
             mode = Mode::Reference;
+        } else if (std::strcmp(arg, "trend") == 0) {
+            mode = Mode::Trend;
         } else if (std::strncmp(arg, "scene=", 6) == 0) {
             only_scene = arg + 6;
         } else if (std::strncmp(arg, "skip=", 5) == 0) {
@@ -242,6 +280,31 @@ int main(int argc, char* argv[])
         }
     }
     const bool interactive = mode == Mode::Interactive;
+
+    // The trend needs no window: the history, printed.
+    if (mode == Mode::Trend) {
+        const auto rows = inspect::load_timings(view_of(kTimingsPath));
+        if (rows.empty()) {
+            std::printf("no history in %s\n", kTimingsPath);
+            return 0;
+        }
+        inspect::print_trend(
+            rows,
+            [](const char* scene, void* user) {
+                const char* list = static_cast<const char*>(user);
+                if (!list) return true;
+                const size_t length = std::strlen(scene);
+                for (const char* at = list; at && *at;) {
+                    const char* end = std::strchr(at, ',');
+                    const size_t n = end ? static_cast<size_t>(end - at) : std::strlen(at);
+                    if (n == length && std::strncmp(at, scene, n) == 0) return true;
+                    at = end ? end + 1 : nullptr;
+                }
+                return false;
+            },
+            const_cast<char*>(only_scene));
+        return 0;
+    }
 
     velk::ApplicationConfig config;
     velk::WindowConfig wc;
@@ -338,10 +401,61 @@ int main(int argc, char* argv[])
                 report.append(text);
                 report.append("\n");
             };
-            char buf[512];
-            std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8s %7s %8s %7s %7s %7s %7s  %s", "scene/view", "mean", "p95",
-                          "tile", "burst", "settled", "changed", "gpu ms", "gpu MB", "arenas", "culling", "verdict");
+            char buf[1024];
+            std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8s %7s %8s %7s %7s %11s %7s %7s %7s  %s", "scene/view", "mean",
+                          "p95", "tile", "burst", "settled", "changed", "gpu ms", "was", "moving ms", "gpu MB", "arenas", "culling",
+                          "verdict");
             if (mode == Mode::Verify) line(buf);
+            // The history the times are checked against, and this run's, which a run of every
+            // scene adds to it.
+            const velk::vector<inspect::TimingRow> history =
+                mode == Mode::Verify ? inspect::load_timings(view_of(kTimingsPath)) : velk::vector<inspect::TimingRow>{};
+            velk::vector<inspect::ViewTimes> run_times;
+            // A time against its baseline: "-" without one.
+            const auto was_text = [](double was, char* out, size_t size) {
+                if (was > 0.0) std::snprintf(out, size, "%.2f", was);
+                else std::snprintf(out, size, "-");
+            };
+            const auto moving_text = [](const velk::vector<double>& ms, double& median, double& worst, char* out, size_t size) {
+                median = -1.0;
+                worst = -1.0;
+                if (ms.empty()) {
+                    std::snprintf(out, size, "-");
+                    return;
+                }
+                velk::vector<double> sorted = ms;
+                std::sort(sorted.begin(), sorted.end());
+                median = sorted[sorted.size() / 2];
+                worst = sorted.back();
+                std::snprintf(out, size, "%.2f/%.2f", median, worst);
+            };
+            // Where a slower view's time went: the passes that grew most since the baseline's run.
+            const auto slower_passes = [&](const inspect::ViewTimes& now, const inspect::ViewTimes& was, const velk::string& since) {
+                struct Growth
+                {
+                    const char* name;
+                    double was;
+                    double now;
+                };
+                velk::vector<Growth> grown;
+                for (const auto& p : now.passes) {
+                    double before = 0.0;
+                    for (const auto& q : was.passes) {
+                        if (q.name == p.name) before = q.ms;
+                    }
+                    if (p.ms > before) grown.push_back({p.name.c_str(), before, p.ms});
+                }
+                std::sort(grown.begin(), grown.end(), [](const Growth& a, const Growth& b) { return a.now - a.was > b.now - b.was; });
+                velk::string text("  slower since ");
+                text.append(since);
+                text.append(":");
+                for (size_t i = 0; i < grown.size() && i < 3u; ++i) {
+                    char part[160];
+                    std::snprintf(part, sizeof(part), "%s %s %.2f to %.2f ms", i == 0 ? "" : ",", grown[i].name, grown[i].was, grown[i].now);
+                    text.append(part);
+                }
+                line(text.c_str());
+            };
             size_t passed = 0;
             size_t failed = 0;
             double peak_mb = 0.0;
@@ -422,9 +536,12 @@ int main(int argc, char* argv[])
                 float burst = 0.f;
                 const long settle_from = std::max(kSettleFrom, built.movers.empty() ? 0l : built.frames);
                 long settled = settle_from;
+                // GPU time while the scene's movers move, after the first frames that load it.
+                velk::vector<double> motion_ms;
                 for (long f = 0; f < settle_frames; ++f) {
                     inspect::place_movers(built, f);
                     if (!frame()) return 1;
+                    if (!built.movers.empty() && f >= kSettleFrom && f < built.frames) motion_ms.push_back(frame_ms(*backend));
                     if (f < settle_from) continue;
                     previous = std::move(last);
                     if (!grab(last)) return 1;
@@ -434,9 +551,11 @@ int main(int argc, char* argv[])
                         if (share > kMaxChangeShare) settled = f + 1;
                     }
                 }
-                // Then still: frame to frame, the GPU time and memory.
+                // Then still: frame to frame, the GPU time, each pass's, and memory.
                 float changed = 0.f;
                 double gpu_ms = 0.0;
+                inspect::ViewTimes times;
+                times.view = velk::string(name);
                 for (long f = 0; f < kMeasureFrames; ++f) {
                     if (!frame()) return 1;
                     previous = std::move(last);
@@ -444,9 +563,28 @@ int main(int argc, char* argv[])
                     if (!previous.rgb.empty()) {
                         changed = std::max(changed, inspect::frame_change(previous, last, kChangeThreshold).share);
                     }
-                    for (const auto& t : backend->last_gpu_timings()) gpu_ms += t.ms;
+                    for (const auto& t : backend->last_gpu_timings()) {
+                        gpu_ms += t.ms;
+                        auto found = std::find_if(times.passes.begin(), times.passes.end(),
+                                                  [&](const inspect::PassTime& p) { return p.name == t.label; });
+                        if (found == times.passes.end()) times.passes.push_back({velk::string(t.label), double(t.ms)});
+                        else found->ms += t.ms;
+                    }
                 }
                 gpu_ms /= static_cast<double>(kMeasureFrames);
+                for (auto& p : times.passes) p.ms /= static_cast<double>(kMeasureFrames);
+                times.settled_ms = gpu_ms;
+                char motion_text[32];
+                moving_text(motion_ms, times.moving_median_ms, times.moving_max_ms, motion_text, sizeof(motion_text));
+                // Against the view's runs on committed code.
+                inspect::ViewTimes base;
+                velk::string base_since;
+                const bool has_base = inspect::baseline_of(history, times.view, kBaselineRuns, base, base_since);
+                char was_ms[16];
+                was_text(has_base ? base.settled_ms : -1.0, was_ms, sizeof(was_ms));
+                const bool still_slower = has_base && inspect::slower(gpu_ms, base.settled_ms);
+                const bool moving_slower = has_base && base.moving_median_ms >= 0.0 && times.moving_median_ms >= 0.0
+                                        && inspect::slower(times.moving_median_ms, base.moving_median_ms);
                 // What the scene holds in the shared arenas, used bytes rather than their
                 // buffers' size, which only grows; and the process's total, which grows with them.
                 uint64_t arenas_used = 0;
@@ -474,35 +612,42 @@ int main(int argc, char* argv[])
                 char settled_text[16];
                 std::snprintf(settled_text, sizeof(settled_text), "%ld", settled);
                 if (!inspect::load_reference(reference_path(spec, view, ".ref"), reference)) {
-                    std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8.5f %7s %8.5f %7.2f %7.0f %7.0f %7.0f  no reference", name,
-                                  "-", "-", "-", static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms, mb,
-                                  arenas_mb, cull_mb);
+                    std::snprintf(buf, sizeof(buf), "%-24s %7s %7s %7s %8.5f %7s %8.5f %7.2f %7s %11s %7.0f %7.0f %7.0f  no reference",
+                                  name, "-", "-", "-", static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms,
+                                  was_ms, motion_text, mb, arenas_mb, cull_mb);
                     line(buf);
                     ++failed;
                 } else {
                     const inspect::Difference d = inspect::compare(still, reference, tile);
                     inspect::save_png(*writer, inspect::difference_map(still, reference), run_path(spec, view, "_diff.png"));
-                    char also[48];
-                    std::snprintf(also, sizeof(also), "%s%s", burst > kMaxChangeShare ? " burst" : "",
-                                  changed > kMaxChangeShare ? " flicker" : "");
+                    char also[80];
+                    std::snprintf(also, sizeof(also), "%s%s%s%s", burst > kMaxChangeShare ? " burst" : "",
+                                  changed > kMaxChangeShare ? " flicker" : "", still_slower ? " slower" : "",
+                                  moving_slower ? " slower moving" : "");
                     char verdict[160];
                     verdict_of(d, also, verdict, sizeof(verdict));
-                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f %8.5f %7s %8.5f %7.2f %7.0f %7.0f %7.0f  %s", name,
-                                  static_cast<double>(d.mean), static_cast<double>(d.p95), static_cast<double>(d.worst_tile),
-                                  static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms, mb, arenas_mb,
-                                  cull_mb, verdict);
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f %8.5f %7s %8.5f %7.2f %7s %11s %7.0f %7.0f %7.0f  %s",
+                                  name, static_cast<double>(d.mean), static_cast<double>(d.p95), static_cast<double>(d.worst_tile),
+                                  static_cast<double>(burst), settled_text, static_cast<double>(changed), gpu_ms, was_ms,
+                                  motion_text, mb, arenas_mb, cull_mb, verdict);
                     line(buf);
                     count(verdict);
                 }
-                if (view.move_frames <= 0) continue;
+                if (still_slower || moving_slower) slower_passes(times, base, base_since);
+                if (view.move_frames <= 0) {
+                    run_times.push_back(std::move(times));
+                    continue;
+                }
 
                 // The motion: each step a frame, each against its own reference; the worst step.
                 inspect::Difference moving{};
                 int worst_step = 0;
                 bool have_references = true;
+                velk::vector<double> step_ms;
                 for (int k = 1; k <= view.move_frames; ++k) {
                     place_camera(main_camera, inspect::motion_place(view, k));
                     if (!frame()) return 1;
+                    step_ms.push_back(frame_ms(*backend));
                     inspect::Image image;
                     if (!grab(image)) return 1;
                     char suffix[32];
@@ -533,19 +678,28 @@ int main(int argc, char* argv[])
                 }
                 char moving_name[64];
                 std::snprintf(moving_name, sizeof(moving_name), "%s moving", name);
+                // The camera's motion's GPU time, against the view's runs on committed code.
+                char step_text[32];
+                moving_text(step_ms, times.moving_median_ms, times.moving_max_ms, step_text, sizeof(step_text));
+                char step_was[16];
+                was_text(has_base ? base.moving_median_ms : -1.0, step_was, sizeof(step_was));
+                const bool steps_slower = has_base && base.moving_median_ms >= 0.0
+                                       && inspect::slower(times.moving_median_ms, base.moving_median_ms);
                 if (!have_references) {
                     std::snprintf(buf, sizeof(buf), "%-24s  no reference for every step", moving_name);
                     line(buf);
                     ++failed;
                 } else {
                     char verdict[160];
-                    verdict_of(moving, "", verdict, sizeof(verdict));
-                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  worst at step %d of %d  %s", moving_name,
+                    verdict_of(moving, steps_slower ? " slower moving" : "", verdict, sizeof(verdict));
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  worst at step %d of %d, ms %s (was %s)  %s", moving_name,
                                   static_cast<double>(moving.mean), static_cast<double>(moving.p95),
-                                  static_cast<double>(moving.worst_tile), worst_step, view.move_frames, verdict);
+                                  static_cast<double>(moving.worst_tile), worst_step, view.move_frames, step_text, step_was, verdict);
                     line(buf);
                     count(verdict);
                 }
+                if (steps_slower) slower_passes(times, base, base_since);
+                run_times.push_back(std::move(times));
 
                 // There and back: the view again after the motion, against how it looked before.
                 place_camera(main_camera, view.place);
@@ -574,6 +728,23 @@ int main(int argc, char* argv[])
                 line(buf);
                 std::snprintf(buf, sizeof(buf), "%zu passed, %zu failed; images in %s", passed, failed, INSPECT_RUN_DIR);
                 line(buf);
+                // A run of every scene goes into the history, with the commits it ran.
+                if (!only_scene && !skip_scenes) {
+                    bool dirty = false;
+                    bool velk_dirty = false;
+                    const velk::string commit = inspect::commit_of(view_of(INSPECT_SOURCE_DIR), view_of(INSPECT_MEASURED_PATHS), dirty);
+                    const velk::string velk_commit =
+                        inspect::commit_of(view_of(INSPECT_VELK_DIR), view_of(INSPECT_VELK_MEASURED_PATHS), velk_dirty);
+                    char date[32] = "";
+                    const std::time_t now = std::time(nullptr);
+                    if (const std::tm* local = std::localtime(&now)) std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", local);
+                    if (inspect::append_timings(view_of(kTimingsPath), velk::string(date), commit, velk_commit, dirty || velk_dirty,
+                                                run_times)) {
+                        std::snprintf(buf, sizeof(buf), "times added to the history at %s%s %s%s", commit.c_str(), dirty ? "*" : "",
+                                      velk_commit.c_str(), velk_dirty ? "*" : "");
+                        line(buf);
+                    }
+                }
                 char path[512];
                 std::snprintf(path, sizeof(path), "%s/report.txt", INSPECT_RUN_DIR);
                 if (std::FILE* f = std::fopen(path, "wb")) {
