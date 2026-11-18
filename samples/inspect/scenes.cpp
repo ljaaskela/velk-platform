@@ -317,10 +317,11 @@ void add_sun(SceneBuilder& b, const velk::vec3& rotation, float intensity)
     place(b, sun);
 }
 
-/// A point light at @p position, with the shadow technique the reference path traces.
-void add_point(SceneBuilder& b, const velk::vec3& position, float intensity, float range)
+/// A point light of @p color at @p position, with the shadow technique the reference path
+/// traces. Returns its transform.
+velk::Trs add_point(SceneBuilder& b, const velk::vec3& position, const velk::color& color, float intensity, float range)
 {
-    auto light = velk::trait::render::create_point_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, intensity, range);
+    auto light = velk::trait::render::create_point_light(color, intensity, range);
     light.add_technique(velk::technique::create_rt_shadow());
     auto element = velk::create_element();
     auto trs = velk::trait::transform::create_trs();
@@ -328,6 +329,13 @@ void add_point(SceneBuilder& b, const velk::vec3& position, float intensity, flo
     element.add_trait(trs);
     element.add_trait(light);
     place(b, element);
+    return trs;
+}
+
+/// A warm white point light at @p position.
+velk::Trs add_point(SceneBuilder& b, const velk::vec3& position, float intensity, float range)
+{
+    return add_point(b, position, velk::color{1.f, 0.96f, 0.88f, 1.f}, intensity, range);
 }
 
 /// The bytes of a Radiance HDR file of one colour, for an even sky.
@@ -510,11 +518,29 @@ void build_moving(SceneBuilder& b)
     add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
     add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
     add_mesh(b, build_box(raw(b), {50.f, 50.f, 50.f}, 8, standard(0.75f, 0.75f, 0.75f)), {-120.f, 0.f, -20.f});
-    b.out.moves = true;
-    b.out.from = {-200.f, 0.f, 60.f};
-    b.out.to = {150.f, 0.f, 60.f};
+    const velk::vec3 from{-200.f, 0.f, 60.f};
     b.out.frames = 120;
-    b.out.mover = add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), b.out.from);
+    b.out.movers.push_back(
+        {add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), from), from, {150.f, 0.f, 60.f}});
+}
+
+/// The moving box's scene under a dim sky, lit only by a red and a blue point light that move
+/// past each other while the box moves, then all stand still: coloured light and shadows that
+/// follow moving lights and a moving box at once.
+void build_moving_lights(SceneBuilder& b)
+{
+    set_sky(b, "moving_lights", 0.03f, 0.035f, 0.045f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    add_mesh(b, build_box(raw(b), {50.f, 50.f, 50.f}, 8, standard(0.75f, 0.75f, 0.75f)), {-120.f, 0.f, -20.f});
+    const velk::vec3 box_from{-200.f, 0.f, 60.f};
+    b.out.frames = 120;
+    b.out.movers.push_back({add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), box_from),
+                            box_from, {150.f, 0.f, 60.f}});
+    const velk::vec3 red_from{-220.f, -60.f, 120.f};
+    const velk::vec3 blue_from{220.f, -80.f, -120.f};
+    b.out.movers.push_back({add_point(b, red_from, velk::color{1.f, 0.15f, 0.1f, 1.f}, 1.5f, 700.f), red_from, {120.f, -60.f, 120.f}});
+    b.out.movers.push_back({add_point(b, blue_from, velk::color{0.15f, 0.3f, 1.f, 1.f}, 1.5f, 700.f), blue_from,
+                            {-120.f, -80.f, -120.f}});
 }
 
 /// A small forest of tree sized solids and a field of pebbles, instanced: the instanced cases.
@@ -650,6 +676,9 @@ const velk::vector<SceneSpec>& scenes()
         {"moving", "a box moving across, then standing still: light follows and settles",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_moving},
+        {"moving_lights", "the moving box, lit by a red and a blue point light moving past each other: light following both",
+         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
+         build_moving_lights},
         {"forest", "instanced tree sized solids and pebbles",
          {{"near", {{0.f, -60.f, 250.f}, 0.f, -8.f}}, {"far", {{0.f, -260.f, 500.f}, 0.f, -20.f}}},
          build_forest},
@@ -685,6 +714,12 @@ void remove_scene(BuiltScene& built, velk::Scene& scene)
         scene.remove(element);
     }
     built = BuiltScene{};
+}
+
+void place_movers(BuiltScene& built, long frame)
+{
+    const float t = built.frames > 0 ? std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f) : 1.f;
+    for (Mover& m : built.movers) m.trs.set_translate(m.from + (m.to - m.from) * t);
 }
 
 Place motion_place(const ViewSpec& view, int k)

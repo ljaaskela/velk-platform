@@ -32,18 +32,25 @@ struct ViewSpec
 /// Where the camera is at step @p k of @p view's motion, 0 its start.
 Place motion_place(const ViewSpec& view, int k);
 
+/// Something a scene moves: its transform, from `from` to `to`.
+struct Mover
+{
+    velk::Trs trs;
+    velk::vec3 from{};
+    velk::vec3 to{};
+};
+
 /// What a scene built: its elements, each a child of the scene's root (shapes take their place
-/// from layout, so they stay at the top), and an object it moves from `from` to `to` over its
-/// first `frames` frames, if it has one.
+/// from layout, so they stay at the top), and what it moves over its first `frames` frames.
 struct BuiltScene
 {
     velk::vector<velk::Element> elements;
-    bool moves = false;
-    velk::Trs mover;
-    velk::vec3 from{};
-    velk::vec3 to{};
+    velk::vector<Mover> movers;
     long frames = 0;
 };
+
+/// Places each of @p built's movers where it is at frame @p frame: on its way, then at its end.
+void place_movers(BuiltScene& built, long frame);
 
 /// What a scene builder gets: the scene, its root to build under, the render context, and the
 /// camera, whose environment the scene sets.

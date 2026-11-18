@@ -146,7 +146,7 @@ constexpr NamedView kViews[] = {
     {velk::DebugView::Record, "record", "record",
      "a colour per kept cut record what is drawn is from, white for none"},
     {velk::DebugView::Light, "light", "light points",
-     "a colour per point of light, blended as pixels read them, darker for a record's own points; flat: one value; quads by light node; magenta not traced yet; grey none"},
+     "a colour per point of light, blended as pixels read them, darker for a record's own points; flat: one value; quads by light node; magenta not traced yet; cyan traced again after a change; grey none"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -395,7 +395,7 @@ int main(int argc, char* argv[])
                     for (int k = 0; k <= view.move_frames; ++k) {
                         place_camera(main_camera, inspect::motion_place(view, k));
                         for (long f = 0; f < reference_frames; ++f) {
-                            if (built.moves) built.mover.set_translate(built.to);
+                            inspect::place_movers(built, built.frames);
                             if (!frame()) return 1;
                         }
                         inspect::Image image;
@@ -414,20 +414,18 @@ int main(int argc, char* argv[])
                 }
 
                 // Settling: what changes from frame to frame while the light builds up, from
-                // kSettleFrom on, and the frame after which nothing more than kMaxChangeShare does.
+                // kSettleFrom on, or once what the scene moves has stopped, and the frame after
+                // which nothing more than kMaxChangeShare does. The reference has what moves where
+                // it ends; a run sees it move there.
                 inspect::Image last;
                 inspect::Image previous;
                 float burst = 0.f;
-                long settled = kSettleFrom;
+                const long settle_from = std::max(kSettleFrom, built.movers.empty() ? 0l : built.frames);
+                long settled = settle_from;
                 for (long f = 0; f < settle_frames; ++f) {
-                    if (built.moves) {
-                        // The reference is the mover where it ends; a run sees it move there.
-                        built.mover.set_translate(built.from
-                                                  + (built.to - built.from)
-                                                        * std::min(static_cast<float>(f) / static_cast<float>(built.frames), 1.f));
-                    }
+                    inspect::place_movers(built, f);
                     if (!frame()) return 1;
-                    if (f < kSettleFrom) continue;
+                    if (f < settle_from) continue;
                     previous = std::move(last);
                     if (!grab(last)) return 1;
                     if (!previous.rgb.empty()) {
@@ -749,10 +747,7 @@ int main(int argc, char* argv[])
     show_level(tree_level);
     long frame = 0;
     while (app.poll()) {
-        if (built.moves) {
-            built.mover.set_translate(built.from
-                                      + (built.to - built.from) * std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f));
-        }
+        inspect::place_movers(built, frame);
         ++frame;
         if (scripted) {
             // Out along the view and back, rising and falling, the same every time, from the start.
