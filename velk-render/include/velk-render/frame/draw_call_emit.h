@@ -227,7 +227,7 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     // Likewise the quad draw, beside its list (kQuadListHeaderWords), for rays that hit a quad.
     if (batch.draws_quads()) {
         if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
-            culling->update_at(uint64_t(quads_word + 5u) * sizeof(uint32_t), &draw_base, sizeof(draw_base));
+            culling->update_at(uint64_t(quads_word + kQuadListDraw) * sizeof(uint32_t), &draw_base, sizeof(draw_base));
         }
     }
     return true;
@@ -431,7 +431,7 @@ inline void emit_draw_calls(
             call.args_buffer = args;
             call.args_buffer_offset = size_t(quads_word) * sizeof(uint32_t);
             call.count_buffer = args;
-            call.count_buffer_offset = size_t(quads_word + 4u) * sizeof(uint32_t);
+            call.count_buffer_offset = size_t(quads_word + kQuadListDrawCount) * sizeof(uint32_t);
             call.max_draw_count = 1;
         }
 

@@ -165,10 +165,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.record = VELK_NO_RECORD;
 
     uint top = VELK_GLOBALS.ray_top;
-    if (top == VELK_RAY_NONE || velk_culling.data[top + 1u] == 0u) return closest ? 0.0 : 1.0;
-    uint top_cuts = top + 4u;
-    uint top_leaves = top_cuts + velk_culling.data[top] * 8u;
-    uint top_nodes = top_leaves + velk_culling.data[top + 1u] * 2u;
+    if (top == VELK_RAY_NONE || velk_culling.data[top + VELK_RAY_TOP_LEAVES] == 0u) return closest ? 0.0 : 1.0;
+    uint top_cuts = top + VELK_RAY_TOP_HEADER_WORDS;
+    uint top_leaves = top_cuts + velk_culling.data[top + VELK_RAY_TOP_CUTS] * VELK_RAY_TOP_CUT_WORDS;
+    uint top_nodes = top_leaves + velk_culling.data[top + VELK_RAY_TOP_LEAVES] * VELK_RAY_TOP_LEAF_WORDS;
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
 
     const uint kTop = 0u;
@@ -178,7 +178,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     // This thread's slice of the work group's stack (s_walk_stack).
     uint stack_base = gl_LocalInvocationIndex * uint(VELK_TRACE_STACK_SIZE);
     int sp = 0;
-    s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[top + 3u];
+    s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[top + VELK_RAY_TOP_ROOT];
     uint level = kTop;
     int partition_scope = 0;
     int mesh_scope = 0;
@@ -372,7 +372,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     if (!closest) return 0.0;
                     best_t = tt;
                     best_key = 0u;
-                    best_draw = quads != VELK_RAY_NONE ? velk_culling.data[quads + 5u] : VELK_RAY_NONE;
+                    best_draw = quads != VELK_RAY_NONE ? velk_culling.data[quads + VELK_QUAD_LIST_DRAW] : VELK_RAY_NONE;
                     best_instance = cluster;
                     best_cluster = VELK_NO_CLUSTER;
                     best_record = r;
@@ -398,9 +398,9 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (items != VELK_RAY_NONE) {
                 uint item = items + named * VELK_PLAIN_ITEM_WORDS;
                 instance = velk_culling.data[item];
-                draw = velk_culling.data[item + 3u];
-                kind = velk_culling.data[item + 4u];
-                mesh = velk_culling.data[item + 5u];
+                draw = velk_culling.data[item + VELK_PLAIN_ITEM_DRAW];
+                kind = velk_culling.data[item + VELK_PLAIN_ITEM_KIND];
+                mesh = velk_culling.data[item + VELK_PLAIN_ITEM_MESH];
                 key = named + 1u;
             }
             // An instance without a place in its raster region is nothing to rays.
@@ -479,13 +479,15 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 continue;
             }
             ++velk_ray_partition_nodes;
-            uint node = nodes + ref * 16u;
+            uint node = nodes + ref * VELK_CUT_NODE_WORDS;
             float t_l, t_r;
-            bool h_l = ray_aabb(ray, velk_ray_vec3(node) - cam, velk_ray_vec3(node + 3u) - cam, best_t * 1.00001, t_l);
-            bool h_r = ray_aabb(ray, velk_ray_vec3(node + 6u) - cam, velk_ray_vec3(node + 9u) - cam, best_t * 1.00001, t_r);
+            bool h_l = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam,
+                                best_t * 1.00001, t_l);
+            bool h_r = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam,
+                                best_t * 1.00001, t_r);
             bool left_first = h_l && (!h_r || t_l <= t_r);
-            uint near_ref = velk_culling.data[node + (left_first ? 12u : 13u)];
-            uint far_ref = velk_culling.data[node + (left_first ? 13u : 12u)];
+            uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
+            uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
             if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
             if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         } else {
@@ -494,34 +496,37 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 ++velk_ray_partitions;
                 // A partition: its tree, whose root's box its leaf here already has.
-                uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * 2u;
-                uint cut_entry = top_cuts + velk_culling.data[leaf] * 8u;
-                uint cut = velk_culling.data[cut_entry];
-                uint state = velk_culling.data[cut + VELK_CUT_STATES_WORD] + velk_culling.data[leaf + 1u] * VELK_CUT_PARTITION_WORDS;
+                uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * VELK_RAY_TOP_LEAF_WORDS;
+                uint cut_entry = top_cuts + velk_culling.data[leaf + VELK_RAY_TOP_LEAF_CUT] * VELK_RAY_TOP_CUT_WORDS;
+                uint cut = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_CUT];
+                uint state = velk_culling.data[cut + VELK_CUT_STATES_WORD]
+                           + velk_culling.data[leaf + VELK_RAY_TOP_LEAF_PARTITION] * VELK_CUT_PARTITION_WORDS;
                 // What rays trace of it: its ray list, over its records.
                 uint count = velk_culling.data[state + VELK_PART_RAY_COUNT];
                 if (count == 0u) continue;
                 uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
                 records = velk_culling.data[cut + VELK_CUT_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_RECORD_END;
                 ray_list = velk_culling.data[cut + VELK_CUT_RAY_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST];
-                nodes = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + velk_culling.data[state + VELK_PART_NODE_FIRST] * 16u;
-                instances_base = velk_culling.data[cut_entry + 1u];
-                items = velk_culling.data[cut_entry + 2u];
-                quads = velk_culling.data[cut_entry + 6u];
-                if (velk_culling.data[cut_entry + 5u] != 0u) velk_ray_met_motion = true;
+                nodes = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + velk_culling.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
+                instances_base = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
+                items = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_ITEMS];
+                quads = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_QUADS];
+                if (velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_MOVES] != 0u) velk_ray_met_motion = true;
                 level = kPartition;
                 partition_scope = sp;
                 if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_ray_tree_nodes(count) - 1u;
                 continue;
             }
             ++velk_ray_top_nodes;
-            uint node = top_nodes + ref * 16u;
+            uint node = top_nodes + ref * VELK_CUT_NODE_WORDS;
             float t_l, t_r;
-            bool h_l = ray_aabb(ray, velk_ray_vec3(node) - cam, velk_ray_vec3(node + 3u) - cam, best_t * 1.00001, t_l);
-            bool h_r = ray_aabb(ray, velk_ray_vec3(node + 6u) - cam, velk_ray_vec3(node + 9u) - cam, best_t * 1.00001, t_r);
+            bool h_l = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam,
+                                best_t * 1.00001, t_l);
+            bool h_r = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam,
+                                best_t * 1.00001, t_r);
             bool left_first = h_l && (!h_r || t_l <= t_r);
-            uint near_ref = velk_culling.data[node + (left_first ? 12u : 13u)];
-            uint far_ref = velk_culling.data[node + (left_first ? 13u : 12u)];
+            uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
+            uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
             if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
             if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         }

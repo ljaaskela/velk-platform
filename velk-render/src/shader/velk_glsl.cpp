@@ -102,11 +102,6 @@ struct MeshStaticData {
 
 )"
 R"(
-// Words per plain item in a view's culling (instance index, slot, table, draw, shape kind,
-// mesh ray data): kPlainItemWords.
-#define VELK_PLAIN_ITEM_WORDS 7u
-// Words before an item descriptor's meshes: kItemDescriptorHeaderWords.
-#define VELK_ITEM_DESCRIPTOR_HEADER_WORDS 8u
 // Words per cluster draw entry: kClusterEntryWords.
 #define VELK_CLUSTER_ENTRY_WORDS VELK_CLUSTER_ENTRY_END
 // Words per partition in a partition table: kCullEntryWords.

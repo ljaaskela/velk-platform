@@ -4,6 +4,8 @@
 #include <velk/array_view.h>
 #include <velk/string_view.h>
 
+#include <velk-render/frame/cull_layout.h>
+
 #include <cmath>
 #include <cstdint>
 
@@ -148,12 +150,8 @@ inline constexpr uint32_t kDrawFlagColor = 1u << 1;
 /// VELK_DRAW_QUADS.
 inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 
-/// A view's quad list, in the culling arena: the draw's indirect arguments (4 vertices, the
-/// instance count, 0, 0), then the draw count (1), then the quad draw's record in the draw data
-/// (DrawDataHeader), which rays name, a spare word, the count of quads in the view's cuts in or
-/// out of view (for the culling log), then the word of each quad drawn, and after the list's
-/// capacity the word of each one's kept cut record.
-inline constexpr uint32_t kQuadListHeaderWords = 8;
+/// Words before the quads in a view's quad list: VELK_QUAD_LIST (frame/cull_layout.h).
+inline constexpr uint32_t kQuadListHeaderWords = kQuadListQuads;
 
 // ===== Scene-data GPU structs =====
 // Mirrors of GLSL types consumed by RT and deferred compute shaders.

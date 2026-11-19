@@ -548,22 +548,23 @@ void main()
     bool top = pc.top_word != 0xFFFFFFFFu;
     uint node;
     if (top) {
-        uint cuts = velk_culling.data[pc.top_word];
-        uint leaves = velk_culling.data[pc.top_word + 1u];
-        if (node_index >= velk_culling.data[pc.top_word + 2u]) return;
-        node = pc.top_word + 4u + cuts * 8u + leaves * 2u + node_index * 16u;
+        uint cuts = velk_culling.data[pc.top_word + VELK_RAY_TOP_CUTS];
+        uint leaves = velk_culling.data[pc.top_word + VELK_RAY_TOP_LEAVES];
+        if (node_index >= velk_culling.data[pc.top_word + VELK_RAY_TOP_NODES]) return;
+        node = pc.top_word + VELK_RAY_TOP_HEADER_WORDS + cuts * VELK_RAY_TOP_CUT_WORDS + leaves * VELK_RAY_TOP_LEAF_WORDS
+             + node_index * VELK_CUT_NODE_WORDS;
     } else {
         uint cut = pc.cut_word;
         if (node_index >= velk_culling.data[cut + VELK_CUT_NODES]) return;
         uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
-        node = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + node_index * 16u;
+        node = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + node_index * VELK_CUT_NODE_WORDS;
     }
-    uint level = velk_culling.data[node + 14u];
-    bool root = velk_culling.data[node + 15u] != 0u;
+    uint level = velk_culling.data[node + VELK_CUT_NODE_LEVEL];
+    bool root = velk_culling.data[node + VELK_CUT_NODE_ROOT] != 0u;
     // A node's children are a level below it; a short tree shows its root's.
     if (level != pc.level + 1u && !(root && level < pc.level + 1u)) return;
-    if (velk_culling.data[node + 12u + side] == 0xFFFFFFFFu) return;
-    uint box = node + side * 6u;
+    if (velk_culling.data[node + VELK_CUT_NODE_LEFT_REF + side] == 0xFFFFFFFFu) return;
+    uint box = node + VELK_CUT_NODE_LEFT_MIN + side * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN);
     vec3 lo = vec3(uintBitsToFloat(velk_culling.data[box]), uintBitsToFloat(velk_culling.data[box + 1u]),
                    uintBitsToFloat(velk_culling.data[box + 2u]));
     vec3 hi = vec3(uintBitsToFloat(velk_culling.data[box + 3u]), uintBitsToFloat(velk_culling.data[box + 4u]),

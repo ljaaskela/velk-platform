@@ -43,23 +43,13 @@ inline constexpr uint32_t kQuadLeavesOnly = 0x80000000u;
 inline constexpr uint32_t kCullChunkListWords = kChunkEnd;
 /// The slot an object id names, in tables by object (IScene::get_object_ids).
 inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
-/// Words per item (InstanceCullPass::together), what a kept cut record names: its instance's
-/// index (kCullNoSlot for an instance without a place in its raster region), its slot in its
-/// batch's instances, its table, its draw's index in the draw data, what rays test it as (an
-/// RtShape kind: 255 its mesh, else its visual's analytic shape, see IAnalyticShape), its mesh's
-/// ray data (MeshStaticData's index, kInvalidMeshStaticBase for none), and how far a motion
-/// function can move it (a float), which its bounds grow by. A plain object's instances are an
-/// item each, first; then each instanced visual's items, an item per slot, which
-/// instance_items_src writes whole each frame, with their objects and next words, so that the
-/// CPU never goes through them. Mirrors VELK_PLAIN_ITEM_WORDS.
-inline constexpr uint32_t kPlainItemWords = 7;
-/// Words per instanced visual in the item descriptors instance_items_src and the choose read:
-/// its first item, its slots, its instances' base, its slot table's word, its mesh count M, its
-/// table, how far it can move (a float) and its first object id (slot i's object is that plus
-/// i), then per mesh its draw, its ray shape kind and its mesh's ray data (kItemMeshWords each).
-/// See InstanceCullPass::item_descriptors. Mirrors VELK_ITEM_DESCRIPTOR_HEADER_WORDS.
-inline constexpr uint32_t kItemDescriptorHeaderWords = 8;
-inline constexpr uint32_t kItemMeshWords = 3;
+/// Items (InstanceCullPass::together), kPlainItemWords each (VELK_PLAIN_ITEM in cull_layout.h),
+/// are what kept cut records name. An item's kind is an RtShape kind: kRayShapeMesh for its mesh,
+/// else its visual's analytic shape (IAnalyticShape); its bounds grow by its motion. A plain
+/// object's instances are an item each, first; then each instanced visual's items, an item per
+/// slot, which instance_items_src writes whole each frame from the visuals' item descriptors
+/// (VELK_ITEM_DESCRIPTOR, then a VELK_ITEM_MESH per mesh), with their objects and next words, so
+/// that the CPU never goes through them.
 /// A plain item's shape kind for a mesh. Mirrors RtShape's 255.
 inline constexpr uint32_t kRayShapeMesh = 255;
 /// A plain item's shape kind for a rect over its instance's extent. Mirrors RtShape's 0.
@@ -101,7 +91,6 @@ inline constexpr uint32_t kCutPartitionWords = kPartEnd;
 /// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
 inline constexpr uint32_t kCutTakeoverWords = kTakeoverEnd;
 inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;
-inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
 
 /// A partition's quad tree: its members as quads, and every node above them a quad standing for
@@ -758,9 +747,9 @@ void main()
     for (uint i = gl_LocalInvocationIndex; i < cull_words.data[state + VELK_PART_RAY_COUNT]; i += 64u) {
         cull_words.data[list_to + i] = cull_words.data[list_from + i];
     }
-    uint node_words = velk_cut_tree_nodes(cull_words.data[state + VELK_PART_RAY_COUNT]) * 16u;
-    uint node_from = velk_cut_node_store(cut, false) + cull_words.data[state + VELK_PART_LAST_NODE_FIRST] * 16u;
-    uint node_to = velk_cut_node_store(cut, true) + cull_words.data[state + VELK_PART_NODE_FIRST] * 16u;
+    uint node_words = velk_cut_tree_nodes(cull_words.data[state + VELK_PART_RAY_COUNT]) * VELK_CUT_NODE_WORDS;
+    uint node_from = velk_cut_node_store(cut, false) + cull_words.data[state + VELK_PART_LAST_NODE_FIRST] * VELK_CUT_NODE_WORDS;
+    uint node_to = velk_cut_node_store(cut, true) + cull_words.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
     for (uint i = gl_LocalInvocationIndex; i < node_words; i += 64u) {
         cull_words.data[node_to + i] = cull_words.data[node_from + i];
     }
@@ -1160,14 +1149,14 @@ void velk_cut_member(uint member, vec3 viewpoint)
     // An instanced visual's object: its one item, by its id, through its visual's descriptor.
     uint at = pc.descriptors_word;
     for (uint k = 0u; k < pc.descriptor_count && k < 4096u; ++k) {
-        uint base = cull_words.data[at + 7u];
-        if (base != 0xFFFFFFFFu && member >= base && member - base < cull_words.data[at + 1u]) {
-            uint item = cull_words.data[at] + member - base;
+        uint base = cull_words.data[at + VELK_ITEM_DESCRIPTOR_OBJECT_BASE];
+        if (base != 0xFFFFFFFFu && member >= base && member - base < cull_words.data[at + VELK_ITEM_DESCRIPTOR_SLOTS]) {
+            uint item = cull_words.data[at + VELK_ITEM_DESCRIPTOR_FIRST] + member - base;
             uint w = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
-            velk_cut_instance(item, cull_words.data[w], cull_words.data[w + 2u], viewpoint);
+            velk_cut_instance(item, cull_words.data[w + VELK_PLAIN_ITEM_INSTANCE], cull_words.data[w + VELK_PLAIN_ITEM_TABLE], viewpoint);
             return;
         }
-        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + 4u], 4096u) * 3u;
+        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + VELK_ITEM_DESCRIPTOR_MESHES], 4096u) * VELK_ITEM_MESH_WORDS;
     }
     // A plain object: each of its items. An object has a few at most; the bound only keeps a
     // broken chain from running on.
@@ -1176,7 +1165,7 @@ void velk_cut_member(uint member, vec3 viewpoint)
     for (uint n = 0u; n < 64u && item != 0xFFFFFFFFu; ++n) {
         if (cull_words.data[pc.objects_word + item] == member) {
             uint at = pc.items_word + item * VELK_PLAIN_ITEM_WORDS;
-            velk_cut_instance(item, cull_words.data[at], cull_words.data[at + 2u], viewpoint);
+            velk_cut_instance(item, cull_words.data[at + VELK_PLAIN_ITEM_INSTANCE], cull_words.data[at + VELK_PLAIN_ITEM_TABLE], viewpoint);
         }
         item = cull_words.data[pc.next_word + item];
     }
@@ -1467,7 +1456,7 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         uint item = items_word + slot * VELK_PLAIN_ITEM_WORDS;
         instance = cull_words.data[item];
         // Grown by how far a motion function can move it, both ways.
-        pad += 2.0 * uintBitsToFloat(cull_words.data[item + 6u]);
+        pad += 2.0 * uintBitsToFloat(cull_words.data[item + VELK_PLAIN_ITEM_MOTION]);
     }
     if (instance == 0xFFFFFFFFu) return;
     mat4 world = cull_instances.data[instance].world_matrix;
@@ -1590,7 +1579,7 @@ void main()
     uint records_count = cull_words.data[state + VELK_PART_COUNT];
     uint first_index = cull_words.data[state + VELK_PART_FIRST];
     uint records = velk_cut_store(cut, true) + first_index * VELK_RECORD_END;
-    uint nodes = velk_cut_node_store(cut, true) + cull_words.data[state + VELK_PART_NODE_FIRST] * 16u;
+    uint nodes = velk_cut_node_store(cut, true) + cull_words.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
     uint list = velk_cut_ray_store(cut, true) + cull_words.data[state + VELK_PART_FIRST];
     uint lane = gl_LocalInvocationIndex;
 
@@ -1630,7 +1619,7 @@ void main()
     while (true) {
         uint here = (below + 1u) / 2u;
         for (uint i = gl_LocalInvocationIndex; i < here; i += 64u) {
-            uint node = nodes + (level_first + i) * 16u;
+            uint node = nodes + (level_first + i) * VELK_CUT_NODE_WORDS;
             for (uint k = 0u; k < 2u; ++k) {
                 uint child = i * 2u + k;
                 vec3 lo = vec3(1e30);
@@ -1648,16 +1637,16 @@ void main()
                     }
                     ref = 0x80000000u | (first * 4u + n - 1u);
                 } else if (child < below) {
-                    uint at = nodes + (below_first + child) * 16u;
-                    lo = min(velk_load_vec3(at), velk_load_vec3(at + 6u));
-                    hi = max(velk_load_vec3(at + 3u), velk_load_vec3(at + 9u));
+                    uint at = nodes + (below_first + child) * VELK_CUT_NODE_WORDS;
+                    lo = min(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MIN), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MIN));
+                    hi = max(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MAX), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MAX));
                     ref = below_first + child;
                 }
-                velk_store_box(node + k * 6u, lo, hi);
-                cull_words.data[node + 12u + k] = ref;
+                velk_store_box(node + VELK_CUT_NODE_LEFT_MIN + k * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN), lo, hi);
+                cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k] = ref;
             }
-            cull_words.data[node + 14u] = level;
-            cull_words.data[node + 15u] = here == 1u ? 1u : 0u;
+            cull_words.data[node + VELK_CUT_NODE_LEVEL] = level;
+            cull_words.data[node + VELK_CUT_NODE_ROOT] = here == 1u ? 1u : 0u;
         }
         memoryBarrierBuffer();
         barrier();
@@ -1672,14 +1661,9 @@ void main()
 )";
 
 /// A view's top tree for rays, over the partitions of all its kept cuts, in the culling arena:
-/// kRayTopHeaderWords (how many cuts, leaves and nodes, and the root node's index), then a
-/// cut each, kRayTopCutWords (its word, its instances_base, its plain items' word or
-/// kCullNoSlot, its partition count, its first leaf, 1 if a motion function moves its
-/// instances, the view's quad list or kCullNoSlot), then a leaf each, two words (the cut's
-/// index, the partition's), then the nodes, kCutNodeWords each as a partition's are, but a
-/// reference with kCutLeaf names a leaf, and without a node of this tree by its index.
-inline constexpr uint32_t kRayTopHeaderWords = 4;
-inline constexpr uint32_t kRayTopCutWords = 8;
+/// VELK_RAY_TOP, VELK_RAY_TOP_CUT and VELK_RAY_TOP_LEAF (cull_layout.h), then the nodes,
+/// kCutNodeWords each as a partition's are, but a reference with kCutLeaf names a leaf, and
+/// without a node of this tree by its index.
 
 /// Nodes in a tree over @p leaves leaves paired level by level. Mirrors velk_top_tree_nodes.
 inline uint32_t top_tree_nodes(uint32_t leaves)
@@ -1733,10 +1717,10 @@ void velk_store_box(uint at, vec3 lo, vec3 hi)
 void main()
 {
     uint top = pc.top_word;
-    uint cuts = cull_words.data[top];
-    uint leaves = cull_words.data[top + 1u];
+    uint cuts = cull_words.data[top + VELK_RAY_TOP_CUTS];
+    uint leaves = cull_words.data[top + VELK_RAY_TOP_LEAVES];
     if (leaves == 0u) return;
-    uint leaf_word = top + 4u + cuts * 8u;
+    uint leaf_word = top + VELK_RAY_TOP_HEADER_WORDS + cuts * VELK_RAY_TOP_CUT_WORDS;
     uint nodes = leaf_word + leaves * 2u;
 
     uint below = leaves;
@@ -1747,7 +1731,7 @@ void main()
     while (true) {
         uint here = (below + 1u) / 2u;
         for (uint i = gl_LocalInvocationIndex; i < here; i += 256u) {
-            uint node = nodes + (level_first + i) * 16u;
+            uint node = nodes + (level_first + i) * VELK_CUT_NODE_WORDS;
             for (uint k = 0u; k < 2u; ++k) {
                 uint child = i * 2u + k;
                 vec3 lo = vec3(1e30);
@@ -1755,31 +1739,33 @@ void main()
                 uint ref = 0xFFFFFFFFu;
                 if (child < below && from_leaves) {
                     // A partition: its root's box, if it has records rays trace.
-                    uint cut = cull_words.data[top + 4u + cull_words.data[leaf_word + child * 2u] * 8u];
-                    uint state = velk_cut_state(cut, cull_words.data[leaf_word + child * 2u + 1u]);
+                    uint leaf = leaf_word + child * VELK_RAY_TOP_LEAF_WORDS;
+                    uint cut = cull_words.data[top + VELK_RAY_TOP_HEADER_WORDS + cull_words.data[leaf + VELK_RAY_TOP_LEAF_CUT] * VELK_RAY_TOP_CUT_WORDS
+                                               + VELK_RAY_TOP_CUT_CUT];
+                    uint state = velk_cut_state(cut, cull_words.data[leaf + VELK_RAY_TOP_LEAF_PARTITION]);
                     uint count = cull_words.data[state + VELK_PART_RAY_COUNT];
                     // One without records is not there for rays: no ref, which the walk skips.
                     if (count != 0u) {
                         uint root = velk_cut_node_store(cut, true)
-                                  + (cull_words.data[state + VELK_PART_NODE_FIRST] + velk_cut_tree_nodes(count) - 1u) * 16u;
+                                  + (cull_words.data[state + VELK_PART_NODE_FIRST] + velk_cut_tree_nodes(count) - 1u) * VELK_CUT_NODE_WORDS;
                         lo = min(velk_load_vec3(root), velk_load_vec3(root + 6u));
                         hi = max(velk_load_vec3(root + 3u), velk_load_vec3(root + 9u));
                         ref = 0x80000000u | child;
                     }
                 } else if (child < below) {
                     // A node over nothing for rays is not there either.
-                    uint at = nodes + (below_first + child) * 16u;
-                    lo = min(velk_load_vec3(at), velk_load_vec3(at + 6u));
-                    hi = max(velk_load_vec3(at + 3u), velk_load_vec3(at + 9u));
-                    if (cull_words.data[at + 12u] != 0xFFFFFFFFu || cull_words.data[at + 13u] != 0xFFFFFFFFu) {
+                    uint at = nodes + (below_first + child) * VELK_CUT_NODE_WORDS;
+                    lo = min(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MIN), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MIN));
+                    hi = max(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MAX), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MAX));
+                    if (cull_words.data[at + VELK_CUT_NODE_LEFT_REF] != 0xFFFFFFFFu || cull_words.data[at + VELK_CUT_NODE_RIGHT_REF] != 0xFFFFFFFFu) {
                         ref = below_first + child;
                     }
                 }
-                velk_store_box(node + k * 6u, lo, hi);
-                cull_words.data[node + 12u + k] = ref;
+                velk_store_box(node + VELK_CUT_NODE_LEFT_MIN + k * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN), lo, hi);
+                cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k] = ref;
             }
-            cull_words.data[node + 14u] = level;
-            cull_words.data[node + 15u] = here == 1u ? 1u : 0u;
+            cull_words.data[node + VELK_CUT_NODE_LEVEL] = level;
+            cull_words.data[node + VELK_CUT_NODE_ROOT] = here == 1u ? 1u : 0u;
         }
         memoryBarrierBuffer();
         barrier();
@@ -1942,7 +1928,7 @@ void main()
     // column after.
     if (entry == VELK_CUT_QUAD) {
         if (pc.quads_word == 0xFFFFFFFFu) return;
-        atomicAdd(cull_words.data[pc.quads_word + 7u], 1u);
+        atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_IN_CUTS], 1u);
         uint w = cluster_or_table;
         GlobalData globals = velk_globals.data[pc.globals_base];
         vec3 center = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER]),
@@ -1951,12 +1937,12 @@ void main()
                     - globals.cam_pos.xyz;
         float radius = uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_RADIUS]) + pc.quad_pad;
         if (pc.whole == 0u && velk_cut_outside(globals.view_projection, center, radius)) return;
-        uint at = atomicAdd(cull_words.data[pc.quads_word + 1u], 1u);
+        uint at = atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_COUNT], 1u);
         if (at < pc.quad_capacity) {
-            cull_words.data[pc.quads_word + 8u + at] = w;
-            cull_words.data[pc.quads_word + 8u + pc.quad_capacity + at] = record;
+            cull_words.data[pc.quads_word + VELK_QUAD_LIST_QUADS + at] = w;
+            cull_words.data[pc.quads_word + VELK_QUAD_LIST_QUADS + pc.quad_capacity + at] = record;
         } else {
-            atomicAdd(cull_words.data[pc.quads_word + 1u], 0xFFFFFFFFu);
+            atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_COUNT], 0xFFFFFFFFu);
         }
         return;
     }
@@ -1969,8 +1955,8 @@ void main()
         uint at = pc.items_word + slot * VELK_PLAIN_ITEM_WORDS;
         uint item = slot;
         instance = cull_words.data[at];
-        slot = cull_words.data[at + 1u];
-        table_word = cull_words.data[at + 2u];
+        slot = cull_words.data[at + VELK_PLAIN_ITEM_SLOT];
+        table_word = cull_words.data[at + VELK_PLAIN_ITEM_TABLE];
         // Rays only: drawn by its own pass, whose pixels find their record by item.
         if (table_word == 0xFFFFFFFFu) {
             cull_words.data[pc.item_records_word + item] = record;
@@ -2160,8 +2146,8 @@ void main()
     if (pc.items_word != 0xFFFFFFFFu) {
         uint item = pc.items_word + item_index * VELK_PLAIN_ITEM_WORDS;
         instance = cull_words.data[item];
-        slot = cull_words.data[item + 1u];
-        table_word = cull_words.data[item + 2u];
+        slot = cull_words.data[item + VELK_PLAIN_ITEM_SLOT];
+        table_word = cull_words.data[item + VELK_PLAIN_ITEM_TABLE];
         // Rays only: drawn by its own pass. Or an instance without a place in its raster region.
         if (table_word == 0xFFFFFFFFu || instance == 0xFFFFFFFFu) return;
     }
@@ -2824,43 +2810,43 @@ void main()
     uint found = 0xFFFFFFFFu;
     uint at = pc.descriptors_word;
     for (uint k = 0u; k < pc.descriptor_count && k < 4096u; ++k) {
-        uint first = cull_words.data[at];
-        uint slots = cull_words.data[at + 1u];
+        uint first = cull_words.data[at + VELK_ITEM_DESCRIPTOR_FIRST];
+        uint slots = cull_words.data[at + VELK_ITEM_DESCRIPTOR_SLOTS];
         if (item >= first && item - first < slots) {
             found = at;
             break;
         }
-        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + 4u], 4096u) * 3u;
+        at += VELK_ITEM_DESCRIPTOR_HEADER_WORDS + min(cull_words.data[at + VELK_ITEM_DESCRIPTOR_MESHES], 4096u) * VELK_ITEM_MESH_WORDS;
     }
     // What does not change with its place: its table, how far it can move, its object, and no
     // next item, since an instanced object has one item.
-    uint slot = found != 0xFFFFFFFFu ? item - cull_words.data[found] : 0u;
-    cull_words.data[w + 2u] = found != 0xFFFFFFFFu ? cull_words.data[found + 5u] : 0xFFFFFFFFu;
-    cull_words.data[w + 6u] = found != 0xFFFFFFFFu ? cull_words.data[found + 6u] : 0u;
-    uint object_base = found != 0xFFFFFFFFu ? cull_words.data[found + 7u] : 0xFFFFFFFFu;
+    uint slot = found != 0xFFFFFFFFu ? item - cull_words.data[found + VELK_ITEM_DESCRIPTOR_FIRST] : 0u;
+    cull_words.data[w + VELK_PLAIN_ITEM_TABLE] = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_TABLE] : 0xFFFFFFFFu;
+    cull_words.data[w + VELK_PLAIN_ITEM_MOTION] = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_MOTION] : 0u;
+    uint object_base = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_OBJECT_BASE] : 0xFFFFFFFFu;
     cull_words.data[pc.objects_word + item] = object_base != 0xFFFFFFFFu ? object_base + slot : 0xFFFFFFFFu;
     cull_words.data[pc.next_word + item] = 0xFFFFFFFFu;
     uint place = 0xFFFFFFFFu;
-    if (found != 0xFFFFFFFFu && cull_words.data[found + 3u] != 0u) {
-        place = cull_words.data[cull_words.data[found + 3u] + slot];
+    if (found != 0xFFFFFFFFu && cull_words.data[found + VELK_ITEM_DESCRIPTOR_SLOT_TABLE] != 0u) {
+        place = cull_words.data[cull_words.data[found + VELK_ITEM_DESCRIPTOR_SLOT_TABLE] + slot];
     }
     if (place == 0xFFFFFFFFu) {
-        cull_words.data[w] = 0xFFFFFFFFu;
-        cull_words.data[w + 1u] = 0xFFFFFFFFu;
-        cull_words.data[w + 3u] = 0xFFFFFFFFu;
-        cull_words.data[w + 4u] = 255u;
-        cull_words.data[w + 5u] = 0xFFFFFFFFu;
+        cull_words.data[w + VELK_PLAIN_ITEM_INSTANCE] = 0xFFFFFFFFu;
+        cull_words.data[w + VELK_PLAIN_ITEM_SLOT] = 0xFFFFFFFFu;
+        cull_words.data[w + VELK_PLAIN_ITEM_DRAW] = 0xFFFFFFFFu;
+        cull_words.data[w + VELK_PLAIN_ITEM_KIND] = 255u;
+        cull_words.data[w + VELK_PLAIN_ITEM_MESH] = 0xFFFFFFFFu;
         return;
     }
-    uint instance = cull_words.data[found + 2u] + place;
-    cull_words.data[w] = instance;
-    cull_words.data[w + 1u] = place;
+    uint instance = cull_words.data[found + VELK_ITEM_DESCRIPTOR_INSTANCES] + place;
+    cull_words.data[w + VELK_PLAIN_ITEM_INSTANCE] = instance;
+    cull_words.data[w + VELK_PLAIN_ITEM_SLOT] = place;
     uint mesh = cull_instances.data[instance].params.y;
-    if (mesh < cull_words.data[found + 4u]) {
-        uint m = found + VELK_ITEM_DESCRIPTOR_HEADER_WORDS + mesh * 3u;
-        cull_words.data[w + 3u] = cull_words.data[m];
-        cull_words.data[w + 4u] = cull_words.data[m + 1u];
-        cull_words.data[w + 5u] = cull_words.data[m + 2u];
+    if (mesh < cull_words.data[found + VELK_ITEM_DESCRIPTOR_MESHES]) {
+        uint m = found + VELK_ITEM_DESCRIPTOR_HEADER_WORDS + mesh * VELK_ITEM_MESH_WORDS;
+        cull_words.data[w + VELK_PLAIN_ITEM_DRAW] = cull_words.data[m + VELK_ITEM_MESH_DRAW];
+        cull_words.data[w + VELK_PLAIN_ITEM_KIND] = cull_words.data[m + VELK_ITEM_MESH_KIND];
+        cull_words.data[w + VELK_PLAIN_ITEM_MESH] = cull_words.data[m + VELK_ITEM_MESH_MESH];
     }
 }
 )";
@@ -3272,13 +3258,14 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 state.pending_meshes.push_back({batch.primitive(), static_cast<uint32_t>(items.size() / kPlainItemWords), slot_count});
             }
             for (uint32_t slot = 0; slot < slot_count; ++slot) {
-                items.push_back(instances_base + slot);
-                items.push_back(slot);
-                items.push_back(table_word);
-                items.push_back(draw);
-                items.push_back(kind);
-                items.push_back(mesh);
-                items.push_back(0u);
+                const size_t at = items.size();
+                items.resize(at + kPlainItemWords, 0u);
+                items[at + kPlainItemInstance] = instances_base + slot;
+                items[at + kPlainItemSlot] = slot;
+                items[at + kPlainItemTable] = table_word;
+                items[at + kPlainItemDraw] = draw;
+                items[at + kPlainItemKind] = kind;
+                items[at + kPlainItemMesh] = mesh;
                 uint32_t object = kCullNoSlot;
                 if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
                     std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
@@ -3573,7 +3560,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 continue;
             }
             for (uint32_t k = 0; k < pending.count; ++k) {
-                arena->update_at(items_byte + (uint64_t(pending.first_item + k) * kPlainItemWords + 5u) * sizeof(uint32_t),
+                arena->update_at(items_byte + (uint64_t(pending.first_item + k) * kPlainItemWords + kPlainItemMesh) * sizeof(uint32_t),
                                  &mesh, sizeof(mesh));
             }
             state.pending_meshes.erase(state.pending_meshes.begin() + static_cast<ptrdiff_t>(i));
@@ -3589,33 +3576,33 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         for (const auto& [key, slots] : state.instanced_slots) {
             const size_t header = descriptors.size();
             descriptors.resize(header + kItemDescriptorHeaderWords, 0u);
-            descriptors[header] = first;
-            descriptors[header + 1u] = slots;
+            descriptors[header + kItemDescriptorFirst] = first;
+            descriptors[header + kItemDescriptorSlots] = slots;
             uint32_t meshes = 0;
             for (const auto& batch : *batches) {
                 InstanceCullInfo info{};
                 if (!batch || !batch->get_instance_cull(info) || !info.instanced || info.key != key) {
                     continue;
                 }
-                descriptors[header + 2u] = info.instances_base;
-                descriptors[header + 3u] = info.slot_table_count >= slots ? info.slot_table_word : 0u;
-                descriptors[header + 5u] = info.table_word;
-                std::memcpy(&descriptors[header + 6u], &info.max_displacement, sizeof(uint32_t));
-                descriptors[header + 7u] = info.object_base != 0u ? info.object_base : kCullNoSlot;
+                descriptors[header + kItemDescriptorInstances] = info.instances_base;
+                descriptors[header + kItemDescriptorSlotTable] = info.slot_table_count >= slots ? info.slot_table_word : 0u;
+                descriptors[header + kItemDescriptorTable] = info.table_word;
+                std::memcpy(&descriptors[header + kItemDescriptorMotion], &info.max_displacement, sizeof(uint32_t));
+                descriptors[header + kItemDescriptorObjectBase] = info.object_base != 0u ? info.object_base : kCullNoSlot;
                 if (info.mesh_index >= meshes) {
                     descriptors.resize(header + kItemDescriptorHeaderWords + size_t(info.mesh_index + 1u) * kItemMeshWords, 0u);
                     for (uint32_t m = meshes; m <= info.mesh_index; ++m) {
                         uint32_t* words = descriptors.data() + header + kItemDescriptorHeaderWords + size_t(m) * kItemMeshWords;
-                        words[0] = kCullNoSlot;
-                        words[1] = kRayShapeMesh;
-                        words[2] = kInvalidMeshStaticBase;
+                        words[kItemMeshDraw] = kCullNoSlot;
+                        words[kItemMeshKind] = kRayShapeMesh;
+                        words[kItemMeshMesh] = kInvalidMeshStaticBase;
                     }
                     meshes = info.mesh_index + 1u;
                 }
                 uint32_t* words = descriptors.data() + header + kItemDescriptorHeaderWords + size_t(info.mesh_index) * kItemMeshWords;
-                batch_ray_words(*batch, ctx, words[0], words[1], words[2]);
+                batch_ray_words(*batch, ctx, words[kItemMeshDraw], words[kItemMeshKind], words[kItemMeshMesh]);
             }
-            descriptors[header + 4u] = meshes;
+            descriptors[header + kItemDescriptorMeshes] = meshes;
             first += slots;
         }
         if (descriptors != state.item_descriptors) {
@@ -3829,7 +3816,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             state.quads = quads != 0 ? arena->alloc((uint64_t(kQuadListHeaderWords) + uint64_t(quads) * 2u) * sizeof(uint32_t))
                                      : ArenaRegion{};
             if (state.quads.valid()) {
-                const uint32_t header[kQuadListHeaderWords] = {4u, 0u, 0u, 0u, 1u, kCullNoSlot, 0u, 0u};
+                uint32_t header[kQuadListHeaderWords] = {};
+                header[kQuadListVertices] = 4u;
+                header[kQuadListDrawCount] = 1u;
+                header[kQuadListDraw] = kCullNoSlot;
                 arena->write_at(state.quads.offset(), header, sizeof(header));
                 state.quad_capacity = quads;
             }
@@ -3867,8 +3857,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             if (state.quads.valid()) {
                 uint32_t quads = 0;
                 uint32_t in_cut = 0;
-                arena->read_at(state.quads.offset() + sizeof(uint32_t), &quads, sizeof(quads));
-                arena->read_at(state.quads.offset() + 7u * sizeof(uint32_t), &in_cut, sizeof(in_cut));
+                arena->read_at(state.quads.offset() + kQuadListCount * sizeof(uint32_t), &quads, sizeof(quads));
+                arena->read_at(state.quads.offset() + kQuadListInCuts * sizeof(uint32_t), &in_cut, sizeof(in_cut));
                 VELK_LOG(I, "quads %u in cut, %u in view", in_cut, quads);
             }
         }
@@ -4006,7 +3996,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 const uint32_t cut_count = top[0];
                 const uint32_t leaves = top[1];
                 const uint32_t node_count = top[2];
-                const size_t nodes_at = kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * 2u;
+                const size_t nodes_at = kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * kRayTopLeafWords;
                 double volume = 0.0;
                 double lo[3] = {1e30, 1e30, 1e30};
                 double hi[3] = {-1e30, -1e30, -1e30};
@@ -4047,7 +4037,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
     } else if (!state.ray_top.valid() || ray_top_layout != state.ray_top_layout) {
         const uint32_t cut_count = plain_cut ? 1u : 0u;
         const uint32_t leaves = plain_cut ? plain_count : 0u;
-        const uint64_t words = uint64_t(kRayTopHeaderWords) + uint64_t(cut_count) * kRayTopCutWords + uint64_t(leaves) * 2u
+        const uint64_t words = uint64_t(kRayTopHeaderWords) + uint64_t(cut_count) * kRayTopCutWords + uint64_t(leaves) * kRayTopLeafWords
                              + uint64_t(top_tree_nodes(leaves)) * kCutNodeWords;
         state.ray_top = arena->alloc(words * sizeof(uint32_t));
         state.ray_top_layout = ray_top_layout;
@@ -4208,8 +4198,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         // The quad list's instance count.
         const uint32_t quads_word = instance_quad_word(state);
         if (quads_word != kCullNoSlot) {
-            cmd->record_clear_buffer(arena_buffer, uint64_t(quads_word + 1u) * sizeof(uint32_t), sizeof(uint32_t));
-            cmd->record_clear_buffer(arena_buffer, uint64_t(quads_word + 7u) * sizeof(uint32_t), sizeof(uint32_t));
+            cmd->record_clear_buffer(arena_buffer, uint64_t(quads_word + kQuadListCount) * sizeof(uint32_t), sizeof(uint32_t));
+            cmd->record_clear_buffer(arena_buffer, uint64_t(quads_word + kQuadListInCuts) * sizeof(uint32_t), sizeof(uint32_t));
         }
         cmd->record_global_barrier();
 
@@ -4384,26 +4374,26 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 const auto cut_count = static_cast<uint32_t>(jobs.size());
                 const uint32_t node_count = top_tree_nodes(leaves);
                 vector<uint32_t> words;
-                words.resize(size_t(kRayTopHeaderWords) + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * 2u, 0u);
-                words[0] = cut_count;
-                words[1] = leaves;
-                words[2] = node_count;
-                words[3] = node_count - 1u;
+                words.resize(size_t(kRayTopHeaderWords) + size_t(cut_count) * kRayTopCutWords + size_t(leaves) * kRayTopLeafWords, 0u);
+                words[kRayTopCuts] = cut_count;
+                words[kRayTopLeaves] = leaves;
+                words[kRayTopNodes] = node_count;
+                words[kRayTopRoot] = node_count - 1u;
                 uint32_t leaf = 0;
                 for (uint32_t c = 0; c < cut_count; ++c) {
                     const CutJob& job = jobs[c];
                     uint32_t* cut = words.data() + kRayTopHeaderWords + size_t(c) * kRayTopCutWords;
-                    cut[0] = job.cut;
-                    cut[1] = job.instances_base;
-                    cut[2] = job.items_word;
-                    cut[3] = job.partition_count;
-                    cut[4] = leaf;
-                    cut[5] = state.items_move ? 1u : 0u;
-                    cut[6] = quads_word;
+                    cut[kRayTopCutCut] = job.cut;
+                    cut[kRayTopCutInstancesBase] = job.instances_base;
+                    cut[kRayTopCutItems] = job.items_word;
+                    cut[kRayTopCutPartitions] = job.partition_count;
+                    cut[kRayTopCutFirstLeaf] = leaf;
+                    cut[kRayTopCutMoves] = state.items_move ? 1u : 0u;
+                    cut[kRayTopCutQuads] = quads_word;
                     for (uint32_t p = 0; p < job.partition_count; ++p, ++leaf) {
-                        uint32_t* at = words.data() + kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaf) * 2u;
-                        at[0] = c;
-                        at[1] = p;
+                        uint32_t* at = words.data() + kRayTopHeaderWords + size_t(cut_count) * kRayTopCutWords + size_t(leaf) * kRayTopLeafWords;
+                        at[kRayTopLeafCut] = c;
+                        at[kRayTopLeafPartition] = p;
                     }
                 }
                 arena->write_at(state.ray_top.offset(), words.data(), words.size() * sizeof(uint32_t));

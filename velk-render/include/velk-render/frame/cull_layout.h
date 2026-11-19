@@ -57,6 +57,135 @@ namespace velk {
     X(cp, gp, Light, LIGHT, 11)                 /* the light of the members under it, one value or kLightNone */ \
     X(cp, gp, Words, WORDS, 12)
 
+/// A view's quad list (kQuadList, VELK_QUAD_LIST), in the culling arena: the quad draw's
+/// indirect arguments and count, then the word of each quad drawn, and after the list's capacity
+/// the word of each one's kept cut record.
+#define VELK_QUAD_LIST(X, cp, gp)                                                                  \
+    X(cp, gp, Vertices, VERTICES, 0)            /* 4 */                                        \
+    X(cp, gp, Count, COUNT, 1)                  /* the instance count: quads drawn */          \
+    X(cp, gp, FirstVertex, FIRST_VERTEX, 2)                                                    \
+    X(cp, gp, FirstInstance, FIRST_INSTANCE, 3)                                                \
+    X(cp, gp, DrawCount, DRAW_COUNT, 4)         /* 1 */                                        \
+    X(cp, gp, Draw, DRAW, 5)                    /* the quad draw's record in the draw data, which rays name */ \
+    X(cp, gp, InCuts, IN_CUTS, 7)               /* quads in the view's cuts, in or out of view, for the log */ \
+    X(cp, gp, Quads, QUADS, 8)
+
+/// An item (kPlainItem, VELK_PLAIN_ITEM), what a kept cut record names. See kPlainItemWords' use
+/// in instance_cull.h (InstanceCullPass::together).
+#define VELK_PLAIN_ITEM(X, cp, gp)                                                                 \
+    X(cp, gp, Instance, INSTANCE, 0)            /* its index in the instance arena, kCullNoSlot for none in its raster region */ \
+    X(cp, gp, Slot, SLOT, 1)                    /* in its batch's instances */                 \
+    X(cp, gp, Table, TABLE, 2)                  /* its batch's culling table */                \
+    X(cp, gp, Draw, DRAW, 3)                    /* its draw's index in the draw data */        \
+    X(cp, gp, Kind, KIND, 4)                    /* what rays test it as: kRayShapeMesh, else an RtShape kind */ \
+    X(cp, gp, Mesh, MESH, 5)                    /* its mesh's ray data, kInvalidMeshStaticBase for none */ \
+    X(cp, gp, Motion, MOTION, 6)                /* how far a motion function can move it, a float */ \
+    X(cp, gp, Words, WORDS, 7)
+
+/// An instanced visual's item descriptor (kItemDescriptor, VELK_ITEM_DESCRIPTOR), then a
+/// VELK_ITEM_MESH for each of its meshes. See InstanceCullPass::item_descriptors.
+#define VELK_ITEM_DESCRIPTOR(X, cp, gp)                                                            \
+    X(cp, gp, First, FIRST, 0)                  /* its first item */                           \
+    X(cp, gp, Slots, SLOTS, 1)                                                                 \
+    X(cp, gp, Instances, INSTANCES, 2)          /* its instances' base */                      \
+    X(cp, gp, SlotTable, SLOT_TABLE, 3)         /* its slot table's word, 0 for none */        \
+    X(cp, gp, Meshes, MESHES, 4)                                                               \
+    X(cp, gp, Table, TABLE, 5)                  /* its culling table */                        \
+    X(cp, gp, Motion, MOTION, 6)                /* how far it can move, a float */             \
+    X(cp, gp, ObjectBase, OBJECT_BASE, 7)       /* its first object id; slot i's is that plus i */ \
+    X(cp, gp, HeaderWords, HEADER_WORDS, 8)
+
+/// A mesh of an item descriptor (kItemMesh, VELK_ITEM_MESH): an item's words from Draw on.
+#define VELK_ITEM_MESH(X, cp, gp)                                                                  \
+    X(cp, gp, Draw, DRAW, 0)                                                                   \
+    X(cp, gp, Kind, KIND, 1)                                                                   \
+    X(cp, gp, Mesh, MESH, 2)                                                                   \
+    X(cp, gp, Words, WORDS, 3)
+
+/// A node of a partition's tree for rays, or of a view's top tree (kCutNode, VELK_CUT_NODE). See
+/// kCutLeaf in instance_cull.h for its references.
+#define VELK_CUT_NODE(X, cp, gp)                                                                   \
+    X(cp, gp, LeftMin, LEFT_MIN, 0)             /* its children's boxes in world space, three floats each */ \
+    X(cp, gp, LeftMax, LEFT_MAX, 3)                                                            \
+    X(cp, gp, RightMin, RIGHT_MIN, 6)                                                          \
+    X(cp, gp, RightMax, RIGHT_MAX, 9)                                                          \
+    X(cp, gp, LeftRef, LEFT_REF, 12)            /* a reference to each child */                \
+    X(cp, gp, RightRef, RIGHT_REF, 13)                                                         \
+    X(cp, gp, Level, LEVEL, 14)                 /* 1 over leaves */                            \
+    X(cp, gp, Root, ROOT, 15)                   /* 1 for the root */                           \
+    X(cp, gp, Words, WORDS, 16)
+
+/// A view's top tree for rays (kRayTop, VELK_RAY_TOP), then a VELK_RAY_TOP_CUT a cut, a
+/// VELK_RAY_TOP_LEAF a leaf, and its nodes, VELK_CUT_NODE each.
+#define VELK_RAY_TOP(X, cp, gp)                                                                    \
+    X(cp, gp, Cuts, CUTS, 0)                                                                   \
+    X(cp, gp, Leaves, LEAVES, 1)                                                               \
+    X(cp, gp, Nodes, NODES, 2)                                                                 \
+    X(cp, gp, Root, ROOT, 3)                    /* the root node's index */                    \
+    X(cp, gp, HeaderWords, HEADER_WORDS, 4)
+
+/// A cut of a view's top tree (kRayTopCut, VELK_RAY_TOP_CUT).
+#define VELK_RAY_TOP_CUT(X, cp, gp)                                                                \
+    X(cp, gp, Cut, CUT, 0)                      /* the kept cut's word */                      \
+    X(cp, gp, InstancesBase, INSTANCES_BASE, 1)                                                \
+    X(cp, gp, Items, ITEMS, 2)                  /* its plain items' word, or kCullNoSlot */    \
+    X(cp, gp, Partitions, PARTITIONS, 3)                                                       \
+    X(cp, gp, FirstLeaf, FIRST_LEAF, 4)                                                        \
+    X(cp, gp, Moves, MOVES, 5)                  /* 1 if a motion function moves its instances */ \
+    X(cp, gp, Quads, QUADS, 6)                  /* the view's quad list, or kCullNoSlot */     \
+    X(cp, gp, Words, WORDS, 8)
+
+/// A leaf of a view's top tree (kRayTopLeaf, VELK_RAY_TOP_LEAF): a partition of a cut.
+#define VELK_RAY_TOP_LEAF(X, cp, gp)                                                               \
+    X(cp, gp, Cut, CUT, 0)                      /* the cut's index */                          \
+    X(cp, gp, Partition, PARTITION, 1)                                                         \
+    X(cp, gp, Words, WORDS, 2)
+
+/// A screen probe (kProbe, VELK_PROBE).
+#define VELK_PROBE(X, cp, gp)                                                                      \
+    X(cp, gp, Light, LIGHT, 0)                  /* the light arriving, three floats */         \
+    X(cp, gp, Position, POSITION, 3)            /* where it is, three floats */                \
+    X(cp, gp, Normal, NORMAL, 6)                /* octahedral */                               \
+    X(cp, gp, Frames, FRAMES, 7)                /* how many frames it holds, a float */        \
+    X(cp, gp, Words, WORDS, 8)
+
+/// An entry of the light pool's trace list (kTraceEntry, VELK_TRACE_ENTRY).
+#define VELK_TRACE_ENTRY(X, cp, gp)                                                                \
+    X(cp, gp, How, HOW, 0)                      /* what it is (kLightTrace*) */                \
+    X(cp, gp, At, AT, 1)                        /* the page, record or node it is in */        \
+    X(cp, gp, Instance, INSTANCE, 2)                                                           \
+    X(cp, gp, Table, TABLE, 3)                  /* its cluster's or mesh's table word */       \
+    X(cp, gp, Words, WORDS, 4)
+
+/// An entry of the light pool's search list (kSearchEntry, VELK_SEARCH_ENTRY).
+#define VELK_SEARCH_ENTRY(X, cp, gp)                                                               \
+    X(cp, gp, Record, RECORD, 0)                                                               \
+    X(cp, gp, Was, WAS, 1)                      /* the record's light before the search */     \
+    X(cp, gp, Instance, INSTANCE, 2)                                                           \
+    X(cp, gp, Words, WORDS, 3)
+
+/// An entry of one of the light pool's point lists (kPointEntry, VELK_POINT_ENTRY).
+#define VELK_POINT_ENTRY(X, cp, gp)                                                                \
+    X(cp, gp, First, FIRST, 0)                  /* the word of its first page */               \
+    X(cp, gp, Point, POINT, 1)                                                                 \
+    X(cp, gp, Instance, INSTANCE, 2)                                                           \
+    X(cp, gp, Words, WORDS, 3)
+
+/// What changed this frame for the light (kChangeList, VELK_CHANGE_LIST), then a VELK_CHANGE
+/// for each change.
+#define VELK_CHANGE_LIST(X, cp, gp)                                                                \
+    X(cp, gp, Count, COUNT, 0)                                                                 \
+    X(cp, gp, All, ALL, 1)                      /* 1 when everything counts as changed */      \
+    X(cp, gp, Changes, CHANGES, 4)
+
+/// A change (kChange, VELK_CHANGE): a box in the world, and the light that changed, or
+/// kLightNone for something in the box that moved, came or went.
+#define VELK_CHANGE(X, cp, gp)                                                                     \
+    X(cp, gp, Min, MIN, 0)                      /* three floats */                             \
+    X(cp, gp, Light, LIGHT, 3)                                                                 \
+    X(cp, gp, Max, MAX, 4)                      /* three floats */                             \
+    X(cp, gp, Words, WORDS, 8)
+
 /// A primitive's entry for drawing by cluster (kClusterEntry, VELK_CLUSTER_ENTRY). See
 /// instance_cluster_runs_src.
 #define VELK_CLUSTER_ENTRY(X, cp, gp)                                                              \
@@ -216,6 +345,20 @@ namespace velk {
 VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
 VELK_LOD_CLUSTER(VELK_LAYOUT_CPP_WORD, LodCluster, LOD_CLUSTER)
 VELK_QUAD_NODE(VELK_LAYOUT_CPP_WORD, QuadNode, QUAD_NODE)
+VELK_QUAD_LIST(VELK_LAYOUT_CPP_WORD, QuadList, QUAD_LIST)
+VELK_PLAIN_ITEM(VELK_LAYOUT_CPP_WORD, PlainItem, PLAIN_ITEM)
+VELK_ITEM_DESCRIPTOR(VELK_LAYOUT_CPP_WORD, ItemDescriptor, ITEM_DESCRIPTOR)
+VELK_ITEM_MESH(VELK_LAYOUT_CPP_WORD, ItemMesh, ITEM_MESH)
+VELK_CUT_NODE(VELK_LAYOUT_CPP_WORD, CutNode, CUT_NODE)
+VELK_RAY_TOP(VELK_LAYOUT_CPP_WORD, RayTop, RAY_TOP)
+VELK_RAY_TOP_CUT(VELK_LAYOUT_CPP_WORD, RayTopCut, RAY_TOP_CUT)
+VELK_RAY_TOP_LEAF(VELK_LAYOUT_CPP_WORD, RayTopLeaf, RAY_TOP_LEAF)
+VELK_PROBE(VELK_LAYOUT_CPP_WORD, Probe, PROBE)
+VELK_TRACE_ENTRY(VELK_LAYOUT_CPP_WORD, TraceEntry, TRACE_ENTRY)
+VELK_POINT_ENTRY(VELK_LAYOUT_CPP_WORD, PointEntry, POINT_ENTRY)
+VELK_SEARCH_ENTRY(VELK_LAYOUT_CPP_WORD, SearchEntry, SEARCH_ENTRY)
+VELK_CHANGE_LIST(VELK_LAYOUT_CPP_WORD, ChangeList, CHANGE_LIST)
+VELK_CHANGE(VELK_LAYOUT_CPP_WORD, Change, CHANGE)
 VELK_CLUSTER_ENTRY(VELK_LAYOUT_CPP_WORD, ClusterEntry, CLUSTER_ENTRY)
 VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
 VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
@@ -235,6 +378,20 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_BATCH_TABLE(VELK_LAYOUT_GLSL_WORD, Table, TABLE)                                          \
     VELK_LOD_CLUSTER(VELK_LAYOUT_GLSL_WORD, LodCluster, LOD_CLUSTER)                               \
     VELK_QUAD_NODE(VELK_LAYOUT_GLSL_WORD, QuadNode, QUAD_NODE)                                     \
+    VELK_QUAD_LIST(VELK_LAYOUT_GLSL_WORD, QuadList, QUAD_LIST)                                     \
+    VELK_PLAIN_ITEM(VELK_LAYOUT_GLSL_WORD, PlainItem, PLAIN_ITEM)                                  \
+    VELK_ITEM_DESCRIPTOR(VELK_LAYOUT_GLSL_WORD, ItemDescriptor, ITEM_DESCRIPTOR)                   \
+    VELK_ITEM_MESH(VELK_LAYOUT_GLSL_WORD, ItemMesh, ITEM_MESH)                                     \
+    VELK_CUT_NODE(VELK_LAYOUT_GLSL_WORD, CutNode, CUT_NODE)                                        \
+    VELK_RAY_TOP(VELK_LAYOUT_GLSL_WORD, RayTop, RAY_TOP)                                           \
+    VELK_RAY_TOP_CUT(VELK_LAYOUT_GLSL_WORD, RayTopCut, RAY_TOP_CUT)                                \
+    VELK_RAY_TOP_LEAF(VELK_LAYOUT_GLSL_WORD, RayTopLeaf, RAY_TOP_LEAF)                             \
+    VELK_PROBE(VELK_LAYOUT_GLSL_WORD, Probe, PROBE)                                                \
+    VELK_TRACE_ENTRY(VELK_LAYOUT_GLSL_WORD, TraceEntry, TRACE_ENTRY)                               \
+    VELK_POINT_ENTRY(VELK_LAYOUT_GLSL_WORD, PointEntry, POINT_ENTRY)                               \
+    VELK_SEARCH_ENTRY(VELK_LAYOUT_GLSL_WORD, SearchEntry, SEARCH_ENTRY)                            \
+    VELK_CHANGE_LIST(VELK_LAYOUT_GLSL_WORD, ChangeList, CHANGE_LIST)                               \
+    VELK_CHANGE(VELK_LAYOUT_GLSL_WORD, Change, CHANGE)                                             \
     VELK_CLUSTER_ENTRY(VELK_LAYOUT_GLSL_WORD, ClusterEntry, CLUSTER_ENTRY)                         \
     VELK_PARTITION_ENTRY(VELK_LAYOUT_GLSL_WORD, PartitionEntry, PARTITION_ENTRY)                   \
     VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \

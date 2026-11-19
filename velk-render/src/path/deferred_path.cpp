@@ -1068,9 +1068,9 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
             return;
         }
         uint32_t change[kLightChangeWords] = {};
-        std::memcpy(change, lo, sizeof(float) * 3);
-        change[3] = light;
-        std::memcpy(change + 4, hi, sizeof(float) * 3);
+        std::memcpy(change + kChangeMin, lo, sizeof(float) * 3);
+        change[kChangeLight] = light;
+        std::memcpy(change + kChangeMax, hi, sizeof(float) * 3);
         words.insert(words.end(), change, change + kLightChangeWords);
         ++count;
     };
@@ -1145,8 +1145,8 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     }
     // Nothing changed: no light is traced again.
     if (!all && count == 0) return;
-    words[0] = all ? 0u : count;
-    words[1] = all ? 1u : 0u;
+    words[kChangeListCount] = all ? 0u : count;
+    words[kChangeListAll] = all ? 1u : 0u;
     if (all) words.resize(kLightChangeHeaderWords);
     arena->update_at(vs.light_changes.offset(), words.data(), words.size() * sizeof(uint32_t));
 

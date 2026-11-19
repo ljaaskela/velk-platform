@@ -4,6 +4,7 @@
 #include <velk/string_view.h>
 #include <velk/vector.h>
 
+#include <velk-render/frame/cull_layout.h>
 #include <velk-render/interface/intf_gpu_arena.h>
 
 #include <cstdint>
@@ -193,17 +194,18 @@ static_assert(kLightPoolTraces == kLightPoolSegmentWords + kLightMaxSegments, "t
 static_assert(kLightPoolHeaderEnd == kLightPoolLastMark + kLightPoolMarkWords, "the last mark's counts end the header");
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
-inline constexpr uint32_t kLightSearchWords = 3;
-/// Lights the trace list takes a frame, and its words a light: what it is (kLightTrace*), the
-/// page, record or node it is in, its instance, and its cluster's or mesh's table word. Room for
-/// the first trace of the largest record (kLightMaxPages of points, eight points an entry).
+inline constexpr uint32_t kLightSearchWords = kSearchEntryWords;
+/// Lights the trace list takes a frame, and its words a light (VELK_TRACE_ENTRY in
+/// cull_layout.h). Room for the first trace of the largest record (kLightMaxPages of points,
+/// eight points an entry).
 inline constexpr uint32_t kLightTraceCapacity = 8192;  ///< Mirrors VELK_LIGHT_TRACE_CAPACITY.
-inline constexpr uint32_t kLightTraceWords = 4;
+inline constexpr uint32_t kLightTraceWords = kTraceEntryWords;
 /// Points of light each of the three point lists takes a frame (first traces of coarse points,
-/// other first traces, later traces), and their words a point. Coarse points are all traced;
-/// past the frame's budget of rays the others wait for a later frame.
+/// other first traces, later traces), and their words a point (VELK_POINT_ENTRY in
+/// cull_layout.h). Coarse points are all traced; past the frame's budget of rays the others wait
+/// for a later frame.
 inline constexpr uint32_t kLightPointCapacity = 65536;  ///< Mirrors VELK_LIGHT_POINT_CAPACITY.
-inline constexpr uint32_t kLightPointWords = 3;
+inline constexpr uint32_t kLightPointWords = kPointEntryWords;
 /// Work groups of the trace for points from the point lists, after kLightTraceCapacity for the
 /// trace list's: a point a thread.
 inline constexpr uint32_t kLightPointGroups = 3u * kLightPointCapacity / 64u;
@@ -237,10 +239,10 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 // kLightSearchCapacity, kLightTraceCapacity, kLightTraceWords.
 #define VELK_LIGHT_SEARCH_CAPACITY 1024u
 #define VELK_LIGHT_TRACE_CAPACITY 8192u
-#define VELK_LIGHT_TRACE_WORDS 4u
+#define VELK_LIGHT_TRACE_WORDS VELK_TRACE_ENTRY_WORDS
 // kLightPointCapacity, kLightPointWords, kLightFirstBudgetScale.
 #define VELK_LIGHT_POINT_CAPACITY 65536u
-#define VELK_LIGHT_POINT_WORDS 3u
+#define VELK_LIGHT_POINT_WORDS VELK_POINT_ENTRY_WORDS
 #define VELK_LIGHT_FIRST_BUDGET_SCALE 4u
 // The point lists (velk_light_list_point): first traces, later traces, first traces of coarse
 // points. Their counts and words in the pool's header.
@@ -603,10 +605,10 @@ void velk_light_list_entry(uint pool, uint kind, uint at, uint instance, uint ta
     uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACES], 1u);
     if (i >= VELK_LIGHT_TRACE_CAPACITY) return;
     uint w = VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACE_WORD] + i * VELK_LIGHT_TRACE_WORDS;
-    VELK_LIGHT_WORDS.data[w] = kind;
-    VELK_LIGHT_WORDS.data[w + 1u] = at;
-    VELK_LIGHT_WORDS.data[w + 2u] = instance;
-    VELK_LIGHT_WORDS.data[w + 3u] = table;
+    VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_HOW] = kind;
+    VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_AT] = at;
+    VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_INSTANCE] = instance;
+    VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_TABLE] = table;
 }
 
 // Lists the coarse light of the own points whose first page is `page`, once a frame, when it is
@@ -644,9 +646,9 @@ void velk_light_list_point(uint pool, uint first, uint p, uint instance, uint fr
     uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(list)], 1u);
     if (i >= VELK_LIGHT_POINT_CAPACITY) return;
     uint w = VELK_LIGHT_WORDS.data[pool + velk_light_list_word_word(list)] + i * VELK_LIGHT_POINT_WORDS;
-    VELK_LIGHT_WORDS.data[w] = first;
-    VELK_LIGHT_WORDS.data[w + 1u] = p;
-    VELK_LIGHT_WORDS.data[w + 2u] = instance;
+    VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_FIRST] = first;
+    VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_POINT] = p;
+    VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_INSTANCE] = instance;
 }
 )"
 
@@ -1057,9 +1059,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     }
     place = (place + velk_points_hash(frame * 2654435761u + list) % listed_points) % listed_points;
     uint w = VELK_LIGHT_WORDS.data[pool + velk_light_list_word_word(list)] + place * VELK_LIGHT_POINT_WORDS;
-    uint first = VELK_LIGHT_WORDS.data[w];
-    uint q = VELK_LIGHT_WORDS.data[w + 1u];
-    uint instance = VELK_LIGHT_WORDS.data[w + 2u];
+    uint first = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_FIRST];
+    uint q = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_POINT];
+    uint instance = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_INSTANCE];
     uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
     if (kind == VELK_LIGHT_LINKED || q >= VELK_LIGHT_WORDS.data[first + VELK_PAGE_POINT_WORDS] / 2u) return;
     uint cluster = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER];
@@ -1191,12 +1193,12 @@ void main()
     }
     if (index >= min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACES], VELK_LIGHT_TRACE_CAPACITY)) return;
     uint w = VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACE_WORD] + index * VELK_LIGHT_TRACE_WORDS;
-    uint how = VELK_LIGHT_WORDS.data[w];
+    uint how = VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_HOW];
     uint kind = how & VELK_LIGHT_TRACE_KIND;
     if (kind == VELK_LIGHT_TRACE_SKIP) return;
-    uint at = VELK_LIGHT_WORDS.data[w + 1u];
-    uint instance = VELK_LIGHT_WORDS.data[w + 2u];
-    uint table = VELK_LIGHT_WORDS.data[w + 3u];
+    uint at = VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_AT];
+    uint instance = VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_INSTANCE];
+    uint table = VELK_LIGHT_WORDS.data[w + VELK_TRACE_ENTRY_TABLE];
     uint frame = VELK_GLOBALS.present_counter;
     GlobalData g = VELK_GLOBALS;
 
@@ -1270,12 +1272,10 @@ void main()
 }
 )";
 
-/// What changed this frame, for light_changes_main_src: a header of kLightChangeHeaderWords (how
-/// many changes, and 1 when everything counts as changed), then kLightChangeWords a change: a box
-/// in the world (min xyz, then max xyz at 4) and at 3 the index of the light that changed, or
-/// kLightNone for something in the box that moved, came or went.
-inline constexpr uint32_t kLightChangeHeaderWords = 4;
-inline constexpr uint32_t kLightChangeWords = 8;
+/// What changed this frame, for light_changes_main_src: VELK_CHANGE_LIST, then a VELK_CHANGE a
+/// change (cull_layout.h).
+inline constexpr uint32_t kLightChangeHeaderWords = kChangeListChanges;
+inline constexpr uint32_t kLightChangeWords = kChangeWords;
 /// The most changes a frame lists; more count as everything changed.
 inline constexpr uint32_t kLightChanges = 128;
 
@@ -1291,9 +1291,7 @@ inline constexpr uint32_t kLightChanges = 128;
 inline constexpr string_view light_changes_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 )" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL R"(
-#define VELK_CHANGE_WORDS 8u
 #define VELK_CHANGES_MAX 128u
-#define VELK_RAY_TOP_CUT_WORDS 8u
 
 vec3 velk_change_vec3(uint at)
 {
@@ -1333,12 +1331,12 @@ bool velk_change_in_way(vec3 center, float radius, Light light, vec3 lo, vec3 hi
 bool velk_change_alters(uint changes, vec3 center, float radius, uint slots[VELK_LIGHT_SLOTS])
 {
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
-    uint count = min(VELK_LIGHT_WORDS.data[changes], VELK_CHANGES_MAX);
+    uint count = min(VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_COUNT], VELK_CHANGES_MAX);
     for (uint k = 0u; k < count; ++k) {
-        uint w = changes + 4u + k * VELK_CHANGE_WORDS;
-        uint light = VELK_LIGHT_WORDS.data[w + 3u];
-        vec3 lo = velk_change_vec3(w) - cam;
-        vec3 hi = velk_change_vec3(w + 4u) - cam;
+        uint w = changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS;
+        uint light = VELK_LIGHT_WORDS.data[w + VELK_CHANGE_LIGHT];
+        vec3 lo = velk_change_vec3(w + VELK_CHANGE_MIN) - cam;
+        vec3 hi = velk_change_vec3(w + VELK_CHANGE_MAX) - cam;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             if (slots[s] == VELK_LIGHT_NONE) continue;
             if (light != VELK_LIGHT_NONE) {
@@ -1362,10 +1360,10 @@ void main()
 {
     uint pool = pc.spare3;
     uint changes = pc.spare4;
-    uint cut_entry = pc.spare1 + 4u + pc.spare2 * VELK_RAY_TOP_CUT_WORDS;
-    uint cut = VELK_LIGHT_WORDS.data[cut_entry];
-    uint instances_base = VELK_LIGHT_WORDS.data[cut_entry + 1u];
-    uint items_word = VELK_LIGHT_WORDS.data[cut_entry + 2u];
+    uint cut_entry = pc.spare1 + VELK_RAY_TOP_HEADER_WORDS + pc.spare2 * VELK_RAY_TOP_CUT_WORDS;
+    uint cut = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_CUT];
+    uint instances_base = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
+    uint items_word = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_ITEMS];
     // A record a thread, 64 a group: the prelude's groups are 8 by 8.
     uint index = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     // The records placed in the current store, all before this.
@@ -1375,7 +1373,7 @@ void main()
     uint cluster = VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER];
     uint slot = VELK_LIGHT_WORDS.data[record + VELK_RECORD_SLOT];
     uint value = VELK_LIGHT_WORDS.data[record + VELK_RECORD_LIGHT];
-    bool all = VELK_LIGHT_WORDS.data[changes + 1u] != 0u;
+    bool all = VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_ALL] != 0u;
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
     uint slots[VELK_LIGHT_SLOTS];
 
@@ -1482,7 +1480,6 @@ layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_w
 #define CELLS_HEADER pc.env.z
 )" VELK_LIGHT_POOL_GLSL R"(
 #define VELK_PROBE_PIXELS 16u
-#define VELK_PROBE_WORDS 8u
 #define VELK_PROBE_RAYS 16u
 )" R"(
 uint velk_light_grid_hash(ivec3 cube)
@@ -1604,13 +1601,15 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint acro
         vec2 p = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
         if (all(greaterThanEqual(p, vec2(0.0))) && p.x < float(width) && p.y < float(height)) {
             uint before = was_store + ((uint(p.y) / VELK_PROBE_PIXELS) * across + uint(p.x) / VELK_PROBE_PIXELS) * VELK_PROBE_WORDS;
-            if (uintBitsToFloat(probe_words.data[before + 7u]) > 0.0) {
-                vec3 then_pos = vec3(uintBitsToFloat(probe_words.data[before + 3u]), uintBitsToFloat(probe_words.data[before + 4u]),
-                                     uintBitsToFloat(probe_words.data[before + 5u])) - g.cam_moved;
-                vec3 then_n = velk_probe_oct_decode(probe_words.data[before + 6u]);
+            if (uintBitsToFloat(probe_words.data[before + VELK_PROBE_FRAMES]) > 0.0) {
+                vec3 then_pos = vec3(uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION]),
+                                     uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION + 1u]),
+                                     uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION + 2u])) - g.cam_moved;
+                vec3 then_n = velk_probe_oct_decode(probe_words.data[before + VELK_PROBE_NORMAL]);
                 if (dot(then_n, n) > 0.9 && abs(dot(then_n, at - then_pos)) < 0.05 * length(at) + 1e-3) {
-                    return vec3(uintBitsToFloat(probe_words.data[before]), uintBitsToFloat(probe_words.data[before + 1u]),
-                                uintBitsToFloat(probe_words.data[before + 2u]));
+                    return vec3(uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT]),
+                                uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT + 1u]),
+                                uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT + 2u]));
                 }
             }
         }
@@ -1697,27 +1696,29 @@ void main()
         vec2 at = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
         if (all(greaterThanEqual(at, vec2(0.0))) && at.x < float(width) && at.y < float(height)) {
             uint before = was_store + ((uint(at.y) / VELK_PROBE_PIXELS) * across + uint(at.x) / VELK_PROBE_PIXELS) * VELK_PROBE_WORDS;
-            float had = uintBitsToFloat(probe_words.data[before + 7u]);
-            vec3 then_pos = vec3(uintBitsToFloat(probe_words.data[before + 3u]), uintBitsToFloat(probe_words.data[before + 4u]),
-                                 uintBitsToFloat(probe_words.data[before + 5u])) - g.cam_moved;
-            vec3 then_n = velk_probe_oct_decode(probe_words.data[before + 6u]);
+            float had = uintBitsToFloat(probe_words.data[before + VELK_PROBE_FRAMES]);
+            vec3 then_pos = vec3(uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION]),
+                                 uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION + 1u]),
+                                 uintBitsToFloat(probe_words.data[before + VELK_PROBE_POSITION + 2u])) - g.cam_moved;
+            vec3 then_n = velk_probe_oct_decode(probe_words.data[before + VELK_PROBE_NORMAL]);
             float off = abs(dot(then_n, pos - then_pos));
             if (had > 0.0 && dot(then_n, n) > 0.9 && off < 0.05 * length(pos) + 1e-3) {
-                vec3 then_light = vec3(uintBitsToFloat(probe_words.data[before]), uintBitsToFloat(probe_words.data[before + 1u]),
-                                       uintBitsToFloat(probe_words.data[before + 2u]));
+                vec3 then_light = vec3(uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT]),
+                                       uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT + 1u]),
+                                       uintBitsToFloat(probe_words.data[before + VELK_PROBE_LIGHT + 2u]));
                 frames = min(had + 1.0, 16.0);
                 arriving = mix(then_light, arriving, 1.0 / frames);
             }
         }
     }
-    probe_words.data[now] = floatBitsToUint(arriving.r);
-    probe_words.data[now + 1u] = floatBitsToUint(arriving.g);
-    probe_words.data[now + 2u] = floatBitsToUint(arriving.b);
-    probe_words.data[now + 3u] = floatBitsToUint(pos.x);
-    probe_words.data[now + 4u] = floatBitsToUint(pos.y);
-    probe_words.data[now + 5u] = floatBitsToUint(pos.z);
-    probe_words.data[now + 6u] = velk_probe_oct_encode(n);
-    probe_words.data[now + 7u] = floatBitsToUint(frames);
+    probe_words.data[now + VELK_PROBE_LIGHT] = floatBitsToUint(arriving.r);
+    probe_words.data[now + VELK_PROBE_LIGHT + 1u] = floatBitsToUint(arriving.g);
+    probe_words.data[now + VELK_PROBE_LIGHT + 2u] = floatBitsToUint(arriving.b);
+    probe_words.data[now + VELK_PROBE_POSITION] = floatBitsToUint(pos.x);
+    probe_words.data[now + VELK_PROBE_POSITION + 1u] = floatBitsToUint(pos.y);
+    probe_words.data[now + VELK_PROBE_POSITION + 2u] = floatBitsToUint(pos.z);
+    probe_words.data[now + VELK_PROBE_NORMAL] = velk_probe_oct_encode(n);
+    probe_words.data[now + VELK_PROBE_FRAMES] = floatBitsToUint(frames);
 }
 )";
 
@@ -1770,10 +1771,10 @@ void velk_light_search(uint record, uint was, uint instance)
         light_words.data[record + VELK_RECORD_LIGHT] = was;
         return;
     }
-    uint list = light_words.data[pc.pool_word + VELK_POOL_SEARCH_WORD] + at * 3u;
-    light_words.data[list] = record;
-    light_words.data[list + 1u] = was;
-    light_words.data[list + 2u] = instance;
+    uint list = light_words.data[pc.pool_word + VELK_POOL_SEARCH_WORD] + at * VELK_SEARCH_ENTRY_WORDS;
+    light_words.data[list + VELK_SEARCH_ENTRY_RECORD] = record;
+    light_words.data[list + VELK_SEARCH_ENTRY_WAS] = was;
+    light_words.data[list + VELK_SEARCH_ENTRY_INSTANCE] = instance;
 }
 
 // Puts a first trace of `rays` rays on the trace list (kLightTraceWords); nothing when the list or
@@ -2236,10 +2237,10 @@ void main()
     uint index = gl_WorkGroupID.x;
     uint lane = gl_LocalInvocationIndex;
     if (index >= light_words.data[pool + VELK_POOL_SEARCHED]) return;
-    uint list = light_words.data[pool + VELK_POOL_SEARCH_WORD] + index * 3u;
-    uint record = light_words.data[list];
-    uint was = light_words.data[list + 1u];
-    uint instance = light_words.data[list + 2u];
+    uint list = light_words.data[pool + VELK_POOL_SEARCH_WORD] + index * VELK_SEARCH_ENTRY_WORDS;
+    uint record = light_words.data[list + VELK_SEARCH_ENTRY_RECORD];
+    uint was = light_words.data[list + VELK_SEARCH_ENTRY_WAS];
+    uint instance = light_words.data[list + VELK_SEARCH_ENTRY_INSTANCE];
     uint entry = light_words.data[record + VELK_RECORD_ENTRY];
     uint slot = light_words.data[record + VELK_RECORD_SLOT];
     uint clusters = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
