@@ -2159,7 +2159,8 @@ void main()
     // A cluster: as wide on screen as it is now, and its largest triangle.
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + VELK_LOD_CLUSTER_VERTICES];
-    mat4 world = light_instances.data[d.instances_base + velk_ids_slot(d, ids)].world_matrix;
+    LightInstance li = light_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    mat4 world = velk_sized_world(li.world_matrix, li.offset.xyz, li.size.xyz);
     float scale = max(max(length(world[0].xyz), length(world[1].xyz)), length(world[2].xyz));
     vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
                     uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
@@ -2559,11 +2560,12 @@ void main()
             // How wide it is now, to lay it out again when it has grown to twice that.
             mat4 vp = g.view_projection;
             float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-            float scale = max(max(length(inst.world_matrix[0].xyz), length(inst.world_matrix[1].xyz)), length(inst.world_matrix[2].xyz));
+            mat4 sized = velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz);
+            float scale = max(max(length(sized[0].xyz), length(sized[1].xyz)), length(sized[2].xyz));
             vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
                             uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
                             uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
-            float away = length(mat3(inst.world_matrix) * own + (inst.world_matrix[3].xyz - g.cam_pos.xyz));
+            float away = length(mat3(sized) * own + (sized[3].xyz - g.cam_pos.xyz));
             float across = 2.0 * uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale * pixels_per_unit / max(away, 1e-3);
             uint laid;
             if (velk_light_lay_out(vertices, cluster, kind, table, 2u * (vertices + grid_points), index_base, across, laid)) {

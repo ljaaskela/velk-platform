@@ -195,6 +195,15 @@ vec3 velk_rel_position(mat4 world, vec3 local, GlobalData globals)
     return mat3(world) * local + (world[3].xyz - globals.cam_pos.xyz);
 }
 
+// An instance's world matrix with its offset and size in it, as its vertices are placed
+// (offset + local * size, then the world): what a mesh's own coordinates are under. A size of 0
+// counts as 1.
+mat4 velk_sized_world(mat4 world, vec3 offset, vec3 size)
+{
+    vec3 s = mix(size, vec3(1.0), equal(size, vec3(0.0)));
+    return world * mat4(vec4(s.x, 0.0, 0.0, 0.0), vec4(0.0, s.y, 0.0, 0.0), vec4(0.0, 0.0, s.z, 0.0), vec4(offset, 1.0));
+}
+
 )"
 // Frame-invariant per-view globals, bound at set = 1 slot 2 and read by index
 // in every stage (graphics via velk_global_data(root), compute via the

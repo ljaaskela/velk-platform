@@ -958,7 +958,8 @@ float velk_cut_scale(mat4 world)
 // Walks the tree of `entry` from `node` down for `named`, choosing what it holds.
 void velk_cut_walk(uint named, uint entry, uint node, vec3 viewpoint)
 {
-    mat4 world = cull_instances.data[velk_cut_named_instance(named)].world_matrix;
+    CullInstance ci = cull_instances.data[velk_cut_named_instance(named)];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     GlobalData globals = velk_globals.data[pc.globals_base];
     velk_lod_walk(entry, node, named, world, velk_cut_scale(world), viewpoint, viewpoint, globals.view_projection,
                   globals.viewport.y, pc.lod_max_pixels);
@@ -991,7 +992,8 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
     uint named = s_items[w];
     uint entry = s_items[w + 1u];
     uint node = s_items[w + 2u];
-    mat4 world = cull_instances.data[velk_cut_named_instance(named)].world_matrix;
+    CullInstance ci = cull_instances.data[velk_cut_named_instance(named)];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = velk_cut_scale(world);
     GlobalData globals = velk_globals.data[pc.globals_base];
     mat4 vp = globals.view_projection;
@@ -1475,7 +1477,8 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         hi += vec3(pad);
         return;
     }
-    // A cluster's own sphere, or a whole mesh's: its table's.
+    // A cluster's own sphere, or a whole mesh's: its table's, in the mesh's own coordinates.
+    world = velk_sized_world(world, cull_instances.data[instance].offset.xyz, cull_instances.data[instance].size.xyz);
     uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE : cluster;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
@@ -1547,7 +1550,8 @@ bool velk_ray_record(uint record, uint index, vec3 viewpoint, float pixels_per_u
     uint instance = pc.instances_base + slot;
     if (pc.items_word != 0xFFFFFFFFu) instance = cull_words.data[pc.items_word + slot * VELK_PLAIN_ITEM_WORDS];
     if (instance == 0xFFFFFFFFu) return false;
-    mat4 world = cull_instances.data[instance].world_matrix;
+    CullInstance ci = cull_instances.data[instance];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cull_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     return velk_ray_pixels(cluster + VELK_LOD_CLUSTER_PARENT_SPHERE, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
@@ -1964,9 +1968,10 @@ void main()
         }
         if (instance == 0xFFFFFFFFu) return;
     }
-    mat4 world = cull_instances.data[instance].world_matrix;
+    CullInstance ci = cull_instances.data[instance];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     if (world[3][3] == 0.0) return;
-    uint table = table_word + cull_instances.data[instance].params.y * VELK_TABLE_END;
+    uint table = table_word + ci.params.y * VELK_TABLE_END;
     GlobalData globals = velk_globals.data[pc.globals_base];
     vec3 cam = globals.cam_pos.xyz;
     mat4 vp = globals.view_projection;
@@ -2152,10 +2157,11 @@ void main()
         if (table_word == 0xFFFFFFFFu || instance == 0xFFFFFFFFu) return;
     }
 
-    mat4 world = cull_instances.data[instance].world_matrix;
+    CullInstance ci = cull_instances.data[instance];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     if (world[3][3] == 0.0) return;
 
-    uint table = table_word + cull_instances.data[instance].params.y * VELK_TABLE_END;
+    uint table = table_word + ci.params.y * VELK_TABLE_END;
     vec4 sphere = vec4(uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER]),
                        uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 1u]),
                        uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 2u]),
@@ -2299,7 +2305,8 @@ void main()
                         uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 1u]),
                         uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 2u]));
 
-    mat4 world = cull_instances.data[instance].world_matrix;
+    CullInstance ci = cull_instances.data[instance];
+    mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
     GlobalData globals = velk_globals.data[pc.globals_base];
