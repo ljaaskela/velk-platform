@@ -387,14 +387,64 @@ void Renderer::remove_view(const IElement::Ptr& camera_element, const IWindowSur
                 FrameContext ctx = make_frame_context();
                 auto cam_trait = ::velk::find_attachment<ICamera>(it->camera_element);
                 ctx.view_camera_trait = cam_trait.get();
-                for (auto* pipeline : seen_pipelines_) {
+                for (auto& [raw, pipeline] : seen_pipelines_) {
                     pipeline->on_view_removed(*it->entry, ctx);
                 }
                 ctx.view_camera_trait = nullptr;
                 view_preparer_.on_view_removed(*it->entry);
-                backend_->destroy_surface(get_render_target_id(it->entry->surface()));
             }
+            auto scene_ptr = camera_element->get_scene();
             views_.erase(it);
+            // The camera's pipelines no remaining view's camera has too are shut down and let go,
+            // so that none outlives its camera in the list.
+            const auto pipelines_of = [](const IElement::Ptr& element) {
+                vector<IViewPipeline::Ptr> out;
+                auto trait = ::velk::find_attachment<ICamera>(element);
+                if (auto* storage = interface_cast<IObjectStorage>(trait.get())) {
+                    AttachmentQuery q;
+                    q.interfaceUid = IViewPipeline::UID;
+                    for (auto& a : storage->find_attachments(q)) {
+                        if (auto p = interface_pointer_cast<IViewPipeline>(a)) out.push_back(std::move(p));
+                    }
+                }
+                return out;
+            };
+            for (auto& pipeline : pipelines_of(camera_element)) {
+                const bool shared = std::any_of(views_.begin(), views_.end(), [&](const ViewSlot& v) {
+                    const auto others = pipelines_of(v.camera_element);
+                    return std::find(others.begin(), others.end(), pipeline) != others.end();
+                });
+                auto seen = seen_pipelines_.find(pipeline.get());
+                if (shared || seen == seen_pipelines_.end()) continue;
+                if (backend_) {
+                    FrameContext ctx = make_frame_context();
+                    pipeline->shutdown(ctx);
+                }
+                seen_pipelines_.erase(seen);
+            }
+            // A scene no view shows any more leaves nothing cached of its elements: it may go
+            // away, and an element made later where one of them was is not taken for it.
+            auto* scene = interface_cast<IScene>(scene_ptr);
+            const bool scene_shown = std::any_of(views_.begin(), views_.end(), [&](const ViewSlot& v) {
+                return interface_cast<IScene>(v.camera_element->get_scene()) == scene;
+            });
+            if (scene && !scene_shown) {
+                scene_bvh_cache_.erase(scene);
+                FrameContext ctx = make_frame_context();
+                walk_scene_preorder(scene, scene->root(), [&](IElement* element) {
+                    batch_builder_.evict(element);
+                    render_target_cache_.on_element_removed(element, ctx);
+                });
+            }
+            // The backend surface goes with the last view on it; a view added later makes it again.
+            const bool still_used = std::any_of(views_.begin(), views_.end(),
+                                                [&](const ViewSlot& v) { return v.entry->surface() == surface; });
+            if (backend_ && !still_used) {
+                backend_->destroy_surface(get_render_target_id(surface));
+                if (auto* rt = interface_cast<IRenderTarget>(surface)) {
+                    rt->set_gpu_handle(GpuResourceKey::Default, 0);
+                }
+            }
             return;
         }
     }
@@ -857,18 +907,27 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             }
 
             impl::SceneBvh* bvh = nullptr;
+            auto* root = interface_cast<IObjectStorage>(scene->root().get());
+            if (!root) {
+                continue;
+            }
             auto cit = scene_bvh_cache_.find(scene);
+            // An entry is this scene's only while its tree is the one on the scene's root: a
+            // scene made where a gone one was gets a tree of its own.
             if (cit != scene_bvh_cache_.end()) {
-                bvh = cit->second;
+                auto attached = root->find_attachment<IBvh>();
+                if (!attached || interface_cast<IObject>(attached.get()) != cit->second.owner) {
+                    scene_bvh_cache_.erase(cit);
+                    cit = scene_bvh_cache_.end();
+                }
+            }
+            if (cit != scene_bvh_cache_.end()) {
+                bvh = cit->second.bvh;
             } else {
                 // First time we see this scene. Create + attach a
                 // SceneBvh on the scene root, then cache the typed
                 // pointer here so future frames skip the interface
                 // round-trip.
-                auto* root = interface_cast<IObjectStorage>(scene->root().get());
-                if (!root) {
-                    continue;
-                }
                 auto new_bvh_obj = ::velk::ext::make_object<impl::SceneBvh>();
                 // The make_object signature returns IObject::Ptr whose
                 // raw bytes alias the concrete SceneBvh allocation (see
@@ -877,7 +936,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
                 bvh = static_cast<impl::SceneBvh*>(
                     static_cast<void*>(new_bvh_obj.get()));
                 root->add_attachment(new_bvh_obj);
-                scene_bvh_cache_[scene] = bvh;
+                scene_bvh_cache_[scene] = {bvh, new_bvh_obj.get()};
             }
 
             // Where each view is, and how many pixels a unit covers at a unit from it.
@@ -1020,7 +1079,7 @@ void Renderer::build_frame_passes(const FrameDesc& desc,
             IRenderTarget::Ptr color_target =
                 interface_pointer_cast<IRenderTarget>(pv.slot->entry->surface());
             for (auto& p : pv.pipelines) {
-                seen_pipelines_.insert(p.get());
+                seen_pipelines_.try_emplace(p.get(), p);
                 p->emit(*pv.slot->entry, pv.render_view, color_target, ctx, *slot.graph);
             }
             ctx.view_camera_trait = nullptr;
@@ -1408,12 +1467,12 @@ void Renderer::shutdown()
             for (auto& s : views_) {
                 auto cam_trait = ::velk::find_attachment<ICamera>(s.camera_element);
                 ctx.view_camera_trait = cam_trait.get();
-                for (auto* pipeline : seen_pipelines_) {
+                for (auto& [raw, pipeline] : seen_pipelines_) {
                     pipeline->on_view_removed(*s.entry, ctx);
                 }
                 ctx.view_camera_trait = nullptr;
             }
-            for (auto* pipeline : seen_pipelines_) {
+            for (auto& [raw, pipeline] : seen_pipelines_) {
                 pipeline->shutdown(ctx);
             }
             seen_pipelines_.clear();

@@ -246,10 +246,17 @@ private:
 
     // Per-scene concrete SceneBvh pointer cache. The attachment on the
     // scene root owns the lifetime; we just cache the typed pointer so
-    // rebuild() can be called without a round-trip through IBvh. Stale
-    // entries for dead scenes are harmless because we only touch entries
-    // whose scene is currently in `consumed_scenes`.
-    std::unordered_map<IScene*, impl::SceneBvh*> scene_bvh_cache_;
+    // rebuild() can be called without a round-trip through IBvh. An entry
+    // holds no references: it is used only while its tree is the one on
+    // the scene's root, so that one left by a gone scene is never taken
+    // for a new scene at the same address. A scene's entry goes when no
+    // view shows it any more.
+    struct CachedBvh
+    {
+        impl::SceneBvh* bvh = nullptr;
+        IObject* owner = nullptr;  ///< The tree as attached, only compared.
+    };
+    std::unordered_map<IScene*, CachedBvh> scene_bvh_cache_;
 
     // Shared RTT (render-to-texture) subtree cache. Used by Forward +
     // Deferred raster paths via FrameContext.
@@ -267,11 +274,13 @@ private:
     /// of `prepare`.
     bool scene_state_dirty_ = true;
 
-    // Set of pipelines the Renderer has dispatched to during this run.
-    // Populated by build_frame_passes; iterated for lifecycle hooks
-    // (on_view_removed, shutdown) so we don't have to track which
-    // pipeline was last used by which view.
-    std::unordered_set<IViewPipeline*> seen_pipelines_;
+    // Pipelines the Renderer has dispatched to, held so that none goes
+    // while listed. Populated by build_frame_passes; iterated for
+    // lifecycle hooks (on_view_removed, shutdown) so we don't have to
+    // track which pipeline was last used by which view. A removed view's
+    // camera's pipelines are shut down and dropped unless a remaining
+    // view's camera has them too.
+    std::unordered_map<IViewPipeline*, IViewPipeline::Ptr> seen_pipelines_;
 
     /// Each extra slot lets the CPU queue one more frame ahead of a slower GPU,
     /// which adds that frame to input latency. Two gives full CPU/GPU overlap.

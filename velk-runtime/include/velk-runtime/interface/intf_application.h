@@ -132,6 +132,19 @@ public:
                           const rect& viewport = {}) = 0;
 
     /**
+     * @brief Removes a view added with add_view.
+     *
+     * The camera is no longer rendered onto the window. Once no view on the window shows the
+     * camera's scene, the window no longer holds the scene: its size stops following the
+     * window's, and the window's input goes to the scene of its latest remaining view, or
+     * nowhere.
+     *
+     * @param window Window the view was added to.
+     * @param camera Camera element the view was added with.
+     */
+    virtual void remove_view(const IObject::Ptr& window, const ::velk::IElement::Ptr& camera) = 0;
+
+    /**
      * @brief Pumps platform events.
      *
      * Drives the platform event loop (GLFW pollEvents on desktop). Returns

@@ -83,6 +83,16 @@ public:
     }
 
     /**
+     * @brief Removes a view added with add_view.
+     * @param window Window the view was added to.
+     * @param camera Camera element the view was added with.
+     */
+    void remove_view(const IWindow::Ptr& window, const ::velk::IElement::Ptr& camera)
+    {
+        with<IApplication>([&](auto& a) { a.remove_view(interface_pointer_cast<::velk::IObject>(window), camera); });
+    }
+
+    /**
      * @brief Pumps platform events.
      * @return @c false when all windows have been closed (loop should exit).
      */

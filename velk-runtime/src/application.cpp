@@ -235,6 +235,7 @@ void Application::bind_scene_to_window(const IObject::Ptr& window,
     for (auto& link : scene_links_) {
         auto* existing = interface_cast<IWindow>(link.window);
         if (existing == iwin && link.scene == scene) {
+            ++link.views;
             return;
         }
     }
@@ -257,7 +258,45 @@ void Application::bind_scene_to_window(const IObject::Ptr& window,
     link.window = window;
     link.scene = scene;
     link.resize_handler = std::move(resize_handler);
+    link.views = 1;
     scene_links_.emplace_back(std::move(link));
+}
+
+void Application::remove_view(const IObject::Ptr& window, const ::velk::IElement::Ptr& camera)
+{
+    if (!renderer_) {
+        return;
+    }
+    auto* iwin = interface_cast<IWindow>(window);
+    if (!iwin) {
+        return;
+    }
+    renderer_->remove_view(camera, iwin->surface());
+
+    auto* elem = interface_cast<::velk::IElement>(camera);
+    auto scene = elem ? elem->get_scene() : nullptr;
+    if (!scene) {
+        return;
+    }
+    for (size_t i = 0; i < scene_links_.size(); ++i) {
+        auto& link = scene_links_[i];
+        if (interface_cast<IWindow>(link.window) != iwin || link.scene != scene) {
+            continue;
+        }
+        if (--link.views != 0) {
+            return;
+        }
+        scene_links_.erase(scene_links_.begin() + i);
+        // Input goes to the scene of the window's latest remaining view.
+        shared_ptr<::velk::IScene> input_scene;
+        for (auto& other : scene_links_) {
+            if (interface_cast<IWindow>(other.window) == iwin) {
+                input_scene = other.scene;
+            }
+        }
+        iwin->input().set_scene(input_scene);
+        return;
+    }
 }
 
 bool Application::poll()

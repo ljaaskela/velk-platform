@@ -32,6 +32,7 @@ public:
     void add_view(const IObject::Ptr& window,
                   const ::velk::IElement::Ptr& camera,
                   const rect& viewport) override;
+    void remove_view(const IObject::Ptr& window, const ::velk::IElement::Ptr& camera) override;
     bool poll() override;
     void update() override;
     ::velk::Frame prepare() override;
@@ -49,6 +50,7 @@ private:
         IObject::Ptr window;
         shared_ptr<::velk::IScene> scene;
         ScopedHandler resize_handler;
+        uint32_t views = 0;  ///< Views on the window showing the scene.
     };
 
     struct PerformanceOverlay
