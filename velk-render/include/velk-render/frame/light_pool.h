@@ -477,6 +477,46 @@ bool velk_light_is_coarse(uint n, uvec2 f)
     return c.x + c.y <= m && velk_light_coarse_to_fine(n, m, c) == f;
 }
 
+)" R"(
+// What the cell of a triangle's coarse grid with corners at places `f` of its grid of level `n`
+// says about the points inside it: 0 when it is not known yet (a corner not traced, or with
+// `fresh`, stale since a change), 1 when its corners and its centre check agree for every light,
+// each fully lit or fully blocked, so that its finer points could only repeat them, 2 when they
+// differ. The centre check is the grid point at its centre, `centre`, which counts once traced.
+uint velk_light_cell(uint pool, uint first, uint n, uint vertices, uint base, uvec3 corners, uvec2 f[3], bool fresh,
+                     out uint centre)
+{
+    uvec2 c = (f[0] + f[1] + f[2]) / 3u;
+    centre = velk_light_grid_point(vertices, n, base, corners, c.x, c.y);
+    uint shade = VELK_LIGHT_NONE;
+    bool same = true;
+    for (uint k = 0u; k < 3u; ++k) {
+        uint word = velk_light_own_word(pool, first, velk_light_grid_point(vertices, n, base, corners, f[k].x, f[k].y));
+        uint s = VELK_LIGHT_WORDS.data[word];
+        if (s == VELK_LIGHT_NONE) return 0u;
+        if (fresh && velk_light_point_traces(first, VELK_LIGHT_WORDS.data[word + 1u]) == 0u) return 0u;
+        if (k == 0u) shade = s;
+        else if (s != shade) same = false;
+    }
+    // Every light's four bits all clear or all set.
+    if (!same || shade != (shade & 0x11111111u) * 15u) return 2u;
+    uint word = velk_light_own_word(pool, first, centre);
+    uint s = VELK_LIGHT_WORDS.data[word];
+    bool counts = s != VELK_LIGHT_NONE && (!fresh || velk_light_point_traces(first, VELK_LIGHT_WORDS.data[word + 1u]) != 0u);
+    return counts && s != shade ? 2u : 1u;
+}
+
+// Whether the centre check of a cell whose corner `f0` of a triangle at page `first`, triangle
+// `t`, is due this frame: each cell every 16th frame, cells spread over them.
+bool velk_light_cell_check_due(uint first, uint t, uvec2 f0, uint frame)
+{
+    uint x = first * 2654435761u ^ t * 0x9e3779b9u ^ (f0.x * 73856093u) ^ (f0.y * 19349663u);
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    return ((x + frame) & 15u) == 0u;
+}
+
 // A point list's count (VELK_LIGHT_LIST_*) in the pool's header, and its word's.
 uint velk_light_list_count_word(uint list)
 {
@@ -762,8 +802,8 @@ bool velk_light_add_point(uint word, uint owner, float weight, inout uint lights
 //
 // In a triangle's grid, each level over the one under it: the record's coarse light, then the
 // grid's coarse level (velk_light_coarse_level), whose points count once traced, then the grid,
-// whose points count by their traces. A point not traced yet, or stale since a change, shows
-// what is under it.
+// whose points count by their traces, unless the coarse cell is exact (velk_light_cell). A point
+// not traced yet, or stale since a change, shows what is under it.
 bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b, inout uint lights[VELK_LIGHT_SLOTS],
                            inout vec2 sums[VELK_LIGHT_SLOTS])
 {
@@ -779,7 +819,18 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
         float under[VELK_LIGHT_SLOTS];
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) under[s] = 1.0 - float((coarse >> (3u * s)) & 7u) / 7.0;
         uint m = velk_light_coarse_level(n);
-        for (uint level = n < 2u || m >= n ? 1u : 0u; level < 2u; ++level) {
+        // A coarse cell whose corners agree is exact: its finer points are not traced.
+        bool exact = false;
+        if (n >= 2u && m < n) {
+            uvec2 cells[3];
+            vec3 cw;
+            velk_light_around(m, b, cells, cw);
+            uvec2 f[3];
+            for (uint k = 0u; k < 3u; ++k) f[k] = velk_light_coarse_to_fine(n, m, cells[k]);
+            uint centre;
+            exact = velk_light_cell(pool, first, n, vertices, base, corners, f, true, centre) == 1u;
+        }
+        for (uint level = n < 2u || m >= n ? 1u : 0u; level < (exact ? 1u : 2u); ++level) {
             uvec2 places[3];
             vec3 w;
             velk_light_around(level == 0u ? m : n, b, places, w);
@@ -1835,29 +1886,44 @@ void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, u
         vec3 s = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0) * vec3(inv_w[0], inv_w[1], inv_w[2]);
         b = s / max(s.x + s.y + s.z, 1e-12);
     }
-    // In a triangle's grid: the points around the pixel, and those of the grid's coarse level
-    // around it, which the lighting reads under them until they are traced.
+    // In a triangle's grid: the corners of the coarse cell around the pixel, all three, then the
+    // points around the pixel only where the cell's corners differ (velk_light_cell). Where they
+    // agree, the finer points could only repeat them: only the cell's centre check, every 16th
+    // frame. Not known yet, they wait for the corners. A cell is judged by its corners' light
+    // even when a change made it stale, so that the finer points an edge needs are traced while
+    // it moves; the lighting judges it again with what is traced.
     uint kind = light_words.data[first + VELK_PAGE_KIND];
     if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && triangle < (kind & 0xFFFFu)) {
         uint grid = velk_light_triangle_grid(pc.pool_word, first, triangle);
         uint n = grid >> 24u;
+        uint base = grid & 0xFFFFFFu;
         uint vertices = light_words.data[first + VELK_PAGE_VERTICES];
         uvec2 places[3];
         vec3 w;
+        uint m = velk_light_coarse_level(n);
+        if (n >= 2u && m < n) {
+            velk_light_around(m, b, places, w);
+            uvec2 f[3];
+            for (uint k = 0u; k < 3u; ++k) {
+                f[k] = velk_light_coarse_to_fine(n, m, places[k]);
+                uint p = velk_light_grid_point(vertices, n, base, corners, f[k].x, f[k].y);
+                velk_light_list_point(pc.pool_word, first, p, instance, frame, true);
+            }
+            uint centre;
+            uint cell = velk_light_cell(pc.pool_word, first, n, vertices, base, corners, f, false, centre);
+            if (cell == 0u) return;
+            if (cell == 1u) {
+                if (velk_light_cell_check_due(first, triangle, f[0], frame)) {
+                    velk_light_list_point(pc.pool_word, first, centre, instance, frame, false);
+                }
+                return;
+            }
+        }
         velk_light_around(n, b, places, w);
         for (uint k = 0u; k < 3u; ++k) {
             if (w[k] <= 0.0) continue;
-            uint p = velk_light_grid_point(vertices, n, grid & 0xFFFFFFu, corners, places[k].x, places[k].y);
+            uint p = velk_light_grid_point(vertices, n, base, corners, places[k].x, places[k].y);
             velk_light_list_point(pc.pool_word, first, p, instance, frame, velk_light_is_coarse(n, places[k]));
-        }
-        uint m = velk_light_coarse_level(n);
-        if (n < 2u || m >= n) return;
-        velk_light_around(m, b, places, w);
-        for (uint k = 0u; k < 3u; ++k) {
-            if (w[k] <= 0.0) continue;
-            uvec2 f = velk_light_coarse_to_fine(n, m, places[k]);
-            uint p = velk_light_grid_point(vertices, n, grid & 0xFFFFFFu, corners, f.x, f.y);
-            velk_light_list_point(pc.pool_word, first, p, instance, frame, true);
         }
         return;
     }

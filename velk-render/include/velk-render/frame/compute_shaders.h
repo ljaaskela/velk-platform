@@ -747,6 +747,25 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     float b1 = (q.x * e2.y - q.y * e2.x) / det;
     float b2 = (e1.x * q.y - e1.y * q.x) / det;
     vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
+    // An exact coarse cell (velk_light_cell): its finer points are not traced, by design. Green.
+    uint kind = velk_culling.data[first + VELK_PAGE_KIND];
+    if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && triangle < (kind & 0xFFFFu)) {
+        uint grid = velk_light_triangle_grid(pc.pool_word, first, triangle);
+        uint n = grid >> 24u;
+        uint m = velk_light_coarse_level(n);
+        if (n >= 2u && m < n) {
+            uvec2 cells[3];
+            vec3 cw;
+            velk_light_around(m, b / max(b.x + b.y + b.z, 1e-6), cells, cw);
+            uvec2 f[3];
+            for (uint k = 0u; k < 3u; ++k) f[k] = velk_light_coarse_to_fine(n, m, cells[k]);
+            uint centre;
+            if (velk_light_cell(pc.pool_word, first, n, velk_culling.data[first + VELK_PAGE_VERTICES], grid & 0xFFFFFFu, corners, f,
+                                true, centre) == 1u) {
+                return vec3(0.1, 0.45, 0.1);
+            }
+        }
+    }
     vec3 color = vec3(0.0);
     uint words[9];
     uint points[9];
