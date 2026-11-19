@@ -152,8 +152,9 @@ bool intersect_cube(Ray ray, RtShape shape, out RayHit hit)
                      dot(ray.dir, V) / v_len2,
                      dot(ray.dir, W) / w_len2);
 
-    // Slab test against [0, 1]^3, since U/V/W are full extents.
-    vec3 inv_d = 1.0 / rd_l;
+    // Slab test against [0, 1]^3, since U/V/W are full extents. No direction component exactly
+    // zero: a ray parallel to a face and starting on its plane would make 0 times infinity.
+    vec3 inv_d = 1.0 / mix(rd_l, sign(rd_l + vec3(1e-30)) * 1e-12, lessThan(abs(rd_l), vec3(1e-12)));
     vec3 t0 = (vec3(0.0) - ro_l) * inv_d;
     vec3 t1 = (vec3(1.0) - ro_l) * inv_d;
     vec3 tmin_v = min(t0, t1);
@@ -748,6 +749,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     float b2 = (e1.x * q.y - e1.y * q.x) / det;
     vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
     // An exact coarse cell (velk_light_cell): its finer points are not traced, by design. Green.
+    // A cell whose corners are not known yet: yellow.
     uint kind = velk_culling.data[first + VELK_PAGE_KIND];
     if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && triangle < (kind & 0xFFFFu)) {
         uint grid = velk_light_triangle_grid(pc.pool_word, first, triangle);
@@ -760,10 +762,11 @@ vec3 light_color(uvec2 ids, ivec2 coord)
             uvec2 f[3];
             for (uint k = 0u; k < 3u; ++k) f[k] = velk_light_coarse_to_fine(n, m, cells[k]);
             uint centre;
-            if (velk_light_cell(pc.pool_word, first, n, velk_culling.data[first + VELK_PAGE_VERTICES], grid & 0xFFFFFFu, corners, f,
-                                true, centre) == 1u) {
-                return vec3(0.1, 0.45, 0.1);
-            }
+            uint cell = velk_light_cell(pc.pool_word, first, n, velk_culling.data[first + VELK_PAGE_VERTICES], grid & 0xFFFFFFu,
+                                        corners, f, true, centre);
+            if (cell == 1u) return vec3(0.1, 0.45, 0.1);
+            // Not known yet: a corner not traced, or stale since a change. Yellow.
+            if (cell == 0u) return vec3(0.9, 0.8, 0.1);
         }
     }
     vec3 color = vec3(0.0);
@@ -791,6 +794,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     return mix(color, vec3(1.0, 0.0, 1.0), clamp(untrusted, 0.0, 1.0));
 }
 
+)" R"(
 const vec3 kLevelColors[8] = vec3[8](
     vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
     vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));

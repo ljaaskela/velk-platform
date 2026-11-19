@@ -168,7 +168,7 @@ constexpr NamedView kViews[] = {
     {velk::DebugView::Record, "record", "record",
      "a colour per kept cut record what is drawn is from, white for none"},
     {velk::DebugView::Light, "light", "light points",
-     "a colour per point of light, blended as pixels read them, darker for a record's own points; flat: one value; quads by light node; magenta not traced yet; cyan stale since a change; green an exact coarse cell, finer points not traced; grey none"},
+     "a colour per point of light, blended as pixels read them, darker for a record's own points; flat: one value; quads by light node; magenta not traced yet; cyan stale since a change; green an exact coarse cell, finer points not traced; yellow a cell whose corners are not known yet; grey none"},
 };
 constexpr size_t kViewCount = sizeof(kViews) / sizeof(kViews[0]);
 
@@ -387,6 +387,8 @@ int main(int argc, char* argv[])
         next_scene.set_root(next_root);
         FlyCamera next_camera = add_camera(next_scene, next_root, mode == Mode::Reference);
         built = inspect::build_scene(specs[index], next_scene, next_root, ctx, next_camera.camera, mode == Mode::Reference);
+        // A run without a window captures the view= asked for.
+        if (!interactive) next_camera.camera.set_debug_view(kViews[start_view].view);
         // The new view before the old one goes, so that the window's surface stays.
         app.add_view(window, next_camera.element);
         if (main_camera.element) app.remove_view(window, main_camera.element);

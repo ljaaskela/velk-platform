@@ -23,7 +23,11 @@ inline constexpr string_view velk_trace_src = R"(
 // [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
 bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
 {
-    vec3 inv_d = 1.0 / ray.dir;
+    // No direction component exactly zero: a ray parallel to a slab and starting on its plane
+    // would make 0 times infinity, and the box would count as missed. Rays from a grid of points
+    // toward a light without size do run so, along whole lines of points.
+    vec3 d = mix(ray.dir, sign(ray.dir + vec3(1e-30)) * 1e-12, lessThan(abs(ray.dir), vec3(1e-12)));
+    vec3 inv_d = 1.0 / d;
     vec3 t0 = (bmin - ray.origin) * inv_d;
     vec3 t1 = (bmax - ray.origin) * inv_d;
     vec3 tmn = min(t0, t1);
@@ -54,6 +58,9 @@ uint velk_ray_mesh_nodes = 0u;
 uint velk_ray_partitions = 0u;
 // The deepest this thread's walks' stack got, against VELK_TRACE_STACK_SIZE.
 int velk_ray_deepest = 0;
+// How far along a shadow ray what stopped it was, or the nearest patch that kept part of its
+// light. For the shader to clear before tracing and read after.
+float velk_ray_blocker_t = 0.0;
 
 // The walk's stack: a slice of VELK_TRACE_STACK_SIZE for each thread of the work group, which
 // has 64, in shared memory, since as an array of its own it would be in scratch memory.
@@ -284,7 +291,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (tt < 1e-4 * max(length(e1), length(e2))) continue;
             float world_t = tt / mesh_scale;
             if (world_t < best_t * 0.99999 || (world_t <= best_t * 1.00001 && cur_key > best_key)) {
-                if (!closest) return 0.0;
+                if (!closest) {
+                    velk_ray_blocker_t = world_t;
+                    return 0.0;
+                }
                 best_t = world_t;
                 best_key = cur_key;
                 best_draw = cur_draw;
@@ -349,6 +359,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 float area = 4.0 * length(cross(velk_ray_vec3(cluster + VELK_QUAD_NODE_U), velk_ray_vec3(cluster + VELK_QUAD_NODE_V)));
                 float covered = min(0.5 * area / (3.14159265 * radius * radius), 1.0);
                 through *= 1.0 - covered;
+                velk_ray_blocker_t = velk_ray_blocker_t > 0.0 ? min(velk_ray_blocker_t, max(along, 0.0)) : max(along, 0.0);
                 if (through < 0.01) return 0.0;
                 continue;
             }
@@ -369,7 +380,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 float b = dot(from_corner, v) / (2.0 * dot(v, v));
                 if (a < 0.0 || a > 1.0 || b < 0.0 || b > 1.0) continue;
                 if (tt < best_t * 0.99999) {
-                    if (!closest) return 0.0;
+                    if (!closest) {
+                        velk_ray_blocker_t = tt;
+                        return 0.0;
+                    }
                     best_t = tt;
                     best_key = 0u;
                     best_draw = quads != VELK_RAY_NONE ? velk_culling.data[quads + VELK_QUAD_LIST_DRAW] : VELK_RAY_NONE;
@@ -450,7 +464,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (intersect_shape(local, velk_instance_shape(inst, kind, draw), h) && h.t > 0.0) {
                     float world_t = h.t / scale;
                     if (world_t < best_t * 0.99999 || (world_t <= best_t * 1.00001 && key > best_key)) {
-                        if (!closest) return 0.0;
+                        if (!closest) {
+                            velk_ray_blocker_t = world_t;
+                            return 0.0;
+                        }
                         best_t = world_t;
                         best_key = key;
                         best_draw = draw;
