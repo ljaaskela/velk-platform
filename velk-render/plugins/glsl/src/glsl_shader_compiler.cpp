@@ -70,6 +70,9 @@ vector<uint32_t> GlslShaderCompiler::compile(string_view source, ShaderStage sta
     options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
     options.SetTargetSpirv(shaderc_spirv_version_1_5);
     options.SetGenerateDebugInfo();
+#ifdef NDEBUG
+    options.SetOptimizationLevel(shaderc_optimization_level_performance);
+#endif
     options.SetIncluder(std::make_unique<VelkIncluder>(includes_.empty() ? nullptr : &includes_));
 
     shaderc_shader_kind kind = shaderc_fragment_shader;
@@ -122,6 +125,11 @@ uint64_t GlslShaderCompiler::dependency_hash() const
               });
 
     uint64_t h = 0xcbf29ce484222325ULL;
+#ifdef NDEBUG
+    // Optimized SPIR-V is cached apart from unoptimized.
+    h ^= 0x6f707469ULL;
+    h *= 0x100000001b3ULL;
+#endif
     for (auto* kv : sorted) {
         // Mix in name and content separately so that ("ab","c") and
         // ("a","bc") don't collide.
