@@ -120,14 +120,15 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     setup = hash_bytes(setup, &render_view.env.texture_id, sizeof(render_view.env.texture_id));
     setup = hash_bytes(setup, &render_view.env.intensity, sizeof(render_view.env.intensity));
     setup = hash_bytes(setup, &render_view.env.rotation_rad, sizeof(render_view.env.rotation_rad));
-    // A light's position is left out, so that a swaying lamp does not start it over.
     for (const GpuLight& light : render_view.lights) {
         setup = hash_bytes(setup, light.color_intensity, sizeof(light.color_intensity));
+        setup = hash_bytes(setup, light.position, sizeof(light.position));
         if (light.flags[0] == 0u) {
             setup = hash_bytes(setup, light.direction, sizeof(light.direction));
         }
     }
-    restart = restart || setup != vs.setup;
+    // Anything that moved, came or went starts it over too, so that no frame mixes two scenes.
+    restart = restart || setup != vs.setup || render_view.bvh.changed_all || !render_view.bvh.changed.empty();
     vs.setup = setup;
 
     // What rays walk: the view's kept cut, as every path has it.
