@@ -3941,7 +3941,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      h[kLightPoolSumLaterTraces]);
             // Since the last log: where traces come from, a change or the view.
             clear(kLightPoolSumRetraces, kLightPoolSumLaidLightOnly + 1u - kLightPoolSumRetraces);
-            VELK_LOG(I, "light causes: %u later traces after a change; points laid out for records without light %u, "
+            VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
                         "again for records grown %u, for records grown from one value %u, for records for light only %u",
                      h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidGrown], h[kLightPoolSumLaidFromOne],
                      h[kLightPoolSumLaidLightOnly]);

@@ -759,15 +759,15 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     for (uint k = 0u; k < read; ++k) {
         color += weights[k] * id_color(words[k] * 2654435761u);
         uint traces = velk_light_point_traces(owners[k], velk_culling.data[words[k] + 1u]);
-        float trust = velk_culling.data[words[k]] == VELK_LIGHT_NONE
-                    ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
+        bool none = velk_culling.data[words[k]] == VELK_LIGHT_NONE;
+        float trust = none ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
         untrusted += weights[k] * (1.0 - trust);
-        if (traces >= VELK_LIGHT_RETRACE && traces < VELK_LIGHT_RETRACED) retracing += weights[k];
+        if (!none && traces == 0u) retracing += weights[k];
     }
     // Darker where the record has its own points, coarse enough itself.
     color = velk_culling.data[first + VELK_PAGE_KIND] == VELK_LIGHT_LINKED ? color : color * 0.45;
     // Magenta as far as the points it reads are not fully traced yet (VELK_LIGHT_TRUSTED_TRACES),
-    // cyan as far as they are traced again after a change.
+    // cyan as far as they are stale since a change.
     color = mix(color, vec3(0.0, 1.0, 1.0), clamp(retracing, 0.0, 1.0));
     return mix(color, vec3(1.0, 0.0, 1.0), clamp(untrusted, 0.0, 1.0));
 }
