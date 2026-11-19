@@ -18,11 +18,13 @@
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
 //
-// verify: every scene at each of its views: settles for `settle` frames (240), measuring how
-// much changes from frame to frame meanwhile and by which frame it stops; then over 8 more
+// verify: every scene at each of its views: loads for 10 frames, and what it moves moves; then
+// `settle` frames (10), measuring how much changes from frame to frame from the load on, or
+// from the movement's end, and by which frame it stops; then over 8 more
 // frames how far the image is from the view's reference, how much it still changes, the GPU
-// time and memory. A view with a motion then moves, a step a frame, each step against its own
-// reference, and comes back to be compared with how it looked before. Writes, overwriting the
+// time and memory. In a scene that moves things, five frames of the movement are each judged
+// against their own reference. A view with a motion then moves, a step a frame, each step
+// against its own reference, and comes back to be compared with how it looked before. Writes, overwriting the
 // last run, the images, their difference maps and a report to build/verify; then exits. GPU
 // times are checked against the median of the view's last runs on committed code in the
 // history (reference_images/verify/timings.tsv), and a run of every scene adds its times to
@@ -30,8 +32,8 @@
 //
 // trend: each view's times in the history, oldest first, marking where they stepped.
 //
-// reference: every scene at each of its views, and each step of a view's motion, with the
-// reference path, `frames` frames (128) accumulated each, saved in reference_images/verify;
+// reference: every scene at each of its views, each step of a view's motion, and what a scene
+// moves held at each judged frame of its movement, with the reference path, `frames` frames (128) accumulated each, saved in reference_images/verify;
 // then exits. Make them again only when a scene changes.
 //
 // Up is -y, as in the other samples.
@@ -181,6 +183,14 @@ constexpr long kMeasureFrames = 8;
 constexpr long kSettleFrom = 10;             ///< Frame changes count from here while a view settles.
 constexpr long kBackFrames = 60;             ///< Frames back at a view after its motion, before it is compared.
 constexpr size_t kBaselineRuns = 5;          ///< Runs on committed code a view's times are measured against.
+constexpr int kDuringSamples = 5;            ///< Frames of a scene's movement judged against references.
+
+/// The frame of a scene's movement where sample @p k (1 to kDuringSamples) is judged, evenly
+/// spaced, neither its start nor its end.
+long during_frame(const inspect::BuiltScene& built, int k)
+{
+    return built.frames * k / (kDuringSamples + 1);
+}
 
 /// One scene at one view, as a verification or reference run goes through them.
 struct Job
@@ -234,7 +244,7 @@ int main(int argc, char* argv[])
     bool start_scripted = false;
     long start_frame = 0;
     uint32_t tree_level = 0;
-    long settle_frames = 240;
+    long settle_frames = 10;
     long reference_frames = 128;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -538,13 +548,35 @@ int main(int argc, char* argv[])
                                         && inspect::save_png(*writer, image, png);
                         VELK_LOG(I, "reference: %s%s %s", name, suffix, saved ? "saved" : "FAILED");
                     }
+                    // Then what the scene moves, held at each frame of its movement that a run
+                    // judges, from the view itself.
+                    for (int k = 1; !built.movers.empty() && k <= kDuringSamples; ++k) {
+                        const long at = during_frame(built, k);
+                        place_camera(main_camera, view.place);
+                        for (long f = 0; f < reference_frames; ++f) {
+                            inspect::place_movers(built, at);
+                            if (!frame()) return 1;
+                        }
+                        inspect::Image image;
+                        if (!grab(image)) return 1;
+                        char suffix[32];
+                        std::snprintf(suffix, sizeof(suffix), "_at%ld", at);
+                        velk::string ref = reference_path(spec, view, suffix);
+                        velk::string png = ref;
+                        ref.append(".ref");
+                        png.append(".png");
+                        const bool saved = inspect::save_reference(inspect::downscale(image, kCompareScale), ref)
+                                        && inspect::save_png(*writer, image, png);
+                        VELK_LOG(I, "reference: %s%s %s", name, suffix, saved ? "saved" : "FAILED");
+                    }
                     continue;
                 }
 
-                // Settling: what changes from frame to frame while the light builds up, from
-                // kSettleFrom on, or once what the scene moves has stopped, and the frame after
+                // Settling, settle_frames after the load or after what the scene moves has
+                // stopped: what changes from frame to frame meanwhile, and the frame after
                 // which nothing more than kMaxChangeShare does. The reference has what moves where
-                // it ends; a run sees it move there.
+                // it ends; a run sees it move there. On the way, frames of the movement are judged
+                // against references with what moves held there.
                 inspect::Image last;
                 inspect::Image previous;
                 float burst = 0.f;
@@ -553,12 +585,48 @@ int main(int argc, char* argv[])
                 // GPU time while the scene's movers move, after the first frames that load it.
                 velk::vector<double> motion_ms;
                 velk::vector<inspect::PassTime> motion_passes;
-                for (long f = 0; f < settle_frames; ++f) {
+                inspect::Difference during{};
+                long during_worst = 0;
+                int during_judged = 0;
+                bool during_references = true;
+                int next_during = 1;
+                for (long f = 0; f < settle_from + settle_frames; ++f) {
                     inspect::place_movers(built, f);
                     if (!frame()) return 1;
                     if (!built.movers.empty() && f >= kSettleFrom && f < built.frames) {
                         motion_ms.push_back(frame_ms(*backend));
                         add_passes(motion_passes);
+                    }
+                    if (!built.movers.empty() && next_during <= kDuringSamples && f == during_frame(built, next_during)) {
+                        ++next_during;
+                        inspect::Image image;
+                        if (!grab(image)) return 1;
+                        char suffix[32];
+                        std::snprintf(suffix, sizeof(suffix), "_at%ld", f);
+                        velk::string ours = run_path(spec, view, suffix);
+                        ours.append(".png");
+                        inspect::save_png(*writer, image, ours);
+                        velk::string ref = reference_path(spec, view, suffix);
+                        ref.append(".ref");
+                        inspect::Image during_reference;
+                        if (!inspect::load_reference(ref, during_reference)) {
+                            during_references = false;
+                        } else {
+                            const inspect::Image small = inspect::downscale(image, kCompareScale);
+                            const inspect::Difference d = inspect::compare(small, during_reference, tile);
+                            velk::string diff = run_path(spec, view, suffix);
+                            diff.append("_diff.png");
+                            inspect::save_png(*writer, inspect::difference_map(small, during_reference), diff);
+                            during.mean = std::max(during.mean, d.mean);
+                            during.p95 = std::max(during.p95, d.p95);
+                            if (d.worst_tile > during.worst_tile || during_judged == 0) {
+                                during.worst_tile = d.worst_tile;
+                                during.tile_x = d.tile_x;
+                                during.tile_y = d.tile_y;
+                                during_worst = f;
+                            }
+                            ++during_judged;
+                        }
                     }
                     if (f < settle_from) continue;
                     previous = std::move(last);
@@ -652,6 +720,24 @@ int main(int argc, char* argv[])
                 }
                 if (still_slower) slower_passes("slower", times.passes, base.passes, base_since);
                 if (moving_slower) slower_passes("slower moving", times.moving_passes, base.moving_passes, base_since);
+                // The frames of the scene's movement, the worst of them.
+                if (!built.movers.empty()) {
+                    char during_name[64];
+                    std::snprintf(during_name, sizeof(during_name), "%s during", name);
+                    if (!during_references || during_judged == 0) {
+                        std::snprintf(buf, sizeof(buf), "%-24s  no reference for every frame of the movement", during_name);
+                        line(buf);
+                        ++failed;
+                    } else {
+                        char verdict[160];
+                        verdict_of(during, "", verdict, sizeof(verdict));
+                        std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  worst at frame %ld of %ld, %d frames judged  %s",
+                                      during_name, static_cast<double>(during.mean), static_cast<double>(during.p95),
+                                      static_cast<double>(during.worst_tile), during_worst, built.frames, during_judged, verdict);
+                        line(buf);
+                        count(verdict);
+                    }
+                }
                 if (view.move_frames <= 0) {
                     run_times.push_back(std::move(times));
                     continue;
