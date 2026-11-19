@@ -708,14 +708,6 @@ BuiltScene build_scene(const SceneSpec& spec, velk::Scene& scene, velk::Element&
     return out;
 }
 
-void remove_scene(BuiltScene& built, velk::Scene& scene)
-{
-    for (auto& element : built.elements) {
-        scene.remove(element);
-    }
-    built = BuiltScene{};
-}
-
 void place_movers(BuiltScene& built, long frame)
 {
     const float t = built.frames > 0 ? std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f) : 1.f;

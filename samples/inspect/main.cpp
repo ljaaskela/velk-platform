@@ -20,7 +20,8 @@
 //
 // verify: every scene at each of its views: loads for 10 frames, and what it moves moves; then
 // `settle` frames (10), measuring how much changes from frame to frame from the load on, or
-// from the movement's end, and by which frame it stops; then over 8 more
+// from the movement's end, and by which frame it stops, the first of those frames judged
+// against the reference too; then over 8 more
 // frames how far the image is from the view's reference, how much it still changes, the GPU
 // time and memory. In a scene that moves things, five frames of the movement are each judged
 // against their own reference. A view with a motion then moves, a step a frame, each step
@@ -337,13 +338,11 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    auto scene = velk::create_scene();
-    scene.set_geometry(velk::aabb::from_size({static_cast<float>(wc.width), static_cast<float>(wc.height)}));
-    auto root = velk::create_element();
-    scene.set_root(root);
-
-    FlyCamera main_camera = add_camera(scene, root, mode == Mode::Reference);
-    app.add_view(window, main_camera.element);
+    // The scene shown, its root and its camera. Each scene a run goes to is built into a scene
+    // of its own, with a camera and view of its own, so that nothing one leaves carries over.
+    velk::Scene scene;
+    velk::Element root;
+    FlyCamera main_camera;
 
     // The scenes and views a run goes through, in order: those scene= names (a comma separated
     // list, all by default), less those skip= names.
@@ -381,8 +380,18 @@ int main(int argc, char* argv[])
     inspect::BuiltScene built;
     const auto show_scene = [&](size_t index) {
         if (built_index == index) return;
-        inspect::remove_scene(built, scene);
-        built = inspect::build_scene(specs[index], scene, root, ctx, main_camera.camera, mode == Mode::Reference);
+        auto next_scene = velk::create_scene();
+        next_scene.set_geometry(velk::aabb::from_size({static_cast<float>(wc.width), static_cast<float>(wc.height)}));
+        auto next_root = velk::create_element();
+        next_scene.set_root(next_root);
+        FlyCamera next_camera = add_camera(next_scene, next_root, mode == Mode::Reference);
+        built = inspect::build_scene(specs[index], next_scene, next_root, ctx, next_camera.camera, mode == Mode::Reference);
+        // The new view before the old one goes, so that the window's surface stays.
+        app.add_view(window, next_camera.element);
+        if (main_camera.element) app.remove_view(window, main_camera.element);
+        scene = next_scene;
+        root = next_root;
+        main_camera = next_camera;
         built_index = index;
     };
 
@@ -590,6 +599,8 @@ int main(int argc, char* argv[])
                 int during_judged = 0;
                 bool during_references = true;
                 int next_during = 1;
+                inspect::Difference first{};
+                bool have_first = false;
                 for (long f = 0; f < settle_from + settle_frames; ++f) {
                     inspect::place_movers(built, f);
                     if (!frame()) return 1;
@@ -631,6 +642,19 @@ int main(int argc, char* argv[])
                     if (f < settle_from) continue;
                     previous = std::move(last);
                     if (!grab(last)) return 1;
+                    // The first frame once loaded, or once what moves has stopped, before it
+                    // settles: what a viewer sees first, against the reference.
+                    if (f == settle_from) {
+                        inspect::save_png(*writer, last, run_path(spec, view, "_first.png"));
+                        inspect::Image first_reference;
+                        if (inspect::load_reference(reference_path(spec, view, ".ref"), first_reference)) {
+                            const inspect::Image small = inspect::downscale(last, kCompareScale);
+                            first = inspect::compare(small, first_reference, tile);
+                            inspect::save_png(*writer, inspect::difference_map(small, first_reference),
+                                              run_path(spec, view, "_first_diff.png"));
+                            have_first = true;
+                        }
+                    }
                     if (!previous.rgb.empty()) {
                         const float share = inspect::frame_change(previous, last, kChangeThreshold).share;
                         burst = std::max(burst, share);
@@ -720,6 +744,18 @@ int main(int argc, char* argv[])
                 }
                 if (still_slower) slower_passes("slower", times.passes, base.passes, base_since);
                 if (moving_slower) slower_passes("slower moving", times.moving_passes, base.moving_passes, base_since);
+                // The first frame, before settling.
+                if (have_first) {
+                    char first_name[64];
+                    std::snprintf(first_name, sizeof(first_name), "%s first", name);
+                    char verdict[160];
+                    verdict_of(first, "", verdict, sizeof(verdict));
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  at frame %ld, before settling  %s", first_name,
+                                  static_cast<double>(first.mean), static_cast<double>(first.p95),
+                                  static_cast<double>(first.worst_tile), settle_from, verdict);
+                    line(buf);
+                    count(verdict);
+                }
                 // The frames of the scene's movement, the worst of them.
                 if (!built.movers.empty()) {
                     char during_name[64];

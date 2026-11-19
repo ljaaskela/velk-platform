@@ -85,9 +85,6 @@ const SceneSpec* find_scene(const char* name);
 BuiltScene build_scene(const SceneSpec& spec, velk::Scene& scene, velk::Element& root, velk::RenderContext& ctx,
                        velk::Camera& camera, bool reference = false);
 
-/// Takes what @p built added out of @p scene again.
-void remove_scene(BuiltScene& built, velk::Scene& scene);
-
 /// Where a camera at yaw and pitch in degrees looks.
 velk::vec3 forward_of(float yaw_degrees, float pitch_degrees);
 
