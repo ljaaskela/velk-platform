@@ -710,7 +710,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     if (light >= VELK_LIGHT_ONE_VALUE) {
         return (light & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : record_color(record) * 0.8;
     }
-    if (pc.pool_word == 0xFFFFFFFFu || light >= velk_culling.data[pc.pool_word + 1u]) return vec3(1.0, 0.0, 0.0);
+    if (pc.pool_word == 0xFFFFFFFFu || light >= velk_culling.data[pc.pool_word + VELK_POOL_PAGES]) return vec3(1.0, 0.0, 0.0);
     uint first = velk_light_page(pc.pool_word, light);
     vec3 base = record_color(record) * 0.35;
 
@@ -1431,7 +1431,7 @@ void main()
                                        uintBitsToFloat(pc.spare5), point_lights, point_through);
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
-        if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + 83u], 1u);
+        if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_UNTRACED_PIXELS], 1u);
         uint light_count = points ? VELK_LIGHT_SLOTS : pc.light_count;
         for (uint k = 0u; k < light_count; ++k) {
             if (points && point_lights[k] == VELK_LIGHT_NONE) continue;

@@ -3922,10 +3922,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         } else if (ctx.present_counter >= pool.check_frame + 16u) {
             pool.check_frame = ctx.present_counter;
             uint32_t wanted = 0;
-            arena->read_at(pool.header.offset() + 2u * sizeof(uint32_t), &wanted, sizeof(wanted));
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolPagesWanted) * sizeof(uint32_t), &wanted, sizeof(wanted));
             if (wanted != 0 && pool.segments.size() < pool.max_segments) {
                 uint32_t free_pages = 0;
-                arena->read_at(pool.header.offset(), &free_pages, sizeof(free_pages));
+                arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages,
+                               sizeof(free_pages));
                 const uint32_t added = grow_light_pool(pool, *arena, (wanted + kLightSegmentPages - 1u) / kLightSegmentPages);
                 VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u free at the last sweep", added,
                          pool.pages(), wanted, free_pages);
@@ -3934,8 +3935,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         // What it holds, now and then, from the last frame's complete counts.
         if (pool.header.valid() && ctx.present_counter >= pool.log_frame + 30u) {
             pool.log_frame = ctx.present_counter;
-            uint32_t counts[16] = {};
-            arena->read_at(pool.header.offset(), counts, sizeof(counts));
+            // The pool's header as it is now, by its words' names; the summed ones cleared after.
+            uint32_t h[kLightPoolHeaderWords] = {};
+            arena->read_at(pool.header.offset(), h, sizeof(h));
+            const auto clear = [&](uint32_t word, uint32_t count) {
+                const uint32_t zeros[16] = {};
+                arena->update_at(pool.header.offset() + uint64_t(word) * sizeof(uint32_t), zeros, count * sizeof(uint32_t));
+            };
             uint32_t written = 0;
             uint32_t took = 0;
             for (const auto& c : state.cuts) {
@@ -3944,19 +3950,15 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 written += words[0];
                 took += words[1];
             }
-            uint32_t extra[5] = {};
-            arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord) * sizeof(uint32_t), extra, sizeof(extra));
-            uint32_t budget[15] = {};
-            arena->read_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 26u) * sizeof(uint32_t), budget, sizeof(budget));
-            const uint32_t no_changes = 0;
-            arena->update_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 36u) * sizeof(uint32_t), &no_changes,
-                             sizeof(no_changes));
+            clear(kLightPoolSumChanged, 1u);
             VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
                         "traced, %u coarse points listed for a first trace, %u other points for a first trace and %u for a "
                         "later one, %u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
-                     counts[1], counts[0], counts[12], counts[14], counts[13], counts[15], extra[2], budget[14], budget[8], budget[9],
-                     budget[10], written, took, extra[4], budget[0]);
+                     h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsLinked],
+                     h[kLightPoolLastRecordsOneValue], h[kLightPoolLastSearched], h[kLightPoolLastTraces],
+                     h[kLightPoolLastCoarsePoints], h[kLightPoolLastFirstPoints], h[kLightPoolLastLaterPoints],
+                     h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
             uint32_t longest = 0;
             uint32_t most = 0;
             for (const auto& c : state.cuts) {
@@ -3969,37 +3971,36 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                         "records one walk chose %u",
                      longest, most);
             // The light trace's worst frame since the last log: its rays, and their walks' steps.
-            uint32_t worst[4] = {};
-            arena->read_at(pool.header.offset() + 88u * sizeof(uint32_t), worst, sizeof(worst));
-            const uint32_t cleared[4] = {};
-            arena->update_at(pool.header.offset() + 88u * sizeof(uint32_t), cleared, sizeof(cleared));
-            VELK_LOG(I, "light trace: worst frame %u rays (%u for first traces), %u walk steps, %.0f steps a ray", worst[0],
-                     worst[3], worst[1], worst[0] != 0 ? double(worst[1]) / double(worst[0]) : 0.0);
+            clear(kLightPoolWorstRays, kLightPoolWorstFirstRays + 1u - kLightPoolWorstRays);
+            const uint32_t worst_rays = h[kLightPoolWorstRays];
+            const uint32_t worst_steps = h[kLightPoolWorstSteps];
+            VELK_LOG(I, "light trace: worst frame %u rays (%u for first traces), %u walk steps, %.0f steps a ray", worst_rays,
+                     h[kLightPoolWorstFirstRays], worst_steps, worst_rays != 0 ? double(worst_steps) / double(worst_rays) : 0.0);
             // Since the last log: what a ray's walk tests, and which own points were traced.
-            uint32_t sums[8] = {};
-            arena->read_at(pool.header.offset() + 92u * sizeof(uint32_t), sums, sizeof(sums));
-            const uint32_t zeros[8] = {};
-            arena->update_at(pool.header.offset() + 92u * sizeof(uint32_t), zeros, sizeof(zeros));
-            const double rays = sums[2] != 0 ? double(sums[2]) : 1.0;
-            const double steps = double(sums[3]) * 16.0;
-            const double tris = double(sums[0]) * 16.0;
+            clear(kLightPoolSumTriangles, kLightPoolSumLaterTraces + 1u - kLightPoolSumTriangles);
+            const double rays = h[kLightPoolSumRays] != 0 ? double(h[kLightPoolSumRays]) : 1.0;
+            const double steps = double(h[kLightPoolSumSteps]) * 16.0;
+            const double tris = double(h[kLightPoolSumTriangles]) * 16.0;
+            const double tested = double(h[kLightPoolSumRecords]);
             VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records, %.0f nodes; points traced %u first, %u later",
-                     tris / rays, double(sums[1]) / rays, std::max(steps - tris - double(sums[1]), 0.0) / rays, sums[6], sums[7]);
+                     tris / rays, tested / rays, std::max(steps - tris - tested, 0.0) / rays, h[kLightPoolSumFirstTraces],
+                     h[kLightPoolSumLaterTraces]);
             // Since the last log: where traces come from, a change or the view.
-            uint32_t why[5] = {};
-            arena->read_at(pool.header.offset() + 121u * sizeof(uint32_t), why, sizeof(why));
-            arena->update_at(pool.header.offset() + 121u * sizeof(uint32_t), zeros, sizeof(why));
+            clear(kLightPoolSumRetraces, kLightPoolSumLaidLightOnly + 1u - kLightPoolSumRetraces);
             VELK_LOG(I, "light causes: %u later traces after a change; points laid out for records without light %u, "
                         "again for records grown %u, for records grown from one value %u, for records for light only %u",
-                     why[0], why[1], why[2], why[3], why[4]);
+                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidGrown], h[kLightPoolSumLaidFromOne],
+                     h[kLightPoolSumLaidLightOnly]);
             // The last frame's records with own points: how their points are spread, and how many
-            // of them a pixel read.
-            uint32_t spread[9] = {};
-            arena->read_at(pool.header.offset() + 135u * sizeof(uint32_t), spread, sizeof(spread));
+            // of them a pixel read. LAST_MARK holds MARK_POINTS to MARK_BIG_POINTS in their order.
+            const uint32_t* mark = h + kLightPoolLastMark;
+            const auto in_mark = [&](uint32_t word) { return mark[word - kLightPoolMarkPoints]; };
             VELK_LOG(I, "light points: %u on records with own points, %u of them on records a pixel read; the most on one "
                         "record %u; records with under 256 points %u, under 1024 %u, under 4096 %u, under 16384 %u, more %u, "
                         "those with 4096 or more holding %u points",
-                     spread[0], spread[1], spread[2], spread[3], spread[4], spread[5], spread[6], spread[7], spread[8]);
+                     in_mark(kLightPoolMarkPoints), in_mark(kLightPoolMarkReadPoints), in_mark(kLightPoolMarkMostPoints),
+                     in_mark(kLightPoolMarkBuckets), in_mark(kLightPoolMarkBuckets + 1u), in_mark(kLightPoolMarkBuckets + 2u),
+                     in_mark(kLightPoolMarkBuckets + 3u), in_mark(kLightPoolMarkBuckets + 4u), in_mark(kLightPoolMarkBigPoints));
             // What the culling arena holds: in use of its buffer, and this view's part of it.
             uint64_t cut_bytes = 0;
             for (const auto& c : state.cuts) cut_bytes += c.region.size();
@@ -4024,18 +4025,15 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             VELK_LOG(I, "ray lists: %u of %u records", traced_records, all_records);
             // The deepest the walk's stack got since the last log, in the trace and the probes.
-            uint32_t deepest[2] = {};
-            arena->read_at(pool.header.offset() + 100u * sizeof(uint32_t), deepest, sizeof(deepest));
-            arena->update_at(pool.header.offset() + 100u * sizeof(uint32_t), zeros, sizeof(deepest));
-            VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", deepest[0], deepest[1]);
+            clear(kLightPoolDeepestTrace, 2u);
+            VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", h[kLightPoolDeepestTrace],
+                     h[kLightPoolDeepestProbes]);
             // Where a ray's walk spends its steps, since the last log (the same rays as above).
-            uint32_t where[4] = {};
-            arena->read_at(pool.header.offset() + 102u * sizeof(uint32_t), where, sizeof(where));
-            arena->update_at(pool.header.offset() + 102u * sizeof(uint32_t), zeros, sizeof(where));
+            clear(kLightPoolSumTopNodes, kLightPoolSumPartitions + 1u - kLightPoolSumTopNodes);
             VELK_LOG(I, "light trace: a ray walks %.0f top tree nodes, enters %.1f partitions, walks %.0f of their tree nodes "
                         "and %.0f mesh tree nodes",
-                     double(where[0]) * 16.0 / rays, double(where[3]) / rays, double(where[1]) * 16.0 / rays,
-                     double(where[2]) * 16.0 / rays);
+                     double(h[kLightPoolSumTopNodes]) * 16.0 / rays, double(h[kLightPoolSumPartitions]) / rays,
+                     double(h[kLightPoolSumPartitionNodes]) * 16.0 / rays, double(h[kLightPoolSumMeshNodes]) * 16.0 / rays);
             // The top tree's partitions: how many have records for rays, and how much their boxes
             // overlap, as the sum of their volumes over the volume of the box around them all.
             if (state.ray_top.valid()) {

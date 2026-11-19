@@ -31,70 +31,11 @@ namespace velk {
 /// again. Pages no record names, directly or through its vertices, are found free every frame
 /// (light_mark_src, light_sweep_src).
 ///
-/// The pool is a header of kLightPoolHeaderWords, then a stack of the free pages, then a bit per
-/// page marking those in use, both for as many pages as the pool may grow to, then the search
-/// list, and its pages in segments of kLightSegmentPages, each a region of its own, so that
-/// growing moves no page. The header:
-///   0  free pages on the stack
-///   1  pages, in all the segments
-///   2  pages asked for this frame that were not there (a record without asks again)
-///   3  records with pages, as the last mark found
-///   4  records with one value, likewise
-///   5  segments
-///   6  the word of the stack
-///   7  the word of the marks
-///   8  pages taken off the stack this frame, from its top down: the free stack is only read
-///      while records take pages, so taking needs no more than counting
-///   9  records put on the search list this frame, past its room when more asked
-///   10 the word of the search list: for each record, its word, its light word before and the
-///      grid level its own points would have (kLightSearchWords)
-///   11 of the records with pages, those that link (kLightLinked), as the last mark found
-///   12 to 15  3, 4, 11 and 9 of the last frame, complete, for the log
-///   16 to 79  the word of each segment
-///   80 lights put on the trace list this frame, past its room when more asked
-///   81 the word of the trace list: kLightTraceWords a light (light_points_trace_main_src)
-///   82 80 of the last frame, complete, for the log
-///   83 lit pixels this frame whose light was not traced yet (the lighting pass), 84 the last
-///      frame's, complete, for the log
-///   85 rays put on the trace list this frame, against the frame's budget in 106
-///      (velk_light_take_rays)
-///   86 rays the trace cast this frame, 87 the steps their walks took
-///   88, 89 86 and 87 of the frame whose walks took the most steps since the log read them,
-///      which the log then clears
-///   90 of the rays this frame, those for lights traced for the first time, 91 the same frame's
-///      as 88
-///   92 to 99 added up until the log reads and clears them: the trace's triangles tested (in
-///      sixteens), records tested, rays and walk steps (in sixteens); own points traced whose
-///      cluster is finer than the light's level, and their points; all own points traced, and
-///      their points
-///   100, 101 the deepest the walk's stack got in the trace, and in the screen probes, until the
-///      log reads and clears them
-///   102 to 105 added up until the log reads and clears them: the trace's walks' nodes of the top
-///      tree, of partitions' trees and of meshes' or clusters' trees (each in sixteens), and the
-///      partitions they entered
-///   106 the frame's budget in rays: 108 over the walk steps a ray took the last frame that cast
-///      at least 64 rays, over kLightAssumedSteps before the first
-///   107 rays first traces asked for the last frame, those refused too, which other traces leave
-///      to them this frame
-///   108 the budget in walk steps a frame (kLightTraceStepsBudget)
-///   109 rays first traces asked for this frame, those refused too
-///   110, 111 points put on the first trace list and the later trace list this frame, past their
-///      room (kLightPointCapacity) when more asked; 112, 113 the words of those lists
-///      (kLightPointWords a point: its record's first page, its number there, its instance);
-///      114, 115 110 and 111 of the last frame, complete, for the log
-///   116 records whose light a change made due (light_changes_main_src), added up until the log
-///      reads and clears it; 117 unused
-///   118 points put on the coarse trace list this frame (first traces of coarse points, see
-///      velk_light_coarse_level), past its room when more asked; 119 the word of that list; 120
-///      118 of the last frame, complete, for the log
-///   121 to 125 added up until the log reads and clears them, for where traces come from: later
-///      traces of points traced again after a change; own points the search laid out for records
-///      without light (new to the cut, or chosen again without keeping it), for records laid out
-///      again having grown, for records grown from one value, and for records for light only
-///   126 to 134 the mark's counts this frame, of the records with own points: their points; the
-///      points of those a pixel read since the last mark (VELK_LIGHT_READ_WORD); the most one
-///      has; the records with fewer than 256 points, 1024, 4096, 16384, and more; the points of
-///      those with 4096 or more. 135 to 143 the same, of the last frame, complete, for the log
+/// The pool is a header of kLightPoolHeaderWords (VELK_LIGHT_POOL_HEADER), then a stack of the
+/// free pages, then a bit per page marking those in use, both for as many pages as the pool may
+/// grow to, then the search list, and its pages in segments of kLightSegmentPages, each a region
+/// of its own, so that growing moves no page.
+///
 /// A record's first page starts with kLightPageHeaderWords: its cluster's vertices; for its own
 /// points the level of the grid in each of its triangles (1 for none, see velk_light_grid_point),
 /// else kLightLinked; how many point words it has; then its other pages (words 3 to 16), at most
@@ -144,9 +85,91 @@ inline constexpr uint32_t kLightMaxPages = 1u + 14u * 64u;
 inline constexpr uint32_t kLightSlots = 8;
 inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightMaxSegments = 64;
-inline constexpr uint32_t kLightPoolSegmentWord = 16;
-inline constexpr uint32_t kLightPoolTraceWord = kLightPoolSegmentWord + kLightMaxSegments;
-inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolTraceWord + 64u;
+
+/// The light pool's header, its words in order: each one's name in C++ (kLightPool, then the
+/// first name) and in the shaders (VELK_POOL_, then the second), and its place. "This frame":
+/// cleared by the sweep's begin (light_sweep_src), which copies it to its "last" word first, for
+/// the log. "Summed": added up until the log reads and clears it.
+#define VELK_LIGHT_POOL_HEADER(X)                                                                                    \
+    X(FreePages, FREE_PAGES, 0)                  /* free pages on the stack */                                       \
+    X(Pages, PAGES, 1)                           /* pages, in all the segments */                                    \
+    X(PagesWanted, PAGES_WANTED, 2)              /* pages asked for this frame that were not there */                \
+    X(RecordsPaged, RECORDS_PAGED, 3)            /* records with pages, this frame's mark */                         \
+    X(RecordsOneValue, RECORDS_ONE_VALUE, 4)     /* records with one value, likewise */                              \
+    X(Segments, SEGMENTS, 5)                     /* segments */                                                      \
+    X(StackWord, STACK_WORD, 6)                  /* the word of the free stack */                                    \
+    X(MarksWord, MARKS_WORD, 7)                  /* the word of the marks, a bit a page */                           \
+    X(PagesTaken, PAGES_TAKEN, 8)                /* pages taken off the stack this frame, from its top down */       \
+    X(Searched, SEARCHED, 9)                     /* records put on the search list this frame, past its room too */ \
+    X(SearchWord, SEARCH_WORD, 10)               /* the word of the search list (kLightSearchWords a record) */      \
+    X(RecordsLinked, RECORDS_LINKED, 11)         /* of the records with pages, those that link, this frame's mark */ \
+    X(LastRecordsPaged, LAST_RECORDS_PAGED, 12)                                                                      \
+    X(LastRecordsOneValue, LAST_RECORDS_ONE_VALUE, 13)                                                               \
+    X(LastRecordsLinked, LAST_RECORDS_LINKED, 14)                                                                    \
+    X(LastSearched, LAST_SEARCHED, 15)                                                                               \
+    X(SegmentWords, SEGMENT_WORDS, 16)           /* the word of each segment, kLightMaxSegments of them */           \
+    X(Traces, TRACES, 80)                        /* lights put on the trace list this frame, past its room too */    \
+    X(TraceWord, TRACE_WORD, 81)                 /* the word of the trace list (kLightTraceWords a light) */         \
+    X(LastTraces, LAST_TRACES, 82)                                                                                   \
+    X(UntracedPixels, UNTRACED_PIXELS, 83)       /* lit pixels this frame whose light was not traced yet */          \
+    X(LastUntracedPixels, LAST_UNTRACED_PIXELS, 84)                                                                  \
+    X(RaysListed, RAYS_LISTED, 85)               /* rays put on the trace list this frame, against RAY_BUDGET */     \
+    X(RaysCast, RAYS_CAST, 86)                   /* rays the trace cast this frame */                                \
+    X(Steps, STEPS, 87)                          /* the steps their walks took */                                    \
+    X(WorstRays, WORST_RAYS, 88)                 /* RAYS_CAST of the frame with the most STEPS since the log */      \
+    X(WorstSteps, WORST_STEPS, 89)               /* and its STEPS; the log clears both */                            \
+    X(FirstRays, FIRST_RAYS, 90)                 /* of this frame's rays, those of first traces */                   \
+    X(WorstFirstRays, WORST_FIRST_RAYS, 91)      /* FIRST_RAYS of the frame of WORST_RAYS */                         \
+    X(SumTriangles, SUM_TRIANGLES, 92)           /* summed: the trace's triangles tested, in sixteens */             \
+    X(SumRecords, SUM_RECORDS, 93)               /* summed: records tested */                                        \
+    X(SumRays, SUM_RAYS, 94)                     /* summed: rays */                                                  \
+    X(SumSteps, SUM_STEPS, 95)                   /* summed: walk steps, in sixteens */                               \
+    X(SumFirstTraces, SUM_FIRST_TRACES, 98)      /* summed: points traced the first time */                          \
+    X(SumLaterTraces, SUM_LATER_TRACES, 99)      /* summed: points traced again */                                   \
+    X(DeepestTrace, DEEPEST_TRACE, 100)          /* the deepest walk stack in the trace, until the log */            \
+    X(DeepestProbes, DEEPEST_PROBES, 101)        /* and in the screen probes */                                      \
+    X(SumTopNodes, SUM_TOP_NODES, 102)           /* summed: walks' top tree nodes, in sixteens */                    \
+    X(SumPartitionNodes, SUM_PARTITION_NODES, 103) /* summed: partitions' tree nodes, in sixteens */                 \
+    X(SumMeshNodes, SUM_MESH_NODES, 104)         /* summed: meshes' or clusters' tree nodes, in sixteens */          \
+    X(SumPartitions, SUM_PARTITIONS, 105)        /* summed: partitions entered */                                    \
+    X(RayBudget, RAY_BUDGET, 106)                /* the frame's budget in rays: STEP_BUDGET over a ray's steps */    \
+    X(LastFirstRaysAsked, LAST_FIRST_RAYS_ASKED, 107) /* FIRST_RAYS_ASKED of the last frame */                       \
+    X(StepBudget, STEP_BUDGET, 108)              /* the budget in walk steps a frame (kLightTraceStepsBudget) */     \
+    X(FirstRaysAsked, FIRST_RAYS_ASKED, 109)     /* rays first traces asked for this frame, refused ones too */      \
+    X(FirstPoints, FIRST_POINTS, 110)            /* points on the first trace list this frame, past its room too */  \
+    X(LaterPoints, LATER_POINTS, 111)            /* points on the later trace list this frame, likewise */           \
+    X(FirstPointsWord, FIRST_POINTS_WORD, 112)   /* the word of the first trace list (kLightPointWords a point) */   \
+    X(LaterPointsWord, LATER_POINTS_WORD, 113)   /* the word of the later trace list */                              \
+    X(LastFirstPoints, LAST_FIRST_POINTS, 114)                                                                       \
+    X(LastLaterPoints, LAST_LATER_POINTS, 115)                                                                       \
+    X(SumChanged, SUM_CHANGED, 116)              /* summed: records whose light a change made due */                 \
+    X(CoarsePoints, COARSE_POINTS, 118)          /* points on the coarse trace list this frame, past its room too */ \
+    X(CoarsePointsWord, COARSE_POINTS_WORD, 119) /* the word of the coarse trace list */                             \
+    X(LastCoarsePoints, LAST_COARSE_POINTS, 120)                                                                     \
+    X(SumRetraces, SUM_RETRACES, 121)            /* summed: later traces of points traced again after a change */    \
+    X(SumLaidNew, SUM_LAID_NEW, 122)             /* summed: own points laid out for records without light */         \
+    X(SumLaidGrown, SUM_LAID_GROWN, 123)         /* summed: for records laid out again, having grown */              \
+    X(SumLaidFromOne, SUM_LAID_FROM_ONE, 124)    /* summed: for records grown from one value */                      \
+    X(SumLaidLightOnly, SUM_LAID_LIGHT_ONLY, 125) /* summed: for records for light only */                           \
+    X(MarkPoints, MARK_POINTS, 126)              /* this frame's mark, of records with own points: their points */   \
+    X(MarkReadPoints, MARK_READ_POINTS, 127)     /* the points of those a pixel read since the last mark */          \
+    X(MarkMostPoints, MARK_MOST_POINTS, 128)     /* the most one has */                                              \
+    X(MarkBuckets, MARK_BUCKETS, 129)            /* records with under 256, 1024, 4096, 16384 points, and more */    \
+    X(MarkBigPoints, MARK_BIG_POINTS, 134)       /* the points of those with 4096 or more */                         \
+    X(LastMark, LAST_MARK, 135)                  /* MARK_POINTS to MARK_BIG_POINTS of the last frame */              \
+    X(HeaderEnd, HEADER_END, 144)
+
+#define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
+VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
+#undef VELK_LIGHT_POOL_CPP_WORD
+/// The header's words, for the shaders: a #define VELK_POOL_ each.
+#define VELK_LIGHT_POOL_GLSL_WORD(cpp, glsl, word) "#define VELK_POOL_" #glsl " " #word "u\n"
+#define VELK_LIGHT_POOL_HEADER_GLSL VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_GLSL_WORD)
+/// The mark's counts, MARK_POINTS to MARK_BIG_POINTS.
+inline constexpr uint32_t kLightPoolMarkWords = kLightPoolLastMark - kLightPoolMarkPoints;
+inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolHeaderEnd;
+static_assert(kLightPoolTraces == kLightPoolSegmentWords + kLightMaxSegments, "the segments' words end where the trace's begin");
+static_assert(kLightPoolHeaderEnd == kLightPoolLastMark + kLightPoolMarkWords, "the last mark's counts end the header");
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = 3;
@@ -174,7 +197,7 @@ inline constexpr uint32_t kLightFirstBudgetScale = 4;  ///< Mirrors VELK_LIGHT_F
 inline constexpr uint32_t kLightAssumedSteps = 64;
 
 // Reading the pool, for a shader that defines VELK_LIGHT_WORDS as the culling arena's buffer.
-#define VELK_LIGHT_POOL_GLSL R"(
+#define VELK_LIGHT_POOL_GLSL VELK_LIGHT_POOL_HEADER_GLSL R"(
 #define VELK_LIGHT_NONE 0xFFFFFFFFu
 #define VELK_LIGHT_PENDING 0xFFFFFFFEu
 #define VELK_LIGHT_ONE_VALUE 0x80000000u
@@ -232,7 +255,7 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 // The first word of page `page` of the pool at `pool`.
 uint velk_light_page(uint pool, uint page)
 {
-    return VELK_LIGHT_WORDS.data[pool + 16u + (page >> 14u)] + (page & 16383u) * VELK_LIGHT_PAGE_WORDS;
+    return VELK_LIGHT_WORDS.data[pool + VELK_POOL_SEGMENT_WORDS + (page >> 14u)] + (page & 16383u) * VELK_LIGHT_PAGE_WORDS;
 }
 
 // Words before the points of a record with `table` words after its header: an even number, so
@@ -344,7 +367,7 @@ void velk_light_points(uint pool, uint first, uint vertex, out uint words[3], ou
         return;
     }
     uint light = VELK_LIGHT_WORDS.data[velk_light_point_word(pool, first, vertex * 3u)];
-    if (light >= VELK_LIGHT_WORDS.data[pool + 1u]) return;
+    if (light >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
     uint points = VELK_LIGHT_WORDS.data[velk_light_point_word(pool, first, vertex * 3u + 1u)];
     vec2 w = unpackUnorm2x16(VELK_LIGHT_WORDS.data[velk_light_point_word(pool, first, vertex * 3u + 2u)]);
     uint other = velk_light_page(pool, light);
@@ -452,11 +475,11 @@ bool velk_light_is_coarse(uint n, uvec2 f)
 // A point list's count (VELK_LIGHT_LIST_*) in the pool's header, and its word's.
 uint velk_light_list_count_word(uint list)
 {
-    return list == VELK_LIGHT_LIST_COARSE ? 118u : 110u + list;
+    return list == VELK_LIGHT_LIST_COARSE ? VELK_POOL_COARSE_POINTS : VELK_POOL_FIRST_POINTS + list;
 }
 uint velk_light_list_word_word(uint list)
 {
-    return list == VELK_LIGHT_LIST_COARSE ? 119u : 112u + list;
+    return list == VELK_LIGHT_LIST_COARSE ? VELK_POOL_COARSE_POINTS_WORD : VELK_POOL_FIRST_POINTS_WORD + list;
 }
 
 // The points of light a pixel at weights `b` of triangle `t` (corners `corners`) of the record
@@ -546,18 +569,18 @@ uint velk_light_quad_node(uint tree, uint node, vec3 cam, float pixels_per_unit,
 // frame.
 bool velk_light_take_rays(uint pool, uint rays, bool first)
 {
-    uint budget = VELK_LIGHT_WORDS.data[pool + 106u];
+    uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint reserved = 0u;
     if (first) {
-        atomicAdd(VELK_LIGHT_WORDS.data[pool + 109u], rays);
+        atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS_ASKED], rays);
     } else {
-        reserved = min(VELK_LIGHT_WORDS.data[pool + 107u], budget);
+        reserved = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LAST_FIRST_RAYS_ASKED], budget);
         budget -= reserved;
     }
-    uint before = atomicAdd(VELK_LIGHT_WORDS.data[pool + 85u], rays);
+    uint before = atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED], rays);
     if (before + rays <= budget || (before == 0u && (first || reserved == 0u))) return true;
     // Given back, so that a smaller light after it can still fit.
-    atomicAdd(VELK_LIGHT_WORDS.data[pool + 85u], 0u - rays);
+    atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED], 0u - rays);
     return false;
 }
 
@@ -567,9 +590,9 @@ bool velk_light_take_rays(uint pool, uint rays, bool first)
 void velk_light_list_entry(uint pool, uint kind, uint at, uint instance, uint table, uint rays)
 {
     if (!velk_light_take_rays(pool, rays, true)) return;
-    uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + 80u], 1u);
+    uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACES], 1u);
     if (i >= VELK_LIGHT_TRACE_CAPACITY) return;
-    uint w = VELK_LIGHT_WORDS.data[pool + 81u] + i * VELK_LIGHT_TRACE_WORDS;
+    uint w = VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACE_WORD] + i * VELK_LIGHT_TRACE_WORDS;
     VELK_LIGHT_WORDS.data[w] = kind;
     VELK_LIGHT_WORDS.data[w + 1u] = at;
     VELK_LIGHT_WORDS.data[w + 2u] = instance;
@@ -838,7 +861,7 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
             velk_light_add_one(value, velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), lights,
                                sums);
         } else {
-            if (value >= VELK_LIGHT_WORDS.data[pool + 1u]) return false;
+            if (value >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return false;
             uint first = velk_light_page(pool, value);
             uint cluster = velk_ids_cluster(d, ids);
             if (cluster == VELK_NO_CLUSTER) return false;
@@ -941,22 +964,22 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed)
 // This thread's rays and their walks' steps, into the frame's counts (pool header 86 and 87).
 void velk_points_count(uint pool)
 {
-    if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 86u], g_rays);
+    if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_CAST], g_rays);
     // Exact, as the frame's budget in rays is made from it.
-    if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 87u], velk_ray_steps);
-    if (g_first_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 90u], g_first_rays);
+    if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_STEPS], velk_ray_steps);
+    if (g_first_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS], g_first_rays);
     // Added up until the log reads them: triangles tested, records, rays and steps.
-    if (velk_ray_tris != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 92u], (velk_ray_tris + 15u) / 16u);
-    if (velk_ray_records != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 93u], velk_ray_records);
-    if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 94u], g_rays);
-    if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 95u], (velk_ray_steps + 15u) / 16u);
-    if (velk_ray_deepest > 0) atomicMax(VELK_LIGHT_WORDS.data[pool + 100u], uint(velk_ray_deepest));
+    if (velk_ray_tris != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_TRIANGLES], (velk_ray_tris + 15u) / 16u);
+    if (velk_ray_records != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RECORDS], velk_ray_records);
+    if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RAYS], g_rays);
+    if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_STEPS], (velk_ray_steps + 15u) / 16u);
+    if (velk_ray_deepest > 0) atomicMax(VELK_LIGHT_WORDS.data[pool + VELK_POOL_DEEPEST_TRACE], uint(velk_ray_deepest));
     // Where the walks' steps went: top tree nodes, partition tree nodes, mesh tree nodes (in
     // sixteens) and partitions entered.
-    if (velk_ray_top_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 102u], (velk_ray_top_nodes + 15u) / 16u);
-    if (velk_ray_partition_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 103u], (velk_ray_partition_nodes + 15u) / 16u);
-    if (velk_ray_mesh_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 104u], (velk_ray_mesh_nodes + 15u) / 16u);
-    if (velk_ray_partitions != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + 105u], velk_ray_partitions);
+    if (velk_ray_top_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_TOP_NODES], (velk_ray_top_nodes + 15u) / 16u);
+    if (velk_ray_partition_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_PARTITION_NODES], (velk_ray_partition_nodes + 15u) / 16u);
+    if (velk_ray_mesh_nodes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_MESH_NODES], (velk_ray_mesh_nodes + 15u) / 16u);
+    if (velk_ray_partitions != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_PARTITIONS], velk_ray_partitions);
 }
 
 // The slot of `slots` to trace once more at `p`, chosen at random by `seed` in proportion to
@@ -989,12 +1012,12 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
 {
     GlobalData g = VELK_GLOBALS;
     uint lights = max(min(pc.light_count, VELK_LIGHT_SLOTS), 1u);
-    uint coarses = min(VELK_LIGHT_WORDS.data[pool + 118u], VELK_LIGHT_POINT_CAPACITY);
-    uint firsts = min(VELK_LIGHT_WORDS.data[pool + 110u], VELK_LIGHT_POINT_CAPACITY);
-    uint laters = min(VELK_LIGHT_WORDS.data[pool + 111u], VELK_LIGHT_POINT_CAPACITY);
-    uint budget = VELK_LIGHT_WORDS.data[pool + 106u];
+    uint coarses = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_COARSE_POINTS], VELK_LIGHT_POINT_CAPACITY);
+    uint firsts = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_POINTS], VELK_LIGHT_POINT_CAPACITY);
+    uint laters = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LATER_POINTS], VELK_LIGHT_POINT_CAPACITY);
+    uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint first_budget = budget > 0xFFFFFFFFu / VELK_LIGHT_FIRST_BUDGET_SCALE ? 0xFFFFFFFFu : budget * VELK_LIGHT_FIRST_BUDGET_SCALE;
-    uint used = VELK_LIGHT_WORDS.data[pool + 85u] + coarses * lights;
+    uint used = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED] + coarses * lights;
     uint take_firsts = min(firsts, (first_budget - min(used, first_budget)) / lights);
     used += take_firsts * lights;
     uint take_laters = min(laters, budget - min(used, budget));
@@ -1106,7 +1129,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
             value |= uint(blocked * 15.0 + 0.5) << (4u * s);
         }
         traces = 0u;
-        atomicAdd(VELK_LIGHT_WORDS.data[pool + 98u], 1u);
+        atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_FIRST_TRACES], 1u);
     } else {
         // Warming up, a running mean of its rays. Traced again after a change, steps of 1/2, 1/2,
         // 1/3, 1/3, 1/4 and 1/4, the first new ray moving it halfway, so that it follows what
@@ -1114,7 +1137,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         // keeps a sixteenth.
         float step = traces < VELK_LIGHT_WARM_TRACES ? 1.0 / float(traces + 1u)
                    : traces >= VELK_LIGHT_RETRACE ? 1.0 / float((traces - VELK_LIGHT_RETRACE) / 2u + 2u) : 0.25;
-        if (traces >= VELK_LIGHT_RETRACE) atomicAdd(VELK_LIGHT_WORDS.data[pool + 121u], 1u);
+        if (traces >= VELK_LIGHT_RETRACE) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RETRACES], 1u);
         value = old;
         uint s = velk_points_pick(slots, p, seed);
         if (slots[s] != VELK_LIGHT_NONE) {
@@ -1126,7 +1149,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
             uint now = min(uint(mix(was, blocked * 15.0, step) + dither), 15u);
             value = (old & ~(15u << (4u * s))) | (now << (4u * s));
         }
-        atomicAdd(VELK_LIGHT_WORDS.data[pool + 99u], 1u);
+        atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LATER_TRACES], 1u);
     }
     // Never the word for untraced: all eight slots fully dark reads one step lighter.
     if (value == VELK_LIGHT_NONE) value = 0xEFFFFFFFu;
@@ -1154,8 +1177,8 @@ void main()
         velk_points_count(pool);
         return;
     }
-    if (index >= min(VELK_LIGHT_WORDS.data[pool + 80u], VELK_LIGHT_TRACE_CAPACITY)) return;
-    uint w = VELK_LIGHT_WORDS.data[pool + 81u] + index * VELK_LIGHT_TRACE_WORDS;
+    if (index >= min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACES], VELK_LIGHT_TRACE_CAPACITY)) return;
+    uint w = VELK_LIGHT_WORDS.data[pool + VELK_POOL_TRACE_WORD] + index * VELK_LIGHT_TRACE_WORDS;
     uint how = VELK_LIGHT_WORDS.data[w];
     uint kind = how & VELK_LIGHT_TRACE_KIND;
     if (kind == VELK_LIGHT_TRACE_SKIP) return;
@@ -1176,7 +1199,7 @@ void main()
         radius = max(uintBitsToFloat(VELK_LIGHT_WORDS.data[at + 10u]), 0.0);
     } else {
         // A record's one value, or the coarse light on the first page of its own points.
-        if (kind == VELK_LIGHT_TRACE_COARSE && at >= VELK_LIGHT_WORDS.data[pool + 1u]) return;
+        if (kind == VELK_LIGHT_TRACE_COARSE && at >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
         word =kind == VELK_LIGHT_TRACE_COARSE ? velk_light_page(pool, at) + VELK_LIGHT_COARSE_WORD : at + 3u;
         ElementInstance inst = velk_instances.data[instance];
         mat3 to_world = mat3(inst.world_matrix);
@@ -1365,7 +1388,7 @@ void main()
     bool own_points = false;
     uint first = 0u;
     if (value < VELK_LIGHT_ONE_VALUE) {
-        if (value >= VELK_LIGHT_WORDS.data[pool + 1u]) return;
+        if (value >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
         first = velk_light_page(pool, value);
         if (VELK_LIGHT_WORDS.data[first + 1u] == VELK_LIGHT_LINKED) return;
         own_points = true;
@@ -1400,7 +1423,7 @@ void main()
         velk_light_slots_at(center, slots);
     }
     if (!all && !velk_change_alters(changes, center, radius, slots)) return;
-    atomicAdd(VELK_LIGHT_WORDS.data[pool + 116u], 1u);
+    atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_CHANGED], 1u);
     if (own_points) {
         // Its coarse light traced again at once, and its settled points traced again as pixels
         // next read them (velk_light_point_traces), moving toward what changed while pixels keep
@@ -1532,7 +1555,7 @@ vec3 velk_probe_direct(RayHit hit, vec3 at, vec3 n)
         if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return vec3(0.0);
         velk_light_add_one(value, at, lights, sums);
     } else {
-        if (value >= probe_words.data[pool + 1u] || hit.corners.x == VELK_NO_CORNERS) return vec3(0.0);
+        if (value >= probe_words.data[pool + VELK_POOL_PAGES] || hit.corners.x == VELK_NO_CORNERS) return vec3(0.0);
         vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
         if (!velk_light_add_points(pool, velk_light_page(pool, value), 0xFFFFFFFFu, hit.corners, b, lights, sums)) return vec3(0.0);
     }
@@ -1640,7 +1663,7 @@ void main()
     }
     s_light[lane] = light;
     // The deepest the walk's stack got, for the log (light pool header 101).
-    if (pc.shapes_base != 0xFFFFFFFFu && velk_ray_deepest > 0) atomicMax(probe_words.data[pc.shapes_base + 101u], uint(velk_ray_deepest));
+    if (pc.shapes_base != 0xFFFFFFFFu && velk_ray_deepest > 0) atomicMax(probe_words.data[pc.shapes_base + VELK_POOL_DEEPEST_PROBES], uint(velk_ray_deepest));
     barrier();
     if (!live || ray != 0u) return;
 
@@ -1729,12 +1752,12 @@ layout(push_constant) uniform PC {
 // no room, gives its light back.
 void velk_light_search(uint record, uint was, uint instance)
 {
-    uint at = atomicAdd(light_words.data[pc.pool_word + 9u], 1u);
+    uint at = atomicAdd(light_words.data[pc.pool_word + VELK_POOL_SEARCHED], 1u);
     if (at >= VELK_LIGHT_SEARCH_CAPACITY) {
         light_words.data[record + 3u] = was;
         return;
     }
-    uint list = light_words.data[pc.pool_word + 10u] + at * 3u;
+    uint list = light_words.data[pc.pool_word + VELK_POOL_SEARCH_WORD] + at * 3u;
     light_words.data[list] = record;
     light_words.data[list + 1u] = was;
     light_words.data[list + 2u] = instance;
@@ -1750,7 +1773,7 @@ void velk_light_trace(uint kind, uint at, uint instance, uint table, uint rays)
 // Lists the coarse light of the own points whose first page is `page`, when it is due.
 void velk_light_list_record(uint page, uint instance, uint frame)
 {
-    if (page >= light_words.data[pc.pool_word + 1u]) return;
+    if (page >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) return;
     uint first = velk_light_page(pc.pool_word, page);
     if (light_words.data[first + 1u] == VELK_LIGHT_LINKED) return;
     light_words.data[first + VELK_LIGHT_READ_WORD] = 1u;
@@ -1847,7 +1870,7 @@ void main()
     uvec2 coord = gl_GlobalInvocationID.xy;
     if (coord.x >= pc.width || coord.y >= pc.height) return;
     // Again after the search only when it laid records out this frame.
-    if (pc.again != 0u && light_words.data[pc.pool_word + 9u] == 0u) return;
+    if (pc.again != 0u && light_words.data[pc.pool_word + VELK_POOL_SEARCHED] == 0u) return;
     uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, ivec2(coord));
     if (ids.x == 0u) return;
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
@@ -1899,7 +1922,7 @@ void main()
     // this pixel reads are traced when due, and the coarse light of the records they are in: its
     // own, or those of the records for light only it links to at this pixel's corners.
     if (was != VELK_LIGHT_NONE && was < VELK_LIGHT_ONE_VALUE) {
-        if (was >= light_words.data[pc.pool_word + 1u]) return;
+        if (was >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) return;
         uint first = velk_light_page(pc.pool_word, was);
         if (light_words.data[first + 1u] != VELK_LIGHT_LINKED) {
             float laid_for = uintBitsToFloat(light_words.data[first + VELK_LIGHT_ACROSS_WORD]);
@@ -2028,12 +2051,12 @@ shared uint s_grid[kMaxTriangles];
 // swap that fails means another take moved it, so there are at most as many tries as takes.
 bool velk_light_take(uint pool, uint count, out uint base)
 {
-    uint free_pages = light_words.data[pool];
-    uint taken = light_words.data[pool + 8u];
+    uint free_pages = light_words.data[pool + VELK_POOL_FREE_PAGES];
+    uint taken = light_words.data[pool + VELK_POOL_PAGES_TAKEN];
     base = 0u;
     for (uint tries = 0u; tries < 4096u; ++tries) {
         if (taken + count > free_pages) return false;
-        uint seen = atomicCompSwap(light_words.data[pool + 8u], taken, taken + count);
+        uint seen = atomicCompSwap(light_words.data[pool + VELK_POOL_PAGES_TAKEN], taken, taken + count);
         if (seen == taken) {
             base = taken;
             return true;
@@ -2045,7 +2068,7 @@ bool velk_light_take(uint pool, uint count, out uint base)
 
 uint velk_light_taken(uint pool, uint base, uint k)
 {
-    return light_words.data[light_words.data[pool + 6u] + light_words.data[pool] - 1u - base - k];
+    return light_words.data[light_words.data[pool + VELK_POOL_STACK_WORD] + light_words.data[pool + VELK_POOL_FREE_PAGES] - 1u - base - k];
 }
 
 // Pages for a record of `vertices` vertices of `cluster` (its word in its hierarchy's table), as
@@ -2062,7 +2085,7 @@ bool velk_light_lay_out(uint vertices, uint cluster, uint kind, uint table, uint
     uint index_pages = count > VELK_LIGHT_DIRECT_PAGES ? (count - 1u + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS : 0u;
     uint base;
     if (!velk_light_take(pool, count + index_pages, base)) {
-        atomicAdd(light_words.data[pool + 2u], count + index_pages);
+        atomicAdd(light_words.data[pool + VELK_POOL_PAGES_WANTED], count + index_pages);
         return false;
     }
     uint page0 = velk_light_taken(pool, base, 0u);
@@ -2197,8 +2220,8 @@ void main()
     uint pool = pc.pool_word;
     uint index = gl_WorkGroupID.x;
     uint lane = gl_LocalInvocationIndex;
-    if (index >= light_words.data[pool + 9u]) return;
-    uint list = light_words.data[pool + 10u] + index * 3u;
+    if (index >= light_words.data[pool + VELK_POOL_SEARCHED]) return;
+    uint list = light_words.data[pool + VELK_POOL_SEARCH_WORD] + index * 3u;
     uint record = light_words.data[list];
     uint was = light_words.data[list + 1u];
     uint instance = light_words.data[list + 2u];
@@ -2215,7 +2238,7 @@ void main()
         s_own = false;
         s_lights = 0u;
         bool again = false;
-        uint pages = light_words.data[pool + 1u];
+        uint pages = light_words.data[pool + VELK_POOL_PAGES];
         // The instance's records for light only, beside it: an instance's records are together,
         // within the records placed in its store.
         uint store_lo;
@@ -2249,7 +2272,7 @@ void main()
                         light_words.data[at] = VELK_LIGHT_NONE;
                         light_words.data[at + 1u] = VELK_LIGHT_NONE;
                     }
-                    atomicAdd(light_words.data[pool + 125u], other_vertices);
+                    atomicAdd(light_words.data[pool + VELK_POOL_SUM_LAID_LIGHT_ONLY], other_vertices);
                     light_words.data[other + 3u] = laid;
                     velk_light_trace_now(laid, instance);
                     light = laid;
@@ -2327,7 +2350,8 @@ void main()
             light_words.data[record + 3u] = s_page;
             velk_light_trace_now(s_page, instance);
             // For the log, why: no light before, laid out again having grown, or one value before.
-            uint why = was == VELK_LIGHT_NONE ? 122u : was < VELK_LIGHT_ONE_VALUE ? 123u : 124u;
+            uint why = was == VELK_LIGHT_NONE ? VELK_POOL_SUM_LAID_NEW
+                     : was < VELK_LIGHT_ONE_VALUE ? VELK_POOL_SUM_LAID_GROWN : VELK_POOL_SUM_LAID_FROM_ONE;
             atomicAdd(light_words.data[pool + why], s_points);
         }
         return;
@@ -2399,8 +2423,8 @@ layout(push_constant) uniform PC {
 // Never past the pool's pages, whatever a record says.
 void velk_light_mark(uint page)
 {
-    if (page >= light_words.data[pc.pool_word + 1u]) return;
-    atomicOr(light_words.data[light_words.data[pc.pool_word + 7u] + (page >> 5u)], 1u << (page & 31u));
+    if (page >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) return;
+    atomicOr(light_words.data[light_words.data[pc.pool_word + VELK_POOL_MARKS_WORD] + (page >> 5u)], 1u << (page & 31u));
 }
 
 // A record's first page and its others, and its index pages when it has them.
@@ -2417,7 +2441,7 @@ void velk_light_mark_record(uint light)
     for (uint i = 0u; i < index_pages && i + 1u < VELK_LIGHT_DIRECT_PAGES; ++i) {
         uint index = light_words.data[first + 3u + i];
         velk_light_mark(index);
-        if (index >= light_words.data[pc.pool_word + 1u]) continue;
+        if (index >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) continue;
         uint at = velk_light_page(pc.pool_word, index);
         for (uint k = 0u; k < VELK_LIGHT_PAGE_WORDS && 1u + i * VELK_LIGHT_PAGE_WORDS + k < count; ++k) {
             velk_light_mark(light_words.data[at + k]);
@@ -2434,12 +2458,12 @@ void main()
     uint light = light_words.data[light_words.data[cut + 17u + parity] + index * 4u + 3u];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
     if (light >= VELK_LIGHT_ONE_VALUE) {
-        atomicAdd(light_words.data[pc.pool_word + 4u], 1u);
+        atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);
         return;
     }
-    uint pages = light_words.data[pc.pool_word + 1u];
+    uint pages = light_words.data[pc.pool_word + VELK_POOL_PAGES];
     if (light >= pages) return;
-    atomicAdd(light_words.data[pc.pool_word + 3u], 1u);
+    atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_PAGED], 1u);
     velk_light_mark_record(light);
     uint first = velk_light_page(pc.pool_word, light);
     if (light_words.data[first + 1u] != VELK_LIGHT_LINKED) {
@@ -2447,16 +2471,16 @@ void main()
         // and how records' points are spread.
         uint pool = pc.pool_word;
         uint points = light_words.data[first + 2u] / 2u;
-        atomicAdd(light_words.data[pool + 126u], points);
-        if (light_words.data[first + VELK_LIGHT_READ_WORD] != 0u) atomicAdd(light_words.data[pool + 127u], points);
+        atomicAdd(light_words.data[pool + VELK_POOL_MARK_POINTS], points);
+        if (light_words.data[first + VELK_LIGHT_READ_WORD] != 0u) atomicAdd(light_words.data[pool + VELK_POOL_MARK_READ_POINTS], points);
         light_words.data[first + VELK_LIGHT_READ_WORD] = 0u;
-        atomicMax(light_words.data[pool + 128u], points);
+        atomicMax(light_words.data[pool + VELK_POOL_MARK_MOST_POINTS], points);
         uint bucket = points < 256u ? 0u : points < 1024u ? 1u : points < 4096u ? 2u : points < 16384u ? 3u : 4u;
-        atomicAdd(light_words.data[pool + 129u + bucket], 1u);
-        if (points >= 4096u) atomicAdd(light_words.data[pool + 134u], points);
+        atomicAdd(light_words.data[pool + VELK_POOL_MARK_BUCKETS + bucket], 1u);
+        if (points >= 4096u) atomicAdd(light_words.data[pool + VELK_POOL_MARK_BIG_POINTS], points);
         return;
     }
-    atomicAdd(light_words.data[pc.pool_word + 11u], 1u);
+    atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_LINKED], 1u);
     // What its vertices link to, which neighbouring vertices mostly share.
     uint last = VELK_LIGHT_NONE;
     uint vertices = min(light_words.data[first], 256u);
@@ -2485,70 +2509,70 @@ layout(push_constant) uniform PC {
     uint pool_word;
     uint begin;
 } pc;
-
+)" VELK_LIGHT_POOL_HEADER_GLSL R"(
 void main()
 {
     uint pool = pc.pool_word;
     uint word = gl_GlobalInvocationID.x;
     if (pc.begin != 0u) {
         if (word == 0u) {
-            light_words.data[pool + 12u] = light_words.data[pool + 3u];
-            light_words.data[pool + 13u] = light_words.data[pool + 4u];
-            light_words.data[pool + 14u] = light_words.data[pool + 11u];
-            light_words.data[pool + 15u] = light_words.data[pool + 9u];
-            light_words.data[pool + 82u] = light_words.data[pool + 80u];
-            light_words.data[pool + 80u] = 0u;
-            light_words.data[pool + 84u] = light_words.data[pool + 83u];
-            light_words.data[pool + 83u] = 0u;
-            light_words.data[pool + 85u] = 0u;
-            light_words.data[pool + 114u] = light_words.data[pool + 110u];
-            light_words.data[pool + 115u] = light_words.data[pool + 111u];
-            light_words.data[pool + 120u] = light_words.data[pool + 118u];
-            light_words.data[pool + 118u] = 0u;
-            for (uint k = 0u; k < 9u; ++k) {
-                light_words.data[pool + 135u + k] = light_words.data[pool + 126u + k];
-                light_words.data[pool + 126u + k] = 0u;
+            light_words.data[pool + VELK_POOL_LAST_RECORDS_PAGED] = light_words.data[pool + VELK_POOL_RECORDS_PAGED];
+            light_words.data[pool + VELK_POOL_LAST_RECORDS_ONE_VALUE] = light_words.data[pool + VELK_POOL_RECORDS_ONE_VALUE];
+            light_words.data[pool + VELK_POOL_LAST_RECORDS_LINKED] = light_words.data[pool + VELK_POOL_RECORDS_LINKED];
+            light_words.data[pool + VELK_POOL_LAST_SEARCHED] = light_words.data[pool + VELK_POOL_SEARCHED];
+            light_words.data[pool + VELK_POOL_LAST_TRACES] = light_words.data[pool + VELK_POOL_TRACES];
+            light_words.data[pool + VELK_POOL_TRACES] = 0u;
+            light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
+            light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
+            light_words.data[pool + VELK_POOL_RAYS_LISTED] = 0u;
+            light_words.data[pool + VELK_POOL_LAST_FIRST_POINTS] = light_words.data[pool + VELK_POOL_FIRST_POINTS];
+            light_words.data[pool + VELK_POOL_LAST_LATER_POINTS] = light_words.data[pool + VELK_POOL_LATER_POINTS];
+            light_words.data[pool + VELK_POOL_LAST_COARSE_POINTS] = light_words.data[pool + VELK_POOL_COARSE_POINTS];
+            light_words.data[pool + VELK_POOL_COARSE_POINTS] = 0u;
+            for (uint k = 0u; k < VELK_POOL_LAST_MARK - VELK_POOL_MARK_POINTS; ++k) {
+                light_words.data[pool + VELK_POOL_LAST_MARK + k] = light_words.data[pool + VELK_POOL_MARK_POINTS + k];
+                light_words.data[pool + VELK_POOL_MARK_POINTS + k] = 0u;
             }
-            light_words.data[pool + 110u] = 0u;
-            light_words.data[pool + 111u] = 0u;
+            light_words.data[pool + VELK_POOL_FIRST_POINTS] = 0u;
+            light_words.data[pool + VELK_POOL_LATER_POINTS] = 0u;
             // The frame's budget in rays, from the steps a ray took the last frame that cast a
             // work group's worth, so that a few short rays do not set it, or any rays while it
             // has none yet; and what first traces asked for, which others leave to them.
-            uint rays = light_words.data[pool + 86u];
-            if (rays >= 64u || (rays != 0u && light_words.data[pool + 106u] == 0u)) {
-                float steps = max(float(light_words.data[pool + 87u]), 1.0);
-                light_words.data[pool + 106u] = uint(min(float(light_words.data[pool + 108u]) * float(rays) / steps, 4.0e9));
+            uint rays = light_words.data[pool + VELK_POOL_RAYS_CAST];
+            if (rays >= 64u || (rays != 0u && light_words.data[pool + VELK_POOL_RAY_BUDGET] == 0u)) {
+                float steps = max(float(light_words.data[pool + VELK_POOL_STEPS]), 1.0);
+                light_words.data[pool + VELK_POOL_RAY_BUDGET] = uint(min(float(light_words.data[pool + VELK_POOL_STEP_BUDGET]) * float(rays) / steps, 4.0e9));
             }
-            light_words.data[pool + 107u] = light_words.data[pool + 109u];
-            light_words.data[pool + 109u] = 0u;
+            light_words.data[pool + VELK_POOL_LAST_FIRST_RAYS_ASKED] = light_words.data[pool + VELK_POOL_FIRST_RAYS_ASKED];
+            light_words.data[pool + VELK_POOL_FIRST_RAYS_ASKED] = 0u;
             // The frame whose walks took the most steps since the log last read it.
-            if (light_words.data[pool + 87u] > light_words.data[pool + 89u]) {
-                light_words.data[pool + 88u] = light_words.data[pool + 86u];
-                light_words.data[pool + 89u] = light_words.data[pool + 87u];
-                light_words.data[pool + 91u] = light_words.data[pool + 90u];
+            if (light_words.data[pool + VELK_POOL_STEPS] > light_words.data[pool + VELK_POOL_WORST_STEPS]) {
+                light_words.data[pool + VELK_POOL_WORST_RAYS] = light_words.data[pool + VELK_POOL_RAYS_CAST];
+                light_words.data[pool + VELK_POOL_WORST_STEPS] = light_words.data[pool + VELK_POOL_STEPS];
+                light_words.data[pool + VELK_POOL_WORST_FIRST_RAYS] = light_words.data[pool + VELK_POOL_FIRST_RAYS];
             }
-            light_words.data[pool + 86u] = 0u;
-            light_words.data[pool + 87u] = 0u;
-            light_words.data[pool + 90u] = 0u;
-            light_words.data[pool] = 0u;
-            light_words.data[pool + 2u] = 0u;
-            light_words.data[pool + 3u] = 0u;
-            light_words.data[pool + 4u] = 0u;
-            light_words.data[pool + 8u] = 0u;
-            light_words.data[pool + 9u] = 0u;
-            light_words.data[pool + 11u] = 0u;
+            light_words.data[pool + VELK_POOL_RAYS_CAST] = 0u;
+            light_words.data[pool + VELK_POOL_STEPS] = 0u;
+            light_words.data[pool + VELK_POOL_FIRST_RAYS] = 0u;
+            light_words.data[pool + VELK_POOL_FREE_PAGES] = 0u;
+            light_words.data[pool + VELK_POOL_PAGES_WANTED] = 0u;
+            light_words.data[pool + VELK_POOL_RECORDS_PAGED] = 0u;
+            light_words.data[pool + VELK_POOL_RECORDS_ONE_VALUE] = 0u;
+            light_words.data[pool + VELK_POOL_PAGES_TAKEN] = 0u;
+            light_words.data[pool + VELK_POOL_SEARCHED] = 0u;
+            light_words.data[pool + VELK_POOL_RECORDS_LINKED] = 0u;
         }
         return;
     }
-    uint pages = light_words.data[pool + 1u];
+    uint pages = light_words.data[pool + VELK_POOL_PAGES];
     if (word * 32u >= pages) return;
-    uint marks = light_words.data[pool + 7u] + word;
+    uint marks = light_words.data[pool + VELK_POOL_MARKS_WORD] + word;
     uint used = light_words.data[marks];
     uint free_pages = 0u;
     for (uint b = 0u; b < 32u && word * 32u + b < pages; ++b) {
         if ((used & (1u << b)) == 0u) ++free_pages;
     }
-    uint at = light_words.data[pool + 6u] + atomicAdd(light_words.data[pool], free_pages);
+    uint at = light_words.data[pool + VELK_POOL_STACK_WORD] + atomicAdd(light_words.data[pool + VELK_POOL_FREE_PAGES], free_pages);
     for (uint b = 0u; b < 32u && word * 32u + b < pages; ++b) {
         if ((used & (1u << b)) == 0u) light_words.data[at++] = word * 32u + b;
     }
@@ -2605,16 +2629,16 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     const uint32_t base = pool.word();
     vector<uint32_t> initial;
     initial.resize(kLightPoolHeaderWords + max_pages / 32u, 0u);
-    initial[6] = base + kLightPoolHeaderWords;
-    initial[7] = base + kLightPoolHeaderWords + max_pages;
-    initial[10] = base + static_cast<uint32_t>(list_word);
-    initial[kLightPoolTraceWord + 1u] = base + static_cast<uint32_t>(trace_word);
+    initial[kLightPoolStackWord] = base + kLightPoolHeaderWords;
+    initial[kLightPoolMarksWord] = base + kLightPoolHeaderWords + max_pages;
+    initial[kLightPoolSearchWord] = base + static_cast<uint32_t>(list_word);
+    initial[kLightPoolTraceWord] = base + static_cast<uint32_t>(trace_word);
     // The first frame's budget in rays, from an assumed walk, until a frame has measured one.
-    initial[106] = kLightTraceStepsBudget / kLightAssumedSteps;
-    initial[108] = kLightTraceStepsBudget;
-    initial[112] = base + static_cast<uint32_t>(points_word);
-    initial[113] = base + static_cast<uint32_t>(points_word + point_list_words);
-    initial[119] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
+    initial[kLightPoolRayBudget] = kLightTraceStepsBudget / kLightAssumedSteps;
+    initial[kLightPoolStepBudget] = kLightTraceStepsBudget;
+    initial[kLightPoolFirstPointsWord] = base + static_cast<uint32_t>(points_word);
+    initial[kLightPoolLaterPointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
+    initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
     // The header, then the marks, all clear.
     arena.write_at(pool.header.offset(), initial.data(), kLightPoolHeaderWords * sizeof(uint32_t));
     arena.write_at(pool.header.offset() + (uint64_t(kLightPoolHeaderWords) + max_pages) * sizeof(uint32_t),
@@ -2635,14 +2659,14 @@ inline uint32_t grow_light_pool(LightPool& pool, IGpuArena& arena, uint32_t coun
         }
         const auto index = static_cast<uint32_t>(pool.segments.size());
         const auto word = static_cast<uint32_t>(segment.offset() / sizeof(uint32_t));
-        arena.update_at(pool.header.offset() + (uint64_t(kLightPoolSegmentWord) + index) * sizeof(uint32_t), &word, sizeof(word));
+        arena.update_at(pool.header.offset() + (uint64_t(kLightPoolSegmentWords) + index) * sizeof(uint32_t), &word, sizeof(word));
         pool.segments.push_back(std::move(segment));
         ++added;
     }
     const uint32_t pages = pool.pages();
-    arena.update_at(pool.header.offset() + sizeof(uint32_t), &pages, sizeof(pages));
+    arena.update_at(pool.header.offset() + uint64_t(kLightPoolPages) * sizeof(uint32_t), &pages, sizeof(pages));
     const auto segments = static_cast<uint32_t>(pool.segments.size());
-    arena.update_at(pool.header.offset() + 5u * sizeof(uint32_t), &segments, sizeof(segments));
+    arena.update_at(pool.header.offset() + uint64_t(kLightPoolSegments) * sizeof(uint32_t), &segments, sizeof(segments));
     return added;
 }
 
