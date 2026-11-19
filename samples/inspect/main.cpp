@@ -46,6 +46,7 @@
 #include "verify.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1060,6 +1061,61 @@ int main(int argc, char* argv[])
 
     show_view(start_view);
     show_level(tree_level);
+
+    // Frames much slower than those before them, logged with where their GPU time went: the
+    // frame's time between presents, and the GPU time of the last frame it has times for.
+    auto frame_backend = render_context->backend();
+    if (frame_backend) frame_backend->set_gpu_timing_enabled(true);
+    constexpr size_t kSlowWindow = 120;
+    velk::vector<double> recent_wall;
+    velk::vector<double> recent_gpu;
+    size_t recent_at = 0;
+    auto last_present = std::chrono::steady_clock::now();
+    const auto median_of = [](velk::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values.empty() ? 0.0 : values[values.size() / 2];
+    };
+    const auto check_slow = [&](long at) {
+        const auto now = std::chrono::steady_clock::now();
+        const double wall = std::chrono::duration<double, std::milli>(now - last_present).count();
+        last_present = now;
+        const double gpu = frame_backend ? frame_ms(*frame_backend) : 0.0;
+        if (recent_wall.size() >= 30) {
+            const double wall_median = median_of(recent_wall);
+            const double gpu_median = median_of(recent_gpu);
+            const bool wall_slow = wall > 2.0 * wall_median && wall > wall_median + 4.0;
+            const bool gpu_slow = gpu > 2.0 * gpu_median && gpu > gpu_median + 2.0;
+            if (wall_slow || gpu_slow) {
+                struct Pass
+                {
+                    const char* name;
+                    double ms;
+                };
+                velk::vector<Pass> passes;
+                if (frame_backend) {
+                    for (const auto& t : frame_backend->last_gpu_timings()) passes.push_back({t.label, double(t.ms)});
+                }
+                std::sort(passes.begin(), passes.end(), [](const Pass& a, const Pass& b) { return a.ms > b.ms; });
+                char top[256] = "";
+                size_t used = 0;
+                for (size_t i = 0; i < passes.size() && i < 4u && used < sizeof(top); ++i) {
+                    used += static_cast<size_t>(std::snprintf(top + used, sizeof(top) - used, "%s%s %.2f", i == 0 ? "" : ", ",
+                                                              passes[i].name, passes[i].ms));
+                }
+                VELK_LOG(I, "inspect: slow frame %ld: %.1f ms (median %.1f), GPU %.2f ms (median %.2f): %s", at, wall,
+                         wall_median, gpu, gpu_median, top);
+            }
+        }
+        if (recent_wall.size() < kSlowWindow) {
+            recent_wall.push_back(wall);
+            recent_gpu.push_back(gpu);
+        } else {
+            recent_wall[recent_at] = wall;
+            recent_gpu[recent_at] = gpu;
+            recent_at = (recent_at + 1u) % kSlowWindow;
+        }
+    };
+
     long frame = 0;
     while (app.poll()) {
         inspect::place_movers(built, frame);
@@ -1092,6 +1148,7 @@ int main(int argc, char* argv[])
         }
         app.update();
         app.present();
+        check_slow(frame);
     }
     return 0;
 }
