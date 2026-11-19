@@ -3924,8 +3924,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             uint32_t wanted = 0;
             arena->read_at(pool.header.offset() + 2u * sizeof(uint32_t), &wanted, sizeof(wanted));
             if (wanted != 0 && pool.segments.size() < pool.max_segments) {
+                uint32_t free_pages = 0;
+                arena->read_at(pool.header.offset(), &free_pages, sizeof(free_pages));
                 const uint32_t added = grow_light_pool(pool, *arena, (wanted + kLightSegmentPages - 1u) / kLightSegmentPages);
-                VELK_LOG(I, "light pool +%u to %u pg", added, pool.pages());
+                VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u free at the last sweep", added,
+                         pool.pages(), wanted, free_pages);
             }
         }
         // What it holds, now and then, from the last frame's complete counts.
@@ -3948,11 +3951,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const uint32_t no_changes = 0;
             arena->update_at(pool.header.offset() + uint64_t(kLightPoolTraceWord + 36u) * sizeof(uint32_t), &no_changes,
                              sizeof(no_changes));
-            VELK_LOG(I, "light: %u pages; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
+            VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
                         "traced, %u coarse points listed for a first trace, %u other points for a first trace and %u for a "
                         "later one, %u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
-                     counts[1], counts[12], counts[14], counts[13], counts[15], extra[2], budget[14], budget[8], budget[9],
+                     counts[1], counts[0], counts[12], counts[14], counts[13], counts[15], extra[2], budget[14], budget[8], budget[9],
                      budget[10], written, took, extra[4], budget[0]);
             uint32_t longest = 0;
             uint32_t most = 0;
@@ -3989,6 +3992,25 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             VELK_LOG(I, "light causes: %u later traces after a change; points laid out for records without light %u, "
                         "again for records grown %u, for records grown from one value %u, for records for light only %u",
                      why[0], why[1], why[2], why[3], why[4]);
+            // The last frame's records with own points: how their points are spread, and how many
+            // of them a pixel read.
+            uint32_t spread[9] = {};
+            arena->read_at(pool.header.offset() + 135u * sizeof(uint32_t), spread, sizeof(spread));
+            VELK_LOG(I, "light points: %u on records with own points, %u of them on records a pixel read; the most on one "
+                        "record %u; records with under 256 points %u, under 1024 %u, under 4096 %u, under 16384 %u, more %u, "
+                        "those with 4096 or more holding %u points",
+                     spread[0], spread[1], spread[2], spread[3], spread[4], spread[5], spread[6], spread[7], spread[8]);
+            // What the culling arena holds: in use of its buffer, and this view's part of it.
+            uint64_t cut_bytes = 0;
+            for (const auto& c : state.cuts) cut_bytes += c.region.size();
+            uint64_t pool_bytes = pool.header.size();
+            for (const auto& s : pool.segments) pool_bytes += s.size();
+            const uint64_t view_other = state.together.size() + state.item_descriptor_region.size() + state.retest.size()
+                                      + state.quads.size() + state.ray_top.size() + state.rename_words.size();
+            VELK_LOG(I, "culling arena: %.1f of %.1f MB in use; this view's light pool %.1f MB, cut stores %.1f MB, other "
+                        "%.1f MB",
+                     double(arena->capacity() - arena->free_bytes()) / 1e6, double(arena->capacity()) / 1e6,
+                     double(pool_bytes) / 1e6, double(cut_bytes) / 1e6, double(view_other) / 1e6);
             // The ray lists: records rays trace against all records, from the partitions' states.
             uint32_t traced_records = 0;
             uint32_t all_records = 0;
