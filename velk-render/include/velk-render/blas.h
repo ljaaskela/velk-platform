@@ -4,6 +4,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/api/half_float.h>
+#include <velk-render/frame/cull_layout.h>
 
 #include <algorithm>
 #include <cmath>
@@ -89,9 +90,8 @@ struct BlasGpuTree
 /// Most triangles and vertices in one cluster. Local vertex indices are 8 bits.
 inline constexpr uint32_t kClusterMaxTriangles = 256;
 inline constexpr uint32_t kClusterMaxVertices = 256;
-/// Words per cluster in a level of detail hierarchy's table and per node of its tree, read by
-/// VELK_LOD_SELECT_GLSL.
-inline constexpr uint32_t kLodClusterWords = 28;
+/// Words per node of a level of detail hierarchy's tree, read by VELK_LOD_SELECT_GLSL. A cluster
+/// in its table is kLodClusterWords (VELK_LOD_CLUSTER in cull_layout.h).
 inline constexpr uint32_t kLodNodeWords = 16;
 /// Set on a tree node's child that is a cluster, with the cluster's index (VELK_LOD_LEAF).
 inline constexpr uint32_t kLodLeaf = 0x80000000u;

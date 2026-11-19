@@ -25,6 +25,27 @@ namespace velk {
     X(cp, gp, SecondCount, SECOND_COUNT, 11)    /* visible slots the second test listed after them */ \
     X(cp, gp, End, END, 12)
 
+/// A cluster in a level of detail hierarchy's table (kLodCluster, VELK_LOD_CLUSTER). Mirrors
+/// MeshLodCluster. A sphere is three floats of centre, then the radius.
+#define VELK_LOD_CLUSTER(X, cp, gp)                                                                \
+    X(cp, gp, Index, INDEX, 0)                  /* the word of its first index */              \
+    X(cp, gp, Triangles, TRIANGLES, 1)                                                         \
+    X(cp, gp, Level, LEVEL, 2)                  /* 0 is the full mesh */                       \
+    X(cp, gp, Sphere, SPHERE, 3)                /* its group's sphere */                       \
+    X(cp, gp, Error, ERROR, 7)                                                                 \
+    X(cp, gp, ParentSphere, PARENT_SPHERE, 8)                                                  \
+    X(cp, gp, ParentError, PARENT_ERROR, 12)                                                   \
+    X(cp, gp, OwnSphere, OWN_SPHERE, 13)        /* around its own triangles */                 \
+    X(cp, gp, Largest, LARGEST, 17)             /* the diagonal of its largest triangle's box */ \
+    X(cp, gp, Vertex, VERTEX, 18)               /* the word of its first vertex */             \
+    X(cp, gp, Vertices, VERTICES, 19)                                                          \
+    X(cp, gp, Uv1, UV1, 20)                                                                    \
+    X(cp, gp, FullError, FULL_ERROR, 21)        /* its error as built */                       \
+    X(cp, gp, Mark, MARK, 22)                   /* the word of the mark of the group it was made from */ \
+    X(cp, gp, OwnMark, OWN_MARK, 23)            /* the word of its own group's mark */         \
+    X(cp, gp, Color, COLOR, 24)                                                                \
+    X(cp, gp, Words, WORDS, 28)
+
 /// A primitive's entry for drawing by cluster (kClusterEntry, VELK_CLUSTER_ENTRY). See
 /// instance_cluster_runs_src.
 #define VELK_CLUSTER_ENTRY(X, cp, gp)                                                              \
@@ -182,6 +203,7 @@ namespace velk {
     X(cp, gp, End, END, 12)             /* after a spare word */
 
 VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
+VELK_LOD_CLUSTER(VELK_LAYOUT_CPP_WORD, LodCluster, LOD_CLUSTER)
 VELK_CLUSTER_ENTRY(VELK_LAYOUT_CPP_WORD, ClusterEntry, CLUSTER_ENTRY)
 VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
 VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
@@ -199,6 +221,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
 /// Every layout's words, for velk.glsl.
 #define VELK_CULL_LAYOUT_GLSL                                                                      \
     VELK_BATCH_TABLE(VELK_LAYOUT_GLSL_WORD, Table, TABLE)                                          \
+    VELK_LOD_CLUSTER(VELK_LAYOUT_GLSL_WORD, LodCluster, LOD_CLUSTER)                               \
     VELK_CLUSTER_ENTRY(VELK_LAYOUT_GLSL_WORD, ClusterEntry, CLUSTER_ENTRY)                         \
     VELK_PARTITION_ENTRY(VELK_LAYOUT_GLSL_WORD, PartitionEntry, PARTITION_ENTRY)                   \
     VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \

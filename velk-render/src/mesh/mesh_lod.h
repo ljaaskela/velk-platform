@@ -5,6 +5,7 @@
 
 #include <velk-render/blas.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -58,7 +59,32 @@ struct MeshLodCluster
     uint32_t color_word = 0xFFFFFFFFu;
     uint32_t spare[3] = {};
 };
-static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_SELECT_GLSL");
+static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_CLUSTER");
+#define VELK_LOD_CLUSTER_AT(field, word) \
+    static_assert(offsetof(MeshLodCluster, field) == (word) * sizeof(uint32_t), "Mirrors VELK_LOD_CLUSTER");
+VELK_LOD_CLUSTER_AT(index_word, kLodClusterIndex)
+VELK_LOD_CLUSTER_AT(triangle_count, kLodClusterTriangles)
+VELK_LOD_CLUSTER_AT(level, kLodClusterLevel)
+VELK_LOD_CLUSTER_AT(center, kLodClusterSphere)
+VELK_LOD_CLUSTER_AT(radius, kLodClusterSphere + 3)
+VELK_LOD_CLUSTER_AT(error, kLodClusterError)
+VELK_LOD_CLUSTER_AT(parent_center, kLodClusterParentSphere)
+VELK_LOD_CLUSTER_AT(parent_radius, kLodClusterParentSphere + 3)
+VELK_LOD_CLUSTER_AT(parent_error, kLodClusterParentError)
+VELK_LOD_CLUSTER_AT(own_center, kLodClusterOwnSphere)
+VELK_LOD_CLUSTER_AT(own_radius, kLodClusterOwnSphere + 3)
+VELK_LOD_CLUSTER_AT(largest, kLodClusterLargest)
+VELK_LOD_CLUSTER_AT(vertex_word, kLodClusterVertex)
+VELK_LOD_CLUSTER_AT(vertex_count, kLodClusterVertices)
+VELK_LOD_CLUSTER_AT(uv1_word, kLodClusterUv1)
+VELK_LOD_CLUSTER_AT(full_error, kLodClusterFullError)
+VELK_LOD_CLUSTER_AT(mark_word, kLodClusterMark)
+VELK_LOD_CLUSTER_AT(own_mark_word, kLodClusterOwnMark)
+VELK_LOD_CLUSTER_AT(color_word, kLodClusterColor)
+#undef VELK_LOD_CLUSTER_AT
+// velk_lod_pixels reads a sphere's error right after it.
+static_assert(kLodClusterError == kLodClusterSphere + 4 && kLodClusterParentError == kLodClusterParentSphere + 4,
+              "A sphere's error follows it");
 
 /// A node of the tree over a hierarchy's clusters. What it says of a child holds for all
 /// clusters under that child, so that a child none of them would be chosen from is skipped

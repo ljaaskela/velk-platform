@@ -862,7 +862,7 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
             if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
             // From its cluster's sphere, or its whole mesh's.
             uint sphere = entry == 0xFFFFFFFFu ? VELK_LIGHT_WORDS.data[record + VELK_RECORD_MESH_TABLE]
-                        : VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_TABLE] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + 13u;
+                        : VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_TABLE] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE;
             vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
                               uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
             velk_light_add_one(value, velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), lights,
@@ -1068,16 +1068,17 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     uint slots[VELK_LIGHT_SLOTS];
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
     if (slots[0] == VELK_LIGHT_NONE) {
-        vec3 own = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 13u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 14u]),
-                        uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 15u]));
+        vec3 own = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                        uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                        uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
         velk_light_slots_at(velk_rel_position(inst.world_matrix, inst.offset.xyz + own * inst.size.xyz, g), slots);
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = slots[s];
     }
 
     // A vertex, or a grid point in a triangle at weights of its corners.
-    uint vertex_word = VELK_LIGHT_WORDS.data[cluster + 18u];
+    uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
     uint table = (kind & VELK_LIGHT_GRIDDED) != 0u ? min(kind & 0xFFFFu, 256u) : 0u;
-    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster];
+    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_INDEX];
     vec3 local;
     vec3 normal;
     if (q < vertices) {
@@ -1212,7 +1213,7 @@ void main()
         mat3 to_world = mat3(inst.world_matrix);
         float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)),
                           length(to_world[2] * inst.size.z));
-        uint sphere = kind == VELK_LIGHT_TRACE_MESH ? table : table + 13u;
+        uint sphere = kind == VELK_LIGHT_TRACE_MESH ? table : table + VELK_LOD_CLUSTER_OWN_SPHERE;
         vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
                           uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
         center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
@@ -1417,7 +1418,7 @@ void main()
         radius = 0.5 * length(to_world * inst.size.xyz);
     } else {
         uint sphere = entry != VELK_LIGHT_NONE
-                        ? VELK_LIGHT_WORDS.data[(entry & ~VELK_CUT_LIGHT_ONLY) + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 13u
+                        ? VELK_LIGHT_WORDS.data[(entry & ~VELK_CUT_LIGHT_ONLY) + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE
                         : cluster;
         local = velk_change_vec3(sphere);
         radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 3u]) * scale;
@@ -1916,12 +1917,13 @@ void main()
     uint clusters = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
     // A cluster: as wide on screen as it is now, and its largest triangle.
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
-    uint vertices = light_words.data[cluster + 19u];
+    uint vertices = light_words.data[cluster + VELK_LOD_CLUSTER_VERTICES];
     mat4 world = light_instances.data[d.instances_base + velk_ids_slot(d, ids)].world_matrix;
     float scale = max(max(length(world[0].xyz), length(world[1].xyz)), length(world[2].xyz));
-    vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + 13u]), uintBitsToFloat(light_words.data[cluster + 14u]),
-                    uintBitsToFloat(light_words.data[cluster + 15u]));
-    float radius = uintBitsToFloat(light_words.data[cluster + 16u]) * scale;
+    vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                    uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                    uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
+    float radius = uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
     float away = length(mat3(world) * own + (world[3].xyz - g.cam_pos.xyz));
     float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
 
@@ -2140,8 +2142,8 @@ uint velk_light_grids(uint cluster, uint first_index, uint vertex_word, mat4 wor
 {
     mat4 vp = g.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-    uint triangles = min(light_words.data[cluster + 1u], kMaxTriangles);
-    uint vertices = light_words.data[cluster + 19u];
+    uint triangles = min(light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
+    uint vertices = light_words.data[cluster + VELK_LOD_CLUSTER_VERTICES];
     for (uint t = 0u; t < triangles; ++t) {
         vec3 p[3];
         for (uint k = 0u; k < 3u; ++k) {
@@ -2237,7 +2239,7 @@ void main()
     uint slot = light_words.data[record + VELK_RECORD_SLOT];
     uint clusters = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
-    uint vertices = light_words.data[cluster + 19u];
+    uint vertices = light_words.data[cluster + VELK_LOD_CLUSTER_VERTICES];
     GlobalData g = velk_globals.data[pc.globals_base];
     LightInstance inst = light_instances.data[instance];
 
@@ -2267,7 +2269,7 @@ void main()
                         continue;
                     }
                     uint other_cluster = clusters + light_words.data[other + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
-                    uint other_vertices = light_words.data[other_cluster + 19u];
+                    uint other_vertices = light_words.data[other_cluster + VELK_LOD_CLUSTER_VERTICES];
                     uint laid;
                     if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN, 0u, 2u * other_vertices,
                                             VELK_LIGHT_NONE, 0.0, laid)) {
@@ -2303,10 +2305,11 @@ void main()
             // spacing, as fine as that triangle is wide, its corners found through its draw's
             // indices. All threads make them untraced, below.
             uint index_base = draw == 0xFFFFFFFFu ? VELK_LIGHT_NONE : velk_draw_data.data[draw].index_base;
-            uint triangles = min(light_words.data[cluster + 1u], kMaxTriangles);
+            uint triangles = min(light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
             uint grid_points = index_base == VELK_LIGHT_NONE
                 ? 0u
-                : velk_light_grids(cluster, index_base + light_words.data[cluster], light_words.data[cluster + 18u],
+                : velk_light_grids(cluster, index_base + light_words.data[cluster + VELK_LOD_CLUSTER_INDEX],
+                                   light_words.data[cluster + VELK_LOD_CLUSTER_VERTEX],
                                    inst.world_matrix, inst.offset, inst.size, g);
             uint table = grid_points != 0u ? triangles : 0u;
             uint kind = table != 0u ? VELK_LIGHT_GRIDDED | triangles : VELK_LIGHT_OWN;
@@ -2314,10 +2317,11 @@ void main()
             mat4 vp = g.view_projection;
             float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
             float scale = max(max(length(inst.world_matrix[0].xyz), length(inst.world_matrix[1].xyz)), length(inst.world_matrix[2].xyz));
-            vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + 13u]), uintBitsToFloat(light_words.data[cluster + 14u]),
-                            uintBitsToFloat(light_words.data[cluster + 15u]));
+            vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                            uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                            uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
             float away = length(mat3(inst.world_matrix) * own + (inst.world_matrix[3].xyz - g.cam_pos.xyz));
-            float across = 2.0 * uintBitsToFloat(light_words.data[cluster + 16u]) * scale * pixels_per_unit / max(away, 1e-3);
+            float across = 2.0 * uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale * pixels_per_unit / max(away, 1e-3);
             uint laid;
             if (velk_light_lay_out(vertices, cluster, kind, table, 2u * (vertices + grid_points), index_base, across, laid)) {
                 s_page = laid;
@@ -2368,7 +2372,7 @@ void main()
     if (!s_linked) return;
 
     // Each vertex: the nearest point on the records for light only, all in the mesh's own space.
-    uint vertex_word = light_words.data[cluster + 18u];
+    uint vertex_word = light_words.data[cluster + VELK_LOD_CLUSTER_VERTEX];
     for (uint v = lane; v < vertices; v += 64u) {
         vec3 p = velk_light_position(vertex_word + v * VELK_VERTEX3D_WORDS);
         float best = 1e30;
@@ -2377,12 +2381,13 @@ void main()
         vec3 best_weights = vec3(1.0, 0.0, 0.0);
         for (uint i = 0u; i < s_lights; ++i) {
             uint other = clusters + light_words.data[s_light_records[i] + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
-            vec3 center = vec3(uintBitsToFloat(light_words.data[other + 13u]), uintBitsToFloat(light_words.data[other + 14u]),
-                               uintBitsToFloat(light_words.data[other + 15u]));
-            if (length(p - center) - uintBitsToFloat(light_words.data[other + 16u]) >= best) continue;
-            uint triangles = light_words.data[other + 1u];
-            uint first_index = s_index_base + light_words.data[other];
-            uint other_vertices = light_words.data[other + 18u];
+            vec3 center = vec3(uintBitsToFloat(light_words.data[other + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                               uintBitsToFloat(light_words.data[other + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                               uintBitsToFloat(light_words.data[other + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
+            if (length(p - center) - uintBitsToFloat(light_words.data[other + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) >= best) continue;
+            uint triangles = light_words.data[other + VELK_LOD_CLUSTER_TRIANGLES];
+            uint first_index = s_index_base + light_words.data[other + VELK_LOD_CLUSTER_INDEX];
+            uint other_vertices = light_words.data[other + VELK_LOD_CLUSTER_VERTEX];
             for (uint t = 0u; t < triangles; ++t) {
                 uint w = first_index + t * 3u;
                 uvec3 k = uvec3(velk_mesh_words.data[w], velk_mesh_words.data[w + 1u], velk_mesh_words.data[w + 2u]);

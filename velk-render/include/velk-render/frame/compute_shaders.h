@@ -786,15 +786,16 @@ vec3 cluster_color(uvec2 ids)
     if (cluster == VELK_NO_CLUSTER) return vec3(0.25);
     uint slot = velk_ids_slot(d, ids);
     if (pc.mode == 7u) return id_color(cluster * 7919u + slot * 104729u);
-    if (pc.mode == 8u) return kLevelColors[min(velk_culling.data[cluster + 2u], 7u)];
+    if (pc.mode == 8u) return kLevelColors[min(velk_culling.data[cluster + VELK_LOD_CLUSTER_LEVEL], 7u)];
 
     DebugInstance inst = debug_instances.data[d.instances_base + slot];
     GlobalData g = velk_globals.data[pc.chooser_globals];
-    vec3 local = vec3(uintBitsToFloat(velk_culling.data[cluster + 13u]), uintBitsToFloat(velk_culling.data[cluster + 14u]),
-                      uintBitsToFloat(velk_culling.data[cluster + 15u]));
+    vec3 local = vec3(uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                      uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                      uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
     mat3 to_world = mat3(inst.world_matrix);
     float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)), length(to_world[2] * inst.size.z));
-    float radius = uintBitsToFloat(velk_culling.data[cluster + 16u]) * scale;
+    float radius = uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
     vec3 center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
     mat4 vp = g.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
@@ -815,11 +816,12 @@ bool outside_chooser(uvec2 ids)
     if (cluster == VELK_NO_CLUSTER) return false;
     DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
     GlobalData g = velk_globals.data[pc.chooser_globals];
-    vec3 local = vec3(uintBitsToFloat(velk_culling.data[cluster + 13u]), uintBitsToFloat(velk_culling.data[cluster + 14u]),
-                      uintBitsToFloat(velk_culling.data[cluster + 15u]));
+    vec3 local = vec3(uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
+                      uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
+                      uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
     mat3 to_world = mat3(inst.world_matrix);
     float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)), length(to_world[2] * inst.size.z));
-    float radius = uintBitsToFloat(velk_culling.data[cluster + 16u]) * scale;
+    float radius = uintBitsToFloat(velk_culling.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
     vec3 center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
     mat4 vp = g.view_projection;
     vec4 clip = vp * vec4(center, 1.0);

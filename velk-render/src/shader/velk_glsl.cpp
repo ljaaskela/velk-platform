@@ -129,8 +129,6 @@ R"(
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.
 #define VELK_CUT_PARTITION_WORDS VELK_PART_END
-// Words per cluster in a level of detail table: kLodClusterWords.
-#define VELK_LOD_CLUSTER_WORDS 28u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
 // kLodNodeWords, and rays' node with its children's boxes sits before each.
 #define VELK_LOD_NODE_STRIDE 32u
@@ -407,14 +405,14 @@ layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[];
 // The word of the first vertex that indices of `cluster` in draw `d` count from.
 uint velk_cluster_vertex_word(VelkDrawData d, uint cluster)
 {
-    return cluster == VELK_NO_CLUSTER ? d.vbo_base : velk_culling.data[cluster + 18u];
+    return cluster == VELK_NO_CLUSTER ? d.vbo_base : velk_culling.data[cluster + VELK_LOD_CLUSTER_VERTEX];
 }
 
 // The word of the second uv of vertex `index`. The draw's own when the cluster has none,
 // which is one for all vertices when the mesh has none either.
 uint velk_cluster_uv1_word(VelkDrawData d, uint cluster, uint index)
 {
-    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 20u];
+    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + VELK_LOD_CLUSTER_UV1];
     uint each = (d.flags & VELK_DRAW_UV1) != 0u ? index * 2u : 0u;
     return own == VELK_NO_CLUSTER ? d.uv1_base + each : own + index * 2u;
 }
@@ -428,7 +426,7 @@ vec2 velk_read_uv1(uint word)
 // when the cluster has none, which is one white word for all vertices when the mesh has none.
 uint velk_cluster_color_word(VelkDrawData d, uint cluster, uint index)
 {
-    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + 24u];
+    uint own = cluster == VELK_NO_CLUSTER ? VELK_NO_CLUSTER : velk_culling.data[cluster + VELK_LOD_CLUSTER_COLOR];
     uint each = (d.flags & VELK_DRAW_COLOR) != 0u ? index : 0u;
     return own == VELK_NO_CLUSTER ? d.color_base + each : own + index;
 }

@@ -425,9 +425,9 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_cluster_words.data[header + 10u];
                 } else {
                     // Its vertices move, so its triangles are tested as they are drawn.
-                    drawn_at = velk_culling.data[cur_cluster];
-                    drawn_left = velk_culling.data[cur_cluster + 1u];
-                    drawn_vertices = velk_culling.data[cur_cluster + 18u];
+                    drawn_at = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_INDEX];
+                    drawn_left = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_TRIANGLES];
+                    drawn_vertices = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_VERTEX];
                 }
             } else if (kind == 255u) {
                 // A whole mesh: its own tree.

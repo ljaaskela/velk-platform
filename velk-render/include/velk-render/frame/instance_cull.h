@@ -429,15 +429,16 @@ uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod
 
     c = ref & ~VELK_LOD_LEAF;
     uint cluster = clusters + c * VELK_LOD_CLUSTER_WORDS;
-    float own = velk_lod_pixels(cluster + 3u, world, scale, lod_cam, pixels_per_unit);
-    float parent = velk_lod_pixels(cluster + 8u, world, scale, lod_cam, pixels_per_unit);
+    float own = velk_lod_pixels(cluster + VELK_LOD_CLUSTER_SPHERE, world, scale, lod_cam, pixels_per_unit);
+    float parent = velk_lod_pixels(cluster + VELK_LOD_CLUSTER_PARENT_SPHERE, world, scale, lod_cam, pixels_per_unit);
     float limit = max_pixels;
 #ifdef VELK_LOD_LIGHT
     // Out of view, the light's level is all there is of it: rays and light use it, and it
     // is drawn if it comes into view before its partition chooses again.
-    vec3 at = mat3(world) * vec3(uintBitsToFloat(cull_words.data[cluster + 3u]), uintBitsToFloat(cull_words.data[cluster + 4u]),
-                                 uintBitsToFloat(cull_words.data[cluster + 5u])) + world[3].xyz;
-    bool out_of_view = velk_lod_out_of_view(at, uintBitsToFloat(cull_words.data[cluster + 6u]) * scale, vp);
+    vec3 at = mat3(world) * vec3(uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE]),
+                                 uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 1u]),
+                                 uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 2u])) + world[3].xyz;
+    bool out_of_view = velk_lod_out_of_view(at, uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 3u]) * scale, vp);
     if (out_of_view) {
         limit = pc.light_pixels;
         g_out_of_view = true;
@@ -525,26 +526,27 @@ void velk_lod_take(uint entry, uint c, uint slot, uint cut_record, mat4 world, f
     // where its error as built is too large, which asks for them.
     // Using it also says its own group is wanted, which keeps the group loaded.
     uint taken = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
-    uint own_mark = cull_words.data[taken + 23u];
+    uint own_mark = cull_words.data[taken + VELK_LOD_CLUSTER_OWN_MARK];
     if (own_mark != 0xFFFFFFFFu) {
         cull_words.data[own_mark] = 1u;
     }
-    uint mark = cull_words.data[taken + 22u];
+    uint mark = cull_words.data[taken + VELK_LOD_CLUSTER_MARK];
     if (mark != 0xFFFFFFFFu) {
-        float from = length(velk_lod_center(taken + 3u, world, lod_cam)) - uintBitsToFloat(cull_words.data[taken + 6u]) * scale;
-        if (uintBitsToFloat(cull_words.data[taken + 21u]) * scale * pixels_per_unit / max(from, 1e-3) > pc.lod_max_pixels) {
+        float from = length(velk_lod_center(taken + VELK_LOD_CLUSTER_SPHERE, world, lod_cam))
+                   - uintBitsToFloat(cull_words.data[taken + VELK_LOD_CLUSTER_SPHERE + 3u]) * scale;
+        if (uintBitsToFloat(cull_words.data[taken + VELK_LOD_CLUSTER_FULL_ERROR]) * scale * pixels_per_unit / max(from, 1e-3) > pc.lod_max_pixels) {
             cull_words.data[mark] = 1u;
         }
     }
     uint draw = cull_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
     if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_MOVED) == 0u) {
         uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
-        float radius = uintBitsToFloat(cull_words.data[cluster + 16u]) * scale;
-        float away = length(velk_lod_center(cluster + 13u, world, cam));
+        float radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
+        float away = length(velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam));
         float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
-        float triangles = float(max(cull_words.data[cluster + 1u], 1u));
+        float triangles = float(max(cull_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], 1u));
         // The largest triangle as wide as it can be on screen, at the cluster's nearest.
-        float largest = uintBitsToFloat(cull_words.data[cluster + 17u]) * scale * pixels_per_unit / max(away - radius, 1e-3);
+        float largest = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_LARGEST]) * scale * pixels_per_unit / max(away - radius, 1e-3);
         if (across < pc.tiny_pixels * sqrt(triangles) && largest < 4.0 * pc.tiny_pixels
             && velk_tiny_add(draw, cluster, slot, cut_record)) {
             return;
@@ -1482,7 +1484,7 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         return;
     }
     // A cluster's own sphere, or a whole mesh's: its table's.
-    uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 13u : cluster;
+    uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE : cluster;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
     vec3 center = mat3(world) * vec3(uintBitsToFloat(cull_words.data[sphere]), uintBitsToFloat(cull_words.data[sphere + 1u]),
@@ -1556,7 +1558,7 @@ bool velk_ray_record(uint record, uint index, vec3 viewpoint, float pixels_per_u
     mat4 world = cull_instances.data[instance].world_matrix;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cull_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
-    return velk_ray_pixels(cluster + 8u, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
+    return velk_ray_pixels(cluster + VELK_LOD_CLUSTER_PARENT_SPHERE, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
 }
 
 void velk_store_box(uint at, vec3 lo, vec3 hi)
@@ -2007,13 +2009,13 @@ void main()
     // A deforming mesh's spheres are where it is at rest, which says nothing about where it is.
     bool deforming = (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
     if (!deforming && pc.whole == 0u) {
-        float own_radius = uintBitsToFloat(cull_words.data[cluster + 16u]) * scale;
-        if (velk_cut_outside(vp, velk_lod_center(cluster + 13u, world, cam), own_radius)) return;
+        float own_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
+        if (velk_cut_outside(vp, velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam), own_radius)) return;
         // Tested where it was last frame, against what was drawn then.
-        float test_radius = uintBitsToFloat(cull_words.data[cluster + 6u]) * scale;
+        float test_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 3u]) * scale;
         if (pc.pyramid_word != 0xFFFFFFFFu
             && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection,
-                                   velk_lod_center(cluster + 3u, world, cam) + globals.cam_moved, test_radius)
+                                   velk_lod_center(cluster + VELK_LOD_CLUSTER_SPHERE, world, cam) + globals.cam_moved, test_radius)
             && velk_retest(entry, c, slot, record, cam)) {
             return;
         }
@@ -2136,7 +2138,7 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
                      bool deforming)
 {
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
-    if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot)) {
+    if (deforming || !velk_lod_occluded(cluster + VELK_LOD_CLUSTER_SPHERE, world, scale, cam, entry, c, slot)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
     }
 }
@@ -2286,7 +2288,7 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
                      bool deforming)
 {
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
-    if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam)) {
+    if (deforming || !velk_lod_occluded(cluster + VELK_LOD_CLUSTER_SPHERE, world, scale, cam)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
     }
 }
@@ -2315,7 +2317,7 @@ void main()
 
     if (entry != 0xFFFFFFFFu) {
         uint cluster = cull_words.data[record + VELK_RETEST_CLUSTER];
-        uint sphere = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
+        uint sphere = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_SPHERE;
         if (!velk_lod_occluded(sphere, world, scale, cam)) {
             mat4 vp = globals.view_projection;
             float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
@@ -2414,9 +2416,9 @@ void main()
         if (count != 0u) {
             uint cluster = table + c * VELK_LOD_CLUSTER_WORDS;
             uint command = commands + draws * 5u;
-            cull_words.data[command + 0u] = cull_words.data[cluster + 1u] * 3u;
+            cull_words.data[command + 0u] = cull_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES] * 3u;
             cull_words.data[command + 1u] = count;
-            cull_words.data[command + 2u] = cull_words.data[cluster];
+            cull_words.data[command + 2u] = cull_words.data[cluster + VELK_LOD_CLUSTER_INDEX];
             cull_words.data[command + 3u] = 0u;
             cull_words.data[command + 4u] = first;
             ++draws;
@@ -2562,9 +2564,9 @@ void main()
     TinyInstance inst = tiny_instances.data[d.instances_base + tiny_words.data[record + VELK_TINY_SLOT]];
     GlobalData g = velk_globals.data[d.globals_base];
     // The cluster's record says where its indices are, and the vertices they count from.
-    uint first = tiny_words.data[cluster];
-    uint vertices = tiny_words.data[cluster + 18u];
-    uint count = tiny_words.data[cluster + 1u];
+    uint first = tiny_words.data[cluster + VELK_LOD_CLUSTER_INDEX];
+    uint vertices = tiny_words.data[cluster + VELK_LOD_CLUSTER_VERTEX];
+    uint count = tiny_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES];
     vec2 size = vec2(float(pc.width), float(pc.height));
     uint plane = pc.width * pc.height;
 
