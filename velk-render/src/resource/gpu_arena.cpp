@@ -3,7 +3,10 @@
 #include "arena_buffer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+
+#include <velk/api/velk.h>
 
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/render_path/frame_context.h>
@@ -141,18 +144,32 @@ bool GpuArena::grow_persistent(uint64_t want)
     desc.size = want;
     desc.cpu_writable = true;
     desc.index_buffer = index_buffer_;
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
     auto new_buffer = resources_ ? resources_->create_gpu_buffer(desc)
                                  : backend_->create_gpu_buffer(desc);
     if (!new_buffer) return false;
+    const auto created = Clock::now();
     if (persistent_buffer_) {
         // Rebinding rewrites a descriptor that submitted frames are using, and
         // the copy below reads what their queued writes left in the old buffer.
         backend_->wait_for_frame_completion(backend_->frame_completion_marker());
         backend_->retarget_buffer_writes(persistent_buffer_.get(), new_buffer);
     }
+    const auto waited = Clock::now();
     void* new_mapped = new_buffer->map();
     if (persistent_buffer_ && persistent_capacity_) {
         backend_->copy_gpu_buffer(persistent_buffer_.get(), new_buffer.get(), persistent_capacity_);
+    }
+    const auto copied = Clock::now();
+    // Each growth past the first stalls the frame: what it cost, for the log.
+    if (persistent_capacity_ != 0) {
+        const auto ms = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        VELK_LOG(I, "arena %u grew %.1f to %.1f MB: buffer %.1f ms, waiting for frames %.1f ms, copy %.1f ms",
+                 slot_, double(persistent_capacity_) / 1e6, double(want) / 1e6, ms(started, created), ms(created, waited),
+                 ms(waited, copied));
     }
     // Reassigning drops the old Ptr; ~VkGpuBuffer defers its own destroy past
     // in-flight frames, so we must NOT also explicit-defer it here.
