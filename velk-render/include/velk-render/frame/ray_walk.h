@@ -328,12 +328,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if ((h_l || h_r) && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         } else if (records_left > 0u) {
             ++velk_ray_records;
-            uint r = records + velk_culling.data[record_at] * 4u;
+            uint r = records + velk_culling.data[record_at] * VELK_RECORD_END;
             record_at += 1u;
             --records_left;
-            uint entry = velk_culling.data[r];
-            uint cluster = velk_culling.data[r + 1u];
-            uint named = velk_culling.data[r + 2u];
+            uint entry = velk_culling.data[r + VELK_RECORD_ENTRY];
+            uint cluster = velk_culling.data[r + VELK_RECORD_CLUSTER];
+            uint named = velk_culling.data[r + VELK_RECORD_SLOT];
             // A patch of small members: a shadow ray keeps the part of its light their quads leave,
             // by the share of the patch's sphere they cover, the node's quad keeping their area,
             // seen from every way alike (half of it on average). Probe rays pass it.
@@ -502,7 +502,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 uint count = velk_culling.data[state + 16u];
                 if (count == 0u) continue;
                 uint parity = velk_culling.data[cut + 12u];
-                records = velk_culling.data[cut + 17u + parity] + velk_culling.data[state + 5u] * 4u;
+                records = velk_culling.data[cut + 17u + parity] + velk_culling.data[state + 5u] * VELK_RECORD_END;
                 ray_list = velk_culling.data[cut + 38u + parity] + velk_culling.data[state + 5u];
                 nodes = velk_culling.data[cut + 26u + parity] + velk_culling.data[state + 10u] * 16u;
                 instances_base = velk_culling.data[cut_entry + 1u];

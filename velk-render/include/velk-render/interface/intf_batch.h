@@ -6,6 +6,7 @@
 #include <velk/interface/intf_interface.h>
 #include <velk/uid.h>
 
+#include <velk-render/frame/cull_layout.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_mesh.h>
 #include <velk-render/interface/intf_program.h>
@@ -52,11 +53,10 @@ struct BatchBufferLayout
     static constexpr size_t kBufferSize        = kCountOffset + kCountSize; // 48
 };
 
-/// The clusters chosen in a cull start with this many words: how many records follow, and the
-/// group counts of the dispatch that sorts them. A record is an entry, a cluster, a slot and
-/// the word of the kept cut record it is from, 0xFFFFFFFF for none. See `instance_cluster_fill_src`.
-inline constexpr uint32_t kCullChosenHeaderWords = 4;
-inline constexpr uint32_t kCullChosenRecordWords = 4;
+/// The clusters chosen in a cull: a header of this many words, then records of this many
+/// (VELK_CHOSEN_LIST and VELK_CHOSEN in cull_layout.h). See `instance_cluster_fill_src`.
+inline constexpr uint32_t kCullChosenHeaderWords = kChosenListRecords;
+inline constexpr uint32_t kCullChosenRecordWords = kChosenEnd;
 /// Words in a cluster draw entry: see `instance_cluster_runs_src`. Mirrors VELK_CLUSTER_ENTRY_WORDS.
 inline constexpr uint32_t kClusterEntryWords = 16;
 /// Where in a cluster draw entry the draw data record its pixels name is, written when the

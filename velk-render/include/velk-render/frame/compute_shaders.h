@@ -633,8 +633,9 @@ vec3 id_color(uint id)
 // frame while the record's place in the cut's stores does not.
 vec3 record_color(uint record)
 {
-    return id_color(velk_culling.data[record] * 2654435761u ^ velk_culling.data[record + 1u] * 2246822519u
-                    ^ velk_culling.data[record + 2u] * 3266489917u);
+    return id_color(velk_culling.data[record + VELK_RECORD_ENTRY] * 2654435761u
+                    ^ velk_culling.data[record + VELK_RECORD_CLUSTER] * 2246822519u
+                    ^ velk_culling.data[record + VELK_RECORD_SLOT] * 3266489917u);
 }
 
 struct DebugInstance {
@@ -698,14 +699,15 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     GlobalData g = velk_globals.data[d.globals_base];
     mat4 vp = g.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-    if (velk_culling.data[record] == VELK_CUT_QUAD) {
-        uint node = velk_light_quad_node(velk_culling.data[record + 2u], velk_culling.data[record + 1u], g.cam_pos.xyz,
-                                         pixels_per_unit, pc.light_pixels);
+    if (velk_culling.data[record + VELK_RECORD_ENTRY] == VELK_CUT_QUAD) {
+        uint node = velk_light_quad_node(velk_culling.data[record + VELK_RECORD_QUAD_TREE],
+                                         velk_culling.data[record + VELK_RECORD_QUAD_NODE], g.cam_pos.xyz, pixels_per_unit,
+                                         pc.light_pixels);
         uint value = velk_culling.data[node + 11u];
         if (value == VELK_LIGHT_NONE) return vec3(0.25);
         return (value & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : id_color(node);
     }
-    uint light = velk_culling.data[record + 3u];
+    uint light = velk_culling.data[record + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return vec3(0.25);
     if (light >= VELK_LIGHT_ONE_VALUE) {
         return (light & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : record_color(record) * 0.8;

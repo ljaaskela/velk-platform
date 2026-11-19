@@ -514,7 +514,7 @@ void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRen
         vs.tiny_log_frame = ctx.present_counter;
         uint32_t header[kTinyHeaderWords];
         arena->read_at(vs.tiny_list.offset(), header, sizeof(header));
-        VELK_LOG(I, "clusters drawn in compute: %u, room for %u", header[4], vs.tiny_capacity);
+        VELK_LOG(I, "clusters drawn in compute: %u, room for %u", header[kTinyListDrawn], vs.tiny_capacity);
     }
 
     bool dirty = true;

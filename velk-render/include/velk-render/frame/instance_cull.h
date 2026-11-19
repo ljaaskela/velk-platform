@@ -7,6 +7,7 @@
 #include <velk/vector.h>
 
 #include <velk-render/api/cached_view_pass.h>
+#include <velk-render/frame/cull_layout.h>
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/frame/light_pool.h>
 #include <velk-render/gpu_data.h>
@@ -129,10 +130,10 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
 /// members, and each instance's in the order its hierarchy's tree is expanded and walked, so
 /// that records near in the store are near in the world.
-/// A record is kCutRecordWords: entry, cluster and slot, as the chosen lists have them, and its
-/// light (kLightNone until it is read, see light_pool.h); for a mesh without clusters the whole instance: entry kCullNoSlot,
-/// cluster its mesh's table; for an item rays see that its own pass draws, entry and cluster
-/// kCullNoSlot. What is drawn from a record, and what a ray hits of it, carries the word of the
+/// A record is VELK_CUT_RECORD (cull_layout.h): entry, cluster and slot, as the chosen lists have
+/// them, and its light (kLightNone until it is read, see light_pool.h); for a mesh without
+/// clusters the whole instance: entry kCullNoSlot, cluster its mesh's table; for an item rays see
+/// that its own pass draws, entry and cluster kCullNoSlot. What is drawn from a record, and what a ray hits of it, carries the word of the
 /// record (velk_ids_record, RayHit::record), which holds for that frame.
 ///
 /// Each partition has a tree over its records for rays, kCutNodeWords a node: the boxes of
@@ -144,8 +145,8 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 inline constexpr uint32_t kCutHeaderWords = 45;
 inline constexpr uint32_t kCutPartitionWords = 24;  ///< Mirrors VELK_CUT_PARTITION_WORDS.
 /// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
-inline constexpr uint32_t kCutTakeoverWords = 2;
-inline constexpr uint32_t kCutRecordWords = 4;
+inline constexpr uint32_t kCutTakeoverWords = kTakeoverEnd;
+inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;
 inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
 
@@ -316,13 +317,10 @@ void main()
 }
 )";
 
-/// The list of what failed the first occlusion test starts with its count. A record is an
-/// instance's index in the instance arena, its slot, its table, then an entry and cluster, the
-/// entry kCullNoSlot for the whole instance, the kept cut record it is from, where the visual's chosen
-/// clusters go and how many fit, then where its levels of detail are chosen from (three
-/// floats, see instance_partition_cull_src) and a spare word. What does not fit is drawn.
-inline constexpr uint32_t kCullRetestHeaderWords = 1;
-inline constexpr uint32_t kCullRetestRecordWords = 12;
+/// The list of what failed the first occlusion test: VELK_RETEST_LIST, VELK_RETEST
+/// (cull_layout.h).
+inline constexpr uint32_t kCullRetestHeaderWords = kRetestListRecords;
+inline constexpr uint32_t kCullRetestRecordWords = kRetestEnd;
 inline constexpr uint32_t kCullRetestMaxRecords = 1u << 20;
 
 // Whether a sphere around a point relative to the camera, as seen through vp, lies behind all
@@ -369,26 +367,23 @@ bool velk_behind_pyramid(uint pyramid, mat4 vp, vec3 center, float radius)
 }
 )"
 
-/// Words before the records of the list of clusters drawn in compute (instance_tiny_draw_src):
-/// how many were added, the group counts of the dispatch that draws them, how many of them
-/// are drawn, and three spare. A record is kTinyRecordWords: its draw data record, the word
-/// of its cluster in the level of detail table, its instance's slot under that draw, and the
-/// word of the kept cut record it is from (kCutRecordWords), 0xFFFFFFFF for none.
-inline constexpr uint32_t kTinyHeaderWords = 8;
-inline constexpr uint32_t kTinyRecordWords = 4;
+/// The list of clusters drawn in compute (instance_tiny_draw_src): VELK_TINY_LIST, VELK_TINY
+/// (cull_layout.h).
+inline constexpr uint32_t kTinyHeaderWords = kTinyListRecords;
+inline constexpr uint32_t kTinyRecordWords = kTinyEnd;
 
 // Adds a cluster to the list of those drawn in compute, false when it is full. The shader has
 // pc.tiny_word and pc.tiny_capacity.
 #define VELK_TINY_ADD_GLSL R"(
 bool velk_tiny_add(uint draw, uint cluster, uint slot, uint cut_record)
 {
-    uint at = atomicAdd(cull_words.data[pc.tiny_word], 1u);
+    uint at = atomicAdd(cull_words.data[pc.tiny_word + VELK_TINY_LIST_COUNT], 1u);
     if (at >= pc.tiny_capacity) return false;
-    uint record = pc.tiny_word + 8u + at * 4u;
-    cull_words.data[record] = draw;
-    cull_words.data[record + 1u] = cluster;
-    cull_words.data[record + 2u] = slot;
-    cull_words.data[record + 3u] = cut_record;
+    uint record = pc.tiny_word + VELK_TINY_LIST_RECORDS + at * VELK_TINY_END;
+    cull_words.data[record + VELK_TINY_DRAW] = draw;
+    cull_words.data[record + VELK_TINY_CLUSTER] = cluster;
+    cull_words.data[record + VELK_TINY_SLOT] = slot;
+    cull_words.data[record + VELK_TINY_CUT_RECORD] = cut_record;
     return true;
 }
 )"
@@ -930,13 +925,14 @@ void velk_takeover_put(uint cut, uint was)
     uint table = cull_words.data[cut + 30u];
     uint mask = cull_words.data[cut + 31u] - 1u;
     uint stamp = cull_words.data[cut + 29u];
-    uint h = velk_takeover_hash(cull_words.data[was], cull_words.data[was + 1u], cull_words.data[was + 2u]);
+    uint h = velk_takeover_hash(cull_words.data[was + VELK_RECORD_ENTRY], cull_words.data[was + VELK_RECORD_CLUSTER],
+                                cull_words.data[was + VELK_RECORD_SLOT]);
     for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
-        uint s = table + ((h + p) & mask) * 2u;
-        uint seen = cull_words.data[s];
+        uint s = table + ((h + p) & mask) * VELK_TAKEOVER_END;
+        uint seen = cull_words.data[s + VELK_TAKEOVER_FRAME];
         if (seen == stamp) continue;
-        if (atomicCompSwap(cull_words.data[s], seen, stamp) == seen) {
-            cull_words.data[s + 1u] = was;
+        if (atomicCompSwap(cull_words.data[s + VELK_TAKEOVER_FRAME], seen, stamp) == seen) {
+            cull_words.data[s + VELK_TAKEOVER_RECORD] = was;
             return;
         }
     }
@@ -950,10 +946,13 @@ uint velk_takeover_find(uint cut, uint entry, uint cluster, uint slot)
     uint stamp = cull_words.data[cut + 29u];
     uint h = velk_takeover_hash(entry, cluster, slot);
     for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
-        uint s = table + ((h + p) & mask) * 2u;
-        if (cull_words.data[s] != stamp) return 0xFFFFFFFFu;
-        uint was = cull_words.data[s + 1u];
-        if (cull_words.data[was] == entry && cull_words.data[was + 1u] == cluster && cull_words.data[was + 2u] == slot) return was;
+        uint s = table + ((h + p) & mask) * VELK_TAKEOVER_END;
+        if (cull_words.data[s + VELK_TAKEOVER_FRAME] != stamp) return 0xFFFFFFFFu;
+        uint was = cull_words.data[s + VELK_TAKEOVER_RECORD];
+        if (cull_words.data[was + VELK_RECORD_ENTRY] == entry && cull_words.data[was + VELK_RECORD_CLUSTER] == cluster
+            && cull_words.data[was + VELK_RECORD_SLOT] == slot) {
+            return was;
+        }
     }
     return 0xFFFFFFFFu;
 }
@@ -966,10 +965,10 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
         uint at = g_at++;
         // Never past the range the count gave the partition.
         if (at >= cull_words.data[g_state + 5u] + cull_words.data[g_state + 6u]) return;
-        uint record = g_store + at * 4u;
-        cull_words.data[record] = entry;
-        cull_words.data[record + 1u] = cluster;
-        cull_words.data[record + 2u] = slot;
+        uint record = g_store + at * VELK_RECORD_END;
+        cull_words.data[record + VELK_RECORD_ENTRY] = entry;
+        cull_words.data[record + VELK_RECORD_CLUSTER] = cluster;
+        cull_words.data[record + VELK_RECORD_SLOT] = slot;
         // Whether rays leave it out, for the tree pass.
         uint mark = cull_words.data[pc.cut_word + 44u] + (at >> 5u);
         uint bit = 1u << (at & 31u);
@@ -979,11 +978,11 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
         if (g_takeover) {
             uint was = velk_takeover_find(pc.cut_word, entry, cluster, slot);
             if (was != 0xFFFFFFFFu) {
-                light = cull_words.data[was + 3u];
+                light = cull_words.data[was + VELK_RECORD_LIGHT];
                 ++g_took;
             }
         }
-        cull_words.data[record + 3u] = light;
+        cull_words.data[record + VELK_RECORD_LIGHT] = light;
     }
     ++g_count;
 }
@@ -1475,9 +1474,10 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
 {
     lo = vec3(1e30);
     hi = vec3(-1e30);
-    uint entry = cull_words.data[record] & ~(velk_cut_light_only(cull_words.data[record]) ? VELK_CUT_LIGHT_ONLY : 0u);
-    uint cluster = cull_words.data[record + 1u];
-    uint slot = cull_words.data[record + 2u];
+    uint entry = cull_words.data[record + VELK_RECORD_ENTRY]
+               & ~(velk_cut_light_only(cull_words.data[record + VELK_RECORD_ENTRY]) ? VELK_CUT_LIGHT_ONLY : 0u);
+    uint cluster = cull_words.data[record + VELK_RECORD_CLUSTER];
+    uint slot = cull_words.data[record + VELK_RECORD_SLOT];
     if (entry == VELK_CUT_RAY_QUAD) {
         // A patch: its node's sphere, which holds all its members, in the world already.
         vec3 c = vec3(uintBitsToFloat(cull_words.data[cluster]), uintBitsToFloat(cull_words.data[cluster + 1u]),
@@ -1590,15 +1590,15 @@ bool velk_ray_record(uint record, uint index, vec3 viewpoint, float pixels_per_u
 {
     uint marks = cull_words.data[pc.cut_word + 44u];
     if ((cull_words.data[marks + (index >> 5u)] & (1u << (index & 31u))) != 0u) return false;
-    uint entry = cull_words.data[record];
+    uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
     if (entry >= VELK_CUT_RAY_QUAD || velk_cut_light_only(entry)) return true;
-    uint slot = cull_words.data[record + 2u];
+    uint slot = cull_words.data[record + VELK_RECORD_SLOT];
     uint instance = pc.instances_base + slot;
     if (pc.items_word != 0xFFFFFFFFu) instance = cull_words.data[pc.items_word + slot * VELK_PLAIN_ITEM_WORDS];
     if (instance == 0xFFFFFFFFu) return false;
     mat4 world = cull_instances.data[instance].world_matrix;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
-    uint cluster = cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = cull_words.data[entry + 2u] + cull_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     return velk_ray_pixels(cluster + 8u, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
 }
 
@@ -1627,7 +1627,7 @@ void main()
     if (cull_words.data[state + 8u] == 0u) return;
     uint records_count = cull_words.data[state + 6u];
     uint first_index = cull_words.data[state + 5u];
-    uint records = velk_cut_store(cut, true) + first_index * 4u;
+    uint records = velk_cut_store(cut, true) + first_index * VELK_RECORD_END;
     uint nodes = velk_cut_node_store(cut, true) + cull_words.data[state + 10u] * 16u;
     uint list = velk_cut_ray_store(cut, true) + cull_words.data[state + 5u];
     uint lane = gl_LocalInvocationIndex;
@@ -1644,14 +1644,14 @@ void main()
     uint to = min(from + per, records_count);
     uint mine = 0u;
     for (uint r = from; r < to; ++r) {
-        if (velk_ray_record(records + r * 4u, first_index + r, viewpoint, pixels_per_unit)) ++mine;
+        if (velk_ray_record(records + r * VELK_RECORD_END, first_index + r, viewpoint, pixels_per_unit)) ++mine;
     }
     s_counts[lane] = mine;
     barrier();
     uint at = 0u;
     for (uint i = 0u; i < lane; ++i) at += s_counts[i];
     for (uint r = from; r < to; ++r) {
-        if (velk_ray_record(records + r * 4u, first_index + r, viewpoint, pixels_per_unit)) cull_words.data[list + at++] = r;
+        if (velk_ray_record(records + r * VELK_RECORD_END, first_index + r, viewpoint, pixels_per_unit)) cull_words.data[list + at++] = r;
     }
     uint count = 0u;
     for (uint i = 0u; i < 64u; ++i) count += s_counts[i];
@@ -1679,7 +1679,7 @@ void main()
                     uint n = min(4u, count - first);
                     for (uint r = 0u; r < n; ++r) {
                         vec3 rlo, rhi;
-                        velk_cut_record_box(records + cull_words.data[list + first + r] * 4u, pc.instances_base, pc.items_word,
+                        velk_cut_record_box(records + cull_words.data[list + first + r] * VELK_RECORD_END, pc.instances_base, pc.items_word,
                                             pc.pad, rlo, rhi);
                         lo = min(lo, rlo);
                         hi = max(hi, rhi);
@@ -1910,13 +1910,13 @@ uint g_table;
 
 void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 {
-    uint at = atomicAdd(cull_words.data[pc.chosen_word], 1u);
+    uint at = atomicAdd(cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT], 1u);
     if (at >= pc.chosen_capacity) return;
-    uint record = pc.chosen_word + 4u + at * 4u;
-    cull_words.data[record] = entry;
-    cull_words.data[record + 1u] = cluster;
-    cull_words.data[record + 2u] = slot;
-    cull_words.data[record + 3u] = cut_record;
+    uint record = pc.chosen_word + VELK_CHOSEN_LIST_RECORDS + at * VELK_CHOSEN_END;
+    cull_words.data[record + VELK_CHOSEN_ENTRY] = entry;
+    cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
+    cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
+    cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
     atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
 }
 
@@ -1924,20 +1924,20 @@ void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 // were chosen already, so where from no longer matters: the camera stands in.
 bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record, vec3 cam)
 {
-    uint at = atomicAdd(cull_words.data[pc.retest_word], 1u);
+    uint at = atomicAdd(cull_words.data[pc.retest_word + VELK_RETEST_LIST_COUNT], 1u);
     if (at >= pc.retest_capacity) return false;
-    uint record = pc.retest_word + 1u + at * 12u;
-    cull_words.data[record] = g_instance;
-    cull_words.data[record + 1u] = slot;
-    cull_words.data[record + 2u] = g_table;
-    cull_words.data[record + 3u] = entry;
-    cull_words.data[record + 4u] = cluster;
-    cull_words.data[record + 5u] = cut_record;
-    cull_words.data[record + 6u] = pc.chosen_word;
-    cull_words.data[record + 7u] = pc.chosen_capacity;
-    cull_words.data[record + 8u] = floatBitsToUint(cam.x);
-    cull_words.data[record + 9u] = floatBitsToUint(cam.y);
-    cull_words.data[record + 10u] = floatBitsToUint(cam.z);
+    uint record = pc.retest_word + VELK_RETEST_LIST_RECORDS + at * VELK_RETEST_END;
+    cull_words.data[record + VELK_RETEST_INSTANCE] = g_instance;
+    cull_words.data[record + VELK_RETEST_SLOT] = slot;
+    cull_words.data[record + VELK_RETEST_TABLE] = g_table;
+    cull_words.data[record + VELK_RETEST_ENTRY] = entry;
+    cull_words.data[record + VELK_RETEST_CLUSTER] = cluster;
+    cull_words.data[record + VELK_RETEST_CUT_RECORD] = cut_record;
+    cull_words.data[record + VELK_RETEST_CHOSEN_WORD] = pc.chosen_word;
+    cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY] = pc.chosen_capacity;
+    cull_words.data[record + VELK_RETEST_FROM] = floatBitsToUint(cam.x);
+    cull_words.data[record + VELK_RETEST_FROM + 1u] = floatBitsToUint(cam.y);
+    cull_words.data[record + VELK_RETEST_FROM + 2u] = floatBitsToUint(cam.z);
     return true;
 }
 
@@ -1964,10 +1964,10 @@ void main()
     uint cut = pc.cut_word;
     uint index = gl_GlobalInvocationID.x;
     if (index >= cull_words.data[cut + 28u]) return;
-    uint record = velk_cut_store(cut, true) + index * 4u;
-    uint entry = cull_words.data[record];
-    uint cluster_or_table = cull_words.data[record + 1u];
-    uint slot = cull_words.data[record + 2u];
+    uint record = velk_cut_store(cut, true) + index * VELK_RECORD_END;
+    uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
+    uint cluster_or_table = cull_words.data[record + VELK_RECORD_CLUSTER];
+    uint slot = cull_words.data[record + VELK_RECORD_SLOT];
 
     // For light only: counted, not drawn. A patch for rays only: not drawn.
     if (velk_cut_light_only(entry)) {
@@ -2128,33 +2128,33 @@ vec3 g_lod_cam;
 
 void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 {
-    uint at = atomicAdd(cull_words.data[pc.chosen_word], 1u);
+    uint at = atomicAdd(cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT], 1u);
     if (at >= pc.chosen_capacity) return;
-    uint record = pc.chosen_word + 4u + at * 4u;
-    cull_words.data[record] = entry;
-    cull_words.data[record + 1u] = cluster;
-    cull_words.data[record + 2u] = slot;
-    cull_words.data[record + 3u] = cut_record;
+    uint record = pc.chosen_word + VELK_CHOSEN_LIST_RECORDS + at * VELK_CHOSEN_END;
+    cull_words.data[record + VELK_CHOSEN_ENTRY] = entry;
+    cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
+    cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
+    cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
     atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
 }
 
 // Lists something for the second test, false when there is no room for it.
 bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record)
 {
-    uint at = atomicAdd(cull_words.data[pc.retest_word], 1u);
+    uint at = atomicAdd(cull_words.data[pc.retest_word + VELK_RETEST_LIST_COUNT], 1u);
     if (at >= pc.retest_capacity) return false;
-    uint record = pc.retest_word + 1u + at * 12u;
-    cull_words.data[record] = g_instance;
-    cull_words.data[record + 1u] = slot;
-    cull_words.data[record + 2u] = g_table;
-    cull_words.data[record + 3u] = entry;
-    cull_words.data[record + 4u] = cluster;
-    cull_words.data[record + 5u] = cut_record;
-    cull_words.data[record + 6u] = pc.chosen_word;
-    cull_words.data[record + 7u] = pc.chosen_capacity;
-    cull_words.data[record + 8u] = floatBitsToUint(g_lod_cam.x);
-    cull_words.data[record + 9u] = floatBitsToUint(g_lod_cam.y);
-    cull_words.data[record + 10u] = floatBitsToUint(g_lod_cam.z);
+    uint record = pc.retest_word + VELK_RETEST_LIST_RECORDS + at * VELK_RETEST_END;
+    cull_words.data[record + VELK_RETEST_INSTANCE] = g_instance;
+    cull_words.data[record + VELK_RETEST_SLOT] = slot;
+    cull_words.data[record + VELK_RETEST_TABLE] = g_table;
+    cull_words.data[record + VELK_RETEST_ENTRY] = entry;
+    cull_words.data[record + VELK_RETEST_CLUSTER] = cluster;
+    cull_words.data[record + VELK_RETEST_CUT_RECORD] = cut_record;
+    cull_words.data[record + VELK_RETEST_CHOSEN_WORD] = pc.chosen_word;
+    cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY] = pc.chosen_capacity;
+    cull_words.data[record + VELK_RETEST_FROM] = floatBitsToUint(g_lod_cam.x);
+    cull_words.data[record + VELK_RETEST_FROM + 1u] = floatBitsToUint(g_lod_cam.y);
+    cull_words.data[record + VELK_RETEST_FROM + 2u] = floatBitsToUint(g_lod_cam.z);
     return true;
 }
 
@@ -2302,13 +2302,13 @@ uint g_chosen_capacity;
 
 void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 {
-    uint at = atomicAdd(cull_words.data[g_chosen_word], 1u);
+    uint at = atomicAdd(cull_words.data[g_chosen_word + VELK_CHOSEN_LIST_COUNT], 1u);
     if (at >= g_chosen_capacity) return;
-    uint record = g_chosen_word + 4u + at * 4u;
-    cull_words.data[record] = entry;
-    cull_words.data[record + 1u] = cluster;
-    cull_words.data[record + 2u] = slot;
-    cull_words.data[record + 3u] = cut_record;
+    uint record = g_chosen_word + VELK_CHOSEN_LIST_RECORDS + at * VELK_CHOSEN_END;
+    cull_words.data[record + VELK_CHOSEN_ENTRY] = entry;
+    cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
+    cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
+    cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
     atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
 }
 
@@ -2336,17 +2336,18 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
 void main()
 {
     uint index = gl_GlobalInvocationID.x;
-    if (index >= min(cull_words.data[pc.retest_word], pc.retest_capacity)) return;
+    if (index >= min(cull_words.data[pc.retest_word + VELK_RETEST_LIST_COUNT], pc.retest_capacity)) return;
 
-    uint record = pc.retest_word + 1u + index * 12u;
-    uint instance = cull_words.data[record];
-    uint slot = cull_words.data[record + 1u];
-    uint table_word = cull_words.data[record + 2u];
-    uint entry = cull_words.data[record + 3u];
-    g_chosen_word = cull_words.data[record + 6u];
-    g_chosen_capacity = cull_words.data[record + 7u];
-    vec3 lod_cam = vec3(uintBitsToFloat(cull_words.data[record + 8u]), uintBitsToFloat(cull_words.data[record + 9u]),
-                        uintBitsToFloat(cull_words.data[record + 10u]));
+    uint record = pc.retest_word + VELK_RETEST_LIST_RECORDS + index * VELK_RETEST_END;
+    uint instance = cull_words.data[record + VELK_RETEST_INSTANCE];
+    uint slot = cull_words.data[record + VELK_RETEST_SLOT];
+    uint table_word = cull_words.data[record + VELK_RETEST_TABLE];
+    uint entry = cull_words.data[record + VELK_RETEST_ENTRY];
+    g_chosen_word = cull_words.data[record + VELK_RETEST_CHOSEN_WORD];
+    g_chosen_capacity = cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY];
+    vec3 lod_cam = vec3(uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM]),
+                        uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 1u]),
+                        uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 2u]));
 
     mat4 world = cull_instances.data[instance].world_matrix;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
@@ -2355,12 +2356,13 @@ void main()
     vec3 cam = globals.cam_pos.xyz;
 
     if (entry != 0xFFFFFFFFu) {
-        uint cluster = cull_words.data[record + 4u];
+        uint cluster = cull_words.data[record + VELK_RETEST_CLUSTER];
         uint sphere = cull_words.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
         if (!velk_lod_occluded(sphere, world, scale, cam)) {
             mat4 vp = globals.view_projection;
             float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
-            velk_lod_take(entry, cluster, slot, cull_words.data[record + 5u], world, scale, cam, lod_cam, pixels_per_unit);
+            velk_lod_take(entry, cluster, slot, cull_words.data[record + VELK_RETEST_CUT_RECORD], world, scale, cam, lod_cam,
+                          pixels_per_unit);
         }
         return;
     }
@@ -2432,9 +2434,9 @@ void main()
         entry = cull_words.data[pc.entries_word + invocation];
     }
     if (invocation == 0u) {
-        cull_words.data[pc.chosen_word + 1u] = (cull_words.data[pc.chosen_word] + 63u) / 64u;
-        cull_words.data[pc.chosen_word + 2u] = 1u;
-        cull_words.data[pc.chosen_word + 3u] = 1u;
+        cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_GROUPS] = (cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT] + 63u) / 64u;
+        cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_GROUPS + 1u] = 1u;
+        cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_GROUPS + 2u] = 1u;
     }
 
     uint capacity = cull_words.data[entry + 1u];
@@ -2490,16 +2492,17 @@ layout(push_constant) uniform PC {
 void main()
 {
     uint index = gl_GlobalInvocationID.x;
-    if (index >= min(cull_words.data[pc.chosen_word], pc.chosen_capacity)) return;
-    uint record = pc.chosen_word + 4u + index * 4u;
-    uint entry = cull_words.data[record];
-    uint at = atomicAdd(cull_words.data[cull_words.data[entry + 5u] + cull_words.data[record + 1u]], 1u);
+    if (index >= min(cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT], pc.chosen_capacity)) return;
+    uint record = pc.chosen_word + VELK_CHOSEN_LIST_RECORDS + index * VELK_CHOSEN_END;
+    uint entry = cull_words.data[record + VELK_CHOSEN_ENTRY];
+    uint at = atomicAdd(cull_words.data[cull_words.data[entry + 5u] + cull_words.data[record + VELK_CHOSEN_CLUSTER]], 1u);
     uint capacity = cull_words.data[entry + 1u];
     if (at < capacity) {
         uint list = cull_words.data[entry];
-        cull_words.data[list + at] = cull_words.data[record + 2u];
-        cull_words.data[list + capacity + at] = cull_words.data[record + 3u];
-        cull_words.data[list + capacity * 2u + at] = cull_words.data[entry + 2u] + cull_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
+        cull_words.data[list + at] = cull_words.data[record + VELK_CHOSEN_SLOT];
+        cull_words.data[list + capacity + at] = cull_words.data[record + VELK_CHOSEN_CUT_RECORD];
+        cull_words.data[list + capacity * 2u + at] = cull_words.data[entry + 2u]
+                                                   + cull_words.data[record + VELK_CHOSEN_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     }
 }
 )";
@@ -2524,12 +2527,12 @@ layout(push_constant) uniform PC {
 
 void main()
 {
-    uint count = min(tiny_words.data[pc.list_word], pc.capacity);
+    uint count = min(tiny_words.data[pc.list_word + VELK_TINY_LIST_COUNT], pc.capacity);
     uint row = clamp(count, 1u, 65535u);
-    tiny_words.data[pc.list_word + 1u] = count == 0u ? 0u : row;
-    tiny_words.data[pc.list_word + 2u] = (count + row - 1u) / row;
-    tiny_words.data[pc.list_word + 3u] = 1u;
-    tiny_words.data[pc.list_word + 4u] = count;
+    tiny_words.data[pc.list_word + VELK_TINY_LIST_GROUPS] = count == 0u ? 0u : row;
+    tiny_words.data[pc.list_word + VELK_TINY_LIST_GROUPS + 1u] = (count + row - 1u) / row;
+    tiny_words.data[pc.list_word + VELK_TINY_LIST_GROUPS + 2u] = 1u;
+    tiny_words.data[pc.list_word + VELK_TINY_LIST_DRAWN] = count;
 }
 )";
 
@@ -2592,12 +2595,12 @@ float tiny_edge(vec2 a, vec2 b, vec2 p)
 void main()
 {
     uint index = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    if (index >= tiny_words.data[pc.list_word + 4u]) return;
-    uint record = pc.list_word + 8u + index * 4u;
-    uint draw = tiny_words.data[record];
+    if (index >= tiny_words.data[pc.list_word + VELK_TINY_LIST_DRAWN]) return;
+    uint record = pc.list_word + VELK_TINY_LIST_RECORDS + index * VELK_TINY_END;
+    uint draw = tiny_words.data[record + VELK_TINY_DRAW];
     VelkDrawData d = velk_draw_data.data[draw];
-    uint cluster = tiny_words.data[record + 1u];
-    TinyInstance inst = tiny_instances.data[d.instances_base + tiny_words.data[record + 2u]];
+    uint cluster = tiny_words.data[record + VELK_TINY_CLUSTER];
+    TinyInstance inst = tiny_instances.data[d.instances_base + tiny_words.data[record + VELK_TINY_SLOT]];
     GlobalData g = velk_globals.data[d.globals_base];
     // The cluster's record says where its indices are, and the vertices they count from.
     uint first = tiny_words.data[cluster];
@@ -2945,27 +2948,27 @@ void main()
     uint cut = pc.cut_word;
     uint index = gl_GlobalInvocationID.x;
     if (index >= cull_words.data[cut + 16u]) return;
-    uint record = velk_cut_store(cut, false) + index * 4u;
-    uint entry = cull_words.data[record];
+    uint record = velk_cut_store(cut, false) + index * VELK_RECORD_END;
+    uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
     if (entry == VELK_CUT_QUAD || entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE) return;
     bool stale = false;
     if (entry == 0xFFFFFFFFu) {
-        uint table = cull_words.data[record + 1u];
+        uint table = cull_words.data[record + VELK_RECORD_MESH_TABLE];
         if (table != 0xFFFFFFFFu) {
             uint renamed = velk_rename(table);
             stale = renamed == VELK_CUT_STALE;
-            cull_words.data[record + 1u] = renamed;
+            cull_words.data[record + VELK_RECORD_MESH_TABLE] = renamed;
         }
     } else {
         uint renamed = velk_rename(entry & ~VELK_CUT_LIGHT_ONLY);
         stale = renamed == VELK_CUT_STALE;
-        cull_words.data[record] = stale ? VELK_CUT_STALE : renamed | (entry & VELK_CUT_LIGHT_ONLY);
+        cull_words.data[record + VELK_RECORD_ENTRY] = stale ? VELK_CUT_STALE : renamed | (entry & VELK_CUT_LIGHT_ONLY);
     }
-    uint item = cull_words.data[record + 2u];
+    uint item = cull_words.data[record + VELK_RECORD_SLOT];
     if (item < pc.item_count) {
         uint renamed = cull_words.data[pc.items_word + item];
         stale = stale || renamed == 0xFFFFFFFFu;
-        cull_words.data[record + 2u] = renamed;
+        cull_words.data[record + VELK_RECORD_SLOT] = renamed;
     } else if (item != 0xFFFFFFFFu) {
         // An instanced visual's item: where its block went, or stale with its visual gone.
         uint renamed = 0xFFFFFFFFu;
@@ -2978,10 +2981,10 @@ void main()
             }
         }
         stale = stale || renamed == 0xFFFFFFFFu;
-        cull_words.data[record + 2u] = renamed;
+        cull_words.data[record + VELK_RECORD_SLOT] = renamed;
     }
     // What does not carry over: its partition chooses again (instance_cut_stale_src).
-    if (stale) cull_words.data[record] = VELK_CUT_STALE;
+    if (stale) cull_words.data[record + VELK_RECORD_ENTRY] = VELK_CUT_STALE;
 }
 )";
 
@@ -3072,7 +3075,7 @@ inline void record_cluster_layout(Command& cmd, InstanceCullPass& state, IGpuPip
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        cmd.record_dispatch_indirect(dc, arena_buffer, uint64_t(pc.chosen_word + 1u) * sizeof(uint32_t));
+        cmd.record_dispatch_indirect(dc, arena_buffer, uint64_t(pc.chosen_word + kChosenListGroups) * sizeof(uint32_t));
     };
     record_fill({together_word, state.together_chosen});
     cmd.record_global_barrier();

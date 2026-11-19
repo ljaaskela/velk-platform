@@ -842,12 +842,12 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
     uint record = velk_ids_record(d, ids);
     if (record == VELK_NO_RECORD) return false;
     GlobalData g = velk_globals.data[d.globals_base];
-    uint entry = VELK_LIGHT_WORDS.data[record];
+    uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
 
     if (entry == VELK_CUT_QUAD) {
         mat4 vp = g.view_projection;
         float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-        uint node = velk_light_quad_node(VELK_LIGHT_WORDS.data[record + 2u], VELK_LIGHT_WORDS.data[record + 1u],
+        uint node = velk_light_quad_node(VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_TREE], VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_NODE],
                                          g.cam_pos.xyz, pixels_per_unit, light_pixels);
         uint value = VELK_LIGHT_WORDS.data[node + 11u];
         if (value >= VELK_LIGHT_PENDING || (value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
@@ -855,14 +855,14 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
                            uintBitsToFloat(VELK_LIGHT_WORDS.data[node + 2u])) - g.cam_pos.xyz;
         velk_light_add_one(value, center, lights, sums);
     } else {
-        uint value = VELK_LIGHT_WORDS.data[record + 3u];
+        uint value = VELK_LIGHT_WORDS.data[record + VELK_RECORD_LIGHT];
         if (value >= VELK_LIGHT_PENDING) return false;
         ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
         if (value >= VELK_LIGHT_ONE_VALUE) {
             if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
             // From its cluster's sphere, or its whole mesh's.
-            uint sphere = entry == 0xFFFFFFFFu ? VELK_LIGHT_WORDS.data[record + 1u]
-                        : VELK_LIGHT_WORDS.data[entry + 2u] + VELK_LIGHT_WORDS.data[record + 1u] * VELK_LOD_CLUSTER_WORDS + 13u;
+            uint sphere = entry == 0xFFFFFFFFu ? VELK_LIGHT_WORDS.data[record + VELK_RECORD_MESH_TABLE]
+                        : VELK_LIGHT_WORDS.data[entry + 2u] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + 13u;
             vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
                               uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
             velk_light_add_one(value, velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), lights,
@@ -1364,11 +1364,11 @@ void main()
     uint index = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     // The records placed in the current store, all before this.
     if (index >= VELK_LIGHT_WORDS.data[cut + 28u]) return;
-    uint record = VELK_LIGHT_WORDS.data[cut + 17u + VELK_LIGHT_WORDS.data[cut + 12u]] + index * 4u;
-    uint entry = VELK_LIGHT_WORDS.data[record];
-    uint cluster = VELK_LIGHT_WORDS.data[record + 1u];
-    uint slot = VELK_LIGHT_WORDS.data[record + 2u];
-    uint value = VELK_LIGHT_WORDS.data[record + 3u];
+    uint record = VELK_LIGHT_WORDS.data[cut + 17u + VELK_LIGHT_WORDS.data[cut + 12u]] + index * VELK_RECORD_END;
+    uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
+    uint cluster = VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER];
+    uint slot = VELK_LIGHT_WORDS.data[record + VELK_RECORD_SLOT];
+    uint value = VELK_LIGHT_WORDS.data[record + VELK_RECORD_LIGHT];
     bool all = VELK_LIGHT_WORDS.data[changes + 1u] != 0u;
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
     uint slots[VELK_LIGHT_SLOTS];
@@ -1445,7 +1445,7 @@ void main()
             VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] = now;
         }
     } else {
-        velk_change_one(record + 3u);
+        velk_change_one(record + VELK_RECORD_LIGHT);
     }
 }
 )";
@@ -1550,7 +1550,7 @@ vec3 velk_probe_direct(RayHit hit, vec3 at, vec3 n)
     uint pool = pc.shapes_base;
     if (hit.record == VELK_NO_RECORD || pool == 0xFFFFFFFFu) return vec3(0.0);
     uint entry = probe_words.data[hit.record];
-    uint value = probe_words.data[hit.record + 3u];
+    uint value = probe_words.data[hit.record + VELK_RECORD_LIGHT];
     if (entry == VELK_CUT_QUAD || value >= VELK_LIGHT_PENDING) return vec3(0.0);
     uint lights[VELK_LIGHT_SLOTS];
     vec2 sums[VELK_LIGHT_SLOTS];
@@ -1761,7 +1761,7 @@ void velk_light_search(uint record, uint was, uint instance)
 {
     uint at = atomicAdd(light_words.data[pc.pool_word + VELK_POOL_SEARCHED], 1u);
     if (at >= VELK_LIGHT_SEARCH_CAPACITY) {
-        light_words.data[record + 3u] = was;
+        light_words.data[record + VELK_RECORD_LIGHT] = was;
         return;
     }
     uint list = light_words.data[pc.pool_word + VELK_POOL_SEARCH_WORD] + at * 3u;
@@ -1886,12 +1886,12 @@ void main()
     GlobalData g = velk_globals.data[d.globals_base];
     mat4 vp = g.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-    uint entry = light_words.data[record];
+    uint entry = light_words.data[record + VELK_RECORD_ENTRY];
     uint frame = g.present_counter;
 
     // A quad: one value on the node over it as wide as the light spacing.
     if (entry == VELK_CUT_QUAD) {
-        uint node = velk_light_quad_node(light_words.data[record + 2u], light_words.data[record + 1u], g.cam_pos.xyz,
+        uint node = velk_light_quad_node(light_words.data[record + VELK_RECORD_QUAD_TREE], light_words.data[record + VELK_RECORD_QUAD_NODE], g.cam_pos.xyz,
                                          pixels_per_unit, pc.light_pixels);
         if (light_words.data[node + 11u] == VELK_LIGHT_NONE) {
             atomicCompSwap(light_words.data[node + 11u], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
@@ -1900,21 +1900,22 @@ void main()
         return;
     }
 
-    uint was = light_words.data[record + 3u];
+    uint was = light_words.data[record + VELK_RECORD_LIGHT];
     if (was == VELK_LIGHT_PENDING) return;
     uint instance = d.instances_base + velk_ids_slot(d, ids);
     // A whole mesh or a shape drawn by its own pass: one value, traced from the mesh's sphere.
     if (entry == 0xFFFFFFFFu) {
         if (was == VELK_LIGHT_NONE) {
-            atomicCompSwap(light_words.data[record + 3u], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
-        } else if (light_words.data[record + 1u] != 0xFFFFFFFFu) {
-            velk_light_list_one(record + 3u, VELK_LIGHT_TRACE_MESH, record, instance, light_words.data[record + 1u], frame);
+            atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
+        } else if (light_words.data[record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu) {
+            velk_light_list_one(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_MESH, record, instance,
+                                light_words.data[record + VELK_RECORD_MESH_TABLE], frame);
         }
         return;
     }
     uint clusters = light_words.data[entry + 2u];
     // A cluster: as wide on screen as it is now, and its largest triangle.
-    uint cluster = clusters + light_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + 19u];
     mat4 world = light_instances.data[d.instances_base + velk_ids_slot(d, ids)].world_matrix;
     float scale = max(max(length(world[0].xyz), length(world[1].xyz)), length(world[2].xyz));
@@ -1934,7 +1935,7 @@ void main()
         if (light_words.data[first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED) {
             float laid_for = uintBitsToFloat(light_words.data[first + VELK_PAGE_ACROSS]);
             if (pc.again == 0u && across > 2.0 * laid_for
-                && atomicCompSwap(light_words.data[record + 3u], was, VELK_LIGHT_PENDING) == was) {
+                && atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], was, VELK_LIGHT_PENDING) == was) {
                 velk_light_search(record, was, instance);
                 return;
             }
@@ -1957,9 +1958,9 @@ void main()
     // After the search, nothing more goes on the search list: those wait for the next frame.
     if (was == VELK_LIGHT_NONE) {
         if (pc.again != 0u) return;
-        if (atomicCompSwap(light_words.data[record + 3u], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) != VELK_LIGHT_NONE) return;
+        if (atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) != VELK_LIGHT_NONE) return;
         if (vertices == 0u || across < pc.light_pixels) {
-            light_words.data[record + 3u] = VELK_LIGHT_ONE_VALUE;
+            light_words.data[record + VELK_RECORD_LIGHT] = VELK_LIGHT_ONE_VALUE;
             return;
         }
         velk_light_search(record, VELK_LIGHT_NONE, instance);
@@ -1967,10 +1968,10 @@ void main()
     }
     // One value, grown to twice the light spacing: points. Else traced from its cluster's sphere.
     if (pc.again != 0u || vertices == 0u || across < 2.0 * pc.light_pixels) {
-        velk_light_list_one(record + 3u, VELK_LIGHT_TRACE_CLUSTER, record, instance, cluster, frame);
+        velk_light_list_one(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_CLUSTER, record, instance, cluster, frame);
         return;
     }
-    if (atomicCompSwap(light_words.data[record + 3u], was, VELK_LIGHT_PENDING) != was) return;
+    if (atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], was, VELK_LIGHT_PENDING) != was) return;
     velk_light_search(record, was, instance);
 }
 )";
@@ -2232,10 +2233,10 @@ void main()
     uint record = light_words.data[list];
     uint was = light_words.data[list + 1u];
     uint instance = light_words.data[list + 2u];
-    uint entry = light_words.data[record];
-    uint slot = light_words.data[record + 2u];
+    uint entry = light_words.data[record + VELK_RECORD_ENTRY];
+    uint slot = light_words.data[record + VELK_RECORD_SLOT];
     uint clusters = light_words.data[entry + 2u];
-    uint cluster = clusters + light_words.data[record + 1u] * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + 19u];
     GlobalData g = velk_globals.data[pc.globals_base];
     LightInstance inst = light_instances.data[instance];
@@ -2253,23 +2254,24 @@ void main()
         bool in_store = velk_light_store_of(record, store_lo, store_hi);
         for (int dir = -1; in_store && dir <= 1; dir += 2) {
             for (uint k = 1u; k <= kScan; ++k) {
-                if (dir < 0 && record < store_lo + k * 4u) break;
-                if (dir > 0 && record + k * 4u >= store_hi) break;
-                uint other = dir < 0 ? record - k * 4u : record + k * 4u;
-                if (light_words.data[other + 2u] != slot) break;
-                if (light_words.data[other] != (entry | VELK_CUT_LIGHT_ONLY)) continue;
-                uint light = light_words.data[other + 3u];
+                if (dir < 0 && record < store_lo + k * VELK_RECORD_END) break;
+                if (dir > 0 && record + k * VELK_RECORD_END >= store_hi) break;
+                uint other = dir < 0 ? record - k * VELK_RECORD_END : record + k * VELK_RECORD_END;
+                if (light_words.data[other + VELK_RECORD_SLOT] != slot) break;
+                if (light_words.data[other + VELK_RECORD_ENTRY] != (entry | VELK_CUT_LIGHT_ONLY)) continue;
+                uint light = light_words.data[other + VELK_RECORD_LIGHT];
                 if (light == VELK_LIGHT_NONE) {
-                    if (atomicCompSwap(light_words.data[other + 3u], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) != VELK_LIGHT_NONE) {
+                    if (atomicCompSwap(light_words.data[other + VELK_RECORD_LIGHT], VELK_LIGHT_NONE, VELK_LIGHT_PENDING)
+                        != VELK_LIGHT_NONE) {
                         again = true;
                         continue;
                     }
-                    uint other_cluster = clusters + light_words.data[other + 1u] * VELK_LOD_CLUSTER_WORDS;
+                    uint other_cluster = clusters + light_words.data[other + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
                     uint other_vertices = light_words.data[other_cluster + 19u];
                     uint laid;
                     if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN, 0u, 2u * other_vertices,
                                             VELK_LIGHT_NONE, 0.0, laid)) {
-                        light_words.data[other + 3u] = VELK_LIGHT_NONE;
+                        light_words.data[other + VELK_RECORD_LIGHT] = VELK_LIGHT_NONE;
                         again = true;
                         continue;
                     }
@@ -2280,7 +2282,7 @@ void main()
                         light_words.data[at + 1u] = VELK_LIGHT_NONE;
                     }
                     atomicAdd(light_words.data[pool + VELK_POOL_SUM_LAID_LIGHT_ONLY], other_vertices);
-                    light_words.data[other + 3u] = laid;
+                    light_words.data[other + VELK_RECORD_LIGHT] = laid;
                     velk_light_trace_now(laid, instance);
                     light = laid;
                 }
@@ -2295,7 +2297,7 @@ void main()
         }
         uint draw = light_words.data[entry + 13u];
         if (again || (s_lights != 0u && draw == 0xFFFFFFFFu)) {
-            light_words.data[record + 3u] = was;
+            light_words.data[record + VELK_RECORD_LIGHT] = was;
         } else if (s_lights == 0u) {
             // Coarse enough: its own points, with a grid in each triangle wider than the light
             // spacing, as fine as that triangle is wide, its corners found through its draw's
@@ -2324,7 +2326,7 @@ void main()
                 s_points = vertices + grid_points;
                 s_own = true;
             } else {
-                light_words.data[record + 3u] = was;
+                light_words.data[record + VELK_RECORD_LIGHT] = was;
             }
         } else {
             uint laid;
@@ -2334,7 +2336,7 @@ void main()
                 s_index_base = velk_draw_data.data[draw].index_base;
                 s_linked = true;
             } else {
-                light_words.data[record + 3u] = was;
+                light_words.data[record + VELK_RECORD_LIGHT] = was;
             }
         }
     }
@@ -2354,7 +2356,7 @@ void main()
         memoryBarrierBuffer();
         barrier();
         if (lane == 0u) {
-            light_words.data[record + 3u] = s_page;
+            light_words.data[record + VELK_RECORD_LIGHT] = s_page;
             velk_light_trace_now(s_page, instance);
             // For the log, why: no light before, laid out again having grown, or one value before.
             uint why = was == VELK_LIGHT_NONE ? VELK_POOL_SUM_LAID_NEW
@@ -2374,7 +2376,7 @@ void main()
         uint best_points = 0u;
         vec3 best_weights = vec3(1.0, 0.0, 0.0);
         for (uint i = 0u; i < s_lights; ++i) {
-            uint other = clusters + light_words.data[s_light_records[i] + 1u] * VELK_LOD_CLUSTER_WORDS;
+            uint other = clusters + light_words.data[s_light_records[i] + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
             vec3 center = vec3(uintBitsToFloat(light_words.data[other + 13u]), uintBitsToFloat(light_words.data[other + 14u]),
                                uintBitsToFloat(light_words.data[other + 15u]));
             if (length(p - center) - uintBitsToFloat(light_words.data[other + 16u]) >= best) continue;
@@ -2403,7 +2405,7 @@ void main()
     }
     memoryBarrierBuffer();
     barrier();
-    if (lane == 0u) light_words.data[record + 3u] = s_page;
+    if (lane == 0u) light_words.data[record + VELK_RECORD_LIGHT] = s_page;
 }
 )";
 
@@ -2462,7 +2464,7 @@ void main()
     uint index = gl_GlobalInvocationID.x;
     if (index >= light_words.data[cut + 28u]) return;
     uint parity = light_words.data[cut + 12u];
-    uint light = light_words.data[light_words.data[cut + 17u + parity] + index * 4u + 3u];
+    uint light = light_words.data[light_words.data[cut + 17u + parity] + index * VELK_RECORD_END + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
     if (light >= VELK_LIGHT_ONE_VALUE) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);

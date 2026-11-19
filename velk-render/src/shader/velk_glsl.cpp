@@ -1,5 +1,7 @@
 #include "shader/velk_glsl.h"
 
+#include <velk-render/frame/cull_layout.h>
+
 namespace velk {
 
 // Framework-level shader declarations registered automatically into every
@@ -16,6 +18,8 @@ const string_view kVelkGlsl = R"(
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_scalar_block_layout : require
 )"
+// The words of the culling's lists and kept cuts, as cull_layout.h names them.
+VELK_CULL_LAYOUT_GLSL
 // An analytic shape, in its instance's own space: what rays test a visual drawn by its
 // own pass as (velk_instance_shape), and what intersect snippets are given.
 R"(
@@ -493,7 +497,7 @@ uint velk_cluster_first_index(uint cluster)
     return cluster == VELK_NO_CLUSTER ? 0u : velk_culling.data[cluster];
 }
 
-// A kept cut record (kCutRecordWords), as the word of it in the culling arena, or none.
+// A kept cut record (VELK_CUT_RECORD), as the word of it in the culling arena, or none.
 #define VELK_NO_RECORD 0xFFFFFFFFu
 
 // The kept cut record what a pixel shows is from, or VELK_NO_RECORD for what was not drawn from
@@ -501,7 +505,7 @@ uint velk_cluster_first_index(uint cluster)
 uint velk_ids_record(VelkDrawData d, uvec2 ids)
 {
     uint position = ids.y >> d.triangle_bits;
-    uint record = (ids.x & VELK_IDS_TINY) != 0u ? velk_culling.data[ids.y + 3u]
+    uint record = (ids.x & VELK_IDS_TINY) != 0u ? velk_culling.data[ids.y + VELK_TINY_CUT_RECORD]
                 : d.record_base == VELK_NO_VISIBLE_LIST || position >= d.record_count ? VELK_NO_RECORD
                 : velk_culling.data[d.record_base + position];
     // No record is ever at word 0, which a list that was cleared holds.
