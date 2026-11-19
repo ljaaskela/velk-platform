@@ -47,27 +47,9 @@ void DefaultBatch::finalize_storage(uint32_t prim_count, bool indexed)
 
 namespace {
 
-/// Words per mesh in the table at the start of a culling region. See instance_cull_compute_src.
-constexpr uint32_t kCullTableWords = 12;
-constexpr uint32_t kCullCountWord = 4;
-constexpr uint32_t kCullListWord = 5;
-constexpr uint32_t kCullCapacityWord = 6;
-constexpr uint32_t kCullFirstEntryWord = 8;
-constexpr uint32_t kCullEntryCountWord = 9;
-
-/// Words in an entry of a primitive drawn by cluster. See instance_cluster_runs_src.
-constexpr uint32_t kClusterEntryListWord = 0;
-constexpr uint32_t kClusterEntryCapacityWord = 1;
-constexpr uint32_t kClusterEntryTableWord = 2;
-constexpr uint32_t kClusterEntryClustersWord = 3;
-constexpr uint32_t kClusterEntryCountsWord = 4;
-constexpr uint32_t kClusterEntryCursorsWord = 5;
-constexpr uint32_t kClusterEntryCommandsWord = 6;
-constexpr uint32_t kClusterEntryDrawsWord = 7;
-constexpr uint32_t kClusterEntryNodesWord = 8;
-constexpr uint32_t kClusterEntryFlagsWord = 9;
-constexpr uint32_t kClusterEntrySecondCommandsWord = 11;
-constexpr uint32_t kClusterEntrySecondDrawsWord = 12;
+/// The culling table's rows (VELK_BATCH_TABLE) and the cluster draw entries (VELK_CLUSTER_ENTRY)
+/// are named in cull_layout.h.
+constexpr uint32_t kCullTableWords = kTableEnd;
 /// Words per cluster: its count, its cursor and a command for each occlusion phase.
 constexpr uint32_t kClusterWords = 12;
 /// Most instances of clusters in one list. At 256 triangles each this is about a billion
@@ -186,7 +168,7 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
             sphere[2] = local.min().z + half.z;
             sphere[3] = vec3::length(half);
         }
-        std::memcpy(entry, sphere, sizeof(sphere));
+        std::memcpy(entry + kTableCenter, sphere, sizeof(sphere));
         const uint32_t capacity = instance_source_ ? instance_source_->get_mesh_instance_count(m) : instance_count_;
         cull_list_words_.push_back(next_list);
         if (!instance_source_) {
@@ -196,8 +178,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         }
         cull_record_words_.push_back(next_list + capacity);
         cull_record_counts_.push_back(capacity);
-        entry[kCullListWord] = next_list;
-        entry[kCullCapacityWord] = capacity;
+        entry[kTableList] = next_list;
+        entry[kTableCapacity] = capacity;
         next_list += capacity * 2u;
     }
 
@@ -218,10 +200,10 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         const PendingDraw& draw = pending[i];
         const uint32_t entry_word = entries_word + static_cast<uint32_t>(i) * kClusterEntryWords;
         uint32_t* table_entry = table.data() + size_t(draw.mesh) * kCullTableWords;
-        if (table_entry[kCullEntryCountWord] == 0u) {
-            table_entry[kCullFirstEntryWord] = entry_word;
+        if (table_entry[kTableEntryCount] == 0u) {
+            table_entry[kTableFirstEntry] = entry_word;
         }
-        ++table_entry[kCullEntryCountWord];
+        ++table_entry[kTableEntryCount];
 
         const uint32_t clusters = draw.lod.cluster_count;
         const uint32_t counts_word = next_list;
@@ -276,7 +258,7 @@ bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
     out.visible_word = owner->cull_list_words_[cull_mesh_];
     out.records_word = owner->cull_record_words_[cull_mesh_];
     out.records_count = owner->cull_record_counts_[cull_mesh_];
-    out.count_word = table_word + cull_mesh_ * kCullTableWords + kCullCountWord;
+    out.count_word = table_word + cull_mesh_ * kCullTableWords + kTableCount;
     if (const ClusterDraw* draw = owner->find_cluster_draw(cull_mesh_, primitive_.get())) {
         out.visible_word = draw->list_word;
         out.cluster_count = draw->clusters;

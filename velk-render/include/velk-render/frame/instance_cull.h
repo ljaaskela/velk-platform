@@ -32,17 +32,15 @@ namespace velk {
 /// kCullNoSlot.
 inline constexpr uint32_t kCullChunkSlots = 64;
 inline constexpr uint32_t kCullNoSlot = 0xFFFFFFFFu;
-/// Words per partition in a partition table: its world bounds (min, max), the word of its first
-/// chunk, its chunk count, the word of its quad tree (kQuadNodeWords, kCullNoSlot for none) and
-/// the tree's leaves. See instance_partition_cull_src. Mirrors VELK_CULL_ENTRY_WORDS.
-inline constexpr uint32_t kCullEntryWords = 10;
+/// Words per partition in a partition table: VELK_PARTITION_ENTRY (cull_layout.h). See
+/// instance_partition_cull_src.
+inline constexpr uint32_t kCullEntryWords = kPartitionEntryEnd;
 /// Set in a partition table entry's leaves word when its tree's leaves are the finest it has (a
 /// partition without its instances, whose list names chunk quads): where no node is small
 /// enough, the leaf itself is taken. Mirrors VELK_QUAD_LEAVES_ONLY.
 inline constexpr uint32_t kQuadLeavesOnly = 0x80000000u;
-/// Words per chunk in a kept cut's choose list: the word of its first slot, and the partition
-/// it is from.
-inline constexpr uint32_t kCullChunkListWords = 2;
+/// Words per chunk in a kept cut's choose list: VELK_CHUNK (cull_layout.h).
+inline constexpr uint32_t kCullChunkListWords = kChunkEnd;
 /// The slot an object id names, in tables by object (IScene::get_object_ids).
 inline constexpr uint32_t kObjectSlotMask = 0x3FFFFFFu;
 /// Words per item (InstanceCullPass::together), what a kept cut record names: its instance's
@@ -463,11 +461,11 @@ void velk_lod_walk(uint entry, uint start, uint slot, mat4 world, float scale, v
                    float max_pixels)
 {
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * height * 0.5;
-    uint clusters = cull_words.data[entry + 2u];
-    uint nodes = cull_words.data[entry + 8u];
+    uint clusters = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
+    uint nodes = cull_words.data[entry + VELK_CLUSTER_ENTRY_NODES];
     // A deforming mesh's spheres are where its clusters are at rest, which says nothing
     // about whether they are hidden.
-    bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
+    bool deforming = (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
     // The tree's nodes are among the mesh's nodes that rays walk, in lod_nodes. The tree is no
     // deeper than kLodMaxDepth.
     uint stack = gl_LocalInvocationIndex * 32u;
@@ -526,7 +524,7 @@ void velk_lod_take(uint entry, uint c, uint slot, uint cut_record, mat4 world, f
     // Drawn in place of finer clusters that are not loaded: its record names a mark, set here
     // where its error as built is too large, which asks for them.
     // Using it also says its own group is wanted, which keeps the group loaded.
-    uint taken = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint taken = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
     uint own_mark = cull_words.data[taken + 23u];
     if (own_mark != 0xFFFFFFFFu) {
         cull_words.data[own_mark] = 1u;
@@ -538,9 +536,9 @@ void velk_lod_take(uint entry, uint c, uint slot, uint cut_record, mat4 world, f
             cull_words.data[mark] = 1u;
         }
     }
-    uint draw = cull_words.data[entry + 13u];
-    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + 9u] & VELK_LOD_MOVED) == 0u) {
-        uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint draw = cull_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
+    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_MOVED) == 0u) {
+        uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
         float radius = uintBitsToFloat(cull_words.data[cluster + 16u]) * scale;
         float away = length(velk_lod_center(cluster + 13u, world, cam));
         float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
@@ -600,8 +598,9 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
     vec3 viewpoint = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_FROM]), uintBitsToFloat(cull_words.data[state + VELK_PART_FROM + 1u]),
                           uintBitsToFloat(cull_words.data[state + VELK_PART_FROM + 2u]));
     uint count = cull_words.data[state + VELK_PART_COUNT];
-    bool same = cull_words.data[state + VELK_PART_CHUNK_FIRST] == cull_words.data[entry + 6u] && cull_words.data[state + VELK_PART_CHUNKS] == chunks
-             && cull_words.data[state + VELK_PART_QUAD_TREE] == cull_words.data[entry + 8u];
+    bool same = cull_words.data[state + VELK_PART_CHUNK_FIRST] == cull_words.data[entry + VELK_PARTITION_ENTRY_FIRST_CHUNK]
+             && cull_words.data[state + VELK_PART_CHUNKS] == chunks
+             && cull_words.data[state + VELK_PART_QUAD_TREE] == cull_words.data[entry + VELK_PARTITION_ENTRY_QUAD_TREE];
     vec3 looked = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_LOOKED]), uintBitsToFloat(cull_words.data[state + VELK_PART_LOOKED + 1u]),
                        uintBitsToFloat(cull_words.data[state + VELK_PART_LOOKED + 2u]));
     bool turned = cull_words.data[state + VELK_PART_OUT_OF_VIEW] != 0u && dot(looked, look) < 0.94;
@@ -641,9 +640,9 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
     cull_words.data[state + VELK_PART_LOOKED + 1u] = floatBitsToUint(look.y);
     cull_words.data[state + VELK_PART_LOOKED + 2u] = floatBitsToUint(look.z);
     cull_words.data[state + VELK_PART_OUT_OF_VIEW] = 0u;
-    cull_words.data[state + VELK_PART_CHUNK_FIRST] = cull_words.data[entry + 6u];
+    cull_words.data[state + VELK_PART_CHUNK_FIRST] = cull_words.data[entry + VELK_PARTITION_ENTRY_FIRST_CHUNK];
     cull_words.data[state + VELK_PART_CHUNKS] = chunks;
-    cull_words.data[state + VELK_PART_QUAD_TREE] = cull_words.data[entry + 8u];
+    cull_words.data[state + VELK_PART_QUAD_TREE] = cull_words.data[entry + VELK_PARTITION_ENTRY_QUAD_TREE];
     cull_words.data[state + VELK_PART_COUNT] = 0u;
     // Nothing for rays until its tree pass lists its new records, which it may never get to
     // when the store has no room for them.
@@ -653,10 +652,10 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
     uint at = atomicAdd(cull_words.data[cut + VELK_CUT_CHOOSE_GROUPS], chunks);
     cull_words.data[state + VELK_PART_CHUNK_START] = at;
     uint list = cull_words.data[cut + VELK_CUT_CHOOSE_WORD];
-    uint first_chunk = cull_words.data[entry + 6u];
+    uint first_chunk = cull_words.data[entry + VELK_PARTITION_ENTRY_FIRST_CHUNK];
     for (uint c = 0u; c < chunks; ++c) {
-        cull_words.data[list + (at + c) * 2u] = first_chunk + c * 64u;
-        cull_words.data[list + (at + c) * 2u + 1u] = index;
+        cull_words.data[list + (at + c) * VELK_CHUNK_END + VELK_CHUNK_FIRST_SLOT] = first_chunk + c * 64u;
+        cull_words.data[list + (at + c) * VELK_CHUNK_END + VELK_CHUNK_PARTITION] = index;
     }
 }
 
@@ -666,12 +665,14 @@ void main()
     if (index >= pc.entry_count) return;
 
     uint entry = pc.table_word + index * VELK_CULL_ENTRY_WORDS;
-    uint chunks = cull_words.data[entry + 7u];
+    uint chunks = cull_words.data[entry + VELK_PARTITION_ENTRY_CHUNKS];
 
-    vec3 lo = vec3(uintBitsToFloat(cull_words.data[entry + 0u]), uintBitsToFloat(cull_words.data[entry + 1u]),
-                   uintBitsToFloat(cull_words.data[entry + 2u]));
-    vec3 hi = vec3(uintBitsToFloat(cull_words.data[entry + 3u]), uintBitsToFloat(cull_words.data[entry + 4u]),
-                   uintBitsToFloat(cull_words.data[entry + 5u]));
+    vec3 lo = vec3(uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MIN]),
+                   uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MIN + 1u]),
+                   uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MIN + 2u]));
+    vec3 hi = vec3(uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MAX]),
+                   uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MAX + 1u]),
+                   uintBitsToFloat(cull_words.data[entry + VELK_PARTITION_ENTRY_MAX + 2u]));
 
     GlobalData globals = velk_globals.data[pc.globals_base];
     lo -= globals.cam_pos.xyz;
@@ -1007,8 +1008,8 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
     GlobalData globals = velk_globals.data[pc.globals_base];
     mat4 vp = globals.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
-    uint clusters = cull_words.data[entry + 2u];
-    uint at = cull_words.data[entry + 8u] + node * VELK_LOD_NODE_STRIDE;
+    uint clusters = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
+    uint at = cull_words.data[entry + VELK_CLUSTER_ENTRY_NODES] + node * VELK_LOD_NODE_STRIDE;
     uint no_rays = s_items[w + 3u] & VELK_CHOOSE_NO_RAYS;
     if (!put) ++g_visited;
     uint n = 0u;
@@ -1031,8 +1032,8 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
 // The roots of an instance's choice; `named` is what its records name: its item.
 void velk_cut_choose(uint named, vec3 viewpoint, uint table)
 {
-    uint first_entry = cull_words.data[table + 8u];
-    uint entries = cull_words.data[table + 9u];
+    uint first_entry = cull_words.data[table + VELK_TABLE_FIRST_ENTRY];
+    uint entries = cull_words.data[table + VELK_TABLE_ENTRY_COUNT];
     if (entries == 0u) {
         velk_cut_root(VELK_CHOOSE_RECORD, named, 0xFFFFFFFFu, table, viewpoint);
         return;
@@ -1054,7 +1055,7 @@ void velk_cut_instance(uint named, uint instance, uint table_word, vec3 viewpoin
         velk_cut_root(VELK_CHOOSE_RECORD, named, 0xFFFFFFFFu, 0xFFFFFFFFu, viewpoint);
         return;
     }
-    velk_cut_choose(named, viewpoint, table_word + cull_instances.data[instance].params.y * 12u);
+    velk_cut_choose(named, viewpoint, table_word + cull_instances.data[instance].params.y * VELK_TABLE_END);
 }
 
 // The topmost node of the quad tree over this member that is small enough on screen from
@@ -1184,10 +1185,10 @@ void main()
 {
     uint cut = pc.cut_word;
     uint chunk_index = gl_WorkGroupID.x;
-    uint chunk = cull_words.data[cut + VELK_CUT_CHOOSE_WORD] + chunk_index * 2u;
+    uint chunk = cull_words.data[cut + VELK_CUT_CHOOSE_WORD] + chunk_index * VELK_CHUNK_END;
     uint lane = gl_LocalInvocationIndex;
-    uint member = cull_words.data[cull_words.data[chunk] + lane];
-    uint state = velk_cut_state(cut, cull_words.data[chunk + 1u]);
+    uint member = cull_words.data[cull_words.data[chunk + VELK_CHUNK_FIRST_SLOT] + lane];
+    uint state = velk_cut_state(cut, cull_words.data[chunk + VELK_CHUNK_PARTITION]);
     uint chunk_word = cull_words.data[cut + VELK_CUT_CHUNK_COUNTS_WORD] + chunk_index;
     // A work group is one chunk of one partition, so this is the same for all its threads. A
     // partition that found no room chooses on the next frame.
@@ -1209,14 +1210,14 @@ void main()
     g_position = 0u;
     g_leaves_only = false;
     if (pc.partition_table != 0xFFFFFFFFu) {
-        uint entry = pc.partition_table + cull_words.data[chunk + 1u] * VELK_CULL_ENTRY_WORDS;
-        uint leaves = cull_words.data[entry + 9u] & ~VELK_QUAD_LEAVES_ONLY;
-        uint position = cull_words.data[chunk] - cull_words.data[entry + 6u] + lane;
-        if (cull_words.data[entry + 8u] != 0xFFFFFFFFu && position < leaves) {
-            g_tree = cull_words.data[entry + 8u];
+        uint entry = pc.partition_table + cull_words.data[chunk + VELK_CHUNK_PARTITION] * VELK_CULL_ENTRY_WORDS;
+        uint leaves = cull_words.data[entry + VELK_PARTITION_ENTRY_TREE_LEAVES] & ~VELK_QUAD_LEAVES_ONLY;
+        uint position = cull_words.data[chunk + VELK_CHUNK_FIRST_SLOT] - cull_words.data[entry + VELK_PARTITION_ENTRY_FIRST_CHUNK] + lane;
+        if (cull_words.data[entry + VELK_PARTITION_ENTRY_QUAD_TREE] != 0xFFFFFFFFu && position < leaves) {
+            g_tree = cull_words.data[entry + VELK_PARTITION_ENTRY_QUAD_TREE];
             g_leaves = leaves;
             g_position = position;
-            g_leaves_only = (cull_words.data[entry + 9u] & VELK_QUAD_LEAVES_ONLY) != 0u;
+            g_leaves_only = (cull_words.data[entry + VELK_PARTITION_ENTRY_TREE_LEAVES] & VELK_QUAD_LEAVES_ONLY) != 0u;
         }
     }
     // The same for all its threads: a work group is one chunk of one partition.
@@ -1481,7 +1482,7 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         return;
     }
     // A cluster's own sphere, or a whole mesh's: its table's.
-    uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 13u : cluster;
+    uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 13u : cluster;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
     vec3 center = mat3(world) * vec3(uintBitsToFloat(cull_words.data[sphere]), uintBitsToFloat(cull_words.data[sphere + 1u]),
@@ -1554,7 +1555,7 @@ bool velk_ray_record(uint record, uint index, vec3 viewpoint, float pixels_per_u
     if (instance == 0xFFFFFFFFu) return false;
     mat4 world = cull_instances.data[instance].world_matrix;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)), dot(world[2].xyz, world[2].xyz)));
-    uint cluster = cull_words.data[entry + 2u] + cull_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cull_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     return velk_ray_pixels(cluster + 8u, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
 }
 
@@ -1873,7 +1874,7 @@ void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
     cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
     cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
     cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
-    atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
+    atomicAdd(cull_words.data[cull_words.data[entry + VELK_CLUSTER_ENTRY_COUNTS] + cluster], 1u);
 }
 
 // Lists a cluster for the second test, false when there is no room for it. Levels of detail
@@ -1973,7 +1974,7 @@ void main()
     }
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
-    uint table = table_word + cull_instances.data[instance].params.y * 12u;
+    uint table = table_word + cull_instances.data[instance].params.y * VELK_TABLE_END;
     GlobalData globals = velk_globals.data[pc.globals_base];
     vec3 cam = globals.cam_pos.xyz;
     mat4 vp = globals.view_projection;
@@ -1981,19 +1982,20 @@ void main()
     float scale = sqrt(scale2);
 
     // The whole instance: near enough.
-    vec3 center = velk_rel_position(world, vec3(uintBitsToFloat(cull_words.data[table]), uintBitsToFloat(cull_words.data[table + 1u]),
-                                                uintBitsToFloat(cull_words.data[table + 2u])), globals);
-    float radius = uintBitsToFloat(cull_words.data[table + 3u]) * scale;
+    vec3 center = velk_rel_position(world, vec3(uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER]),
+                                                uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 1u]),
+                                                uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 2u])), globals);
+    float radius = uintBitsToFloat(cull_words.data[table + VELK_TABLE_RADIUS]) * scale;
     if (pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
     g_instance = instance;
     g_table = table_word;
 
     if (entry == 0xFFFFFFFFu) {
         if (pc.whole == 0u && velk_cut_outside(vp, center, radius)) return;
-        uint at = atomicAdd(cull_words.data[cluster_or_table + 4u], 1u);
-        uint capacity = cull_words.data[cluster_or_table + 6u];
+        uint at = atomicAdd(cull_words.data[cluster_or_table + VELK_TABLE_COUNT], 1u);
+        uint capacity = cull_words.data[cluster_or_table + VELK_TABLE_CAPACITY];
         if (at < capacity) {
-            uint list = cull_words.data[cluster_or_table + 5u];
+            uint list = cull_words.data[cluster_or_table + VELK_TABLE_LIST];
             cull_words.data[list + at] = slot;
             cull_words.data[list + capacity + at] = record;
         }
@@ -2001,9 +2003,9 @@ void main()
     }
 
     uint c = cluster_or_table;
-    uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
     // A deforming mesh's spheres are where it is at rest, which says nothing about where it is.
-    bool deforming = (cull_words.data[entry + 9u] & VELK_LOD_DEFORMING) != 0u;
+    bool deforming = (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
     if (!deforming && pc.whole == 0u) {
         float own_radius = uintBitsToFloat(cull_words.data[cluster + 16u]) * scale;
         if (velk_cut_outside(vp, velk_lod_center(cluster + 13u, world, cam), own_radius)) return;
@@ -2091,7 +2093,7 @@ void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
     cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
     cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
     cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
-    atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
+    atomicAdd(cull_words.data[cull_words.data[entry + VELK_CLUSTER_ENTRY_COUNTS] + cluster], 1u);
 }
 
 // Lists something for the second test, false when there is no room for it.
@@ -2133,7 +2135,7 @@ bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry,
 void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, float pixels_per_unit,
                      bool deforming)
 {
-    uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
     if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam, entry, c, slot)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
     }
@@ -2161,20 +2163,20 @@ void main()
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
 
-    uint table = table_word + cull_instances.data[instance].params.y * 12u;
-    vec4 sphere = vec4(uintBitsToFloat(cull_words.data[table + 0u]),
-                       uintBitsToFloat(cull_words.data[table + 1u]),
-                       uintBitsToFloat(cull_words.data[table + 2u]),
-                       uintBitsToFloat(cull_words.data[table + 3u]));
+    uint table = table_word + cull_instances.data[instance].params.y * VELK_TABLE_END;
+    vec4 sphere = vec4(uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER]),
+                       uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 1u]),
+                       uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 2u]),
+                       uintBitsToFloat(cull_words.data[table + VELK_TABLE_RADIUS]));
     vec3 center = velk_rel_position(world, sphere.xyz, globals);
     float scale2 = max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                        dot(world[2].xyz, world[2].xyz));
     float radius = sphere.w * sqrt(scale2);
-    uint first_entry = cull_words.data[table + 8u];
-    uint entries = cull_words.data[table + 9u];
+    uint first_entry = cull_words.data[table + VELK_TABLE_FIRST_ENTRY];
+    uint entries = cull_words.data[table + VELK_TABLE_ENTRY_COUNT];
     // A deforming mesh's sphere is where it was at rest, which says nothing about whether it
     // is in view or hidden.
-    bool deforming = entries != 0u && (cull_words.data[first_entry + 9u] & VELK_LOD_DEFORMING) != 0u;
+    bool deforming = entries != 0u && (cull_words.data[first_entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
 
     if (!deforming && pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
 
@@ -2204,10 +2206,10 @@ void main()
     }
 
     if (pc.items_word == 0xFFFFFFFFu) {
-        uint index = atomicAdd(cull_words.data[table + 4u], 1u);
-        uint capacity = cull_words.data[table + 6u];
+        uint index = atomicAdd(cull_words.data[table + VELK_TABLE_COUNT], 1u);
+        uint capacity = cull_words.data[table + VELK_TABLE_CAPACITY];
         if (index < capacity) {
-            uint list = cull_words.data[table + 5u];
+            uint list = cull_words.data[table + VELK_TABLE_LIST];
             cull_words.data[list + index] = slot;
             cull_words.data[list + capacity + index] = 0xFFFFFFFFu;
         }
@@ -2265,7 +2267,7 @@ void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
     cull_words.data[record + VELK_CHOSEN_CLUSTER] = cluster;
     cull_words.data[record + VELK_CHOSEN_SLOT] = slot;
     cull_words.data[record + VELK_CHOSEN_CUT_RECORD] = cut_record;
-    atomicAdd(cull_words.data[cull_words.data[entry + 4u] + cluster], 1u);
+    atomicAdd(cull_words.data[cull_words.data[entry + VELK_CLUSTER_ENTRY_COUNTS] + cluster], 1u);
 }
 
 bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam);
@@ -2283,7 +2285,7 @@ bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam)
 void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, float pixels_per_unit,
                      bool deforming)
 {
-    uint cluster = cull_words.data[entry + 2u] + c * VELK_LOD_CLUSTER_WORDS;
+    uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
     if (deforming || !velk_lod_occluded(cluster + 3u, world, scale, cam)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
     }
@@ -2313,7 +2315,7 @@ void main()
 
     if (entry != 0xFFFFFFFFu) {
         uint cluster = cull_words.data[record + VELK_RETEST_CLUSTER];
-        uint sphere = cull_words.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
+        uint sphere = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 3u;
         if (!velk_lod_occluded(sphere, world, scale, cam)) {
             mat4 vp = globals.view_projection;
             float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
@@ -2323,25 +2325,26 @@ void main()
         return;
     }
 
-    uint table = table_word + cull_instances.data[instance].params.y * 12u;
-    vec3 local_center = vec3(uintBitsToFloat(cull_words.data[table + 0u]), uintBitsToFloat(cull_words.data[table + 1u]),
-                             uintBitsToFloat(cull_words.data[table + 2u]));
-    float radius = uintBitsToFloat(cull_words.data[table + 3u]) * scale;
+    uint table = table_word + cull_instances.data[instance].params.y * VELK_TABLE_END;
+    vec3 local_center = vec3(uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER]),
+                             uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 1u]),
+                             uintBitsToFloat(cull_words.data[table + VELK_TABLE_CENTER + 2u]));
+    float radius = uintBitsToFloat(cull_words.data[table + VELK_TABLE_RADIUS]) * scale;
     if (velk_behind_pyramid(pc.pyramid_word, globals.view_projection, velk_rel_position(world, local_center, globals), radius)) {
         return;
     }
 
     // After the positions the first test filled. A table without a list has no capacity.
-    uint position = cull_words.data[table + 4u] + atomicAdd(cull_words.data[table + 11u], 1u);
-    uint capacity = cull_words.data[table + 6u];
+    uint position = cull_words.data[table + VELK_TABLE_COUNT] + atomicAdd(cull_words.data[table + VELK_TABLE_SECOND_COUNT], 1u);
+    uint capacity = cull_words.data[table + VELK_TABLE_CAPACITY];
     if (position < capacity) {
-        uint list = cull_words.data[table + 5u];
+        uint list = cull_words.data[table + VELK_TABLE_LIST];
         cull_words.data[list + position] = slot;
         cull_words.data[list + capacity + position] = 0xFFFFFFFFu;
     }
 
-    uint first_entry = cull_words.data[table + 8u];
-    uint entries = cull_words.data[table + 9u];
+    uint first_entry = cull_words.data[table + VELK_TABLE_FIRST_ENTRY];
+    uint entries = cull_words.data[table + VELK_TABLE_ENTRY_COUNT];
     for (uint e = 0u; e < entries; ++e) {
         velk_lod_visit(first_entry + e * VELK_CLUSTER_ENTRY_WORDS, slot, world, scale, cam, lod_cam, globals.view_projection,
                        globals.viewport.y, pc.lod_max_pixels);
@@ -2395,14 +2398,14 @@ void main()
         cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_GROUPS + 2u] = 1u;
     }
 
-    uint capacity = cull_words.data[entry + 1u];
-    uint table = cull_words.data[entry + 2u];
-    uint clusters = cull_words.data[entry + 3u];
-    uint counts = cull_words.data[entry + 4u];
-    uint cursors = cull_words.data[entry + 5u];
+    uint capacity = cull_words.data[entry + VELK_CLUSTER_ENTRY_CAPACITY];
+    uint table = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
+    uint clusters = cull_words.data[entry + VELK_CLUSTER_ENTRY_CLUSTERS];
+    uint counts = cull_words.data[entry + VELK_CLUSTER_ENTRY_COUNTS];
+    uint cursors = cull_words.data[entry + VELK_CLUSTER_ENTRY_CURSORS];
     uint commands = cull_words.data[entry + (pc.second_phase != 0u ? 11u : 6u)];
 
-    uint first = pc.second_phase != 0u ? cull_words.data[entry + 10u] : 0u;
+    uint first = pc.second_phase != 0u ? cull_words.data[entry + VELK_CLUSTER_ENTRY_FIRST_POSITIONS] : 0u;
     uint draws = 0u;
     for (uint c = 0u; c < clusters; ++c) {
         uint count = min(cull_words.data[counts + c], capacity - first);
@@ -2421,10 +2424,10 @@ void main()
         first += count;
     }
     if (pc.second_phase != 0u) {
-        cull_words.data[entry + 12u] = draws;
+        cull_words.data[entry + VELK_CLUSTER_ENTRY_SECOND_DRAWS] = draws;
     } else {
-        cull_words.data[entry + 7u] = draws;
-        cull_words.data[entry + 10u] = first;
+        cull_words.data[entry + VELK_CLUSTER_ENTRY_DRAWS] = draws;
+        cull_words.data[entry + VELK_CLUSTER_ENTRY_FIRST_POSITIONS] = first;
     }
 }
 )";
@@ -2451,13 +2454,13 @@ void main()
     if (index >= min(cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT], pc.chosen_capacity)) return;
     uint record = pc.chosen_word + VELK_CHOSEN_LIST_RECORDS + index * VELK_CHOSEN_END;
     uint entry = cull_words.data[record + VELK_CHOSEN_ENTRY];
-    uint at = atomicAdd(cull_words.data[cull_words.data[entry + 5u] + cull_words.data[record + VELK_CHOSEN_CLUSTER]], 1u);
-    uint capacity = cull_words.data[entry + 1u];
+    uint at = atomicAdd(cull_words.data[cull_words.data[entry + VELK_CLUSTER_ENTRY_CURSORS] + cull_words.data[record + VELK_CHOSEN_CLUSTER]], 1u);
+    uint capacity = cull_words.data[entry + VELK_CLUSTER_ENTRY_CAPACITY];
     if (at < capacity) {
-        uint list = cull_words.data[entry];
+        uint list = cull_words.data[entry + VELK_CLUSTER_ENTRY_LIST];
         cull_words.data[list + at] = cull_words.data[record + VELK_CHOSEN_SLOT];
         cull_words.data[list + capacity + at] = cull_words.data[record + VELK_CHOSEN_CUT_RECORD];
-        cull_words.data[list + capacity * 2u + at] = cull_words.data[entry + 2u]
+        cull_words.data[list + capacity * 2u + at] = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE]
                                                    + cull_words.data[record + VELK_CHOSEN_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     }
 }
@@ -2767,11 +2770,8 @@ struct InstanceCullPass
     bool renamed = false;  ///< The recording renames, so the next frame records without.
 };
 
-/// Words per mesh in a batch's culling table, and where its first cluster entry and their count
-/// are in it. Mirror DefaultBatch's table.
-inline constexpr uint32_t kBatchTableWords = 12;
-inline constexpr uint32_t kBatchFirstEntryWord = 8;
-inline constexpr uint32_t kBatchEntryCountWord = 9;
+/// Words per mesh in a batch's culling table: VELK_BATCH_TABLE (cull_layout.h).
+inline constexpr uint32_t kBatchTableWords = kTableEnd;
 
 /**
  * Writes the instanced visuals' items (kPlainItemWords), a thread per item from `first_item` on:
@@ -3239,7 +3239,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             t.table_word = info.table_word;
             for (uint32_t m = 0; m < info.table_count; ++m) {
                 uint32_t words[2] = {};
-                arena->read_at((uint64_t(info.table_word) + uint64_t(m) * kBatchTableWords + kBatchFirstEntryWord) * sizeof(uint32_t),
+                arena->read_at((uint64_t(info.table_word) + uint64_t(m) * kBatchTableWords + kTableFirstEntry) * sizeof(uint32_t),
                                words, sizeof(words));
                 t.first_entry.push_back(words[0]);
                 t.entry_count.push_back(words[1]);

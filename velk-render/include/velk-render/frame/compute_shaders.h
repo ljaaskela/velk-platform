@@ -481,11 +481,13 @@ void main()
     float t = float(index % kSteps) / float(kSteps - 1u);
 
     uint entry = pc.table_word + partition_index * VELK_CULL_ENTRY_WORDS;
-    if (velk_culling.data[entry + 7u] == 0u) return;
-    vec3 lo = vec3(uintBitsToFloat(velk_culling.data[entry]), uintBitsToFloat(velk_culling.data[entry + 1u]),
-                   uintBitsToFloat(velk_culling.data[entry + 2u]));
-    vec3 hi = vec3(uintBitsToFloat(velk_culling.data[entry + 3u]), uintBitsToFloat(velk_culling.data[entry + 4u]),
-                   uintBitsToFloat(velk_culling.data[entry + 5u]));
+    if (velk_culling.data[entry + VELK_PARTITION_ENTRY_CHUNKS] == 0u) return;
+    vec3 lo = vec3(uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MIN]),
+                   uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MIN + 1u]),
+                   uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MIN + 2u]));
+    vec3 hi = vec3(uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MAX]),
+                   uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MAX + 1u]),
+                   uintBitsToFloat(velk_culling.data[entry + VELK_PARTITION_ENTRY_MAX + 2u]));
     uint state = velk_culling.data[pc.cut_word + VELK_CUT_STATES_WORD] + partition_index * VELK_CUT_PARTITION_WORDS;
     bool choosing = velk_culling.data[state + VELK_PART_CHOOSING] != 0u;
 

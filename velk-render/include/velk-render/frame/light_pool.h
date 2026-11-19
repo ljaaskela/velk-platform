@@ -862,7 +862,7 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
             if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
             // From its cluster's sphere, or its whole mesh's.
             uint sphere = entry == 0xFFFFFFFFu ? VELK_LIGHT_WORDS.data[record + VELK_RECORD_MESH_TABLE]
-                        : VELK_LIGHT_WORDS.data[entry + 2u] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + 13u;
+                        : VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_TABLE] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + 13u;
             vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
                               uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
             velk_light_add_one(value, velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), lights,
@@ -1417,7 +1417,7 @@ void main()
         radius = 0.5 * length(to_world * inst.size.xyz);
     } else {
         uint sphere = entry != VELK_LIGHT_NONE
-                        ? VELK_LIGHT_WORDS.data[(entry & ~VELK_CUT_LIGHT_ONLY) + 2u] + cluster * VELK_LOD_CLUSTER_WORDS + 13u
+                        ? VELK_LIGHT_WORDS.data[(entry & ~VELK_CUT_LIGHT_ONLY) + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + 13u
                         : cluster;
         local = velk_change_vec3(sphere);
         radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 3u]) * scale;
@@ -1913,7 +1913,7 @@ void main()
         }
         return;
     }
-    uint clusters = light_words.data[entry + 2u];
+    uint clusters = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
     // A cluster: as wide on screen as it is now, and its largest triangle.
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + 19u];
@@ -2235,7 +2235,7 @@ void main()
     uint instance = light_words.data[list + 2u];
     uint entry = light_words.data[record + VELK_RECORD_ENTRY];
     uint slot = light_words.data[record + VELK_RECORD_SLOT];
-    uint clusters = light_words.data[entry + 2u];
+    uint clusters = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + 19u];
     GlobalData g = velk_globals.data[pc.globals_base];
@@ -2295,7 +2295,7 @@ void main()
                 }
             }
         }
-        uint draw = light_words.data[entry + 13u];
+        uint draw = light_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
         if (again || (s_lights != 0u && draw == 0xFFFFFFFFu)) {
             light_words.data[record + VELK_RECORD_LIGHT] = was;
         } else if (s_lights == 0u) {

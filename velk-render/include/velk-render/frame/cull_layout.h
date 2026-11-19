@@ -13,6 +13,55 @@ namespace velk {
 #define VELK_LAYOUT_CPP_WORD(cp, gp, cpp, glsl, word) inline constexpr uint32_t k##cp##cpp = word;
 #define VELK_LAYOUT_GLSL_WORD(cp, gp, cpp, glsl, word) "#define VELK_" #gp "_" #glsl " " #word "u\n"
 
+/// A batch's culling table, a row per mesh (kTable, VELK_TABLE). See instance_cull_compute_src.
+#define VELK_BATCH_TABLE(X, cp, gp)                                                                \
+    X(cp, gp, Center, CENTER, 0)                /* its bounding sphere's centre, three floats */ \
+    X(cp, gp, Radius, RADIUS, 3)                /* and radius */                               \
+    X(cp, gp, Count, COUNT, 4)                  /* visible slots the first test listed */      \
+    X(cp, gp, List, LIST, 5)                    /* the word of the list of visible slots */    \
+    X(cp, gp, Capacity, CAPACITY, 6)            /* the list's capacity */                      \
+    X(cp, gp, FirstEntry, FIRST_ENTRY, 8)       /* the word of its primitives' cluster entries (VELK_CLUSTER_ENTRY) */ \
+    X(cp, gp, EntryCount, ENTRY_COUNT, 9)       /* and how many */                             \
+    X(cp, gp, SecondCount, SECOND_COUNT, 11)    /* visible slots the second test listed after them */ \
+    X(cp, gp, End, END, 12)
+
+/// A primitive's entry for drawing by cluster (kClusterEntry, VELK_CLUSTER_ENTRY). See
+/// instance_cluster_runs_src.
+#define VELK_CLUSTER_ENTRY(X, cp, gp)                                                              \
+    X(cp, gp, ListWord, LIST, 0)                /* the word of its list of positions, then each one's kept cut record and cluster record */ \
+    X(cp, gp, CapacityWord, CAPACITY, 1)        /* the list's capacity */                      \
+    X(cp, gp, TableWord, TABLE, 2)              /* the word of its cluster table (kLodClusterWords a cluster) */ \
+    X(cp, gp, ClustersWord, CLUSTERS, 3)        /* its clusters */                             \
+    X(cp, gp, CountsWord, COUNTS, 4)            /* the word of its counts, one a cluster */    \
+    X(cp, gp, CursorsWord, CURSORS, 5)          /* the word of its cursors, likewise */        \
+    X(cp, gp, CommandsWord, COMMANDS, 6)        /* the word of its commands, likewise */       \
+    X(cp, gp, DrawsWord, DRAWS, 7)              /* how many commands are in use */             \
+    X(cp, gp, NodesWord, NODES, 8)              /* the word of the tree over its clusters */   \
+    X(cp, gp, FlagsWord, FLAGS, 9)              /* kLodDeforming, kLodMoved */                 \
+    X(cp, gp, FirstPositionsWord, FIRST_POSITIONS, 10) /* how many positions the first phase used */ \
+    X(cp, gp, SecondCommandsWord, SECOND_COMMANDS, 11) /* the second phase's commands */       \
+    X(cp, gp, SecondDrawsWord, SECOND_DRAWS, 12) /* and how many are in use */                 \
+    X(cp, gp, DrawWord, DRAW, 13)               /* the draw data record its pixels name, 0xFFFFFFFF until emitted */ \
+    X(cp, gp, RayWord, RAY, 14)                 /* the word of its clusters' ray headers (MeshLodInfo::ray_word) */ \
+    X(cp, gp, Words, END, 16)
+
+/// A partition's entry in a partition table (kPartitionEntry, VELK_PARTITION_ENTRY). See
+/// instance_partition_cull_src.
+#define VELK_PARTITION_ENTRY(X, cp, gp)                                                            \
+    X(cp, gp, Min, MIN, 0)                      /* its world bounds' minimum, three floats */  \
+    X(cp, gp, Max, MAX, 3)                      /* and maximum */                              \
+    X(cp, gp, FirstChunk, FIRST_CHUNK, 6)       /* the word of its first chunk */              \
+    X(cp, gp, Chunks, CHUNKS, 7)                /* its chunk count */                          \
+    X(cp, gp, QuadTree, QUAD_TREE, 8)           /* the word of its quad tree, kCullNoSlot for none */ \
+    X(cp, gp, TreeLeaves, TREE_LEAVES, 9)       /* the tree's leaves, with kQuadLeavesOnly */  \
+    X(cp, gp, End, END, 10)
+
+/// A chunk of a kept cut's choose list (kChunk, VELK_CHUNK).
+#define VELK_CHUNK(X, cp, gp)                                                                      \
+    X(cp, gp, FirstSlot, FIRST_SLOT, 0)         /* the word of its first slot */               \
+    X(cp, gp, Partition, PARTITION, 1)          /* the partition it is from */                 \
+    X(cp, gp, End, END, 2)
+
 /// A kept cut's header (kCut, VELK_CUT), in the culling arena: see instance_cull.h's description
 /// of kept cuts. Two stores of records flip each frame, and with them the node and ray list stores.
 #define VELK_CUT_HEADER(X, cp, gp)                                                                 \
@@ -132,6 +181,10 @@ namespace velk {
     X(cp, gp, From, FROM, 8)            /* where its levels of detail are chosen from, three floats */ \
     X(cp, gp, End, END, 12)             /* after a spare word */
 
+VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
+VELK_CLUSTER_ENTRY(VELK_LAYOUT_CPP_WORD, ClusterEntry, CLUSTER_ENTRY)
+VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
+VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
 VELK_CUT_HEADER(VELK_LAYOUT_CPP_WORD, Cut, CUT)
 VELK_CUT_PART(VELK_LAYOUT_CPP_WORD, Part, PART)
 VELK_CUT_RECORD(VELK_LAYOUT_CPP_WORD, CutRecord, RECORD)
@@ -145,6 +198,10 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
 
 /// Every layout's words, for velk.glsl.
 #define VELK_CULL_LAYOUT_GLSL                                                                      \
+    VELK_BATCH_TABLE(VELK_LAYOUT_GLSL_WORD, Table, TABLE)                                          \
+    VELK_CLUSTER_ENTRY(VELK_LAYOUT_GLSL_WORD, ClusterEntry, CLUSTER_ENTRY)                         \
+    VELK_PARTITION_ENTRY(VELK_LAYOUT_GLSL_WORD, PartitionEntry, PARTITION_ENTRY)                   \
+    VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \
     VELK_CUT_HEADER(VELK_LAYOUT_GLSL_WORD, Cut, CUT)                                               \
     VELK_CUT_PART(VELK_LAYOUT_GLSL_WORD, Part, PART)                                               \
     VELK_CUT_RECORD(VELK_LAYOUT_GLSL_WORD, CutRecord, RECORD)                                      \

@@ -412,10 +412,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             cur_key = key;
             if (entry != VELK_RAY_NONE) {
                 // A cluster of a hierarchy: its triangle tree, or as drawn.
-                cur_draw = velk_culling.data[entry + 13u];
-                cur_cluster = velk_culling.data[entry + 2u] + cluster * VELK_LOD_CLUSTER_WORDS;
+                cur_draw = velk_culling.data[entry + VELK_CLUSTER_ENTRY_DRAW];
+                cur_cluster = velk_culling.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
-                uint rays = velk_culling.data[entry + 14u];
+                uint rays = velk_culling.data[entry + VELK_CLUSTER_ENTRY_RAY];
                 if (rays != VELK_RAY_NONE) {
                     uint header = rays + cluster * 20u;
                     mesh_base = velk_cluster_words.data[header + 13u];

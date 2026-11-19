@@ -108,9 +108,9 @@ R"(
 // Words before an item descriptor's meshes: kItemDescriptorHeaderWords.
 #define VELK_ITEM_DESCRIPTOR_HEADER_WORDS 8u
 // Words per cluster draw entry: kClusterEntryWords.
-#define VELK_CLUSTER_ENTRY_WORDS 16u
+#define VELK_CLUSTER_ENTRY_WORDS VELK_CLUSTER_ENTRY_END
 // Words per partition in a partition table: kCullEntryWords.
-#define VELK_CULL_ENTRY_WORDS 10u
+#define VELK_CULL_ENTRY_WORDS VELK_PARTITION_ENTRY_END
 // Words per node of a partition's quad tree: kQuadNodeWords.
 #define VELK_QUAD_NODE_WORDS 12u
 // A kept cut's record of a quad has this for its entry: kCutQuad.

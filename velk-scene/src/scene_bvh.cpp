@@ -722,11 +722,12 @@ void SceneBvh::emit_quad_trees(FrameContext& ctx, IRenderGraph& graph)
         partition.quad_tree_dirty = false;
         if (partition.cull_entry != kUnplaced) {
             // Its list and chunks with its tree, which a list of chunk quads waited for.
+            static_assert(kPartitionEntryTreeLeaves == kPartitionEntryFirstChunk + 3, "written as one run");
             const uint32_t words[4] = {static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t)),
                                        partition.cull_chunks,
                                        static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)),
                                        partition.quad_leaves | (partition.quad_leaves_only ? kQuadLeavesOnly : 0u)};
-            arena->update_at(plain_cull_.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + 6u) * sizeof(uint32_t),
+            arena->update_at(plain_cull_.offset() + (uint64_t(partition.cull_entry) * kCullEntryWords + kPartitionEntryFirstChunk) * sizeof(uint32_t),
                              words, sizeof(words));
         }
         ++trees;
@@ -911,15 +912,16 @@ void SceneBvh::update_residency()
 void SceneBvh::write_cull_entry(const Partition& partition, IGpuArena& arena, bool fresh)
 {
     uint32_t entry[kCullEntryWords];
-    std::memcpy(entry, partition.cull_bounds.min, sizeof(float) * 3);
-    std::memcpy(entry + 3, partition.cull_bounds.max, sizeof(float) * 3);
+    std::memcpy(entry + kPartitionEntryMin, partition.cull_bounds.min, sizeof(float) * 3);
+    std::memcpy(entry + kPartitionEntryMax, partition.cull_bounds.max, sizeof(float) * 3);
     // Its quad tree once a build of it is under way, which emit_quad_trees writes. A list of
     // quads is nothing to choose from without its tree, so it waits for it too.
     const bool tree = partition.quad_leaves != 0 && !partition.quad_tree_dirty;
-    entry[6] = partition.cull_members.valid() ? static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t)) : 0u;
-    entry[7] = partition.quad_leaves_only && !tree ? 0u : partition.cull_chunks;
-    entry[8] = tree ? static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)) : kCullNoSlot;
-    entry[9] = tree ? partition.quad_leaves | (partition.quad_leaves_only ? kQuadLeavesOnly : 0u) : 0u;
+    entry[kPartitionEntryFirstChunk] =
+        partition.cull_members.valid() ? static_cast<uint32_t>(partition.cull_members.offset() / sizeof(uint32_t)) : 0u;
+    entry[kPartitionEntryChunks] = partition.quad_leaves_only && !tree ? 0u : partition.cull_chunks;
+    entry[kPartitionEntryQuadTree] = tree ? static_cast<uint32_t>(partition.quad_tree.offset() / sizeof(uint32_t)) : kCullNoSlot;
+    entry[kPartitionEntryTreeLeaves] = tree ? partition.quad_leaves | (partition.quad_leaves_only ? kQuadLeavesOnly : 0u) : 0u;
     const uint64_t at = plain_cull_.offset() + uint64_t(partition.cull_entry) * sizeof(entry);
     if (fresh) {
         arena.write_at(at, entry, sizeof(entry));

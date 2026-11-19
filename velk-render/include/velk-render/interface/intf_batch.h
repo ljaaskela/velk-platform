@@ -57,13 +57,9 @@ struct BatchBufferLayout
 /// (VELK_CHOSEN_LIST and VELK_CHOSEN in cull_layout.h). See `instance_cluster_fill_src`.
 inline constexpr uint32_t kCullChosenHeaderWords = kChosenListRecords;
 inline constexpr uint32_t kCullChosenRecordWords = kChosenEnd;
-/// Words in a cluster draw entry: see `instance_cluster_runs_src`. Mirrors VELK_CLUSTER_ENTRY_WORDS.
-inline constexpr uint32_t kClusterEntryWords = 16;
-/// Where in a cluster draw entry the draw data record its pixels name is, written when the
-/// draw is emitted, so that tiny clusters can name it too. 0xFFFFFFFF until then.
-inline constexpr uint32_t kClusterEntryDrawWord = 13;
-/// Where in a cluster draw entry its clusters' ray headers are (MeshLodInfo::ray_word).
-inline constexpr uint32_t kClusterEntryRayWord = 14;
+/// A cluster draw entry's words, kClusterEntryWords of them, are VELK_CLUSTER_ENTRY in
+/// cull_layout.h. Its draw data record (kClusterEntryDrawWord) is written when the draw is
+/// emitted, so that tiny clusters can name it too.
 
 /**
  * @brief What GPU culling needs to know about a batch. Batches with the same @c key
