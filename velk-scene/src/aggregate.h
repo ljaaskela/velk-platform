@@ -3,8 +3,10 @@
 
 #include <velk/string_view.h>
 
+#include <velk-render/frame/cull_layout.h>
 #include <velk-render/interface/intf_mesh.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace velk::impl {
@@ -22,6 +24,10 @@ struct MeshQuad
 /// Words of a MeshQuad in the GPU table of a visual's meshes.
 inline constexpr uint32_t kMeshQuadWords = 10;
 static_assert(sizeof(MeshQuad) == kMeshQuadWords * sizeof(uint32_t), "Mirrors quad_tree_build_src");
+static_assert(offsetof(MeshQuad, center) == kQuadNodeCenter * sizeof(uint32_t) && offsetof(MeshQuad, u) == kQuadNodeU * sizeof(uint32_t)
+                  && offsetof(MeshQuad, v) == kQuadNodeV * sizeof(uint32_t)
+                  && offsetof(MeshQuad, color) == kQuadNodeColor * sizeof(uint32_t),
+              "Mirrors VELK_QUAD_NODE");
 
 /// @p mesh's quad: from its bounds, coloured by its primitives' materials' average albedo, by
 /// the surface each covers. False when it has no bounds.

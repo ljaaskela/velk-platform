@@ -260,23 +260,23 @@ void store3(uint w, vec3 x)
 Quad load_node(uint w)
 {
     Quad q;
-    q.c = load3(w);
-    q.u = load3(w + 3u);
-    q.v = load3(w + 6u);
-    q.color = unpackUnorm4x8(build_words.data[w + 9u]);
-    q.radius = uintBitsToFloat(build_words.data[w + 10u]);
+    q.c = load3(w + VELK_QUAD_NODE_CENTER);
+    q.u = load3(w + VELK_QUAD_NODE_U);
+    q.v = load3(w + VELK_QUAD_NODE_V);
+    q.color = unpackUnorm4x8(build_words.data[w + VELK_QUAD_NODE_COLOR]);
+    q.radius = uintBitsToFloat(build_words.data[w + VELK_QUAD_NODE_RADIUS]);
     return q;
 }
 
 void store_node(uint w, Quad q)
 {
-    store3(w, q.c);
-    store3(w + 3u, q.u);
-    store3(w + 6u, q.v);
-    build_words.data[w + 9u] = packUnorm4x8(q.color);
-    build_words.data[w + 10u] = floatBitsToUint(q.radius);
+    store3(w + VELK_QUAD_NODE_CENTER, q.c);
+    store3(w + VELK_QUAD_NODE_U, q.u);
+    store3(w + VELK_QUAD_NODE_V, q.v);
+    build_words.data[w + VELK_QUAD_NODE_COLOR] = packUnorm4x8(q.color);
+    build_words.data[w + VELK_QUAD_NODE_RADIUS] = floatBitsToUint(q.radius);
     // Its light, none until a pixel under it is lit (light_claim_src).
-    build_words.data[w + 11u] = kNone;
+    build_words.data[w + VELK_QUAD_NODE_LIGHT] = kNone;
 }
 
 Quad no_quad()
@@ -294,10 +294,10 @@ Quad no_quad()
 Quad leaf(mat4 world, uint mesh_word)
 {
     Quad q;
-    q.c = (world * vec4(load3(mesh_word), 1.0)).xyz;
-    q.u = mat3(world) * load3(mesh_word + 3u);
-    q.v = mat3(world) * load3(mesh_word + 6u);
-    uint color = build_words.data[mesh_word + 9u];
+    q.c = (world * vec4(load3(mesh_word + VELK_QUAD_NODE_CENTER), 1.0)).xyz;
+    q.u = mat3(world) * load3(mesh_word + VELK_QUAD_NODE_U);
+    q.v = mat3(world) * load3(mesh_word + VELK_QUAD_NODE_V);
+    uint color = build_words.data[mesh_word + VELK_QUAD_NODE_COLOR];
     q.color = unpackUnorm4x8(color);
     q.radius = color == 0u ? -1.0 : length(q.u) + length(q.v);
     return q;

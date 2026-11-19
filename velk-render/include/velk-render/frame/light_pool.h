@@ -549,14 +549,17 @@ uint velk_light_quad_node(uint tree, uint node, vec3 cam, float pixels_per_unit,
     for (uint step = 0u; step < 32u && i > 0u; ++step) {
         uint parent = (i - 1u) / 2u;
         uint w = tree + parent * VELK_QUAD_NODE_WORDS;
-        float radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 10u]);
+        float radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_RADIUS]);
         if (radius < 0.0) break;
-        vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 1u]),
-                           uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 2u]));
-        vec3 u = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 3u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 4u]),
-                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 5u]));
-        vec3 v = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 6u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 7u]),
-                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + 8u]));
+        vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_CENTER]),
+                           uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_CENTER + 1u]),
+                           uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_CENTER + 2u]));
+        vec3 u = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_U]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_U + 1u]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_U + 2u]));
+        vec3 v = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_V]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_V + 1u]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[w + VELK_QUAD_NODE_V + 2u]));
         float near = length(center - cam) - radius;
         if (near <= 0.0 || 2.0 * max(length(u), length(v)) * pixels_per_unit > light_pixels * near) break;
         i = parent;
@@ -849,10 +852,11 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
         float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
         uint node = velk_light_quad_node(VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_TREE], VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_NODE],
                                          g.cam_pos.xyz, pixels_per_unit, light_pixels);
-        uint value = VELK_LIGHT_WORDS.data[node + 11u];
+        uint value = VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_LIGHT];
         if (value >= VELK_LIGHT_PENDING || (value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
-        vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[node]), uintBitsToFloat(VELK_LIGHT_WORDS.data[node + 1u]),
-                           uintBitsToFloat(VELK_LIGHT_WORDS.data[node + 2u])) - g.cam_pos.xyz;
+        vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_CENTER]),
+                           uintBitsToFloat(VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_CENTER + 1u]),
+                           uintBitsToFloat(VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_CENTER + 2u])) - g.cam_pos.xyz;
         velk_light_add_one(value, center, lights, sums);
     } else {
         uint value = VELK_LIGHT_WORDS.data[record + VELK_RECORD_LIGHT];
@@ -1201,10 +1205,11 @@ void main()
     vec3 center;
     float radius;
     if (kind == VELK_LIGHT_TRACE_NODE) {
-        word = at + 11u;
-        center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[at]), uintBitsToFloat(VELK_LIGHT_WORDS.data[at + 1u]),
-                      uintBitsToFloat(VELK_LIGHT_WORDS.data[at + 2u])) - g.cam_pos.xyz;
-        radius = max(uintBitsToFloat(VELK_LIGHT_WORDS.data[at + 10u]), 0.0);
+        word = at + VELK_QUAD_NODE_LIGHT;
+        center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[at + VELK_QUAD_NODE_CENTER]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[at + VELK_QUAD_NODE_CENTER + 1u]),
+                      uintBitsToFloat(VELK_LIGHT_WORDS.data[at + VELK_QUAD_NODE_CENTER + 2u])) - g.cam_pos.xyz;
+        radius = max(uintBitsToFloat(VELK_LIGHT_WORDS.data[at + VELK_QUAD_NODE_RADIUS]), 0.0);
     } else {
         // A record's one value, or the coarse light on the first page of its own points.
         if (kind == VELK_LIGHT_TRACE_COARSE && at >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
@@ -1377,14 +1382,14 @@ void main()
     // A quad: its light is on the node above it as wide as the light spacing, wherever the
     // camera is, so its node and all above it.
     if (entry == VELK_CUT_QUAD) {
-        vec3 center = velk_change_vec3(cluster) - cam;
-        float radius = max(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 10u]), 0.0);
+        vec3 center = velk_change_vec3(cluster + VELK_QUAD_NODE_CENTER) - cam;
+        float radius = max(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + VELK_QUAD_NODE_RADIUS]), 0.0);
         velk_light_slots_at(center, slots);
         if (!all && !velk_change_alters(changes, center, radius, slots)) return;
         uint tree = slot;
         uint i = (cluster - tree) / VELK_QUAD_NODE_WORDS;
         for (uint step = 0u; step < 32u; ++step) {
-            velk_change_one(tree + i * VELK_QUAD_NODE_WORDS + 11u);
+            velk_change_one(tree + i * VELK_QUAD_NODE_WORDS + VELK_QUAD_NODE_LIGHT);
             if (i == 0u) break;
             i = (i - 1u) / 2u;
         }
@@ -1894,10 +1899,10 @@ void main()
     if (entry == VELK_CUT_QUAD) {
         uint node = velk_light_quad_node(light_words.data[record + VELK_RECORD_QUAD_TREE], light_words.data[record + VELK_RECORD_QUAD_NODE], g.cam_pos.xyz,
                                          pixels_per_unit, pc.light_pixels);
-        if (light_words.data[node + 11u] == VELK_LIGHT_NONE) {
-            atomicCompSwap(light_words.data[node + 11u], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
+        if (light_words.data[node + VELK_QUAD_NODE_LIGHT] == VELK_LIGHT_NONE) {
+            atomicCompSwap(light_words.data[node + VELK_QUAD_NODE_LIGHT], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
         }
-        velk_light_list_one(node + 11u, VELK_LIGHT_TRACE_NODE, node, 0u, 0u, frame);
+        velk_light_list_one(node + VELK_QUAD_NODE_LIGHT, VELK_LIGHT_TRACE_NODE, node, 0u, 0u, frame);
         return;
     }
 

@@ -46,6 +46,17 @@ namespace velk {
     X(cp, gp, Color, COLOR, 24)                                                                \
     X(cp, gp, Words, WORDS, 28)
 
+/// A node of a partition's quad tree (kQuadNode, VELK_QUAD_NODE), in world space; also what an
+/// instance of a mesh is in it, in the mesh's space. See kQuadLeavesOnly in instance_cull.h.
+#define VELK_QUAD_NODE(X, cp, gp)                                                                  \
+    X(cp, gp, Center, CENTER, 0)                /* three floats */                             \
+    X(cp, gp, U, U, 3)                          /* its two half axes, three floats each; its normal is their cross product */ \
+    X(cp, gp, V, V, 6)                                                                         \
+    X(cp, gp, Color, COLOR, 9)                  /* RGBA8, red in the low byte */               \
+    X(cp, gp, Radius, RADIUS, 10)               /* of a sphere at its centre around it and every quad under it, negative for an empty node */ \
+    X(cp, gp, Light, LIGHT, 11)                 /* the light of the members under it, one value or kLightNone */ \
+    X(cp, gp, Words, WORDS, 12)
+
 /// A primitive's entry for drawing by cluster (kClusterEntry, VELK_CLUSTER_ENTRY). See
 /// instance_cluster_runs_src.
 #define VELK_CLUSTER_ENTRY(X, cp, gp)                                                              \
@@ -204,6 +215,7 @@ namespace velk {
 
 VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
 VELK_LOD_CLUSTER(VELK_LAYOUT_CPP_WORD, LodCluster, LOD_CLUSTER)
+VELK_QUAD_NODE(VELK_LAYOUT_CPP_WORD, QuadNode, QUAD_NODE)
 VELK_CLUSTER_ENTRY(VELK_LAYOUT_CPP_WORD, ClusterEntry, CLUSTER_ENTRY)
 VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
 VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
@@ -222,6 +234,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
 #define VELK_CULL_LAYOUT_GLSL                                                                      \
     VELK_BATCH_TABLE(VELK_LAYOUT_GLSL_WORD, Table, TABLE)                                          \
     VELK_LOD_CLUSTER(VELK_LAYOUT_GLSL_WORD, LodCluster, LOD_CLUSTER)                               \
+    VELK_QUAD_NODE(VELK_LAYOUT_GLSL_WORD, QuadNode, QUAD_NODE)                                     \
     VELK_CLUSTER_ENTRY(VELK_LAYOUT_GLSL_WORD, ClusterEntry, CLUSTER_ENTRY)                         \
     VELK_PARTITION_ENTRY(VELK_LAYOUT_GLSL_WORD, PartitionEntry, PARTITION_ENTRY)                   \
     VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \

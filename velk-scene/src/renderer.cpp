@@ -99,23 +99,26 @@ struct ElementInstance {
 VELK_INSTANCES(ElementInstance)
 
 // The instance of the unit quad that the quad at word `quad` of the culling arena is
-// (VELK_QUAD_NODE_WORDS): its 0 to 1 corners across the quad's two half axes, centred on its
+// (VELK_QUAD_NODE): its 0 to 1 corners across the quad's two half axes, centred on its
 // centre, facing along their cross product, in its colour, of no object.
 ElementInstance velk_quad_instance(uint quad)
 {
-    vec3 c = vec3(uintBitsToFloat(velk_culling.data[quad]), uintBitsToFloat(velk_culling.data[quad + 1u]),
-                  uintBitsToFloat(velk_culling.data[quad + 2u]));
-    vec3 u = vec3(uintBitsToFloat(velk_culling.data[quad + 3u]), uintBitsToFloat(velk_culling.data[quad + 4u]),
-                  uintBitsToFloat(velk_culling.data[quad + 5u]));
-    vec3 v = vec3(uintBitsToFloat(velk_culling.data[quad + 6u]), uintBitsToFloat(velk_culling.data[quad + 7u]),
-                  uintBitsToFloat(velk_culling.data[quad + 8u]));
+    vec3 c = vec3(uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_CENTER]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_CENTER + 1u]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_CENTER + 2u]));
+    vec3 u = vec3(uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_U]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_U + 1u]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_U + 2u]));
+    vec3 v = vec3(uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_V]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_V + 1u]),
+                  uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_V + 2u]));
     vec3 n = cross(u, v);
     n = dot(n, n) > 0.0 ? normalize(n) : vec3(0.0, 1.0, 0.0);
     ElementInstance inst;
     inst.world_matrix = mat4(vec4(2.0 * u, 0.0), vec4(2.0 * v, 0.0), vec4(n, 0.0), vec4(c - u - v, 1.0));
     inst.offset = vec4(0.0);
     inst.size = vec4(1.0, 1.0, 1.0, 0.0);
-    inst.color = unpackUnorm4x8(velk_culling.data[quad + 9u]);
+    inst.color = unpackUnorm4x8(velk_culling.data[quad + VELK_QUAD_NODE_COLOR]);
     inst.params = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
     return inst;
 }

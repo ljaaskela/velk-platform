@@ -339,14 +339,14 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             // seen from every way alike (half of it on average). Probe rays pass it.
             if (entry == VELK_CUT_RAY_QUAD) {
                 if (closest) continue;
-                vec3 c = velk_ray_vec3(cluster) - cam;
-                float radius = uintBitsToFloat(velk_culling.data[cluster + 10u]);
+                vec3 c = velk_ray_vec3(cluster + VELK_QUAD_NODE_CENTER) - cam;
+                float radius = uintBitsToFloat(velk_culling.data[cluster + VELK_QUAD_NODE_RADIUS]);
                 if (radius <= 0.0) continue;
                 vec3 to = c - ray.origin;
                 float along = dot(to, ray.dir);
                 float off = dot(to, to) - along * along;
                 if (off > radius * radius || along + radius < 0.0 || along - radius > best_t) continue;
-                float area = 4.0 * length(cross(velk_ray_vec3(cluster + 3u), velk_ray_vec3(cluster + 6u)));
+                float area = 4.0 * length(cross(velk_ray_vec3(cluster + VELK_QUAD_NODE_U), velk_ray_vec3(cluster + VELK_QUAD_NODE_V)));
                 float covered = min(0.5 * area / (3.14159265 * radius * radius), 1.0);
                 through *= 1.0 - covered;
                 if (through < 0.01) return 0.0;
@@ -356,9 +356,9 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
             if (entry == VELK_CUT_QUAD) {
                 // A quad: its plane, then where on it along its two sides, 0 to 1 within it.
-                vec3 c = velk_ray_vec3(cluster) - cam;
-                vec3 u = velk_ray_vec3(cluster + 3u);
-                vec3 v = velk_ray_vec3(cluster + 6u);
+                vec3 c = velk_ray_vec3(cluster + VELK_QUAD_NODE_CENTER) - cam;
+                vec3 u = velk_ray_vec3(cluster + VELK_QUAD_NODE_U);
+                vec3 v = velk_ray_vec3(cluster + VELK_QUAD_NODE_V);
                 vec3 n = cross(u, v);
                 float facing = dot(ray.dir, n);
                 if (abs(facing) <= 1e-12 * dot(n, n)) continue;

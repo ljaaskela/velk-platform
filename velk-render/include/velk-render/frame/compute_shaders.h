@@ -705,7 +705,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
         uint node = velk_light_quad_node(velk_culling.data[record + VELK_RECORD_QUAD_TREE],
                                          velk_culling.data[record + VELK_RECORD_QUAD_NODE], g.cam_pos.xyz, pixels_per_unit,
                                          pc.light_pixels);
-        uint value = velk_culling.data[node + 11u];
+        uint value = velk_culling.data[node + VELK_QUAD_NODE_LIGHT];
         if (value == VELK_LIGHT_NONE) return vec3(0.25);
         return (value & VELK_LIGHT_ONE_TRACED) == 0u ? vec3(1.0, 0.0, 1.0) : id_color(node);
     }

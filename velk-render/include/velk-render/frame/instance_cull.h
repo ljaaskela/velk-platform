@@ -104,17 +104,14 @@ inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;
 inline constexpr uint32_t kCutNodeWords = 16;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
 
-/// A partition's quad tree (VELK_QUAD_NODE_WORDS): its members as quads, and every node above them a quad standing for
+/// A partition's quad tree: its members as quads, and every node above them a quad standing for
 /// the members under it, so that where they are small on screen a few quads take their place.
 /// A complete binary tree over the partition's members in their order, by index with no links:
 /// node 0 is the root, node i's children are 2i + 1 and 2i + 2, and the leaves are the last
 /// `leaves` nodes, leaf k the member at position k of the partition's list (a power of two of
-/// them, the rest empty). A node is kQuadNodeWords: its centre (3 floats), its two half axes
-/// (3 each; its normal is their cross product), its colour (RGBA8, red in the low byte), and
-/// the radius of a sphere at its centre around it and every quad under it, negative for an
-/// empty node, in world space, and the light of the members under it where it is as wide on
-/// screen as the light spacing (kLightPixels), one value or kLightNone (see light_pool.h).
-inline constexpr uint32_t kQuadNodeWords = 12;
+/// them, the rest empty). A node is kQuadNodeWords, VELK_QUAD_NODE in cull_layout.h; its light
+/// is that of the members under it where it is as wide on screen as the light spacing
+/// (kLightPixels), see light_pool.h.
 
 /// A kept cut's record of a quad (kQuadNodeWords) has this for its entry, the node's word for its
 /// cluster, and its tree's word for its slot, which its light is found by. Mirrors VELK_CUT_QUAD.
@@ -1071,14 +1068,15 @@ uint velk_quad_over(vec3 viewpoint, float pixels_per_unit)
     uint chosen = 0xFFFFFFFFu;
     for (uint step = 0u; step < 32u; ++step) {
         uint w = g_tree + node * VELK_QUAD_NODE_WORDS;
-        float radius = uintBitsToFloat(cull_words.data[w + 10u]);
+        float radius = uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_RADIUS]);
         if (radius < 0.0) break;
-        vec3 center = vec3(uintBitsToFloat(cull_words.data[w]), uintBitsToFloat(cull_words.data[w + 1u]),
-                           uintBitsToFloat(cull_words.data[w + 2u]));
-        vec3 u = vec3(uintBitsToFloat(cull_words.data[w + 3u]), uintBitsToFloat(cull_words.data[w + 4u]),
-                      uintBitsToFloat(cull_words.data[w + 5u]));
-        vec3 v = vec3(uintBitsToFloat(cull_words.data[w + 6u]), uintBitsToFloat(cull_words.data[w + 7u]),
-                      uintBitsToFloat(cull_words.data[w + 8u]));
+        vec3 center = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 1u]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 2u]));
+        vec3 u = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U]), uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U + 1u]),
+                      uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U + 2u]));
+        vec3 v = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V]), uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V + 1u]),
+                      uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V + 2u]));
         float side = 2.0 * max(length(u), length(v));
         float near = length(center - viewpoint) - radius;
         // Out of view, no finer than the light's level.
@@ -1103,14 +1101,15 @@ uint velk_quad_patch(vec3 viewpoint, float pixels_per_unit)
     uint chosen = 0xFFFFFFFFu;
     for (uint step = 0u; step < 32u; ++step) {
         uint w = g_tree + node * VELK_QUAD_NODE_WORDS;
-        float radius = uintBitsToFloat(cull_words.data[w + 10u]);
+        float radius = uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_RADIUS]);
         if (radius < 0.0) break;
-        vec3 center = vec3(uintBitsToFloat(cull_words.data[w]), uintBitsToFloat(cull_words.data[w + 1u]),
-                           uintBitsToFloat(cull_words.data[w + 2u]));
-        vec3 u = vec3(uintBitsToFloat(cull_words.data[w + 3u]), uintBitsToFloat(cull_words.data[w + 4u]),
-                      uintBitsToFloat(cull_words.data[w + 5u]));
-        vec3 v = vec3(uintBitsToFloat(cull_words.data[w + 6u]), uintBitsToFloat(cull_words.data[w + 7u]),
-                      uintBitsToFloat(cull_words.data[w + 8u]));
+        vec3 center = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 1u]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 2u]));
+        vec3 u = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U]), uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U + 1u]),
+                      uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_U + 2u]));
+        vec3 v = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V]), uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V + 1u]),
+                      uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_V + 2u]));
         float near = length(center - viewpoint) - radius;
         if (near <= 0.0 || 2.0 * max(length(u), length(v)) * pixels_per_unit > spacing * near) break;
         chosen = node;
@@ -1151,7 +1150,7 @@ void velk_cut_member(uint member, vec3 viewpoint)
         if (quad == 0xFFFFFFFFu && g_leaves_only) quad = g_leaves - 1u + g_position;
         if (quad != 0xFFFFFFFFu) {
             if (velk_quad_first(quad) == g_position
-                && uintBitsToFloat(cull_words.data[g_tree + quad * VELK_QUAD_NODE_WORDS + 10u]) >= 0.0) {
+                && uintBitsToFloat(cull_words.data[g_tree + quad * VELK_QUAD_NODE_WORDS + VELK_QUAD_NODE_RADIUS]) >= 0.0) {
                 velk_cut_root(VELK_CHOOSE_RECORD, g_tree, VELK_CUT_QUAD, g_tree + quad * VELK_QUAD_NODE_WORDS, viewpoint);
             }
             return;
@@ -1439,21 +1438,25 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
     uint slot = cull_words.data[record + VELK_RECORD_SLOT];
     if (entry == VELK_CUT_RAY_QUAD) {
         // A patch: its node's sphere, which holds all its members, in the world already.
-        vec3 c = vec3(uintBitsToFloat(cull_words.data[cluster]), uintBitsToFloat(cull_words.data[cluster + 1u]),
-                      uintBitsToFloat(cull_words.data[cluster + 2u]));
-        float r = max(uintBitsToFloat(cull_words.data[cluster + 10u]), 0.0) + pad;
+        vec3 c = vec3(uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER + 1u]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER + 2u]));
+        float r = max(uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_RADIUS]), 0.0) + pad;
         lo = c - vec3(r);
         hi = c + vec3(r);
         return;
     }
     if (entry == VELK_CUT_QUAD) {
         // A quad: around its corners, in the world already.
-        vec3 c = vec3(uintBitsToFloat(cull_words.data[cluster]), uintBitsToFloat(cull_words.data[cluster + 1u]),
-                      uintBitsToFloat(cull_words.data[cluster + 2u]));
-        vec3 u = vec3(uintBitsToFloat(cull_words.data[cluster + 3u]), uintBitsToFloat(cull_words.data[cluster + 4u]),
-                      uintBitsToFloat(cull_words.data[cluster + 5u]));
-        vec3 v = vec3(uintBitsToFloat(cull_words.data[cluster + 6u]), uintBitsToFloat(cull_words.data[cluster + 7u]),
-                      uintBitsToFloat(cull_words.data[cluster + 8u]));
+        vec3 c = vec3(uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER + 1u]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_CENTER + 2u]));
+        vec3 u = vec3(uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_U]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_U + 1u]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_U + 2u]));
+        vec3 v = vec3(uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_V]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_V + 1u]),
+                      uintBitsToFloat(cull_words.data[cluster + VELK_QUAD_NODE_V + 2u]));
         vec3 reach = abs(u) + abs(v) + vec3(pad);
         lo = c - reach;
         hi = c + reach;
@@ -1942,10 +1945,11 @@ void main()
         atomicAdd(cull_words.data[pc.quads_word + 7u], 1u);
         uint w = cluster_or_table;
         GlobalData globals = velk_globals.data[pc.globals_base];
-        vec3 center = vec3(uintBitsToFloat(cull_words.data[w]), uintBitsToFloat(cull_words.data[w + 1u]),
-                           uintBitsToFloat(cull_words.data[w + 2u]))
+        vec3 center = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 1u]),
+                           uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER + 2u]))
                     - globals.cam_pos.xyz;
-        float radius = uintBitsToFloat(cull_words.data[w + 10u]) + pc.quad_pad;
+        float radius = uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_RADIUS]) + pc.quad_pad;
         if (pc.whole == 0u && velk_cut_outside(globals.view_projection, center, radius)) return;
         uint at = atomicAdd(cull_words.data[pc.quads_word + 1u], 1u);
         if (at < pc.quad_capacity) {

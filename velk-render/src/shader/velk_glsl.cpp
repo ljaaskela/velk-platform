@@ -111,8 +111,6 @@ R"(
 #define VELK_CLUSTER_ENTRY_WORDS VELK_CLUSTER_ENTRY_END
 // Words per partition in a partition table: kCullEntryWords.
 #define VELK_CULL_ENTRY_WORDS VELK_PARTITION_ENTRY_END
-// Words per node of a partition's quad tree: kQuadNodeWords.
-#define VELK_QUAD_NODE_WORDS 12u
 // A kept cut's record of a quad has this for its entry: kCutQuad.
 #define VELK_CUT_QUAD 0xFFFFFFFEu
 // A kept cut's record of a patch of small members for rays only: kCutRayQuad.
