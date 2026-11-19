@@ -1120,7 +1120,10 @@ int main(int argc, char* argv[])
 
     long frame = 0;
     while (app.poll()) {
-        inspect::place_movers(built, frame);
+        // What the scene moves goes there and back, again and again.
+        const long cycle = std::max(built.frames, 1l) * 2;
+        const long at = frame % cycle;
+        inspect::place_movers(built, at <= built.frames ? at : cycle - at);
         ++frame;
         if (scripted) {
             // Out along the view and back, rising and falling, the same every time, from the start.
