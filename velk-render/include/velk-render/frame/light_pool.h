@@ -1363,8 +1363,8 @@ void main()
     // A record a thread, 64 a group: the prelude's groups are 8 by 8.
     uint index = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     // The records placed in the current store, all before this.
-    if (index >= VELK_LIGHT_WORDS.data[cut + 28u]) return;
-    uint record = VELK_LIGHT_WORDS.data[cut + 17u + VELK_LIGHT_WORDS.data[cut + 12u]] + index * VELK_RECORD_END;
+    if (index >= VELK_LIGHT_WORDS.data[cut + VELK_CUT_PLACED]) return;
+    uint record = VELK_LIGHT_WORDS.data[cut + VELK_CUT_STORES + VELK_LIGHT_WORDS.data[cut + VELK_CUT_PARITY]] + index * VELK_RECORD_END;
     uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
     uint cluster = VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER];
     uint slot = VELK_LIGHT_WORDS.data[record + VELK_RECORD_SLOT];
@@ -2027,8 +2027,8 @@ bool velk_light_store_of(uint record, out uint lo, out uint hi)
     uint cuts = light_words.data[pc.top_word];
     for (uint c = 0u; c < cuts; ++c) {
         uint cut = light_words.data[pc.top_word + 4u + c * 8u];
-        uint start = light_words.data[cut + 17u + light_words.data[cut + 12u]];
-        uint end = start + light_words.data[cut + 28u] * 4u;
+        uint start = light_words.data[cut + VELK_CUT_STORES + light_words.data[cut + VELK_CUT_PARITY]];
+        uint end = start + light_words.data[cut + VELK_CUT_PLACED] * 4u;
         if (record >= start && record < end) {
             lo = start;
             hi = end;
@@ -2462,9 +2462,9 @@ void main()
 {
     uint cut = pc.cut_word;
     uint index = gl_GlobalInvocationID.x;
-    if (index >= light_words.data[cut + 28u]) return;
-    uint parity = light_words.data[cut + 12u];
-    uint light = light_words.data[light_words.data[cut + 17u + parity] + index * VELK_RECORD_END + VELK_RECORD_LIGHT];
+    if (index >= light_words.data[cut + VELK_CUT_PLACED]) return;
+    uint parity = light_words.data[cut + VELK_CUT_PARITY];
+    uint light = light_words.data[light_words.data[cut + VELK_CUT_STORES + parity] + index * VELK_RECORD_END + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
     if (light >= VELK_LIGHT_ONE_VALUE) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);

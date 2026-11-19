@@ -486,8 +486,8 @@ void main()
                    uintBitsToFloat(velk_culling.data[entry + 2u]));
     vec3 hi = vec3(uintBitsToFloat(velk_culling.data[entry + 3u]), uintBitsToFloat(velk_culling.data[entry + 4u]),
                    uintBitsToFloat(velk_culling.data[entry + 5u]));
-    uint state = velk_culling.data[pc.cut_word + 22u] + partition_index * VELK_CUT_PARTITION_WORDS;
-    bool choosing = velk_culling.data[state + 8u] != 0u;
+    uint state = velk_culling.data[pc.cut_word + VELK_CUT_STATES_WORD] + partition_index * VELK_CUT_PARTITION_WORDS;
+    bool choosing = velk_culling.data[state + VELK_PART_CHOOSING] != 0u;
 
     // Edges 0..3 along x, 4..7 along y, 8..11 along z, at the four corners of the other two.
     uint axis = edge / 4u;
@@ -552,9 +552,9 @@ void main()
         node = pc.top_word + 4u + cuts * 8u + leaves * 2u + node_index * 16u;
     } else {
         uint cut = pc.cut_word;
-        if (node_index >= velk_culling.data[cut + 24u]) return;
-        uint parity = velk_culling.data[cut + 12u];
-        node = velk_culling.data[cut + 26u + parity] + node_index * 16u;
+        if (node_index >= velk_culling.data[cut + VELK_CUT_NODES]) return;
+        uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
+        node = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + node_index * 16u;
     }
     uint level = velk_culling.data[node + 14u];
     bool root = velk_culling.data[node + 15u] != 0u;

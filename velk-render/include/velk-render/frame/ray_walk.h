@@ -497,14 +497,14 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 uint leaf = top_leaves + (ref & ~VELK_RAY_LEAF) * 2u;
                 uint cut_entry = top_cuts + velk_culling.data[leaf] * 8u;
                 uint cut = velk_culling.data[cut_entry];
-                uint state = velk_culling.data[cut + 22u] + velk_culling.data[leaf + 1u] * VELK_CUT_PARTITION_WORDS;
+                uint state = velk_culling.data[cut + VELK_CUT_STATES_WORD] + velk_culling.data[leaf + 1u] * VELK_CUT_PARTITION_WORDS;
                 // What rays trace of it: its ray list, over its records.
-                uint count = velk_culling.data[state + 16u];
+                uint count = velk_culling.data[state + VELK_PART_RAY_COUNT];
                 if (count == 0u) continue;
-                uint parity = velk_culling.data[cut + 12u];
-                records = velk_culling.data[cut + 17u + parity] + velk_culling.data[state + 5u] * VELK_RECORD_END;
-                ray_list = velk_culling.data[cut + 38u + parity] + velk_culling.data[state + 5u];
-                nodes = velk_culling.data[cut + 26u + parity] + velk_culling.data[state + 10u] * 16u;
+                uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
+                records = velk_culling.data[cut + VELK_CUT_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_RECORD_END;
+                ray_list = velk_culling.data[cut + VELK_CUT_RAY_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST];
+                nodes = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + velk_culling.data[state + VELK_PART_NODE_FIRST] * 16u;
                 instances_base = velk_culling.data[cut_entry + 1u];
                 items = velk_culling.data[cut_entry + 2u];
                 quads = velk_culling.data[cut_entry + 6u];
