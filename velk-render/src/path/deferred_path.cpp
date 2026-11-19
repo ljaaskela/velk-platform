@@ -1215,10 +1215,11 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
         uint32_t ids_word, width, height, pool_word;
         float light_pixels;
         uint32_t lights;
+        uint32_t again;
     };
     // What a first trace casts a ray a point to: the scene's lights, as many as a point has slots.
     const auto lights = static_cast<uint32_t>(std::min<size_t>(render_view.lights.size(), kLightSlots));
-    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights};
+    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights, 0u};
     static_assert(sizeof(PushC) == sizeof(vs.light_claim_recorded), "What the claim was recorded with");
     DeferredComputePushC trace_pc{};
     trace_pc.globals_base = render_view.view_globals_base;
@@ -1274,6 +1275,13 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights};
     emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
              "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc), kLightSearchCapacity, 1u, false);
+    // The claim again for the records the search laid out, so that their coarse points are
+    // traced this frame; it does nothing when the search had none.
+    PushC again_pc = pc;
+    again_pc.again = 1u;
+    emit_one(vs.light_claim_again_pass, view_pass_name(other, "deferred.light_claim2", "other:deferred.light_claim2"),
+             "DeferredPath: light claim again", pipeline, &again_pc, sizeof(again_pc), (vs.visibility_size.x + 7u) / 8u,
+             (vs.visibility_size.y + 7u) / 8u, true);
     // Then the one values the claim listed for tracing, a work group each, and the points it
     // listed, a thread each.
     if (trace) {

@@ -107,6 +107,8 @@ public:
         CutDrawWords cut_draw_words;
         IRenderPass::Ptr light_claim_pass;
         IRenderPass::Ptr light_search_pass;
+        /// The claim again after the search, for the records it laid out (light_claim_src).
+        IRenderPass::Ptr light_claim_again_pass;
         IRenderPass::Ptr light_trace_pass;
         /// What changed this frame for the light (kLightChangeWords a change), and the lights as
         /// each was when last listed as changed. See light_changes_main_src.
@@ -119,7 +121,7 @@ public:
         uint32_t light_change_count = 0;
         uint32_t light_change_all = 0;
         uint64_t light_change_log_frame = 0;
-        uint32_t light_claim_recorded[6] = {};  ///< What the light claim pass was recorded with.        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
+        uint32_t light_claim_recorded[7] = {};  ///< What the light claim pass was recorded with.        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
         /// how many probes each holds. See light_probes_main_src.
         ArenaRegion light_probes[2];
         uint32_t light_probe_count = 0;
