@@ -760,7 +760,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
         if (traces >= VELK_LIGHT_RETRACE && traces < VELK_LIGHT_RETRACED) retracing += weights[k];
     }
     // Darker where the record has its own points, coarse enough itself.
-    color = velk_culling.data[first + 1u] == VELK_LIGHT_LINKED ? color : color * 0.45;
+    color = velk_culling.data[first + VELK_PAGE_KIND] == VELK_LIGHT_LINKED ? color : color * 0.45;
     // Magenta as far as the points it reads are not fully traced yet (VELK_LIGHT_TRUSTED_TRACES),
     // cyan as far as they are traced again after a change.
     color = mix(color, vec3(0.0, 1.0, 1.0), clamp(retracing, 0.0, 1.0));

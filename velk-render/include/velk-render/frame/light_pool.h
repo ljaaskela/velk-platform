@@ -36,16 +36,8 @@ namespace velk {
 /// grow to, then the search list, and its pages in segments of kLightSegmentPages, each a region
 /// of its own, so that growing moves no page.
 ///
-/// A record's first page starts with kLightPageHeaderWords: its cluster's vertices; for its own
-/// points the level of the grid in each of its triangles (1 for none, see velk_light_grid_point),
-/// else kLightLinked; how many point words it has; then its other pages (words 3 to 16), at most
-/// kLightMaxPages in all, kLightNone for none; then, for its own points, the frame something last
-/// changed what they could get (VELK_LIGHT_CHANGED_WORD, kLightNone for never), its cluster's
-/// word in its hierarchy's table, the frame its lights were last chosen again
-/// (VELK_LIGHT_RESET_WORD), its lights, a light index a slot, kLightNone for an empty slot or
-/// before they are chosen, its draw's first index word, how wide it was laid out for, its coarse
-/// light (a one value from its cluster's sphere, VELK_LIGHT_COARSE_WORD), and a word unused. Then
-/// for its own points the word of each triangle's grid. Its point words follow, from an even word
+/// A record's first page starts with its header (VELK_LIGHT_PAGE_HEADER), then for own points
+/// with a grid the word of each triangle's grid. Its point words follow, from an even word
 /// on, then those of its other pages in order: with its own points two words a point, a point per
 /// vertex, then each triangle's grid points in turn: how much of each slot's light it does not get
 /// (4 bits a slot, the first lowest, 15 none, kLightNone until first traced), then how many times
@@ -68,7 +60,36 @@ inline constexpr uint32_t kLightOneQueuedShift = 24;
 inline constexpr uint32_t kLightOwn = 1u;
 inline constexpr uint32_t kLightLinked = 0x80000000u;
 inline constexpr uint32_t kLightPageWords = 64;
-inline constexpr uint32_t kLightPageHeaderWords = 32;
+
+/// The header of a record's first page, its words in order, named as VELK_LIGHT_POOL_HEADER's
+/// (kLightPage and VELK_PAGE_). The words from CHANGED on are its own points' only.
+#define VELK_LIGHT_PAGE_HEADER(X)                                                                                    \
+    X(Vertices, VERTICES, 0)          /* its cluster's vertices */                                                   \
+    X(Kind, KIND, 1)                  /* own points: kLightOwn, or kLightGridded with its triangles; or kLightLinked */ \
+    X(PointWords, POINT_WORDS, 2)     /* how many point words it has */                                              \
+    X(Pages, PAGES, 3)                /* its other pages from the second, kLightNone for none; past                  \
+                                         kLightDirectPages of them, its index pages of 64 pages each */              \
+    X(Changed, CHANGED, 17)           /* the frame something last changed what its points could get, or kLightNone */ \
+    X(Cluster, CLUSTER, 18)           /* its cluster's word in its hierarchy's table */                              \
+    X(Reset, RESET, 19)               /* the frame its lights were last chosen again, or kLightNone */               \
+    X(Slots, SLOTS, 20)               /* its lights, a light index a slot (kLightSlots), kLightNone for none */      \
+    X(Index, INDEX, 28)               /* its draw's first index word */                                              \
+    X(Across, ACROSS, 29)             /* how wide on screen it was laid out for, a float */                          \
+    X(Coarse, COARSE, 30)             /* its coarse light: a one value from its cluster's sphere with its points'    \
+                                         lights, read under its points until they are trusted */                     \
+    X(Read, READ, 31)                 /* not 0 when a pixel read its points since the last mark; for the log */      \
+    X(Grids, GRIDS, 32)               /* for own points with a grid, the first of the triangles' grid words */
+
+#define VELK_LIGHT_PAGE_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPage##cpp = word;
+VELK_LIGHT_PAGE_HEADER(VELK_LIGHT_PAGE_CPP_WORD)
+#undef VELK_LIGHT_PAGE_CPP_WORD
+/// The page header's words, for the shaders: a #define VELK_PAGE_ each.
+#define VELK_LIGHT_PAGE_GLSL_WORD(cpp, glsl, word) "#define VELK_PAGE_" #glsl " " #word "u\n"
+#define VELK_LIGHT_PAGE_HEADER_GLSL VELK_LIGHT_PAGE_HEADER(VELK_LIGHT_PAGE_GLSL_WORD)
+/// The header's words: the triangles' grid words follow it.
+inline constexpr uint32_t kLightPageHeaderWords = kLightPageGrids;
+static_assert(kLightPageChanged == kLightPagePages + 14u, "the header names 14 pages after the first");
+static_assert(kLightPageIndex == kLightPageSlots + 8u, "eight light slots");
 /// The finest grid of light points in a triangle: that many along each of its edges, as many as
 /// its level's 8 bits hold. A record's grids are as fine as its pages hold (kLightMaxPages).
 inline constexpr uint32_t kLightMaxGrid = 255;
@@ -197,14 +218,13 @@ inline constexpr uint32_t kLightFirstBudgetScale = 4;  ///< Mirrors VELK_LIGHT_F
 inline constexpr uint32_t kLightAssumedSteps = 64;
 
 // Reading the pool, for a shader that defines VELK_LIGHT_WORDS as the culling arena's buffer.
-#define VELK_LIGHT_POOL_GLSL VELK_LIGHT_POOL_HEADER_GLSL R"(
+#define VELK_LIGHT_POOL_GLSL VELK_LIGHT_POOL_HEADER_GLSL VELK_LIGHT_PAGE_HEADER_GLSL R"(
 #define VELK_LIGHT_NONE 0xFFFFFFFFu
 #define VELK_LIGHT_PENDING 0xFFFFFFFEu
 #define VELK_LIGHT_ONE_VALUE 0x80000000u
 #define VELK_LIGHT_OWN 1u
 #define VELK_LIGHT_LINKED 0x80000000u
 #define VELK_LIGHT_PAGE_WORDS 64u
-#define VELK_LIGHT_PAGE_HEADER_WORDS 32u
 #define VELK_LIGHT_MAX_GRID 255u
 #define VELK_LIGHT_WARM_TRACES 8u
 #define VELK_LIGHT_DIRECT_PAGES 15u
@@ -232,21 +252,8 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 #define VELK_LIGHT_TRACE_CLUSTER 1u
 #define VELK_LIGHT_TRACE_MESH 2u
 #define VELK_LIGHT_TRACE_NODE 3u
-// A record's coarse light (VELK_LIGHT_COARSE_WORD of the first page the entry names).
+// A record's coarse light (VELK_PAGE_COARSE of the first page the entry names).
 #define VELK_LIGHT_TRACE_COARSE 4u
-// Where in a first page of own points: the frame something last changed what its points could
-// get, its cluster, the frame its lights were last chosen again, its lights.
-#define VELK_LIGHT_CHANGED_WORD 17u
-#define VELK_LIGHT_CLUSTER_WORD 18u
-#define VELK_LIGHT_RESET_WORD 19u
-#define VELK_LIGHT_SLOT_WORD 20u
-#define VELK_LIGHT_INDEX_WORD 28u
-#define VELK_LIGHT_ACROSS_WORD 29u
-// Its coarse light: a one value from its cluster's sphere with its own points' lights, which a
-// pixel reads under its points until they are traced often enough to be trusted.
-#define VELK_LIGHT_COARSE_WORD 30u
-// Not 0 when a pixel read its points since the last mark, which clears it; for the log.
-#define VELK_LIGHT_READ_WORD 31u
 // How many traces of a point it takes for it to replace its record's coarse light outright.
 #define VELK_LIGHT_TRUSTED_TRACES 8.0
 // kLightPixels.
@@ -262,29 +269,29 @@ uint velk_light_page(uint pool, uint page)
 // that a point's two words are on the same page.
 uint velk_light_skip_for(uint table)
 {
-    return VELK_LIGHT_PAGE_HEADER_WORDS + ((table + 1u) & ~1u);
+    return VELK_PAGE_GRIDS + ((table + 1u) & ~1u);
 }
 
 // Words before the points of the record whose first page starts at `first`: its header, and for
 // own points with a grid (VELK_LIGHT_GRIDDED) a word per triangle saying its grid.
 uint velk_light_skip(uint first)
 {
-    uint kind = VELK_LIGHT_WORDS.data[first + 1u];
+    uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
     return velk_light_skip_for((kind & VELK_LIGHT_GRIDDED) != 0u && kind != VELK_LIGHT_LINKED ? kind & 0xFFFFu : 0u);
 }
 
 // The pages the record whose first page starts at `first` has.
 uint velk_light_page_count(uint first)
 {
-    return (velk_light_skip(first) + VELK_LIGHT_WORDS.data[first + 2u] + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS;
+    return (velk_light_skip(first) + VELK_LIGHT_WORDS.data[first + VELK_PAGE_POINT_WORDS] + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS;
 }
 
 // Page `k` of the record whose first page starts at `first`, k from 1: named in its header, or
 // with more than VELK_LIGHT_DIRECT_PAGES, in the index pages its header names.
 uint velk_light_nth_page(uint pool, uint first, uint k, uint pages)
 {
-    if (pages <= VELK_LIGHT_DIRECT_PAGES) return VELK_LIGHT_WORDS.data[first + 2u + k];
-    uint index = VELK_LIGHT_WORDS.data[first + 3u + (k - 1u) / VELK_LIGHT_PAGE_WORDS];
+    if (pages <= VELK_LIGHT_DIRECT_PAGES) return VELK_LIGHT_WORDS.data[first + VELK_PAGE_PAGES - 1u + k];
+    uint index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_PAGES + (k - 1u) / VELK_LIGHT_PAGE_WORDS];
     return VELK_LIGHT_WORDS.data[velk_light_page(pool, index) + (k - 1u) % VELK_LIGHT_PAGE_WORDS];
 }
 
@@ -324,10 +331,10 @@ uint velk_light_point_traces(uint first, uint state)
 {
     if (state == VELK_LIGHT_NONE) return 0u;
     uint listed = state & 0x0FFFFFFFu;
-    uint reset = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_RESET_WORD];
+    uint reset = VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET];
     if (reset != VELK_LIGHT_NONE && listed < reset) return 0u;
     uint traces = state >> 28u;
-    uint changed = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CHANGED_WORD];
+    uint changed = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED];
     if (changed != VELK_LIGHT_NONE && listed < changed && traces != 0u) return VELK_LIGHT_RETRACE;
     return traces;
 }
@@ -343,7 +350,7 @@ bool velk_light_point_due(uint traces)
 // points start after the vertices' (the rest).
 uint velk_light_triangle_grid(uint pool, uint first, uint t)
 {
-    return VELK_LIGHT_WORDS.data[velk_light_word(pool, first, VELK_LIGHT_PAGE_HEADER_WORDS + t)];
+    return VELK_LIGHT_WORDS.data[velk_light_word(pool, first, VELK_PAGE_GRIDS + t)];
 }
 
 // The points of light vertex `vertex` of the record whose first page starts at `first` reads,
@@ -360,8 +367,8 @@ void velk_light_points(uint pool, uint first, uint vertex, out uint words[3], ou
     ids[2] = 0u;
     weights = vec3(1.0, 0.0, 0.0);
     owner = VELK_LIGHT_NONE;
-    if (vertex >= VELK_LIGHT_WORDS.data[first]) return;
-    if (VELK_LIGHT_WORDS.data[first + 1u] != VELK_LIGHT_LINKED) {
+    if (vertex >= VELK_LIGHT_WORDS.data[first + VELK_PAGE_VERTICES]) return;
+    if (VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED) {
         words[0] = velk_light_own_word(pool, first, vertex);
         owner = first;
         return;
@@ -374,7 +381,7 @@ void velk_light_points(uint pool, uint first, uint vertex, out uint words[3], ou
     for (uint k = 0u; k < 3u; ++k) {
         uint p = (points >> (8u * k)) & 255u;
         ids[k] = p;
-        if (p < VELK_LIGHT_WORDS.data[other]) words[k] = velk_light_own_word(pool, other, p);
+        if (p < VELK_LIGHT_WORDS.data[other + VELK_PAGE_VERTICES]) words[k] = velk_light_own_word(pool, other, p);
     }
     weights = vec3(max(1.0 - w.x - w.y, 0.0), w.x, w.y);
     owner = other;
@@ -490,7 +497,7 @@ uint velk_light_pixel_points(uint pool, uint first, uint t, uvec3 corners, vec3 
                              out float weights[9], out uint owners[9])
 {
     uint count = 0u;
-    uint kind = VELK_LIGHT_WORDS.data[first + 1u];
+    uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
     if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && t < (kind & 0xFFFFu)) {
         uint grid = velk_light_triangle_grid(pool, first, t);
         uint n = grid >> 24u;
@@ -498,7 +505,7 @@ uint velk_light_pixel_points(uint pool, uint first, uint t, uvec3 corners, vec3 
         vec3 w;
         velk_light_around(n, b, places, w);
         for (uint k = 0u; k < 3u; ++k) {
-            uint p = velk_light_grid_point(VELK_LIGHT_WORDS.data[first], n, grid & 0xFFFFFFu, corners, places[k].x, places[k].y);
+            uint p = velk_light_grid_point(VELK_LIGHT_WORDS.data[first + VELK_PAGE_VERTICES], n, grid & 0xFFFFFFu, corners, places[k].x, places[k].y);
             words[count] = velk_light_own_word(pool, first, p);
             ids[count] = p;
             weights[count] = w[k];
@@ -605,12 +612,12 @@ void velk_light_list_entry(uint pool, uint kind, uint at, uint instance, uint ta
 void velk_light_list_coarse(uint pool, uint page, uint instance, uint frame, uint lights)
 {
     uint first = velk_light_page(pool, page);
-    uint at = first + VELK_LIGHT_COARSE_WORD;
+    uint at = first + VELK_PAGE_COARSE;
     uint value = VELK_LIGHT_WORDS.data[at];
     if (value < VELK_LIGHT_ONE_VALUE || value >= VELK_LIGHT_PENDING || !velk_light_one_due(value)) return;
     uint listed = (value & ~(31u << VELK_LIGHT_ONE_QUEUED_SHIFT)) | ((frame & 31u) << VELK_LIGHT_ONE_QUEUED_SHIFT);
     if (listed == value || atomicCompSwap(VELK_LIGHT_WORDS.data[at], value, listed) != value) return;
-    velk_light_list_entry(pool, VELK_LIGHT_TRACE_COARSE, page, instance, VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CLUSTER_WORD],
+    velk_light_list_entry(pool, VELK_LIGHT_TRACE_COARSE, page, instance, VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER],
                           8u * max(lights, 1u));
 }
 
@@ -622,7 +629,7 @@ void velk_light_list_coarse(uint pool, uint page, uint instance, uint frame, uin
 // room it waits for a later frame.
 void velk_light_list_point(uint pool, uint first, uint p, uint instance, uint frame, bool coarse)
 {
-    if (p >= VELK_LIGHT_WORDS.data[first + 2u] / 2u) return;
+    if (p >= VELK_LIGHT_WORDS.data[first + VELK_PAGE_POINT_WORDS] / 2u) return;
     uint at = velk_light_own_word(pool, first, p) + 1u;
     uint state = VELK_LIGHT_WORDS.data[at];
     uint traces = velk_light_point_traces(first, state);
@@ -728,14 +735,14 @@ bool velk_light_add_point(uint word, uint owner, float weight, inout uint lights
                           inout vec2 sums[VELK_LIGHT_SLOTS])
 {
     uint shade = VELK_LIGHT_WORDS.data[word];
-    uint coarse = VELK_LIGHT_WORDS.data[owner + VELK_LIGHT_COARSE_WORD];
+    uint coarse = VELK_LIGHT_WORDS.data[owner + VELK_PAGE_COARSE];
     bool has_coarse = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
     if (shade == VELK_LIGHT_NONE && !has_coarse) return false;
     uint traces = velk_light_point_traces(owner, VELK_LIGHT_WORDS.data[word + 1u]);
     float trust = shade == VELK_LIGHT_NONE ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
     if (!has_coarse) trust = 1.0;
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-        uint light = VELK_LIGHT_WORDS.data[owner + VELK_LIGHT_SLOT_WORD + s];
+        uint light = VELK_LIGHT_WORDS.data[owner + VELK_PAGE_SLOTS + s];
         float through = 1.0 - float((coarse >> (3u * s)) & 7u) / 7.0;
         if (trust > 0.0) through = mix(through, 1.0 - float((shade >> (4u * s)) & 15u) / 15.0, trust);
         velk_light_add(light, weight, through, lights, sums);
@@ -754,13 +761,13 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
                            inout vec2 sums[VELK_LIGHT_SLOTS])
 {
     bool traced = false;
-    uint kind = VELK_LIGHT_WORDS.data[first + 1u];
+    uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
     if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && t < (kind & 0xFFFFu)) {
         uint grid = velk_light_triangle_grid(pool, first, t);
         uint n = grid >> 24u;
         uint base = grid & 0xFFFFFFu;
-        uint vertices = VELK_LIGHT_WORDS.data[first];
-        uint coarse = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_COARSE_WORD];
+        uint vertices = VELK_LIGHT_WORDS.data[first + VELK_PAGE_VERTICES];
+        uint coarse = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
         bool known = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
         float under[VELK_LIGHT_SLOTS];
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) under[s] = 1.0 - float((coarse >> (3u * s)) & 7u) / 7.0;
@@ -795,7 +802,7 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
         }
         if (!known) return false;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-            velk_light_add(VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s], 1.0, under[s], lights, sums);
+            velk_light_add(VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s], 1.0, under[s], lights, sums);
         }
         return true;
     }
@@ -1049,28 +1056,28 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     uint first = VELK_LIGHT_WORDS.data[w];
     uint q = VELK_LIGHT_WORDS.data[w + 1u];
     uint instance = VELK_LIGHT_WORDS.data[w + 2u];
-    uint kind = VELK_LIGHT_WORDS.data[first + 1u];
-    if (kind == VELK_LIGHT_LINKED || q >= VELK_LIGHT_WORDS.data[first + 2u] / 2u) return;
-    uint cluster = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CLUSTER_WORD];
-    uint vertices = min(VELK_LIGHT_WORDS.data[first], 256u);
+    uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
+    if (kind == VELK_LIGHT_LINKED || q >= VELK_LIGHT_WORDS.data[first + VELK_PAGE_POINT_WORDS] / 2u) return;
+    uint cluster = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER];
+    uint vertices = min(VELK_LIGHT_WORDS.data[first + VELK_PAGE_VERTICES], 256u);
     ElementInstance inst = velk_instances.data[instance];
     mat3 to_world = mat3(inst.world_matrix);
 
     // Its lights: chosen at the cluster's centre when nothing has chosen them yet, the same inputs
     // giving the same lights wherever they are chosen.
     uint slots[VELK_LIGHT_SLOTS];
-    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s];
+    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
     if (slots[0] == VELK_LIGHT_NONE) {
         vec3 own = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 13u]), uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 14u]),
                         uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + 15u]));
         velk_light_slots_at(velk_rel_position(inst.world_matrix, inst.offset.xyz + own * inst.size.xyz, g), slots);
-        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s] = slots[s];
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = slots[s];
     }
 
     // A vertex, or a grid point in a triangle at weights of its corners.
     uint vertex_word = VELK_LIGHT_WORDS.data[cluster + 18u];
     uint table = (kind & VELK_LIGHT_GRIDDED) != 0u ? min(kind & 0xFFFFu, 256u) : 0u;
-    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_INDEX_WORD] + VELK_LIGHT_WORDS.data[cluster];
+    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster];
     vec3 local;
     vec3 normal;
     if (q < vertices) {
@@ -1200,7 +1207,7 @@ void main()
     } else {
         // A record's one value, or the coarse light on the first page of its own points.
         if (kind == VELK_LIGHT_TRACE_COARSE && at >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
-        word =kind == VELK_LIGHT_TRACE_COARSE ? velk_light_page(pool, at) + VELK_LIGHT_COARSE_WORD : at + 3u;
+        word =kind == VELK_LIGHT_TRACE_COARSE ? velk_light_page(pool, at) + VELK_PAGE_COARSE : at + 3u;
         ElementInstance inst = velk_instances.data[instance];
         mat3 to_world = mat3(inst.world_matrix);
         float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)),
@@ -1218,14 +1225,14 @@ void main()
         // A coarse light's are its points' lights, so that a pixel reads both by the same slots:
         // chosen here, as the points' first trace chooses them, when that has not happened yet.
         uint coarse_first = kind == VELK_LIGHT_TRACE_COARSE ? velk_light_page(pool, at) : VELK_LIGHT_NONE;
-        if (coarse_first != VELK_LIGHT_NONE && VELK_LIGHT_WORDS.data[coarse_first + VELK_LIGHT_SLOT_WORD] != VELK_LIGHT_NONE) {
-            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = VELK_LIGHT_WORDS.data[coarse_first + VELK_LIGHT_SLOT_WORD + s];
+        if (coarse_first != VELK_LIGHT_NONE && VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_SLOTS] != VELK_LIGHT_NONE) {
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_SLOTS + s];
         } else {
             uint chosen[VELK_LIGHT_SLOTS];
             velk_light_slots_at(center, chosen);
             for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
                 s_slots[s] = chosen[s];
-                if (coarse_first != VELK_LIGHT_NONE) VELK_LIGHT_WORDS.data[coarse_first + VELK_LIGHT_SLOT_WORD + s] = chosen[s];
+                if (coarse_first != VELK_LIGHT_NONE) VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_SLOTS + s] = chosen[s];
             }
         }
     }
@@ -1390,7 +1397,7 @@ void main()
     if (value < VELK_LIGHT_ONE_VALUE) {
         if (value >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
         first = velk_light_page(pool, value);
-        if (VELK_LIGHT_WORDS.data[first + 1u] == VELK_LIGHT_LINKED) return;
+        if (VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND] == VELK_LIGHT_LINKED) return;
         own_points = true;
     } else if (value >= VELK_LIGHT_PENDING) {
         return;
@@ -1418,7 +1425,7 @@ void main()
     vec3 center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, VELK_GLOBALS);
 
     if (own_points) {
-        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s];
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
     } else {
         velk_light_slots_at(center, slots);
     }
@@ -1429,13 +1436,13 @@ void main()
         // next read them (velk_light_point_traces), moving toward what changed while pixels keep
         // showing them, so nothing jumps. When everything changed, from their first trace again,
         // their lights chosen again: what changed may be one of them.
-        velk_change_one(first + VELK_LIGHT_COARSE_WORD);
+        velk_change_one(first + VELK_PAGE_COARSE);
         uint now = VELK_GLOBALS.present_counter & 0x0FFFFFFFu;
         if (all) {
-            VELK_LIGHT_WORDS.data[first + VELK_LIGHT_RESET_WORD] = now;
-            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_LIGHT_SLOT_WORD + s] = VELK_LIGHT_NONE;
+            VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET] = now;
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = VELK_LIGHT_NONE;
         } else {
-            VELK_LIGHT_WORDS.data[first + VELK_LIGHT_CHANGED_WORD] = now;
+            VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] = now;
         }
     } else {
         velk_change_one(record + 3u);
@@ -1775,8 +1782,8 @@ void velk_light_list_record(uint page, uint instance, uint frame)
 {
     if (page >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) return;
     uint first = velk_light_page(pc.pool_word, page);
-    if (light_words.data[first + 1u] == VELK_LIGHT_LINKED) return;
-    light_words.data[first + VELK_LIGHT_READ_WORD] = 1u;
+    if (light_words.data[first + VELK_PAGE_KIND] == VELK_LIGHT_LINKED) return;
+    light_words.data[first + VELK_PAGE_READ] = 1u;
     velk_light_list_coarse(pc.pool_word, page, instance, frame, pc.lights);
 }
 
@@ -1817,11 +1824,11 @@ void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, u
     }
     // In a triangle's grid: the points around the pixel, and those of the grid's coarse level
     // around it, which the lighting reads under them until they are traced.
-    uint kind = light_words.data[first + 1u];
+    uint kind = light_words.data[first + VELK_PAGE_KIND];
     if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && triangle < (kind & 0xFFFFu)) {
         uint grid = velk_light_triangle_grid(pc.pool_word, first, triangle);
         uint n = grid >> 24u;
-        uint vertices = light_words.data[first];
+        uint vertices = light_words.data[first + VELK_PAGE_VERTICES];
         uvec2 places[3];
         vec3 w;
         velk_light_around(n, b, places, w);
@@ -1924,8 +1931,8 @@ void main()
     if (was != VELK_LIGHT_NONE && was < VELK_LIGHT_ONE_VALUE) {
         if (was >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) return;
         uint first = velk_light_page(pc.pool_word, was);
-        if (light_words.data[first + 1u] != VELK_LIGHT_LINKED) {
-            float laid_for = uintBitsToFloat(light_words.data[first + VELK_LIGHT_ACROSS_WORD]);
+        if (light_words.data[first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED) {
+            float laid_for = uintBitsToFloat(light_words.data[first + VELK_PAGE_ACROSS]);
             if (pc.again == 0u && across > 2.0 * laid_for
                 && atomicCompSwap(light_words.data[record + 3u], was, VELK_LIGHT_PENDING) == was) {
                 velk_light_search(record, was, instance);
@@ -1940,7 +1947,7 @@ void main()
         uint word = d.index_base + velk_cluster_first_index(cluster) + velk_ids_triangle(d, ids) * 3u;
         for (uint k = 0u; k < 3u; ++k) {
             uint corner = velk_mesh_words.data[word + k];
-            if (corner >= light_words.data[first]) continue;
+            if (corner >= light_words.data[first + VELK_PAGE_VERTICES]) continue;
             velk_light_list_record(light_words.data[velk_light_point_word(pc.pool_word, first, corner * 3u)], instance, frame);
         }
         velk_light_list_pixel(first, d, ids, coord, instance, frame, g);
@@ -2090,29 +2097,29 @@ bool velk_light_lay_out(uint vertices, uint cluster, uint kind, uint table, uint
     }
     uint page0 = velk_light_taken(pool, base, 0u);
     uint first = velk_light_page(pool, page0);
-    light_words.data[first] = vertices;
-    light_words.data[first + 1u] = kind;
-    light_words.data[first + 2u] = points;
+    light_words.data[first + VELK_PAGE_VERTICES] = vertices;
+    light_words.data[first + VELK_PAGE_KIND] = kind;
+    light_words.data[first + VELK_PAGE_POINT_WORDS] = points;
     for (uint k = 1u; k < VELK_LIGHT_DIRECT_PAGES; ++k) {
-        light_words.data[first + 2u + k] = index_pages == 0u && k < count ? velk_light_taken(pool, base, k) : VELK_LIGHT_NONE;
+        light_words.data[first + VELK_PAGE_PAGES - 1u + k] = index_pages == 0u && k < count ? velk_light_taken(pool, base, k) : VELK_LIGHT_NONE;
     }
     for (uint i = 0u; i < index_pages; ++i) {
         uint index = velk_light_taken(pool, base, count + i);
-        light_words.data[first + 3u + i] = index;
+        light_words.data[first + VELK_PAGE_PAGES + i] = index;
         uint at = velk_light_page(pool, index);
         for (uint k = 0u; k < VELK_LIGHT_PAGE_WORDS; ++k) {
             uint nth = 1u + i * VELK_LIGHT_PAGE_WORDS + k;
             light_words.data[at + k] = nth < count ? velk_light_taken(pool, base, nth) : VELK_LIGHT_NONE;
         }
     }
-    light_words.data[first + VELK_LIGHT_CHANGED_WORD] = VELK_LIGHT_NONE;
-    light_words.data[first + VELK_LIGHT_CLUSTER_WORD] = cluster;
-    light_words.data[first + VELK_LIGHT_RESET_WORD] = VELK_LIGHT_NONE;
-    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) light_words.data[first + VELK_LIGHT_SLOT_WORD + s] = VELK_LIGHT_NONE;
-    light_words.data[first + VELK_LIGHT_INDEX_WORD] = index_base;
-    light_words.data[first + VELK_LIGHT_ACROSS_WORD] = floatBitsToUint(across);
-    light_words.data[first + VELK_LIGHT_COARSE_WORD] = VELK_LIGHT_ONE_VALUE;
-    light_words.data[first + VELK_LIGHT_READ_WORD] = 0u;
+    light_words.data[first + VELK_PAGE_CHANGED] = VELK_LIGHT_NONE;
+    light_words.data[first + VELK_PAGE_CLUSTER] = cluster;
+    light_words.data[first + VELK_PAGE_RESET] = VELK_LIGHT_NONE;
+    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) light_words.data[first + VELK_PAGE_SLOTS + s] = VELK_LIGHT_NONE;
+    light_words.data[first + VELK_PAGE_INDEX] = index_base;
+    light_words.data[first + VELK_PAGE_ACROSS] = floatBitsToUint(across);
+    light_words.data[first + VELK_PAGE_COARSE] = VELK_LIGHT_ONE_VALUE;
+    light_words.data[first + VELK_PAGE_READ] = 0u;
     first_page = page0;
     return true;
 }
@@ -2337,7 +2344,7 @@ void main()
     // and they are traced this frame.
     if (s_own) {
         for (uint t = lane; t < s_table; t += 64u) {
-            light_words.data[velk_light_word(pool, s_first, VELK_LIGHT_PAGE_HEADER_WORDS + t)] = s_grid[t];
+            light_words.data[velk_light_word(pool, s_first, VELK_PAGE_GRIDS + t)] = s_grid[t];
         }
         for (uint p = lane; p < s_points; p += 64u) {
             uint at = velk_light_own_word(pool, s_first, p);
@@ -2434,12 +2441,12 @@ void velk_light_mark_record(uint light)
     uint first = velk_light_page(pc.pool_word, light);
     uint count = velk_light_page_count(first);
     if (count <= VELK_LIGHT_DIRECT_PAGES) {
-        for (uint k = 1u; k < count; ++k) velk_light_mark(light_words.data[first + 2u + k]);
+        for (uint k = 1u; k < count; ++k) velk_light_mark(light_words.data[first + VELK_PAGE_PAGES - 1u + k]);
         return;
     }
     uint index_pages = (count - 1u + VELK_LIGHT_PAGE_WORDS - 1u) / VELK_LIGHT_PAGE_WORDS;
     for (uint i = 0u; i < index_pages && i + 1u < VELK_LIGHT_DIRECT_PAGES; ++i) {
-        uint index = light_words.data[first + 3u + i];
+        uint index = light_words.data[first + VELK_PAGE_PAGES + i];
         velk_light_mark(index);
         if (index >= light_words.data[pc.pool_word + VELK_POOL_PAGES]) continue;
         uint at = velk_light_page(pc.pool_word, index);
@@ -2466,14 +2473,14 @@ void main()
     atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_PAGED], 1u);
     velk_light_mark_record(light);
     uint first = velk_light_page(pc.pool_word, light);
-    if (light_words.data[first + 1u] != VELK_LIGHT_LINKED) {
+    if (light_words.data[first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED) {
         // For the log: how many points it has, whether a pixel read them since the last mark,
         // and how records' points are spread.
         uint pool = pc.pool_word;
-        uint points = light_words.data[first + 2u] / 2u;
+        uint points = light_words.data[first + VELK_PAGE_POINT_WORDS] / 2u;
         atomicAdd(light_words.data[pool + VELK_POOL_MARK_POINTS], points);
-        if (light_words.data[first + VELK_LIGHT_READ_WORD] != 0u) atomicAdd(light_words.data[pool + VELK_POOL_MARK_READ_POINTS], points);
-        light_words.data[first + VELK_LIGHT_READ_WORD] = 0u;
+        if (light_words.data[first + VELK_PAGE_READ] != 0u) atomicAdd(light_words.data[pool + VELK_POOL_MARK_READ_POINTS], points);
+        light_words.data[first + VELK_PAGE_READ] = 0u;
         atomicMax(light_words.data[pool + VELK_POOL_MARK_MOST_POINTS], points);
         uint bucket = points < 256u ? 0u : points < 1024u ? 1u : points < 4096u ? 2u : points < 16384u ? 3u : 4u;
         atomicAdd(light_words.data[pool + VELK_POOL_MARK_BUCKETS + bucket], 1u);
@@ -2483,7 +2490,7 @@ void main()
     atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_LINKED], 1u);
     // What its vertices link to, which neighbouring vertices mostly share.
     uint last = VELK_LIGHT_NONE;
-    uint vertices = min(light_words.data[first], 256u);
+    uint vertices = min(light_words.data[first + VELK_PAGE_VERTICES], 256u);
     for (uint v = 0u; v < vertices; ++v) {
         uint linked = light_words.data[velk_light_point_word(pc.pool_word, first, v * 3u)];
         if (linked != last && linked < pages) velk_light_mark_record(linked);
