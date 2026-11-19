@@ -7,7 +7,7 @@
 
 namespace inspect {
 
-/// A pass's GPU time, averaged over a view's still frames.
+/// A pass's GPU time, averaged over a view's still frames or its moving ones.
 struct PassTime
 {
     velk::string name;
@@ -16,7 +16,8 @@ struct PassTime
 
 /// What a verification run measured of a view's GPU time: still, once settled; and while
 /// something moves (the scene's movers or the view's camera motion), the median and worst
-/// frame, negative when nothing moves.
+/// frame, negative when nothing moves. Each pass's time, still and moving; a pass that runs only
+/// on some frames is averaged over all of them.
 struct ViewTimes
 {
     velk::string view;
@@ -24,6 +25,7 @@ struct ViewTimes
     double moving_median_ms = -1.0;
     double moving_max_ms = -1.0;
     velk::vector<PassTime> passes;
+    velk::vector<PassTime> moving_passes;
 };
 
 /// One line of the history: when, at which commits (velk-ui's and velk's, each marked with *
@@ -50,7 +52,8 @@ bool append_timings(velk::string_view path, const velk::string& date, const velk
                     const velk::string& velk_commit, bool dirty, const velk::vector<ViewTimes>& times);
 
 /// What a view's times are measured against: the median of its last `runs` rows on committed
-/// code, each time apart, and the passes of the latest of them. False when there are none.
+/// code, each time apart, and the passes, still and moving, of the latest of them. False when
+/// there are none.
 bool baseline_of(const velk::vector<TimingRow>& rows, velk::string_view view, size_t runs, ViewTimes& out,
                  velk::string& since);
 

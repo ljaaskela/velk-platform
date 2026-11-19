@@ -26,7 +26,7 @@
 // last run, the images, their difference maps and a report to build/verify; then exits. GPU
 // times are checked against the median of the view's last runs on committed code in the
 // history (reference_images/verify/timings.tsv), and a run of every scene adds its times to
-// it, with the commits of velk-ui and velk.
+// it, still and moving, each pass's too, with the commits of velk-ui and velk.
 //
 // trend: each view's times in the history, oldest first, marking where they stepped.
 //
@@ -429,8 +429,20 @@ int main(int argc, char* argv[])
                 worst = sorted.back();
                 std::snprintf(out, size, "%.2f/%.2f", median, worst);
             };
+            // The last frame's passes added to `into`, and `into` as averages over `frames`.
+            const auto add_passes = [&](velk::vector<inspect::PassTime>& into) {
+                for (const auto& t : backend->last_gpu_timings()) {
+                    auto found = std::find_if(into.begin(), into.end(), [&](const inspect::PassTime& p) { return p.name == t.label; });
+                    if (found == into.end()) into.push_back({velk::string(t.label), double(t.ms)});
+                    else found->ms += t.ms;
+                }
+            };
+            const auto average_passes = [](velk::vector<inspect::PassTime>& passes, size_t frames) {
+                for (auto& p : passes) p.ms /= static_cast<double>(frames);
+            };
             // Where a slower view's time went: the passes that grew most since the baseline's run.
-            const auto slower_passes = [&](const inspect::ViewTimes& now, const inspect::ViewTimes& was, const velk::string& since) {
+            const auto slower_passes = [&](const char* what, const velk::vector<inspect::PassTime>& now,
+                                           const velk::vector<inspect::PassTime>& was, const velk::string& since) {
                 struct Growth
                 {
                     const char* name;
@@ -438,15 +450,17 @@ int main(int argc, char* argv[])
                     double now;
                 };
                 velk::vector<Growth> grown;
-                for (const auto& p : now.passes) {
+                for (const auto& p : now) {
                     double before = 0.0;
-                    for (const auto& q : was.passes) {
+                    for (const auto& q : was) {
                         if (q.name == p.name) before = q.ms;
                     }
                     if (p.ms > before) grown.push_back({p.name.c_str(), before, p.ms});
                 }
                 std::sort(grown.begin(), grown.end(), [](const Growth& a, const Growth& b) { return a.now - a.was > b.now - b.was; });
-                velk::string text("  slower since ");
+                velk::string text("  ");
+                text.append(view_of(what));
+                text.append(" since ");
                 text.append(since);
                 text.append(":");
                 for (size_t i = 0; i < grown.size() && i < 3u; ++i) {
@@ -538,10 +552,14 @@ int main(int argc, char* argv[])
                 long settled = settle_from;
                 // GPU time while the scene's movers move, after the first frames that load it.
                 velk::vector<double> motion_ms;
+                velk::vector<inspect::PassTime> motion_passes;
                 for (long f = 0; f < settle_frames; ++f) {
                     inspect::place_movers(built, f);
                     if (!frame()) return 1;
-                    if (!built.movers.empty() && f >= kSettleFrom && f < built.frames) motion_ms.push_back(frame_ms(*backend));
+                    if (!built.movers.empty() && f >= kSettleFrom && f < built.frames) {
+                        motion_ms.push_back(frame_ms(*backend));
+                        add_passes(motion_passes);
+                    }
                     if (f < settle_from) continue;
                     previous = std::move(last);
                     if (!grab(last)) return 1;
@@ -563,19 +581,18 @@ int main(int argc, char* argv[])
                     if (!previous.rgb.empty()) {
                         changed = std::max(changed, inspect::frame_change(previous, last, kChangeThreshold).share);
                     }
-                    for (const auto& t : backend->last_gpu_timings()) {
-                        gpu_ms += t.ms;
-                        auto found = std::find_if(times.passes.begin(), times.passes.end(),
-                                                  [&](const inspect::PassTime& p) { return p.name == t.label; });
-                        if (found == times.passes.end()) times.passes.push_back({velk::string(t.label), double(t.ms)});
-                        else found->ms += t.ms;
-                    }
+                    gpu_ms += frame_ms(*backend);
+                    add_passes(times.passes);
                 }
                 gpu_ms /= static_cast<double>(kMeasureFrames);
-                for (auto& p : times.passes) p.ms /= static_cast<double>(kMeasureFrames);
+                average_passes(times.passes, kMeasureFrames);
                 times.settled_ms = gpu_ms;
                 char motion_text[32];
                 moving_text(motion_ms, times.moving_median_ms, times.moving_max_ms, motion_text, sizeof(motion_text));
+                if (!motion_ms.empty()) {
+                    average_passes(motion_passes, motion_ms.size());
+                    times.moving_passes = std::move(motion_passes);
+                }
                 // Against the view's runs on committed code.
                 inspect::ViewTimes base;
                 velk::string base_since;
@@ -633,7 +650,8 @@ int main(int argc, char* argv[])
                     line(buf);
                     count(verdict);
                 }
-                if (still_slower || moving_slower) slower_passes(times, base, base_since);
+                if (still_slower) slower_passes("slower", times.passes, base.passes, base_since);
+                if (moving_slower) slower_passes("slower moving", times.moving_passes, base.moving_passes, base_since);
                 if (view.move_frames <= 0) {
                     run_times.push_back(std::move(times));
                     continue;
@@ -644,10 +662,12 @@ int main(int argc, char* argv[])
                 int worst_step = 0;
                 bool have_references = true;
                 velk::vector<double> step_ms;
+                velk::vector<inspect::PassTime> step_passes;
                 for (int k = 1; k <= view.move_frames; ++k) {
                     place_camera(main_camera, inspect::motion_place(view, k));
                     if (!frame()) return 1;
                     step_ms.push_back(frame_ms(*backend));
+                    add_passes(step_passes);
                     inspect::Image image;
                     if (!grab(image)) return 1;
                     char suffix[32];
@@ -681,6 +701,8 @@ int main(int argc, char* argv[])
                 // The camera's motion's GPU time, against the view's runs on committed code.
                 char step_text[32];
                 moving_text(step_ms, times.moving_median_ms, times.moving_max_ms, step_text, sizeof(step_text));
+                average_passes(step_passes, step_ms.size());
+                times.moving_passes = std::move(step_passes);
                 char step_was[16];
                 was_text(has_base ? base.moving_median_ms : -1.0, step_was, sizeof(step_was));
                 const bool steps_slower = has_base && base.moving_median_ms >= 0.0
@@ -698,7 +720,7 @@ int main(int argc, char* argv[])
                     line(buf);
                     count(verdict);
                 }
-                if (steps_slower) slower_passes(times, base, base_since);
+                if (steps_slower) slower_passes("slower moving", times.moving_passes, base.moving_passes, base_since);
                 run_times.push_back(std::move(times));
 
                 // There and back: the view again after the motion, against how it looked before.

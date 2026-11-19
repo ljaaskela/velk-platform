@@ -17,7 +17,8 @@ namespace inspect {
 
 namespace {
 
-constexpr const char* kHeader = "date\tcommit\tvelk\tdirty\tview\tsettled_ms\tmoving_median_ms\tmoving_max_ms\tpasses\n";
+constexpr const char* kHeader =
+    "date\tcommit\tvelk\tdirty\tview\tsettled_ms\tmoving_median_ms\tmoving_max_ms\tpasses\tmoving_passes\n";
 
 /// What `command` prints, its first line or all of it.
 velk::string run(const velk::string& command)
@@ -57,6 +58,29 @@ double median(velk::vector<double> values)
     std::sort(values.begin(), values.end());
     const size_t n = values.size();
     return n % 2 == 1 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
+}
+
+/// The passes in a field, as name=ms separated by ';'.
+velk::vector<PassTime> parse_passes(const velk::string& field)
+{
+    velk::vector<PassTime> passes;
+    for (const velk::string& pass : split(velk::string_view(field.c_str(), field.size()), ';')) {
+        const size_t eq = pass.find(velk::string_view("=", 1));
+        if (eq == velk::string::npos) {
+            continue;
+        }
+        passes.push_back({pass.substr(0, eq), std::atof(pass.c_str() + eq + 1)});
+    }
+    return passes;
+}
+
+void write_passes(std::FILE* f, const velk::vector<PassTime>& passes)
+{
+    bool first = true;
+    for (const PassTime& p : passes) {
+        std::fprintf(f, "%s%s=%.3f", first ? "" : ";", p.name.c_str(), p.ms);
+        first = false;
+    }
 }
 
 } // namespace
@@ -106,7 +130,8 @@ velk::vector<TimingRow> load_timings(velk::string_view path)
             first = false;
             continue;
         }
-        // The passes may be left out, as for runs from before they were kept.
+        // The passes may be left out, as for runs from before they were kept, and the moving
+        // ones likewise.
         const auto fields = split(line, '\t');
         if (fields.size() < 8) {
             continue;
@@ -120,13 +145,8 @@ velk::vector<TimingRow> load_timings(velk::string_view path)
         row.times.settled_ms = std::atof(fields[5].c_str());
         row.times.moving_median_ms = std::atof(fields[6].c_str());
         row.times.moving_max_ms = std::atof(fields[7].c_str());
-        for (const velk::string& pass : split(fields.size() > 8 ? velk::string_view(fields[8].c_str(), fields[8].size()) : velk::string_view(), ';')) {
-            const size_t eq = pass.find(velk::string_view("=", 1));
-            if (eq == velk::string::npos) {
-                continue;
-            }
-            row.times.passes.push_back({pass.substr(0, eq), std::atof(pass.c_str() + eq + 1)});
-        }
+        if (fields.size() > 8) row.times.passes = parse_passes(fields[8]);
+        if (fields.size() > 9) row.times.moving_passes = parse_passes(fields[9]);
         rows.push_back(std::move(row));
     }
     return rows;
@@ -151,11 +171,9 @@ bool append_timings(velk::string_view path, const velk::string& date, const velk
     for (const ViewTimes& t : times) {
         std::fprintf(f, "%s\t%s\t%s\t%d\t%s\t%.3f\t%.3f\t%.3f\t", date.c_str(), commit.c_str(), velk_commit.c_str(), dirty ? 1 : 0,
                      t.view.c_str(), t.settled_ms, t.moving_median_ms, t.moving_max_ms);
-        bool first = true;
-        for (const PassTime& p : t.passes) {
-            std::fprintf(f, "%s%s=%.3f", first ? "" : ";", p.name.c_str(), p.ms);
-            first = false;
-        }
+        write_passes(f, t.passes);
+        std::fputs("\t", f);
+        write_passes(f, t.moving_passes);
         std::fputs("\n", f);
     }
     std::fclose(f);
@@ -188,6 +206,7 @@ bool baseline_of(const velk::vector<TimingRow>& rows, velk::string_view view, si
     out.settled_ms = median(settled);
     out.moving_median_ms = median(moving);
     out.passes = latest->times.passes;
+    out.moving_passes = latest->times.moving_passes;
     since = latest->commit;
     return true;
 }
