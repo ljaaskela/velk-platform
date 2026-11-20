@@ -2078,6 +2078,9 @@ layout(push_constant) uniform PC {
 shared uint s_box[6];
 // How many leaves have records for rays, which the sort puts first.
 shared uint s_traced;
+// Whether the tree as built no longer fits its leaves, and how many leaves its nodes name.
+shared uint s_changed;
+shared uint s_named;
 
 // A float as a uint that orders as the float does, for atomicMin and atomicMax.
 uint velk_float_order(float f)
@@ -2149,6 +2152,50 @@ void velk_lbvh_leaf_box(uint ref, out vec3 lo, out vec3 hi)
     velk_leaf_box(g_top, g_leaf_word, ref & 0x7FFFFFFFu, lo, hi);
 }
 
+// Whether leaf `leaf` of the top tree whose leaves start at `leaf_word` has records for rays.
+bool velk_leaf_traced(uint top, uint leaf_word, uint leaf)
+{
+    uint at = leaf_word + leaf * VELK_RAY_TOP_LEAF_WORDS;
+    uint cut = cull_words.data[top + VELK_RAY_TOP_HEADER_WORDS + cull_words.data[at + VELK_RAY_TOP_LEAF_CUT] * VELK_RAY_TOP_CUT_WORDS
+                               + VELK_RAY_TOP_CUT_CUT];
+    return cull_words.data[velk_cut_state(cut, cull_words.data[at + VELK_RAY_TOP_LEAF_PARTITION]) + VELK_PART_RAY_COUNT] != 0u;
+}
+
+// Whether the tree built before still fits its leaves: it was built, no partition of its cuts
+// chose again this frame (a partition's tree, and so its root's box, changes only then), and its
+// nodes name exactly the leaves with records for rays. All threads of the group call it.
+bool velk_top_unchanged(uint top, uint cuts, uint leaf_word, uint leaves, uint nodes, uint node_count, uint lane)
+{
+    if (lane == 0u) {
+        s_changed = cull_words.data[top + VELK_RAY_TOP_BUILT] == 0u ? 1u : 0u;
+        s_named = 0u;
+        s_traced = 0u;
+    }
+    memoryBarrierShared();
+    barrier();
+    for (uint c = lane; c < cuts; c += 256u) {
+        uint cut = cull_words.data[top + VELK_RAY_TOP_HEADER_WORDS + c * VELK_RAY_TOP_CUT_WORDS + VELK_RAY_TOP_CUT_CUT];
+        if (cull_words.data[cut + VELK_CUT_CHOOSE_GROUPS] != 0u) atomicOr(s_changed, 1u);
+    }
+    for (uint i = lane; i < leaves; i += 256u) {
+        if (velk_leaf_traced(top, leaf_word, i)) atomicAdd(s_traced, 1u);
+    }
+    for (uint i = lane; i < node_count; i += 256u) {
+        for (uint k = 0u; k < 2u; ++k) {
+            uint ref = cull_words.data[nodes + i * VELK_CUT_NODE_WORDS + VELK_CUT_NODE_LEFT_REF + k];
+            if (ref == 0xFFFFFFFFu || (ref & 0x80000000u) == 0u) continue;
+            uint leaf = ref & 0x7FFFFFFFu;
+            if (leaf >= leaves || !velk_leaf_traced(top, leaf_word, leaf)) atomicOr(s_changed, 1u);
+            else atomicAdd(s_named, 1u);
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+    bool unchanged = s_changed == 0u && s_named == s_traced;
+    barrier();
+    return unchanged;
+}
+
 void main()
 {
     uint top = pc.top_word;
@@ -2158,6 +2205,9 @@ void main()
     uint leaf_word = top + VELK_RAY_TOP_HEADER_WORDS + cuts * VELK_RAY_TOP_CUT_WORDS;
     uint nodes = leaf_word + leaves * 2u;
     uint lane = gl_LocalInvocationIndex;
+    uint node_count = leaves > 1u ? leaves - 1u : 1u;
+    // Built before over the same partition trees: kept as it is.
+    if (velk_top_unchanged(top, cuts, leaf_word, leaves, nodes, node_count, lane)) return;
 
     // The leaves in Morton order of their boxes' centres within the box around them all, so
     // that partitions near each other share nodes; those at least a quarter as wide as that box
@@ -2210,8 +2260,8 @@ void main()
     g_top = top;
     g_leaf_word = leaf_word;
     g_sorted = sorted;
-    uint node_count = leaves > 1u ? leaves - 1u : 1u;
     velk_lbvh_build_bounded(nodes, node_count, sorted ? s_traced : leaves, lane, 256u, !sorted);
+    if (lane == 0u) cull_words.data[top + VELK_RAY_TOP_BUILT] = 1u;
 }
 )";
 

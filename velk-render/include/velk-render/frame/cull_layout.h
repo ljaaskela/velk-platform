@@ -130,7 +130,8 @@ namespace velk {
     X(cp, gp, Leaves, LEAVES, 1)                                                               \
     X(cp, gp, Nodes, NODES, 2)                                                                 \
     X(cp, gp, Root, ROOT, 3)                    /* the root node's index */                    \
-    X(cp, gp, HeaderWords, HEADER_WORDS, 4)
+    X(cp, gp, Built, BUILT, 4)                  /* 0 until its nodes are built over its leaves */ \
+    X(cp, gp, HeaderWords, HEADER_WORDS, 5)
 
 /// A cut of a view's top tree (kRayTopCut, VELK_RAY_TOP_CUT).
 #define VELK_RAY_TOP_CUT(X, cp, gp)                                                                \
