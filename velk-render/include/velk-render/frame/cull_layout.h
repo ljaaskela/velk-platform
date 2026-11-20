@@ -296,8 +296,9 @@ namespace velk {
     X(cp, gp, DiagMaxFailed, DIAG_MAX_FAILED, 51) /* TEMPORARY: the largest failed take this frame, in pages */ \
     X(cp, gp, DiagRetryOld, DIAG_RETRY_OLD, 52) /* TEMPORARY: own old pages of those whose take failed and kept them */ \
     X(cp, gp, DiagSelfBlocked, DIAG_SELF_BLOCKED, 53) /* TEMPORARY: failed takes that fit the free pages plus their own old */ \
-    X(cp, gp, DiagSnap, DIAG_SNAP, 54)          /* TEMPORARY: the last frame's counts as the sweep saw them, kCutDiagSnapWords */ \
-    X(cp, gp, End, END, 65)
+    X(cp, gp, ShortPages, SHORT_PAGES, 54)      /* pages partitions choosing again asked for and did not get, the last frame */ \
+    X(cp, gp, DiagSnap, DIAG_SNAP, 55)          /* TEMPORARY: the last frame's counts as the sweep saw them, kCutDiagSnapWords */ \
+    X(cp, gp, End, END, 66)
 
 /// A partition's state in a kept cut (kPart, VELK_PART), at the cut's STATES_WORD.
 #define VELK_CUT_PART(X, cp, gp)                                                                   \

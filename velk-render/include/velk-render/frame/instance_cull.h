@@ -1063,6 +1063,10 @@ void main()
             cull_words.data[snap + 8u] = free_now;
             cull_words.data[snap + 9u] = cull_words.data[cut + VELK_CUT_PAGES_TAKEN];
             cull_words.data[snap + 10u] = min(cull_words.data[cut + VELK_CUT_TABLE_USED], pages);
+            // The pages asked for and not got, which the CPU watches every frame while there are
+            // any, so that a pool too small grows soon.
+            uint taken = cull_words.data[cut + VELK_CUT_PAGES_TAKEN];
+            cull_words.data[cut + VELK_CUT_SHORT_PAGES] = demand > taken ? demand - taken : 0u;
             if (kept + demand > pages) {
                 atomicMax(cull_words.data[cut + VELK_CUT_PAGES_WANTED], kept + demand);
             } else if (demand != 0u && cull_words.data[cut + VELK_CUT_PAGES_TAKEN] == 0u) {
@@ -3542,6 +3546,8 @@ struct InstanceCullPass
         uint32_t partitions = 0;
         uint32_t capacity = 0;      ///< Records the pool holds, kCutPageRecords a page.
         uint32_t node_capacity = 0; ///< Tree nodes the pool holds, kCutPageNodes a page.
+        uint64_t made_frame = 0;    ///< The frame it was made, for watching its pool closely at first.
+        bool short_pages = false;   ///< Partitions lately asked for pages they did not get.
     };
     vector<Cut> cuts;
     /// The view's quads drawn (kQuadListHeaderWords), filled each frame by the draw pass from
@@ -4502,12 +4508,23 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
     record = record || tables_changed;
     state.partition_tables = partition_tables;
 
-    // Whether a cut's pool was too small lately, now and then: reading the arena is slow, and
-    // until it grows the partitions that find no free pages keep their old records.
+    // Whether a cut's pool was too small lately: every frame for kCutYoungFrames after it is made
+    // and while partitions ask for pages they do not get, else now and then, reading the arena
+    // being slow. Until it grows, partitions that find no free pages keep their old records.
     constexpr uint64_t kCutCheckFrames = 16;
-    if (!state.cuts.empty() && ctx.present_counter >= state.cut_check_frame + kCutCheckFrames) {
-        state.cut_check_frame = ctx.present_counter;
-        for (const auto& cut : state.cuts) {
+    constexpr uint64_t kCutYoungFrames = 32;
+    if (!state.cuts.empty()) {
+        const bool now_and_then = ctx.present_counter >= state.cut_check_frame + kCutCheckFrames;
+        if (now_and_then) {
+            state.cut_check_frame = ctx.present_counter;
+        }
+        for (auto& cut : state.cuts) {
+            if (!now_and_then && !cut.short_pages && ctx.present_counter >= cut.made_frame + kCutYoungFrames) {
+                continue;
+            }
+            uint32_t short_pages = 0;
+            arena->read_at(cut.region.offset() + uint64_t(kCutShortPages) * sizeof(uint32_t), &short_pages, sizeof(short_pages));
+            cut.short_pages = short_pages != 0;
             uint32_t wanted_pages = 0;
             arena->read_at(cut.region.offset() + uint64_t(kCutPagesWanted) * sizeof(uint32_t), &wanted_pages, sizeof(wanted_pages));
             const uint32_t wanted = wanted_pages * kCutPageRecords;
@@ -4566,6 +4583,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             InstanceCullPass::Cut cut;
             cut.key = info.key;
             cut.partitions = info.partitions;
+            cut.made_frame = ctx.present_counter;
             // The pool: whole pages, room for the records kept, and for the new and the old records
             // of the partitions choosing again at once, with a page a partition for the part-filled
             // last pages of both.
