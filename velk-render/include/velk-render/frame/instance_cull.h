@@ -4516,8 +4516,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             cut.key = info.key;
             cut.partitions = info.partitions;
             // The pool: whole pages, room for the records kept, and for the new and the old records
-            // of the partitions choosing again at once.
-            const uint32_t capacity = std::max({info.members * 2u + 4096u, wanted + wanted / 2u,
+            // of the partitions choosing again at once, with a page a partition for the part-filled
+            // last pages of both.
+            const uint32_t capacity = std::max({info.members * 2u + 4096u + info.partitions * kCutPageRecords, wanted + wanted / 2u,
                                                 old != state.cuts.end() ? old->capacity : 0u});
             const uint32_t pages = (capacity + kCutPageRecords - 1u) / kCutPageRecords;
             cut.capacity = pages * kCutPageRecords;
