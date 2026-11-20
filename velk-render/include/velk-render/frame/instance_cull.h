@@ -243,8 +243,9 @@ void velk_sort_keys(uint n, uint lane, uint lanes)
 )"
 
 // A ray tree as a radix tree over its leaves in their sorted order (Karras 2012), for the tree
-// builds, after VELK_CUT_GLSL. The shader defines velk_lbvh_key, the sorted key of leaf g (all
-// different); velk_lbvh_leaf_ref, its reference in a node, 0xFFFFFFFF for none; and
+// builds, after VELK_CUT_GLSL. The shader defines velk_lbvh_key, the sorted code of leaf g
+// without its place, so that leaves with the same code split evenly by their places;
+// velk_lbvh_leaf_ref, its reference in a node, 0xFFFFFFFF for none; and
 // velk_lbvh_leaf_box, the box of the leaf a reference names; and velk_store_box and
 // velk_load_vec3. With g_lbvh_balanced each leaf's key is its place, which makes the tree
 // balanced.
@@ -1927,7 +1928,7 @@ uint g_leaf_records = 0u;
 
 uint velk_lbvh_key(uint g)
 {
-    return s_leaf_key[g];
+    return s_leaf_key[g] >> kSortIndexBits;
 }
 
 // Leaf g: up to four records from the list's place 4g, as the first one's place times four plus
@@ -2131,7 +2132,7 @@ bool g_sorted = false;
 
 uint velk_lbvh_key(uint g)
 {
-    return s_order[g];
+    return s_order[g] >> kSortIndexBits;
 }
 
 // Leaf g in order: its partition's leaf, none for one without records for rays.
