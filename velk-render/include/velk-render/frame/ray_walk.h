@@ -96,12 +96,19 @@ vec3 velk_ray_vec3(uint at)
                 uintBitsToFloat(velk_culling.data[at + 2u]));
 }
 
-// Nodes in the tree over a partition's `records` records. Mirrors cut_tree_nodes.
+// Nodes in the tree over a partition's `records` records: one less than its leaves of four, at
+// least one. Mirrors cut_tree_nodes. Counted as pairs merged level by level, the same value as
+// leaves minus one: the walk compiles to fewer registers this way.
 uint velk_ray_tree_nodes(uint records)
 {
     if (records == 0u) return 0u;
-    uint leaves = (records + 3u) / 4u;
-    return leaves > 1u ? leaves - 1u : 1u;
+    uint below = (records + 3u) / 4u;
+    uint total = 0u;
+    do {
+        total += below / 2u;
+        below = (below + 1u) / 2u;
+    } while (below > 1u);
+    return max(total, 1u);
 }
 
 // `ray` in an instance's own space. For a mesh, where its vertices are, (local - offset) /
