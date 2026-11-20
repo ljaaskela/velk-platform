@@ -542,8 +542,8 @@ void main()
 )";
 
 /// Draws the boxes of one level of the trees over a kept cut's partitions (DebugView::RayTree)
-/// over a view's image: at `level` 0 its leaves of four records, at higher ones its nodes',
-/// and a partition's root where its tree is not that tall, coloured by level. `cut_word` is
+/// over a view's image: at `level` k the children of the nodes of height k + 1, at 0 leaves of
+/// four records, and a partition's root where its tree is not that tall, coloured by level. `cut_word` is
 /// the kept cut (kCutHeaderWords). With `top_word` set instead, the view's top tree over the
 /// partitions (kRayTopHeaderWords, DebugView::RayTop): at 0 each partition's box. A thread per
 /// point along an edge, kRayTreeEdgeSteps of them per edge, 12 edges a box, two boxes a node.

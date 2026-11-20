@@ -82,10 +82,11 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 ///
 /// Each partition has a tree over its records for rays, kCutNodeWords a node: the boxes of
 /// its two children (left min, left max, right min, right max, in world space), then a
-/// reference to each, its level (1 over leaves) and 1 for the root. A reference with kCutLeaf
-/// is up to four of its records, the first one's offset from its first record times four plus
-/// how many less one; without, a node's offset from its first node; kCullNoSlot for none. Its
-/// nodes are its levels from the bottom, the root last. See instance_cut_tree_src.
+/// reference to each, its height (1 over leaves only) and 1 for the root. A reference with
+/// kCutLeaf is up to four of its records, the first one's offset from its first record times
+/// four plus how many less one; without, a node's offset from its first node; kCullNoSlot for
+/// none. The tree is a radix tree over its leaves in Morton order (VELK_LBVH_GLSL), the root
+/// its last node. See instance_cut_tree_src.
 inline constexpr uint32_t kCutHeaderWords = kCutEnd;
 inline constexpr uint32_t kCutPartitionWords = kPartEnd;
 /// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
@@ -134,19 +135,15 @@ inline uint32_t quad_tree_leaves(uint32_t members)
     return leaves;
 }
 
-/// Nodes in the tree over a partition of @p records records. Mirrors velk_cut_tree_nodes.
+/// Nodes in the tree over a partition of @p records records: one less than its leaves of four,
+/// at least one. Mirrors velk_cut_tree_nodes.
 inline uint32_t cut_tree_nodes(uint32_t records)
 {
     if (records == 0) {
         return 0;
     }
-    uint32_t below = (records + 3u) / 4u;
-    uint32_t total = 0;
-    do {
-        below = (below + 1u) / 2u;
-        total += below;
-    } while (below > 1u);
-    return total;
+    const uint32_t leaves = (records + 3u) / 4u;
+    return leaves > 1u ? leaves - 1u : 1u;
 }
 
 // Where a cut's parts are. The shader declares cull_words.
@@ -177,18 +174,13 @@ uint velk_cut_ray_store(uint cut, bool current)
     return cull_words.data[cut + VELK_CUT_RAY_STORES + (current ? parity : 1u - parity)];
 }
 
-// Nodes in the tree over a partition's `records` records: its leaves of four records paired
-// level by level up to one. Mirrors cut_tree_nodes.
+// Nodes in the tree over a partition's `records` records: one less than its leaves of four, at
+// least one. Mirrors cut_tree_nodes.
 uint velk_cut_tree_nodes(uint records)
 {
     if (records == 0u) return 0u;
-    uint below = (records + 3u) / 4u;
-    uint total = 0u;
-    do {
-        below = (below + 1u) / 2u;
-        total += below;
-    } while (below > 1u);
-    return total;
+    uint leaves = (records + 3u) / 4u;
+    return leaves > 1u ? leaves - 1u : 1u;
 }
 )"
 
@@ -246,6 +238,163 @@ void velk_sort_keys(uint n, uint lane, uint lanes)
             memoryBarrierShared();
             barrier();
         }
+    }
+}
+)"
+
+// A ray tree as a radix tree over its leaves in their sorted order (Karras 2012), for the tree
+// builds, after VELK_CUT_GLSL. The shader defines velk_lbvh_key, the sorted key of leaf g (all
+// different); velk_lbvh_leaf_ref, its reference in a node, 0xFFFFFFFF for none; and
+// velk_lbvh_leaf_box, the box of the leaf a reference names; and velk_store_box and
+// velk_load_vec3. With g_lbvh_balanced each leaf's key is its place, which makes the tree
+// balanced.
+#define VELK_LBVH_GLSL R"(
+bool g_lbvh_balanced = false;
+uint velk_lbvh_key(uint g);
+uint velk_lbvh_leaf_ref(uint g);
+void velk_lbvh_leaf_box(uint ref, out vec3 lo, out vec3 hi);
+void velk_store_box(uint at, vec3 lo, vec3 hi);
+vec3 velk_load_vec3(uint at);
+
+// How many leading bits the keys of leaves i and j of n share; -1 past either end. Keys alike
+// go on by their places.
+int velk_lbvh_delta(int i, int j, int n)
+{
+    if (j < 0 || j >= n) return -1;
+    uint a = g_lbvh_balanced ? uint(i) : velk_lbvh_key(uint(i));
+    uint b = g_lbvh_balanced ? uint(j) : velk_lbvh_key(uint(j));
+    if (a != b) return 31 - findMSB(a ^ b);
+    return 63 - findMSB(uint(i ^ j));
+}
+
+// The children of internal node i (0 the root) of the radix tree over n leaves, n at least 2:
+// a leaf as 0x80000000 and its place, else an internal node.
+void velk_lbvh_children(int i, int n, out uint left, out uint right)
+{
+    int d = velk_lbvh_delta(i, i + 1, n) - velk_lbvh_delta(i, i - 1, n) >= 0 ? 1 : -1;
+    // The other end of its range: past it the shared prefix is no longer than toward i - d.
+    int dmin = velk_lbvh_delta(i, i - d, n);
+    int lmax = 2;
+    for (uint k = 0u; k < 30u && velk_lbvh_delta(i, i + lmax * d, n) > dmin; ++k) lmax *= 2;
+    int l = 0;
+    for (int t = lmax / 2; t >= 1; t /= 2) {
+        if (velk_lbvh_delta(i, i + (l + t) * d, n) > dmin) l += t;
+    }
+    int j = i + l * d;
+    // Where the range splits: the last leaf that shares more than the range does with i.
+    int dnode = velk_lbvh_delta(i, j, n);
+    int s = 0;
+    int div = 2;
+    for (uint k = 0u; k < 32u; ++k) {
+        int t = (l + div - 1) / div;
+        if (velk_lbvh_delta(i, i + (s + t) * d, n) > dnode) s += t;
+        if (t <= 1) break;
+        div *= 2;
+    }
+    int split = i + s * d + min(d, 0);
+    left = min(i, j) == split ? 0x80000000u | uint(split) : uint(split);
+    right = max(i, j) == split + 1 ? 0x80000000u | uint(split + 1) : uint(split + 1);
+}
+
+// Builds the radix tree over the `n` leaves into the `node_count` nodes at `nodes`
+// (kCutNodeWords each): internal node i at place node_count - 1 - i, the root last, the places
+// before the tree's cleared; then each node's boxes from its children's, from the bottom up, a
+// round a level, and its height (VELK_CUT_NODE_LEVEL, 1 over leaves only). Returns the root's
+// height, 0 when it did not finish. All `lanes` threads of the work group call it.
+uint velk_lbvh_build(uint nodes, uint node_count, uint n, uint lane, uint lanes)
+{
+    uint internal = n > 1u ? n - 1u : 1u;
+    for (uint s = lane; s + internal < node_count; s += lanes) {
+        uint node = nodes + s * VELK_CUT_NODE_WORDS;
+        velk_store_box(node + VELK_CUT_NODE_LEFT_MIN, vec3(1e30), vec3(-1e30));
+        velk_store_box(node + VELK_CUT_NODE_RIGHT_MIN, vec3(1e30), vec3(-1e30));
+        cull_words.data[node + VELK_CUT_NODE_LEFT_REF] = 0xFFFFFFFFu;
+        cull_words.data[node + VELK_CUT_NODE_RIGHT_REF] = 0xFFFFFFFFu;
+        cull_words.data[node + VELK_CUT_NODE_LEVEL] = 0u;
+        cull_words.data[node + VELK_CUT_NODE_ROOT] = 0u;
+    }
+    // Each internal node's children. Until the boxes are done, ROOT holds the round a node was
+    // done in, plus one.
+    for (uint i = lane; i < internal; i += lanes) {
+        uint node = nodes + (node_count - 1u - i) * VELK_CUT_NODE_WORDS;
+        uint left = 0xFFFFFFFFu;
+        uint right = 0xFFFFFFFFu;
+        if (n >= 2u) {
+            uint l;
+            uint r;
+            velk_lbvh_children(int(i), int(n), l, r);
+            left = (l & 0x80000000u) != 0u ? velk_lbvh_leaf_ref(l & 0x7FFFFFFFu) : node_count - 1u - l;
+            right = (r & 0x80000000u) != 0u ? velk_lbvh_leaf_ref(r & 0x7FFFFFFFu) : node_count - 1u - r;
+        } else if (n == 1u) {
+            left = velk_lbvh_leaf_ref(0u);
+        }
+        cull_words.data[node + VELK_CUT_NODE_LEFT_REF] = left;
+        cull_words.data[node + VELK_CUT_NODE_RIGHT_REF] = right;
+        cull_words.data[node + VELK_CUT_NODE_LEVEL] = 0u;
+        cull_words.data[node + VELK_CUT_NODE_ROOT] = 0u;
+    }
+    memoryBarrierBuffer();
+    barrier();
+    // A node is done once its child nodes were done in an earlier round, whose boxes the
+    // barrier since has made seen. The keys all differ, so the tree is at most 64 deep.
+    uint root = nodes + (node_count - 1u) * VELK_CUT_NODE_WORDS;
+    for (uint round = 1u; round <= 72u; ++round) {
+        for (uint i = lane; i < internal; i += lanes) {
+            uint node = nodes + (node_count - 1u - i) * VELK_CUT_NODE_WORDS;
+            if (cull_words.data[node + VELK_CUT_NODE_ROOT] != 0u) continue;
+            uint height = 0u;
+            bool ready = true;
+            for (uint k = 0u; k < 2u; ++k) {
+                uint ref = cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k];
+                if ((ref & 0x80000000u) != 0u || ref >= node_count) continue;
+                uint below = nodes + ref * VELK_CUT_NODE_WORDS;
+                uint done = cull_words.data[below + VELK_CUT_NODE_ROOT];
+                if (done == 0u || done >= round) ready = false;
+                height = max(height, cull_words.data[below + VELK_CUT_NODE_LEVEL]);
+            }
+            if (!ready) continue;
+            for (uint k = 0u; k < 2u; ++k) {
+                uint ref = cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k];
+                vec3 lo = vec3(1e30);
+                vec3 hi = vec3(-1e30);
+                if (ref == 0xFFFFFFFFu) {
+                } else if ((ref & 0x80000000u) != 0u) {
+                    velk_lbvh_leaf_box(ref, lo, hi);
+                } else if (ref < node_count) {
+                    uint below = nodes + ref * VELK_CUT_NODE_WORDS;
+                    lo = min(velk_load_vec3(below + VELK_CUT_NODE_LEFT_MIN), velk_load_vec3(below + VELK_CUT_NODE_RIGHT_MIN));
+                    hi = max(velk_load_vec3(below + VELK_CUT_NODE_LEFT_MAX), velk_load_vec3(below + VELK_CUT_NODE_RIGHT_MAX));
+                }
+                velk_store_box(node + VELK_CUT_NODE_LEFT_MIN + k * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN), lo, hi);
+            }
+            cull_words.data[node + VELK_CUT_NODE_LEVEL] = height + 1u;
+            cull_words.data[node + VELK_CUT_NODE_ROOT] = round;
+        }
+        memoryBarrierBuffer();
+        barrier();
+        if (cull_words.data[root + VELK_CUT_NODE_ROOT] != 0u) break;
+    }
+    uint height = cull_words.data[root + VELK_CUT_NODE_ROOT] != 0u ? cull_words.data[root + VELK_CUT_NODE_LEVEL] : 0u;
+    memoryBarrierBuffer();
+    barrier();
+    for (uint i = lane; i < internal; i += lanes) {
+        cull_words.data[nodes + (node_count - 1u - i) * VELK_CUT_NODE_WORDS + VELK_CUT_NODE_ROOT] = i == 0u ? 1u : 0u;
+    }
+    memoryBarrierBuffer();
+    barrier();
+    return height;
+}
+
+// Builds the radix tree over `n` leaves (velk_lbvh_build), and a balanced one instead where it
+// is deeper than a balanced one by more than 4 levels, so that the walk's stack holds.
+void velk_lbvh_build_bounded(uint nodes, uint node_count, uint n, uint lane, uint lanes, bool balanced)
+{
+    g_lbvh_balanced = balanced;
+    uint height = velk_lbvh_build(nodes, node_count, n, lane, lanes);
+    uint most = (n > 1u ? uint(findMSB(n - 1u)) + 1u : 1u) + 4u;
+    if (!balanced && (height == 0u || height > most)) {
+        g_lbvh_balanced = true;
+        velk_lbvh_build(nodes, node_count, n, lane, lanes);
     }
 }
 )"
@@ -1575,9 +1724,10 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
 
 /**
  * Builds the tree over each partition's records that chose again this frame (kCutNodeWords):
- * its ray list sorted by where its records are (Morton order, the widest last; past
- * kRaySortMax records it keeps theirs, which is near to near), then leaves of four records in
- * that order, paired level by level from the bottom. `pad` grows every box, for instances that a
+ * its ray list sorted by where its records are (Morton order, the widest after them, those
+ * without a box last and left out), then leaves of four records in that order, and the radix
+ * tree over them (VELK_LBVH_GLSL). Past kRaySortMax records the list keeps its order, which is
+ * near to near, and the tree over it is balanced. `pad` grows every box, for instances that a
  * motion function moves, by twice how far it can move one, so that the tree holds wherever
  * they are while it is kept. Also the partition's box around all it draws, whether it is
  * always visited, and its counts for the log (VELK_PART_BOX, ALWAYS, LIGHT_ONLY, QUADS), which
@@ -1608,8 +1758,12 @@ layout(push_constant) uniform PC {
     uint globals_base;   // the view's, for sizes on screen
     float light_pixels;  // the light's level, as at instance_cut_choose_src
 } pc;
-)" VELK_CUT_GLSL VELK_CUT_BOX_GLSL VELK_SORT_GLSL R"(
+)" VELK_CUT_GLSL VELK_CUT_BOX_GLSL VELK_SORT_GLSL VELK_LBVH_GLSL R"(
 shared uint s_counts[64];
+// After the sort: the key of each leaf of four records, that of its first, and how many records
+// have a box, which the sort puts first.
+shared uint s_leaf_key[kSortMax / 4u];
+shared uint s_bounded;
 // The box around what the partition draws and its counts, each thread's share, then added up.
 shared vec3 s_lo[64];
 shared vec3 s_hi[64];
@@ -1704,8 +1858,9 @@ void velk_write_ray_entry(uint at, uint r, uint records)
 
 // Puts the `count` entries of the ray list at `list` in Morton order of their spheres' centres
 // within the box around them, so that the tree's leaves of four hold records near each other;
-// records at least a quarter as wide as that box go last, together, so that they widen as few
-// nodes as they can. All threads of the group call it.
+// records at least a quarter as wide as that box go after them, together, so that they widen as
+// few nodes as they can; records without a box last. Leaves s_leaf_key and s_bounded. All
+// threads of the group call it.
 void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
 {
     vec3 lo = vec3(1e30);
@@ -1719,6 +1874,7 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
     }
     s_lo[lane] = lo;
     s_hi[lane] = hi;
+    if (lane == 0u) s_bounded = 0u;
     memoryBarrierShared();
     barrier();
     for (uint i = 0u; i < 64u; ++i) {
@@ -1733,9 +1889,14 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
         if (i < count) {
             uint at = list + i * VELK_CUT_RAY_WORDS;
             float radius = uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]);
-            // 20 bits of Morton code under a bit for the wide ones; a record not there last.
-            uint code = radius < 0.0 ? 0x1FFFFFu
-                      : ((radius >= 0.25 * extent ? 1u : 0u) << 20u) | (velk_morton(velk_load_vec3(at + VELK_CUT_RAY_CENTER), lo, hi) >> 10u);
+            // 20 bits of Morton code under a bit for the wide ones; a record without a box last,
+            // its code above every other.
+            uint code = 0x1FFFFFu;
+            if (radius >= 0.0) {
+                code = ((radius >= 0.25 * extent ? 1u : 0u) << 20u)
+                     | min(velk_morton(velk_load_vec3(at + VELK_CUT_RAY_CENTER), lo, hi) >> 10u, 0xFFFFEu);
+                atomicAdd(s_bounded, 1u);
+            }
             key = (code << kSortIndexBits) | i;
         }
         s_order[i] = key;
@@ -1743,6 +1904,10 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
     memoryBarrierShared();
     barrier();
     velk_sort_keys(n, lane, 64u);
+    // Each leaf's key, its first record's, before the keys give way to the records.
+    for (uint g = lane; g * 4u < count; g += 64u) s_leaf_key[g] = s_order[g * 4u];
+    memoryBarrierShared();
+    barrier();
     // Each place's record in the new order, read before any entry is written again.
     for (uint i = lane; i < count; i += 64u) {
         s_order[i] = cull_words.data[list + (s_order[i] & kSortIndexMask) * VELK_CUT_RAY_WORDS + VELK_CUT_RAY_INDEX];
@@ -1752,6 +1917,40 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
     for (uint i = lane; i < count; i += 64u) velk_write_ray_entry(list + i * VELK_CUT_RAY_WORDS, s_order[i], records);
     memoryBarrierBuffer();
     barrier();
+}
+
+// The partition the tree is built over: its ray list, its records, and how many of the list's
+// entries its leaves of four hold.
+uint g_list = 0u;
+uint g_records = 0u;
+uint g_leaf_records = 0u;
+
+uint velk_lbvh_key(uint g)
+{
+    return s_leaf_key[g];
+}
+
+// Leaf g: up to four records from the list's place 4g, as the first one's place times four plus
+// how many less one.
+uint velk_lbvh_leaf_ref(uint g)
+{
+    uint first = g * 4u;
+    return 0x80000000u | (first * 4u + min(4u, g_leaf_records - first) - 1u);
+}
+
+void velk_lbvh_leaf_box(uint ref, out vec3 lo, out vec3 hi)
+{
+    lo = vec3(1e30);
+    hi = vec3(-1e30);
+    uint first = (ref & 0x7FFFFFFFu) >> 2u;
+    uint n = (ref & 3u) + 1u;
+    for (uint r = 0u; r < n; ++r) {
+        vec3 rlo, rhi;
+        velk_cut_record_box(g_records + cull_words.data[g_list + (first + r) * VELK_CUT_RAY_WORDS + VELK_CUT_RAY_INDEX] * VELK_RECORD_END,
+                            pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
+        lo = min(lo, rlo);
+        hi = max(hi, rhi);
+    }
 }
 
 void main()
@@ -1824,55 +2023,18 @@ void main()
     memoryBarrierBuffer();
     barrier();
     if (count == 0u) return;
-    // Where they are, as far as a sort in the group's memory takes; more stay in their order.
-    if (count > 4u && count <= kSortMax) velk_sort_ray_list(list, count, records, lane);
-
-    uint below = (count + 3u) / 4u;
-    uint below_first = 0u;
-    uint level_first = 0u;
-    bool from_leaves = true;
-    uint level = 1u;
-    while (true) {
-        uint here = (below + 1u) / 2u;
-        for (uint i = gl_LocalInvocationIndex; i < here; i += 64u) {
-            uint node = nodes + (level_first + i) * VELK_CUT_NODE_WORDS;
-            for (uint k = 0u; k < 2u; ++k) {
-                uint child = i * 2u + k;
-                vec3 lo = vec3(1e30);
-                vec3 hi = vec3(-1e30);
-                uint ref = 0xFFFFFFFFu;
-                if (child < below && from_leaves) {
-                    uint first = child * 4u;
-                    uint n = min(4u, count - first);
-                    for (uint r = 0u; r < n; ++r) {
-                        vec3 rlo, rhi;
-                        velk_cut_record_box(records + cull_words.data[list + (first + r) * VELK_CUT_RAY_WORDS + VELK_CUT_RAY_INDEX] * VELK_RECORD_END,
-                                            pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
-                        lo = min(lo, rlo);
-                        hi = max(hi, rhi);
-                    }
-                    ref = 0x80000000u | (first * 4u + n - 1u);
-                } else if (child < below) {
-                    uint at = nodes + (below_first + child) * VELK_CUT_NODE_WORDS;
-                    lo = min(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MIN), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MIN));
-                    hi = max(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MAX), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MAX));
-                    ref = below_first + child;
-                }
-                velk_store_box(node + VELK_CUT_NODE_LEFT_MIN + k * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN), lo, hi);
-                cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k] = ref;
-            }
-            cull_words.data[node + VELK_CUT_NODE_LEVEL] = level;
-            cull_words.data[node + VELK_CUT_NODE_ROOT] = here == 1u ? 1u : 0u;
-        }
-        memoryBarrierBuffer();
-        barrier();
-        if (here == 1u) break;
-        below_first = level_first;
-        level_first += here;
-        below = here;
-        from_leaves = false;
-        ++level;
+    // Where they are, as far as a sort in the group's memory takes, those without a box last and
+    // left out of the leaves; more stay in their order and get a balanced tree.
+    bool sorted = count > 4u && count <= kSortMax;
+    uint leaf_records = count;
+    if (sorted) {
+        velk_sort_ray_list(list, count, records, lane);
+        leaf_records = s_bounded;
     }
+    g_list = list;
+    g_records = records;
+    g_leaf_records = leaf_records;
+    velk_lbvh_build_bounded(nodes, velk_cut_tree_nodes(count), (leaf_records + 3u) / 4u, lane, 64u, !sorted);
 }
 )";
 
@@ -1881,27 +2043,22 @@ void main()
 /// kCutNodeWords each as a partition's are, but a reference with kCutLeaf names a leaf, and
 /// without a node of this tree by its index.
 
-/// Nodes in a tree over @p leaves leaves paired level by level. Mirrors velk_top_tree_nodes.
+/// Nodes in the top tree over @p leaves leaves: one less than them, at least one. The top build
+/// works it out the same way.
 inline uint32_t top_tree_nodes(uint32_t leaves)
 {
     if (leaves == 0) {
         return 0;
     }
-    uint32_t below = leaves;
-    uint32_t total = 0;
-    do {
-        below = (below + 1u) / 2u;
-        total += below;
-    } while (below > 1u);
-    return total;
+    return leaves > 1u ? leaves - 1u : 1u;
 }
 
 /**
  * Builds a view's top tree for rays (kRayTopHeaderWords) over the trees of its kept cuts'
- * partitions, as they are this frame: each leaf's box is its partition's root's, empty for one
- * without records. Leaves are paired in Morton order of their boxes' centres, up to
- * kRaySortMax of them; past that in the order of the cuts and of each cut's partition table.
- * One work group.
+ * partitions, as they are this frame: each leaf's box is its partition's root's. Up to
+ * kRaySortMax leaves, a radix tree (VELK_LBVH_GLSL) over those with records for rays in Morton
+ * order of their boxes' centres; past that, a balanced tree over all of them in the order of the
+ * cuts and of each cut's partition table, those without records not referenced. One work group.
  */
 inline constexpr string_view instance_cut_top_src = R"(
 #version 450
@@ -1914,9 +2071,11 @@ layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_wor
 layout(push_constant) uniform PC {
     uint top_word;
 } pc;
-)" VELK_CUT_GLSL VELK_SORT_GLSL R"(
+)" VELK_CUT_GLSL VELK_SORT_GLSL VELK_LBVH_GLSL R"(
 // The box around the leaves' centres: its min, then its max, as velk_float_order keeps them.
 shared uint s_box[6];
+// How many leaves have records for rays, which the sort puts first.
+shared uint s_traced;
 
 // A float as a uint that orders as the float does, for atomicMin and atomicMax.
 uint velk_float_order(float f)
@@ -1965,6 +2124,29 @@ void velk_store_box(uint at, vec3 lo, vec3 hi)
     cull_words.data[at + 5u] = floatBitsToUint(hi.z);
 }
 
+// The top tree being built: its word and its leaves', and whether its leaves are sorted.
+uint g_top = 0u;
+uint g_leaf_word = 0u;
+bool g_sorted = false;
+
+uint velk_lbvh_key(uint g)
+{
+    return s_order[g];
+}
+
+// Leaf g in order: its partition's leaf, none for one without records for rays.
+uint velk_lbvh_leaf_ref(uint g)
+{
+    uint leaf = g_sorted ? s_order[g] & kSortIndexMask : g;
+    vec3 lo, hi;
+    return velk_leaf_box(g_top, g_leaf_word, leaf, lo, hi) ? 0x80000000u | leaf : 0xFFFFFFFFu;
+}
+
+void velk_lbvh_leaf_box(uint ref, out vec3 lo, out vec3 hi)
+{
+    velk_leaf_box(g_top, g_leaf_word, ref & 0x7FFFFFFFu, lo, hi);
+}
+
 void main()
 {
     uint top = pc.top_word;
@@ -1982,6 +2164,7 @@ void main()
     bool sorted = leaves <= kSortMax;
     if (sorted) {
         if (lane < 6u) s_box[lane] = lane < 3u ? 0xFFFFFFFFu : 0u;
+        if (lane == 0u) s_traced = 0u;
         memoryBarrierShared();
         barrier();
         for (uint i = lane; i < leaves; i += 256u) {
@@ -2009,6 +2192,7 @@ void main()
                 if (velk_leaf_box(top, leaf_word, i, blo, bhi)) {
                     bool wide = length(bhi - blo) * 0.5 >= 0.25 * extent;
                     code = ((wide ? 1u : 0u) << 20u) | min(velk_morton((blo + bhi) * 0.5, lo, hi) >> 10u, 0xFFFFEu);
+                    atomicAdd(s_traced, 1u);
                 }
                 key = (code << kSortIndexBits) | i;
             }
@@ -2019,49 +2203,13 @@ void main()
         velk_sort_keys(n, lane, 256u);
     }
 
-    uint below = leaves;
-    uint below_first = 0u;
-    uint level_first = 0u;
-    bool from_leaves = true;
-    uint level = 1u;
-    while (true) {
-        uint here = (below + 1u) / 2u;
-        for (uint i = gl_LocalInvocationIndex; i < here; i += 256u) {
-            uint node = nodes + (level_first + i) * VELK_CUT_NODE_WORDS;
-            for (uint k = 0u; k < 2u; ++k) {
-                uint child = i * 2u + k;
-                vec3 lo = vec3(1e30);
-                vec3 hi = vec3(-1e30);
-                uint ref = 0xFFFFFFFFu;
-                if (child < below && from_leaves) {
-                    // A partition: its root's box, if it has records rays trace. One without
-                    // records is not there for rays: no ref, which the walk skips.
-                    uint leaf = sorted ? s_order[child] & kSortIndexMask : child;
-                    if (velk_leaf_box(top, leaf_word, leaf, lo, hi)) ref = 0x80000000u | leaf;
-                } else if (child < below) {
-                    // A node over nothing for rays is not there either.
-                    uint at = nodes + (below_first + child) * VELK_CUT_NODE_WORDS;
-                    lo = min(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MIN), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MIN));
-                    hi = max(velk_load_vec3(at + VELK_CUT_NODE_LEFT_MAX), velk_load_vec3(at + VELK_CUT_NODE_RIGHT_MAX));
-                    if (cull_words.data[at + VELK_CUT_NODE_LEFT_REF] != 0xFFFFFFFFu || cull_words.data[at + VELK_CUT_NODE_RIGHT_REF] != 0xFFFFFFFFu) {
-                        ref = below_first + child;
-                    }
-                }
-                velk_store_box(node + VELK_CUT_NODE_LEFT_MIN + k * (VELK_CUT_NODE_RIGHT_MIN - VELK_CUT_NODE_LEFT_MIN), lo, hi);
-                cull_words.data[node + VELK_CUT_NODE_LEFT_REF + k] = ref;
-            }
-            cull_words.data[node + VELK_CUT_NODE_LEVEL] = level;
-            cull_words.data[node + VELK_CUT_NODE_ROOT] = here == 1u ? 1u : 0u;
-        }
-        memoryBarrierBuffer();
-        barrier();
-        if (here == 1u) break;
-        below_first = level_first;
-        level_first += here;
-        below = here;
-        from_leaves = false;
-        ++level;
-    }
+    // Sorted, only the leaves with records for rays, which come first; else all of them in a
+    // balanced tree, those without records not there for the walk (no reference).
+    g_top = top;
+    g_leaf_word = leaf_word;
+    g_sorted = sorted;
+    uint node_count = leaves > 1u ? leaves - 1u : 1u;
+    velk_lbvh_build_bounded(nodes, node_count, sorted ? s_traced : leaves, lane, 256u, !sorted);
 }
 )";
 

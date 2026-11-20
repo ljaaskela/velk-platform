@@ -100,13 +100,8 @@ vec3 velk_ray_vec3(uint at)
 uint velk_ray_tree_nodes(uint records)
 {
     if (records == 0u) return 0u;
-    uint below = (records + 3u) / 4u;
-    uint total = 0u;
-    do {
-        below = (below + 1u) / 2u;
-        total += below;
-    } while (below > 1u);
-    return total;
+    uint leaves = (records + 3u) / 4u;
+    return leaves > 1u ? leaves - 1u : 1u;
 }
 
 // `ray` in an instance's own space. For a mesh, where its vertices are, (local - offset) /
