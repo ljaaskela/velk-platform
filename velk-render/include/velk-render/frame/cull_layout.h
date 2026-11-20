@@ -115,6 +115,14 @@ namespace velk {
     X(cp, gp, Root, ROOT, 15)                   /* 1 for the root */                           \
     X(cp, gp, Words, WORDS, 16)
 
+/// An entry of a partition's ray list (kCutRay, VELK_CUT_RAY): a record rays trace and a sphere
+/// around it in world space, which a ray is tested against before the record's instance is read.
+#define VELK_CUT_RAY(X, cp, gp)                                                                    \
+    X(cp, gp, Index, INDEX, 0)                  /* the record's index from its partition's first */ \
+    X(cp, gp, Center, CENTER, 1)                /* its sphere's centre, three floats */        \
+    X(cp, gp, Radius, RADIUS, 4)                                                               \
+    X(cp, gp, Words, WORDS, 5)
+
 /// A view's top tree for rays (kRayTop, VELK_RAY_TOP), then a VELK_RAY_TOP_CUT a cut, a
 /// VELK_RAY_TOP_LEAF a leaf, and its nodes, VELK_CUT_NODE each.
 #define VELK_RAY_TOP(X, cp, gp)                                                                    \
@@ -366,6 +374,7 @@ VELK_PLAIN_ITEM(VELK_LAYOUT_CPP_WORD, PlainItem, PLAIN_ITEM)
 VELK_ITEM_DESCRIPTOR(VELK_LAYOUT_CPP_WORD, ItemDescriptor, ITEM_DESCRIPTOR)
 VELK_ITEM_MESH(VELK_LAYOUT_CPP_WORD, ItemMesh, ITEM_MESH)
 VELK_CUT_NODE(VELK_LAYOUT_CPP_WORD, CutNode, CUT_NODE)
+VELK_CUT_RAY(VELK_LAYOUT_CPP_WORD, CutRay, CUT_RAY)
 VELK_RAY_TOP(VELK_LAYOUT_CPP_WORD, RayTop, RAY_TOP)
 VELK_RAY_TOP_CUT(VELK_LAYOUT_CPP_WORD, RayTopCut, RAY_TOP_CUT)
 VELK_RAY_TOP_LEAF(VELK_LAYOUT_CPP_WORD, RayTopLeaf, RAY_TOP_LEAF)
@@ -400,6 +409,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_ITEM_DESCRIPTOR(VELK_LAYOUT_GLSL_WORD, ItemDescriptor, ITEM_DESCRIPTOR)                   \
     VELK_ITEM_MESH(VELK_LAYOUT_GLSL_WORD, ItemMesh, ITEM_MESH)                                     \
     VELK_CUT_NODE(VELK_LAYOUT_GLSL_WORD, CutNode, CUT_NODE)                                        \
+    VELK_CUT_RAY(VELK_LAYOUT_GLSL_WORD, CutRay, CUT_RAY)                                           \
     VELK_RAY_TOP(VELK_LAYOUT_GLSL_WORD, RayTop, RAY_TOP)                                           \
     VELK_RAY_TOP_CUT(VELK_LAYOUT_GLSL_WORD, RayTopCut, RAY_TOP_CUT)                                \
     VELK_RAY_TOP_LEAF(VELK_LAYOUT_GLSL_WORD, RayTopLeaf, RAY_TOP_LEAF)                             \

@@ -66,9 +66,9 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// is how many records it had, whose light its new records take over (LAST_FIRST then says where
 /// they are); a new quad tree (QUAD_TREE) or a turn of the camera after choosing for being out of
 /// view (OUT_OF_VIEW) makes it choose again. The ray list stores hold for each partition, from its
-/// first record's place, the places of the records rays trace (those at the light's level:
-/// records for light only, clusters as coarse as the light, quads, whole objects), which its tree
-/// is over; the ray marks have a bit for each record of the current store, set by the choosing
+/// first record's place, an entry (kCutRayWords) for each record rays trace (those at the light's
+/// level: records for light only, clusters as coarse as the light, quads, whole objects): its
+/// place and a sphere around it. Its tree is over them; the ray marks have a bit for each record of the current store, set by the choosing
 /// where the record's member is in a patch for rays (kCutRayQuad), so that the tree pass leaves it
 /// out, read only for the partitions that chose this frame.
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
@@ -766,9 +766,9 @@ void main()
         cull_words.data[to + i] = cull_words.data[from + i];
     }
     // Its ray list, by its records' places, so it holds as they do.
-    uint list_from = velk_cut_ray_store(cut, false) + cull_words.data[state + VELK_PART_LAST_FIRST];
-    uint list_to = velk_cut_ray_store(cut, true) + cull_words.data[state + VELK_PART_FIRST];
-    for (uint i = gl_LocalInvocationIndex; i < cull_words.data[state + VELK_PART_RAY_COUNT]; i += 64u) {
+    uint list_from = velk_cut_ray_store(cut, false) + cull_words.data[state + VELK_PART_LAST_FIRST] * VELK_CUT_RAY_WORDS;
+    uint list_to = velk_cut_ray_store(cut, true) + cull_words.data[state + VELK_PART_FIRST] * VELK_CUT_RAY_WORDS;
+    for (uint i = gl_LocalInvocationIndex; i < cull_words.data[state + VELK_PART_RAY_COUNT] * VELK_CUT_RAY_WORDS; i += 64u) {
         cull_words.data[list_to + i] = cull_words.data[list_from + i];
     }
     uint node_words = velk_cut_tree_nodes(cull_words.data[state + VELK_PART_RAY_COUNT]) * VELK_CUT_NODE_WORDS;
@@ -1641,7 +1641,7 @@ void main()
     uint first_index = cull_words.data[state + VELK_PART_FIRST];
     uint records = velk_cut_store(cut, true) + first_index * VELK_RECORD_END;
     uint nodes = velk_cut_node_store(cut, true) + cull_words.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
-    uint list = velk_cut_ray_store(cut, true) + cull_words.data[state + VELK_PART_FIRST];
+    uint list = velk_cut_ray_store(cut, true) + cull_words.data[state + VELK_PART_FIRST] * VELK_CUT_RAY_WORDS;
     uint lane = gl_LocalInvocationIndex;
 
     // The records rays trace, in their order: each thread a run of them, counted, then placed
@@ -1690,7 +1690,17 @@ void main()
     uint at = 0u;
     for (uint i = 0u; i < lane; ++i) at += s_counts[i];
     for (uint r = from; r < to; ++r) {
-        if (velk_ray_record(records + r * VELK_RECORD_END, first_index + r, viewpoint, pixels_per_unit)) cull_words.data[list + at++] = r;
+        if (!velk_ray_record(records + r * VELK_RECORD_END, first_index + r, viewpoint, pixels_per_unit)) continue;
+        // The record, and the sphere around its box, grown by the pad as the box is.
+        vec3 rlo, rhi;
+        velk_cut_record_box(records + r * VELK_RECORD_END, pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
+        uint entry = list + at * VELK_CUT_RAY_WORDS;
+        cull_words.data[entry + VELK_CUT_RAY_INDEX] = r;
+        vec3 centre = (rlo + rhi) * 0.5;
+        float radius = rlo.x <= rhi.x ? length(rhi - rlo) * 0.5 : -1.0;
+        for (uint k = 0u; k < 3u; ++k) cull_words.data[entry + VELK_CUT_RAY_CENTER + k] = floatBitsToUint(centre[k]);
+        cull_words.data[entry + VELK_CUT_RAY_RADIUS] = floatBitsToUint(radius);
+        ++at;
     }
     uint count = 0u;
     for (uint i = 0u; i < 64u; ++i) count += s_counts[i];
@@ -1718,8 +1728,8 @@ void main()
                     uint n = min(4u, count - first);
                     for (uint r = 0u; r < n; ++r) {
                         vec3 rlo, rhi;
-                        velk_cut_record_box(records + cull_words.data[list + first + r] * VELK_RECORD_END, pc.instances_base, pc.items_word,
-                                            pc.pad, rlo, rhi);
+                        velk_cut_record_box(records + cull_words.data[list + (first + r) * VELK_CUT_RAY_WORDS + VELK_CUT_RAY_INDEX] * VELK_RECORD_END,
+                                            pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
                         lo = min(lo, rlo);
                         hi = max(hi, rhi);
                     }
@@ -3960,10 +3970,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             uint32_t takeover_slots = 1;
             while (takeover_slots < cut.capacity * 2u) takeover_slots <<= 1;
             const uint32_t takeover_word = node_store_word + node_capacity * kCutNodeWords * 2u;
-            // A ray list store, a word a record.
+            // The two ray list stores, kCutRayWords a record.
             const uint32_t ray_store_word = takeover_word + takeover_slots * kCutTakeoverWords;
             // The ray marks, a bit a record.
-            const uint32_t marks_word = ray_store_word + cut.capacity * 2u;
+            const uint32_t marks_word = ray_store_word + cut.capacity * kCutRayWords * 2u;
             // The runs the drawing walks, two words each.
             const uint32_t visible_word = marks_word + cut.capacity / 32u + 1u;
             const size_t words = size_t(visible_word) + size_t(cut_visible_runs(cut.capacity, info.partitions)) * 2u;
@@ -3993,7 +4003,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             initial[kCutTakeoverWord] = base + takeover_word;
             initial[kCutTakeoverSlots] = takeover_slots;
             initial[kCutRayStores] = base + ray_store_word;
-            initial[kCutRayStores + 1u] = base + ray_store_word + cut.capacity;
+            initial[kCutRayStores + 1u] = base + ray_store_word + cut.capacity * kCutRayWords;
             initial[kCutRayMarksWord] = base + marks_word;
             initial[kCutVisibleWord] = base + visible_word;
             // Chosen from nowhere, and from a table entry no partition has: all choose.

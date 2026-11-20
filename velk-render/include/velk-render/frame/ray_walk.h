@@ -347,9 +347,17 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if ((h_l || h_r) && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
         } else if (records_left > 0u) {
             ++velk_ray_records;
-            uint r = records + velk_culling.data[record_at] * VELK_RECORD_END;
-            record_at += 1u;
+            uint ray_entry = record_at;
+            record_at += VELK_CUT_RAY_WORDS;
             --records_left;
+            // The sphere around the record first, so that a record the ray misses is never read.
+            float radius = uintBitsToFloat(velk_culling.data[ray_entry + VELK_CUT_RAY_RADIUS]);
+            if (radius < 0.0) continue;
+            vec3 to_centre = velk_ray_vec3(ray_entry + VELK_CUT_RAY_CENTER) - cam - ray.origin;
+            float along = dot(to_centre, ray.dir);
+            if (along + radius < 0.0 || along - radius > best_t * 1.00001) continue;
+            if (dot(to_centre, to_centre) - along * along > radius * radius) continue;
+            uint r = records + velk_culling.data[ray_entry + VELK_CUT_RAY_INDEX] * VELK_RECORD_END;
             uint entry = velk_culling.data[r + VELK_RECORD_ENTRY];
             uint cluster = velk_culling.data[r + VELK_RECORD_CLUSTER];
             uint named = velk_culling.data[r + VELK_RECORD_SLOT];
@@ -502,7 +510,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             uint ref = s_walk_stack[stack_base + uint(--sp)];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 uint first = (ref & ~VELK_RAY_LEAF) >> 2u;
-                record_at = ray_list + first;
+                record_at = ray_list + first * VELK_CUT_RAY_WORDS;
                 records_left = (ref & 3u) + 1u;
                 continue;
             }
@@ -534,7 +542,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (count == 0u) continue;
                 uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
                 records = velk_culling.data[cut + VELK_CUT_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_RECORD_END;
-                ray_list = velk_culling.data[cut + VELK_CUT_RAY_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST];
+                ray_list = velk_culling.data[cut + VELK_CUT_RAY_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_CUT_RAY_WORDS;
                 nodes = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + velk_culling.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
                 instances_base = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
                 items = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_ITEMS];
