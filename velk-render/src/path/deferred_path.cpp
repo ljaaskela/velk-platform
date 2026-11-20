@@ -1349,6 +1349,10 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     // Its stores come from ensure_arena_words, before anything is recorded.
     const uint32_t probes = vs.light_probe_count;
     if (probes == 0) return;
+    // The probe grid the shaders work out from the G-buffer's size, which the stores must hold.
+    const uint32_t across = (vs.gbuffer_size.x + kLightProbePixels - 1u) / kLightProbePixels;
+    const uint32_t down = (vs.gbuffer_size.y + kLightProbePixels - 1u) / kLightProbePixels;
+    if (across * down > probes) return;
     vs.light_probe_parity ^= 1u;
     const auto store_word = [&](uint32_t which) {
         return static_cast<uint32_t>(vs.light_probes[which].offset() / sizeof(uint32_t));
@@ -1393,11 +1397,12 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
-        // The gather, kLightProbeRays threads a probe in groups of 64, then the filter, a thread a
-        // probe.
+        // The gather, kLightProbeRays threads a probe, a group a 4 by 4 tile of the probe grid,
+        // then the filter, a thread a probe.
+        static_assert(kLightProbeRays * 16u == 64u, "a group of 64 threads is a 4 by 4 tile of probes");
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
-        dc.groups_x = (probes * kLightProbeRays + 63u) / 64u;
+        dc.groups_x = ((across + 3u) / 4u) * ((down + 3u) / 4u);
         dc.groups_y = 1;
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);

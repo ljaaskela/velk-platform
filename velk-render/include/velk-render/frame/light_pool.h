@@ -2065,7 +2065,8 @@ vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
 /**
  * The screen probes' bounce light, in two dispatches of the same shader.
  *
- * Gather: sixteen probes a group, a ray a thread, kLightProbeRays a probe. The rays are spread
+ * Gather: a 4 by 4 tile of probes a group, a ray a thread, kLightProbeRays a probe, groups in
+ * rows of tiles across the probe grid. The rays are spread
  * over the hemisphere around the probe's normal by cosine: each takes its own quarter of a 4 by 4
  * grid of directions, a different cell of it each frame so that four frames cover all sixteen,
  * staggered by the probe's place so that each 2 by 2 block of probes covers them all every frame,
@@ -2325,24 +2326,28 @@ vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
     return normalize(a * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
 }
 
-// The gather: sixteen probes a group, a ray a thread, each probe's light from its rays into the
-// ray store.
+// The gather: a 4 by 4 tile of probes a group, a ray a thread, each probe's light from its rays
+// into the ray store.
 void velk_probes_gather(uint lane)
 {
     uint width = pc.extras.y & 0xFFFFu;
     uint height = pc.extras.y >> 16u;
     uint across = (width + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
     uint down = (height + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
-    uint probes = across * down;
-    uint probe = gl_WorkGroupID.x * (64u / VELK_PROBE_RAYS) + lane / VELK_PROBE_RAYS;
+    // A group's sixteen probes are a 4 by 4 tile of the probe grid, so that its rays start near
+    // each other.
+    uint tiles_across = (across + 3u) / 4u;
+    uint local = lane / VELK_PROBE_RAYS;
+    uvec2 square = uvec2((gl_WorkGroupID.x % tiles_across) * 4u + (local & 3u), (gl_WorkGroupID.x / tiles_across) * 4u + (local >> 2u));
     uint ray = lane % VELK_PROBE_RAYS;
-    bool live = probe < probes;
+    bool live = square.x < across && square.y < down;
+    uint probe = square.y * across + square.x;
     uint raw = pc.extras.x + probe * VELK_PROBE_WORDS;
     GlobalData g = VELK_GLOBALS;
 
     // Its surface: the middle pixel of its square.
-    ivec2 pixel = ivec2(int(min((probe % across) * VELK_PROBE_PIXELS + VELK_PROBE_PIXELS / 2u, width - 1u)),
-                        int(min((probe / across) * VELK_PROBE_PIXELS + VELK_PROBE_PIXELS / 2u, height - 1u)));
+    ivec2 pixel = ivec2(int(min(square.x * VELK_PROBE_PIXELS + VELK_PROBE_PIXELS / 2u, width - 1u)),
+                        int(min(square.y * VELK_PROBE_PIXELS + VELK_PROBE_PIXELS / 2u, height - 1u)));
     vec3 pos = live ? texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], pixel, 0).xyz : vec3(0.0);
     vec3 n4 = live ? texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], pixel, 0).xyz : vec3(0.0);
     bool surface = live && dot(n4, n4) > 1e-6;
@@ -2351,7 +2356,7 @@ void velk_probes_gather(uint lane)
     vec3 light = vec3(0.0);
     vec3 dir = n;
     if (surface) {
-        dir = velk_probe_ray_dir(probe, uvec2(probe % across, probe / across), ray, g.present_counter, n);
+        dir = velk_probe_ray_dir(probe, square, ray, g.present_counter, n);
         Ray rr;
         rr.origin = pos + n * max(length(pos) * 1e-3, 1e-3);
         rr.dir = dir;
