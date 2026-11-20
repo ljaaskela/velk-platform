@@ -26,6 +26,9 @@ public:
     // IShaderSource — eval-driver overrides.
     string_view get_source(string_view role) const override;
     string_view get_fn_name(string_view role) const override;
+    /// The mean of its start and end colours: over its rect, at any angle, half of it is
+    /// nearer each end.
+    color get_average_albedo() const override;
 
 private:
     using Base = ::velk::ext::Material<GradientMaterial, IGradient>;

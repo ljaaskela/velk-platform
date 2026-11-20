@@ -2,6 +2,7 @@
 
 #include <velk/api/state.h>
 #include <velk-render/gpu_data.h>
+#include <velk-render/interface/intf_surface.h>
 #include <velk-scene/ext/material_shaders.h>
 
 #include <cstring>
@@ -60,6 +61,16 @@ string_view ImageMaterial::get_fn_name(string_view role) const
 {
     if (role == ::velk::shader_role::kEval) return "velk_eval_image";
     return {};
+}
+
+color ImageMaterial::get_average_albedo() const
+{
+    auto state = read_state<IImageMaterial>(this);
+    if (!state) return color::white();
+    color mean = color::white();
+    if (auto surface = state->texture.template get<ISurface>()) mean = surface->get_average_color();
+    const color& t = state->tint;
+    return {mean.r * t.r, mean.g * t.g, mean.b * t.b, mean.a * t.a};
 }
 
 } // namespace velk::ui::impl

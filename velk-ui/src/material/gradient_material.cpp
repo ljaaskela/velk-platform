@@ -74,5 +74,14 @@ string_view GradientMaterial::get_fn_name(string_view role) const
     return {};
 }
 
+color GradientMaterial::get_average_albedo() const
+{
+    auto state = read_state<IGradient>(this);
+    if (!state) return color::white();
+    const color& a = state->start_color;
+    const color& b = state->end_color;
+    return {0.5f * (a.r + b.r), 0.5f * (a.g + b.g), 0.5f * (a.b + b.b), 0.5f * (a.a + b.a)};
+}
+
 
 } // namespace velk::ui

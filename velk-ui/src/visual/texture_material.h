@@ -25,6 +25,8 @@ public:
 
     string_view get_source(string_view role) const override;
     string_view get_fn_name(string_view role) const override;
+    /// Its texture's mean colour times its tint.
+    color get_average_albedo() const override;
 };
 
 } // namespace velk::ui::impl
