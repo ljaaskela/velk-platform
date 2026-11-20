@@ -2338,6 +2338,21 @@ inline void append_rt_intersect_shape(string& src, const IFrameSnippetRegistry& 
 }
 
 /**
+ * @brief Composes a compute shader that traces rays and runs no material code: the RT prelude,
+ *        the frame's intersect snippets and intersect_shape, then @p main_src. Its pipeline
+ *        depends only on the frame's intersects.
+ */
+inline string compose_rt_trace(const IFrameSnippetRegistry& snippets, string_view main_src)
+{
+    string src;
+    src += rt_compute_prelude_src;
+    append_rt_intersect_includes(src, snippets);
+    append_rt_intersect_shape(src, snippets);
+    src += main_src;
+    return src;
+}
+
+/**
  * A point on a drawn triangle, the same for a pixel and a ray: from the draw (VelkDrawData),
  * the instance, the cluster and the triangle, then the weights of its corners, what its
  * material is given. Part of compose_rt_compute's shared body, after velk_material_varyings.

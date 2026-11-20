@@ -1352,16 +1352,15 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
         return static_cast<uint32_t>(vs.light_probes[which].offset() / sizeof(uint32_t));
     };
 
-    // Composed with the frame's materials, for the albedo where a ray hits.
+    // A hit's albedo comes from its draw's shading summary, so the pass composes no material
+    // code and depends only on the frame's intersects.
     constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
-    uint64_t key = 0xcbf29ce484222325ULL ^ 0x4c50'524f'4245'0001ULL;
-    for (auto id : ctx.snippets->frame_materials()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
-    for (auto id : ctx.snippets->frame_shadow_techs()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    uint64_t key = 0xcbf29ce484222325ULL ^ 0x4c50'524f'4245'0002ULL;
     for (auto id : ctx.snippets->frame_intersects()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
     key |= 0x2000000000000000ULL;
     auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
     if (!pipeline) {
-        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_compute(*ctx.snippets, light_probes_main_src)), key);
+        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_trace(*ctx.snippets, light_probes_main_src)), key);
     }
     if (!pipeline) return;
 

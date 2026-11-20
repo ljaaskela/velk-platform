@@ -2004,8 +2004,9 @@ inline constexpr uint32_t kLightProbeRays = 16;
  * hemisphere around its surface's normal, turned each frame; a hit brings what the light points
  * there say reaches it and its indirect light (velk_probe_hit_indirect), times its albedo, and
  * what it gives off; a miss the environment. Blended
- * with the probe the last frame had where this one was, when that was on the same surface.
- * Composed with the materials by compose_rt_compute. pc.shapes_base is the light pool,
+ * with the probe the last frame had where this one was, when that was on the same surface. A
+ * hit's albedo and emission come from its draw's shading summary (velk_probe_surface), so it is
+ * composed by compose_rt_trace, without the materials' code. pc.shapes_base is the light pool,
  * pc.env.z the light header (the grid), pc.env.w the last frame's probe store, pc.extras this
  * frame's probe store, the G-buffer's size (x low, y high), its world position and its normal.
  */
@@ -2047,6 +2048,56 @@ uint velk_light_grid_at(uint first, uint k)
     return k < everywhere ? probe_words.data[grid + 4u + k] : probe_words.data[first + k - everywhere];
 }
 )" VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_ADD_GLSL R"(
+// Each draw record's shading summary (kDrawShadeWords, gpu_data.h), at the record's index.
+layout(set = 1, binding = 6, std430) readonly buffer VelkDrawShade { uint data[]; } velk_draw_shade;
+#define VELK_DRAW_SHADE_WORDS 2u
+#define VELK_DRAW_SHADE_UNLIT 0x01000000u
+
+vec3 velk_srgb_to_linear(vec3 s)
+{
+    return mix(s / 12.92, pow((s + 0.055) / 1.055, vec3(2.4)), greaterThan(s, vec3(0.04045)));
+}
+
+// An RGB9E5 colour (rgb9e5 in gpu_data.h).
+vec3 velk_rgb9e5(uint w)
+{
+    return vec3(float(w & 511u), float((w >> 9u) & 511u), float((w >> 18u) & 511u)) * exp2(float(int(w >> 27u) - 24));
+}
+
+// What a ray sees of the surface it hit, without its material's code: its draw's shading
+// summary, its albedo times its instance's colour and, where the draw has them, its vertex
+// colours. A lit surface reflects that albedo; an unlit one gives it off, on top of its emission.
+// White and lit where the hit names no draw, as the default material is.
+void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool lit)
+{
+    albedo = vec3(1.0);
+    emission = vec3(0.0);
+    lit = true;
+    if (hit.draw == 0xFFFFFFFFu || hit.instance == 0xFFFFFFFFu) return;
+    VelkDrawData d = velk_draw_data.data[hit.draw];
+    uint at = hit.draw * VELK_DRAW_SHADE_WORDS;
+    uint look = 0x00FFFFFFu;
+    uint glow = 0u;
+    if (at + 1u < uint(velk_draw_shade.data.length())) {
+        look = velk_draw_shade.data[at];
+        glow = velk_draw_shade.data[at + 1u];
+    }
+    // A quad's hit names the quad's word, whose colour is its instance's.
+    vec4 tint = (d.flags & VELK_DRAW_QUADS) != 0u ? unpackUnorm4x8(velk_culling.data[hit.instance + VELK_QUAD_NODE_COLOR])
+                                                    : velk_instances.data[hit.instance].color;
+    if ((d.flags & VELK_DRAW_COLOR) != 0u && hit.corners.x != VELK_NO_CORNERS) {
+        vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
+        tint *= velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.x)) * b.x
+              + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.y)) * b.y
+              + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.z)) * b.z;
+    }
+    vec3 surface = velk_srgb_to_linear(unpackUnorm4x8(look).rgb) * tint.rgb;
+    lit = (look & VELK_DRAW_SHADE_UNLIT) == 0u;
+    albedo = lit ? surface : vec3(0.0);
+    emission = velk_rgb9e5(glow) + (lit ? vec3(0.0) : surface);
+}
+
+)" R"(
 shared vec3 s_light[64];
 
 vec3 velk_probe_oct_decode(uint packed)
@@ -2197,12 +2248,10 @@ void main()
             vec3 at = rr.origin + dir * hit.t;
             vec3 hn = normalize(hit.normal);
             if (dot(hn, dir) > 0.0) hn = -hn;
-            uint material;
-            EvalContext ectx = velk_hit_context(hit, dir, at, hn, material);
-            MaterialEval e = velk_eval_material(material, ectx);
-            bool lit = e.lighting_mode == VELK_LIGHTING_STANDARD;
-            vec3 albedo = lit ? e.color.rgb * (1.0 - clamp(e.metallic, 0.0, 1.0)) : vec3(0.0);
-            vec3 emission = e.emissive + (lit ? vec3(0.0) : e.color.rgb);
+            vec3 albedo;
+            vec3 emission;
+            bool lit;
+            velk_probe_surface(hit, albedo, emission, lit);
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
             vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, width, height, across) : vec3(0.0);
