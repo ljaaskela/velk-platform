@@ -1905,8 +1905,9 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
     memoryBarrierShared();
     barrier();
     velk_sort_keys(n, lane, 64u);
-    // Each leaf's key, its first record's, before the keys give way to the records.
-    for (uint g = lane; g * 4u < count; g += 64u) s_leaf_key[g] = s_order[g * 4u];
+    // Each leaf's key, its last record with a box's, so that a leaf holding a wide record goes
+    // with the wide ones; before the keys give way to the records.
+    for (uint g = lane; g * 4u < count; g += 64u) s_leaf_key[g] = s_order[min(g * 4u + 3u, max(s_bounded, 1u) - 1u)];
     memoryBarrierShared();
     barrier();
     // Each place's record in the new order, read before any entry is written again.
