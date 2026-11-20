@@ -2062,6 +2062,7 @@ vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
  * Gather: sixteen probes a group, a ray a thread, kLightProbeRays a probe. The rays are spread
  * evenly over the hemisphere around the probe's normal: each takes its own quarter of a 4 by 4
  * grid of directions, a different cell of it each frame so that four frames cover all sixteen,
+ * staggered by the probe's place so that each 2 by 2 block of probes covers them all every frame,
  * moved within the cell by a value of the probe's own. A hit brings what the light points there
  * say reaches it and its indirect light (velk_probe_hit_indirect), times its albedo, and what it
  * gives off; a miss the environment. The probe's light from its rays goes to the ray store.
@@ -2295,13 +2296,17 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint acro
     return velk_probe_sky(n);
 }
 
-// The direction of ray `ray` of probe `probe` in frame `frame`, around the normal `n`: even over
-// the hemisphere, in the ray's own quarter of a 4 by 4 grid of directions (the cosine to the
-// normal one way, the turn about it the other), a different cell of that quarter each frame, at
-// a place in the cell of the probe's own that moves every four frames.
-vec3 velk_probe_ray_dir(uint probe, uint ray, uint frame, vec3 n)
+// The direction of ray `ray` of probe `probe`, at `square` on the probe grid, in frame `frame`,
+// around the normal `n`: even over the hemisphere, in the ray's own quarter of a 4 by 4 grid of
+// directions (the cosine to the normal one way, the turn about it the other), a different cell of
+// that quarter each frame, staggered by the probe's place so that every 2 by 2 block of probes
+// covers all sixteen cells each frame, at a place in the cell of the probe's own that moves every
+// four frames.
+vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
 {
-    vec2 cell = vec2(float((ray & 1u) * 2u + (frame & 1u)), float((ray >> 1u) * 2u + ((frame >> 1u) & 1u)));
+    uint sub_x = (frame & 1u) ^ (square.x & 1u);
+    uint sub_y = ((frame >> 1u) & 1u) ^ (square.y & 1u);
+    vec2 cell = vec2(float((ray & 1u) * 2u + sub_x), float((ray >> 1u) * 2u + sub_y));
     vec2 jitter = fract(vec2(float(probe) * 0.7548777, float(probe) * 0.5698403)
                         + float(frame >> 2u) * vec2(0.6180340, 0.3819660));
     vec2 uv = (cell + jitter) * 0.25;
@@ -2339,7 +2344,7 @@ void velk_probes_gather(uint lane)
     vec3 light = vec3(0.0);
     vec3 dir = n;
     if (surface) {
-        dir = velk_probe_ray_dir(probe, ray, g.present_counter, n);
+        dir = velk_probe_ray_dir(probe, uvec2(probe % across, probe / across), ray, g.present_counter, n);
         Ray rr;
         rr.origin = pos + n * max(length(pos) * 1e-3, 1e-3);
         rr.dir = dir;
