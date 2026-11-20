@@ -19,17 +19,22 @@ namespace velk {
  * includes velk_intersect.glsl before it. Rays are relative to the camera, as positions are.
  */
 inline constexpr string_view velk_trace_src = R"(
-// Ray-vs-AABB slab test. Returns true if ray intersects the box within
-// [0, t_max] and writes t_near (clamped to >= 0) to t_hit.
-bool ray_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
+// The reciprocal of a ray's direction, for ray_aabb, worked out once per ray. No component is
+// exactly zero: a ray parallel to a slab and starting on its plane would make 0 times infinity,
+// and the box would count as missed. Rays from a grid of points toward a light without size do
+// run so, along whole lines of points.
+vec3 velk_ray_inv_dir(vec3 dir)
 {
-    // No direction component exactly zero: a ray parallel to a slab and starting on its plane
-    // would make 0 times infinity, and the box would count as missed. Rays from a grid of points
-    // toward a light without size do run so, along whole lines of points.
-    vec3 d = mix(ray.dir, sign(ray.dir + vec3(1e-30)) * 1e-12, lessThan(abs(ray.dir), vec3(1e-12)));
-    vec3 inv_d = 1.0 / d;
-    vec3 t0 = (bmin - ray.origin) * inv_d;
-    vec3 t1 = (bmax - ray.origin) * inv_d;
+    return 1.0 / mix(dir, sign(dir + vec3(1e-30)) * 1e-12, lessThan(abs(dir), vec3(1e-12)));
+}
+
+// Ray-vs-AABB slab test for a ray from `origin` whose direction's reciprocal is `inv_d`
+// (velk_ray_inv_dir). Returns true if it meets the box within [0, t_max] and writes t_near
+// (clamped to >= 0) to t_hit.
+bool ray_aabb(vec3 origin, vec3 inv_d, vec3 bmin, vec3 bmax, float t_max, out float t_hit)
+{
+    vec3 t0 = (bmin - origin) * inv_d;
+    vec3 t1 = (bmax - origin) * inv_d;
     vec3 tmn = min(t0, t1);
     vec3 tmx = max(t0, t1);
     float tnear = max(max(tmn.x, tmn.y), tmn.z);
@@ -201,8 +206,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint ray_list = 0u;
     uint records_left = 0u;
 
-    // The record being walked, and the ray in its instance's space.
+    // The reciprocal of the ray's direction, for the boxes of the top and partition trees.
+    vec3 inv_dir = velk_ray_inv_dir(ray.dir);
+    // The record being walked, and the ray in its instance's space with its direction's
+    // reciprocal, for the boxes of its mesh's tree.
     Ray walk_ray = ray;
+    vec3 walk_inv_dir = inv_dir;
     float mesh_scale = 1.0;
     uint cur_draw = VELK_RAY_NONE;
     uint cur_instance = VELK_RAY_NONE;
@@ -327,8 +336,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             VelkMeshNode node = velk_mesh_nodes.data[mesh_base + ref];
             float limit = best_t * 1.00001 * mesh_scale;
             float t_l, t_r;
-            bool h_l = ray_aabb(walk_ray, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
-            bool h_r = ray_aabb(walk_ray, vec3(node.b.zw, node.c.x), node.c.yzw, limit, t_r);
+            bool h_l = ray_aabb(walk_ray.origin, walk_inv_dir, node.a.xyz, vec3(node.a.w, node.b.xy), limit, t_l);
+            bool h_r = ray_aabb(walk_ray.origin, walk_inv_dir, vec3(node.b.zw, node.c.x), node.c.yzw, limit, t_r);
             // The nearer child on top, so that a near hit or a blocker is found sooner. A child
             // that is not there has a box no ray reaches.
             bool left_first = h_l && (!h_r || t_l <= t_r);
@@ -429,6 +438,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 cur_draw = velk_culling.data[entry + VELK_CLUSTER_ENTRY_DRAW];
                 cur_cluster = velk_culling.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
+                walk_inv_dir = velk_ray_inv_dir(walk_ray.dir);
                 uint rays = velk_culling.data[entry + VELK_CLUSTER_ENTRY_RAY];
                 if (rays != VELK_RAY_NONE) {
                     uint header = rays + cluster * 20u;
@@ -451,6 +461,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 cur_draw = draw;
                 cur_cluster = VELK_NO_CLUSTER;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
+                walk_inv_dir = velk_ray_inv_dir(walk_ray.dir);
                 mesh_base = st.blas_node_base;
                 word_base = st.cluster_word_base;
                 level = kMesh;
@@ -498,10 +509,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             ++velk_ray_partition_nodes;
             uint node = nodes + ref * VELK_CUT_NODE_WORDS;
             float t_l, t_r;
-            bool h_l = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam,
-                                best_t * 1.00001, t_l);
-            bool h_r = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam,
-                                best_t * 1.00001, t_r);
+            bool h_l = ray_aabb(ray.origin, inv_dir, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam,
+                                velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam, best_t * 1.00001, t_l);
+            bool h_r = ray_aabb(ray.origin, inv_dir, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam,
+                                velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam, best_t * 1.00001, t_r);
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
             uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
@@ -537,10 +548,10 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             ++velk_ray_top_nodes;
             uint node = top_nodes + ref * VELK_CUT_NODE_WORDS;
             float t_l, t_r;
-            bool h_l = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam,
-                                best_t * 1.00001, t_l);
-            bool h_r = ray_aabb(ray, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam,
-                                best_t * 1.00001, t_r);
+            bool h_l = ray_aabb(ray.origin, inv_dir, velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MIN) - cam,
+                                velk_ray_vec3(node + VELK_CUT_NODE_LEFT_MAX) - cam, best_t * 1.00001, t_l);
+            bool h_r = ray_aabb(ray.origin, inv_dir, velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MIN) - cam,
+                                velk_ray_vec3(node + VELK_CUT_NODE_RIGHT_MAX) - cam, best_t * 1.00001, t_r);
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
             uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
