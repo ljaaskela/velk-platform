@@ -272,6 +272,7 @@ namespace velk {
     X(cp, gp, Tables, TABLES, 24)               /* the two page tables' words, a page an entry */ \
     X(cp, gp, KeptPages, KEPT_PAGES, 26)        /* pages of partitions keeping their cut this frame */ \
     X(cp, gp, PagesDemand, PAGES_DEMAND, 27)    /* pages partitions choosing again asked for this frame, placed or not */ \
+    X(cp, gp, DiagChoosing, DIAG_CHOOSING, 28)  /* TEMPORARY: partitions choosing again this frame */ \
     X(cp, gp, TakeoverFrame, TAKEOVER_FRAME, 29) /* the frame of the takeover table, counted by the begin pass */ \
     X(cp, gp, TakeoverWord, TAKEOVER_WORD, 30)  /* the takeover table's word (VELK_TAKEOVER a slot) */ \
     X(cp, gp, TakeoverSlots, TAKEOVER_SLOTS, 31) /* and its slots, a power of two */           \
@@ -281,6 +282,8 @@ namespace velk {
     X(cp, gp, TookOver, TOOK_OVER, 35)          /* of those, how many took over an old record's light */ \
     X(cp, gp, LastRewritten, LAST_REWRITTEN, 36)                                               \
     X(cp, gp, LastTookOver, LAST_TOOK_OVER, 37)                                                \
+    X(cp, gp, DiagRetrying, DIAG_RETRYING, 38)  /* TEMPORARY: of those, ones that kept old records last frame */ \
+    X(cp, gp, DiagFailed, DIAG_FAILED, 39)      /* TEMPORARY: takes that failed this frame */  \
     X(cp, gp, LongestWalk, LONGEST_WALK, 40)    /* the most hierarchy nodes one thread walked choosing this frame */ \
     X(cp, gp, MostChosen, MOST_CHOSEN, 41)      /* the most records one walk chose */          \
     X(cp, gp, LastLongestWalk, LAST_LONGEST_WALK, 42)                                          \
@@ -290,7 +293,11 @@ namespace velk {
     X(cp, gp, VisibleWord, VISIBLE_WORD, 48)    /* the word of their runs: first record and end, two words a group */ \
     X(cp, gp, DiagTreeBuilds, DIAG_TREE_BUILDS, 49) /* TEMPORARY: partition trees built since the log */ \
     X(cp, gp, DiagTreeFallbacks, DIAG_TREE_FALLBACKS, 50) /* and of them those that fell back to balanced */ \
-    X(cp, gp, End, END, 51)
+    X(cp, gp, DiagMaxFailed, DIAG_MAX_FAILED, 51) /* TEMPORARY: the largest failed take this frame, in pages */ \
+    X(cp, gp, DiagRetryOld, DIAG_RETRY_OLD, 52) /* TEMPORARY: own old pages of those whose take failed and kept them */ \
+    X(cp, gp, DiagSelfBlocked, DIAG_SELF_BLOCKED, 53) /* TEMPORARY: failed takes that fit the free pages plus their own old */ \
+    X(cp, gp, DiagSnap, DIAG_SNAP, 54)          /* TEMPORARY: the last frame's counts as the sweep saw them, kCutDiagSnapWords */ \
+    X(cp, gp, End, END, 65)
 
 /// A partition's state in a kept cut (kPart, VELK_PART), at the cut's STATES_WORD.
 #define VELK_CUT_PART(X, cp, gp)                                                                   \
