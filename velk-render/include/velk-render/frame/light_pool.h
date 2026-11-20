@@ -261,23 +261,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(MarkDeepest, MARK_DEEPEST, 134)            /* and the deepest of them */                                       \
     X(LastMarkPieces, LAST_MARK_PIECES, 135)                                                                         \
     X(LastMarkDeepest, LAST_MARK_DEEPEST, 136)                                                                       \
-    X(DiagDepth, DIAG_DEPTH, 137)                /* TEMPORARY: pieces kept at each depth, this frame's mark */       \
-    X(LastDiagDepth, LAST_DIAG_DEPTH, 150)                                                                           \
-    X(DiagAskRoot, DIAG_ASK_ROOT, 163)           /* TEMPORARY, summed: asks for a root */                            \
-    X(DiagAskAlways, DIAG_ASK_ALWAYS, 164)       /* asks for children coarser than the coarse pieces */              \
-    X(DiagAskEdge, DIAG_ASK_EDGE, 165)           /* asks for children where points differ */                         \
-    X(DiagListFull, DIAG_LIST_FULL, 166)         /* asks refused, the split list full */                             \
-    X(DiagNoPages, DIAG_NO_PAGES, 167)           /* asks refused, no pages */                                        \
-    X(DiagPixels, DIAG_PIXELS, 168)              /* pixels walking down pieces */                                    \
-    X(DiagPixelsCoarse, DIAG_PIXELS_COARSE, 169) /* of those, ending coarser than the light spacing */               \
-    X(DiagRootLevel, DIAG_ROOT_LEVEL, 170)       /* TEMPORARY: roots kept of grid level 2 to 6, this frame's mark */ \
-    X(LastDiagRootLevel, LAST_DIAG_ROOT_LEVEL, 175)                                                                  \
-    X(DiagMerges, DIAG_MERGES, 180)              /* TEMPORARY, summed: four children dropped as their light agreed */ \
-    X(DiagPixelsVertexCoarse, DIAG_PIXELS_VERTEX_COARSE, 181) /* TEMPORARY, summed: pixels whose coarse level is the vertex points */ \
-    X(DiagCoarseVertex, DIAG_COARSE_VERTEX, 182) /* TEMPORARY, summed: coarse list points from vertex points */      \
-    X(DiagCoarsePiece, DIAG_COARSE_PIECE, 183)   /* and from pieces */                                               \
-    X(DiagPixelsExact, DIAG_PIXELS_EXACT, 184)   /* TEMPORARY, summed: pixels whose coarse cell is exact */          \
-    X(HeaderEnd, HEADER_END, 185)
+    X(HeaderEnd, HEADER_END, 137)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1086,10 +1070,6 @@ void velk_light_list_at(uint pool, uint word, uint first, uint entry_first, uint
               : traces == 0u && !stale ? VELK_LIGHT_LIST_FIRST
                                        : VELK_LIGHT_LIST_LATER;
     if (list == VELK_LIGHT_LIST_LATER && stale) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LATER_RESTARTS], 1u);
-    if (list == VELK_LIGHT_LIST_COARSE) {
-        atomicAdd(VELK_LIGHT_WORDS.data[pool + ((entry_point & VELK_LIGHT_POINT_PIECE) != 0u ? VELK_POOL_DIAG_COARSE_PIECE
-                                                                                               : VELK_POOL_DIAG_COARSE_VERTEX)], 1u);
-    }
     uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(list)], 1u);
     if (i >= VELK_LIGHT_POINT_CAPACITY) return;
     uint w = VELK_LIGHT_WORDS.data[pool + velk_light_list_word_word(list)] + i * VELK_LIGHT_POINT_WORDS;
@@ -2366,10 +2346,8 @@ bool velk_light_split(uint page, uint how)
     uint at = atomicAdd(light_words.data[pc.pool_word + VELK_POOL_SPLITS], 1u);
     if (at >= VELK_LIGHT_SPLIT_CAPACITY) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_SUM_SPLITS_REFUSED], 1u);
-        atomicAdd(light_words.data[pc.pool_word + VELK_POOL_DIAG_LIST_FULL], 1u);
         return false;
     }
-    if ((how & VELK_LIGHT_SPLIT_ROOT) != 0u) atomicAdd(light_words.data[pc.pool_word + VELK_POOL_DIAG_ASK_ROOT], 1u);
     uint w = light_words.data[pc.pool_word + VELK_POOL_SPLIT_WORD] + at * VELK_SPLIT_ENTRY_WORDS;
     light_words.data[w + VELK_SPLIT_ENTRY_PAGE] = page;
     light_words.data[w + VELK_SPLIT_ENTRY_HOW] = how;
@@ -2411,7 +2389,6 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     // are traced while it moves; the lighting judges it again with what is traced.
     uint cell = velk_way_cell(pool, first, corners, way, false);
     if (cell < 2u) velk_way_stop_at_coarse(way);
-    if (cell == 1u && pc.again == 0u) atomicAdd(light_words.data[pool + VELK_POOL_DIAG_PIXELS_EXACT], 1u);
     bool on_piece = way.piece != VELK_PIECE_VERTICES;
     uint piece_first = on_piece ? velk_light_page(pool, way.piece) : 0u;
     if (on_piece) {
@@ -2442,9 +2419,6 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     }
 
     if (pc.again != 0u) return;
-    atomicAdd(light_words.data[pool + VELK_POOL_DIAG_PIXELS], 1u);
-    if (way.spacing > pc.light_pixels) atomicAdd(light_words.data[pool + VELK_POOL_DIAG_PIXELS_COARSE], 1u);
-    if (way.coarse == VELK_PIECE_VERTICES) atomicAdd(light_words.data[pool + VELK_POOL_DIAG_PIXELS_VERTEX_COARSE], 1u);
     if (way.spacing <= pc.light_pixels) return;
     // Nothing under it yet: a piece without children, or the vertex points without a root.
     if (on_piece && (way.depth >= VELK_PIECE_DEEPEST || light_words.data[piece_first + VELK_PIECE_CHILDREN] < pages)) return;
@@ -2464,16 +2438,14 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
         // Every light's four bits all clear or all set, the same at all three.
         if (s0 == s1 && s1 == s2 && s0 == (s0 & 0x11111111u) * 15u) return;
     }
-    bool asked = false;
     if (on_piece) {
         uint before = atomicOr(light_words.data[piece_first + VELK_PIECE_READ], VELK_PIECE_ASKED);
-        asked = (before & VELK_PIECE_ASKED) == 0u && velk_light_split(way.piece, depth << 8u);
+        if ((before & VELK_PIECE_ASKED) == 0u) velk_light_split(way.piece, depth << 8u);
     } else if (atomicCompSwap(light_words.data[root_word], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) == VELK_LIGHT_NONE) {
-        asked = velk_light_split(light_words.data[first + VELK_PAGE_FIRST],
-                                 VELK_LIGHT_SPLIT_ROOT | triangle | (depth << 8u) | (level << 16u));
-        if (!asked) light_words.data[root_word] = VELK_LIGHT_NONE;
+        if (!velk_light_split(light_words.data[first + VELK_PAGE_FIRST], VELK_LIGHT_SPLIT_ROOT | triangle | (depth << 8u) | (level << 16u))) {
+            light_words.data[root_word] = VELK_LIGHT_NONE;
+        }
     }
-    if (asked) atomicAdd(light_words.data[pool + (edge ? VELK_POOL_DIAG_ASK_EDGE : VELK_POOL_DIAG_ASK_ALWAYS)], 1u);
 }
 
 )" R"(
@@ -2944,7 +2916,6 @@ void velk_split(uint index)
             } else {
                 atomicAdd(light_words.data[pool + VELK_POOL_PAGES_WANTED], count);
                 atomicAdd(light_words.data[pool + VELK_POOL_SUM_SPLITS_REFUSED], 1u);
-                atomicAdd(light_words.data[pool + VELK_POOL_DIAG_NO_PAGES], 1u);
                 if (s_split == 1u) light_words.data[s_root_word] = VELK_LIGHT_NONE;
                 s_split = 0u;
             }
@@ -3402,7 +3373,6 @@ void main()
             }
             if (unread || merge) {
                 for (uint k = 0u; k < 4u; ++k) light_words.data[at + VELK_PIECE_CHILDREN + k] = VELK_LIGHT_NONE;
-                if (merge) atomicAdd(light_words.data[pool + VELK_POOL_DIAG_MERGES], 1u);
             }
         } else if (parent == VELK_LIGHT_NONE && velk_pieces_unread(at, now)) {
             atomicCompSwap(light_words.data[velk_light_root_word(pool, first, triangle)], page, VELK_LIGHT_NONE);
@@ -3427,10 +3397,6 @@ void main()
     atomicOr(light_words.data[light_words.data[pool + VELK_POOL_MARKS_WORD] + (page >> 5u)], 1u << (page & 31u));
     atomicAdd(light_words.data[pool + VELK_POOL_MARK_PIECES], 1u);
     atomicMax(light_words.data[pool + VELK_POOL_MARK_DEEPEST], velk_piece_depth(light_words.data[at + VELK_PIECE_PLACE]));
-    atomicAdd(light_words.data[pool + VELK_POOL_DIAG_DEPTH + min(velk_piece_depth(light_words.data[at + VELK_PIECE_PLACE]), 12u)], 1u);
-    if (parent == VELK_LIGHT_NONE) {
-        atomicAdd(light_words.data[pool + VELK_POOL_DIAG_ROOT_LEVEL + velk_piece_level(light_words.data[at + VELK_PIECE_PLACE]) - 2u], 1u);
-    }
 }
 )";
 
@@ -3476,14 +3442,6 @@ void main()
             light_words.data[pool + VELK_POOL_LAST_MARK_DEEPEST] = light_words.data[pool + VELK_POOL_MARK_DEEPEST];
             light_words.data[pool + VELK_POOL_MARK_PIECES] = 0u;
             light_words.data[pool + VELK_POOL_MARK_DEEPEST] = 0u;
-            for (uint k = 0u; k < 13u; ++k) {
-                light_words.data[pool + VELK_POOL_LAST_DIAG_DEPTH + k] = light_words.data[pool + VELK_POOL_DIAG_DEPTH + k];
-                light_words.data[pool + VELK_POOL_DIAG_DEPTH + k] = 0u;
-            }
-            for (uint k = 0u; k < 5u; ++k) {
-                light_words.data[pool + VELK_POOL_LAST_DIAG_ROOT_LEVEL + k] = light_words.data[pool + VELK_POOL_DIAG_ROOT_LEVEL + k];
-                light_words.data[pool + VELK_POOL_DIAG_ROOT_LEVEL + k] = 0u;
-            }
             light_words.data[pool + VELK_POOL_LAST_SPLITS] = light_words.data[pool + VELK_POOL_SPLITS];
             light_words.data[pool + VELK_POOL_SPLITS] = 0u;
             light_words.data[pool + VELK_POOL_FRAME] = light_words.data[pool + VELK_POOL_FRAME] + 1u;
