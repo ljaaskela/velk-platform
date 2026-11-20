@@ -389,6 +389,25 @@ uint velk_light_page(uint pool, uint page)
     return VELK_LIGHT_WORDS.data[pool + VELK_POOL_SEGMENT_WORDS + (page >> 14u)] + (page & 16383u) * VELK_LIGHT_PAGE_WORDS;
 }
 
+// The record at place `place` of the kept cut `cut`'s pool, when a partition holds it: its
+// word, the partition's state and the record's place in the partition's page table. False for a
+// place of a free page, or past the records its page's partition holds.
+bool velk_cut_live_record(uint cut, uint place, out uint record, out uint state, out uint at)
+{
+    record = 0u;
+    state = 0u;
+    at = 0u;
+    if (place >= VELK_LIGHT_WORDS.data[cut + VELK_CUT_CAPACITY]) return false;
+    uint header = VELK_LIGHT_WORDS.data[cut + VELK_CUT_PAGE_HEADERS] + (place / VELK_CUT_PAGE_RECORDS) * VELK_CUT_PAGE_WORDS;
+    uint owner = VELK_LIGHT_WORDS.data[header + VELK_CUT_PAGE_OWNER];
+    if (owner >= VELK_LIGHT_WORDS.data[cut + VELK_CUT_PARTITIONS]) return false;
+    state = VELK_LIGHT_WORDS.data[cut + VELK_CUT_STATES_WORD] + owner * VELK_CUT_PARTITION_WORDS;
+    at = VELK_LIGHT_WORDS.data[header + VELK_CUT_PAGE_PLACE] * VELK_CUT_PAGE_RECORDS + place % VELK_CUT_PAGE_RECORDS;
+    if (at >= VELK_LIGHT_WORDS.data[state + VELK_PART_COUNT]) return false;
+    record = VELK_LIGHT_WORDS.data[cut + VELK_CUT_RECORD_POOL] + place * VELK_RECORD_END;
+    return true;
+}
+
 // Words before the points of a record with `table` words after its header: an even number, so
 // that a point's two words are on the same page.
 uint velk_light_skip_for(uint table)
@@ -1900,11 +1919,12 @@ void main()
     uint cut = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_CUT];
     uint instances_base = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
     uint items_word = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_ITEMS];
-    // A record a thread, 64 a group: the prelude's groups are 8 by 8.
-    uint index = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
-    // The records placed in the current store, all before this.
-    if (index >= VELK_LIGHT_WORDS.data[cut + VELK_CUT_PLACED]) return;
-    uint record = VELK_LIGHT_WORDS.data[cut + VELK_CUT_STORES + VELK_LIGHT_WORDS.data[cut + VELK_CUT_PARITY]] + index * VELK_RECORD_END;
+    // A record of the pool a thread, a page a group (64 records): the prelude's groups are 8 by
+    // 8. Only those a partition holds.
+    uint record;
+    uint state;
+    uint at;
+    if (!velk_cut_live_record(cut, gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex, record, state, at)) return;
     uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
     uint cluster = VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER];
     uint slot = VELK_LIGHT_WORDS.data[record + VELK_RECORD_SLOT];
@@ -2650,27 +2670,32 @@ layout(push_constant) uniform PC {
 
 #define VELK_LIGHT_WORDS light_words
 )" VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL R"(
-// How far along the store to look for an instance's records for light only, each way.
+// How far along a partition's records to look for an instance's records for light only, each way.
 const uint kScan = 256u;
 
-// The words of the records placed in the current store of the kept cut `record` is in, from
-// `lo` up to `hi`: what the scan for records for light only stays within, since records past
-// them are left from earlier frames. False when no cut of the view's top tree holds it.
-bool velk_light_store_of(uint record, out uint lo, out uint hi)
+// Where `record` is in its partition, which the scan for records for light only stays within:
+// its cut's record pool, the partition's page table in the current one, the record's place there
+// and the partition's count. False when no cut of the view's top tree holds it.
+bool velk_light_store_of(uint record, out uint pool, out uint table, out uint at, out uint count)
 {
-    lo = 0u;
-    hi = 0u;
+    pool = 0u;
+    table = 0u;
+    at = 0u;
+    count = 0u;
     if (pc.top_word == 0xFFFFFFFFu) return false;
     uint cuts = light_words.data[pc.top_word + VELK_RAY_TOP_CUTS];
     for (uint c = 0u; c < cuts; ++c) {
         uint cut = light_words.data[pc.top_word + VELK_RAY_TOP_HEADER_WORDS + c * VELK_RAY_TOP_CUT_WORDS + VELK_RAY_TOP_CUT_CUT];
-        uint start = light_words.data[cut + VELK_CUT_STORES + light_words.data[cut + VELK_CUT_PARITY]];
-        uint end = start + light_words.data[cut + VELK_CUT_PLACED] * 4u;
-        if (record >= start && record < end) {
-            lo = start;
-            hi = end;
-            return true;
-        }
+        uint start = light_words.data[cut + VELK_CUT_RECORD_POOL];
+        if (record < start || record >= start + light_words.data[cut + VELK_CUT_CAPACITY] * VELK_RECORD_END) continue;
+        uint word;
+        uint state;
+        if (!velk_cut_live_record(cut, (record - start) / VELK_RECORD_END, word, state, at)) return false;
+        pool = start;
+        uint parity = light_words.data[cut + VELK_CUT_TABLE_PARITY];
+        table = light_words.data[cut + VELK_CUT_TABLES + parity] + light_words.data[state + VELK_PART_TABLE_FIRST];
+        count = light_words.data[state + VELK_PART_COUNT];
+        return true;
     }
     return false;
 }
@@ -3029,15 +3054,20 @@ void main()
         bool again = false;
         uint pages = light_words.data[pool + VELK_POOL_PAGES];
         // The instance's records for light only, beside it: an instance's records are together,
-        // within the records placed in its store.
-        uint store_lo;
-        uint store_hi;
-        bool in_store = velk_light_store_of(record, store_lo, store_hi);
+        // in order within its partition's records.
+        uint record_pool;
+        uint part_table;
+        uint part_at;
+        uint part_count;
+        bool in_store = velk_light_store_of(record, record_pool, part_table, part_at, part_count);
         for (int dir = -1; in_store && dir <= 1; dir += 2) {
             for (uint k = 1u; k <= kScan; ++k) {
-                if (dir < 0 && record < store_lo + k * VELK_RECORD_END) break;
-                if (dir > 0 && record + k * VELK_RECORD_END >= store_hi) break;
-                uint other = dir < 0 ? record - k * VELK_RECORD_END : record + k * VELK_RECORD_END;
+                if (dir < 0 && part_at < k) break;
+                if (dir > 0 && part_at + k >= part_count) break;
+                uint near_at = dir < 0 ? part_at - k : part_at + k;
+                uint near_place = light_words.data[part_table + near_at / VELK_CUT_PAGE_RECORDS] * VELK_CUT_PAGE_RECORDS
+                                + near_at % VELK_CUT_PAGE_RECORDS;
+                uint other = record_pool + near_place * VELK_RECORD_END;
                 if (light_words.data[other + VELK_RECORD_SLOT] != slot) break;
                 if (light_words.data[other + VELK_RECORD_ENTRY] != (entry | VELK_CUT_LIGHT_ONLY)) continue;
                 uint light = light_words.data[other + VELK_RECORD_LIGHT];
@@ -3181,9 +3211,9 @@ void main()
 )";
 
 /**
- * Marks the pages the records of a kept cut's current store name, and those of the records for
- * light only their vertices link to, and counts its records with pages and with one value. A
- * thread per record, dispatched by the cut's drawing counts.
+ * Marks the pages the records of a kept cut name, and those of the records for light only their
+ * vertices link to, and counts its records with pages and with one value. A thread per record
+ * of the cut's pool, a group a page up to the last in use (VELK_CUT_DRAW_GROUPS).
  */
 inline constexpr string_view light_mark_src = R"(
 #version 450
@@ -3218,10 +3248,12 @@ void velk_light_mark_record(uint light)
 void main()
 {
     uint cut = pc.cut_word;
-    uint index = gl_GlobalInvocationID.x;
-    if (index >= light_words.data[cut + VELK_CUT_PLACED]) return;
-    uint parity = light_words.data[cut + VELK_CUT_PARITY];
-    uint light = light_words.data[light_words.data[cut + VELK_CUT_STORES + parity] + index * VELK_RECORD_END + VELK_RECORD_LIGHT];
+    // A record of the pool a thread, only those a partition holds.
+    uint record;
+    uint state;
+    uint at;
+    if (!velk_cut_live_record(cut, gl_GlobalInvocationID.x, record, state, at)) return;
+    uint light = light_words.data[record + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
     if (light >= VELK_LIGHT_ONE_VALUE) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);

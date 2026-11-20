@@ -118,7 +118,7 @@ namespace velk {
 /// An entry of a partition's ray list (kCutRay, VELK_CUT_RAY): a record rays trace and a sphere
 /// around it in world space, which a ray is tested against before the record's instance is read.
 #define VELK_CUT_RAY(X, cp, gp)                                                                    \
-    X(cp, gp, Index, INDEX, 0)                  /* the record's index from its partition's first */ \
+    X(cp, gp, Index, INDEX, 0)                  /* the record's place in its cut's pool */     \
     X(cp, gp, Center, CENTER, 1)                /* its sphere's centre, three floats */        \
     X(cp, gp, Radius, RADIUS, 4)                                                               \
     X(cp, gp, Words, WORDS, 5)
@@ -246,26 +246,30 @@ namespace velk {
     X(cp, gp, End, END, 2)
 
 /// A kept cut's header (kCut, VELK_CUT), in the culling arena: see instance_cull.h's description
-/// of kept cuts. Two stores of records flip each frame, and with them the node and ray list stores.
+/// of kept cuts. Its records, ray list entries and tree nodes are in pages of one pool, each
+/// partition's named by its page table.
 #define VELK_CUT_HEADER(X, cp, gp)                                                                 \
-    X(cp, gp, CopyGroups, COPY_GROUPS, 0)       /* group counts of the copy dispatch: partitions keeping their records */ \
-    X(cp, gp, ChooseGroups, CHOOSE_GROUPS, 4)   /* of the choosing dispatches: chunks choosing again */ \
-    X(cp, gp, DrawGroups, DRAW_GROUPS, 8)       /* of the drawing dispatch: a group per 64 records */ \
-    X(cp, gp, Parity, PARITY, 12)               /* which store is current, 0 or 1 */           \
-    X(cp, gp, Asked, ASKED, 13)                 /* records the current store was asked for, past its room too */ \
+    X(cp, gp, Pages, PAGES, 0)                  /* pages in the pool */                        \
+    X(cp, gp, FreePages, FREE_PAGES, 1)         /* pages on the free stack, as the last sweep left it */ \
+    X(cp, gp, PagesTaken, PAGES_TAKEN, 2)       /* pages taken off the stack this frame, from its top down */ \
+    X(cp, gp, PagesWanted, PAGES_WANTED, 3)     /* the most pages a frame wanted, when more than fit */ \
+    X(cp, gp, ChooseGroups, CHOOSE_GROUPS, 4)   /* group counts of the choosing dispatches: chunks choosing again */ \
+    X(cp, gp, TableUsed, TABLE_USED, 7)         /* entries of the current page table given out */ \
+    X(cp, gp, DrawGroups, DRAW_GROUPS, 8)       /* of the passes over the pool's records: a group a page, up to the last in use */ \
+    X(cp, gp, TableParity, TABLE_PARITY, 11)    /* which page table is current, 0 or 1 */      \
+    X(cp, gp, RecordPool, RECORD_POOL, 12)      /* the word of the pool's records (VELK_RECORD) */ \
+    X(cp, gp, RayPool, RAY_POOL, 13)            /* of its ray list entries (VELK_CUT_RAY), one a record */ \
     X(cp, gp, ChoseAgain, CHOSE_AGAIN, 14)      /* how many times partitions chose again, for the log */ \
-    X(cp, gp, MostWanted, MOST_WANTED, 15)      /* the most records a frame wanted, when more than fit */ \
-    X(cp, gp, Capacity, CAPACITY, 16)           /* records a store holds */                    \
-    X(cp, gp, Stores, STORES, 17)               /* the two record stores' words */             \
+    X(cp, gp, NodePool, NODE_POOL, 15)          /* of its tree nodes (VELK_CUT_NODE), kCutPageNodes a page */ \
+    X(cp, gp, Capacity, CAPACITY, 16)           /* records the pool holds, kCutPageRecords a page */ \
+    X(cp, gp, PageHeaders, PAGE_HEADERS, 17)    /* the word of the pages' headers (VELK_CUT_PAGE) */ \
+    X(cp, gp, StackWord, STACK_WORD, 18)        /* the word of the free stack, a page each */  \
     X(cp, gp, Partitions, PARTITIONS, 19)       /* partitions */                               \
-    X(cp, gp, KeepWord, KEEP_WORD, 20)          /* the word of the keep list: a partition index each */ \
+    X(cp, gp, PageMarks, PAGE_MARKS, 20)        /* the word of the page marks, a bit a page */ \
     X(cp, gp, ChooseWord, CHOOSE_WORD, 21)      /* the word of the choose list: kCullChunkListWords a chunk */ \
     X(cp, gp, StatesWord, STATES_WORD, 22)      /* the word of the partitions' states (VELK_PART) */ \
     X(cp, gp, ChunkCountsWord, CHUNK_COUNTS_WORD, 23) /* the word of the choose list's chunks' counts and first records */ \
-    X(cp, gp, Nodes, NODES, 24)                 /* tree nodes in the current node store */     \
-    X(cp, gp, NodeCapacity, NODE_CAPACITY, 25)  /* tree nodes a node store holds */            \
-    X(cp, gp, NodeStores, NODE_STORES, 26)      /* the two node stores' words */               \
-    X(cp, gp, Placed, PLACED, 28)               /* the end of the records placed in the current store */ \
+    X(cp, gp, Tables, TABLES, 24)               /* the two page tables' words, a page an entry */ \
     X(cp, gp, TakeoverFrame, TAKEOVER_FRAME, 29) /* the frame of the takeover table, counted by the begin pass */ \
     X(cp, gp, TakeoverWord, TAKEOVER_WORD, 30)  /* the takeover table's word (VELK_TAKEOVER a slot) */ \
     X(cp, gp, TakeoverSlots, TAKEOVER_SLOTS, 31) /* and its slots, a power of two */           \
@@ -275,13 +279,12 @@ namespace velk {
     X(cp, gp, TookOver, TOOK_OVER, 35)          /* of those, how many took over an old record's light */ \
     X(cp, gp, LastRewritten, LAST_REWRITTEN, 36)                                               \
     X(cp, gp, LastTookOver, LAST_TOOK_OVER, 37)                                                \
-    X(cp, gp, RayStores, RAY_STORES, 38)        /* the two ray list stores' words */           \
     X(cp, gp, LongestWalk, LONGEST_WALK, 40)    /* the most hierarchy nodes one thread walked choosing this frame */ \
     X(cp, gp, MostChosen, MOST_CHOSEN, 41)      /* the most records one walk chose */          \
     X(cp, gp, LastLongestWalk, LAST_LONGEST_WALK, 42)                                          \
     X(cp, gp, LastMostChosen, LAST_MOST_CHOSEN, 43)                                            \
-    X(cp, gp, RayMarksWord, RAY_MARKS_WORD, 44) /* the word of the ray marks, a bit a record of the current store */ \
-    X(cp, gp, VisibleGroups, VISIBLE_GROUPS, 45) /* of the drawing dispatch: a group per 64 records of partitions in view */ \
+    X(cp, gp, RayMarksWord, RAY_MARKS_WORD, 44) /* the word of the ray marks, a bit a record of the pool */ \
+    X(cp, gp, VisibleGroups, VISIBLE_GROUPS, 45) /* of the drawing dispatch: a group a page of partitions in view */ \
     X(cp, gp, VisibleWord, VISIBLE_WORD, 48)    /* the word of their runs: first record and end, two words a group */ \
     X(cp, gp, DiagTreeBuilds, DIAG_TREE_BUILDS, 49) /* TEMPORARY: partition trees built since the log */ \
     X(cp, gp, DiagTreeFallbacks, DIAG_TREE_FALLBACKS, 50) /* and of them those that fell back to balanced */ \
@@ -292,14 +295,16 @@ namespace velk {
     X(cp, gp, From, FROM, 0)                    /* where in the world it chose from, three floats */ \
     X(cp, gp, ChunkFirst, CHUNK_FIRST, 3)       /* its table entry's first chunk word when it chose */ \
     X(cp, gp, Chunks, CHUNKS, 4)                /* and its chunk count */                      \
-    X(cp, gp, First, FIRST, 5)                  /* its first record in the current store */    \
-    X(cp, gp, Count, COUNT, 6)                  /* its record count there */                   \
-    X(cp, gp, LastFirst, LAST_FIRST, 7)         /* its first record in the last store */       \
+    X(cp, gp, TableFirst, TABLE_FIRST, 5)       /* its page table's first entry in the current page table */ \
+    X(cp, gp, Count, COUNT, 6)                  /* its record count, kCutPageRecords a page */ \
+    X(cp, gp, LastTableFirst, LAST_TABLE_FIRST, 7) /* while choosing again, its old page table's first entry in the last */ \
     X(cp, gp, Choosing, CHOOSING, 8)            /* 1 while choosing this frame */              \
     X(cp, gp, ChunkStart, CHUNK_START, 9)       /* while choosing, where its chunks start in the choose list */ \
-    X(cp, gp, NodeFirst, NODE_FIRST, 10)        /* its first tree node in the current node store */ \
-    X(cp, gp, LastNodeFirst, LAST_NODE_FIRST, 11) /* in the last */                            \
+    X(cp, gp, Root, ROOT, 10)                   /* its tree's root, a node of the pool, while RAY_COUNT is not 0 */ \
+    X(cp, gp, OldRayCount, OLD_RAY_COUNT, 11)   /* while choosing again, RAY_COUNT as it was */ \
     X(cp, gp, QuadTree, QUAD_TREE, 12)          /* its table entry's quad tree word when it chose */ \
+    X(cp, gp, Retry, RETRY, 13)                 /* 1 when it kept its old records for want of pages, to choose again */ \
+    X(cp, gp, Same, SAME, 14)                   /* while choosing again, 1 when its chunks and quad tree are as before */ \
     X(cp, gp, OldCount, OLD_COUNT, 15)          /* while choosing again, how many records it had, 0 for none */ \
     X(cp, gp, RayCount, RAY_COUNT, 16)          /* how many records rays trace (its ray list) */ \
     X(cp, gp, Looked, LOOKED, 17)               /* which way the camera looked when it chose, three floats */ \
@@ -309,6 +314,13 @@ namespace velk {
     X(cp, gp, Quads, QUADS, 23)                 /* its quads, for the log */                   \
     X(cp, gp, Box, BOX, 24)                     /* the world box around what it draws, min then max, six floats */ \
     X(cp, gp, End, END, 30)
+
+/// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
+/// and where in its page table.
+#define VELK_CUT_PAGE(X, cp, gp)                                                                   \
+    X(cp, gp, Owner, OWNER, 0)          /* the partition's index, kCullNoSlot for a free page */  \
+    X(cp, gp, Place, PLACE, 1)          /* its place in the partition's page table */             \
+    X(cp, gp, Words, WORDS, 2)
 
 /// A record of a kept cut (kCutRecord, VELK_RECORD). See kCutHeaderWords.
 #define VELK_CUT_RECORD(X, cp, gp)                                                                 \
@@ -395,6 +407,7 @@ VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
 VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
 VELK_CUT_HEADER(VELK_LAYOUT_CPP_WORD, Cut, CUT)
 VELK_CUT_PART(VELK_LAYOUT_CPP_WORD, Part, PART)
+VELK_CUT_PAGE(VELK_LAYOUT_CPP_WORD, CutPage, CUT_PAGE)
 VELK_CUT_RECORD(VELK_LAYOUT_CPP_WORD, CutRecord, RECORD)
 VELK_TAKEOVER(VELK_LAYOUT_CPP_WORD, Takeover, TAKEOVER)
 VELK_CHOSEN_LIST(VELK_LAYOUT_CPP_WORD, ChosenList, CHOSEN_LIST)
@@ -430,6 +443,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \
     VELK_CUT_HEADER(VELK_LAYOUT_GLSL_WORD, Cut, CUT)                                               \
     VELK_CUT_PART(VELK_LAYOUT_GLSL_WORD, Part, PART)                                               \
+    VELK_CUT_PAGE(VELK_LAYOUT_GLSL_WORD, CutPage, CUT_PAGE)                                        \
     VELK_CUT_RECORD(VELK_LAYOUT_GLSL_WORD, CutRecord, RECORD)                                      \
     VELK_TAKEOVER(VELK_LAYOUT_GLSL_WORD, Takeover, TAKEOVER)                                       \
     VELK_CHOSEN_LIST(VELK_LAYOUT_GLSL_WORD, ChosenList, CHOSEN_LIST)                               \

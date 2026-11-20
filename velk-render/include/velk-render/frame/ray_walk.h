@@ -96,21 +96,6 @@ vec3 velk_ray_vec3(uint at)
                 uintBitsToFloat(velk_culling.data[at + 2u]));
 }
 
-// Nodes in the tree over a partition's `records` records: one less than its leaves of four, at
-// least one. Mirrors cut_tree_nodes. Counted as pairs merged level by level, the same value as
-// leaves minus one: the walk compiles to fewer registers this way.
-uint velk_ray_tree_nodes(uint records)
-{
-    if (records == 0u) return 0u;
-    uint below = (records + 3u) / 4u;
-    uint total = 0u;
-    do {
-        total += below / 2u;
-        below = (below + 1u) / 2u;
-    } while (below > 1u);
-    return max(total, 1u);
-}
-
 // `ray` in an instance's own space. For a mesh, where its vertices are, (local - offset) /
 // size. Its direction is of unit length there; `scale` is how far it goes there per unit of
 // the ray's t.
@@ -539,20 +524,19 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 uint cut = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_CUT];
                 uint state = velk_culling.data[cut + VELK_CUT_STATES_WORD]
                            + velk_culling.data[leaf + VELK_RAY_TOP_LEAF_PARTITION] * VELK_CUT_PARTITION_WORDS;
-                // What rays trace of it: its ray list, over its records.
-                uint count = velk_culling.data[state + VELK_PART_RAY_COUNT];
-                if (count == 0u) continue;
-                uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
-                records = velk_culling.data[cut + VELK_CUT_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_RECORD_END;
-                ray_list = velk_culling.data[cut + VELK_CUT_RAY_STORES + parity] + velk_culling.data[state + VELK_PART_FIRST] * VELK_CUT_RAY_WORDS;
-                nodes = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + velk_culling.data[state + VELK_PART_NODE_FIRST] * VELK_CUT_NODE_WORDS;
+                // What rays trace of it: its ray list, over its records, in its cut's pool, which
+                // its tree's references name by place.
+                if (velk_culling.data[state + VELK_PART_RAY_COUNT] == 0u) continue;
+                records = velk_culling.data[cut + VELK_CUT_RECORD_POOL];
+                ray_list = velk_culling.data[cut + VELK_CUT_RAY_POOL];
+                nodes = velk_culling.data[cut + VELK_CUT_NODE_POOL];
                 instances_base = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
                 items = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_ITEMS];
                 quads = velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_QUADS];
                 if (velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_MOVES] != 0u) velk_ray_met_motion = true;
                 level = kPartition;
                 partition_scope = sp;
-                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_ray_tree_nodes(count) - 1u;
+                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[state + VELK_PART_ROOT];
                 continue;
             }
             ++velk_ray_top_nodes;

@@ -584,10 +584,19 @@ void main()
         node = pc.top_word + VELK_RAY_TOP_HEADER_WORDS + cuts * VELK_RAY_TOP_CUT_WORDS + leaves * VELK_RAY_TOP_LEAF_WORDS
              + node_index * VELK_CUT_NODE_WORDS;
     } else {
+        // The pool's nodes up to the last page in use; only those of the tree of the partition
+        // that holds the page.
         uint cut = pc.cut_word;
-        if (node_index >= velk_culling.data[cut + VELK_CUT_NODES]) return;
-        uint parity = velk_culling.data[cut + VELK_CUT_PARITY];
-        node = velk_culling.data[cut + VELK_CUT_NODE_STORES + parity] + node_index * VELK_CUT_NODE_WORDS;
+        uint page = node_index / VELK_CUT_PAGE_NODES;
+        if (page >= velk_culling.data[cut + VELK_CUT_DRAW_GROUPS] || page >= velk_culling.data[cut + VELK_CUT_PAGES]) return;
+        uint header = velk_culling.data[cut + VELK_CUT_PAGE_HEADERS] + page * VELK_CUT_PAGE_WORDS;
+        uint owner = velk_culling.data[header + VELK_CUT_PAGE_OWNER];
+        if (owner >= velk_culling.data[cut + VELK_CUT_PARTITIONS]) return;
+        uint state = velk_culling.data[cut + VELK_CUT_STATES_WORD] + owner * VELK_CUT_PARTITION_WORDS;
+        uint rays = velk_culling.data[state + VELK_PART_RAY_COUNT];
+        uint tree_nodes = rays == 0u ? 0u : max((rays + 3u) / 4u, 2u) - 1u;
+        if (velk_culling.data[header + VELK_CUT_PAGE_PLACE] * VELK_CUT_PAGE_NODES + node_index % VELK_CUT_PAGE_NODES >= tree_nodes) return;
+        node = velk_culling.data[cut + VELK_CUT_NODE_POOL] + node_index * VELK_CUT_NODE_WORDS;
     }
     uint level = velk_culling.data[node + VELK_CUT_NODE_LEVEL];
     bool root = velk_culling.data[node + VELK_CUT_NODE_ROOT] != 0u;
@@ -663,7 +672,7 @@ vec3 id_color(uint id)
 }
 
 // A colour per kept cut record by what it is (entry, cluster, slot), which stays from frame to
-// frame while the record's place in the cut's stores does not.
+// frame, also when the record's partition chooses again and its place in the cut's pool moves.
 vec3 record_color(uint record)
 {
     return id_color(velk_culling.data[record + VELK_RECORD_ENTRY] * 2654435761u

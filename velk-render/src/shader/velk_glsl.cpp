@@ -122,6 +122,10 @@ R"(
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.
 #define VELK_CUT_PARTITION_WORDS VELK_PART_END
+// Records, and ray list entries, a page of a kept cut's pool holds: kCutPageRecords. Tree nodes:
+// kCutPageNodes.
+#define VELK_CUT_PAGE_RECORDS 64u
+#define VELK_CUT_PAGE_NODES 16u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
 // kLodNodeWords, and rays' node with its children's boxes sits before each.
 #define VELK_LOD_NODE_STRIDE 32u
