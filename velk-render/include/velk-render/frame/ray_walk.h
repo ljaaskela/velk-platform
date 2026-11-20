@@ -68,8 +68,12 @@ int velk_ray_deepest = 0;
 float velk_ray_blocker_t = 0.0;
 
 // The walk's stack: a slice of VELK_TRACE_STACK_SIZE for each thread of the work group, which
-// has 64, in shared memory, since as an array of its own it would be in scratch memory.
-shared uint s_walk_stack[64u * uint(VELK_TRACE_STACK_SIZE)];
+// has VELK_RT_GROUP_THREADS (64 unless the shader says), in shared memory, since as an array of
+// its own it would be in scratch memory.
+#ifndef VELK_RT_GROUP_THREADS
+#define VELK_RT_GROUP_THREADS 64
+#endif
+shared uint s_walk_stack[uint(VELK_RT_GROUP_THREADS) * uint(VELK_TRACE_STACK_SIZE)];
 
 // Which of its object's six axis directions a surface facing `n`, in the object's own space,
 // faces: 0 and 1 for +x and -x, then y, then z, as the G-buffer's surface attachment has it.

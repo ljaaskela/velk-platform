@@ -1596,7 +1596,14 @@ void main()
 #include "velk.glsl"
 #include "velk-ui.glsl"
 
+// A work group of VELK_RT_GROUP_THREADS threads in a row where the composer defines it
+// (compose_rt_trace), else 8 by 8.
+#ifdef VELK_RT_GROUP_THREADS
+layout(local_size_x = VELK_RT_GROUP_THREADS, local_size_y = 1, local_size_z = 1) in;
+#else
+#define VELK_RT_GROUP_THREADS 64
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#endif
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D gStorageImages[];
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
@@ -1705,8 +1712,8 @@ struct BrdfSample {
     uint sample_count_hint;
 };
 
-// The walk's stack per thread, in shared memory: 32 for 64 threads is 8 KB. The light trace's
-// log gives the deepest the probes' rays got.
+// The walk's stack per thread, in shared memory: 32 for 64 threads is 8 KB, for 32 threads 4 KB.
+// The light trace's log gives the deepest the probes' rays got.
 #define VELK_TRACE_STACK_SIZE 32
 #include "velk_trace.glsl"
 
@@ -2336,12 +2343,24 @@ inline void append_rt_intersect_shape(string& src, const IFrameSnippetRegistry& 
 /**
  * @brief Composes a compute shader that traces rays and runs no material code: the RT prelude,
  *        the frame's intersect snippets and intersect_shape, then @p main_src. Its pipeline
- *        depends only on the frame's intersects.
+ *        depends only on the frame's intersects. A work group is @p group_threads threads in a
+ *        row; 0 keeps the prelude's 8 by 8.
  */
-inline string compose_rt_trace(const IFrameSnippetRegistry& snippets, string_view main_src)
+inline string compose_rt_trace(const IFrameSnippetRegistry& snippets, string_view main_src, uint32_t group_threads = 0)
 {
     string src;
-    src += rt_compute_prelude_src;
+    if (group_threads != 0) {
+        // The group size goes right after the #version line, before the prelude reads it.
+        const size_t version = rt_compute_prelude_src.find(string_view("#version"));
+        const size_t line_end = rt_compute_prelude_src.find('\n', version);
+        src += rt_compute_prelude_src.substr(0, line_end + 1);
+        char define[64];
+        std::snprintf(define, sizeof(define), "#define VELK_RT_GROUP_THREADS %u\n", group_threads);
+        src += define;
+        src += rt_compute_prelude_src.substr(line_end + 1);
+    } else {
+        src += rt_compute_prelude_src;
+    }
     append_rt_intersect_includes(src, snippets);
     append_rt_intersect_shape(src, snippets);
     src += main_src;

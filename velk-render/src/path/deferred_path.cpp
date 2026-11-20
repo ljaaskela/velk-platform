@@ -1366,7 +1366,7 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     key |= 0x2000000000000000ULL;
     auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
     if (!pipeline) {
-        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_trace(*ctx.snippets, light_probes_main_src)), key);
+        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_trace(*ctx.snippets, light_probes_main_src, kLightProbeGroupThreads)), key);
     }
     if (!pipeline) return;
     // The filter traces nothing: the RT prelude and the filter alone.
@@ -1407,11 +1407,10 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
-        // The gather, kLightProbeRays threads a probe, a group a 4 by 4 tile of the probe grid.
-        static_assert(kLightProbeRays * 16u == 64u, "a group of 64 threads is a 4 by 4 tile of probes");
+        // The gather, kLightProbeRays threads a probe, a group a 4 by 2 tile of the probe grid.
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
-        dc.groups_x = ((across + 3u) / 4u) * ((down + 3u) / 4u);
+        dc.groups_x = ((across + 3u) / 4u) * ((down + 1u) / 2u);
         dc.groups_y = 1;
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
