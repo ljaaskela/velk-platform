@@ -66,7 +66,8 @@ struct WrittenDrawData
 
 /**
  * @brief Writes the shading summary of the draw record at @p draw_base (kDrawShadeWords) into
- *        the draw-shade array, from @p material: lit and white with no emission for none. The
+ *        the draw-shade array, from @p material: lit, tinted and white with no emission for none,
+ *        as the eval of a draw without a material is. The
  *        array covers as many records as @p draw_arena holds, growing with it.
  */
 inline void write_draw_shade(IGpuResourceManager& resources, const IGpuArena& draw_arena, uint32_t draw_base,
@@ -86,8 +87,9 @@ inline void write_draw_shade(IGpuResourceManager& resources, const IGpuArena& dr
     const color albedo = material ? material->get_average_albedo() : color::white();
     const color emission = material ? material->get_average_emission() : color::black();
     const bool lit = material ? material->is_lit() : true;
+    const bool tinted = material ? material->is_tinted() : true;
     uint32_t words[kDrawShadeWords];
-    pack_draw_shade(albedo.r, albedo.g, albedo.b, lit, emission.r, emission.g, emission.b, words);
+    pack_draw_shade(albedo.r, albedo.g, albedo.b, lit, tinted, emission.r, emission.g, emission.b, words);
     shade->update_at(at, words, kBytes);
 }
 

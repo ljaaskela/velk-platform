@@ -2052,6 +2052,7 @@ uint velk_light_grid_at(uint first, uint k)
 layout(set = 1, binding = 6, std430) readonly buffer VelkDrawShade { uint data[]; } velk_draw_shade;
 #define VELK_DRAW_SHADE_WORDS 2u
 #define VELK_DRAW_SHADE_UNLIT 0x01000000u
+#define VELK_DRAW_SHADE_TINTED 0x02000000u
 
 vec3 velk_srgb_to_linear(vec3 s)
 {
@@ -2065,9 +2066,9 @@ vec3 velk_rgb9e5(uint w)
 }
 
 // What a ray sees of the surface it hit, without its material's code: its draw's shading
-// summary, its albedo times its instance's colour and, where the draw has them, its vertex
-// colours. A lit surface reflects that albedo; an unlit one gives it off, on top of its emission.
-// White and lit where the hit names no draw, as the default material is.
+// summary, its albedo times, where its material takes them, its instance's colour and its vertex
+// colours, and on a quad the quad's colour. A lit surface reflects that albedo; an unlit one
+// gives it off, on top of its emission. White and lit where the hit names no draw.
 void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool lit)
 {
     albedo = vec3(1.0);
@@ -2076,16 +2077,19 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
     if (hit.draw == 0xFFFFFFFFu || hit.instance == 0xFFFFFFFFu) return;
     VelkDrawData d = velk_draw_data.data[hit.draw];
     uint at = hit.draw * VELK_DRAW_SHADE_WORDS;
-    uint look = 0x00FFFFFFu;
+    uint look = 0x00FFFFFFu | VELK_DRAW_SHADE_TINTED;
     uint glow = 0u;
     if (at + 1u < uint(velk_draw_shade.data.length())) {
         look = velk_draw_shade.data[at];
         glow = velk_draw_shade.data[at + 1u];
     }
-    // A quad's hit names the quad's word, whose colour is its instance's.
-    vec4 tint = (d.flags & VELK_DRAW_QUADS) != 0u ? unpackUnorm4x8(velk_culling.data[hit.instance + VELK_QUAD_NODE_COLOR])
-                                                    : velk_instances.data[hit.instance].color;
-    if ((d.flags & VELK_DRAW_COLOR) != 0u && hit.corners.x != VELK_NO_CORNERS) {
+    bool quads = (d.flags & VELK_DRAW_QUADS) != 0u;
+    bool tinted = (look & VELK_DRAW_SHADE_TINTED) != 0u;
+    // A quad's hit names the quad's word, whose colour is what the quad shows.
+    vec4 tint = vec4(1.0);
+    if (quads) tint = unpackUnorm4x8(velk_culling.data[hit.instance + VELK_QUAD_NODE_COLOR]);
+    else if (tinted) tint = velk_instances.data[hit.instance].color;
+    if (!quads && tinted && (d.flags & VELK_DRAW_COLOR) != 0u && hit.corners.x != VELK_NO_CORNERS) {
         vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
         tint *= velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.x)) * b.x
               + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.y)) * b.y

@@ -153,12 +153,15 @@ inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 /// Words of a draw's shading summary in the draw-shade array (IRenderBackend::kGlobalDrawShade),
 /// at its draw record's index: what a ray that hits it sees without its material's code. The
 /// first word its material's average albedo (IMaterial::get_average_albedo) as sRGB bytes, red
-/// lowest, with kDrawShadeUnlit in the top byte; the second its average emission as RGB9E5. A
-/// hit multiplies the albedo by its instance's colour and, with kDrawFlagColor, its vertex
-/// colours: reflected when lit, given off when unlit. Mirrors VELK_DRAW_SHADE_*.
+/// lowest, with kDrawShadeUnlit and kDrawShadeTinted in the top byte; the second its average
+/// emission as RGB9E5. With kDrawShadeTinted a hit multiplies the albedo by its instance's colour
+/// and, with kDrawFlagColor, its vertex colours; a quad's always by its quad's colour. Reflected
+/// when lit, given off when unlit. Mirrors VELK_DRAW_SHADE_*.
 inline constexpr uint32_t kDrawShadeWords = 2;
 /// The draw's material is unlit (IMaterial::is_lit false).
 inline constexpr uint32_t kDrawShadeUnlit = 1u << 24;
+/// The draw's material takes its instance and vertex colours (IMaterial::is_tinted).
+inline constexpr uint32_t kDrawShadeTinted = 1u << 25;
 
 /// A linear value 0 to 1 as an sRGB byte.
 inline uint32_t srgb_byte(float linear)
@@ -197,10 +200,11 @@ inline uint32_t rgb9e5(float r, float g, float b)
 }
 
 /// Packs a draw's shading summary (kDrawShadeWords) into @p out.
-inline void pack_draw_shade(float albedo_r, float albedo_g, float albedo_b, bool lit, float emission_r,
+inline void pack_draw_shade(float albedo_r, float albedo_g, float albedo_b, bool lit, bool tinted, float emission_r,
                             float emission_g, float emission_b, uint32_t out[kDrawShadeWords])
 {
-    out[0] = srgb_byte(albedo_r) | (srgb_byte(albedo_g) << 8) | (srgb_byte(albedo_b) << 16) | (lit ? 0u : kDrawShadeUnlit);
+    out[0] = srgb_byte(albedo_r) | (srgb_byte(albedo_g) << 8) | (srgb_byte(albedo_b) << 16) | (lit ? 0u : kDrawShadeUnlit)
+           | (tinted ? kDrawShadeTinted : 0u);
     out[1] = rgb9e5(emission_r, emission_g, emission_b);
 }
 

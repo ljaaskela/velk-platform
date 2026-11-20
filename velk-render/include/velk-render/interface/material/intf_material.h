@@ -54,6 +54,10 @@ public:
     /// Whether light falls on its surface. An unlit surface shows its colour as it is, so
     /// light bouncing off it takes that colour as given off, not reflected.
     virtual bool is_lit() const = 0;
+
+    /// Whether its surface's colour is multiplied by its draw's instance colour and vertex
+    /// colours (EvalContext::base), so that light bouncing off it takes them too.
+    virtual bool is_tinted() const = 0;
 };
 
 } // namespace velk

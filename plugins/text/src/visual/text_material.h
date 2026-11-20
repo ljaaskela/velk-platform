@@ -44,6 +44,8 @@ public:
     string_view get_source(string_view role) const override;
     string_view get_fn_name(string_view role) const override;
     void register_includes(IRenderContext& ctx) const override;
+    /// Its glyphs take the text's colour, EvalContext::base.
+    bool is_tinted() const override { return true; }
 
 private:
     using Base = ::velk::ext::Material<TextMaterial, ITextMaterialInternal>;

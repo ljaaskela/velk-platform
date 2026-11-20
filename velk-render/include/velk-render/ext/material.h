@@ -78,6 +78,8 @@ public:
     color get_average_emission() const override { return color::black(); }
     /// Unlit, as a material's eval is unless it says otherwise (velk_default_material_eval).
     bool is_lit() const override { return false; }
+    /// Untinted, as velk_default_material_eval is: its colour does not take EvalContext::base.
+    bool is_tinted() const override { return false; }
 
     /// Subscribe / unsubscribe to IMaterialOptions attachments so option
     /// writes propagate into pipeline invalidation without polling.
