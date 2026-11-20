@@ -2066,7 +2066,7 @@ vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
  * The screen probes' bounce light, in two dispatches of the same shader.
  *
  * Gather: sixteen probes a group, a ray a thread, kLightProbeRays a probe. The rays are spread
- * evenly over the hemisphere around the probe's normal: each takes its own quarter of a 4 by 4
+ * over the hemisphere around the probe's normal by cosine: each takes its own quarter of a 4 by 4
  * grid of directions, a different cell of it each frame so that four frames cover all sixteen,
  * staggered by the probe's place so that each 2 by 2 block of probes covers them all every frame,
  * moved within the cell by a value of the probe's own. A hit brings what the light points there
@@ -2303,11 +2303,11 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint acro
 }
 
 // The direction of ray `ray` of probe `probe`, at `square` on the probe grid, in frame `frame`,
-// around the normal `n`: even over the hemisphere, in the ray's own quarter of a 4 by 4 grid of
-// directions (the cosine to the normal one way, the turn about it the other), a different cell of
-// that quarter each frame, staggered by the probe's place so that every 2 by 2 block of probes
-// covers all sixteen cells each frame, at a place in the cell of the probe's own that moves every
-// four frames.
+// around the normal `n`: over the hemisphere by cosine, in the ray's own quarter of a 4 by 4 grid
+// of directions (the squared sine to the normal one way, the turn about it the other), a
+// different cell of that quarter each frame, staggered by the probe's place so that every 2 by 2
+// block of probes covers all sixteen cells each frame, at a place in the cell of the probe's own
+// that moves every four frames.
 vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
 {
     uint sub_x = (frame & 1u) ^ (square.x & 1u);
@@ -2316,8 +2316,9 @@ vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
     vec2 jitter = fract(vec2(float(probe) * 0.7548777, float(probe) * 0.5698403)
                         + float(frame >> 2u) * vec2(0.6180340, 0.3819660));
     vec2 uv = (cell + jitter) * 0.25;
-    float z = uv.x;
-    float r = sqrt(max(1.0 - z * z, 0.0));
+    // By cosine: as many rays as the light they carry, few grazing.
+    float z = sqrt(max(1.0 - uv.x, 0.0));
+    float r = sqrt(uv.x);
     float phi = 6.2831853 * uv.y;
     vec3 a = normalize(abs(n.y) < 0.9 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
     vec3 b = cross(n, a);
@@ -2383,9 +2384,10 @@ void velk_probes_gather(uint lane)
         return;
     }
 
-    // Even over the hemisphere: the mean radiance weighted by cosine, as the lighting pass takes
-    // it, is twice the mean of what the rays found times their cosine to the normal; each
-    // colour's direction three times the mean of it times the ray's direction.
+    // By cosine: the mean radiance weighted by cosine, as the lighting pass takes it, is the mean
+    // of what the rays found. Each colour's direction: along the normal one and a half times
+    // that, across it four times the mean of what a ray found times its direction's part across
+    // the normal, which for light changing evenly over the hemisphere is its L1 direction.
     VelkProbeLight p;
     p.e = vec3(0.0);
     p.r = vec3(0.0);
@@ -2394,15 +2396,16 @@ void velk_probes_gather(uint lane)
     for (uint k = 0u; k < VELK_PROBE_RAYS; ++k) {
         vec3 l = s_light[lane + k];
         vec3 w = s_dir[lane + k];
-        p.e += l * max(dot(w, n), 0.0);
-        p.r += l.r * w;
-        p.g += l.g * w;
-        p.b += l.b * w;
+        vec3 across_n = w - dot(w, n) * n;
+        p.e += l;
+        p.r += l.r * across_n;
+        p.g += l.g * across_n;
+        p.b += l.b * across_n;
     }
-    p.e *= 2.0 / float(VELK_PROBE_RAYS);
-    p.r *= 3.0 / float(VELK_PROBE_RAYS);
-    p.g *= 3.0 / float(VELK_PROBE_RAYS);
-    p.b *= 3.0 / float(VELK_PROBE_RAYS);
+    p.e /= float(VELK_PROBE_RAYS);
+    p.r = 1.5 * p.e.r * n + p.r * (4.0 / float(VELK_PROBE_RAYS));
+    p.g = 1.5 * p.e.g * n + p.g * (4.0 / float(VELK_PROBE_RAYS));
+    p.b = 1.5 * p.e.b * n + p.b * (4.0 / float(VELK_PROBE_RAYS));
     velk_probe_write(raw, p, pos, n, 1.0);
 }
 
