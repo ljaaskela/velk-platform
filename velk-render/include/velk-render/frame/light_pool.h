@@ -2047,12 +2047,18 @@ vec3 velk_probe_position(uint at)
                 uintBitsToFloat(VELK_LIGHT_WORDS.data[at + VELK_PROBE_POSITION + 2u]));
 }
 
-// What a probe at normal `pn` with light `p` brings a surface facing `n`: its light at its own
-// normal, moved by its directions to `n`.
-vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
+// What a probe at normal `pn` with light `p` brings a surface facing `n`, unclamped: its light at
+// its own normal, moved by its directions to `n`. For sums, clamped once after them.
+vec3 velk_probe_eval_raw(VelkProbeLight p, vec3 pn, vec3 n)
 {
     vec3 d = n - pn;
-    return max(p.e + vec3(dot(p.r, d), dot(p.g, d), dot(p.b, d)) / 3.0, vec3(0.0));
+    return p.e + vec3(dot(p.r, d), dot(p.g, d), dot(p.b, d)) / 3.0;
+}
+
+// The same, never below zero.
+vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
+{
+    return max(velk_probe_eval_raw(p, pn, n), vec3(0.0));
 }
 )"
 
@@ -2401,12 +2407,12 @@ void velk_probes_gather(uint lane)
 }
 
 )" R"(
-// Probe `at`'s light added `w` times to a sum, seen from the normal `n`: its light at `n`, and its
-// directions as they are.
+// Probe `at`'s light added `w` times to a sum, seen from the normal `n`: its light at `n`,
+// unclamped, and its directions as they are.
 void velk_probe_add(inout VelkProbeLight sum, uint at, vec3 at_n, vec3 n, float w)
 {
     VelkProbeLight q = velk_probe_read(at);
-    sum.e += w * velk_probe_eval(q, at_n, n);
+    sum.e += w * velk_probe_eval_raw(q, at_n, n);
     sum.r += w * q.r;
     sum.g += w * q.g;
     sum.b += w * q.b;
@@ -2456,7 +2462,7 @@ void velk_probes_filter()
         float w = exp(-off / near) * pow(max(dot(n, at_n), 0.0), 4.0);
         if (w <= 1e-4) continue;
         VelkProbeLight q = velk_probe_read(at);
-        vec3 e = velk_probe_eval(q, at_n, n);
+        vec3 e = velk_probe_eval_raw(q, at_n, n);
         fresh.e += w * e;
         fresh.r += w * q.r;
         fresh.g += w * q.g;
@@ -2470,6 +2476,7 @@ void velk_probes_filter()
     fresh.g /= total;
     fresh.b /= total;
     vec3 spread = sqrt(max(squares / total - fresh.e * fresh.e, vec3(0.0)));
+    fresh.e = max(fresh.e, vec3(0.0));
 
     // The last frame's probes around where it was: the 2 by 2 around that place on the last
     // frame's grid, by how near, each where it was on the same surface.
@@ -2506,16 +2513,16 @@ void velk_probes_filter()
     }
 
     // Blended with it over up to 16 frames; where enough neighbours agree, the last frame's light
-    // kept within one and a half spreads of theirs, its directions scaled with it.
+    // kept within two and a half spreads of theirs, its directions scaled with it.
     VelkProbeLight light = fresh;
     float frames = 1.0;
     if (had_weight > 1e-4) {
-        had.e /= had_weight;
+        had.e = max(had.e / had_weight, vec3(0.0));
         had.r /= had_weight;
         had.g /= had_weight;
         had.b /= had_weight;
         if (total >= 3.0) {
-            vec3 kept = clamp(had.e, max(fresh.e - 1.5 * spread, vec3(0.0)), fresh.e + 1.5 * spread);
+            vec3 kept = clamp(had.e, max(fresh.e - 2.5 * spread, vec3(0.0)), fresh.e + 2.5 * spread);
             vec3 scale = vec3(had.e.r > 1e-6 ? kept.r / had.e.r : 1.0, had.e.g > 1e-6 ? kept.g / had.e.g : 1.0,
                               had.e.b > 1e-6 ? kept.b / had.e.b : 1.0);
             had.e = kept;
