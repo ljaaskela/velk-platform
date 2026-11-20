@@ -3061,12 +3061,18 @@ void main()
         uint part_count;
         bool in_store = velk_light_store_of(record, record_pool, part_table, part_at, part_count);
         for (int dir = -1; in_store && dir <= 1; dir += 2) {
+            // The page the scan is in, read from the table only when it steps onto another.
+            uint table_page = 0xFFFFFFFFu;
+            uint page_place = 0u;
             for (uint k = 1u; k <= kScan; ++k) {
                 if (dir < 0 && part_at < k) break;
                 if (dir > 0 && part_at + k >= part_count) break;
                 uint near_at = dir < 0 ? part_at - k : part_at + k;
-                uint near_place = light_words.data[part_table + near_at / VELK_CUT_PAGE_RECORDS] * VELK_CUT_PAGE_RECORDS
-                                + near_at % VELK_CUT_PAGE_RECORDS;
+                if (near_at / VELK_CUT_PAGE_RECORDS != table_page) {
+                    table_page = near_at / VELK_CUT_PAGE_RECORDS;
+                    page_place = light_words.data[part_table + table_page] * VELK_CUT_PAGE_RECORDS;
+                }
+                uint near_place = page_place + near_at % VELK_CUT_PAGE_RECORDS;
                 uint other = record_pool + near_place * VELK_RECORD_END;
                 if (light_words.data[other + VELK_RECORD_SLOT] != slot) break;
                 if (light_words.data[other + VELK_RECORD_ENTRY] != (entry | VELK_CUT_LIGHT_ONLY)) continue;
