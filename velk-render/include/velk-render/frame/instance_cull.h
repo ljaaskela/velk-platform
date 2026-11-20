@@ -387,13 +387,13 @@ uint velk_lbvh_build(uint nodes, uint node_count, uint n, uint lane, uint lanes)
 }
 
 // Builds the radix tree over `n` leaves (velk_lbvh_build), and a balanced one instead where it
-// is deeper than a balanced one by more than 4 levels, so that the walk's stack holds. True when
+// is deeper than a balanced one by more than 8 levels, so that the walk's stack holds. True when
 // it fell back to the balanced one.
 bool velk_lbvh_build_bounded(uint nodes, uint node_count, uint n, uint lane, uint lanes, bool balanced)
 {
     g_lbvh_balanced = balanced;
     uint height = velk_lbvh_build(nodes, node_count, n, lane, lanes);
-    uint most = (n > 1u ? uint(findMSB(n - 1u)) + 1u : 1u) + 4u;
+    uint most = (n > 1u ? uint(findMSB(n - 1u)) + 1u : 1u) + 8u;
     if (!balanced && (height == 0u || height > most)) {
         g_lbvh_balanced = true;
         velk_lbvh_build(nodes, node_count, n, lane, lanes);
