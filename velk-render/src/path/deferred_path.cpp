@@ -1011,10 +1011,9 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         uint32_t extras[4];
         uint32_t env[4];
     };
-    // No lights here, so their fields carry the surface attachment and the words of each
-    // pixel. See RESOLVE_SURFACE and RESOLVE_TINY.
+    // No lights here, so their count carries the words of each pixel. See RESOLVE_TINY.
     const PushC pc{0u, render_view.view_globals_base, static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)),
-                   handle(GBufferAttachment::Surface), {0.f, 0.f},
+                   0u, {0.f, 0.f},
                    {vs.visibility->attachment(0), vs.visibility_size.x, vs.visibility_size.y, handle(GBufferAttachment::Albedo)},
                    {handle(GBufferAttachment::Normal), handle(GBufferAttachment::WorldPos),
                     handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};

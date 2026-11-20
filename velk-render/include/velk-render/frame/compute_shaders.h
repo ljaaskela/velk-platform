@@ -244,9 +244,7 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 #define RESOLVE_POSITION pc.env.y
 #define RESOLVE_MATERIAL pc.env.z
 #define RESOLVE_EMISSIVE pc.env.w
-// The resolve has no lights, so their field carries one more attachment.
-#define RESOLVE_SURFACE pc.lights_base
-// And their count the word of the depth plane that compute raster drew to, a word a pixel
+// The resolve has no lights, so their count carries the word of the depth plane that compute raster drew to, a word a pixel
 // (instance_tiny_draw_src). After it come the pixels' ids, two words a pixel
 // (velk_pixel_ids): compute raster's where it drew, the hardware's written here elsewhere.
 #define RESOLVE_TINY pc.light_count
@@ -284,16 +282,6 @@ vec3 resolve_shading_normal(MaterialEval e, EvalContext ctx)
     return normalize(length(e.normal) > 0.0 ? e.normal : ctx.normal);
 }
 
-// Which of the object's axes `facing`, in the object's own axes, is mostly along: 0 to 5,
-// positive x first.
-float resolve_side(vec3 facing)
-{
-    vec3 across = abs(facing);
-    return across.x >= across.y && across.x >= across.z ? (facing.x < 0.0 ? 1.0 : 0.0)
-         : across.y >= across.z ? (facing.y < 0.0 ? 3.0 : 2.0)
-         : (facing.z < 0.0 ? 5.0 : 4.0);
-}
-
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -318,7 +306,6 @@ void main()
         imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(0.0));
         imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord, vec4(0.0));
         imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(0.0));
-        imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord, vec4(0.0));
         return;
     }
 
@@ -380,15 +367,6 @@ void main()
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
                vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, 0.0));
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
-
-    // Where on the object this is, in the object's own axes but world units, and which of
-    // those axes the surface faces. From the vertices as stored and the unmapped normal, so
-    // neither a swaying material nor a normal map moves it.
-    mat3 to_world = mat3(inst.world_matrix);
-    vec3 axis_scale = vec3(length(to_world[0]), length(to_world[1]), length(to_world[2]));
-    vec3 local = v0.local * weights.x + v1.local * weights.y + v2.local * weights.z;
-    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_SURFACE)], coord,
-               vec4(local * axis_scale, resolve_side(transpose(to_world) * ctx.normal)));
 }
 )";
 
@@ -2312,7 +2290,6 @@ inline void append_rt_intersect_shape(string& src, const IFrameSnippetRegistry& 
 inline constexpr string_view velk_surface_src = R"(
 // A corner of a drawn triangle, as its material's vertex function gives it.
 struct VelkSurfaceVertex {
-    vec3 local;     // in the instance's own space, before its size
     vec3 rel;       // in world space, from the camera
     vec3 normal;
     vec2 uv;
@@ -2327,7 +2304,6 @@ VelkSurfaceVertex velk_surface_vertex(VelkDrawData d, uint cluster, ElementInsta
     VelkVertex3D v = velk_unpack_vertex3d(velk_cluster_vertex_word(d, cluster) + index * VELK_VERTEX3D_WORDS);
     VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
     VelkSurfaceVertex r;
-    r.local = inst.offset.xyz + v.position * inst.size.xyz;
     r.rel = s.rel_pos;
     r.normal = s.world_normal;
     r.uv = s.local_uv;
