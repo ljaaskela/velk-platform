@@ -2299,16 +2299,15 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint acro
 }
 
 // The direction of ray `ray` of probe `probe`, at `square` on the probe grid, in frame `frame`,
-// around the normal `n`: over the hemisphere by cosine, in the ray's own quarter of a 4 by 4 grid
-// of directions (the squared sine to the normal one way, the turn about it the other), a
-// different cell of that quarter each frame, staggered by the probe's place so that every 2 by 2
-// block of probes covers all sixteen cells each frame, at a place in the cell of the probe's own
-// that moves every four frames.
+// around the normal `n`: over the hemisphere by cosine, in a cell of a 4 by 4 grid of directions
+// (the squared sine to the normal one way, the turn about it the other). Each frame a probe's four
+// rays take one band each way, each of the four rows and each of the four columns; over four
+// frames a probe takes all sixteen cells, and every 2 by 2 block of probes takes all sixteen each
+// frame. The place in the cell is the probe's own and moves every four frames.
 vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
 {
-    uint sub_x = (frame & 1u) ^ (square.x & 1u);
-    uint sub_y = ((frame >> 1u) & 1u) ^ (square.y & 1u);
-    vec2 cell = vec2(float((ray & 1u) * 2u + sub_x), float((ray >> 1u) * 2u + sub_y));
+    uint s = (frame & 3u) ^ ((square.x & 1u) | ((square.y & 1u) << 1u));
+    vec2 cell = vec2(float(ray), float(((ray & 1u) * 2u + (ray >> 1u)) ^ s));
     vec2 jitter = fract(vec2(float(probe) * 0.7548777, float(probe) * 0.5698403)
                         + float(frame >> 2u) * vec2(0.6180340, 0.3819660));
     vec2 uv = (cell + jitter) * 0.25;
