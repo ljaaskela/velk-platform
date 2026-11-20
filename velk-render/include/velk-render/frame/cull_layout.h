@@ -252,7 +252,7 @@ namespace velk {
     X(cp, gp, Pages, PAGES, 0)                  /* pages in the pool */                        \
     X(cp, gp, FreePages, FREE_PAGES, 1)         /* pages on the free stack, as the last sweep left it */ \
     X(cp, gp, PagesTaken, PAGES_TAKEN, 2)       /* pages taken off the stack this frame, from its top down */ \
-    X(cp, gp, PagesWanted, PAGES_WANTED, 3)     /* the most pages a frame wanted, when more than fit */ \
+    X(cp, gp, PagesWanted, PAGES_WANTED, 3)     /* pages the pool should hold, set when it is too small */ \
     X(cp, gp, ChooseGroups, CHOOSE_GROUPS, 4)   /* group counts of the choosing dispatches: chunks choosing again */ \
     X(cp, gp, TableUsed, TABLE_USED, 7)         /* entries of the current page table given out */ \
     X(cp, gp, DrawGroups, DRAW_GROUPS, 8)       /* of the passes over the pool's records: a group a page, up to the last in use */ \
@@ -270,6 +270,8 @@ namespace velk {
     X(cp, gp, StatesWord, STATES_WORD, 22)      /* the word of the partitions' states (VELK_PART) */ \
     X(cp, gp, ChunkCountsWord, CHUNK_COUNTS_WORD, 23) /* the word of the choose list's chunks' counts and first records */ \
     X(cp, gp, Tables, TABLES, 24)               /* the two page tables' words, a page an entry */ \
+    X(cp, gp, KeptPages, KEPT_PAGES, 26)        /* pages of partitions keeping their cut this frame */ \
+    X(cp, gp, PagesDemand, PAGES_DEMAND, 27)    /* pages partitions choosing again asked for this frame, placed or not */ \
     X(cp, gp, TakeoverFrame, TAKEOVER_FRAME, 29) /* the frame of the takeover table, counted by the begin pass */ \
     X(cp, gp, TakeoverWord, TAKEOVER_WORD, 30)  /* the takeover table's word (VELK_TAKEOVER a slot) */ \
     X(cp, gp, TakeoverSlots, TAKEOVER_SLOTS, 31) /* and its slots, a power of two */           \

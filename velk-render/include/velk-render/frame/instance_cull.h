@@ -891,6 +891,7 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
             for (uint p = 0u; p < pages; ++p) cull_words.data[to + p] = cull_words.data[from + p];
             cull_words.data[state + VELK_PART_TABLE_FIRST] = first;
             cull_words.data[state + VELK_PART_OLD_COUNT] = 0u;
+            atomicAdd(cull_words.data[cut + VELK_CUT_KEPT_PAGES], pages);
             return;
         }
         // Never so, since a page is in one table at most: nothing for it this frame.
@@ -980,6 +981,8 @@ void main()
     cull_words.data[cut + VELK_CUT_TABLE_PARITY] = 1u - cull_words.data[cut + VELK_CUT_TABLE_PARITY];
     cull_words.data[cut + VELK_CUT_TABLE_USED] = 0u;
     cull_words.data[cut + VELK_CUT_PAGES_TAKEN] = 0u;
+    cull_words.data[cut + VELK_CUT_KEPT_PAGES] = 0u;
+    cull_words.data[cut + VELK_CUT_PAGES_DEMAND] = 0u;
     // A new frame of the takeover table: what it held is gone.
     cull_words.data[cut + VELK_CUT_TAKEOVER_FRAME] += 1u;
     cull_words.data[cut + VELK_CUT_LAST_LIGHT_ONLY_RECORDS] = cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS];
@@ -999,8 +1002,9 @@ void main()
 
 /**
  * Finds the free pages of a kept cut's pool once the culling is done: with `phase` 0, a thread
- * per entry of the current page table marks its page (and the first thread empties the free
- * stack and the drawing counts); with 1, a thread per 32 pages puts every page no table names on
+ * per entry of the current page table marks its page (and the first thread judges whether the
+ * pool is too small, VELK_CUT_PAGES_WANTED, then empties the free stack and the drawing counts);
+ * with 1, a thread per 32 pages puts every page no table names on
  * the free stack, its header saying so, and the group counts of the passes over the pool's
  * records (VELK_CUT_DRAW_GROUPS) go up to the last page in use, then clears the marks. The pages
  * of partitions that chose again are free from here, for the next frame's choosing.
@@ -1026,6 +1030,19 @@ void main()
     uint marks = cull_words.data[cut + VELK_CUT_PAGE_MARKS];
     if (pc.phase == 0u) {
         if (index == 0u) {
+            // Whether the pool is too small, once every partition choosing again has taken its
+            // pages or failed to: when the pages kept and asked for do not fit it, or when none
+            // could be placed while some asked, with free pages fewer than even the smallest ask.
+            // A shortage that partitions keeping their old records for a frame drain is neither.
+            uint kept = cull_words.data[cut + VELK_CUT_KEPT_PAGES];
+            uint demand = cull_words.data[cut + VELK_CUT_PAGES_DEMAND];
+            uint free_now = min(cull_words.data[cut + VELK_CUT_FREE_PAGES], pages);
+            if (kept + demand > pages) {
+                atomicMax(cull_words.data[cut + VELK_CUT_PAGES_WANTED], kept + demand);
+            } else if (demand != 0u && cull_words.data[cut + VELK_CUT_PAGES_TAKEN] == 0u) {
+                // Every ask was more than the free pages, so this is more than the pool.
+                atomicMax(cull_words.data[cut + VELK_CUT_PAGES_WANTED], pages - free_now + demand);
+            }
             cull_words.data[cut + VELK_CUT_FREE_PAGES] = 0u;
             cull_words.data[cut + VELK_CUT_DRAW_GROUPS] = 0u;
         }
@@ -1728,6 +1745,9 @@ void main()
     uint pages = velk_cut_pages(count);
     uint base = 0u;
     uint first = 0u;
+    // What the frame asks of the pool, placed or not, for the sweep to judge whether it is too
+    // small (instance_cut_pages_src).
+    if (pages != 0u) atomicAdd(cull_words.data[cut + VELK_CUT_PAGES_DEMAND], pages);
     bool placed = pages == 0u || velk_cut_take(cut, pages, base);
     if (placed && pages != 0u) {
         first = atomicAdd(cull_words.data[cut + VELK_CUT_TABLE_USED], pages);
@@ -1735,9 +1755,6 @@ void main()
         if (first + pages > pool_pages) placed = false;
     }
     if (!placed) {
-        // The pages in use, those taken this frame and these: what the pool should hold.
-        uint in_use = pool_pages - min(cull_words.data[cut + VELK_CUT_FREE_PAGES], pool_pages);
-        atomicMax(cull_words.data[cut + VELK_CUT_PAGES_WANTED], in_use + cull_words.data[cut + VELK_CUT_PAGES_TAKEN] + pages);
         cull_words.data[state + VELK_PART_CHOOSING] = 0u;
         uint old = cull_words.data[state + VELK_PART_OLD_COUNT];
         uint old_pages = velk_cut_pages(old);
