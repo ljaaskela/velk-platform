@@ -150,6 +150,60 @@ inline constexpr uint32_t kDrawFlagColor = 1u << 1;
 /// VELK_DRAW_QUADS.
 inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 
+/// Words of a draw's shading summary in the draw-shade array (IRenderBackend::kGlobalDrawShade),
+/// at its draw record's index: what a ray that hits it sees without its material's code. The
+/// first word its material's average albedo (IMaterial::get_average_albedo) as sRGB bytes, red
+/// lowest, with kDrawShadeUnlit in the top byte; the second its average emission as RGB9E5. A
+/// hit multiplies the albedo by its instance's colour and, with kDrawFlagColor, its vertex
+/// colours: reflected when lit, given off when unlit. Mirrors VELK_DRAW_SHADE_*.
+inline constexpr uint32_t kDrawShadeWords = 2;
+/// The draw's material is unlit (IMaterial::is_lit false).
+inline constexpr uint32_t kDrawShadeUnlit = 1u << 24;
+
+/// A linear value 0 to 1 as an sRGB byte.
+inline uint32_t srgb_byte(float linear)
+{
+    const float c = linear <= 0.f ? 0.f : linear >= 1.f ? 1.f : linear;
+    const float s = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.f / 2.4f) - 0.055f;
+    return static_cast<uint32_t>(s * 255.f + 0.5f);
+}
+
+/// A linear colour as RGB9E5: three 9-bit mantissas, red lowest, under a shared 5-bit
+/// exponent (bias 15), as VK_FORMAT_E5B9G9R8_UFLOAT_PACK32 holds it.
+inline uint32_t rgb9e5(float r, float g, float b)
+{
+    const auto clamp = [](float v) {
+        constexpr float kMax = 65408.f;  // (2^9 - 1) / 2^9 * 2^16
+        return v > 0.f ? (v < kMax ? v : kMax) : 0.f;
+    };
+    r = clamp(r);
+    g = clamp(g);
+    b = clamp(b);
+    const float most = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    int exp = most > 0.f ? static_cast<int>(std::floor(std::log2(most))) + 1 : 0;
+    if (exp < -15) exp = -15;
+    if (exp > 16) exp = 16;
+    float scale = std::exp2(static_cast<float>(9 - exp));
+    // Rounding can carry the largest mantissa to 512: one exponent more.
+    if (static_cast<uint32_t>(most * scale + 0.5f) >= 512u && exp < 16) {
+        ++exp;
+        scale *= 0.5f;
+    }
+    const auto mantissa = [scale](float v) {
+        const uint32_t m = static_cast<uint32_t>(v * scale + 0.5f);
+        return m > 511u ? 511u : m;
+    };
+    return mantissa(r) | (mantissa(g) << 9) | (mantissa(b) << 18) | (static_cast<uint32_t>(exp + 15) << 27);
+}
+
+/// Packs a draw's shading summary (kDrawShadeWords) into @p out.
+inline void pack_draw_shade(float albedo_r, float albedo_g, float albedo_b, bool lit, float emission_r,
+                            float emission_g, float emission_b, uint32_t out[kDrawShadeWords])
+{
+    out[0] = srgb_byte(albedo_r) | (srgb_byte(albedo_g) << 8) | (srgb_byte(albedo_b) << 16) | (lit ? 0u : kDrawShadeUnlit);
+    out[1] = rgb9e5(emission_r, emission_g, emission_b);
+}
+
 /// Words before the quads in a view's quad list: VELK_QUAD_LIST (frame/cull_layout.h).
 inline constexpr uint32_t kQuadListHeaderWords = kQuadListQuads;
 

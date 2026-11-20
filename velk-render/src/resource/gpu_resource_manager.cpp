@@ -449,7 +449,7 @@ void GpuResourceManager::log_arena_memory() const
 {
     static constexpr const char* kNames[IRenderBackend::kGlobalBufferSlotCount] = {
         "bvh nodes",     "bvh shapes",  "globals",      "instances",  "materials",  "lights",
-        "primary shapes", "text curves", "text bands",   "text glyphs", "records",   "mesh static",
+        "draw shading",  "text curves", "text bands",   "text glyphs", "records",   "mesh static",
         "blas nodes",    "cluster words", "mesh words", "draw data",  "culling"};
     uint64_t total_used = 0;
     uint64_t total_capacity = 0;

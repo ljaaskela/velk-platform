@@ -365,7 +365,9 @@ public:
         kGlobalInstances = 3,  ///< Persistent per-batch instance data, read at velk_instances.data[instances_base + i].
         kGlobalMaterials = 4,  ///< Persistent per-material draw data, read at velk_materials.data[material_base].
         kGlobalLights    = 5,  ///< Persistent per-view light array, read at velk_lights.data[lights_base + i].
-        // 6 is free.
+        /// Each draw record's shading summary (kDrawShadeWords), at the record's index: a flat
+        /// array over the arena's whole buffer, never suballocated. Written with the record.
+        kGlobalDrawShade = 6,
         /// Glyph outline data, one region per font. Claimed by the text
         /// plugin via IGpuResourceManager::shared_arena; listed here because
         /// the slot map is global, not because velk-render uses them.

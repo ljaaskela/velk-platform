@@ -65,6 +65,33 @@ struct WrittenDrawData
 };
 
 /**
+ * @brief Writes the shading summary of the draw record at @p draw_base (kDrawShadeWords) into
+ *        the draw-shade array, from @p material: lit and white with no emission for none. The
+ *        array covers as many records as @p draw_arena holds, growing with it.
+ */
+inline void write_draw_shade(IGpuResourceManager& resources, const IGpuArena& draw_arena, uint32_t draw_base,
+                             const IMaterial* material)
+{
+    constexpr uint64_t kBytes = kDrawShadeWords * sizeof(uint32_t);
+    auto shade = resources.shared_arena(IRenderBackend::kGlobalDrawShade, static_cast<uint32_t>(kBytes));
+    if (!shade) return;
+    const uint64_t at = uint64_t(draw_base) * kBytes;
+    if (shade->capacity() < at + kBytes) {
+        const uint64_t records = draw_arena.capacity() / sizeof(DrawDataHeader);
+        const uint64_t want = records * kBytes > at + kBytes ? records * kBytes : at + kBytes;
+        // Nothing is suballocated from it, so its free bytes are its whole buffer.
+        shade->reserve(want);
+        if (shade->capacity() < at + kBytes) return;
+    }
+    const color albedo = material ? material->get_average_albedo() : color::white();
+    const color emission = material ? material->get_average_emission() : color::black();
+    const bool lit = material ? material->is_lit() : true;
+    uint32_t words[kDrawShadeWords];
+    pack_draw_shade(albedo.r, albedo.g, albedo.b, lit, emission.r, emission.g, emission.b, words);
+    shade->update_at(at, words, kBytes);
+}
+
+/**
  * @brief Writes @p batch's draw record (DrawDataHeader) in its region of the shared draw data
  *        arena: where its instances, vertices, indices, texture and material are. What a pixel
  *        or a ray that names the draw reads (VelkDrawData). Also tells a batch drawn by cluster
@@ -218,6 +245,7 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     const uint32_t draw_base =
         static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
     out.draw_base = draw_base;
+    write_draw_shade(resources, *draw_arena, draw_base, interface_cast<IMaterial>(material_ptr.get()));
     if (cull_info.cluster_count != 0) {
         if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
             culling->update_at(uint64_t(cull_info.cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
