@@ -390,15 +390,45 @@ string_view StandardMaterial::get_fn_name(string_view role) const
 
 color StandardMaterial::get_average_albedo() const
 {
-    color albedo = color::white();
+    // Last wins, as in write_draw_data. Defaults as glTF's: white, fully metal.
+    color base = color::white();
+    float metallic = 1.f;
     for (const auto& prop : properties_) {
-        if (prop && property_class_id(prop) == ClassId::BaseColorProperty) {
-            if (auto r = read_state<IBaseColorProperty>(prop)) {
-                albedo = r->factor;
+        if (!prop) continue;
+        const Uid cid = property_class_id(prop);
+        if (cid == ClassId::BaseColorProperty) {
+            base = color::white();
+            if (auto r = read_state<IBaseColorProperty>(prop)) base = r->factor;
+            if (ISurface* tex = property_texture(prop)) {
+                const color mean = tex->get_average_color();
+                base = {base.r * mean.r, base.g * mean.g, base.b * mean.b, base.a * mean.a};
             }
+        } else if (cid == ClassId::MetallicRoughnessProperty) {
+            metallic = 1.f;
+            if (auto r = read_state<IMetallicRoughnessProperty>(prop)) metallic = r->metallic_factor;
+            if (ISurface* tex = property_texture(prop)) metallic *= tex->get_average_color().b;
         }
     }
-    return albedo;
+    const float diffuse = 1.f - (metallic < 0.f ? 0.f : metallic > 1.f ? 1.f : metallic);
+    return {base.r * diffuse, base.g * diffuse, base.b * diffuse, base.a};
+}
+
+color StandardMaterial::get_average_emission() const
+{
+    color emission = color::black();
+    for (const auto& prop : properties_) {
+        if (!prop || property_class_id(prop) != ClassId::EmissiveProperty) continue;
+        emission = color::black();
+        float strength = 1.f;
+        if (auto r = read_state<IEmissiveProperty>(prop)) {
+            emission = r->factor;
+            strength = r->strength;
+        }
+        color mean = color::white();
+        if (ISurface* tex = property_texture(prop)) mean = tex->get_average_color();
+        emission = {emission.r * strength * mean.r, emission.g * strength * mean.g, emission.b * strength * mean.b, 1.f};
+    }
+    return emission;
 }
 
 vector<ISurface*> StandardMaterial::get_textures() const

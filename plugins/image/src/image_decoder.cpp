@@ -23,6 +23,7 @@ struct DecodedPixels
     int width{};
     int height{};
     vector<uint8_t> pixels; ///< RGBA8. Empty on failure.
+    ImageAverages averages; ///< Worked out here, off the main thread.
 };
 
 /// Reads @p file and decodes it to RGBA8. Safe to call from any thread.
@@ -55,6 +56,7 @@ DecodedPixels read_and_decode(const IFile& file)
     stbi_image_free(decoded);
     out.width = w;
     out.height = h;
+    out.averages = average_rgba8(out.pixels.data(), static_cast<size_t>(w) * static_cast<size_t>(h));
     return out;
 }
 
@@ -92,7 +94,7 @@ IResource::Ptr ImageDecoder::decode(const IResource::Ptr& inner) const
             if (result.pixels.empty()) {
                 img->fail_loading();
             } else {
-                img->finish_loading(result.width, result.height, std::move(result.pixels));
+                img->finish_loading(result.width, result.height, std::move(result.pixels), result.averages);
             }
         });
     });

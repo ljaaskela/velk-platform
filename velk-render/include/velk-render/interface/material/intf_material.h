@@ -43,8 +43,17 @@ public:
     /// can index them by fixed position. Default: no textures.
     virtual vector<ISurface*> get_textures() const = 0;
 
-    /// Roughly what colour its surface reflects, for when it covers less than a pixel.
+    /// Roughly what colour its surface reflects, for when it covers less than a pixel or light
+    /// bounces off it. For a lit material the diffuse part: its base colour less what metal
+    /// reflects. For an unlit one the colour it shows.
     virtual color get_average_albedo() const = 0;
+
+    /// Roughly what light its surface gives off, in linear colour, for the same uses.
+    virtual color get_average_emission() const = 0;
+
+    /// Whether light falls on its surface. An unlit surface shows its colour as it is, so
+    /// light bouncing off it takes that colour as given off, not reflected.
+    virtual bool is_lit() const = 0;
 };
 
 } // namespace velk

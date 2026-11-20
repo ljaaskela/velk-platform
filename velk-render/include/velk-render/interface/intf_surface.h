@@ -37,6 +37,16 @@ public:
      * environment maps want clamp, etc.).
      */
     virtual SamplerDesc get_sampler_desc() const { return {}; }
+
+    /**
+     * @brief Returns the mean colour of its texels, in linear space.
+     *
+     * The colour is weighted by alpha, so cut-out texels do not darken it; the alpha is the
+     * plain mean. For a material that wants one colour for the whole texture, such as light
+     * bouncing off it. White where it is not known: a surface that is not a decoded image, or
+     * an image still loading.
+     */
+    virtual color get_average_color() const { return color::white(); }
 };
 
 } // namespace velk

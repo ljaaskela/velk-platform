@@ -43,8 +43,12 @@ public:
     string_view get_fn_name(string_view role) const override;
 
     vector<ISurface*> get_textures() const override;
-    /// Its base colour factor. A texture's own colours are not included.
+    /// Its base colour factor times its base colour texture's mean, less what metal reflects
+    /// (metallic factor times the metallic-roughness texture's mean blue).
     color get_average_albedo() const override;
+    /// Its emissive factor and strength times its emissive texture's mean.
+    color get_average_emission() const override;
+    bool is_lit() const override { return true; }
 
     /// Fixed slot indices into DrawDataHeader::texture_ids[] used by the
     /// standard material eval shader. Must match the order returned by

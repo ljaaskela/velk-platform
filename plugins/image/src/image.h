@@ -15,6 +15,18 @@
 
 namespace velk::ui::impl {
 
+/// The mean colours of RGBA8 texels (ISurface::get_average_color), alpha weighted: as linear
+/// values, and as sRGB values made linear. Which one an image gives depends on its format.
+struct ImageAverages
+{
+    color raw = color::white();
+    color from_srgb = color::white();
+    bool known = false;
+};
+
+/// Works out the averages of @p pixel_count RGBA8 texels at @p pixels.
+ImageAverages average_rgba8(const uint8_t* pixels, size_t pixel_count);
+
 /**
  * @brief Decoded raster image. Owns CPU pixels until the renderer uploads
  *        them, after which the pixel buffer is freed.
@@ -44,9 +56,10 @@ public:
     /// Marks the image as Loading (0x0, no pixels) while a worker decodes it.
     void begin_loading(string_view uri);
 
-    /// Completes an asynchronous load with decoded pixels. Keeps the format
+    /// Completes an asynchronous load with decoded pixels and their averages
+    /// (average_rgba8, worked out where they were decoded). Keeps the format
     /// and sampler set by loaders in the meantime. Fires on_loaded.
-    void finish_loading(int width, int height, vector<uint8_t> pixels);
+    void finish_loading(int width, int height, vector<uint8_t> pixels, const ImageAverages& averages);
 
     /// Completes an asynchronous load as Failed. Fires on_loaded.
     void fail_loading();
@@ -97,6 +110,7 @@ public:
     uvec2 get_dimensions() const override { return {static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)}; }
     PixelFormat format() const override { return format_; }
     SamplerDesc get_sampler_desc() const override { return sampler_desc_; }
+    color get_average_color() const override;
 
 private:
     string uri_;
@@ -108,6 +122,8 @@ private:
     bool dirty_{false};
     bool persistent_{false};
     SamplerDesc sampler_desc_{};
+    /// Kept after the pixels are freed at upload.
+    ImageAverages averages_{};
 };
 
 } // namespace velk::ui::impl
