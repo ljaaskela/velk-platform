@@ -2002,9 +2002,9 @@ inline constexpr uint32_t kLightProbePixels = 16;
 inline constexpr uint32_t kLightProbeWords = kProbeWords;
 /// Rays a probe traces a frame, each in its own quarter of the hemisphere.
 inline constexpr uint32_t kLightProbeRays = 4;
-/// Threads in a work group of the probes' gather: a 4 by 2 tile of probes, kLightProbeRays each.
-inline constexpr uint32_t kLightProbeGroupThreads = 32;
-static_assert(kLightProbeRays * 8u == kLightProbeGroupThreads, "a group is a 4 by 2 tile of probes");
+/// Threads in a work group of the probes' gather: a 2 by 2 tile of probes, kLightProbeRays each.
+inline constexpr uint32_t kLightProbeGroupThreads = 16;
+static_assert(kLightProbeRays * 4u == kLightProbeGroupThreads, "a group is a 2 by 2 tile of probes");
 
 // A probe's light (VELK_PROBE_LIGHT), for a shader that defines VELK_LIGHT_WORDS as the buffer
 // the probes are in: read, written and seen from a normal.
@@ -2099,7 +2099,7 @@ void velk_probe_write(uint at, VelkProbeLight p, vec3 pos, vec3 n, float frames)
 )"
 
 /**
- * The screen probes' gather: a 4 by 2 tile of probes a group of kLightProbeGroupThreads, a ray a
+ * The screen probes' gather: a 2 by 2 tile of probes a group of kLightProbeGroupThreads, a ray a
  * thread, kLightProbeRays a probe, groups in rows of tiles across the probe grid. The rays are spread over the hemisphere
  * around the probe's normal by cosine: each takes its own quarter of a 4 by 4 grid of directions,
  * a different cell of it each frame so that four frames cover all sixteen, staggered by the
@@ -2325,7 +2325,7 @@ vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
     return normalize(a * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
 }
 
-// The gather: a 4 by 2 tile of probes a group of 32 threads, a ray a thread, each probe's light
+// The gather: a 2 by 2 tile of probes a group of 16 threads, a ray a thread, each probe's light
 // from its rays into the ray store.
 void velk_probes_gather(uint lane)
 {
@@ -2333,11 +2333,11 @@ void velk_probes_gather(uint lane)
     uint height = pc.extras.y >> 16u;
     uint across = (width + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
     uint down = (height + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
-    // A group's eight probes are a 4 by 2 tile of the probe grid, so that its rays start near
+    // A group's four probes are a 2 by 2 tile of the probe grid, so that its rays start near
     // each other.
-    uint tiles_across = (across + 3u) / 4u;
+    uint tiles_across = (across + 1u) / 2u;
     uint local = lane / VELK_PROBE_RAYS;
-    uvec2 square = uvec2((gl_WorkGroupID.x % tiles_across) * 4u + (local & 3u), (gl_WorkGroupID.x / tiles_across) * 2u + (local >> 2u));
+    uvec2 square = uvec2((gl_WorkGroupID.x % tiles_across) * 2u + (local & 1u), (gl_WorkGroupID.x / tiles_across) * 2u + (local >> 1u));
     uint ray = lane % VELK_PROBE_RAYS;
     bool live = square.x < across && square.y < down;
     uint probe = square.y * across + square.x;

@@ -1407,10 +1407,10 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
-        // The gather, kLightProbeRays threads a probe, a group a 4 by 2 tile of the probe grid.
+        // The gather, kLightProbeRays threads a probe, a group a 2 by 2 tile of the probe grid.
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
-        dc.groups_x = ((across + 3u) / 4u) * ((down + 1u) / 2u);
+        dc.groups_x = ((across + 1u) / 2u) * ((down + 1u) / 2u);
         dc.groups_y = 1;
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
