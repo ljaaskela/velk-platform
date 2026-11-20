@@ -727,26 +727,32 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     DebugInstance inst = debug_instances.data[d.instances_base + velk_ids_slot(d, ids)];
     uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
     uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
-    vec3 local[3];
-    vec2 p[3];
+    vec3 p[3];
     vec2 size = vec2(float(pc.width), float(pc.height));
     for (int k = 0; k < 3; ++k) {
         uint at = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
-        local[k] = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
-                        uintBitsToFloat(velk_mesh_words.data[at + 2u]));
-        vec4 clip = vp * vec4(velk_rel_position(inst.world_matrix, inst.offset.xyz + local[k] * inst.size.xyz, g), 1.0);
-        if (clip.w <= 0.0) return base;
-        p[k] = (clip.xy / clip.w * 0.5 + 0.5) * size;
+        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
+                          uintBitsToFloat(velk_mesh_words.data[at + 2u]));
+        p[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
     }
-    vec2 pixel = vec2(coord) + 0.5;
-    // Where the pixel is in it, on screen: enough to find the points around it.
-    vec2 e1 = p[1] - p[0];
-    vec2 e2 = p[2] - p[0];
-    float det = e1.x * e2.y - e1.y * e2.x;
-    if (abs(det) < 1e-6) return base;
-    vec2 q = pixel - p[0];
-    float b1 = (q.x * e2.y - q.y * e2.x) / det;
-    float b2 = (e1.x * q.y - e1.y * q.x) / det;
+    // Where the pixel's view ray meets the triangle's plane, and its weights there, as the claim
+    // and the lighting work them out.
+    vec3 e1 = p[1] - p[0];
+    vec3 e2 = p[2] - p[0];
+    vec2 ndc = (vec2(coord) + 0.5) / size * 2.0 - 1.0;
+    vec4 on_ray = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec3 dir = on_ray.xyz / on_ray.w;
+    vec3 normal = cross(e1, e2);
+    float facing = dot(normal, dir);
+    if (abs(facing) < 1e-20) return base;
+    vec3 q = dir * (dot(normal, p[0]) / facing) - p[0];
+    float d11 = dot(e1, e1);
+    float d12 = dot(e1, e2);
+    float d22 = dot(e2, e2);
+    float det = d11 * d22 - d12 * d12;
+    if (abs(det) < 1e-20) return base;
+    float b1 = (d22 * dot(q, e1) - d12 * dot(q, e2)) / det;
+    float b2 = (d11 * dot(q, e2) - d12 * dot(q, e1)) / det;
     vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
     // An exact coarse cell (velk_light_cell): its finer points are not traced, by design. Green.
     // A cell whose corners are not known yet: yellow.

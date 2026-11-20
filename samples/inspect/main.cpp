@@ -2,7 +2,7 @@
 // each with a few fixed views, for looking at the renderer's structures and for checking its
 // images against references.
 //
-// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]]
+// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N]
 // velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [settle=N]
 // velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [frames=N]
 // velk_ui_inspect trend [scene=NAMES]
@@ -248,6 +248,7 @@ int main(int argc, char* argv[])
     uint32_t tree_level = 0;
     long settle_frames = 10;
     long reference_frames = 128;
+    long capture_frame = 0;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         if (std::strcmp(arg, "verify") == 0) {
@@ -264,6 +265,8 @@ int main(int argc, char* argv[])
             settle_frames = std::max(1l, std::atol(arg + 7));
         } else if (std::strncmp(arg, "frames=", 7) == 0) {
             reference_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "capture=", 8) == 0) {
+            capture_frame = std::max(1l, std::atol(arg + 8));
         } else if (std::strncmp(arg, "level=", 6) == 0) {
             tree_level = static_cast<uint32_t>(std::atol(arg + 6));
         } else if (std::strncmp(arg, "view=", 5) == 0) {
@@ -1154,6 +1157,22 @@ int main(int argc, char* argv[])
         app.update();
         app.present();
         check_slow(frame);
+        // With capture=N: frame N saved, then the run ends.
+        if (capture_frame > 0 && frame == capture_frame) {
+            auto writer = velk::instance().create<velk::IImageWriter>(velk::ui::ClassId::ImageEncoder);
+            inspect::Image image;
+            std::error_code ec;
+            std::filesystem::create_directories(INSPECT_RUN_DIR, ec);
+            char path[256];
+            std::snprintf(path, sizeof(path), "%s/capture.png", INSPECT_RUN_DIR);
+            if (writer && frame_backend && inspect::grab_window(*frame_backend, velk::get_render_target_id(window.surface()), image)
+                && inspect::save_png(*writer, image, path)) {
+                VELK_LOG(I, "inspect: frame %ld saved to %s", frame, path);
+            } else {
+                VELK_LOG(E, "inspect: could not save frame %ld", frame);
+            }
+            break;
+        }
     }
     return 0;
 }
