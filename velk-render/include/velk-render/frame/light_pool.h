@@ -2661,9 +2661,9 @@ bool velk_light_store_of(uint record, out uint lo, out uint hi)
     lo = 0u;
     hi = 0u;
     if (pc.top_word == 0xFFFFFFFFu) return false;
-    uint cuts = light_words.data[pc.top_word];
+    uint cuts = light_words.data[pc.top_word + VELK_RAY_TOP_CUTS];
     for (uint c = 0u; c < cuts; ++c) {
-        uint cut = light_words.data[pc.top_word + 4u + c * 8u];
+        uint cut = light_words.data[pc.top_word + VELK_RAY_TOP_HEADER_WORDS + c * VELK_RAY_TOP_CUT_WORDS + VELK_RAY_TOP_CUT_CUT];
         uint start = light_words.data[cut + VELK_CUT_STORES + light_words.data[cut + VELK_CUT_PARITY]];
         uint end = start + light_words.data[cut + VELK_CUT_PLACED] * 4u;
         if (record >= start && record < end) {
