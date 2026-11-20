@@ -2355,8 +2355,9 @@ inline string compose_rt_trace(const IFrameSnippetRegistry& snippets, string_vie
         const size_t line_end = rt_compute_prelude_src.find('\n', version);
         src += rt_compute_prelude_src.substr(0, line_end + 1);
         char define[64];
-        std::snprintf(define, sizeof(define), "#define VELK_RT_GROUP_THREADS %u\n", group_threads);
-        src += define;
+        const int length = std::snprintf(define, sizeof(define), "#define VELK_RT_GROUP_THREADS %u\n", group_threads);
+        // As long as written: a string_view of the whole array would take its NUL and what follows.
+        src += string_view(define, length > 0 ? size_t(length) : 0u);
         src += rt_compute_prelude_src.substr(line_end + 1);
     } else {
         src += rt_compute_prelude_src;
