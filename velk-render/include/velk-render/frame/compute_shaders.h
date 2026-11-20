@@ -1422,7 +1422,8 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, out vec3 light)
     const float kProbe = 16.0;
     uint across = (pc.width + 15u) / 16u;
     uint down = (pc.height + 15u) / 16u;
-    vec2 at = (vec2(coord) + 0.5) / kProbe - 0.5;
+    // A probe sits at the middle pixel of its square, whose centre is 8.5 pixels in.
+    vec2 at = (vec2(coord) + 0.5 - (kProbe * 0.5 + 0.5)) / kProbe;
     ivec2 base = ivec2(floor(at));
     vec2 f = at - vec2(base);
     float total = 0.0;
