@@ -733,6 +733,7 @@ void main()
     cull_words.data[cut + VELK_CUT_MOST_CHOSEN] = 0u;
     cull_words.data[cut + VELK_CUT_COPY_GROUPS] = 0u;
     cull_words.data[cut + VELK_CUT_CHOOSE_GROUPS] = 0u;
+    cull_words.data[cut + VELK_CUT_VISIBLE_GROUPS] = 0u;
 }
 )";
 
@@ -1519,7 +1520,9 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
  * leaves of four records in their order, which is near to near in the world, paired level by
  * level from the bottom, so that no sort is needed. `pad` grows every box, for instances that a
  * motion function moves, by twice how far it can move one, so that the tree holds wherever
- * they are while it is kept. A work group per partition.
+ * they are while it is kept. Also the partition's box around all it draws, whether it is
+ * always visited, and its counts for the log (VELK_PART_BOX, ALWAYS, LIGHT_ONLY, QUADS), which
+ * instance_cut_visible_src goes by. A work group per partition.
  */
 inline constexpr string_view instance_cut_tree_src = R"(
 #version 450
@@ -1548,6 +1551,37 @@ layout(push_constant) uniform PC {
 } pc;
 )" VELK_CUT_GLSL VELK_CUT_BOX_GLSL R"(
 shared uint s_counts[64];
+// The box around what the partition draws and its counts, each thread's share, then added up.
+shared vec3 s_lo[64];
+shared vec3 s_hi[64];
+shared uint s_always[64];
+shared uint s_light_only[64];
+shared uint s_quads[64];
+
+// Adds `record`'s share to the partition's box and counts: none for one for light only or a
+// patch for rays, which are not drawn; a deforming mesh's or an item drawn by its own pass
+// makes the partition always visited.
+void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint always, inout uint light_only, inout uint quads)
+{
+    uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
+    if (velk_cut_light_only(entry)) {
+        ++light_only;
+        return;
+    }
+    if (entry == VELK_CUT_RAY_QUAD) return;
+    if (entry == VELK_CUT_QUAD) {
+        ++quads;
+    } else if (entry != 0xFFFFFFFFu) {
+        if ((cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u) always = 1u;
+    } else if (pc.items_word != 0xFFFFFFFFu) {
+        uint item = pc.items_word + cull_words.data[record + VELK_RECORD_SLOT] * VELK_PLAIN_ITEM_WORDS;
+        if (cull_words.data[item + VELK_PLAIN_ITEM_TABLE] == 0xFFFFFFFFu) always = 1u;
+    }
+    vec3 rlo, rhi;
+    velk_cut_record_box(record, pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
+    lo = min(lo, rlo);
+    hi = max(hi, rhi);
+}
 
 // How wide on screen, from `from`, the error of the sphere at `word` (centre, radius, error) is.
 float velk_ray_pixels(uint word, mat4 world, float scale, vec3 from, float pixels_per_unit)
@@ -1621,11 +1655,38 @@ void main()
     uint from = min(lane * per, records_count);
     uint to = min(from + per, records_count);
     uint mine = 0u;
+    vec3 draw_lo = vec3(1e30);
+    vec3 draw_hi = vec3(-1e30);
+    uint always = 0u;
+    uint light_only = 0u;
+    uint quads = 0u;
     for (uint r = from; r < to; ++r) {
         if (velk_ray_record(records + r * VELK_RECORD_END, first_index + r, viewpoint, pixels_per_unit)) ++mine;
+        velk_draw_share(records + r * VELK_RECORD_END, draw_lo, draw_hi, always, light_only, quads);
     }
     s_counts[lane] = mine;
+    s_lo[lane] = draw_lo;
+    s_hi[lane] = draw_hi;
+    s_always[lane] = always;
+    s_light_only[lane] = light_only;
+    s_quads[lane] = quads;
     barrier();
+    if (lane == 0u) {
+        for (uint i = 1u; i < 64u; ++i) {
+            draw_lo = min(draw_lo, s_lo[i]);
+            draw_hi = max(draw_hi, s_hi[i]);
+            always |= s_always[i];
+            light_only += s_light_only[i];
+            quads += s_quads[i];
+        }
+        for (uint k = 0u; k < 3u; ++k) {
+            cull_words.data[state + VELK_PART_BOX + k] = floatBitsToUint(draw_lo[k]);
+            cull_words.data[state + VELK_PART_BOX + 3u + k] = floatBitsToUint(draw_hi[k]);
+        }
+        cull_words.data[state + VELK_PART_ALWAYS] = always;
+        cull_words.data[state + VELK_PART_LIGHT_ONLY] = light_only;
+        cull_words.data[state + VELK_PART_QUADS] = quads;
+    }
     uint at = 0u;
     for (uint i = 0u; i < lane; ++i) at += s_counts[i];
     for (uint r = from; r < to; ++r) {
@@ -1830,13 +1891,98 @@ void main()
 }
 )";
 
+/// Runs of a kept cut's records that instance_cut_draw_src walks (VELK_CUT_VISIBLE_WORD): at
+/// most a run per 64 records of the store and one more per partition.
+inline uint32_t cut_visible_runs(uint32_t capacity, uint32_t partitions)
+{
+    return capacity / 64u + partitions + 1u;
+}
+
+/**
+ * Lists the records instance_cut_draw_src walks: those of each partition whose box around what
+ * it draws (VELK_PART_BOX) is in view, or that is always visited, in runs of 64, the group
+ * counts of the drawing dispatch in VELK_CUT_VISIBLE_GROUPS. With `whole` set, every
+ * partition's. Adds up the partitions' counts for the log. A thread per partition.
+ */
+inline constexpr string_view instance_cut_visible_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+
+layout(push_constant) uniform PC {
+    uint cut_word;
+    uint globals_base;
+    uint whole;       // 1 to list every partition, in view or not
+    uint quads_word;  // the view's quad list, for its count of quads in cuts, or 0xFFFFFFFF
+} pc;
+)" VELK_CUT_GLSL R"(
+// Whether the box from `lo` to `hi`, relative to the camera, is outside one of the view's
+// planes, tested as instance_cut_draw_src tests spheres: clip z by the wider of its two
+// conventions.
+bool velk_box_outside(mat4 vp, vec3 lo, vec3 hi)
+{
+    vec3 c = (lo + hi) * 0.5;
+    vec3 e = (hi - lo) * 0.5;
+    vec3 r3 = vec3(vp[0][3], vp[1][3], vp[2][3]);
+    for (int k = 0; k < 3; ++k) {
+        vec3 rk = vec3(vp[0][k], vp[1][k], vp[2][k]);
+        for (int s = 0; s < 2; ++s) {
+            vec3 n = s == 0 ? r3 + rk : r3 - rk;
+            float d = s == 0 ? vp[3][3] + vp[3][k] : vp[3][3] - vp[3][k];
+            if (dot(n, c) + d + dot(abs(n), e) < 0.0) return true;
+        }
+    }
+    return false;
+}
+
+void main()
+{
+    uint cut = pc.cut_word;
+    uint index = gl_GlobalInvocationID.x;
+    uint partitions = cull_words.data[cut + VELK_CUT_PARTITIONS];
+    if (index >= partitions) return;
+    uint state = velk_cut_state(cut, index);
+    uint count = cull_words.data[state + VELK_PART_COUNT];
+    if (count == 0u) return;
+    uint light_only = cull_words.data[state + VELK_PART_LIGHT_ONLY];
+    if (light_only != 0u) atomicAdd(cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS], light_only);
+    uint quads = cull_words.data[state + VELK_PART_QUADS];
+    if (pc.quads_word != 0xFFFFFFFFu && quads != 0u) atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_IN_CUTS], quads);
+
+    if (pc.whole == 0u && cull_words.data[state + VELK_PART_ALWAYS] == 0u) {
+        vec3 lo = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 1u]),
+                       uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 2u]));
+        vec3 hi = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 3u]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 4u]),
+                       uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 5u]));
+        // Nothing drawn: only records for light only, or patches for rays.
+        if (any(greaterThan(lo, hi))) return;
+        GlobalData g = velk_globals.data[pc.globals_base];
+        if (velk_box_outside(g.view_projection, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz)) return;
+    }
+
+    uint first = cull_words.data[state + VELK_PART_FIRST];
+    uint runs = (count + 63u) / 64u;
+    uint room = cull_words.data[cut + VELK_CUT_CAPACITY] / 64u + partitions + 1u;
+    uint at = atomicAdd(cull_words.data[cut + VELK_CUT_VISIBLE_GROUPS], runs);
+    uint list = cull_words.data[cut + VELK_CUT_VISIBLE_WORD];
+    for (uint r = 0u; r < runs && at + r < room; ++r) {
+        cull_words.data[list + (at + r) * 2u] = first + r * 64u;
+        cull_words.data[list + (at + r) * 2u + 1u] = first + count;
+    }
+}
+)";
+
 /**
  * Draws from a kept cut: each record of the current store whose instance is near enough, and
  * whose cluster is in view and not hidden behind what was drawn last frame, goes where
  * instance_cull_compute_src puts what it chooses: compute raster, the visual's chosen list, or
  * the second occlusion phase. A whole instance record adds its slot to its mesh's visible list,
- * and a quad in view goes to the view's quad list. A thread per record. With `whole` set,
- * every record is drawn wherever it is, for a view that shows another camera's choice from
+ * and a quad in view goes to the view's quad list. Only the records of partitions in view, which
+ * instance_cut_visible_src lists in runs: a work group a run, a thread a record. With `whole`
+ * set, every record is drawn wherever it is, for a view that shows another camera's choice from
  * outside.
  */
 inline constexpr string_view instance_cut_draw_src = R"(
@@ -1934,25 +2080,24 @@ bool velk_cut_outside(mat4 vp, vec3 center, float radius)
 void main()
 {
     uint cut = pc.cut_word;
-    uint index = gl_GlobalInvocationID.x;
-    if (index >= cull_words.data[cut + VELK_CUT_PLACED]) return;
+    // A group a run of the records of partitions in view (instance_cut_visible_src).
+    uint run = gl_WorkGroupID.x;
+    if (run >= cull_words.data[cut + VELK_CUT_CAPACITY] / 64u + cull_words.data[cut + VELK_CUT_PARTITIONS] + 1u) return;
+    uint runs = cull_words.data[cut + VELK_CUT_VISIBLE_WORD] + run * 2u;
+    uint index = cull_words.data[runs] + gl_LocalInvocationIndex;
+    if (index >= cull_words.data[runs + 1u]) return;
     uint record = velk_cut_store(cut, true) + index * VELK_RECORD_END;
     uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
     uint cluster_or_table = cull_words.data[record + VELK_RECORD_CLUSTER];
     uint slot = cull_words.data[record + VELK_RECORD_SLOT];
 
-    // For light only: counted, not drawn. A patch for rays only: not drawn.
-    if (velk_cut_light_only(entry)) {
-        atomicAdd(cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS], 1u);
-        return;
-    }
-    if (entry == VELK_CUT_RAY_QUAD) return;
+    // For light only, or a patch for rays only: not drawn.
+    if (velk_cut_light_only(entry) || entry == VELK_CUT_RAY_QUAD) return;
 
     // A quad: in view, it goes to the view's quad list, never past its room, its record in the
     // column after.
     if (entry == VELK_CUT_QUAD) {
         if (pc.quads_word == 0xFFFFFFFFu) return;
-        atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_IN_CUTS], 1u);
         uint w = cluster_or_table;
         GlobalData globals = velk_globals.data[pc.globals_base];
         vec3 center = vec3(uintBitsToFloat(cull_words.data[w + VELK_QUAD_NODE_CENTER]),
@@ -3747,7 +3892,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const uint32_t ray_store_word = takeover_word + takeover_slots * kCutTakeoverWords;
             // The ray marks, a bit a record.
             const uint32_t marks_word = ray_store_word + cut.capacity * 2u;
-            const size_t words = size_t(marks_word) + size_t(cut.capacity) / 32u + 1u;
+            // The runs the drawing walks, two words each.
+            const uint32_t visible_word = marks_word + cut.capacity / 32u + 1u;
+            const size_t words = size_t(visible_word) + size_t(cut_visible_runs(cut.capacity, info.partitions)) * 2u;
             cut.region = arena->alloc(words * sizeof(uint32_t));
             if (!cut.region.valid()) {
                 VELK_LOG(E, "instance culling: no room for a kept cut of %u records", cut.capacity);
@@ -3756,7 +3903,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const auto base = static_cast<uint32_t>(cut.region.offset() / sizeof(uint32_t));
             vector<uint32_t> initial;
             initial.resize(store_word, 0u);
-            for (uint32_t args : {kCutCopyGroups, kCutChooseGroups, kCutDrawGroups}) {
+            for (uint32_t args : {kCutCopyGroups, kCutChooseGroups, kCutDrawGroups, kCutVisibleGroups}) {
                 initial[args + 1u] = 1u;
                 initial[args + 2u] = 1u;
             }
@@ -3776,6 +3923,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             initial[kCutRayStores] = base + ray_store_word;
             initial[kCutRayStores + 1u] = base + ray_store_word + cut.capacity;
             initial[kCutRayMarksWord] = base + marks_word;
+            initial[kCutVisibleWord] = base + visible_word;
             // Chosen from nowhere, and from a table entry no partition has: all choose.
             constexpr float kFar = 1e30f;
             uint32_t far_bits;
@@ -4169,6 +4317,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto place_pipeline = pipeline_for(instance_cut_place_src, 0x4375'7450'6c61'6365ULL);
         auto args_pipeline = pipeline_for(instance_cut_args_src, 0x4375'7441'7267'7320ULL);
         auto draw_pipeline = pipeline_for(instance_cut_draw_src, 0x4375'7444'7261'7720ULL);
+        auto visible_pipeline = pipeline_for(instance_cut_visible_src, 0x4375'7456'6973'6962ULL);
         auto tree_pipeline = pipeline_for(instance_cut_tree_src, 0x4375'7454'7265'6520ULL);
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
@@ -4179,7 +4328,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto stale_pipeline = pipeline_for(instance_cut_stale_src, 0x4375'7453'7461'6c65ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
+                                 && visible_pipeline && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
                                  && rename_pipeline
                                  && items_pipeline && stale_pipeline;
         IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
@@ -4514,13 +4663,20 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             float quad_pad;
             uint32_t item_records_word;
         };
+        // The records of partitions in view, in runs, then those drawn.
+        for (const CutJob& job : jobs) {
+            if (job.partition_count == 0) continue;
+            const uint32_t visible_pc[4] = {job.cut, view_globals_base, whole_cut ? 1u : 0u, quads_word};
+            dispatch(visible_pipeline.get(), visible_pc, sizeof(visible_pc), (job.partition_count + 63u) / 64u);
+        }
+        if (!jobs.empty()) cmd->record_global_barrier();
         for (const CutJob& job : jobs) {
             const DrawPushC pc{job.cut, job.instances_base, job.table_word, view_globals_base, job.max_distance,
                                kLodMaxErrorPixels, job.chosen_word, job.chosen_capacity,
                                pyramid_word, retest_word, state.retest_capacity,
                                state.tiny_word, state.tiny_capacity, state.tiny_pixels, whole_cut ? 1u : 0u, job.items_word,
                                quads_word, state.quad_capacity, job.pad, item_records_word};
-            dispatch(draw_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + kCutDrawGroups);
+            dispatch(draw_pipeline.get(), &pc, sizeof(pc), 1u, job.cut + kCutVisibleGroups);
         }
         // Without the scene's plain partitions, plain objects are chosen every frame.
         if (together && plain_cut_word == kCullNoSlot) {
@@ -4568,6 +4724,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(top_pipeline));
         rec.held.push_back(std::move(args_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
+        rec.held.push_back(std::move(visible_pipeline));
         rec.held.push_back(std::move(mark_pipeline));
         rec.held.push_back(std::move(sweep_pipeline));
         rec.held.push_back(std::move(pieces_pipeline));

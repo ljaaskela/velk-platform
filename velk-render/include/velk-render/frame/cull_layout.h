@@ -270,7 +270,9 @@ namespace velk {
     X(cp, gp, LastLongestWalk, LAST_LONGEST_WALK, 42)                                          \
     X(cp, gp, LastMostChosen, LAST_MOST_CHOSEN, 43)                                            \
     X(cp, gp, RayMarksWord, RAY_MARKS_WORD, 44) /* the word of the ray marks, a bit a record of the current store */ \
-    X(cp, gp, End, END, 45)
+    X(cp, gp, VisibleGroups, VISIBLE_GROUPS, 45) /* of the drawing dispatch: a group per 64 records of partitions in view */ \
+    X(cp, gp, VisibleWord, VISIBLE_WORD, 48)    /* the word of their runs: first record and end, two words a group */ \
+    X(cp, gp, End, END, 49)
 
 /// A partition's state in a kept cut (kPart, VELK_PART), at the cut's STATES_WORD.
 #define VELK_CUT_PART(X, cp, gp)                                                                   \
@@ -289,7 +291,11 @@ namespace velk {
     X(cp, gp, RayCount, RAY_COUNT, 16)          /* how many records rays trace (its ray list) */ \
     X(cp, gp, Looked, LOOKED, 17)               /* which way the camera looked when it chose, three floats */ \
     X(cp, gp, OutOfView, OUT_OF_VIEW, 20)       /* 1 when it chose clusters at the light's level for being out of view */ \
-    X(cp, gp, End, END, 24)
+    X(cp, gp, Always, ALWAYS, 21)               /* 1 when its records are visited in view or not: some deform, or are items drawn by their own pass */ \
+    X(cp, gp, LightOnly, LIGHT_ONLY, 22)        /* its records for light only, for the log */ \
+    X(cp, gp, Quads, QUADS, 23)                 /* its quads, for the log */                   \
+    X(cp, gp, Box, BOX, 24)                     /* the world box around what it draws, min then max, six floats */ \
+    X(cp, gp, End, END, 30)
 
 /// A record of a kept cut (kCutRecord, VELK_RECORD). See kCutHeaderWords.
 #define VELK_CUT_RECORD(X, cp, gp)                                                                 \
