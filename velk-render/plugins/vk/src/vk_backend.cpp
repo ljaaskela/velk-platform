@@ -642,6 +642,19 @@ bool VkBackend::create_device()
         return false;
     }
 
+    // Optional: 64-bit atomics on storage buffers, for the one-pass compute raster.
+    {
+        VkPhysicalDeviceVulkan12Features have12{};
+        have12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 query{};
+        query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        query.pNext = &have12;
+        vkGetPhysicalDeviceFeatures2(physical_device_, &query);
+        buffer_int64_atomics_supported_ = have12.shaderBufferInt64Atomics == VK_TRUE;
+        features12.shaderBufferInt64Atomics = buffer_int64_atomics_supported_ ? VK_TRUE : VK_FALSE;
+    }
+    VELK_LOG(I, "VkBackend: 64-bit buffer atomics %s", buffer_int64_atomics_supported_ ? "available" : "not available");
+
     // Optional: lets a lost device report why. Queried after the required features
     // are checked, since that check reuses the structs above.
     VkPhysicalDeviceFaultFeaturesEXT fault_features{};

@@ -31,6 +31,7 @@ public:
     void shutdown() override;
     void wait_idle() override;
     bool supports_primitive_id() const override { return primitive_id_supported_; }
+    bool supports_buffer_int64_atomics() const override { return buffer_int64_atomics_supported_; }
     uint64_t frame_completion_marker() const override;
     void wait_for_frame_completion(uint64_t marker) override;
     uint64_t pending_frame_completion_marker() const override;
@@ -401,6 +402,7 @@ private:
     /// the frame slot, the index.
     uint32_t pass_marker(uint32_t index) const;
     bool primitive_id_supported_ = false; ///< The device's geometryShader feature is enabled.
+    bool buffer_int64_atomics_supported_ = false; ///< shaderBufferInt64Atomics is enabled.
     bool device_lost_ = false;            ///< A lost device has already been reported.
     vector<IVkRenderTargetGroup*> live_render_target_groups_; ///< Walked at begin_frame to clear cleared-flags.
 

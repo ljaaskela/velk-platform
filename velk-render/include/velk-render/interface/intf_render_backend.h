@@ -227,6 +227,9 @@ public:
     /// Whether fragment shaders can read gl_PrimitiveID, which the deferred path needs.
     virtual bool supports_primitive_id() const = 0;
 
+    /// Whether shaders can use 64-bit atomics on storage buffers (shaderBufferInt64Atomics).
+    virtual bool supports_buffer_int64_atomics() const = 0;
+
     /** @brief Returns a monotonically increasing marker tagging the GPU
      *         work submitted by the most recent `submit_frame()` call.
      *
