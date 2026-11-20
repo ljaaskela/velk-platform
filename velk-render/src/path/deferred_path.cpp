@@ -156,6 +156,13 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 1
 // tiny_cluster_pixels. 0 when not set.
 uint32_t tiny_pixels_override() { return env_uint("VELK_TINY_PIXELS", 1, 64); }
 
+// A development aid: VELK_TINY_TWO_PASS=1 draws clusters in compute in two dispatches even
+// where the device has 64-bit buffer atomics, to see that path run.
+bool tiny_one_pass(FrameContext& ctx)
+{
+    return ctx.backend && ctx.backend->supports_buffer_int64_atomics() && env_uint("VELK_TINY_TWO_PASS", 1, 1) == 0;
+}
+
 uint32_t float_bits(float f)
 {
     uint32_t bits = 0;
@@ -477,13 +484,25 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 si
             clear.resize(size_t(pixels));
             arena->write_at(vs.pixel_words.offset(), clear.data(), clear.size() * sizeof(uint32_t));
         }
-        vs.tiny_capacity = static_cast<uint32_t>(pixels);
-        vs.tiny_list = arena->alloc((uint64_t(kTinyHeaderWords) + pixels * kTinyRecordWords) * sizeof(uint32_t));
+        // In one pass, as many clusters as its 64-bit words can tell apart, and those words, a
+        // pixel each from an even word, clear.
+        const bool one_pass = tiny_one_pass(ctx);
+        vs.tiny_capacity = static_cast<uint32_t>(one_pass ? std::min<uint64_t>(pixels, kTinyOnePassRecords) : pixels);
+        vs.tiny_list = arena->alloc((uint64_t(kTinyHeaderWords) + uint64_t(vs.tiny_capacity) * kTinyRecordWords) * sizeof(uint32_t));
         if (vs.tiny_list.valid()) {
             const uint32_t none[kTinyHeaderWords] = {};
             arena->write_at(vs.tiny_list.offset(), none, sizeof(none));
         } else {
             vs.tiny_capacity = 0;
+        }
+        vs.tiny_wide = {};
+        if (one_pass) {
+            vs.tiny_wide = arena->alloc((2u * pixels + 1u) * sizeof(uint32_t));
+            if (vs.tiny_wide.valid()) {
+                vector<uint32_t> clear;
+                clear.resize(size_t(2u * pixels + 1u));
+                arena->write_at(vs.tiny_wide.offset(), clear.data(), clear.size() * sizeof(uint32_t));
+            }
         }
     }
 }
@@ -506,8 +525,12 @@ void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRen
         return found ? found : ctx.render_ctx->pipelines().compile_compute(src, key);
     };
     auto args_pipeline = pipeline_for(instance_tiny_args_src, 0x5469'6e79'4172'6773ULL);
-    auto draw_pipeline = pipeline_for(instance_tiny_draw_src, 0x5469'6e79'4472'6177ULL);
-    if (!args_pipeline || !draw_pipeline) return;
+    // With 64-bit buffer atomics, one dispatch and the step that unpacks it; else two.
+    const bool one_pass = vs.tiny_wide.valid();
+    auto draw_pipeline = one_pass ? pipeline_for(instance_tiny_draw_one_pass_src, 0x5469'6e79'4472'6131ULL)
+                                  : pipeline_for(instance_tiny_draw_src, 0x5469'6e79'4472'6177ULL);
+    auto unpack_pipeline = one_pass ? pipeline_for(instance_tiny_unpack_src, 0x5469'6e79'556e'706bULL) : IGpuPipeline::Ptr{};
+    if (!args_pipeline || !draw_pipeline || (one_pass && !unpack_pipeline)) return;
 
     // How many there were in some recent frame, now and then.
     if (ctx.present_counter >= vs.tiny_log_frame + kCellStatFrames) {
@@ -537,18 +560,34 @@ void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRen
         cmd->record_global_barrier();
         // A triangle covers at most a few cut-offs in each direction.
         const auto most = static_cast<uint32_t>(std::max(std::ceil(4.f * tiny_pixels), 1.f));
-        for (uint32_t mode = 0; mode < 2; ++mode) {
+        const auto planes_word = static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t));
+        // The 64-bit words from an even word.
+        uint32_t wide_word = one_pass ? static_cast<uint32_t>(vs.tiny_wide.offset() / sizeof(uint32_t)) : 0u;
+        wide_word += wide_word & 1u;
+        for (uint32_t mode = 0; mode < (one_pass ? 1u : 2u); ++mode) {
             struct PushC
             {
-                uint32_t list_word, planes_word, width, height, depth_id, mode, most;
+                uint32_t list_word, planes_word, width, height, depth_id, mode, most, wide_word;
             };
-            const PushC pc{list_word, static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)), vs.pixel_words_size.x,
-                           vs.pixel_words_size.y, vs.visibility->attachment(1), mode, most};
+            const PushC pc{list_word, planes_word, vs.pixel_words_size.x, vs.pixel_words_size.y, vs.visibility->attachment(1), mode,
+                           most, wide_word};
             DispatchCall dc{};
             dc.pipeline = draw_pipeline.get();
             dc.root_constants_size = sizeof(pc);
             std::memcpy(dc.root_constants, &pc, sizeof(pc));
             cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(list_word + 1u) * sizeof(uint32_t));
+            cmd->record_global_barrier();
+        }
+        if (one_pass) {
+            const uint32_t pc[5] = {list_word, planes_word, vs.pixel_words_size.x, vs.pixel_words_size.y, wide_word};
+            DispatchCall dc{};
+            dc.pipeline = unpack_pipeline.get();
+            dc.groups_x = (vs.pixel_words_size.x + 7u) / 8u;
+            dc.groups_y = (vs.pixel_words_size.y + 7u) / 8u;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(pc);
+            std::memcpy(dc.root_constants, pc, sizeof(pc));
+            cmd->record_dispatch(dc);
             cmd->record_global_barrier();
         }
         cmd->pop_label();
@@ -557,6 +596,7 @@ void DeferredPath::emit_tiny_cluster_pass(ViewState& vs, FrameContext& ctx, IRen
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
         rec.held.push_back(std::move(args_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
+        if (unpack_pipeline) rec.held.push_back(std::move(unpack_pipeline));
     });
 }
 

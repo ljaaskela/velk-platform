@@ -2667,11 +2667,14 @@ void main()
  * planes_word, with a fixed number per triangle in its lowest bits, so that exact ties go to
  * one triangle. With 1, the triangle whose depth that is writes its ids to the first two words
  * of the pixel's record after that plane (velk_pixel_ids). The resolve takes both from there.
+ *
+ * instance_tiny_draw_one_pass_src does it in one dispatch where the device has 64-bit buffer
+ * atomics: each pixel keeps a 64-bit word at wide_word (an even word), the depth in its high
+ * half and in its low half the cluster's place in the list (kTinyOnePassRecords of them at
+ * most) and the triangle, its lowest 8 bits. instance_tiny_unpack_src then writes the plane
+ * and the ids from it.
  */
-inline constexpr string_view instance_tiny_draw_src = R"(
-#version 450
-#include "velk.glsl"
-
+#define VELK_TINY_DRAW_GLSL R"(
 layout(local_size_x = 128) in;
 
 struct TinyInstance {
@@ -2693,7 +2696,12 @@ layout(push_constant) uniform PC {
     uint depth_id;  // the hardware's depth
     uint mode;
     uint most;
+    uint wide_word;  // one pass: the 64-bit words, a pixel each
 } pc;
+
+#ifdef VELK_TINY_ONE_PASS
+layout(set = 1, binding = 16, std430) buffer TinyWide { uint64_t data[]; } tiny_wide;
+#endif
 
 uint tiny_tie(uint record_index, uint triangle)
 {
@@ -2748,7 +2756,11 @@ void main()
         ivec2 from = max(ivec2(ceil(lo - 0.5)), ivec2(0));
         ivec2 to = min(ivec2(floor(hi - 0.5)), ivec2(int(pc.width), int(pc.height)) - 1);
         to = min(to, from + int(pc.most) - 1);
+#ifdef VELK_TINY_ONE_PASS
+        uint64_t payload = uint64_t((index << 8u) | t);
+#else
         uint tie = tiny_tie(index, t);
+#endif
         vec3 depths = vec3(s[0].z, s[1].z, s[2].z);
         for (int y = from.y; y <= to.y; ++y) {
             for (int x = from.x; x <= to.x; ++x) {
@@ -2758,8 +2770,11 @@ void main()
                 float depth = dot(b, depths);
                 if (depth <= 0.0 || depth > 1.0) continue;
                 if (texelFetch(velk_textures[nonuniformEXT(pc.depth_id)], ivec2(x, y), 0).r >= depth) continue;
-                uint bits = (floatBitsToUint(depth) & ~0xFFu) | tie;
                 uint pixel = uint(y) * pc.width + uint(x);
+#ifdef VELK_TINY_ONE_PASS
+                atomicMax(tiny_wide.data[pc.wide_word / 2u + pixel], (uint64_t(floatBitsToUint(depth)) << 32) | payload);
+#else
+                uint bits = (floatBitsToUint(depth) & ~0xFFu) | tie;
                 if (pc.mode == 0u) {
                     atomicMax(tiny_words.data[pc.planes_word + pixel], bits);
                 } else if (tiny_words.data[pc.planes_word + pixel] == bits) {
@@ -2767,9 +2782,66 @@ void main()
                     tiny_words.data[ids] = (draw + 1u) | VELK_IDS_TINY | (t << VELK_IDS_TRIANGLE_SHIFT);
                     tiny_words.data[ids + 1u] = record;
                 }
+#endif
             }
         }
     }
+}
+)"
+
+inline constexpr string_view instance_tiny_draw_src = "#version 450\n#include \"velk.glsl\"\n" VELK_TINY_DRAW_GLSL;
+
+/// Clusters instance_tiny_draw_one_pass_src can tell apart: its 64-bit words' low half holds a
+/// cluster's place in the list above the triangle's 8 bits.
+inline constexpr uint32_t kTinyOnePassRecords = 1u << 24u;
+
+inline constexpr string_view instance_tiny_draw_one_pass_src =
+    "#version 450\n"
+    "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n"
+    "#extension GL_EXT_shader_atomic_int64 : require\n"
+    "#define VELK_TINY_ONE_PASS 1\n"
+    "#include \"velk.glsl\"\n" VELK_TINY_DRAW_GLSL;
+
+/**
+ * After instance_tiny_draw_one_pass_src, a thread a pixel: where it drew, writes the depth to
+ * the plane at planes_word and the ids to the pixel's record after it, as the two dispatches of
+ * instance_tiny_draw_src leave them, and clears the pixel's 64-bit word for the next frame.
+ */
+inline constexpr string_view instance_tiny_unpack_src = R"(
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 16, std430) buffer TinyWords { uint data[]; } tiny_words;
+layout(set = 1, binding = 16, std430) buffer TinyWide { uint64_t data[]; } tiny_wide;
+
+layout(push_constant) uniform PC {
+    uint list_word;
+    uint planes_word;
+    uint width;
+    uint height;
+    uint wide_word;
+} pc;
+
+void main()
+{
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.width || coord.y >= pc.height) return;
+    uint pixel = coord.y * pc.width + coord.x;
+    uint64_t packed = tiny_wide.data[pc.wide_word / 2u + pixel];
+    if (packed == 0ul) return;
+    tiny_wide.data[pc.wide_word / 2u + pixel] = 0ul;
+    uint low = uint(packed & 0xFFFFFFFFul);
+    uint index = low >> 8u;
+    uint t = low & 0xFFu;
+    if (index >= tiny_words.data[pc.list_word + VELK_TINY_LIST_DRAWN]) return;
+    uint record = pc.list_word + VELK_TINY_LIST_RECORDS + index * VELK_TINY_END;
+    tiny_words.data[pc.planes_word + pixel] = uint(packed >> 32);
+    uint ids = pc.planes_word + pc.width * pc.height + pixel * VELK_PIXEL_RECORD_WORDS;
+    tiny_words.data[ids] = (tiny_words.data[record + VELK_TINY_DRAW] + 1u) | VELK_IDS_TINY | (t << VELK_IDS_TRIANGLE_SHIFT);
+    tiny_words.data[ids + 1u] = record;
 }
 )";
 

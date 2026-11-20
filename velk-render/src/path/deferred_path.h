@@ -142,6 +142,9 @@ public:
         /// leaves them, two words a pixel (velk_pixel_ids). All in the culling arena.
         ArenaRegion tiny_list;
         uint32_t tiny_capacity = 0;
+        /// With 64-bit buffer atomics, compute raster's 64-bit word a pixel, cleared after each
+        /// frame (instance_tiny_draw_one_pass_src). Not there for the two dispatches.
+        ArenaRegion tiny_wide;
         ArenaRegion pixel_words;
         uvec2 pixel_words_size{0, 0};
         IRenderPass::Ptr tiny_pass;
