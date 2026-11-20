@@ -164,9 +164,20 @@ namespace velk {
     X(cp, gp, Instance, INSTANCE, 2)                                                           \
     X(cp, gp, Words, WORDS, 3)
 
+/// An entry of the light pool's split list (kSplitEntry, VELK_SPLIT_ENTRY): an ask for a
+/// triangle's root piece, or for a piece's children.
+#define VELK_SPLIT_ENTRY(X, cp, gp)                                                                \
+    X(cp, gp, Page, PAGE, 0)                    /* the piece's page, or for a root its record's \
+                                                   first page */                               \
+    X(cp, gp, How, HOW, 1)                      /* the triangle for a root (bits 0 to 7), the  \
+                                                   depth to make pieces down to (8 to 15), and \
+                                                   bit 31 for a root */                        \
+    X(cp, gp, Words, WORDS, 2)
+
 /// An entry of one of the light pool's point lists (kPointEntry, VELK_POINT_ENTRY).
 #define VELK_POINT_ENTRY(X, cp, gp)                                                                \
-    X(cp, gp, First, FIRST, 0)                  /* the word of its first page */               \
+    X(cp, gp, First, FIRST, 0)                  /* the word of its first page, or for a piece's \
+                                                   point (VELK_LIGHT_POINT_PIECE) its page */  \
     X(cp, gp, Point, POINT, 1)                                                                 \
     X(cp, gp, Instance, INSTANCE, 2)                                                           \
     X(cp, gp, Words, WORDS, 3)
@@ -357,6 +368,7 @@ VELK_PROBE(VELK_LAYOUT_CPP_WORD, Probe, PROBE)
 VELK_TRACE_ENTRY(VELK_LAYOUT_CPP_WORD, TraceEntry, TRACE_ENTRY)
 VELK_POINT_ENTRY(VELK_LAYOUT_CPP_WORD, PointEntry, POINT_ENTRY)
 VELK_SEARCH_ENTRY(VELK_LAYOUT_CPP_WORD, SearchEntry, SEARCH_ENTRY)
+VELK_SPLIT_ENTRY(VELK_LAYOUT_CPP_WORD, SplitEntry, SPLIT_ENTRY)
 VELK_CHANGE_LIST(VELK_LAYOUT_CPP_WORD, ChangeList, CHANGE_LIST)
 VELK_CHANGE(VELK_LAYOUT_CPP_WORD, Change, CHANGE)
 VELK_CLUSTER_ENTRY(VELK_LAYOUT_CPP_WORD, ClusterEntry, CLUSTER_ENTRY)
@@ -390,6 +402,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_TRACE_ENTRY(VELK_LAYOUT_GLSL_WORD, TraceEntry, TRACE_ENTRY)                               \
     VELK_POINT_ENTRY(VELK_LAYOUT_GLSL_WORD, PointEntry, POINT_ENTRY)                               \
     VELK_SEARCH_ENTRY(VELK_LAYOUT_GLSL_WORD, SearchEntry, SEARCH_ENTRY)                            \
+    VELK_SPLIT_ENTRY(VELK_LAYOUT_GLSL_WORD, SplitEntry, SPLIT_ENTRY)                               \
     VELK_CHANGE_LIST(VELK_LAYOUT_GLSL_WORD, ChangeList, CHANGE_LIST)                               \
     VELK_CHANGE(VELK_LAYOUT_GLSL_WORD, Change, CHANGE)                                             \
     VELK_CLUSTER_ENTRY(VELK_LAYOUT_GLSL_WORD, ClusterEntry, CLUSTER_ENTRY)                         \

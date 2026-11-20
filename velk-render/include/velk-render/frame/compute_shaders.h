@@ -689,12 +689,13 @@ vec3 triangle_size_color(uvec2 ids)
          : vec3(0.0, 0.0, 1.0);
 }
 
-// Mode 15: where light comes from. A record with points: a colour per point of light, blended as
-// a pixel reads them (its triangle's corners, each its own point or the three it links to), so
+// Mode 15: where light comes from. A triangle with pieces: the depth of the piece a pixel reads
+// (light_color says the colours). Else a record with points: a colour per point of light, blended
+// as a pixel reads them (its triangle's corners, each its own point or the three it links to), so
 // each patch is one point's reach, darker where they are the record's own than where they are
-// those of the records for light only it links to; one with one value flat in its colour; a quad in the colour
-// of the node its light is on; magenta as far as that light is not traced yet; what has no light
-// yet grey, and what is from no record white.
+// those of the records for light only it links to; one with one value flat in its colour; a quad
+// in the colour of the node its light is on; magenta as far as that light is not traced yet; what
+// has no light yet grey, and what is from no record white.
 vec3 light_color(uvec2 ids, ivec2 coord)
 {
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
@@ -754,34 +755,42 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     float b1 = (d22 * dot(q, e1) - d12 * dot(q, e2)) / det;
     float b2 = (d11 * dot(q, e2) - d12 * dot(q, e1)) / det;
     vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
-    // An exact coarse cell (velk_light_cell): its finer points are not traced, by design. Green.
-    // A cell whose corners are not known yet: yellow.
-    uint kind = velk_culling.data[first + VELK_PAGE_KIND];
-    if (kind != VELK_LIGHT_LINKED && (kind & VELK_LIGHT_GRIDDED) != 0u && triangle < (kind & 0xFFFFu)) {
-        uint grid = velk_light_triangle_grid(pc.pool_word, first, triangle);
-        uint n = grid >> 24u;
-        uint m = velk_light_coarse_level(n);
-        if (n >= 2u && m < n) {
-            uvec2 cells[3];
-            vec3 cw;
-            velk_light_around(m, b / max(b.x + b.y + b.z, 1e-6), cells, cw);
-            uvec2 f[3];
-            for (uint k = 0u; k < 3u; ++k) f[k] = velk_light_coarse_to_fine(n, m, cells[k]);
-            uint centre;
-            uint cell = velk_light_cell(pc.pool_word, first, n, velk_culling.data[first + VELK_PAGE_VERTICES], grid & 0xFFFFFFu,
-                                        corners, f, true, centre);
-            if (cell == 1u) return vec3(0.1, 0.45, 0.1);
-            // Not known yet: a corner not traced, or stale since a change. Yellow.
-            if (cell == 0u) return vec3(0.9, 0.8, 0.1);
+    b /= max(b.x + b.y + b.z, 1e-6);
+    // In pieces: the level the pixel reads as the lighting finds it (its coarse level where that
+    // level's cell is exact), coloured by its depth (red at the root, then orange,
+    // yellow, green, cyan, blue, purple, pink, again from red; dark grey its triangle's vertex
+    // points), darker toward its points' places so that its grid shows; magenta as far as the
+    // points it reads are not traced yet, cyan as far as they are stale since a change.
+    if (triangle < velk_light_pieced(first)) {
+        const vec3 kDepthColors[8] = vec3[8](
+            vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
+            vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));
+        uint root = velk_culling.data[velk_light_root_word(pc.pool_word, first, triangle)];
+        vec3 at = dir * (dot(normal, p[0]) / facing);
+        float px_per_world = pixels_per_unit / max(length(at), 1e-4);
+        float tri_px = sqrt(max(max(d11, d22), dot(p[2] - p[1], p[2] - p[1]))) * px_per_world;
+        VelkPieceWay way = velk_piece_way(pc.pool_word, root, b, tri_px, pc.light_pixels);
+        if (velk_way_cell(pc.pool_word, first, corners, way, true) == 1u) velk_way_stop_at_coarse(way);
+        uint words[3];
+        vec3 w;
+        velk_way_around(pc.pool_word, first, corners, way.piece, way.at, words, w);
+        float untraced = 0.0;
+        float stale = 0.0;
+        for (uint k = 0u; k < 3u; ++k) {
+            if (velk_culling.data[words[k]] == VELK_LIGHT_NONE) untraced += w[k];
+            else if (velk_light_point_traces(first, velk_culling.data[words[k] + 1u]) == 0u) stale += w[k];
         }
+        vec3 shown = way.piece == VELK_PIECE_VERTICES ? vec3(0.3) : kDepthColors[way.depth & 7u];
+        vec3 color = shown * (0.55 + 0.45 * max(max(w.x, w.y), w.z));
+        color = mix(color, vec3(0.0, 1.0, 1.0), clamp(stale, 0.0, 1.0));
+        return mix(color, vec3(1.0, 0.0, 1.0), clamp(untraced, 0.0, 1.0));
     }
     vec3 color = vec3(0.0);
     uint words[9];
     uint points[9];
     float weights[9];
     uint owners[9];
-    uint read = velk_light_pixel_points(pc.pool_word, first, triangle, corners, b / max(b.x + b.y + b.z, 1e-6), words, points,
-                                        weights, owners);
+    uint read = velk_light_pixel_points(pc.pool_word, first, corners, b, words, points, weights, owners);
     float untrusted = 0.0;
     float retracing = 0.0;
     for (uint k = 0u; k < read; ++k) {

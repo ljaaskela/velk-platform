@@ -1275,10 +1275,12 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     };
     const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights,
                                 instance_ray_top_word(vs.instance_cull)};
+    // Its groups past the search list's make the pieces the claim asked for.
     emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
-             "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc), kLightSearchCapacity, 1u, false);
-    // The claim again for the records the search laid out, so that their coarse points are
-    // traced this frame; it does nothing when the search had none.
+             "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc),
+             kLightSearchCapacity + kLightSplitCapacity, 1u, false);
+    // The claim again for the records and pieces the search made, so that their coarse points
+    // are traced this frame; it does nothing when the search had none.
     PushC again_pc = pc;
     again_pc.again = 1u;
     emit_one(vs.light_claim_again_pass, view_pass_name(other, "deferred.light_claim2", "other:deferred.light_claim2"),

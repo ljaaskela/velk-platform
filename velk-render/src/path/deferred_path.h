@@ -107,7 +107,7 @@ public:
         CutDrawWords cut_draw_words;
         IRenderPass::Ptr light_claim_pass;
         IRenderPass::Ptr light_search_pass;
-        /// The claim again after the search, for the records it laid out (light_claim_src).
+        /// The claim again after the search, for the records and pieces it made (light_claim_src).
         IRenderPass::Ptr light_claim_again_pass;
         IRenderPass::Ptr light_trace_pass;
         /// What changed this frame for the light (kLightChangeWords a change), and the lights as

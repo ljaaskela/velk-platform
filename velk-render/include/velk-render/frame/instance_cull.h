@@ -3947,21 +3947,31 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      tris / rays, tested / rays, std::max(steps - tris - tested, 0.0) / rays, h[kLightPoolSumFirstTraces],
                      h[kLightPoolSumLaterTraces]);
             // Since the last log: where traces come from, a change or the view.
-            clear(kLightPoolSumRetraces, kLightPoolSumLaidLightOnly + 1u - kLightPoolSumRetraces);
+            clear(kLightPoolSumRetraces, kLightPoolSumSplitsRefused + 1u - kLightPoolSumRetraces);
             VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
-                        "again for records grown %u, for records grown from one value %u, for records for light only %u",
-                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidGrown], h[kLightPoolSumLaidFromOne],
-                     h[kLightPoolSumLaidLightOnly]);
-            // The last frame's records with own points: how their points are spread, and how many
-            // of them a pixel read. LAST_MARK holds MARK_POINTS to MARK_BIG_POINTS in their order.
-            const uint32_t* mark = h + kLightPoolLastMark;
-            const auto in_mark = [&](uint32_t word) { return mark[word - kLightPoolMarkPoints]; };
-            VELK_LOG(I, "light points: %u on records with own points, %u of them on records a pixel read; the most on one "
-                        "record %u; records with under 256 points %u, under 1024 %u, under 4096 %u, under 16384 %u, more %u, "
-                        "those with 4096 or more holding %u points",
-                     in_mark(kLightPoolMarkPoints), in_mark(kLightPoolMarkReadPoints), in_mark(kLightPoolMarkMostPoints),
-                     in_mark(kLightPoolMarkBuckets), in_mark(kLightPoolMarkBuckets + 1u), in_mark(kLightPoolMarkBuckets + 2u),
-                     in_mark(kLightPoolMarkBuckets + 3u), in_mark(kLightPoolMarkBuckets + 4u), in_mark(kLightPoolMarkBigPoints));
+                        "for records grown from one value %u, for records for light only %u",
+                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidLightOnly]);
+            // Pieces: those kept at the last frame's mark and the deepest of them, and since the
+            // last log those made, freed and asked for but not made.
+            VELK_LOG(I, "light pieces: %u kept, the deepest at %u; last frame %u asks; since the last log %u made, %u freed, "
+                        "%u asks not made",
+                     h[kLightPoolLastMarkPieces], h[kLightPoolLastMarkDeepest], h[kLightPoolLastSplits], h[kLightPoolSumPiecesMade],
+                     h[kLightPoolSumPiecesFreed], h[kLightPoolSumSplitsRefused]);
+            // TEMPORARY: pieces by depth, asks by rule and refusals by cause, pixels ending coarse.
+            clear(kLightPoolDiagAskRoot, kLightPoolDiagPixelsCoarse + 1u - kLightPoolDiagAskRoot);
+            clear(kLightPoolDiagPixelsVertexCoarse, kLightPoolDiagPixelsExact + 1u - kLightPoolDiagPixelsVertexCoarse);
+            clear(kLightPoolDiagMerges, 1u);
+            const uint32_t* dd = h + kLightPoolLastDiagDepth;
+            const uint32_t* rl = h + kLightPoolLastDiagRootLevel;
+            VELK_LOG(I, "diag pieces by depth: %u %u %u %u %u %u %u %u %u %u %u %u %u; roots by level 2-6: %u %u %u %u %u; "
+                        "asks root %u (of all asks: always %u, edge %u); refused list full %u, no pages %u; merges %u; pixels %u, "
+                        "ending coarser than the spacing %u, coarse level the vertex points %u; coarse list points from vertex "
+                        "points %u, from pieces %u; pixels with an exact coarse cell %u",
+                     dd[0], dd[1], dd[2], dd[3], dd[4], dd[5], dd[6], dd[7], dd[8], dd[9], dd[10], dd[11], dd[12], rl[0], rl[1],
+                     rl[2], rl[3], rl[4], h[kLightPoolDiagAskRoot], h[kLightPoolDiagAskAlways], h[kLightPoolDiagAskEdge],
+                     h[kLightPoolDiagListFull], h[kLightPoolDiagNoPages], h[kLightPoolDiagMerges], h[kLightPoolDiagPixels],
+                     h[kLightPoolDiagPixelsCoarse], h[kLightPoolDiagPixelsVertexCoarse], h[kLightPoolDiagCoarseVertex],
+                     h[kLightPoolDiagCoarsePiece], h[kLightPoolDiagPixelsExact]);
             // What the culling arena holds: in use of its buffer, and this view's part of it.
             uint64_t cut_bytes = 0;
             for (const auto& c : state.cuts) cut_bytes += c.region.size();
@@ -4147,12 +4157,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
         auto sweep_pipeline = pipeline_for(light_sweep_src, 0x4c69'6768'7453'7770ULL);
+        auto pieces_pipeline = pipeline_for(light_pieces_src, 0x4c69'6768'7450'6363ULL);
         auto rename_pipeline = pipeline_for(instance_cut_rename_src, 0x4375'7452'656e'616dULL);
         auto items_pipeline = pipeline_for(instance_items_src, 0x4375'6c6c'4974'656dULL);
         auto stale_pipeline = pipeline_for(instance_cut_stale_src, 0x4375'7453'7461'6c65ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && copy_pipeline && choose_pipeline && place_pipeline && args_pipeline && draw_pipeline
-                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && rename_pipeline
+                                 && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
+                                 && rename_pipeline
                                  && items_pipeline && stale_pipeline;
         IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
         for (auto& stage_cmd : stage_cmds) {
@@ -4424,6 +4436,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                     dispatch(mark_pipeline.get(), mark_pc, sizeof(mark_pc), 1u, job.cut + kCutDrawGroups);
                 }
                 cmd->record_global_barrier();
+                // The pieces: what no pixel reads unlinked, then those still linked marked.
+                const uint32_t piece_groups = (state.light_pool.pages() + 63u) / 64u;
+                const uint32_t unlink_pc[2] = {light_pool_word, 0u};
+                dispatch(pieces_pipeline.get(), unlink_pc, sizeof(unlink_pc), piece_groups);
+                cmd->record_global_barrier();
+                const uint32_t keep_pc[2] = {light_pool_word, 1u};
+                dispatch(pieces_pipeline.get(), keep_pc, sizeof(keep_pc), piece_groups);
+                cmd->record_global_barrier();
                 const uint32_t sweep_pc[2] = {light_pool_word, 0u};
                 dispatch(sweep_pipeline.get(), sweep_pc, sizeof(sweep_pc), (state.light_pool.pages() / 32u + 63u) / 64u);
             }
@@ -4534,6 +4554,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(draw_pipeline));
         rec.held.push_back(std::move(mark_pipeline));
         rec.held.push_back(std::move(sweep_pipeline));
+        rec.held.push_back(std::move(pieces_pipeline));
         rec.held.push_back(std::move(rename_pipeline));
         rec.held.push_back(std::move(items_pipeline));
         rec.held.push_back(std::move(stale_pipeline));
