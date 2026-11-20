@@ -43,10 +43,13 @@ public:
     /// can index them by fixed position. Default: no textures.
     virtual vector<ISurface*> get_textures() const = 0;
 
-    /// Roughly what colour its surface reflects, for when it covers less than a pixel or light
-    /// bounces off it. For a lit material the diffuse part: its base colour less what metal
-    /// reflects. For an unlit one the colour it shows.
+    /// Roughly what colour its surface shows, for when it covers less than a pixel or light
+    /// bounces off it: for a lit material its base colour, for an unlit one the colour it shows.
     virtual color get_average_albedo() const = 0;
+
+    /// Roughly how much of its surface is metal, 0 to 1. Metal reflects its base colour only as
+    /// a mirror does, so light bouncing off it diffusely takes 1 less this of it.
+    virtual float get_average_metallic() const = 0;
 
     /// Roughly what light its surface gives off, in linear colour, for the same uses.
     virtual color get_average_emission() const = 0;

@@ -390,27 +390,31 @@ string_view StandardMaterial::get_fn_name(string_view role) const
 
 color StandardMaterial::get_average_albedo() const
 {
-    // Last wins, as in write_draw_data. Defaults as glTF's: white, fully metal.
+    // Last wins, as in write_draw_data. White as glTF's default.
     color base = color::white();
-    float metallic = 1.f;
     for (const auto& prop : properties_) {
-        if (!prop) continue;
-        const Uid cid = property_class_id(prop);
-        if (cid == ClassId::BaseColorProperty) {
-            base = color::white();
-            if (auto r = read_state<IBaseColorProperty>(prop)) base = r->factor;
-            if (ISurface* tex = property_texture(prop)) {
-                const color mean = tex->get_average_color();
-                base = {base.r * mean.r, base.g * mean.g, base.b * mean.b, base.a * mean.a};
-            }
-        } else if (cid == ClassId::MetallicRoughnessProperty) {
-            metallic = 1.f;
-            if (auto r = read_state<IMetallicRoughnessProperty>(prop)) metallic = r->metallic_factor;
-            if (ISurface* tex = property_texture(prop)) metallic *= tex->get_average_color().b;
+        if (!prop || property_class_id(prop) != ClassId::BaseColorProperty) continue;
+        base = color::white();
+        if (auto r = read_state<IBaseColorProperty>(prop)) base = r->factor;
+        if (ISurface* tex = property_texture(prop)) {
+            const color mean = tex->get_average_color();
+            base = {base.r * mean.r, base.g * mean.g, base.b * mean.b, base.a * mean.a};
         }
     }
-    const float diffuse = 1.f - (metallic < 0.f ? 0.f : metallic > 1.f ? 1.f : metallic);
-    return {base.r * diffuse, base.g * diffuse, base.b * diffuse, base.a};
+    return base;
+}
+
+float StandardMaterial::get_average_metallic() const
+{
+    // Last wins, as in write_draw_data. Fully metal as glTF's default.
+    float metallic = 1.f;
+    for (const auto& prop : properties_) {
+        if (!prop || property_class_id(prop) != ClassId::MetallicRoughnessProperty) continue;
+        metallic = 1.f;
+        if (auto r = read_state<IMetallicRoughnessProperty>(prop)) metallic = r->metallic_factor;
+        if (ISurface* tex = property_texture(prop)) metallic *= tex->get_average_color().b;
+    }
+    return metallic < 0.f ? 0.f : metallic > 1.f ? 1.f : metallic;
 }
 
 color StandardMaterial::get_average_emission() const

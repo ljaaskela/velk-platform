@@ -43,9 +43,10 @@ public:
     string_view get_fn_name(string_view role) const override;
 
     vector<ISurface*> get_textures() const override;
-    /// Its base colour factor times its base colour texture's mean, less what metal reflects
-    /// (metallic factor times the metallic-roughness texture's mean blue).
+    /// Its base colour factor times its base colour texture's mean.
     color get_average_albedo() const override;
+    /// Its metallic factor times its metallic-roughness texture's mean blue.
+    float get_average_metallic() const override;
     /// Its emissive factor and strength times its emissive texture's mean.
     color get_average_emission() const override;
     bool is_lit() const override { return true; }

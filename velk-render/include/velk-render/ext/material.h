@@ -75,6 +75,7 @@ public:
     }
 
     color get_average_albedo() const override { return color::white(); }
+    float get_average_metallic() const override { return 0.f; }
     color get_average_emission() const override { return color::black(); }
     /// Unlit, as a material's eval is unless it says otherwise (velk_default_material_eval).
     bool is_lit() const override { return false; }

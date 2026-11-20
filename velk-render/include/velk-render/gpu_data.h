@@ -152,8 +152,8 @@ inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 
 /// Words of a draw's shading summary in the draw-shade array (IRenderBackend::kGlobalDrawShade),
 /// at its draw record's index: what a ray that hits it sees without its material's code. The
-/// first word its material's average albedo (IMaterial::get_average_albedo) as sRGB bytes, red
-/// lowest, with kDrawShadeUnlit and kDrawShadeTinted in the top byte; the second its average
+/// first word its material's average albedo (IMaterial::get_average_albedo, less its average
+/// metallic when lit) as sRGB bytes, red lowest, with kDrawShadeUnlit and kDrawShadeTinted in the top byte; the second its average
 /// emission as RGB9E5. With kDrawShadeTinted a hit multiplies the albedo by its instance's colour
 /// and, with kDrawFlagColor, its vertex colours; a quad's always by its quad's colour. Reflected
 /// when lit, given off when unlit. Mirrors VELK_DRAW_SHADE_*.
