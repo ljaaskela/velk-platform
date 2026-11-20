@@ -2075,7 +2075,6 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
     emission = vec3(0.0);
     lit = true;
     if (hit.draw == 0xFFFFFFFFu || hit.instance == 0xFFFFFFFFu) return;
-    VelkDrawData d = velk_draw_data.data[hit.draw];
     uint at = hit.draw * VELK_DRAW_SHADE_WORDS;
     uint look = 0x00FFFFFFu | VELK_DRAW_SHADE_TINTED;
     uint glow = 0u;
@@ -2083,17 +2082,22 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
         look = velk_draw_shade.data[at];
         glow = velk_draw_shade.data[at + 1u];
     }
-    bool quads = (d.flags & VELK_DRAW_QUADS) != 0u;
-    bool tinted = (look & VELK_DRAW_SHADE_TINTED) != 0u;
-    // A quad's hit names the quad's word, whose colour is what the quad shows.
+    // The draw record only where the tint is taken: quads have no material, so they are tinted.
     vec4 tint = vec4(1.0);
-    if (quads) tint = unpackUnorm4x8(velk_culling.data[hit.instance + VELK_QUAD_NODE_COLOR]);
-    else if (tinted) tint = velk_instances.data[hit.instance].color;
-    if (!quads && tinted && (d.flags & VELK_DRAW_COLOR) != 0u && hit.corners.x != VELK_NO_CORNERS) {
-        vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
-        tint *= velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.x)) * b.x
-              + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.y)) * b.y
-              + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.z)) * b.z;
+    if ((look & VELK_DRAW_SHADE_TINTED) != 0u) {
+        VelkDrawData d = velk_draw_data.data[hit.draw];
+        if ((d.flags & VELK_DRAW_QUADS) != 0u) {
+            // A quad's hit names the quad's word, whose colour is what the quad shows.
+            tint = unpackUnorm4x8(velk_culling.data[hit.instance + VELK_QUAD_NODE_COLOR]);
+        } else {
+            tint = velk_instances.data[hit.instance].color;
+            if ((d.flags & VELK_DRAW_COLOR) != 0u && hit.corners.x != VELK_NO_CORNERS) {
+                vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
+                tint *= velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.x)) * b.x
+                      + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.y)) * b.y
+                      + velk_read_color(velk_cluster_color_word(d, hit.cluster, hit.corners.z)) * b.z;
+            }
+        }
     }
     vec3 surface = velk_srgb_to_linear(unpackUnorm4x8(look).rgb) * tint.rgb;
     lit = (look & VELK_DRAW_SHADE_UNLIT) == 0u;
