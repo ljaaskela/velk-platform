@@ -131,7 +131,9 @@ namespace velk {
     X(cp, gp, Nodes, NODES, 2)                                                                 \
     X(cp, gp, Root, ROOT, 3)                    /* the root node's index */                    \
     X(cp, gp, Built, BUILT, 4)                  /* 0 until its nodes are built over its leaves */ \
-    X(cp, gp, HeaderWords, HEADER_WORDS, 5)
+    X(cp, gp, DiagBuilds, DIAG_BUILDS, 5)       /* TEMPORARY: builds since the log, and of them */ \
+    X(cp, gp, DiagFallbacks, DIAG_FALLBACKS, 6) /* those that fell back to a balanced tree */  \
+    X(cp, gp, HeaderWords, HEADER_WORDS, 7)
 
 /// A cut of a view's top tree (kRayTopCut, VELK_RAY_TOP_CUT).
 #define VELK_RAY_TOP_CUT(X, cp, gp)                                                                \
@@ -281,7 +283,9 @@ namespace velk {
     X(cp, gp, RayMarksWord, RAY_MARKS_WORD, 44) /* the word of the ray marks, a bit a record of the current store */ \
     X(cp, gp, VisibleGroups, VISIBLE_GROUPS, 45) /* of the drawing dispatch: a group per 64 records of partitions in view */ \
     X(cp, gp, VisibleWord, VISIBLE_WORD, 48)    /* the word of their runs: first record and end, two words a group */ \
-    X(cp, gp, End, END, 49)
+    X(cp, gp, DiagTreeBuilds, DIAG_TREE_BUILDS, 49) /* TEMPORARY: partition trees built since the log */ \
+    X(cp, gp, DiagTreeFallbacks, DIAG_TREE_FALLBACKS, 50) /* and of them those that fell back to balanced */ \
+    X(cp, gp, End, END, 51)
 
 /// A partition's state in a kept cut (kPart, VELK_PART), at the cut's STATES_WORD.
 #define VELK_CUT_PART(X, cp, gp)                                                                   \

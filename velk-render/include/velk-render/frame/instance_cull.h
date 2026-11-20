@@ -387,8 +387,9 @@ uint velk_lbvh_build(uint nodes, uint node_count, uint n, uint lane, uint lanes)
 }
 
 // Builds the radix tree over `n` leaves (velk_lbvh_build), and a balanced one instead where it
-// is deeper than a balanced one by more than 4 levels, so that the walk's stack holds.
-void velk_lbvh_build_bounded(uint nodes, uint node_count, uint n, uint lane, uint lanes, bool balanced)
+// is deeper than a balanced one by more than 4 levels, so that the walk's stack holds. True when
+// it fell back to the balanced one.
+bool velk_lbvh_build_bounded(uint nodes, uint node_count, uint n, uint lane, uint lanes, bool balanced)
 {
     g_lbvh_balanced = balanced;
     uint height = velk_lbvh_build(nodes, node_count, n, lane, lanes);
@@ -396,7 +397,9 @@ void velk_lbvh_build_bounded(uint nodes, uint node_count, uint n, uint lane, uin
     if (!balanced && (height == 0u || height > most)) {
         g_lbvh_balanced = true;
         velk_lbvh_build(nodes, node_count, n, lane, lanes);
+        return true;
     }
+    return false;
 }
 )"
 
@@ -2036,7 +2039,12 @@ void main()
     g_list = list;
     g_records = records;
     g_leaf_records = leaf_records;
-    velk_lbvh_build_bounded(nodes, velk_cut_tree_nodes(count), (leaf_records + 3u) / 4u, lane, 64u, !sorted);
+    bool fell_back = velk_lbvh_build_bounded(nodes, velk_cut_tree_nodes(count), (leaf_records + 3u) / 4u, lane, 64u, !sorted);
+    // TEMPORARY, for the log.
+    if (lane == 0u) {
+        atomicAdd(cull_words.data[cut + VELK_CUT_DIAG_TREE_BUILDS], 1u);
+        if (fell_back) atomicAdd(cull_words.data[cut + VELK_CUT_DIAG_TREE_FALLBACKS], 1u);
+    }
 }
 )";
 
@@ -2260,8 +2268,13 @@ void main()
     g_top = top;
     g_leaf_word = leaf_word;
     g_sorted = sorted;
-    velk_lbvh_build_bounded(nodes, node_count, sorted ? s_traced : leaves, lane, 256u, !sorted);
-    if (lane == 0u) cull_words.data[top + VELK_RAY_TOP_BUILT] = 1u;
+    bool fell_back = velk_lbvh_build_bounded(nodes, node_count, sorted ? s_traced : leaves, lane, 256u, !sorted);
+    if (lane == 0u) {
+        cull_words.data[top + VELK_RAY_TOP_BUILT] = 1u;
+        // TEMPORARY, for the log.
+        atomicAdd(cull_words.data[top + VELK_RAY_TOP_DIAG_BUILDS], 1u);
+        if (fell_back) atomicAdd(cull_words.data[top + VELK_RAY_TOP_DIAG_FALLBACKS], 1u);
+    }
 }
 )";
 
@@ -4671,6 +4684,22 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 VELK_LOG(I, "ray top tree: %u partitions with records for rays of %u, their boxes' volumes %.1f times the "
                             "box around them all (%.0f by %.0f by %.0f)",
                          boxes, leaves, around > 0.0 ? volume / around : 0.0, hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+                // TEMPORARY: radix builds since the last log and those that fell back to a balanced
+                // tree, the top tree's and the partition trees'.
+                uint32_t tree_builds = 0;
+                uint32_t tree_fallbacks = 0;
+                const uint32_t zeros[2] = {};
+                for (const auto& c : state.cuts) {
+                    uint32_t words[2] = {};
+                    arena->read_at(c.region.offset() + uint64_t(kCutDiagTreeBuilds) * sizeof(uint32_t), words, sizeof(words));
+                    tree_builds += words[0];
+                    tree_fallbacks += words[1];
+                    arena->update_at(c.region.offset() + uint64_t(kCutDiagTreeBuilds) * sizeof(uint32_t), zeros, sizeof(zeros));
+                }
+                VELK_LOG(I, "diag ray trees: top tree built %u times, %u of them balanced instead; partition trees built %u times, "
+                            "%u of them balanced instead",
+                         top[kRayTopDiagBuilds], top[kRayTopDiagFallbacks], tree_builds, tree_fallbacks);
+                arena->update_at(state.ray_top.offset() + uint64_t(kRayTopDiagBuilds) * sizeof(uint32_t), zeros, sizeof(zeros));
             }
         }
     }
