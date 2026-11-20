@@ -243,6 +243,7 @@ public:
     VELK_CLASS_UID(kTerrainMaterialClass, "ScaleTerrainMaterial");
 
     size_t get_draw_data_size() const override { return sizeof(TerrainParams); }
+    bool is_lit() const override { return true; }
 
     velk::ReturnValue write_draw_data(void* out, size_t size, velk::ITextureResolver*) const override
     {
@@ -329,6 +330,7 @@ public:
     VELK_CLASS_UID(kTreeMaterialClass, "ScaleTreeMaterial");
 
     size_t get_draw_data_size() const override { return sizeof(TreeParams); }
+    bool is_lit() const override { return true; }
 
     velk::ReturnValue write_draw_data(void* out, size_t size, velk::ITextureResolver*) const override
     {
