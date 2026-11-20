@@ -217,10 +217,12 @@ uint velk_morton_spread(uint v)
     return v;
 }
 
-// The 30-bit Morton code of `p` within the box `lo` to `hi`.
+// The 30-bit Morton code of `p` within the box `lo` to `hi`. One grid scale on all axes, the
+// box's widest, so that a flat spread still gets cells that are square.
 uint velk_morton(vec3 p, vec3 lo, vec3 hi)
 {
-    vec3 q = clamp((p - lo) / max(hi - lo, vec3(1e-20)), 0.0, 1.0) * 1023.0;
+    float extent = max(max(hi.x - lo.x, hi.y - lo.y), max(hi.z - lo.z, 1e-20));
+    vec3 q = clamp((p - lo) / extent, 0.0, 1.0) * 1023.0;
     return (velk_morton_spread(uint(q.x)) << 2u) | (velk_morton_spread(uint(q.y)) << 1u) | velk_morton_spread(uint(q.z));
 }
 
@@ -241,6 +243,7 @@ void velk_sort_keys(uint n, uint lane, uint lanes)
                     }
                 }
             }
+            memoryBarrierShared();
             barrier();
         }
     }
@@ -1716,6 +1719,7 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
     }
     s_lo[lane] = lo;
     s_hi[lane] = hi;
+    memoryBarrierShared();
     barrier();
     for (uint i = 0u; i < 64u; ++i) {
         lo = min(lo, s_lo[i]);
@@ -1736,12 +1740,14 @@ void velk_sort_ray_list(uint list, uint count, uint records, uint lane)
         }
         s_order[i] = key;
     }
+    memoryBarrierShared();
     barrier();
     velk_sort_keys(n, lane, 64u);
     // Each place's record in the new order, read before any entry is written again.
     for (uint i = lane; i < count; i += 64u) {
         s_order[i] = cull_words.data[list + (s_order[i] & kSortIndexMask) * VELK_CUT_RAY_WORDS + VELK_CUT_RAY_INDEX];
     }
+    memoryBarrierShared();
     barrier();
     for (uint i = lane; i < count; i += 64u) velk_write_ray_entry(list + i * VELK_CUT_RAY_WORDS, s_order[i], records);
     memoryBarrierBuffer();
@@ -1969,12 +1975,14 @@ void main()
     uint nodes = leaf_word + leaves * 2u;
     uint lane = gl_LocalInvocationIndex;
 
-    // The leaves in Morton order of their boxes' centres within the box around them all, those
-    // without records for rays last, so that partitions near each other share nodes; past
-    // kSortMax leaves, in their order.
+    // The leaves in Morton order of their boxes' centres within the box around them all, so
+    // that partitions near each other share nodes; those at least a quarter as wide as that box
+    // after them, together, so that they widen as few nodes as they can; those without records
+    // for rays last. Past kSortMax leaves, in their order.
     bool sorted = leaves <= kSortMax;
     if (sorted) {
         if (lane < 6u) s_box[lane] = lane < 3u ? 0xFFFFFFFFu : 0u;
+        memoryBarrierShared();
         barrier();
         for (uint i = lane; i < leaves; i += 256u) {
             vec3 blo, bhi;
@@ -1985,20 +1993,28 @@ void main()
                 atomicMax(s_box[3u + k], velk_float_order(c[k]));
             }
         }
+        memoryBarrierShared();
         barrier();
         vec3 lo = vec3(velk_float_unorder(s_box[0]), velk_float_unorder(s_box[1]), velk_float_unorder(s_box[2]));
         vec3 hi = vec3(velk_float_unorder(s_box[3]), velk_float_unorder(s_box[4]), velk_float_unorder(s_box[5]));
+        float extent = max(max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z);
         uint n = 1u;
         while (n < leaves) n <<= 1u;
         for (uint i = lane; i < n; i += 256u) {
             uint key = 0xFFFFFFFFu;
             if (i < leaves) {
                 vec3 blo, bhi;
-                uint code = velk_leaf_box(top, leaf_word, i, blo, bhi) ? velk_morton((blo + bhi) * 0.5, lo, hi) >> 9u : 0x1FFFFFu;
+                // 20 bits of Morton code under a bit for the wide ones; one without records last.
+                uint code = 0x1FFFFFu;
+                if (velk_leaf_box(top, leaf_word, i, blo, bhi)) {
+                    bool wide = length(bhi - blo) * 0.5 >= 0.25 * extent;
+                    code = ((wide ? 1u : 0u) << 20u) | min(velk_morton((blo + bhi) * 0.5, lo, hi) >> 10u, 0xFFFFEu);
+                }
                 key = (code << kSortIndexBits) | i;
             }
             s_order[i] = key;
         }
+        memoryBarrierShared();
         barrier();
         velk_sort_keys(n, lane, 256u);
     }
