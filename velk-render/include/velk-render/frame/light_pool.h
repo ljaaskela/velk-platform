@@ -2210,6 +2210,8 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
 // What each ray found and which way it went, for its probe's first thread.
 shared vec3 s_light[64];
 shared vec3 s_dir[64];
+// The deepest any thread's walk stack got, for one write to the log's word a group.
+shared uint s_deepest;
 
 // What light `index` brings a surface at `at` facing `n`, unshadowed.
 vec3 velk_probe_light(uint index, vec3 at, vec3 n)
@@ -2347,6 +2349,10 @@ void velk_probes_gather(uint lane)
     bool surface = live && dot(n4, n4) > 1e-6;
     vec3 n = surface ? normalize(n4) : vec3(0.0, 1.0, 0.0);
 
+    if (lane == 0u) s_deepest = 0u;
+    memoryBarrierShared();
+    barrier();
+
     vec3 light = vec3(0.0);
     vec3 dir = n;
     if (surface) {
@@ -2373,10 +2379,14 @@ void velk_probes_gather(uint lane)
     }
     s_light[lane] = light;
     s_dir[lane] = dir;
-    // The deepest the walk's stack got, for the log (light pool header 101).
-    if (pc.shapes_base != 0xFFFFFFFFu && velk_ray_deepest > 0) atomicMax(probe_words.data[pc.shapes_base + VELK_POOL_DEEPEST_PROBES], uint(velk_ray_deepest));
+    // The deepest the walk's stack got, for the log (light pool header 101): the group's deepest,
+    // written once.
+    if (velk_ray_deepest > 0) atomicMax(s_deepest, uint(velk_ray_deepest));
     memoryBarrierShared();
     barrier();
+    if (lane == 0u && pc.shapes_base != 0xFFFFFFFFu && s_deepest > 0u) {
+        atomicMax(probe_words.data[pc.shapes_base + VELK_POOL_DEEPEST_PROBES], s_deepest);
+    }
     if (!live || ray != 0u) return;
     if (!surface) {
         for (uint w = 0u; w < VELK_PROBE_WORDS; ++w) probe_words.data[raw + w] = 0u;
