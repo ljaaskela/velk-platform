@@ -152,11 +152,11 @@ namespace velk {
 
 /// A screen probe (kProbe, VELK_PROBE).
 #define VELK_PROBE(X, cp, gp)                                                                      \
-    X(cp, gp, Light, LIGHT, 0)                  /* the light arriving, three floats */         \
-    X(cp, gp, Position, POSITION, 3)            /* where it is, three floats */                \
-    X(cp, gp, Normal, NORMAL, 6)                /* octahedral */                               \
-    X(cp, gp, Frames, FRAMES, 7)                /* how many frames it holds, a float */        \
-    X(cp, gp, Words, WORDS, 8)
+    X(cp, gp, Light, LIGHT, 0)                  /* the light arriving: 12 halves (velk_probe_read) */ \
+    X(cp, gp, Position, POSITION, 6)            /* where it is, three floats */                \
+    X(cp, gp, Normal, NORMAL, 9)                /* octahedral */                               \
+    X(cp, gp, Frames, FRAMES, 10)               /* how many frames it holds, a float */        \
+    X(cp, gp, Words, WORDS, 11)
 
 /// An entry of the light pool's trace list (kTraceEntry, VELK_TRACE_ENTRY).
 #define VELK_TRACE_ENTRY(X, cp, gp)                                                                \

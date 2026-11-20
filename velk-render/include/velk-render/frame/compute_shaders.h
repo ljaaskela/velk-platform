@@ -1410,11 +1410,11 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL R"(
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL R"(
 // The bounce light at a pixel from the screen probes around it (light_probes_main_src, this
-// frame's store at pc.spare1): the four nearest, by how near they are on screen, how much their
-// normal agrees with `n` and how near `pos` is to their surface's plane. False where none of
-// them has a surface like it.
+// frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
+// near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
+// surface's plane. False where none of them has a surface like it.
 bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, out vec3 light)
 {
     light = vec3(0.0);
@@ -1428,20 +1428,15 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, out vec3 light)
     float total = 0.0;
     for (int k = 0; k < 4; ++k) {
         ivec2 p = clamp(base + ivec2(k & 1, k >> 1), ivec2(0), ivec2(int(across) - 1, int(down) - 1));
-        uint w = pc.spare1 + (uint(p.y) * across + uint(p.x)) * 8u;
-        if (uintBitsToFloat(velk_light_cell_words.data[w + 7u]) <= 0.0) continue;
-        vec2 e = unpackSnorm2x16(velk_light_cell_words.data[w + 6u]);
-        vec3 pn = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
-        if (pn.z < 0.0) pn.xy = (1.0 - abs(pn.yx)) * vec2(pn.x >= 0.0 ? 1.0 : -1.0, pn.y >= 0.0 ? 1.0 : -1.0);
-        pn = normalize(pn);
-        vec3 ppos = vec3(uintBitsToFloat(velk_light_cell_words.data[w + 3u]), uintBitsToFloat(velk_light_cell_words.data[w + 4u]),
-                         uintBitsToFloat(velk_light_cell_words.data[w + 5u]));
+        uint w = pc.spare1 + (uint(p.y) * across + uint(p.x)) * VELK_PROBE_WORDS;
+        if (uintBitsToFloat(velk_light_cell_words.data[w + VELK_PROBE_FRAMES]) <= 0.0) continue;
+        vec3 pn = velk_probe_normal(w);
+        vec3 ppos = velk_probe_position(w);
         float bilinear = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
         float facing = pow(max(dot(pn, n), 0.0), 4.0);
         float plane = exp(-abs(dot(pn, pos - ppos)) / (0.02 * length(pos) + 1e-3));
         float weight = bilinear * facing * plane + 1e-6 * bilinear;
-        light += weight * vec3(uintBitsToFloat(velk_light_cell_words.data[w]), uintBitsToFloat(velk_light_cell_words.data[w + 1u]),
-                               uintBitsToFloat(velk_light_cell_words.data[w + 2u]));
+        light += weight * velk_probe_eval(velk_probe_read(w), pn, n);
         total += weight;
     }
     if (total <= 1e-5) return false;

@@ -121,9 +121,12 @@ public:
         uint32_t light_change_count = 0;
         uint32_t light_change_all = 0;
         uint64_t light_change_log_frame = 0;
-        uint32_t light_claim_recorded[8] = {};  ///< What the light claim pass was recorded with.        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, and
-        /// how many probes each holds. See light_probes_main_src.
+        uint32_t light_claim_recorded[8] = {};  ///< What the light claim pass was recorded with.
+        /// The screen probes' two stores (kLightProbeWords a probe), which swap each frame, the
+        /// store of their light from this frame's rays, and how many probes each holds. See
+        /// light_probes_main_src.
         ArenaRegion light_probes[2];
+        ArenaRegion light_probe_rays;
         uint32_t light_probe_count = 0;
         uint32_t light_probe_parity = 0;
         IRenderPass::Ptr light_probes_pass;

@@ -456,20 +456,22 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 si
     if (!vs.light_changes.valid()) {
         vs.light_changes = arena->alloc(uint64_t(kLightChangeHeaderWords + kLightChanges * kLightChangeWords) * sizeof(uint32_t));
     }
-    // The screen probes' two stores, a probe per kLightProbePixels square of the G-buffer.
+    // The screen probes' two stores and their ray store, a probe per kLightProbePixels square of
+    // the G-buffer.
     const uint32_t probes = ((size.x + kLightProbePixels - 1u) / kLightProbePixels)
                           * ((size.y + kLightProbePixels - 1u) / kLightProbePixels);
     if (probes != vs.light_probe_count) {
         vs.light_probe_count = 0;
-        for (auto& store : vs.light_probes) {
-            store = probes != 0 ? arena->alloc(uint64_t(probes) * kLightProbeWords * sizeof(uint32_t)) : ArenaRegion{};
-            if (store.valid()) {
+        ArenaRegion* stores[3] = {&vs.light_probes[0], &vs.light_probes[1], &vs.light_probe_rays};
+        for (ArenaRegion* store : stores) {
+            *store = probes != 0 ? arena->alloc(uint64_t(probes) * kLightProbeWords * sizeof(uint32_t)) : ArenaRegion{};
+            if (store->valid()) {
                 vector<uint32_t> empty;
                 empty.resize(size_t(probes) * kLightProbeWords, 0u);
-                arena->write_at(store.offset(), empty.data(), empty.size() * sizeof(uint32_t));
+                arena->write_at(store->offset(), empty.data(), empty.size() * sizeof(uint32_t));
             }
         }
-        if (vs.light_probes[0].valid() && vs.light_probes[1].valid()) vs.light_probe_count = probes;
+        if (vs.light_probes[0].valid() && vs.light_probes[1].valid() && vs.light_probe_rays.valid()) vs.light_probe_count = probes;
     }
 
     // The list of clusters drawn in compute and the words of each pixel, made again when the
@@ -1371,7 +1373,8 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.lights_base = render_view.lights_base;
     pc.env_params[0] = render_view.env.intensity;
     pc.env_params[1] = render_view.env.rotation_rad;
-    pc.extras[0] = store_word(vs.light_probe_parity);
+    const uint32_t rays_word = static_cast<uint32_t>(vs.light_probe_rays.offset() / sizeof(uint32_t));
+    pc.extras[0] = rays_word;
     pc.extras[1] = vs.gbuffer_size.x | (vs.gbuffer_size.y << 16u);
     pc.extras[2] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
     pc.extras[3] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
@@ -1379,6 +1382,10 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.env[1] = render_view.env.texture_id;
     pc.env[2] = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
     pc.env[3] = store_word(vs.light_probe_parity ^ 1u);
+    // The filter: the ray store and the last frame's probes into this frame's store.
+    RtPushC filter_pc = pc;
+    filter_pc.extras[2] = store_word(vs.light_probe_parity);
+    filter_pc.extras[3] = 0xFFFFFFFFu;
 
     bool dirty = true;
     emit_cached_view_pass(vs.light_probes_pass, dirty,
@@ -1386,17 +1393,24 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
+        // The gather, kLightProbeRays threads a probe in groups of 64, then the filter, a thread a
+        // probe.
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
-        dc.groups_x = (probes + 3u) / 4u;
+        dc.groups_x = (probes * kLightProbeRays + 63u) / 64u;
         dc.groups_y = 1;
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        DispatchCall filter = dc;
+        filter.groups_x = (probes + 63u) / 64u;
+        std::memcpy(filter.root_constants, &filter_pc, sizeof(filter_pc));
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light probes");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch(filter);
         cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();
