@@ -2062,30 +2062,54 @@ vec3 velk_probe_eval(VelkProbeLight p, vec3 pn, vec3 n)
 }
 )"
 
+// Writing a probe whole (VELK_PROBE), after VELK_PROBE_GLSL, for a shader whose VELK_LIGHT_WORDS
+// is writable.
+#define VELK_PROBE_WRITE_GLSL R"(
+uint velk_probe_oct_encode(vec3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return packSnorm2x16(e);
+}
+
+// Halves past their range would be infinite: kept within it.
+uint velk_probe_halves(float a, float b)
+{
+    return packHalf2x16(clamp(vec2(a, b), vec2(-65000.0), vec2(65000.0)));
+}
+
+// Writes probe `at` whole: its light, where it is, its normal and its frames.
+void velk_probe_write(uint at, VelkProbeLight p, vec3 pos, vec3 n, float frames)
+{
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT] = velk_probe_halves(p.e.x, p.e.y);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT + 1u] = velk_probe_halves(p.e.z, p.r.x);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT + 2u] = velk_probe_halves(p.r.y, p.r.z);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT + 3u] = velk_probe_halves(p.g.x, p.g.y);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT + 4u] = velk_probe_halves(p.g.z, p.b.x);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_LIGHT + 5u] = velk_probe_halves(p.b.y, p.b.z);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_POSITION] = floatBitsToUint(pos.x);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_POSITION + 1u] = floatBitsToUint(pos.y);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_POSITION + 2u] = floatBitsToUint(pos.z);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_NORMAL] = velk_probe_oct_encode(n);
+    VELK_LIGHT_WORDS.data[at + VELK_PROBE_FRAMES] = floatBitsToUint(frames);
+}
+)"
+
 /**
- * The screen probes' bounce light, in two dispatches of the same shader.
- *
- * Gather: a 4 by 4 tile of probes a group, a ray a thread, kLightProbeRays a probe, groups in
- * rows of tiles across the probe grid. The rays are spread
- * over the hemisphere around the probe's normal by cosine: each takes its own quarter of a 4 by 4
- * grid of directions, a different cell of it each frame so that four frames cover all sixteen,
- * staggered by the probe's place so that each 2 by 2 block of probes covers them all every frame,
- * moved within the cell by a value of the probe's own. A hit brings what the light points there
- * say reaches it and its indirect light (velk_probe_hit_indirect), times its albedo, and what it
- * gives off; a miss the environment. The probe's light from its rays goes to the ray store.
- *
- * Filter: a thread a probe. Its light is the mean of its own and its 3 by 3 neighbours' light
- * from their rays, each by how near its surface is to the probe's plane and the probe to its,
- * and how much their normals agree; then blended with the last frame's light where it was, the 2
- * by 2 probes around that place that were on the same surface, kept to the spread of the
- * neighbours' light where enough of them agree.
+ * The screen probes' gather: a 4 by 4 tile of probes a group, a ray a thread, kLightProbeRays a
+ * probe, groups in rows of tiles across the probe grid. The rays are spread over the hemisphere
+ * around the probe's normal by cosine: each takes its own quarter of a 4 by 4 grid of directions,
+ * a different cell of it each frame so that four frames cover all sixteen, staggered by the
+ * probe's place so that each 2 by 2 block of probes covers them all every frame, moved within the
+ * cell by a value of the probe's own. A hit brings what the light points there say reaches it and
+ * its indirect light (velk_probe_hit_indirect), times its albedo, and what it gives off; a miss
+ * the environment. The probe's light from its rays goes to the ray store; light_probes_filter_src
+ * then filters it.
  *
  * A hit's albedo and emission come from its draw's shading summary (velk_probe_surface), so it is
  * composed by compose_rt_trace, without the materials' code. pc.shapes_base is the light pool,
- * pc.env.z the light header (the grid), pc.env.w the last frame's probe store. Gather: pc.extras
- * the ray store, the G-buffer's size (x low, y high), its world position and its normal. Filter:
- * pc.extras.w 0xFFFFFFFF, pc.extras.x the ray store, pc.extras.y the size, pc.extras.z this
- * frame's probe store.
+ * pc.env.z the light header (the grid), pc.env.w the last frame's probe store, pc.extras the ray
+ * store, the G-buffer's size (x low, y high), its world position and its normal.
  */
 inline constexpr string_view light_probes_main_src = R"(
 layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_words;
@@ -2095,7 +2119,7 @@ layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_w
 )" VELK_LIGHT_POOL_GLSL R"(
 #define VELK_PROBE_PIXELS 16u
 #define VELK_PROBE_RAYS 4u
-)" VELK_PROBE_GLSL R"(
+)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL R"(
 uint velk_light_grid_hash(ivec3 cube)
 {
     uint h = (uint(cube.x) * 0x8da6b343u) ^ (uint(cube.y) * 0xd8163841u) ^ (uint(cube.z) * 0xcb1ab31fu);
@@ -2186,35 +2210,6 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
 // What each ray found and which way it went, for its probe's first thread.
 shared vec3 s_light[64];
 shared vec3 s_dir[64];
-
-uint velk_probe_oct_encode(vec3 n)
-{
-    n /= abs(n.x) + abs(n.y) + abs(n.z);
-    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
-    return packSnorm2x16(e);
-}
-
-// Halves past their range would be infinite: kept within it.
-uint velk_probe_halves(float a, float b)
-{
-    return packHalf2x16(clamp(vec2(a, b), vec2(-65000.0), vec2(65000.0)));
-}
-
-// Writes probe `at` whole: its light, where it is, its normal and its frames.
-void velk_probe_write(uint at, VelkProbeLight p, vec3 pos, vec3 n, float frames)
-{
-    probe_words.data[at + VELK_PROBE_LIGHT] = velk_probe_halves(p.e.x, p.e.y);
-    probe_words.data[at + VELK_PROBE_LIGHT + 1u] = velk_probe_halves(p.e.z, p.r.x);
-    probe_words.data[at + VELK_PROBE_LIGHT + 2u] = velk_probe_halves(p.r.y, p.r.z);
-    probe_words.data[at + VELK_PROBE_LIGHT + 3u] = velk_probe_halves(p.g.x, p.g.y);
-    probe_words.data[at + VELK_PROBE_LIGHT + 4u] = velk_probe_halves(p.g.z, p.b.x);
-    probe_words.data[at + VELK_PROBE_LIGHT + 5u] = velk_probe_halves(p.b.y, p.b.z);
-    probe_words.data[at + VELK_PROBE_POSITION] = floatBitsToUint(pos.x);
-    probe_words.data[at + VELK_PROBE_POSITION + 1u] = floatBitsToUint(pos.y);
-    probe_words.data[at + VELK_PROBE_POSITION + 2u] = floatBitsToUint(pos.z);
-    probe_words.data[at + VELK_PROBE_NORMAL] = velk_probe_oct_encode(n);
-    probe_words.data[at + VELK_PROBE_FRAMES] = floatBitsToUint(frames);
-}
 
 // What light `index` brings a surface at `at` facing `n`, unshadowed.
 vec3 velk_probe_light(uint index, vec3 at, vec3 n)
@@ -2414,7 +2409,27 @@ void velk_probes_gather(uint lane)
     velk_probe_write(raw, p, pos, n, 1.0);
 }
 
-)" R"(
+void main()
+{
+    velk_probes_gather(gl_LocalInvocationIndex);
+}
+)";
+
+/**
+ * The screen probes' filter, after the gather (light_probes_main_src): a thread a probe. Its light
+ * is the mean of its own and its 3 by 3 neighbours' light from their rays, each by how near its
+ * surface is to the probe's plane and the probe to its, and how much their normals agree; then
+ * blended with the last frame's light where it was, the 2 by 2 probes around that place that were
+ * on the same surface, kept to the spread of the neighbours' light where enough of them agree.
+ * Traces nothing: composed after rt_compute_prelude_src alone. pc.env.w is the last frame's probe
+ * store, pc.extras.x the ray store, pc.extras.y the G-buffer's size (x low, y high), pc.extras.z
+ * this frame's probe store.
+ */
+inline constexpr string_view light_probes_filter_src = R"(
+layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_words;
+#define VELK_LIGHT_WORDS probe_words
+#define VELK_PROBE_PIXELS 16u
+)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL R"(
 // Probe `at`'s light added `w` times to a sum, seen from the normal `n`: its light at `n`,
 // unclamped, and its directions as they are.
 void velk_probe_add(inout VelkProbeLight sum, uint at, vec3 at_n, vec3 n, float w)
@@ -2550,11 +2565,7 @@ void velk_probes_filter()
 
 void main()
 {
-    if (pc.extras.w == 0xFFFFFFFFu) {
-        velk_probes_filter();
-        return;
-    }
-    velk_probes_gather(gl_LocalInvocationIndex);
+    velk_probes_filter();
 }
 )";
 

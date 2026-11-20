@@ -1369,6 +1369,16 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
         pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_trace(*ctx.snippets, light_probes_main_src)), key);
     }
     if (!pipeline) return;
+    // The filter traces nothing: the RT prelude and the filter alone.
+    constexpr uint64_t kFilterKey = 0x4c50'4649'4c54'0001ULL;
+    auto filter_pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{kFilterKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    if (!filter_pipeline) {
+        string src;
+        src += rt_compute_prelude_src;
+        src += light_probes_filter_src;
+        filter_pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), kFilterKey);
+    }
+    if (!filter_pipeline) return;
 
     RtPushC pc{};
     pc.shapes_base = pool.segments.empty() ? kLightNone : pool.word();
@@ -1389,7 +1399,7 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     // The filter: the ray store and the last frame's probes into this frame's store.
     RtPushC filter_pc = pc;
     filter_pc.extras[2] = store_word(vs.light_probe_parity);
-    filter_pc.extras[3] = 0xFFFFFFFFu;
+    filter_pc.extras[3] = 0u;
 
     bool dirty = true;
     emit_cached_view_pass(vs.light_probes_pass, dirty,
@@ -1397,8 +1407,7 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
-        // The gather, kLightProbeRays threads a probe, a group a 4 by 4 tile of the probe grid,
-        // then the filter, a thread a probe.
+        // The gather, kLightProbeRays threads a probe, a group a 4 by 4 tile of the probe grid.
         static_assert(kLightProbeRays * 16u == 64u, "a group of 64 threads is a 4 by 4 tile of probes");
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
@@ -1407,21 +1416,42 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
-        DispatchCall filter = dc;
-        filter.groups_x = (probes + 63u) / 64u;
-        std::memcpy(filter.root_constants, &filter_pc, sizeof(filter_pc));
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light probes");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
-        cmd->record_global_barrier();
-        cmd->record_dispatch(filter);
         cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();
         rec.cmd = std::move(cmd);
         rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
         rec.held.push_back(pipeline);
+    });
+
+    bool filter_dirty = true;
+    emit_cached_view_pass(vs.light_probes_filter_pass, filter_dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.light_probes_filter",
+                                         "other:deferred.light_probes_filter"),
+                          graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        // A thread a probe.
+        DispatchCall dc{};
+        dc.pipeline = filter_pipeline.get();
+        dc.groups_x = (across * down + 63u) / 64u;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(filter_pc);
+        std::memcpy(dc.root_constants, &filter_pc, sizeof(filter_pc));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: light probes filter");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.held.push_back(filter_pipeline);
     });
 }
 

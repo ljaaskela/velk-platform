@@ -130,6 +130,8 @@ public:
         uint32_t light_probe_count = 0;
         uint32_t light_probe_parity = 0;
         IRenderPass::Ptr light_probes_pass;
+        /// The probes' filter, after their gather (light_probes_filter_src).
+        IRenderPass::Ptr light_probes_filter_pass;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
