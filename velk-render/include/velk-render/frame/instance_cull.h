@@ -1897,7 +1897,7 @@ void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 
 // Lists a cluster for the second test, false when there is no room for it. Levels of detail
 // were chosen already, so where from no longer matters: the camera stands in.
-bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record, vec3 cam)
+bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record)
 {
     uint at = atomicAdd(cull_words.data[pc.retest_word + VELK_RETEST_LIST_COUNT], 1u);
     if (at >= pc.retest_capacity) return false;
@@ -1910,9 +1910,6 @@ bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record, vec3 cam)
     cull_words.data[record + VELK_RETEST_CUT_RECORD] = cut_record;
     cull_words.data[record + VELK_RETEST_CHOSEN_WORD] = pc.chosen_word;
     cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY] = pc.chosen_capacity;
-    cull_words.data[record + VELK_RETEST_FROM] = floatBitsToUint(cam.x);
-    cull_words.data[record + VELK_RETEST_FROM + 1u] = floatBitsToUint(cam.y);
-    cull_words.data[record + VELK_RETEST_FROM + 2u] = floatBitsToUint(cam.z);
     return true;
 }
 
@@ -2034,7 +2031,7 @@ void main()
         if (pc.pyramid_word != 0xFFFFFFFFu
             && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection,
                                    velk_lod_center(cluster + VELK_LOD_CLUSTER_SPHERE, world, cam) + globals.cam_moved, test_radius)
-            && velk_retest(entry, c, slot, record, cam)) {
+            && velk_retest(entry, c, slot, record)) {
             return;
         }
     }
@@ -2130,9 +2127,6 @@ bool velk_retest(uint entry, uint cluster, uint slot, uint cut_record)
     cull_words.data[record + VELK_RETEST_CUT_RECORD] = cut_record;
     cull_words.data[record + VELK_RETEST_CHOSEN_WORD] = pc.chosen_word;
     cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY] = pc.chosen_capacity;
-    cull_words.data[record + VELK_RETEST_FROM] = floatBitsToUint(g_lod_cam.x);
-    cull_words.data[record + VELK_RETEST_FROM + 1u] = floatBitsToUint(g_lod_cam.y);
-    cull_words.data[record + VELK_RETEST_FROM + 2u] = floatBitsToUint(g_lod_cam.z);
     return true;
 }
 
@@ -2324,16 +2318,15 @@ void main()
     uint entry = cull_words.data[record + VELK_RETEST_ENTRY];
     g_chosen_word = cull_words.data[record + VELK_RETEST_CHOSEN_WORD];
     g_chosen_capacity = cull_words.data[record + VELK_RETEST_CHOSEN_CAPACITY];
-    vec3 lod_cam = vec3(uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM]),
-                        uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 1u]),
-                        uintBitsToFloat(cull_words.data[record + VELK_RETEST_FROM + 2u]));
 
     CullInstance ci = cull_instances.data[instance];
     mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
     GlobalData globals = velk_globals.data[pc.globals_base];
+    // Its levels of detail are chosen from the camera, as the first test chose them.
     vec3 cam = globals.cam_pos.xyz;
+    vec3 lod_cam = cam;
 
     if (entry != 0xFFFFFFFFu) {
         uint cluster = cull_words.data[record + VELK_RETEST_CLUSTER];

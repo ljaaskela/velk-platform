@@ -350,8 +350,7 @@ namespace velk {
     X(cp, gp, CutRecord, CUT_RECORD, 5) /* the kept cut record it is from */                       \
     X(cp, gp, ChosenWord, CHOSEN_WORD, 6) /* where the visual's chosen clusters go */              \
     X(cp, gp, ChosenCapacity, CHOSEN_CAPACITY, 7) /* and how many fit */                           \
-    X(cp, gp, From, FROM, 8)            /* where its levels of detail are chosen from, three floats */ \
-    X(cp, gp, End, END, 12)             /* after a spare word */
+    X(cp, gp, End, END, 8)
 
 VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
 VELK_LOD_CLUSTER(VELK_LAYOUT_CPP_WORD, LodCluster, LOD_CLUSTER)
