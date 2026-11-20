@@ -2483,7 +2483,9 @@ void velk_probes_filter()
     vec4 clip = g.prev_view_projection * vec4(pos + g.cam_moved, 1.0);
     if (was_store != 0xFFFFFFFFu && clip.w > 1e-5) {
         vec2 at_px = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
-        vec2 on_grid = at_px / float(VELK_PROBE_PIXELS) - 0.5;
+        // A probe sits at the middle pixel of its square, whose centre is half a pixel on: a
+        // still camera lands exactly on it.
+        vec2 on_grid = (at_px - (float(VELK_PROBE_PIXELS / 2u) + 0.5)) / float(VELK_PROBE_PIXELS);
         ivec2 base = ivec2(floor(on_grid));
         vec2 f = on_grid - vec2(base);
         for (int k = 0; k < 4; ++k) {
