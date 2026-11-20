@@ -19,7 +19,8 @@ enum class GBufferAttachment : uint32_t
 {
     Albedo         = 0, ///< RGBA8      rgb = surface albedo, a = alpha.
     Normal         = 1, ///< RGBA16F    xyz = world-space normal, w = how far the surface may be from the full mesh, in world units.
-    WorldPos       = 2, ///< RGBA32F    xyz = position relative to the camera, w = unused. Full float because
+    WorldPos       = 2, ///< RGBA32F    xyz = position relative to the camera, w = the longest edge of its
+                        ///  triangle as drawn, in world units, which light pieces are chosen by. Full float because
                         ///  RGBA16F's ~3 decimal digits of precision quantizes a typical
                         ///  100 m scene to ~0.1 m steps, which collapses entire raster
                         ///  triangles into a single shader-visible position and breaks
@@ -40,6 +41,10 @@ inline constexpr PixelFormat kGBufferFormats[static_cast<uint32_t>(GBufferAttach
     PixelFormat::RGBA8,    // MaterialParams
     PixelFormat::RGBA16F,  // Emissive (HDR; see comment above)
 };
+
+/** @brief Words a pixel's record in the culling arena has: its ids, then two of its triangle
+ *  weights. Mirrors VELK_PIXEL_RECORD_WORDS (velk_pixel_ids). */
+inline constexpr uint32_t kPixelRecordWords = 4;
 
 /** @brief The visibility buffer's attachments: IDs, then depth. See VELK_VISIBILITY_OUT. */
 inline constexpr uint32_t kVisibilityAttachments = 2;

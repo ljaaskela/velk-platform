@@ -438,20 +438,33 @@ vec4 velk_read_color(uint word)
     return unpackUnorm4x8(velk_mesh_words.data[word]);
 }
 
-// What each pixel shows, two words a pixel, row by row from `ids_word` in the culling arena,
-// as the deferred path's visibility resolve leaves it: 0 for nothing, else its draw data
-// record plus one. Drawn by the hardware, the second word is the position in the draw's
-// visible list shifted up by its triangle bits, over the triangle. Drawn in compute
-// (instance_tiny_draw_src), the first word also has VELK_IDS_TINY and the triangle in the
-// cluster at VELK_IDS_TRIANGLE_SHIFT, and the second is the word of the cluster's record.
+// What each pixel shows, VELK_PIXEL_RECORD_WORDS words a pixel, row by row from `ids_word` in
+// the culling arena, as the deferred path's visibility resolve leaves it. Its first two words,
+// its ids: 0 for nothing, else its draw data record plus one. Drawn by the hardware, the second
+// word is the position in the draw's visible list shifted up by its triangle bits, over the
+// triangle. Drawn in compute (instance_tiny_draw_src), the first word also has VELK_IDS_TINY and
+// the triangle in the cluster at VELK_IDS_TRIANGLE_SHIFT, and the second is the word of the
+// cluster's record. Its last two, the second and third of its weights in its triangle, floats
+// (velk_pixel_weights).
 #define VELK_IDS_TINY 0x80000000u
 #define VELK_IDS_TRIANGLE_SHIFT 23u
 #define VELK_IDS_DRAW_MASK 0x7FFFFFu
+#define VELK_PIXEL_RECORD_WORDS 4u
 
 uvec2 velk_pixel_ids(uint ids_word, uint width, ivec2 coord)
 {
-    uint at = ids_word + 2u * (uint(coord.y) * width + uint(coord.x));
+    uint at = ids_word + VELK_PIXEL_RECORD_WORDS * (uint(coord.y) * width + uint(coord.x));
     return uvec2(velk_culling.data[at], velk_culling.data[at + 1u]);
+}
+
+// Where a pixel that shows something is in its triangle, as weights of its three corners,
+// each from 0 to 1 and adding up to 1, as the resolve found them where the view ray meets the
+// triangle as drawn.
+vec3 velk_pixel_weights(uint ids_word, uint width, ivec2 coord)
+{
+    uint at = ids_word + VELK_PIXEL_RECORD_WORDS * (uint(coord.y) * width + uint(coord.x));
+    vec2 w = vec2(uintBitsToFloat(velk_culling.data[at + 2u]), uintBitsToFloat(velk_culling.data[at + 3u]));
+    return vec3(1.0 - w.x - w.y, w.x, w.y);
 }
 
 // The draw data record of a pixel that shows something.

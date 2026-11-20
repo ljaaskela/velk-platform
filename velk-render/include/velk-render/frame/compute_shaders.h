@@ -230,8 +230,9 @@ bool intersect_sphere(Ray ray, RtShape shape, out RayHit hit)
 
 /**
  * Fills the G-buffer from the visibility buffer: for each pixel, finds its triangle, where
- * the view ray meets it, and what the material gives there. Goes after compose_rt_compute's
- * shared body, whose push constants it borrows.
+ * the view ray meets it, and what the material gives there; and the pixel's record, its ids
+ * and weights in its triangle (velk_pixel_ids, velk_pixel_weights). Goes after
+ * compose_rt_compute's shared body, whose push constants it borrows.
  */
 inline constexpr string_view visibility_resolve_main_src = R"(
 layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
@@ -304,9 +305,10 @@ void main()
     // Compute raster drew here, nearer than the hardware, and left its ids. Its depth is
     // cleared for the next frame.
     uvec2 ids = uvec2(0u);
+    uint ids_at = 0u;
     if (inside) {
         uint pixel_index = uint(coord.y) * RESOLVE_WIDTH + uint(coord.x);
-        uint ids_at = RESOLVE_TINY + RESOLVE_WIDTH * RESOLVE_HEIGHT + pixel_index * 2u;
+        ids_at = RESOLVE_TINY + RESOLVE_WIDTH * RESOLVE_HEIGHT + pixel_index * VELK_PIXEL_RECORD_WORDS;
         if (resolve_words.data[RESOLVE_TINY + pixel_index] != 0u) {
             resolve_words.data[RESOLVE_TINY + pixel_index] = 0u;
             ids = uvec2(resolve_words.data[ids_at], resolve_words.data[ids_at + 1u]);
@@ -323,6 +325,7 @@ void main()
     vec3 smooth_normal = vec3(0.0);
     vec3 rel = vec3(0.0);
     float lod_error = 0.0;
+    float tri_size = 0.0;
     // The draw and instance, which a neighbour must share to count.
     uvec2 surface = uvec2(0xFFFFFFFFu);
     if (drawn) {
@@ -345,6 +348,15 @@ void main()
         vec3 weights = vec3(1.0 / 3.0);
         rel = (v0.rel + v1.rel + v2.rel) / 3.0;
         resolve_hit(g, pixel, v0.rel, e1, e2, weights, rel);
+
+        // For the passes after, which read the pixel's light: where it is in its triangle
+        // (velk_pixel_weights), and the triangle's longest edge.
+        vec3 b = clamp(weights, 0.0, 1.0);
+        b /= max(b.x + b.y + b.z, 1e-6);
+        resolve_words.data[ids_at + 2u] = floatBitsToUint(b.y);
+        resolve_words.data[ids_at + 3u] = floatBitsToUint(b.z);
+        vec3 e3 = v2.rel - v1.rel;
+        tri_size = sqrt(max(max(dot(e1, e1), dot(e2, e2)), dot(e3, e3)));
 
         // Texture coordinates' steps to the next pixels along, on this triangle's plane even
         // where another covers them.
@@ -402,7 +414,7 @@ void main()
 
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_ALBEDO)], coord, e.color);
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(N, lod_error));
-    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, 0.0));
+    imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, tri_size));
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
                vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, 0.0));
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
@@ -753,8 +765,9 @@ vec3 light_color(uvec2 ids, ivec2 coord)
                           uintBitsToFloat(velk_mesh_words.data[at + 2u]));
         p[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
     }
-    // Where the pixel's view ray meets the triangle's plane, and its weights there, as the claim
-    // and the lighting work them out.
+    // Its weights there as the resolve left them for the claim and the lighting; where the
+    // pixel's view ray meets the triangle's plane, for how many pixels a world unit is there.
+    vec3 b = velk_pixel_weights(pc.ids_word, pc.width, coord);
     vec3 e1 = p[1] - p[0];
     vec3 e2 = p[2] - p[0];
     vec2 ndc = (vec2(coord) + 0.5) / size * 2.0 - 1.0;
@@ -763,16 +776,8 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     vec3 normal = cross(e1, e2);
     float facing = dot(normal, dir);
     if (abs(facing) < 1e-20) return base;
-    vec3 q = dir * (dot(normal, p[0]) / facing) - p[0];
     float d11 = dot(e1, e1);
-    float d12 = dot(e1, e2);
     float d22 = dot(e2, e2);
-    float det = d11 * d22 - d12 * d12;
-    if (abs(det) < 1e-20) return base;
-    float b1 = (d22 * dot(q, e1) - d12 * dot(q, e2)) / det;
-    float b2 = (d11 * dot(q, e2) - d12 * dot(q, e1)) / det;
-    vec3 b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
-    b /= max(b.x + b.y + b.z, 1e-6);
     // In pieces: the level the pixel reads as the lighting finds it (its coarse level where that
     // level's cell is exact), coloured by its depth (red at the root, then orange,
     // yellow, green, cyan, blue, purple, pink, again from red; dark grey its triangle's vertex
@@ -1449,7 +1454,8 @@ void main()
     vec4 albedo = velk_texture(pc.albedo_tex_id, uv);
     vec4 normal_and_error = velk_texture(pc.normal_tex_id, uv);
     vec3 world_n = normal_and_error.xyz;
-    vec3 world_pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
+    vec4 position = velk_texture(pc.worldpos_tex_id, uv);
+    vec3 world_pos = position.xyz;
     vec4 mat = velk_texture(pc.material_tex_id, uv);
 
     // No surface: the environment along the view ray.
@@ -1489,7 +1495,8 @@ void main()
         float point_through[VELK_LIGHT_SLOTS];
         bool points = false;
         if (pc.spare3 != VELK_LIGHT_NONE) {
-            points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord), world_pos,
+            points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord),
+                                       velk_pixel_weights(pc.spare4, pc.spare2, coord), world_pos, position.w,
                                        uintBitsToFloat(pc.spare5), point_lights, point_through);
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.

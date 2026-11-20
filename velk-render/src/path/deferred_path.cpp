@@ -470,7 +470,7 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 si
     // resolve clears it again after it.
     const uint64_t pixels = uint64_t(size.x) * size.y;
     if (pixels > 0 && (!vs.pixel_words.valid() || vs.pixel_words_size != size)) {
-        vs.pixel_words = arena->alloc(pixels * 3u * sizeof(uint32_t));
+        vs.pixel_words = arena->alloc(pixels * (1u + kPixelRecordWords) * sizeof(uint32_t));
         vs.pixel_words_size = size;
         if (vs.pixel_words.valid()) {
             vector<uint32_t> clear;
@@ -1194,7 +1194,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
 void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
     const LightPool& pool = vs.instance_cull.light_pool;
-    if (!vs.visibility || pool.segments.empty() || !vs.pixel_words.valid()) return;
+    if (!vs.visibility || !vs.gbuffer || pool.segments.empty() || !vs.pixel_words.valid()) return;
 
     constexpr uint64_t kKey = 0x4c69'6768'7443'6c6dULL;
     auto found = ctx.render_ctx->pipelines().find(PipelineCacheKey{kKey, PixelFormat::RGBA8, DepthFormat::None, 0});
@@ -1215,10 +1215,12 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
         float light_pixels;
         uint32_t lights;
         uint32_t again;
+        uint32_t position_id;
     };
     // What a first trace casts a ray a point to: the scene's lights, as many as a point has slots.
     const auto lights = static_cast<uint32_t>(std::min<size_t>(render_view.lights.size(), kLightSlots));
-    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights, 0u};
+    const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights, 0u,
+                   vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos))};
     static_assert(sizeof(PushC) == sizeof(vs.light_claim_recorded), "What the claim was recorded with");
     DeferredComputePushC trace_pc{};
     trace_pc.globals_base = render_view.view_globals_base;
@@ -1237,7 +1239,7 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     const bool other = vs.instance_cull.chosen_by_other;
     // One dispatch as its own pass, timed apart: the claim, the search, the trace.
     const auto emit_one = [&](IRenderPass::Ptr& pass, const char* name, const char* label, const IGpuPipeline::Ptr& used,
-                              const void* used_pc, uint32_t pc_size, uint32_t groups_x, uint32_t groups_y, bool reads_visibility) {
+                              const void* used_pc, uint32_t pc_size, uint32_t groups_x, uint32_t groups_y, bool reads_pixels) {
         bool dirty = true;
         emit_cached_view_pass(pass, dirty, name, graph, [&](CachedPassRecording& rec) {
             auto cmd = ctx.backend->create_command_buffer();
@@ -1257,7 +1259,11 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
             cmd->pop_label();
             cmd->end_recording();
             rec.cmd = std::move(cmd);
-            if (reads_visibility) rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+            if (reads_pixels) {
+                rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+                // The claim reads each pixel's position and triangle size from the G-buffer.
+                rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            }
             rec.held.push_back(used);
         });
     };

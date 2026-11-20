@@ -2504,8 +2504,8 @@ void main()
  *
  * Two dispatches. With `mode` 0, keeps the nearest depth of each pixel in the plane at
  * planes_word, with a fixed number per triangle in its lowest bits, so that exact ties go to
- * one triangle. With 1, the triangle whose depth that is writes its ids (velk_pixel_ids) to
- * the two words a pixel after that plane. The resolve takes both from there.
+ * one triangle. With 1, the triangle whose depth that is writes its ids to the first two words
+ * of the pixel's record after that plane (velk_pixel_ids). The resolve takes both from there.
  */
 inline constexpr string_view instance_tiny_draw_src = R"(
 #version 450
@@ -2602,7 +2602,7 @@ void main()
                 if (pc.mode == 0u) {
                     atomicMax(tiny_words.data[pc.planes_word + pixel], bits);
                 } else if (tiny_words.data[pc.planes_word + pixel] == bits) {
-                    uint ids = pc.planes_word + plane + pixel * 2u;
+                    uint ids = pc.planes_word + plane + pixel * VELK_PIXEL_RECORD_WORDS;
                     tiny_words.data[ids] = (draw + 1u) | VELK_IDS_TINY | (t << VELK_IDS_TRIANGLE_SHIFT);
                     tiny_words.data[ids + 1u] = record;
                 }

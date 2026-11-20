@@ -1368,10 +1368,11 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
 #define VELK_LIGHT_READ_GLSL VELK_LIGHT_ADD_GLSL R"(
 // The direct light the pixel with ids `ids` at `at` (relative to the camera) gets from the
 // points of light: up to VELK_LIGHT_SLOTS lights, filled in order, the rest VELK_LIGHT_NONE, and
-// how much of each gets through. False when it has no traced light yet. `light_pixels` is
-// kLightPixels.
-bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out uint lights[VELK_LIGHT_SLOTS],
-                       out float through[VELK_LIGHT_SLOTS])
+// how much of each gets through. False when it has no traced light yet. `b` is where the pixel
+// is in its triangle (velk_pixel_weights), `tri_size` the triangle's longest edge in world
+// units, `light_pixels` kLightPixels.
+bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, float light_pixels,
+                       out uint lights[VELK_LIGHT_SLOTS], out float through[VELK_LIGHT_SLOTS])
 {
     vec2 sums[VELK_LIGHT_SLOTS];
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
@@ -1414,35 +1415,11 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 at, float light_pixels, out ui
             uint first = velk_light_page(pool, value);
             uint cluster = velk_ids_cluster(d, ids);
             if (cluster == VELK_NO_CLUSTER) return false;
-            // Where the pixel is in its triangle.
+            // The triangle's corners, and how many pixels a world unit at the pixel is.
             uint word = d.index_base + velk_cluster_first_index(cluster) + velk_ids_triangle(d, ids) * 3u;
             uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
-            vec3 p[3];
-            for (int k = 0; k < 3; ++k) {
-                uint v = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
-                vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[v]), uintBitsToFloat(velk_mesh_words.data[v + 1u]),
-                                  uintBitsToFloat(velk_mesh_words.data[v + 2u]));
-                p[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-            }
-            vec3 e1 = p[1] - p[0];
-            vec3 e2 = p[2] - p[0];
-            vec3 q = at - p[0];
-            // The triangle's longest edge, which its pieces are chosen by, and how many pixels a
-            // world unit at the pixel is.
-            float tri_size = sqrt(max(max(dot(e1, e1), dot(e2, e2)), dot(p[2] - p[1], p[2] - p[1])));
             mat4 vp = g.view_projection;
             float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(at), 1e-4);
-            float d11 = dot(e1, e1);
-            float d12 = dot(e1, e2);
-            float d22 = dot(e2, e2);
-            float det = d11 * d22 - d12 * d12;
-            vec3 b = vec3(1.0, 0.0, 0.0);
-            if (abs(det) > 1e-20) {
-                float b1 = (d22 * dot(q, e1) - d12 * dot(q, e2)) / det;
-                float b2 = (d11 * dot(q, e2) - d12 * dot(q, e1)) / det;
-                b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
-                b /= max(b.x + b.y + b.z, 1e-6);
-            }
             if (!velk_light_add_points(pool, first, velk_ids_triangle(d, ids), corners, b, at, px_per_world, tri_size, lights, sums)) {
                 return false;
             }
@@ -2323,6 +2300,7 @@ layout(push_constant) uniform PC {
     float light_pixels;
     uint lights;  // the scene's lights, at most VELK_LIGHT_SLOTS
     uint again;   // after the search, for the records it laid out
+    uint position_id;  // the G-buffer's positions, with each triangle's longest edge
 } pc;
 
 #define VELK_LIGHT_WORDS light_words
@@ -2481,8 +2459,9 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
 )" R"(
 // Lists the points of light the pixel at `coord` (ids `ids`, of draw `d`) reads from the record
 // whose first page starts at `first`, those it reads with any weight, when they are due
-// (velk_light_list_point). Where the pixel is in its triangle comes from its corners on screen,
-// corrected for perspective, as the lighting finds it from the pixel's place.
+// (velk_light_list_point). Where the pixel is in its triangle, and its triangle's size, are as
+// the resolve left them for the lighting too (velk_pixel_weights, the G-buffer's positions), so
+// that both read the same points.
 void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, uint instance, uint frame, GlobalData g)
 {
     uint cluster = velk_ids_cluster(d, ids);
@@ -2490,45 +2469,14 @@ void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, u
     uint triangle = velk_ids_triangle(d, ids);
     uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
     uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
-    LightInstance inst = light_instances.data[instance];
-    vec2 size = vec2(float(pc.width), float(pc.height));
-    vec3 p[3];
-    for (int k = 0; k < 3; ++k) {
-        uint at = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
-        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[at]), uintBitsToFloat(velk_mesh_words.data[at + 1u]),
-                          uintBitsToFloat(velk_mesh_words.data[at + 2u]));
-        p[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-    }
-    // Where the pixel's view ray meets the triangle's plane, and its weights there worked out as
-    // the lighting works them out (velk_light_direct), so that both read the same points.
-    vec3 e1 = p[1] - p[0];
-    vec3 e2 = p[2] - p[0];
-    vec2 ndc = (vec2(coord) + 0.5) / size * 2.0 - 1.0;
-    // A point on the ray (the near plane, depth being reversed); the camera is at the origin.
-    vec4 on_ray = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
-    vec3 dir = on_ray.xyz / on_ray.w;
-    vec3 normal = cross(e1, e2);
-    float facing = dot(normal, dir);
-    if (abs(facing) < 1e-20) return;
-    vec3 at = dir * (dot(normal, p[0]) / facing);
-    vec3 q = at - p[0];
-    float d11 = dot(e1, e1);
-    float d12 = dot(e1, e2);
-    float d22 = dot(e2, e2);
-    float det = d11 * d22 - d12 * d12;
-    vec3 b = vec3(1.0, 0.0, 0.0);
-    if (abs(det) > 1e-20) {
-        float b1 = (d22 * dot(q, e1) - d12 * dot(q, e2)) / det;
-        float b2 = (d11 * dot(q, e2) - d12 * dot(q, e1)) / det;
-        b = clamp(vec3(1.0 - b1 - b2, b1, b2), 0.0, 1.0);
-        b /= max(b.x + b.y + b.z, 1e-6);
-    }
+    vec3 b = velk_pixel_weights(pc.ids_word, pc.width, ivec2(coord));
     // In pieces: the pixel's way down its triangle's levels, from its vertex points.
     uint pool = pc.pool_word;
     if (triangle < velk_light_pieced(first)) {
+        vec4 position = texelFetch(velk_textures[nonuniformEXT(pc.position_id)], ivec2(coord), 0);
         mat4 vp = g.view_projection;
-        float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(at), 1e-4);
-        float tri_px = sqrt(max(max(d11, d22), dot(p[2] - p[1], p[2] - p[1]))) * px_per_world;
+        float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
+        float tri_px = position.w * px_per_world;
         velk_light_list_way(first, corners, triangle, b, tri_px, instance, frame);
         return;
     }
