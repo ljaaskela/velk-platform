@@ -1424,8 +1424,12 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
     if (record == VELK_NO_RECORD) return false;
     GlobalData g = velk_globals.data[d.globals_base];
     uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
-    radiance = record + VELK_RECORD_RADIANCE;
-    radiance_dir = record + VELK_RECORD_RADIANCE_DIR;
+    // Not for a whole mesh or a shape, which no cluster bounds: one value could not hold light
+    // that changes across a whole floor.
+    if (entry != 0xFFFFFFFFu) {
+        radiance = record + VELK_RECORD_RADIANCE;
+        radiance_dir = record + VELK_RECORD_RADIANCE_DIR;
+    }
 
     if (entry == VELK_CUT_QUAD) {
         mat4 vp = g.view_projection;
@@ -2305,9 +2309,12 @@ void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance
     }
     if (entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE) return;
     light = hit.record + VELK_RECORD_LIGHT;
-    radiance = hit.record + VELK_RECORD_RADIANCE;
-    radiance_dir = hit.record + VELK_RECORD_RADIANCE_DIR;
-    ask =!velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
+    // Kept indirect light only on a cluster, which bounds it (velk_light_direct).
+    if (entry != 0xFFFFFFFFu) {
+        radiance = hit.record + VELK_RECORD_RADIANCE;
+        radiance_dir = hit.record + VELK_RECORD_RADIANCE_DIR;
+    }
+    ask = !velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
 }
 
 // Asks for the light at `word` to be traced, for a hit: none yet becomes an untraced one value,
