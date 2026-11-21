@@ -1466,10 +1466,11 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
         ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
         if (value >= VELK_LIGHT_ONE_VALUE) {
             if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
-            // From its cluster's sphere, or its whole mesh's.
+            // From its cluster's sphere, or its whole mesh's, or a shape's box's middle.
             uint sphere = entry == 0xFFFFFFFFu ? VELK_LIGHT_WORDS.data[record + VELK_RECORD_MESH_TABLE]
                         : VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_TABLE] + VELK_LIGHT_WORDS.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE;
-            vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
+            vec3 local = sphere == VELK_LIGHT_NONE ? vec3(0.5)
+                       : vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
                               uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
             velk_light_add_one(value, velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g), lights,
                                sums);
@@ -1836,10 +1837,19 @@ void main()
         float scale = max(max(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)),
                           length(to_world[2] * inst.size.z));
         uint sphere = kind == VELK_LIGHT_TRACE_MESH ? table : table + VELK_LOD_CLUSTER_OWN_SPHERE;
-        vec3 local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
-                          uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
+        vec3 local = vec3(0.5);
+        if (sphere == VELK_LIGHT_NONE) {
+            // A shape without a mesh's table: from the middle of its instance's box, out of
+            // the sphere around it; a flat one only just off itself, having nothing to clear.
+            float thickness = min(min(length(to_world[0] * inst.size.x), length(to_world[1] * inst.size.y)),
+                                  length(to_world[2] * inst.size.z));
+            radius = thickness <= scale * 1e-4 ? scale * 1e-3 : 0.5 * length(to_world * inst.size.xyz);
+        } else {
+            local = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere]), uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 1u]),
+                         uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 2u]));
+            radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 3u]) * scale;
+        }
         center = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-        radius = uintBitsToFloat(VELK_LIGHT_WORDS.data[sphere + 3u]) * scale;
     }
     // Read by all threads before the first writes it, at the end.
     uint old = VELK_LIGHT_WORDS.data[word];
@@ -2377,8 +2387,7 @@ vec3 velk_probe_light(uint index, vec3 at, vec3 n)
 // value's lights are chosen at. Its record's, at the hit; for a quad, the node as wide as
 // kLightPixels over it, at the node's centre, as the lighting pass finds it. All VELK_LIGHT_NONE
 // for none. `ask` is whether a hit may ask for its one value to be traced (velk_probe_ask): not
-// for a record for light only, which light_search_src lays out only from none, nor for a whole
-// mesh without the sphere it is traced from.
+// for a record for light only, which light_search_src lays out only from none.
 void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance, out uint radiance_dir, out vec3 center,
                           out bool ask)
 {
@@ -2411,7 +2420,7 @@ void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance
         radiance = hit.record + VELK_RECORD_RADIANCE;
         radiance_dir = hit.record + VELK_RECORD_RADIANCE_DIR;
     }
-    ask = !velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
+    ask = !velk_cut_light_only(entry);
 }
 
 // Asks for the light at `word` to be traced, for a hit: none yet becomes an untraced one value,
@@ -3277,11 +3286,12 @@ void main()
     uint was = light_words.data[record + VELK_RECORD_LIGHT];
     if (was == VELK_LIGHT_PENDING) return;
     uint instance = d.instances_base + velk_ids_slot(d, ids);
-    // A whole mesh or a shape drawn by its own pass: one value, traced from the mesh's sphere.
+    // A whole mesh or a shape drawn by its own pass: one value, traced from the mesh's sphere, or
+    // a shape without one from its instance's box.
     if (entry == 0xFFFFFFFFu) {
         if (was == VELK_LIGHT_NONE) {
             atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE);
-        } else if (light_words.data[record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu) {
+        } else {
             velk_light_list_one(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_MESH, record, instance,
                                 light_words.data[record + VELK_RECORD_MESH_TABLE], frame);
         }
@@ -4057,7 +4067,7 @@ void main()
         if (instance == VELK_LIGHT_NONE) return;
         if (entry == 0xFFFFFFFFu) {
             uint table = light_words.data[record + VELK_RECORD_MESH_TABLE];
-            if (table != VELK_LIGHT_NONE) velk_light_list_asked(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_MESH, record, instance, table, frame);
+            velk_light_list_asked(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_MESH, record, instance, table, frame);
         } else {
             uint cluster = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
             velk_light_list_asked(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_CLUSTER, record, instance, cluster, frame);
