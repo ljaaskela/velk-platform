@@ -1498,9 +1498,12 @@ void DeferredPath::emit_reflection_pass(ViewState& vs, const RenderView& render_
         td.sampler.mag_filter = SamplerFilter::Nearest;
         td.sampler.min_filter = SamplerFilter::Nearest;
         td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
-        vs.reflect_samples = graph.resources().create_render_texture(td);
         vs.reflect_result[0] = graph.resources().create_render_texture(td);
         vs.reflect_result[1] = graph.resources().create_render_texture(td);
+        // A sample a 2 by 2 block, every one written each frame.
+        td.width = static_cast<int>((width + 1u) / 2u);
+        td.height = static_cast<int>((height + 1u) / 2u);
+        vs.reflect_samples = graph.resources().create_render_texture(td);
         vs.reflect_size = vs.gbuffer_size;
         vs.reflect_fresh = true;
     }

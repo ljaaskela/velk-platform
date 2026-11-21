@@ -132,7 +132,7 @@ public:
         IRenderPass::Ptr light_probes_pass;
         /// The probes' filter, after their gather (light_probes_filter_src).
         IRenderPass::Ptr light_probes_filter_pass;
-        /// Reflections: each pixel's last traced sample, and the resolved result, two that swap
+        /// Reflections: this frame's sample of each 2 by 2 block, and the resolved result, two that swap
         /// each frame (light_probes_main_src with VELK_REFLECT, reflect_resolve_src). The
         /// result the lighting reads is reflect_result[reflect_parity]; `reflect_fresh` while the
         /// last one is not a result yet.

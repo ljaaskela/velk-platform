@@ -2652,26 +2652,28 @@ void velk_probes_gather(uint lane)
 // reflection, the mirror one below VELK_REFLECT_SHARP, else one of its GGX lobe. What the ray
 // hits is lit as a probe's ray finds it (velk_probe_surface, velk_probe_direct,
 // velk_probe_hit_indirect), and its metal reflects the environment; a miss is the environment,
-// as sharp as the reflection is. Into the samples image (pc.extras.x) at the pixel: the light,
-// and how far the ray went, -1 for a miss, 0 for no reflection. pc.extras.y is the G-buffer's
-// size (x low, y high), z its positions, w its normals, pc.more.x its material parameters.
+// as sharp as the reflection is. Into the samples image (pc.extras.x), a texel a block, every one
+// written each frame: the light, and how far the ray went, -1 for a miss, 0 for no reflection.
+// pc.extras.y is the G-buffer's size (x low, y high), z its positions, w its normals, pc.more.x
+// its material parameters.
 void velk_reflect_trace(uint lane)
 {
     uint width = pc.extras.y & 0xFFFFu;
     uint height = pc.extras.y >> 16u;
     uint across = (width + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
-    uint groups_across = ((width + 1u) / 2u + 7u) / 8u;
+    uvec2 blocks = uvec2((width + 1u) / 2u, (height + 1u) / 2u);
+    uint groups_across = (blocks.x + 7u) / 8u;
     uvec2 block = uvec2((gl_WorkGroupID.x % groups_across) * 8u + lane % 8u, (gl_WorkGroupID.x / groups_across) * 4u + lane / 8u);
+    if (block.x >= blocks.x || block.y >= blocks.y) return;
     GlobalData g = VELK_GLOBALS;
     uint k = g.present_counter & 3u;
-    ivec2 pixel = ivec2(block * 2u + uvec2(k & 1u, k >> 1u));
-    if (pixel.x >= int(width) || pixel.y >= int(height)) return;
+    ivec2 pixel = min(ivec2(block * 2u + uvec2(k & 1u, k >> 1u)), ivec2(int(width) - 1, int(height) - 1));
     vec4 mat = texelFetch(velk_textures[nonuniformEXT(pc.more.x)], pixel, 0);
     float roughness = clamp(mat.g, 0.04, 1.0);
     uint mode = uint(mat.b * 255.0 + 0.5);
     vec3 n4 = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], pixel, 0).xyz;
     if (mode == 0u || dot(n4, n4) < 1e-6 || roughness >= VELK_REFLECT_CUTOFF) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], pixel, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], ivec2(block), vec4(0.0));
         return;
     }
     vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], pixel, 0).xyz;
@@ -2709,12 +2711,13 @@ void velk_reflect_trace(uint lane)
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
         light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
-        t = max(hit.t, 1e-4);
+        // Within what half floats hold.
+        t = clamp(hit.t, 1e-4, 65000.0);
     } else {
         // As the lighting blurs the environment for a lobe; a sampled ray is one of the lobe already.
         light = velk_probe_env(dir, roughness < VELK_REFLECT_SHARP ? roughness : 0.0);
     }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], pixel, vec4(light, t));
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], ivec2(block), vec4(min(light, vec3(65000.0)), t));
 }
 #endif
 
@@ -2730,19 +2733,33 @@ void main()
 
 /**
  * The reflections' resolve, after their trace (light_probes_main_src with VELK_REFLECT): a thread a
- * pixel, 8 by 8 a group. A pixel that reflects takes the samples of its 2 by 2 block, each traced
- * within the last four frames, by how much their surfaces agree with its own; a mirror's own
- * sample where it has one. Then, but for a mirror, blended with the last frame's result where the
- * reflection was then: through its image along the view ray, behind the surface by how far the
- * ray went, or for a miss the view ray's direction; kept to the spread of the block's samples.
- * Into this frame's result (pc.more.z): the light, and how many frames it holds, 0 for no
- * reflection. Traces nothing: composed after rt_compute_prelude_src alone. pc.extras.x is the
- * samples image, y the G-buffer's size (x low, y high), z its positions, w its normals; pc.more.x
- * its material parameters, y the last frame's result, w not 0 when there is none.
+ * pixel, 8 by 8 a group. The trace left a sample a 2 by 2 block (pc.extras.x), from the block's
+ * pixel of this frame. A pixel that reflects finds the last frame's result where its reflection
+ * was then: through its image along the view ray, behind the surface by how far the ray went, or
+ * for a miss the view ray's direction; else where the surface was. A mirror takes its own sample
+ * where it is the pixel traced, else that last result, else its block's sample. A glossy surface
+ * takes the samples of the 3 by 3 blocks around, by how much the surfaces they were traced from
+ * agree with its own, blended with the last result kept to their spread. Into this frame's result
+ * (pc.more.z): the light, and how many frames it holds, 0 for no reflection. Traces nothing:
+ * composed after rt_compute_prelude_src alone. pc.extras.y is the G-buffer's size (x low, y
+ * high), z its positions, w its normals; pc.more.x its material parameters, y the last frame's
+ * result, w not 0 when there is none.
  */
 inline constexpr string_view reflect_resolve_src = R"(
 #define VELK_REFLECT_CUTOFF 0.3
 #define VELK_REFLECT_SHARP 0.05
+
+// The last frame's result where the place `at` (relative to the camera, or with `w` 0 a direction)
+// was on screen; no frames off screen.
+vec4 velk_reflect_last(vec3 at, float w, uint width, uint height)
+{
+    GlobalData g = VELK_GLOBALS;
+    vec4 clip = g.prev_view_projection * vec4(w > 0.5 ? at + g.cam_moved : at, w);
+    if (clip.w <= 1e-5) return vec4(0.0);
+    vec2 p = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
+    if (any(lessThan(p, vec2(0.0))) || p.x >= float(width) || p.y >= float(height)) return vec4(0.0);
+    return texelFetch(velk_textures[nonuniformEXT(pc.more.y)], ivec2(p), 0);
+}
 
 void main()
 {
@@ -2760,57 +2777,68 @@ void main()
     vec3 n = normalize(n4);
     vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], coord, 0).xyz;
     ivec2 last = ivec2(int(width) - 1, int(height) - 1);
-    ivec2 base = coord & ivec2(~1);
+    ivec2 blocks_last = ivec2(int((width + 1u) / 2u) - 1, int((height + 1u) / 2u) - 1);
+    uint k = VELK_GLOBALS.present_counter & 3u;
+    ivec2 phase = ivec2(int(k & 1u), int(k >> 1u));
+    ivec2 own_block = coord / 2;
+    bool sharp = roughness < VELK_REFLECT_SHARP;
+    // This frame's samples: the own block's for a mirror, the 3 by 3 blocks' for a glossy surface.
+    int reach = sharp ? 0 : 1;
     vec3 sum = vec3(0.0);
     float total = 0.0;
     vec3 lo = vec3(1e30);
     vec3 hi = vec3(-1e30);
+    vec4 own = vec4(0.0);
     float t_any = 0.0;
-    for (int k = 0; k < 4; ++k) {
-        ivec2 q = min(base + ivec2(k & 1, k >> 1), last);
-        vec4 s = texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], q, 0);
-        if (s.a == 0.0) continue;
-        vec3 qn = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], q, 0).xyz;
-        if (dot(qn, qn) < 1e-6) continue;
-        vec3 qp = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], q, 0).xyz;
-        float w = pow(max(dot(normalize(qn), n), 0.0), 8.0) * exp(-abs(dot(n, qp - pos)) / (0.02 * length(pos) + 1e-3));
-        if (w <= 1e-4) continue;
-        sum += w * s.rgb;
-        total += w;
-        lo = min(lo, s.rgb);
-        hi = max(hi, s.rgb);
-        if (t_any == 0.0) t_any = s.a;
+    for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+            ivec2 b = clamp(own_block + ivec2(dx, dy), ivec2(0), blocks_last);
+            vec4 s = texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], b, 0);
+            if (s.a == 0.0) continue;
+            ivec2 q = min(b * 2 + phase, last);
+            vec3 qn = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], q, 0).xyz;
+            if (dot(qn, qn) < 1e-6) continue;
+            vec3 qp = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], q, 0).xyz;
+            float w = pow(max(dot(normalize(qn), n), 0.0), 8.0) * exp(-abs(dot(n, qp - pos)) / (0.02 * length(pos) + 1e-3));
+            if (w <= 1e-4) continue;
+            sum += w * s.rgb;
+            total += w;
+            lo = min(lo, s.rgb);
+            hi = max(hi, s.rgb);
+            if (dx == 0 && dy == 0) own = s;
+            if (t_any == 0.0) t_any = s.a;
+        }
+    }
+    // The last result, through the reflection's image, else where the surface was.
+    float t = own.a != 0.0 ? own.a : t_any;
+    vec4 was = vec4(0.0);
+    if (pc.more.w == 0u) {
+        vec3 view = normalize(pos);
+        if (t != 0.0) was = t > 0.0 ? velk_reflect_last(pos + view * t, 1.0, width, height) : velk_reflect_last(view, 0.0, width, height);
+        if (was.a <= 0.0) was = velk_reflect_last(pos, 1.0, width, height);
+    }
+    if (sharp) {
+        bool traced = coord == min(own_block * 2 + phase, last);
+        vec3 result = vec3(0.0);
+        float frames = 1.0;
+        if (traced && own.a != 0.0) result = own.rgb;
+        else if (was.a > 0.0) result = was.rgb;
+        else if (total > 0.0) result = sum / total;
+        else frames = 0.0;
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(result, frames));
+        return;
     }
     if (total <= 0.0) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(0.0));
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, was.a > 0.0 ? was : vec4(0.0));
         return;
     }
     vec3 now = sum / total;
-    vec4 own = texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], coord, 0);
-    // A mirror: its own ray, which is the same every time it is traced.
-    if (roughness < VELK_REFLECT_SHARP) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(own.a != 0.0 ? own.rgb : now, 1.0));
-        return;
-    }
-    float t = own.a != 0.0 ? own.a : t_any;
     vec3 history = now;
     float frames = 0.0;
-    if (pc.more.w == 0u) {
-        GlobalData g = VELK_GLOBALS;
-        vec3 view = normalize(pos);
-        vec4 clip = t > 0.0 ? g.prev_view_projection * vec4(pos + view * t + g.cam_moved, 1.0)
-                            : g.prev_view_projection * vec4(view, 0.0);
-        if (clip.w > 1e-5) {
-            vec2 p = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
-            if (all(greaterThanEqual(p, vec2(0.0))) && p.x < float(width) && p.y < float(height)) {
-                vec4 h = texelFetch(velk_textures[nonuniformEXT(pc.more.y)], ivec2(p), 0);
-                if (h.a > 0.0) {
-                    vec3 spread = (hi - lo) * 0.25 + vec3(0.02);
-                    history = clamp(h.rgb, lo - spread, hi + spread);
-                    frames = h.a;
-                }
-            }
-        }
+    if (was.a > 0.0) {
+        vec3 spread = (hi - lo) * 0.25 + vec3(0.02);
+        history = clamp(was.rgb, lo - spread, hi + spread);
+        frames = was.a;
     }
     frames = min(frames + 1.0, 16.0);
     imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(mix(history, now, 1.0 / frames), frames));
