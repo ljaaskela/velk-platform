@@ -387,8 +387,13 @@ void handle(Session& session, const string& line)
         result += ",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"velk-editor\",\"version\":\"0.1.0\"}}";
         respond(*id, result);
     } else if (method == "tools/list") {
+        // One message per line: drop kTools' line breaks.
         string result = "{\"tools\":";
-        result += string_view(kTools, std::strlen(kTools));
+        for (const char* c = kTools; *c; ++c) {
+            if (*c != '\n') {
+                result += string_view(c, 1);
+            }
+        }
         result += "}";
         respond(*id, result);
     } else if (method == "tools/call") {
