@@ -233,6 +233,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(SumRecords, SUM_RECORDS, 93)               /* summed: records tested */                                        \
     X(SumRays, SUM_RAYS, 94)                     /* summed: rays */                                                  \
     X(SumSteps, SUM_STEPS, 95)                   /* summed: walk steps, in sixteens */                               \
+    X(PointRaysCharged, POINT_RAYS_CHARGED, 96)  /* rays the traced points were charged this frame, against RAY_BUDGET */ \
     X(SumFirstTraces, SUM_FIRST_TRACES, 98)      /* summed: points traced the first time */                          \
     X(SumLaterTraces, SUM_LATER_TRACES, 99)      /* summed: points traced again */                                   \
     X(DeepestTrace, DEEPEST_TRACE, 100)          /* the deepest walk stack in the trace, until the log */            \
@@ -1531,6 +1532,7 @@ uint velk_points_hash(uint x)
 }
 
 uint g_rays = 0u;        // the rays this thread cast
+uint g_rays_charged = 0u; // the rays its point was charged against the budget, cast or not
 uint g_first_rays = 0u;  // of those, for lights traced for the first time
 
 // How much of the light from a point of `light` chosen by `seed` is kept from `p` (facing `n`,
@@ -1582,6 +1584,7 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, ui
 void velk_points_count(uint pool)
 {
     if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_CAST], g_rays);
+    if (g_rays_charged != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_POINT_RAYS_CHARGED], g_rays_charged);
     // Exact, as the frame's budget in rays is made from it.
     if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_STEPS], velk_ray_steps);
     if (g_first_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS], g_first_rays);
@@ -1628,7 +1631,9 @@ uint velk_points_pick(uint slots[VELK_LIGHT_SLOTS], vec3 p, uint seed)
 // moving that slot toward what the ray found.
 // Where a point of light is: a vertex of a cluster (`vertex`), or weights `b` of the corners of
 // triangle `triangle`, which for a coarse point (`around`) move up to half a step of its grid
-// (`step_a`, `step_b`) each way, by an R2 sequence from `start`.
+// (`step_a`, `step_b`) each way, by an R2 sequence from `start`, from its trace 1 on: its first
+// is on the grid point itself, as a point traced from none over and over (lights moving) would
+// otherwise always sample one place half a step off, which may be under something standing there.
 struct VelkPointPlace
 {
     uint instance;
@@ -1660,7 +1665,7 @@ void velk_point_place(VelkPointPlace at, uint trace, out vec3 p, out vec3 n, out
                       uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
     } else {
         vec3 b = at.b;
-        if (at.around) {
+        if (at.around && trace > 0u) {
             vec2 r = fract(at.start + float(trace) * vec2(0.7548777, 0.5698403)) - 0.5;
             b += r.x * at.step_a + r.y * at.step_b;
             b = max(b, vec3(0.0));
@@ -1844,7 +1849,10 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         // Stored as one more.
         traces = four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
         atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
+        // What the budget charged it (velk_points_trace_point's from_none), whatever it cast.
+        g_rays_charged = from_none;
     } else {
+        g_rays_charged = 1u;
         // Warming up, a running mean of its rays.
         float step = 1.0 / float(traces + 1u);
         value = old;
@@ -4429,7 +4437,10 @@ void main()
             light_words.data[pool + VELK_POOL_TRACES] = 0u;
             light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
             light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
+            // What the frame's work was charged: the lights listed for tracing and the points.
+            const uint charged = light_words.data[pool + VELK_POOL_RAYS_LISTED] + light_words.data[pool + VELK_POOL_POINT_RAYS_CHARGED];
             light_words.data[pool + VELK_POOL_RAYS_LISTED] = 0u;
+            light_words.data[pool + VELK_POOL_POINT_RAYS_CHARGED] = 0u;
             light_words.data[pool + VELK_POOL_LAST_FIRST_POINTS] = light_words.data[pool + VELK_POOL_FIRST_POINTS];
             light_words.data[pool + VELK_POOL_LAST_LATER_POINTS] = light_words.data[pool + VELK_POOL_LATER_POINTS];
             light_words.data[pool + VELK_POOL_LAST_COARSE_POINTS] = light_words.data[pool + VELK_POOL_COARSE_POINTS];
@@ -4444,13 +4455,16 @@ void main()
             light_words.data[pool + VELK_POOL_FIRST_POINTS] = 0u;
             light_words.data[pool + VELK_POOL_LATER_POINTS] = 0u;
             light_words.data[pool + VELK_POOL_LATER_RESTARTS] = 0u;
-            // The frame's budget in rays, from the steps a ray took the last frame that cast a
+            // The frame's budget in rays as the work is charged them (a light or a point traced
+            // from none its rays for every light, though it casts none for a light facing away
+            // or out of reach), from the steps the last frame's charged rays took, if it cast a
             // work group's worth, so that a few short rays do not set it, or any rays while it
             // has none yet; and what first traces asked for, which others leave to them.
             uint rays = light_words.data[pool + VELK_POOL_RAYS_CAST];
             if (rays >= 64u || (rays != 0u && light_words.data[pool + VELK_POOL_RAY_BUDGET] == 0u)) {
                 float steps = max(float(light_words.data[pool + VELK_POOL_STEPS]), 1.0);
-                light_words.data[pool + VELK_POOL_RAY_BUDGET] = uint(min(float(light_words.data[pool + VELK_POOL_STEP_BUDGET]) * float(rays) / steps, 4.0e9));
+                light_words.data[pool + VELK_POOL_RAY_BUDGET] =
+                    uint(min(float(light_words.data[pool + VELK_POOL_STEP_BUDGET]) * float(max(charged, rays)) / steps, 4.0e9));
             }
             light_words.data[pool + VELK_POOL_LAST_FIRST_RAYS_ASKED] = light_words.data[pool + VELK_POOL_FIRST_RAYS_ASKED];
             light_words.data[pool + VELK_POOL_FIRST_RAYS_ASKED] = 0u;
