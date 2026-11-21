@@ -351,6 +351,10 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 // A point list entry's point (VELK_POINT_ENTRY_POINT) with this is a piece's point, and its
 // first (VELK_POINT_ENTRY_FIRST) the piece's page.
 #define VELK_LIGHT_POINT_PIECE 0x80000000u
+// A piece's point listed as its pixel's coarse level: its rays start anywhere around it, half a
+// step of its grid each way, so that its light is that of the place around it and a shadow thinner
+// than its spacing shows as partial light (velk_points_trace_point).
+#define VELK_LIGHT_POINT_COARSE 0x40000000u
 // A split list entry's how (VELK_SPLIT_ENTRY_HOW) with this asks for a triangle's root.
 #define VELK_LIGHT_SPLIT_ROOT 0x80000000u
 // kLightSearchCapacity, kLightSplitCapacity, kLightTraceCapacity, kLightTraceWords.
@@ -728,9 +732,17 @@ float velk_piece_spacing(uint depth, uint root_level, float tri_px)
 }
 
 // The level of a root's grid for a triangle whose longest edge is `tri_px` pixels long, its points
-// about `light_pixels` apart: one of VELK_PIECE_ROOT_LEVELS.
+// about `light_pixels` apart: one of VELK_PIECE_ROOT_LEVELS. A triangle at least twice
+// VELK_LIGHT_COARSE_PIECES times that long gets the coarsest grid whose points are still that far
+// apart, so that its root is its coarse level, whose points look for thin shadows between them
+// (VELK_LIGHT_POINT_COARSE), and not its vertices.
 uint velk_piece_root_level(float tri_px, float light_pixels)
 {
+    float coarse = VELK_LIGHT_COARSE_PIECES * light_pixels;
+    if (tri_px >= 2.0 * coarse) {
+        uint n = uint(clamp(floor(tri_px / coarse), 2.0, float(VELK_PIECE_LEVEL)));
+        return n == 5u ? 4u : n;
+    }
     uint n = uint(clamp(ceil(tri_px / light_pixels), 2.0, float(VELK_PIECE_LEVEL)));
     return n == 5u ? VELK_PIECE_LEVEL : n;
 }
@@ -1122,12 +1134,12 @@ void velk_light_list_point(uint pool, uint first, uint p, uint instance, uint fr
 }
 
 // Puts point `q` of the piece at page `page`, whose record's first page starts at `first`, on a
-// point list (velk_light_list_at).
+// point list (velk_light_list_at); a `coarse` one sampled around it (VELK_LIGHT_POINT_COARSE).
 void velk_light_list_piece_point(uint pool, uint page, uint q, uint first, uint instance, uint frame, bool coarse)
 {
     if (q >= VELK_PIECE_POINTS) return;
-    velk_light_list_at(pool, velk_light_page(pool, page) + 2u * q, first, page, q | VELK_LIGHT_POINT_PIECE, instance, frame,
-                       coarse);
+    uint point = q | VELK_LIGHT_POINT_PIECE | (coarse ? VELK_LIGHT_POINT_COARSE : 0u);
+    velk_light_list_at(pool, velk_light_page(pool, page) + 2u * q, first, page, point, instance, frame, coarse);
 }
 )"
 
@@ -1641,6 +1653,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     // A piece's point: its page, and its record's first page and triangle from its owner word.
     uint piece = VELK_LIGHT_NONE;
     uint piece_triangle = 0u;
+    bool around = (q & VELK_LIGHT_POINT_COARSE) != 0u;
+    q &= ~VELK_LIGHT_POINT_COARSE;
     if ((q & VELK_LIGHT_POINT_PIECE) != 0u) {
         piece = first;
         q &= ~VELK_LIGHT_POINT_PIECE;
@@ -1688,6 +1702,20 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         uvec2 ab = velk_piece_place(q);
         if (ab.x + ab.y > velk_piece_level(place)) return;
         vec3 b = velk_piece_weights(place, ab);
+        if (around) {
+            // A coarse point: somewhere within half a step of its grid each way, a different place
+            // each of its traces, spread evenly over them (an R2 sequence from a start of its own),
+            // kept in its triangle.
+            uint state_now = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + 2u * q + 1u];
+            uint trace = state_now == VELK_LIGHT_NONE ? 0u : state_now >> 28u;
+            uint own = velk_points_hash(piece * 977u + q);
+            vec2 start = vec2(float(own & 0xFFFFu), float(own >> 16u)) / 65536.0;
+            vec2 r = fract(start + float(trace) * vec2(0.7548777, 0.5698403)) - 0.5;
+            vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
+            b += r.x * (velk_piece_weights(place, uvec2(1u, 0u)) - b0) + r.y * (velk_piece_weights(place, uvec2(0u, 1u)) - b0);
+            b = max(b, vec3(0.0));
+            b /= max(b.x + b.y + b.z, 1e-6);
+        }
         local = vec3(0.0);
         normal = vec3(0.0);
         for (uint k = 0u; k < 3u; ++k) {
@@ -3047,9 +3075,8 @@ void main()
  *
  * Then, in kLightSplitCapacity more groups, makes the pieces the split list asks for, a work
  * group an ask: a triangle's root, or a piece's children, down to the depth asked, every level
- * whole. Their points start untraced, but for those they share with the level above, which take
- * its light: a root's corners from the vertices' points, a child's from its parent's. They are
- * linked in last, so that nothing reads them before they are written.
+ * whole. Their points start untraced, but for a root's corners, which take the vertices' points'
+ * light. They are linked in last, so that nothing reads them before they are written.
  */
 inline constexpr string_view light_search_src = R"(
 #version 450
@@ -3233,8 +3260,10 @@ uint velk_split_place(uint level, uint q)
     return place;
 }
 
-// Writes piece `q` at level `level` of the pieces being made, its points untraced but for those
-// its parent shares, or for a root its corners, which the vertices' points give.
+// Writes piece `q` at level `level` of the pieces being made, its points untraced but for a root's
+// corners, which the vertices' points give. A child traces even the points it shares with its
+// parent at its own places: its parent's may be light sampled around them (VELK_LIGHT_POINT_COARSE),
+// and the parent shows under it until they are traced.
 void velk_split_write(uint level, uint q, uint frame)
 {
     uint pool = pc.pool_word;
@@ -3248,8 +3277,6 @@ void velk_split_write(uint level, uint q, uint frame)
     light_words.data[at + VELK_PIECE_OWNER] = s_record | (s_triangle << 24u);
     light_words.data[at + VELK_PIECE_PARENT] = level == 0u ? VELK_LIGHT_NONE : velk_split_page(level - 1u, q >> 2u);
     light_words.data[at + VELK_PIECE_READ] = frame;
-    uint parent_at = level == 0u ? 0u : velk_light_page(pool, velk_split_page(level - 1u, q >> 2u));
-    uint parent_place = level == 0u ? 0u : velk_split_place(level - 1u, q >> 2u);
     for (uint p = 0u; p < VELK_PIECE_POINTS; ++p) {
         uint shade = VELK_LIGHT_NONE;
         uint state = VELK_LIGHT_NONE;
@@ -3268,16 +3295,6 @@ void velk_split_write(uint level, uint q, uint frame)
                 if (v < light_words.data[s_record_first + VELK_PAGE_VERTICES]) {
                     from_word = velk_light_own_word(pool, s_record_first, v);
                     from_blocker = velk_light_blocker_word(pool, s_record_first, v);
-                }
-            }
-        } else {
-            // A point at an even step of this level is one of its parent's.
-            ivec2 x = velk_piece_point_at(place, ab);
-            if (((x.x | x.y) & 1) == 0) {
-                uint shared_point = velk_piece_point_of(parent_place, x / 2);
-                if (shared_point != VELK_LIGHT_NONE) {
-                    from_word = parent_at + 2u * shared_point;
-                    from_blocker = velk_light_page_blocker(pool, velk_split_page(level - 1u, q >> 2u), 2u * shared_point);
                 }
             }
         }
