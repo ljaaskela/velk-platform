@@ -332,6 +332,12 @@ inline void emit_draw_calls(
         const IBatch& batch = *batch_ptr;
 
         if (frustum && !::velk::render::aabb_in_frustum(*frustum, batch.world_aabb())) {
+            // Not drawn, but rays may hit it, and name its draw: its record is written all the same,
+            // once a frame (the second phase follows the first).
+            if (!second_phase) {
+                WrittenDrawData unseen;
+                write_draw_data(batch, resources, defaults, view_globals_base, snippets, resolve_ctx, unseen, cut_words);
+            }
             continue;
         }
 
