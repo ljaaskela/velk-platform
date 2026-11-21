@@ -13,6 +13,7 @@ target_link_libraries(velk_editor_core PRIVATE velk)
 target_include_directories(velk_editor_core
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<TARGET_PROPERTY:velk_remote,INTERFACE_INCLUDE_DIRECTORIES>
+            $<TARGET_PROPERTY:velk_importer,INTERFACE_INCLUDE_DIRECTORIES>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 

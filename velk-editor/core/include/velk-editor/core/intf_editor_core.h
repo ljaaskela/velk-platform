@@ -2,6 +2,7 @@
 #define VELK_EDITOR_INTF_EDITOR_CORE_H
 
 #include <velk/api/object_ref.h>
+#include <velk/interface/intf_future.h>
 #include <velk/interface/intf_metadata.h>
 #include <velk/string.h>
 
@@ -40,7 +41,13 @@ public:
         (RPROP, uint32_t, revision, 0),        ///< Increases each time the tree is read again.
         (FN, ReturnValue, attach, (string, host), (uint32_t, port)), ///< Attaches to an application's editor endpoint.
         (FN, void, detach),                    ///< Closes the connection.
-        (FN, void, refresh)                    ///< Reads the tree again; ignored while a read runs.
+        (FN, void, refresh),                   ///< Reads the tree again; ignored while a read runs.
+        /// Resolves to a string: the object's class, properties with store-file JSON values, and attachments, as JSON.
+        (FN, IFuture::Ptr, describe, (uint64_t, object)),
+        /// Sets a property from a store-file JSON value. Resolves to a ReturnValue.
+        (FN, IFuture::Ptr, set, (uint64_t, object), (string, name), (string, json)),
+        /// Resolves to vector<uint8_t>: the application window's last frame as PNG, empty on failure.
+        (FN, IFuture::Ptr, capture, (uint32_t, window))
     )
 };
 

@@ -1,6 +1,9 @@
 #include "editor_core.h"
 
+#include <velk/api/future.h>
 #include <velk/api/hierarchy.h>
+#include <velk/interface/intf_array_any.h>
+#include <velk/plugins/importer/plugin.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 
@@ -19,7 +22,296 @@ string class_name_of(Uid uid)
     return string("?");
 }
 
+void append_quoted(string& out, string_view s)
+{
+    out += "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') {
+            out += "\\";
+        }
+        if (static_cast<unsigned char>(c) >= 0x20) {
+            out += string_view(&c, 1);
+        }
+    }
+    out += "\"";
+}
+
+void append_number(string& out, uint64_t n)
+{
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(n));
+    out += string_view(buf, std::strlen(buf));
+}
+
+size_t element_size_of(Uid element_type)
+{
+    auto probe = instance().create_any(element_type);
+    return probe ? probe->get_data_size(element_type) : 0;
+}
+
+/// A value read from the application, as an IAny of its type; null for types not registered here.
+IAny::Ptr any_from(const RemoteValue& v)
+{
+    if (v.form != RemoteValue::Form::String && !instance().type_registry().find_factory(v.type)) {
+        return nullptr;
+    }
+    switch (v.form) {
+    case RemoteValue::Form::Bytes: {
+        auto any = instance().create_any(v.type);
+        if (!any || any->get_data_size(v.type) != v.data.size()
+            || failed(any->set_data(v.data.data(), v.data.size(), v.type))) {
+            return nullptr;
+        }
+        return any;
+    }
+    case RemoteValue::Form::String: {
+        string s(string_view(reinterpret_cast<const char*>(v.data.data()), v.data.size()));
+        auto any = instance().create_any(type_uid<string>());
+        return any && succeeded(any->set_data(&s, sizeof(s), type_uid<string>())) ? any : nullptr;
+    }
+    case RemoteValue::Form::Array: {
+        auto any = instance().create_any(v.type);
+        auto* array = interface_cast<IArrayAny>(any);
+        if (!array) {
+            return nullptr;
+        }
+        if (!v.data.empty()) {
+            const size_t size = element_size_of(v.element_type);
+            if (!size || v.data.size() % size
+                || failed(array->set_from_buffer(v.data.data(), v.data.size() / size, v.element_type))) {
+                return nullptr;
+            }
+            return any;
+        }
+        for (auto& e : v.elements) {
+            auto element = any_from(e);
+            if (!element || failed(array->push_back(*element))) {
+                return nullptr;
+            }
+        }
+        return any;
+    }
+    default:
+        return nullptr;
+    }
+}
+
+/// @p any, a value of @p type, as it is sent to the application.
+bool remote_from(const IAny& any, Uid type, RemoteValue& out)
+{
+    out = {};
+    out.type = type;
+    if (type == type_uid<string>()) {
+        string s;
+        if (failed(any.get_data(&s, sizeof(s), type))) {
+            return false;
+        }
+        out.form = RemoteValue::Form::String;
+        out.data.resize(s.size());
+        if (!s.empty()) {
+            std::memcpy(out.data.data(), s.data(), s.size());
+        }
+        return true;
+    }
+    if (auto* array = interface_cast<IArrayAny>(const_cast<IAny*>(&any))) {
+        out.form = RemoteValue::Form::Array;
+        out.element_type = array->element_type();
+        const size_t n = array->array_size();
+        const size_t size = element_size_of(out.element_type);
+        if (size) {
+            out.data.resize(n * size);
+            if (n == 0 || succeeded(array->get_buffer(out.data.data(), n, out.element_type))) {
+                return true;
+            }
+            out.data.clear();
+        }
+        out.elements.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            auto element = instance().create_any(out.element_type);
+            if (!element || failed(array->get_at(i, *element))
+                || !remote_from(*element, out.element_type, out.elements[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    const size_t size = any.get_data_size(type);
+    if (!size) {
+        return false;
+    }
+    out.form = RemoteValue::Form::Bytes;
+    out.data.resize(size);
+    return succeeded(any.get_data(out.data.data(), size, type));
+}
+
 } // namespace
+
+IJsonValueCodec* EditorCore::codec() const
+{
+    if (!codec_) {
+        codec_ = instance().create<IJsonValueCodec>(::velk::ClassId::JsonImporter);
+    }
+    return codec_.get();
+}
+
+string EditorCore::value_json(const RemoteValue& value) const
+{
+    if (value.form == RemoteValue::Form::Object) {
+        // Object references by handle until objects carry their store ids (#85).
+        string out;
+        if (value.object) {
+            out += "{\"ref\":";
+            append_number(out, value.object);
+            out += "}";
+        } else {
+            out += "null";
+        }
+        return out;
+    }
+    auto any = any_from(value);
+    auto* c = codec();
+    string json = any && c ? c->to_json(*any, value.type) : string();
+    return json.empty() ? string("null") : json;
+}
+
+bool EditorCore::json_value(string_view json, Uid type, RemoteValue& out) const
+{
+    auto* c = codec();
+    auto any = c ? c->from_json(json, type) : nullptr;
+    return any && remote_from(*any, type, out);
+}
+
+string EditorCore::description_json(const RemoteDescription& d) const
+{
+    string out = "{\"object\":";
+    append_number(out, d.handle);
+    if (!d.alive) {
+        out += ",\"alive\":false}";
+        return out;
+    }
+    out += ",\"class\":";
+    append_quoted(out, d.class_name);
+    out += ",\"properties\":{";
+    bool first = true;
+    for (auto& p : d.properties) {
+        if (!first) {
+            out += ",";
+        }
+        first = false;
+        append_quoted(out, p.name);
+        out += ":";
+        out += succeeded(p.status) ? value_json(p.value) : string("null");
+    }
+    out += "},\"read_only\":[";
+    first = true;
+    for (auto& p : d.properties) {
+        if (p.flags & ObjectFlags::ReadOnly) {
+            if (!first) {
+                out += ",";
+            }
+            first = false;
+            append_quoted(out, p.name);
+        }
+    }
+    out += "],\"attachments\":[";
+    for (size_t i = 0; i < d.attachments.size(); ++i) {
+        if (i) {
+            out += ",";
+        }
+        out += "{\"object\":";
+        append_number(out, d.attachments[i].handle);
+        out += ",\"class\":";
+        append_quoted(out, class_name_of(d.attachments[i].class_uid));
+        out += "}";
+    }
+    out += "]";
+    if (d.is_hierarchy) {
+        out += ",\"hierarchy_root\":";
+        append_number(out, d.hierarchy_root.handle);
+    }
+    out += "}";
+    return out;
+}
+
+IFuture::Ptr EditorCore::fn_describe(uint64_t object)
+{
+    IFuture::Ptr future = instance().create_future();
+    Promise promise(future);
+    if (!client_ || !client_.is_connected()) {
+        promise.set_value(string("{\"error\":\"not attached\"}"));
+        return future;
+    }
+    IEditorCore::WeakPtr weak = get_self<IEditorCore>();
+    const RemoteHandle handles[] = {object};
+    client_.describe(handles).then([weak, promise](const RemoteDescriptions& d) mutable {
+        auto self = weak.lock();
+        auto* core = static_cast<EditorCore*>(self.get());
+        promise.set_value(core && !d.items.empty() ? core->description_json(d.items[0]) : string("null"));
+    });
+    return future;
+}
+
+IFuture::Ptr EditorCore::fn_set(uint64_t object, string name, string json)
+{
+    IFuture::Ptr future = instance().create_future();
+    Promise promise(future);
+    if (!client_ || !client_.is_connected()) {
+        promise.set_value(ReturnValue::Fail);
+        return future;
+    }
+    // The property's type comes from its current value.
+    IEditorCore::WeakPtr weak = get_self<IEditorCore>();
+    const RemotePropertyName names[] = {{object, name}};
+    client_.get(names).then([weak, promise, object, name, json](const RemotePropertyValues& got) mutable {
+        auto self = weak.lock();
+        auto* core = static_cast<EditorCore*>(self.get());
+        RemoteValue value;
+        if (!core || got.items.empty() || failed(got.items[0].status)
+            || !core->json_value(json, got.items[0].value.type, value)) {
+            promise.set_value(ReturnValue::Fail);
+            return;
+        }
+        const RemotePropertyValue values[] = {{object, name, {}, value}};
+        core->client_.set(values).then([promise](const RemoteResults& results) mutable {
+            promise.set_value(results.items.empty() ? ReturnValue::Fail : results.items[0]);
+        });
+    });
+    return future;
+}
+
+IFuture::Ptr EditorCore::fn_capture(uint32_t window)
+{
+    IFuture::Ptr future = instance().create_future();
+    Promise promise(future);
+    if (!client_ || !client_.is_connected()) {
+        promise.set_value(vector<uint8_t>{});
+        return future;
+    }
+    IEditorCore::WeakPtr weak = get_self<IEditorCore>();
+    client_.roots().then([weak, promise, window](const RemoteRoots& roots) mutable {
+        auto self = weak.lock();
+        auto* core = static_cast<EditorCore*>(self.get());
+        RemoteHandle app = 0;
+        for (auto& r : roots.items) {
+            if (r.name == "app") {
+                app = r.object.handle;
+            }
+        }
+        if (!core || !app) {
+            promise.set_value(vector<uint8_t>{});
+            return;
+        }
+        const RemoteCall calls[] = {{app, "capture", {make_remote_value(window)}}};
+        core->client_.call(calls).then([promise](const RemoteCallResults& results) mutable {
+            vector<uint8_t> png;
+            if (!results.items.empty() && results.items[0].value.form == RemoteValue::Form::Array) {
+                png = results.items[0].value.data;
+            }
+            promise.set_value(png);
+        });
+    });
+    return future;
+}
 
 EditorCore::EditorCore()
 {

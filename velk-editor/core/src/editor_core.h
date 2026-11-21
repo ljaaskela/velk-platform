@@ -4,6 +4,7 @@
 #include <velk/api/event.h>
 #include <velk/ext/object.h>
 #include <velk/interface/intf_hierarchy.h>
+#include <velk/plugins/importer/interface/intf_importer_plugin.h>
 #include <velk/plugins/remote/api/remote.h>
 
 #include <velk-editor/core/intf_editor_core.h>
@@ -31,6 +32,9 @@ public:
     ReturnValue fn_attach(string host, uint32_t port) override;
     void fn_detach() override;
     void fn_refresh() override;
+    IFuture::Ptr fn_describe(uint64_t object) override;
+    IFuture::Ptr fn_set(uint64_t object, string name, string json) override;
+    IFuture::Ptr fn_capture(uint32_t window) override;
 
 private:
     /** @brief A tree read in progress: a few batched round trips, one per hierarchy level. */
@@ -61,8 +65,17 @@ private:
     /** @brief Empties the tree and marks the core detached. */
     void detached();
 
+    /** @brief The importer's JSON value codec, created on first use. */
+    IJsonValueCodec* codec() const;
+    /** @brief Store-file JSON of a value read from the application; "null" when it cannot be written. */
+    string value_json(const RemoteValue& value) const;
+    /** @brief A value of @p type read from store-file JSON, for sending to the application. */
+    bool json_value(string_view json, Uid type, RemoteValue& out) const;
+    string description_json(const RemoteDescription& description) const;
+
     RemoteClient client_;
     ScopedHandler disconnected_;
+    mutable IJsonValueCodec::Ptr codec_;
     IHierarchy::Ptr tree_;
     IObject::Ptr top_;
     std::unordered_map<RemoteHandle, IObject::Ptr> nodes_;
