@@ -826,6 +826,24 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
+    // The draws by cluster name the culling arena's buffer (their commands and counts) and the
+    // mesh-word arena's (their indices), which growing replaces, as loading detail grows the
+    // second at any frame: drawn from a replaced one, the recorded passes are made again. A
+    // grown buffer can have the old one's address, so its size counts too.
+    {
+        auto culling = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+        auto mesh_words = ctx.resources->shared_arena(IRenderBackend::kGlobalMeshWords, sizeof(uint32_t));
+        IGpuBuffer* buffers[2] = {culling ? culling->buffer() : nullptr, mesh_words ? mesh_words->buffer() : nullptr};
+        for (uint32_t k = 0; k < 2; ++k) {
+            const size_t size = buffers[k] ? buffers[k]->size_bytes() : 0;
+            if (buffers[k] != vs.draw_buffers[k] || size != vs.draw_buffer_sizes[k]) {
+                vs.draw_buffers[k] = buffers[k];
+                vs.draw_buffer_sizes[k] = size;
+                vs.visibility_dirty = true;
+                vs.transparent_dirty = true;
+            }
+        }
+    }
     // The draws name the view's quad list, the records of items drawn by their own pass and
     // which of those are drawn by their clusters, which culling makes again when batches change.
     CutDrawWords cut_draw_words = instance_cut_draw_words(vs.instance_cull);

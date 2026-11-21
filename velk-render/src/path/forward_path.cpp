@@ -119,6 +119,21 @@ void ForwardPath::build_passes(IViewEntry& entry,
     if (cache.instance_cull.arena_generation != culling_generation) {
         cache.dirty = true;
     }
+    // Likewise the mesh-word arena's, which loading detail grows at any frame. A grown buffer
+    // can have the old one's address, so its size counts too.
+    {
+        auto culling = ctx.resources ? ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t)) : nullptr;
+        auto mesh_words = ctx.resources ? ctx.resources->shared_arena(IRenderBackend::kGlobalMeshWords, sizeof(uint32_t)) : nullptr;
+        IGpuBuffer* buffers[2] = {culling ? culling->buffer() : nullptr, mesh_words ? mesh_words->buffer() : nullptr};
+        for (uint32_t k = 0; k < 2; ++k) {
+            const size_t size = buffers[k] ? buffers[k]->size_bytes() : 0;
+            if (buffers[k] != cache.draw_buffers[k] || size != cache.draw_buffer_sizes[k]) {
+                cache.draw_buffers[k] = buffers[k];
+                cache.draw_buffer_sizes[k] = size;
+                cache.dirty = true;
+            }
+        }
+    }
 
     emit_cached_view_pass(
         cache.pass, cache.dirty, "forward", graph,

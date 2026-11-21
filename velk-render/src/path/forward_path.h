@@ -84,6 +84,10 @@ private:
         /// cmd buffer's baked VkImage handles are stale and the pass
         /// must re-record.
         IGpuTexture* last_target_texture = nullptr;
+        /// The culling arena's and the mesh-word arena's buffers, and their sizes, that the
+        /// recorded draws by cluster name; another has them made again.
+        IGpuBuffer* draw_buffers[2] = {};
+        size_t draw_buffer_sizes[2] = {};
     };
     std::unordered_map<IViewEntry*, CachedPass> cached_passes_;
 };

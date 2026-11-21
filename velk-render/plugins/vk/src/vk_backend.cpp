@@ -3189,10 +3189,12 @@ void VkBackend::flush_buffer_writes()
         std::memcpy(static_cast<uint8_t*>(mapped) + queued_total, merged.data(), merged.size());
     }
 
-    // Earlier frames may still read these ranges. Execution dependency only:
-    // the copies wait for those reads on the GPU, not on the CPU.
+    // Earlier frames may still read these ranges, and shaders write the same buffers (the
+    // culling's counts and lists): the copies wait for both on the GPU, not on the CPU, and
+    // the writes are made available before the copies overwrite.
     VkMemoryBarrier before{};
     before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(sync.command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
@@ -3211,11 +3213,12 @@ void VkBackend::flush_buffer_writes()
         }
     }
 
-    // Host reads too, for IGpuArena::read_at.
+    // For what reads them after, and what writes them after (a shader's or a clear's write
+    // must not land before the copy's); host reads too, for IGpuArena::read_at.
     VkMemoryBarrier after{};
     after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(sync.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after,
                          0, nullptr, 0, nullptr);
@@ -3468,7 +3471,9 @@ void VkBackend::wait_for_frame_completion(uint64_t marker)
 
 uint64_t VkBackend::pending_frame_completion_marker() const
 {
-    return next_frame_value_.load();
+    // The frame being recorded, or the next one between frames, takes its value after those
+    // closed and still queued for their submit.
+    return closed_frame_completion_marker() + 1u;
 }
 
 uint64_t VkBackend::closed_frame_completion_marker() const

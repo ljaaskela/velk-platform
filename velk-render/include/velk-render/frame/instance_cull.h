@@ -3106,6 +3106,9 @@ void main()
             uint list = cull_words.data[cluster_or_table + VELK_TABLE_LIST];
             cull_words.data[list + at] = slot;
             cull_words.data[list + capacity + at] = record;
+        } else {
+            // No room: the count, which the draw's instance count is, gives it back.
+            atomicAdd(cull_words.data[cluster_or_table + VELK_TABLE_COUNT], 0xFFFFFFFFu);
         }
         return;
     }
@@ -3362,6 +3365,9 @@ void main()
             uint list = cull_words.data[table + VELK_TABLE_LIST];
             cull_words.data[list + index] = slot;
             cull_words.data[list + capacity + index] = 0xFFFFFFFFu;
+        } else {
+            // No room: the count, which the draw's instance count is, gives it back.
+            atomicAdd(cull_words.data[table + VELK_TABLE_COUNT], 0xFFFFFFFFu);
         }
     }
 
@@ -3491,6 +3497,10 @@ void main()
         uint list = cull_words.data[table + VELK_TABLE_LIST];
         cull_words.data[list + position] = slot;
         cull_words.data[list + capacity + position] = 0xFFFFFFFFu;
+    } else {
+        // No room: the count, which the second draw's instance count is, gives it back, so that
+        // it never reads past the list.
+        atomicAdd(cull_words.data[table + VELK_TABLE_SECOND_COUNT], 0xFFFFFFFFu);
     }
 
     uint first_entry = cull_words.data[table + VELK_TABLE_FIRST_ENTRY];
