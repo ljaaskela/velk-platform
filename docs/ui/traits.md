@@ -135,7 +135,7 @@ Each element's Constraint-phase traits describe its box (`describe()`): size, ma
 * **Measure** (bottom-up): an element reports the size it wants for the space offered, and per axis whether it takes whatever it is given. Content is measured only where the size is auto, or by a Layout-phase trait such as Stack.
 * **Arrange** (top-down): the parent gives each child a rectangle. The child takes its margin off, sizes itself, and places itself by its alignment: its own `Align`, else the parent's. Then it arranges its children in its content rectangle.
 
-A Layout-phase trait measures and places the children through `ILayoutContext`. Without one, children pile up at the start of the content rectangle; an element with no layout traits fills its parent.
+A Layout-phase trait measures and places the children through `ILayoutContext`. Without one, each child is placed on its own in the parent's content rectangle, so children overlap: at its top-left corner plus the child's margin, sized by the child's `FixedSize` (filling the rectangle without one), unless the child sets its own alignment with `Align`.
 
 `Stack` gives children with a fixed or auto size along its axis that size, and shares what is left between the children that take the space offered. Across the axis it places them by its `align` property (`fill` by default).
 
