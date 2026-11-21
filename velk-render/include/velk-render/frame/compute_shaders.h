@@ -1414,10 +1414,12 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 // The bounce light at a pixel from the screen probes around it (light_probes_main_src, this
 // frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
 // near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
-// surface's plane. False where none of them has a surface like it.
-bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, out vec3 light)
+// surface's plane. `along` is the same probes' light seen from `r`, for a rough reflection along
+// it. False where none of them has a surface like it.
+bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along)
 {
     light = vec3(0.0);
+    along = vec3(0.0);
     if (pc.spare1 == 0xFFFFFFFFu) return false;
     const float kProbe = 16.0;
     uint across = (pc.width + 15u) / 16u;
@@ -1437,11 +1439,14 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, out vec3 light)
         float facing = pow(max(dot(pn, n), 0.0), 4.0);
         float plane = exp(-abs(dot(pn, pos - ppos)) / (0.02 * length(pos) + 1e-3));
         float weight = bilinear * facing * plane + 1e-6 * bilinear;
-        light += weight * velk_probe_eval(velk_probe_read(w), pn, n);
+        VelkProbeLight probe = velk_probe_read(w);
+        light += weight * velk_probe_eval(probe, pn, n);
+        along += weight * velk_probe_eval(probe, pn, r);
         total += weight;
     }
     if (total <= 1e-5) return false;
     light /= total;
+    along /= total;
     return true;
 }
 
@@ -1571,18 +1576,23 @@ void main()
         float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
         vec3 env_diffuse = env_miss_color_lod(N, env_max_lod);
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
+
+        // Light from other surfaces and the sky: the screen probes around it, or the environment
+        // where none has a surface like it yet. The same probes seen along the reflection stand in
+        // for a rough reflection, shadowed as the environment is not.
+        vec3 indirect;
+        vec3 probe_specular;
+        bool probed = velk_probe_indirect(coord, world_pos, N, reflect(-V, N), indirect, probe_specular);
+        if (probed) env_specular = probe_specular;
         // Traced reflections (reflect_resolve_src, pc.spare0) where the surface is smooth enough
-        // for them, fading into the environment toward the roughness they stop at.
+        // for them, fading into the rough reflection toward the roughness they stop at.
         if (pc.spare0 != VELK_LIGHT_NONE) {
             vec4 traced = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], coord, 0);
             if (traced.a > 0.0) env_specular = mix(env_specular, traced.rgb, 1.0 - smoothstep(0.21, 0.3, roughness));
         }
         vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
 
-        // Light from other surfaces and the sky: the screen probes around it, or the environment
-        // where none has a surface like it yet.
-        vec3 indirect;
-        if (!velk_probe_indirect(coord, world_pos, N, indirect)) {
+        if (!probed) {
             indirect = env_diffuse;
         } else if (radiance != VELK_LIGHT_NONE
                    && ((uint(coord.x) & 3u) | ((uint(coord.y) & 3u) << 2u)) == (VELK_GLOBALS.present_counter * 7u & 15u)) {
