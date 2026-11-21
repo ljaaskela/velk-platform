@@ -1094,6 +1094,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
 {
     const LightPool& pool = vs.instance_cull.light_pool;
     const vector<uint32_t>& cuts = vs.instance_cull.ray_top_cuts;
+    vs.lights_moved = false;
     if (pool.segments.empty() || !vs.light_changes.valid() || !vs.light_header.valid() || cuts.empty()
         || !vs.instance_cull.ray_top.valid()) {
         return;
@@ -1164,6 +1165,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         changed_lights.push_back(static_cast<uint32_t>(i));
         listed[i] = b;
     }
+    vs.lights_moved = all_lights || !changed_lights.empty();
     // The lights first, then the boxes in what is left, those past it in one box around them all:
     // only what that box could shadow changes, not everything. Everything only when the lights
     // alone leave no room.
@@ -1447,7 +1449,23 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     // The filter: the ray store and the last frame's probes into this frame's store.
     RtPushC filter_pc = pc;
     filter_pc.extras[2] = store_word(vs.light_probe_parity);
-    filter_pc.extras[3] = 0u;
+    // The most frames a probe blends over: few while lights move and for 32 frames after, as their
+    // bounce changes a little each frame; many once they stand still, so that light that does not
+    // change settles. A camera that turns more than 5 degrees in a frame (a cut, not a turn)
+    // starts it over too: the probes' history then comes from another view. vs.lights_moved is
+    // this frame's: emit_light_changes_pass runs first and sets it on every path.
+    const vec4 w_row = render_view.view_projection.row(3);
+    vec3 forward{w_row.x, w_row.y, w_row.z};
+    const float forward_length = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+    bool cut = false;
+    if (forward_length > 0.f) {
+        forward = {forward.x / forward_length, forward.y / forward_length, forward.z / forward_length};
+        const vec3& was = vs.probe_forward;
+        cut = forward.x * was.x + forward.y * was.y + forward.z * was.z < 0.9962f;
+        vs.probe_forward = forward;
+    }
+    vs.lights_still_frames = vs.lights_moved || cut ? 0u : std::min(vs.lights_still_frames + 1u, 32u);
+    filter_pc.extras[3] = vs.lights_still_frames >= 32u ? 64u : 16u;
 
     bool dirty = true;
     emit_cached_view_pass(vs.light_probes_pass, dirty,

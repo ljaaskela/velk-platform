@@ -3112,8 +3112,13 @@ void velk_probes_filter()
         }
     }
 
-    // Blended with it over up to 16 frames; where enough neighbours agree, the last frame's light
-    // kept within two and a half spreads of theirs, its directions scaled with it.
+    // Blended with it over up to 16 frames; where enough neighbours agree, its light kept within
+    // two and a half spreads of theirs, its directions scaled with it. While no light has moved for
+    // a while (pc.extras.w more than 16), a probe that was not cut grows past 16 frames, up to
+    // pc.extras.w, so that light that does not change settles. Settled, it is no longer cut: its
+    // light away from theirs by more than three spreads, or a quarter of it, halves the frames it
+    // counts instead, down to 16, so that a single frame whose few rays all missed the light costs
+    // little while a change that lasts brings it back in a few frames.
     VelkProbeLight light = fresh;
     float frames = 1.0;
     if (had_weight > 1e-4) {
@@ -3121,16 +3126,26 @@ void velk_probes_filter()
         had.r /= had_weight;
         had.g /= had_weight;
         had.b /= had_weight;
+        float had_mean = had_frames / had_weight;
+        frames = min(had_mean + 1.0, 16.0);
         if (total >= 3.0) {
-            vec3 kept = clamp(had.e, max(fresh.e - 2.5 * spread, vec3(0.0)), fresh.e + 2.5 * spread);
-            vec3 scale = vec3(had.e.r > 1e-6 ? kept.r / had.e.r : 1.0, had.e.g > 1e-6 ? kept.g / had.e.g : 1.0,
-                              had.e.b > 1e-6 ? kept.b / had.e.b : 1.0);
-            had.e = kept;
-            had.r *= scale.r;
-            had.g *= scale.g;
-            had.b *= scale.b;
+            float most = max(float(pc.extras.w), 16.0);
+            if (most > 16.0 && had_mean > 16.0) {
+                vec3 margin = max(3.0 * spread, 0.25 * max(had.e, fresh.e) + vec3(0.01));
+                bool away = any(notEqual(clamp(had.e, max(fresh.e - margin, vec3(0.0)), fresh.e + margin), had.e));
+                frames = away ? max(had_mean * 0.5, 16.0) : min(had_mean + 1.0, most);
+            } else {
+                vec3 kept = clamp(had.e, max(fresh.e - 2.5 * spread, vec3(0.0)), fresh.e + 2.5 * spread);
+                bool cut = any(notEqual(kept, had.e));
+                vec3 scale = vec3(had.e.r > 1e-6 ? kept.r / had.e.r : 1.0, had.e.g > 1e-6 ? kept.g / had.e.g : 1.0,
+                                  had.e.b > 1e-6 ? kept.b / had.e.b : 1.0);
+                had.e = kept;
+                had.r *= scale.r;
+                had.g *= scale.g;
+                had.b *= scale.b;
+                frames = min(had_mean + 1.0, cut ? 16.0 : most);
+            }
         }
-        frames = min(had_frames / had_weight + 1.0, 16.0);
         float t = 1.0 / frames;
         light.e = mix(had.e, fresh.e, t);
         light.r = mix(had.r, fresh.r, t);
