@@ -1,5 +1,7 @@
 #include "visual_phase_type_extension.h"
 
+#include "enum_names.h"
+
 #include <velk/api/any.h>
 #include <velk-scene/interface/intf_visual.h>
 
@@ -27,6 +29,13 @@ IAny::Ptr VisualPhaseTypeExtension::deserialize(Uid uid, const IImportData& data
     }
 
     return {};
+}
+
+ReturnValue VisualPhaseTypeExtension::serialize(Uid uid, const IAny& value, IExportData& out) const
+{
+    static const EnumName<VisualPhase> names[] = {{VisualPhase::BeforeChildren, "before_children"},
+                                                  {VisualPhase::AfterChildren, "after_children"}};
+    return uid == type_uid<VisualPhase>() ? write_enum(value, uid, names, out) : ReturnValue::Fail;
 }
 
 } // namespace velk::ui

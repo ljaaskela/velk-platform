@@ -2,6 +2,8 @@
 
 #include <velk/api/any.h>
 
+#include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace velk::ui {
@@ -49,6 +51,33 @@ IAny::Ptr DimTypeExtension::deserialize(Uid, const IImportData& data) const
         return Any<dim>(dim::px(static_cast<float>(data.as_number())));
     }
     return {};
+}
+
+ReturnValue DimTypeExtension::serialize(Uid, const IAny& value, IExportData& out) const
+{
+    dim d{};
+    if (failed(value.get_data(&d, sizeof(d), type_uid<dim>()))) {
+        return ReturnValue::Fail;
+    }
+    // The strings parse_dim reads: "auto", "240px", "50%", and "" for none.
+    char buf[32];
+    switch (d.unit) {
+    case DimUnit::Auto:
+        out.text("auto");
+        break;
+    case DimUnit::Px:
+        std::snprintf(buf, sizeof(buf), "%gpx", static_cast<double>(d.value));
+        out.text(string_view(buf, std::strlen(buf)));
+        break;
+    case DimUnit::Pct:
+        std::snprintf(buf, sizeof(buf), "%g%%", static_cast<double>(d.value * 100.f));
+        out.text(string_view(buf, std::strlen(buf)));
+        break;
+    default:
+        out.text("");
+        break;
+    }
+    return ReturnValue::Success;
 }
 
 } // namespace velk::ui

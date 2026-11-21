@@ -1,5 +1,7 @@
 #include "light_type_extension.h"
 
+#include "enum_names.h"
+
 #include <velk/api/any.h>
 #include <velk-render/interface/intf_light.h>
 
@@ -29,6 +31,15 @@ IAny::Ptr LightTypeExtension::deserialize(Uid uid, const IImportData& data) cons
     }
 
     return {};
+}
+
+ReturnValue LightTypeExtension::serialize(Uid uid, const IAny& value, IExportData& out) const
+{
+    static const EnumName<LightType> names[] = {{LightType::Directional, "directional"},
+                                                {LightType::Point, "point"},
+                                                {LightType::Spot, "spot"},
+                                                {LightType::Area, "area"}};
+    return uid == type_uid<LightType>() ? write_enum(value, uid, names, out) : ReturnValue::Fail;
 }
 
 } // namespace velk::ui

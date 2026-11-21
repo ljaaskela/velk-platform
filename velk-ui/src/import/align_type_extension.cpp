@@ -1,5 +1,7 @@
 #include "align_type_extension.h"
 
+#include "enum_names.h"
+
 #include <velk/api/any.h>
 #include <velk-scene/types.h>
 
@@ -55,6 +57,28 @@ IAny::Ptr AlignTypeExtension::deserialize(Uid uid, const IImportData& data) cons
     }
 
     return {};
+}
+
+ReturnValue AlignTypeExtension::serialize(Uid uid, const IAny& value, IExportData& out) const
+{
+    if (uid == type_uid<HAlign>()) {
+        static const EnumName<HAlign> names[] = {
+            {HAlign::Left, "left"}, {HAlign::Center, "center"}, {HAlign::Right, "right"}};
+        return write_enum(value, uid, names, out);
+    }
+    if (uid == type_uid<VAlign>()) {
+        static const EnumName<VAlign> names[] = {
+            {VAlign::Top, "top"}, {VAlign::Center, "center"}, {VAlign::Bottom, "bottom"}};
+        return write_enum(value, uid, names, out);
+    }
+    if (uid == type_uid<Alignment>()) {
+        static const EnumName<Alignment> names[] = {{Alignment::Start, "start"},
+                                                    {Alignment::Center, "center"},
+                                                    {Alignment::End, "end"},
+                                                    {Alignment::Fill, "fill"}};
+        return write_enum(value, uid, names, out);
+    }
+    return ReturnValue::Fail;
 }
 
 } // namespace velk::ui
