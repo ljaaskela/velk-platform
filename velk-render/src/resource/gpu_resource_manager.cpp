@@ -413,7 +413,7 @@ void GpuResourceManager::track_geometry(const IMeshPrimitiveInternal::WeakPtr& p
     tracked_geometry_.push_back(primitive);
 }
 
-void GpuResourceManager::update_geometry()
+void GpuResourceManager::update_geometry(uint32_t frame)
 {
     geometry_frame_used_ = 0;
     ++geometry_frame_;
@@ -423,7 +423,7 @@ void GpuResourceManager::update_geometry()
         if (!primitive) {
             continue;
         }
-        primitive->update_lod(*this);
+        primitive->update_lod(*this, frame);
         if (kept != i) {
             tracked_geometry_[kept] = tracked_geometry_[i];
         }

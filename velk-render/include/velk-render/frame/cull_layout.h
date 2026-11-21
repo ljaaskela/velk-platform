@@ -44,6 +44,7 @@ namespace velk {
     X(cp, gp, Mark, MARK, 22)                   /* the word of the mark of the group it was made from */ \
     X(cp, gp, OwnMark, OWN_MARK, 23)            /* the word of its own group's mark */         \
     X(cp, gp, Color, COLOR, 24)                                                                \
+    X(cp, gp, Changed, CHANGED, 25)             /* the frame its errors last changed, plus one; 0 for never */ \
     X(cp, gp, Words, WORDS, 28)
 
 /// A node of a partition's quad tree (kQuadNode, VELK_QUAD_NODE), in world space; also what an
@@ -304,7 +305,7 @@ namespace velk {
     X(cp, gp, Root, ROOT, 10)                   /* its tree's root, a node of the pool, while RAY_COUNT is not 0 */ \
     X(cp, gp, OldRayCount, OLD_RAY_COUNT, 11)   /* while choosing again, RAY_COUNT as it was */ \
     X(cp, gp, QuadTree, QUAD_TREE, 12)          /* its table entry's quad tree word when it chose */ \
-    X(cp, gp, Retry, RETRY, 13)                 /* 1 when it kept its old records for want of pages, to choose again */ \
+    X(cp, gp, Retry, RETRY, 13)                 /* 1 to choose again: it kept its old records for want of pages, or a cluster of its records changed its errors after it chose */ \
     X(cp, gp, Same, SAME, 14)                   /* while choosing again, 1 when its chunks and quad tree are as before */ \
     X(cp, gp, OldCount, OLD_COUNT, 15)          /* while choosing again, how many records it had, 0 for none */ \
     X(cp, gp, RayCount, RAY_COUNT, 16)          /* how many records rays trace (its ray list) */ \
@@ -315,7 +316,8 @@ namespace velk {
     X(cp, gp, Quads, QUADS, 23)                 /* its quads, for the log */                   \
     X(cp, gp, Box, BOX, 24)                     /* the world box around what it draws, min then max, six floats */ \
     X(cp, gp, Balanced, BALANCED, 30)           /* when its tree for rays fell back to a balanced one, the height the sorted one had (0 overflowed as 1); 0 when not; for the log */ \
-    X(cp, gp, End, END, 31)
+    X(cp, gp, Chose, CHOSE, 31)                 /* the frame it last chose in, plus one: a cluster of its records whose errors changed later has it choose again */ \
+    X(cp, gp, End, END, 32)
 
 /// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
 /// and where in its page table.

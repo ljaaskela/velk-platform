@@ -64,9 +64,11 @@ struct FrameGlobals
     float    inverse_view_projection[16];  ///< Inverse of view_projection.
     float    viewport[4];                  ///< width, height, 1/width, 1/height.
     float    cam_pos[4];                   ///< World-space camera position (xyz) + pad.
-    uint32_t spare0;
+    /// The word of the culling's trace of one pixel in the culling arena (kTraceHeaderWords),
+    /// which its render path writes before culling; 0xFFFFFFFF for none.
+    uint32_t trace = 0xFFFFFFFFu;
     uint32_t spare1;
-    uint32_t present_counter;              ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
+    uint32_t present_counter;             ///< Monotonic CPU frame index (RT noise seed; never a GPU-completion proxy).
     float    lod_scale;                    ///< See set_lod_scale.
     float    prev_view_projection[16];     ///< Previous frame's view-projection (identity on the first frame). For temporal reprojection.
     float    cam_moved[3];                 ///< How far the camera moved since the previous frame.

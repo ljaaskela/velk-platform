@@ -116,8 +116,8 @@ public:
     virtual void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) = 0;
 
     /// Once a frame, before anything is drawn: lets the tracked primitives load what was
-    /// asked for.
-    virtual void update_geometry() = 0;
+    /// asked for. @p frame is the frame's present counter (IMeshPrimitiveInternal::update_lod).
+    virtual void update_geometry(uint32_t frame) = 0;
 
     /// Creates a backend texture, wraps it in a RenderTexture, registers
     /// it for lifecycle tracking, and returns the Ptr. When the last

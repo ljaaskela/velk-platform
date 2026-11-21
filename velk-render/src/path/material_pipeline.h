@@ -21,6 +21,10 @@ namespace velk {
 constexpr uint64_t kForwardEvalContentTag = 0x46776452'4576616cULL; // "FwdREval"
 constexpr uint64_t kVisibilityContentTag = 0x56697342'75666572ULL; // "VisBufer"
 constexpr uint64_t kTransparentEvalContentTag = 0x54726e73'4576616cULL; // "TrnsEval"
+/// The deferred path's lit transparent driver (transparent_lit_head_src), without and with the
+/// area lights' code.
+constexpr uint64_t kTransparentLitContentTag = 0x54726e73'4c697420ULL;     // "TrnsLit "
+constexpr uint64_t kTransparentLitAreaContentTag = 0x54726e73'4c697441ULL; // "TrnsLitA"
 
 /**
  * @brief Accumulates an FNV-1a content hash over the inputs that uniquely

@@ -35,6 +35,40 @@ void main()
 }
 )";
 
+// The culling's trace of one pixel (InstanceCullPass::trace), for the visibility pass: at that
+// pixel, what came of each fragment drawn there. Its notes are of stage 4: reached the shader (0),
+// cut out by its material's alpha (1), written (2); then the draw, its ids' second word (instance
+// and triangle) and its depth's bits. Only where fragment shaders can write buffers, which the
+// composer says with VELK_FRAGMENT_STORES; else nothing.
+#define VELK_TRACE_FRAGMENT_GLSL R"(
+#ifdef VELK_FRAGMENT_STORES
+layout(set = 1, binding = 16, std430) buffer VelkTraceWords { uint data[]; } velk_trace_words;
+
+// A note of stage `stage` at the traced pixel, for a fragment of draw `draw_base`: what came of
+// it, its ids' second word and `value`.
+void velk_trace_fragment_note(uint stage, uint draw_base, uint outcome, uint value)
+{
+    uint t = velk_globals.data[velk_draw_data.data[draw_base].globals_base].trace;
+    if (t == 0xFFFFFFFFu) return;
+    if (uint(gl_FragCoord.x) != velk_trace_words.data[t] || uint(gl_FragCoord.y) != velk_trace_words.data[t + 1u]) return;
+    uint at = atomicAdd(velk_trace_words.data[t + 2u], 1u);
+    if (at >= velk_trace_words.data[t + 3u]) return;
+    uint w = t + 6u + at * 4u;
+    velk_trace_words.data[w] = stage | (outcome << 8u);
+    velk_trace_words.data[w + 1u] = draw_base;
+    velk_trace_words.data[w + 2u] = (v_instance << velk_draw_data.data[draw_base].triangle_bits) | uint(gl_PrimitiveID);
+    velk_trace_words.data[w + 3u] = value;
+}
+#else
+void velk_trace_fragment_note(uint stage, uint draw_base, uint outcome, uint value) {}
+#endif
+
+void velk_trace_fragment(uint draw_base, uint outcome)
+{
+    velk_trace_fragment_note(4u, draw_base, outcome, floatBitsToUint(gl_FragCoord.z));
+}
+)"
+
 // Writes which triangle a pixel shows.
 [[maybe_unused]] constexpr string_view visibility_fragment_src = R"(
 #version 450
@@ -45,9 +79,10 @@ VELK_DRAW_DATA(root)
 VELK_VARYINGS_IN
 
 VELK_VISIBILITY_OUT
-
+)" VELK_TRACE_FRAGMENT_GLSL R"(
 void main()
 {
+    velk_trace_fragment(root.draw_base, 2u);
     VELK_WRITE_VISIBILITY(root);
 }
 )";
@@ -62,12 +97,14 @@ VELK_DRAW_DATA(root)
 VELK_VARYINGS_IN
 
 VELK_VISIBILITY_OUT
-
+)" VELK_TRACE_FRAGMENT_GLSL R"(
 void velk_visual_discard();
 
 void main()
 {
+    velk_trace_fragment(root.draw_base, 0u);
     velk_visual_discard();
+    velk_trace_fragment(root.draw_base, 2u);
     VELK_WRITE_VISIBILITY(root);
 }
 )";
@@ -80,12 +117,13 @@ VELK_DRAW_DATA(root)
 VELK_VARYINGS_IN
 
 VELK_VISIBILITY_OUT
-
+)" VELK_TRACE_FRAGMENT_GLSL R"(
 void velk_visual_discard();
 
 void main()
 {
     GlobalData globals = velk_global_data(root);
+    velk_trace_fragment(root.draw_base, 0u);
     velk_visual_discard();
 
     EvalContext ctx;
@@ -102,8 +140,12 @@ void main()
     ctx.tangent     = v_world_tangent;
 
     MaterialEval e = <%EVAL_FN%>(ctx);
-    if (e.color.a < <%DISCARD%>) discard;
+    if (e.color.a < <%DISCARD%>) {
+        velk_trace_fragment(root.draw_base, 1u);
+        discard;
+    }
 
+    velk_trace_fragment(root.draw_base, 2u);
     VELK_WRITE_VISIBILITY(root);
 }
 )";
@@ -128,7 +170,7 @@ VELK_DRAW_DATA(root)
 VELK_VARYINGS_IN
 
 VELK_FRAG_OUT(frag_color)
-
+)" VELK_TRACE_FRAGMENT_GLSL R"(
 void main()
 {
     GlobalData globals = velk_global_data(root);
@@ -147,6 +189,8 @@ void main()
 
     MaterialEval e = <%EVAL_FN%>(ctx);
     if (e.color.a < <%DISCARD%>) discard;
+    // The culling's trace, at its pixel: drawn by the forward path, at this depth.
+    velk_trace_fragment_note(9u, root.draw_base, 0u, floatBitsToUint(gl_FragCoord.z));
     frag_color = e.color;
 }
 )";

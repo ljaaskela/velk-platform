@@ -91,6 +91,20 @@ IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatc
     } else {
         composed.append(discard_src);
     }
+    // The culling's trace notes fragments where fragment shaders can write buffers
+    // (VELK_TRACE_FRAGMENT_GLSL): said after the #version line.
+    auto backend = ctx.backend();
+    if (backend && backend->supports_fragment_stores()) {
+        const size_t version = composed.find(string_view("#version"));
+        const size_t line_end = version != string::npos ? composed.find('\n', version) : string::npos;
+        if (line_end != string::npos) {
+            string with;
+            with.append(string_view(composed.data(), line_end + 1));
+            with.append(string_view("#define VELK_FRAGMENT_STORES 1\n"));
+            with.append(string_view(composed.data() + line_end + 1, composed.size() - line_end - 1));
+            composed = std::move(with);
+        }
+    }
     return ctx.pipelines().compile_dynamic(string_view(composed), vsrc, key, formats, DepthFormat::Default, po);
 }
 
@@ -183,6 +197,7 @@ uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, s
 // Diagnostic: the cut-off for clusters drawn in compute, in pixels, in place of the camera's
 // tiny_cluster_pixels. 0 when not set.
 uint32_t tiny_pixels_override() { return env_uint("VELK_TINY_PIXELS", 1, 64); }
+
 
 // A development aid: VELK_TINY_TWO_PASS=1 draws clusters in compute in two dispatches even
 // where the device has 64-bit buffer atomics, to see that path run.
@@ -745,6 +760,8 @@ void DeferredPath::reserve(IViewEntry& entry, const RenderView& render_view, Fra
     ensure_arena_words(vs, ctx, size);
     build_light_grid(vs, render_view, ctx);
     ensure_depth_pyramid(vs, ctx, size);
+    trace_pixel_from_env(vs.instance_cull.trace_x, vs.instance_cull.trace_y);
+    vs.instance_cull.trace_entry = trace_entry_from_env();
     reserve_instance_cull(vs.instance_cull, render_view.batches, ctx, render_view.bvh.plain_partitions,
                           render_view.bvh.plain_partition_count);
 }
@@ -804,6 +821,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
                             occlusion ? static_cast<uint32_t>(vs.depth_pyramid.offset() / sizeof(uint32_t)) : kCullNoSlot,
                             chosen, render_view.bvh.plain_partitions, render_view.bvh.plain_partition_count);
     publish_ray_top(vs.instance_cull, render_view.view_globals_base, ctx);
+    publish_trace(vs.instance_cull, render_view.view_globals_base, ctx);
     if (vs.instance_cull.arena_generation != culling_generation) {
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
@@ -2378,6 +2396,34 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
         vs.last_transparent_target = target_texture;
     }
 
+    // Lit as the deferred lighting lights a pixel (transparent_lit_head_src), once the light
+    // header is there; with the area lights' code only when the view has an area light, as the
+    // lighting is. What it pushes after the draw's word, recorded with it.
+    const bool lit = vs.light_header.valid();
+    bool has_area_light = false;
+    for (const auto& l : render_view.lights) {
+        if (l.flags[0] == static_cast<uint32_t>(LightType::Area)) has_area_light = true;
+    }
+    const LightPool& pool = vs.instance_cull.light_pool;
+    TransparentLitPushC lit_pc{};
+    lit_pc.pool_word = pool.segments.empty() ? kLightNone : pool.word();
+    lit_pc.light_pixels = kLightPixels;
+    lit_pc.cells_header = lit ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
+    lit_pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    lit_pc.lights_base = render_view.lights_base;
+    lit_pc.env_texture_id = render_view.env.texture_id;
+    lit_pc.env_params[0] = render_view.env.intensity;
+    lit_pc.env_params[1] = render_view.env.rotation_rad;
+    const bool ltc_ready = has_area_light && ensure_ltc_tables(ctx, graph);
+    lit_pc.ltc_matrix_id = ltc_ready ? get_texture_id(ltc_matrix_) : 0u;
+    lit_pc.ltc_magnitude_id = ltc_ready ? get_texture_id(ltc_magnitude_) : 0u;
+    lit_pc.area = has_area_light ? 1u : 0u;
+    lit_pc.lit = lit ? 1u : 0u;
+    if (std::memcmp(&lit_pc, &vs.transparent_lit_recorded, sizeof(lit_pc)) != 0) {
+        vs.transparent_lit_recorded = lit_pc;
+        vs.transparent_dirty = true;
+    }
+
     emit_cached_view_pass(
         vs.cached_transparent_pass, vs.transparent_dirty,
         view_pass_name(vs.instance_cull.chosen_by_other, "deferred.transparent", "other:deferred.transparent"),
@@ -2390,14 +2436,27 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
             // Only BLEND batches; everything else drew opaque in the gbuffer.
             // resolve returns null to skip non-blended batches, and holds the
             // pipeline strong (the cache is weak).
+            string lit_driver;
+            if (lit) {
+                // The culling's trace notes fragments where fragment shaders can write buffers.
+                if (ctx.backend->supports_fragment_stores()) {
+                    lit_driver.append(string_view("#define VELK_FRAGMENT_STORES 1\n"));
+                }
+                lit_driver.append(transparent_lit_head_src);
+                lit_driver.append(has_area_light ? deferred_area_light_src : deferred_area_light_stub_src);
+                lit_driver.append(transparent_lit_main_src);
+            }
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
                 if (b.pipeline_options().blend_mode != BlendMode::Alpha) {
                     return nullptr;
                 }
-                // Glass driver: Fresnel-boosted opacity at grazing angles.
-                auto p = resolve_or_compile_forward(
-                    *ctx.render_ctx, b, target_format, depth_format,
-                    transparent_fragment_driver_template, kTransparentEvalContentTag);
+                // Glass driver: Fresnel-boosted opacity at grazing angles; lit when it can be.
+                auto p = lit ? resolve_or_compile_forward(*ctx.render_ctx, b, target_format, depth_format,
+                                                          string_view(lit_driver),
+                                                          has_area_light ? kTransparentLitAreaContentTag
+                                                                         : kTransparentLitContentTag)
+                             : resolve_or_compile_forward(*ctx.render_ctx, b, target_format, depth_format,
+                                                          transparent_fragment_driver_template, kTransparentEvalContentTag);
                 if (!p) return nullptr;
                 IGpuPipeline* raw = p.get();
                 rec.held.push_back(std::move(p));
@@ -2416,6 +2475,12 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
 
             // No transparent geometry this view: leave an empty (no-op) pass.
             if (draw_calls.empty()) return;
+            if (lit) {
+                for (DrawCall& call : draw_calls) {
+                    std::memcpy(call.root_constants + sizeof(uint32_t), &lit_pc, kTransparentLitPushBytes);
+                    call.root_constants_size = sizeof(uint32_t) + kTransparentLitPushBytes;
+                }
+            }
 
             if (auto cmd = ctx.backend->create_command_buffer()) {
                 // Load the lit composite + the opaque gbuffer depth; blend the

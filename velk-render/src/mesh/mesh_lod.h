@@ -57,7 +57,10 @@ struct MeshLodCluster
     /// The word of its first vertex's colour, likewise, or kLodNoAttribute. See
     /// IMeshPrimitive::get_color_buffer.
     uint32_t color_word = 0xFFFFFFFFu;
-    uint32_t spare[3] = {};
+    /// The frame its errors last changed, plus one, as loading and dropping detail change them;
+    /// 0 for never. A kept cut whose records have it chooses again when it chose before that.
+    uint32_t changed = 0;
+    uint32_t spare[2] = {};
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_CLUSTER");
 #define VELK_LOD_CLUSTER_AT(field, word) \
@@ -81,6 +84,7 @@ VELK_LOD_CLUSTER_AT(full_error, kLodClusterFullError)
 VELK_LOD_CLUSTER_AT(mark_word, kLodClusterMark)
 VELK_LOD_CLUSTER_AT(own_mark_word, kLodClusterOwnMark)
 VELK_LOD_CLUSTER_AT(color_word, kLodClusterColor)
+VELK_LOD_CLUSTER_AT(changed, kLodClusterChanged)
 #undef VELK_LOD_CLUSTER_AT
 // velk_lod_pixels reads a sphere's error right after it.
 static_assert(kLodClusterError == kLodClusterSphere + 4 && kLodClusterParentError == kLodClusterParentSphere + 4,

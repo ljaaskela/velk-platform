@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -162,6 +164,116 @@ inline uint32_t cut_tree_nodes(uint32_t records)
     const uint32_t leaves = (records + 3u) / 4u;
     return leaves > 1u ? leaves - 1u : 1u;
 }
+
+/// The culling's trace (VELK_TRACE_PIXEL): what it does with everything the ray through one
+/// pixel passes the bounds of, so that what is missing there can be followed. In the culling
+/// arena, named by the view's FrameGlobals::trace (kTraceNone for none): the pixel's x and y,
+/// how many notes were made since the CPU last read them, how many fit, a cluster entry whose
+/// walks are noted wherever they go (VELK_TRACE_ENTRY, kTraceNone for none) and a spare word,
+/// then the notes, kTraceNoteWords each: the stage and in bits 8 and up what came of it, then
+/// three words the stage says (VELK_TRACE_GLSL).
+inline constexpr uint32_t kTraceNone = 0xFFFFFFFFu;
+inline constexpr uint32_t kTraceHeaderWords = 6;
+inline constexpr uint32_t kTraceNoteWords = 4;
+inline constexpr uint32_t kTraceCapacity = 4096;
+/// A partition's choice: a record written (0), or left out past the count it was given (1);
+/// then its entry, cluster and slot.
+inline constexpr uint32_t kTraceChoose = 1;
+/// A partition with records whose box the ray passes: listed (0), outside the view (1), its runs
+/// past the room (2); then its index, its count of records and 0.
+inline constexpr uint32_t kTracePartition = 2;
+/// A cluster record drawn: chosen (0), outside the view (1), held back by occlusion (2), compute
+/// raster (3), the chosen list full (4); then its entry, cluster and record.
+inline constexpr uint32_t kTraceDraw = 3;
+/// A fragment at the pixel, in the visibility pass (VELK_TRACE_FRAGMENT_GLSL): reached its shader
+/// (0), cut out by its material's alpha (1), written (2); then its draw, its ids' second word and
+/// its depth's bits.
+inline constexpr uint32_t kTraceRaster = 4;
+/// The resolve at the pixel (visibility_resolve_main_src): took the hardware raster's ids (0) or
+/// compute raster's (1); then the ids' two words and 0.
+inline constexpr uint32_t kTraceResolve = 5;
+/// A blended fragment at the pixel, in the transparent pass (transparent_lit_main_src): drawn (0);
+/// then its draw, its ids' second word and the bits of the opacity it was drawn with.
+inline constexpr uint32_t kTraceBlended = 6;
+/// A partition's walk of a mesh's hierarchy (velk_lod_child) reached a cluster on the ray: chosen
+/// (2), for light only (3), skipped with all under its node too coarse (4) or with a parent that
+/// will do (5), too coarse itself (6), its parent will do (7); then its entry, cluster and the
+/// partition's state word.
+inline constexpr uint32_t kTraceWalk = 7;
+/// An instance culled every frame (instance_cull_compute_src), not by a kept cut: walked (0),
+/// too far (1), outside the view (2), held back by occlusion (3); then its first cluster entry,
+/// its slot and its count of entries.
+inline constexpr uint32_t kTraceInstance = 8;
+/// A fragment at the pixel drawn by the forward path (forward_fragment_driver_template): drawn
+/// (0); then its draw, its ids' second word and its depth's bits.
+inline constexpr uint32_t kTraceForward = 9;
+/// The numbers one decision of the walk of the entry traced went by (VELK_TRACE_ENTRY): 0; then
+/// what (a node's reference or a cluster, with which number in bits 24 to 27), the number as
+/// stored and on screen in pixels, each a float's bits.
+inline constexpr uint32_t kTraceNumbers = 10;
+/// The shape of the tree of the entry traced: 0; then a child's reference, its node's index and
+/// which of its two children it is.
+inline constexpr uint32_t kTraceShape = 11;
+
+// The trace's shader side (kTraceNone and the rest above). The shader declares cull_words.
+#define VELK_TRACE_GLSL R"(
+#define VELK_TRACE_NONE 0xFFFFFFFFu
+#define VELK_TRACE_CHOOSE 1u
+#define VELK_TRACE_PARTITION 2u
+#define VELK_TRACE_DRAW 3u
+
+// The ray through the traced pixel, from the camera; false when nothing is traced.
+bool velk_trace_ray(GlobalData g, out vec3 origin, out vec3 dir)
+{
+    origin = vec3(0.0);
+    dir = vec3(0.0, 0.0, 1.0);
+    uint t = g.trace;
+    if (t == VELK_TRACE_NONE) return false;
+    vec2 ndc = (vec2(float(cull_words.data[t]), float(cull_words.data[t + 1u])) + 0.5) * g.viewport.zw * 2.0 - 1.0;
+    vec4 near_h = g.inverse_view_projection * vec4(ndc, 1.0, 1.0);
+    vec4 mid_h = g.inverse_view_projection * vec4(ndc, 0.5, 1.0);
+    origin = near_h.xyz / near_h.w;
+    dir = normalize(mid_h.xyz / mid_h.w - origin);
+    return true;
+}
+
+// Whether that ray passes within `radius` of `center`, from the camera.
+bool velk_trace_sphere(GlobalData g, vec3 center, float radius)
+{
+    vec3 o;
+    vec3 d;
+    if (!velk_trace_ray(g, o, d)) return false;
+    vec3 oc = center - o;
+    return length(oc - d * max(dot(oc, d), 0.0)) <= radius;
+}
+
+// Whether that ray passes the box from `lo` to `hi`, from the camera.
+bool velk_trace_box(GlobalData g, vec3 lo, vec3 hi)
+{
+    vec3 o;
+    vec3 d;
+    if (!velk_trace_ray(g, o, d)) return false;
+    vec3 inv = 1.0 / d;
+    vec3 t0 = (lo - o) * inv;
+    vec3 t1 = (hi - o) * inv;
+    vec3 tn = min(t0, t1);
+    vec3 tf = max(t0, t1);
+    return min(min(tf.x, tf.y), tf.z) >= max(max(max(tn.x, tn.y), tn.z), 0.0);
+}
+
+void velk_trace_note(GlobalData g, uint stage, uint outcome, uint a, uint b, uint c)
+{
+    uint t = g.trace;
+    if (t == VELK_TRACE_NONE) return;
+    uint at = atomicAdd(cull_words.data[t + 2u], 1u);
+    if (at >= cull_words.data[t + 3u]) return;
+    uint w = t + 6u + at * 4u;
+    cull_words.data[w] = stage | (outcome << 8u);
+    cull_words.data[w + 1u] = a;
+    cull_words.data[w + 2u] = b;
+    cull_words.data[w + 3u] = c;
+}
+)"
 
 // Where a cut's parts are. The shader declares cull_words.
 #define VELK_CUT_GLSL R"(
@@ -692,8 +804,30 @@ uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod
     // Out of view: no finer than the light's level.
     if (velk_lod_out_of_view(mat3(world) * center + world[3].xyz, reach, vp)) finest = pc.light_pixels;
 #endif
-    if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > coarsest) return VELK_LOD_SKIP;
-    if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= finest) return VELK_LOD_SKIP;
+#ifdef VELK_TRACE_WALK
+    // The tree's shape (kTraceShape): which node this child is under, and which of its two.
+    velk_trace_shape(ref, child);
+    // The node's two bounds, as stored and on screen, for every child the walk of the entry
+    // traced tests.
+    velk_trace_numbers(ref | 0x08000000u, uintBitsToFloat(lod_nodes.data[child + 4u]),
+                       uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach));
+    velk_trace_numbers(ref | 0x04000000u, uintBitsToFloat(lod_nodes.data[child + 5u]),
+                       uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3));
+#endif
+    if (uintBitsToFloat(lod_nodes.data[child + 4u]) * per_error / (dist + reach) > coarsest) {
+#ifdef VELK_TRACE_WALK
+        if ((ref & VELK_LOD_LEAF) != 0u) velk_trace_walk(clusters, ref & ~VELK_LOD_LEAF, world, scale, 4u);
+        else velk_trace_node(mat3(world) * center + world[3].xyz, reach, ref, 8u);
+#endif
+        return VELK_LOD_SKIP;
+    }
+    if (uintBitsToFloat(lod_nodes.data[child + 5u]) * per_error / max(dist - reach, 1e-3) <= finest) {
+#ifdef VELK_TRACE_WALK
+        if ((ref & VELK_LOD_LEAF) != 0u) velk_trace_walk(clusters, ref & ~VELK_LOD_LEAF, world, scale, 5u);
+        else velk_trace_node(mat3(world) * center + world[3].xyz, reach, ref, finest > max_pixels ? 10u : 9u);
+#endif
+        return VELK_LOD_SKIP;
+    }
     if ((ref & VELK_LOD_LEAF) == 0u) {
         c = ref;
         return VELK_LOD_DESCEND;
@@ -715,6 +849,18 @@ uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod
         limit = pc.light_pixels;
         g_out_of_view = true;
     }
+#endif
+#ifdef VELK_TRACE_WALK
+    // The cluster's own error and its parent's, as stored and on screen.
+    velk_trace_numbers(c | 0x02000000u, uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 4u]), own);
+    velk_trace_numbers(c | 0x01000000u, uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_PARENT_SPHERE + 4u]), parent);
+    // Traced: chosen (2), for light only (3), too coarse (6), or its parent will do (7).
+    velk_trace_walk(clusters, c, world, scale,
+                    own <= limit && parent > limit ? 2u
+#ifdef VELK_LOD_LIGHT
+                    : !out_of_view && own <= pc.light_pixels && parent > pc.light_pixels ? 3u
+#endif
+                    : own > limit ? 6u : 7u);
 #endif
     if (own <= limit && parent > limit) return VELK_LOD_CHOSEN;
 #ifdef VELK_LOD_LIGHT
@@ -906,6 +1052,8 @@ void velk_cut_decide(uint index, uint entry, uint chunks, vec3 cam, vec3 away, v
     // when one of them moved, so that what stayed keeps its light. Its pages and ray list as
     // they were, kept for the frame should no free pages be there for its new ones.
     cull_words.data[state + VELK_PART_LAST_TABLE_FIRST] = cull_words.data[state + VELK_PART_TABLE_FIRST];
+    // When it chose: the clusters whose errors change after it have it choose again.
+    cull_words.data[state + VELK_PART_CHOSE] = velk_globals.data[pc.globals_base].present_counter + 1u;
     cull_words.data[state + VELK_PART_OLD_COUNT] = count;
     cull_words.data[state + VELK_PART_OLD_RAY_COUNT] = count != 0u ? cull_words.data[state + VELK_PART_RAY_COUNT] : 0u;
     cull_words.data[state + VELK_PART_SAME] = same ? 1u : 0u;
@@ -1136,7 +1284,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 #define VELK_LOD_LIGHT
-)" VELK_CUT_GLSL R"(
+)" VELK_CUT_GLSL VELK_TRACE_GLSL R"(
 uint g_count;
 uint g_state;
 uint g_table;     // the word of the partition's page table in the current one, while writing
@@ -1265,6 +1413,19 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
 void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, float pixels_per_unit,
                      bool deforming)
 {
+    // Traced: written, or left out past the count.
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (g_writing && g.trace != VELK_TRACE_NONE) {
+        uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
+        uint own = cluster + VELK_LOD_CLUSTER_OWN_SPHERE;
+        vec3 center = mat3(world) * vec3(uintBitsToFloat(cull_words.data[own]), uintBitsToFloat(cull_words.data[own + 1u]),
+                                         uintBitsToFloat(cull_words.data[own + 2u]))
+                    + (world[3].xyz - g.cam_pos.xyz);
+        float radius = uintBitsToFloat(cull_words.data[own + 3u]) * scale;
+        if (velk_trace_sphere(g, center, radius)) {
+            velk_trace_note(g, VELK_TRACE_CHOOSE, g_at < cull_words.data[g_state + VELK_PART_COUNT] ? 0u : 1u, entry, c, slot);
+        }
+    }
     velk_cut_record(entry, c, slot);
 }
 
@@ -1272,6 +1433,60 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
 void velk_lod_light_chosen(uint entry, uint c, uint slot)
 {
     velk_cut_record(entry | VELK_CUT_LIGHT_ONLY, c, slot);
+}
+
+// The trace of the walk (kTraceWalk): what the walk of entry g_walk_entry, for the partition
+// at g_state, made of cluster `c` (its words at `clusters`), when the traced pixel's ray passes
+// its own sphere.
+#define VELK_TRACE_WALK
+uint g_walk_entry;
+void velk_trace_walk(uint clusters, uint c, mat4 world, float scale, uint what)
+{
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (g.trace == VELK_TRACE_NONE) return;
+    // The entry traced in every pass, its items' expansion too; else only while writing.
+    bool named = cull_words.data[g.trace + 4u] == g_walk_entry;
+    if (!g_writing && !named) return;
+    uint own = clusters + c * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE;
+    vec3 center = mat3(world) * vec3(uintBitsToFloat(cull_words.data[own]), uintBitsToFloat(cull_words.data[own + 1u]),
+                                     uintBitsToFloat(cull_words.data[own + 2u]))
+                + (world[3].xyz - g.cam_pos.xyz);
+    // On the ray, or of the entry traced wherever it is.
+    if (cull_words.data[g.trace + 4u] != g_walk_entry
+        && !velk_trace_sphere(g, center, uintBitsToFloat(cull_words.data[own + 3u]) * scale)) return;
+    velk_trace_note(g, 7u, what, g_walk_entry, c, g_state);
+}
+
+// The numbers a decision of the walk of the entry traced went by (kTraceNumbers): `what` (a
+// node's reference or a cluster, and which number), the number as stored and what it is on
+// screen from the partition's viewpoint, in pixels.
+void velk_trace_numbers(uint what, float stored, float pixels)
+{
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (g.trace == VELK_TRACE_NONE || cull_words.data[g.trace + 4u] != g_walk_entry) return;
+    velk_trace_note(g, 10u, 0u, what, floatBitsToUint(stored), floatBitsToUint(pixels));
+}
+
+// The child `ref` of the node whose child words start at `child`, in the tree of the entry
+// traced: its node's index and which child it is.
+void velk_trace_shape(uint ref, uint child)
+{
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (g.trace == VELK_TRACE_NONE || cull_words.data[g.trace + 4u] != g_walk_entry) return;
+    uint offset = child - cull_words.data[g_walk_entry + VELK_CLUSTER_ENTRY_NODES];
+    velk_trace_note(g, 11u, 0u, ref, offset / VELK_LOD_NODE_STRIDE, (offset % VELK_LOD_NODE_STRIDE) / 8u);
+}
+
+// Likewise a node of the tree, its sphere at `at` (world space) of `reach`, skipped with all
+// under it (`what`), for which `node` is its reference.
+void velk_trace_node(vec3 at, float reach, uint node, uint what)
+{
+    GlobalData g = velk_globals.data[pc.globals_base];
+    if (g.trace == VELK_TRACE_NONE) return;
+    bool named = cull_words.data[g.trace + 4u] == g_walk_entry;
+    if (!g_writing && !named) return;
+    if (!named && !velk_trace_sphere(g, at - g.cam_pos.xyz, reach)) return;
+    velk_trace_note(g, 7u, what, g_walk_entry, node | 0x40000000u, g_state | (g_writing ? 0u : 0x80000000u));
 }
 )" VELK_LOD_SELECT_GLSL R"(
 // The instance a record's `named` is of: its item's.
@@ -1291,6 +1506,7 @@ void velk_cut_walk(uint named, uint entry, uint node, vec3 viewpoint)
     CullInstance ci = cull_instances.data[velk_cut_named_instance(named)];
     mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     GlobalData globals = velk_globals.data[pc.globals_base];
+    g_walk_entry = entry;
     velk_lod_walk(entry, node, named, world, velk_cut_scale(world), viewpoint, viewpoint, globals.view_projection,
                   globals.viewport.y, pc.lod_max_pixels);
 }
@@ -1309,6 +1525,11 @@ void velk_cut_root(uint kind, uint named, uint entry, uint ref, vec3 viewpoint)
         s_items[at * 4u + 2u] = ref;
         s_items[at * 4u + 3u] = kind | (g_no_rays ? VELK_CHOOSE_NO_RAYS : 0u);
     } else if (kind == VELK_CHOOSE_RECORD) {
+        // Traced: a root chosen as it is, of the entry traced.
+        GlobalData g = velk_globals.data[pc.globals_base];
+        if (g_writing && g.trace != VELK_TRACE_NONE && cull_words.data[g.trace + 4u] == entry) {
+            velk_trace_note(g, 7u, 11u, entry, ref, g_state);
+        }
         velk_cut_record(entry, ref, named);
     } else {
         velk_cut_walk(named, entry, ref, viewpoint);
@@ -1322,6 +1543,7 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
     uint named = s_items[w];
     uint entry = s_items[w + 1u];
     uint node = s_items[w + 2u];
+    g_walk_entry = entry & ~VELK_CUT_LIGHT_ONLY;
     CullInstance ci = cull_instances.data[velk_cut_named_instance(named)];
     mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = velk_cut_scale(world);
@@ -2632,7 +2854,7 @@ layout(push_constant) uniform PC {
     uint whole;       // 1 to list every partition, in view or not
     uint quads_word;  // the view's quad list, for its count of quads in cuts, or 0xFFFFFFFF
 } pc;
-)" VELK_CUT_GLSL R"(
+)" VELK_CUT_GLSL VELK_TRACE_GLSL R"(
 // Whether the box from `lo` to `hi`, relative to the camera, is outside one of the view's
 // planes, tested as instance_cut_draw_src tests spheres: clip z by the wider of its two
 // conventions.
@@ -2666,21 +2888,28 @@ void main()
     uint quads = cull_words.data[state + VELK_PART_QUADS];
     if (pc.quads_word != 0xFFFFFFFFu && quads != 0u) atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_IN_CUTS], quads);
 
+    // Traced: a partition whose box the traced pixel's ray passes, whether listed or why not.
+    GlobalData g = velk_globals.data[pc.globals_base];
+    vec3 lo = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 1u]),
+                   uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 2u]));
+    vec3 hi = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 3u]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 4u]),
+                   uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 5u]));
+    bool boxed = all(lessThanEqual(lo, hi));
+    bool traced = g.trace != VELK_TRACE_NONE && boxed && velk_trace_box(g, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz);
     if (pc.whole == 0u && cull_words.data[state + VELK_PART_ALWAYS] == 0u) {
-        vec3 lo = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 1u]),
-                       uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 2u]));
-        vec3 hi = vec3(uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 3u]), uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 4u]),
-                       uintBitsToFloat(cull_words.data[state + VELK_PART_BOX + 5u]));
         // Nothing drawn: only records for light only, or patches for rays.
-        if (any(greaterThan(lo, hi))) return;
-        GlobalData g = velk_globals.data[pc.globals_base];
-        if (velk_box_outside(g.view_projection, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz)) return;
+        if (!boxed) return;
+        if (velk_box_outside(g.view_projection, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz)) {
+            if (traced) velk_trace_note(g, VELK_TRACE_PARTITION, 1u, index, count, 0u);
+            return;
+        }
     }
 
     uint table = velk_cut_table(cut, true) + cull_words.data[state + VELK_PART_TABLE_FIRST];
     uint runs = velk_cut_pages(count);
     uint room = cull_words.data[cut + VELK_CUT_CAPACITY] / VELK_CUT_PAGE_RECORDS + partitions + 1u;
     uint at = atomicAdd(cull_words.data[cut + VELK_CUT_VISIBLE_GROUPS], runs);
+    if (traced) velk_trace_note(g, VELK_TRACE_PARTITION, at + runs > room ? 2u : 0u, index, count, 0u);
     uint list = cull_words.data[cut + VELK_CUT_VISIBLE_WORD];
     for (uint r = 0u; r < runs && at + r < room; ++r) {
         uint first = cull_words.data[table + r] * VELK_CUT_PAGE_RECORDS;
@@ -2740,13 +2969,15 @@ layout(push_constant) uniform PC {
     float quad_pad;        // what a quad's sphere grows by, for instances a motion function moves
     uint item_records_word;  // by plain item, the record of one its own pass draws (InstanceCullPass::together)
 } pc;
-)" VELK_CUT_GLSL VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL R"(
+)" VELK_CUT_GLSL VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL VELK_TRACE_GLSL R"(
 uint g_instance;
 uint g_table;
+uint g_traced = 0xFFFFFFFFu;  // what came of the traced record this thread draws, or 0xFFFFFFFF
 
 void velk_lod_use(uint entry, uint cluster, uint slot, uint cut_record)
 {
     uint at = atomicAdd(cull_words.data[pc.chosen_word + VELK_CHOSEN_LIST_COUNT], 1u);
+    if (g_traced != 0xFFFFFFFFu) g_traced = at >= pc.chosen_capacity ? 4u : 0u;
     if (at >= pc.chosen_capacity) return;
     uint record = pc.chosen_word + VELK_CHOSEN_LIST_RECORDS + at * VELK_CHOSEN_END;
     cull_words.data[record + VELK_CHOSEN_ENTRY] = entry;
@@ -2881,12 +3112,30 @@ void main()
 
     uint c = cluster_or_table;
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
+    // Its cluster's errors changed after its partition chose, as loading or dropping detail
+    // changes them: the partition, its page's owner, chooses again on the next frame.
+    uint changed = cull_words.data[cluster + VELK_LOD_CLUSTER_CHANGED];
+    if (changed != 0u) {
+        uint place = (record - cull_words.data[pc.cut_word + VELK_CUT_RECORD_POOL]) / VELK_RECORD_END;
+        uint owner = cull_words.data[cull_words.data[pc.cut_word + VELK_CUT_PAGE_HEADERS]
+                                     + (place / VELK_CUT_PAGE_RECORDS) * VELK_CUT_PAGE_WORDS + VELK_CUT_PAGE_OWNER];
+        if (owner < cull_words.data[pc.cut_word + VELK_CUT_PARTITIONS]) {
+            uint owner_state = velk_cut_state(pc.cut_word, owner);
+            if (changed > cull_words.data[owner_state + VELK_PART_CHOSE]) cull_words.data[owner_state + VELK_PART_RETRY] = 1u;
+        }
+    }
     uint entry_flags = cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS];
     // A deforming mesh's spheres are where it is at rest, which says nothing about where it is.
     bool deforming = (entry_flags & VELK_LOD_DEFORMING) != 0u;
+    float own_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
+    vec3 own_center = velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam);
+    // Traced: what comes of a cluster the traced pixel's ray passes.
+    bool traced = globals.trace != VELK_TRACE_NONE && velk_trace_sphere(globals, own_center, own_radius);
     if (!deforming && pc.whole == 0u) {
-        float own_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
-        if (velk_cut_outside(vp, velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam), own_radius)) return;
+        if (velk_cut_outside(vp, own_center, own_radius)) {
+            if (traced) velk_trace_note(globals, VELK_TRACE_DRAW, 1u, entry, c, record);
+            return;
+        }
         // Tested where it was last frame, against what was drawn then. A blended batch's own pass
         // draws only the first phase; its depth test hides what is behind.
         float test_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 3u]) * scale;
@@ -2894,11 +3143,15 @@ void main()
             && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection,
                                    velk_lod_center(cluster + VELK_LOD_CLUSTER_SPHERE, world, cam) + globals.cam_moved, test_radius)
             && velk_retest(entry, c, slot, record)) {
+            if (traced) velk_trace_note(globals, VELK_TRACE_DRAW, 2u, entry, c, record);
             return;
         }
     }
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * globals.viewport.y * 0.5;
+    // Chosen or the list full, as velk_lod_use says; else compute raster took it.
+    if (traced) g_traced = 3u;
     velk_lod_take(entry, c, slot, record, world, scale, cam, cam, pixels_per_unit);
+    if (traced) velk_trace_note(globals, VELK_TRACE_DRAW, g_traced, entry, c, record);
 }
 )";
 
@@ -2958,7 +3211,7 @@ layout(push_constant) uniform PC {
     uint tiny_capacity;
     float tiny_pixels;     // 0 for none
 } pc;
-)" VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL R"(
+)" VELK_OCCLUSION_GLSL VELK_TINY_ADD_GLSL VELK_TRACE_GLSL R"(
 uint g_instance;
 uint g_table;
 vec3 g_lod_cam;
@@ -3014,8 +3267,17 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
     // Clusters for rays only: their batch draws itself.
     if ((cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u) return;
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
+    // Traced: chosen (0) or held back by occlusion (2), as the kept cut's draw notes it, with no
+    // record.
+    GlobalData g = velk_globals.data[pc.globals_base];
+    bool traced = g.trace != VELK_TRACE_NONE
+               && velk_trace_sphere(g, velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, g.cam_pos.xyz),
+                                    uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale);
     if (deforming || !velk_lod_occluded(cluster + VELK_LOD_CLUSTER_SPHERE, world, scale, cam, entry, c, slot)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
+        if (traced) velk_trace_note(g, VELK_TRACE_DRAW, 0u, entry, c, 0xFFFFFFFFu);
+    } else if (traced) {
+        velk_trace_note(g, VELK_TRACE_DRAW, 2u, entry, c, 0xFFFFFFFFu);
     }
 }
 
@@ -3057,7 +3319,12 @@ void main()
     // is in view or hidden.
     bool deforming = entries != 0u && (cull_words.data[first_entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
 
-    if (!deforming && pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) return;
+    // Traced: an instance the traced pixel's ray passes, culled every frame (kTraceInstance).
+    bool traced = globals.trace != VELK_TRACE_NONE && velk_trace_sphere(globals, center, radius);
+    if (!deforming && pc.max_distance > 0.0 && length(center) - radius > pc.max_distance) {
+        if (traced) velk_trace_note(globals, 8u, 1u, first_entry, slot, entries);
+        return;
+    }
 
     // The sphere against each clip plane. Planes are rows of the matrix added to or
     // taken from its last row, so their normals' lengths are at most the sum of the
@@ -3071,9 +3338,11 @@ void main()
     vec3 r3 = vec3(vp[0][3], vp[1][3], vp[2][3]);
     float w_reach = radius * length(r3);
     if (!deforming) {
-        if (abs(clip.x) > clip.w + w_reach + radius * length(r0)) return;
-        if (abs(clip.y) > clip.w + w_reach + radius * length(r1)) return;
-        if (abs(clip.z) > clip.w + w_reach + radius * length(r2)) return;
+        if (abs(clip.x) > clip.w + w_reach + radius * length(r0) || abs(clip.y) > clip.w + w_reach + radius * length(r1)
+            || abs(clip.z) > clip.w + w_reach + radius * length(r2)) {
+            if (traced) velk_trace_note(globals, 8u, 2u, first_entry, slot, entries);
+            return;
+        }
     }
 
     g_instance = instance;
@@ -3081,8 +3350,10 @@ void main()
     if (!deforming && pc.pyramid_word != 0xFFFFFFFFu
         && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection, center + globals.cam_moved, radius)
         && velk_retest(0xFFFFFFFFu, 0u, slot, 0xFFFFFFFFu)) {
+        if (traced) velk_trace_note(globals, 8u, 3u, first_entry, slot, entries);
         return;
     }
+    if (traced) velk_trace_note(globals, 8u, 0u, first_entry, slot, entries);
 
     if (pc.items_word == 0xFFFFFFFFu) {
         uint index = atomicAdd(cull_words.data[table + VELK_TABLE_COUNT], 1u);
@@ -3684,6 +3955,14 @@ struct InstanceCullPass
     /// names of, and the path gives records the first time it draws them (light_claim_src).
     LightPool light_pool;
 
+    /// The trace of one pixel (kTraceHeaderWords): its region, made when the path asks for one by
+    /// setting trace_x, which it is then written with, and when it was last logged.
+    ArenaRegion trace;
+    uint32_t trace_x = kTraceNone;
+    uint32_t trace_y = 0;
+    uint32_t trace_entry = kTraceNone;  ///< A cluster entry whose walks are noted wherever they go.
+    uint64_t trace_log_frame = 0;
+
     /// What kept cut records name in the batches, as the batches were last made, so that a cut
     /// outlives batches made again (instance_cut_rename_src): each batch's tables, by their
     /// word, with each mesh's first cluster entry and how many, and the visual for one that has
@@ -4099,6 +4378,63 @@ inline void publish_ray_top(const InstanceCullPass& state, uint32_t view_globals
     }
     const uint32_t word = instance_ray_top_word(state);
     ctx.globals_arena->update_at(uint64_t(view_globals_base) * sizeof(FrameGlobals) + offsetof(FrameGlobals, ray_top), &word,
+                                 sizeof(word));
+}
+
+/// The pixel VELK_TRACE_PIXEL=x,y names for the culling's trace (InstanceCullPass::trace), a
+/// diagnostic logged every 60 frames; @p x is kTraceNone without it.
+inline void trace_pixel_from_env(uint32_t& x, uint32_t& y)
+{
+    x = kTraceNone;
+    y = 0;
+    unsigned px = 0;
+    unsigned py = 0;
+#ifdef _WIN32
+    char* val = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&val, &len, "VELK_TRACE_PIXEL") != 0 || !val) return;
+    const bool read = std::sscanf(val, "%u,%u", &px, &py) == 2;
+    std::free(val);
+#else
+    const char* val = std::getenv("VELK_TRACE_PIXEL");
+    const bool read = val && std::sscanf(val, "%u,%u", &px, &py) == 2;
+#endif
+    if (read) {
+        x = px;
+        y = py;
+    }
+}
+
+/// The cluster entry VELK_TRACE_ENTRY names, whose walks the trace notes wherever they go, as
+/// the trace's log prints entries; kTraceNone without it.
+inline uint32_t trace_entry_from_env()
+{
+    unsigned entry = 0;
+#ifdef _WIN32
+    char* val = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&val, &len, "VELK_TRACE_ENTRY") != 0 || !val) return kTraceNone;
+    const bool read = std::sscanf(val, "%u", &entry) == 1;
+    std::free(val);
+#else
+    const char* val = std::getenv("VELK_TRACE_ENTRY");
+    const bool read = val && std::sscanf(val, "%u", &entry) == 1;
+#endif
+    return read ? entry : kTraceNone;
+}
+
+/// Tells the culling shaders of the view at @p view_globals_base where its trace is
+/// (FrameGlobals::trace, kTraceNone for none). Before the culling runs, after the globals are
+/// written for the frame.
+inline void publish_trace(const InstanceCullPass& state, uint32_t view_globals_base, FrameContext& ctx)
+{
+    if (!ctx.globals_arena) {
+        return;
+    }
+    const uint32_t word = state.trace.valid() && state.trace_x != kTraceNone
+        ? static_cast<uint32_t>(state.trace.offset() / sizeof(uint32_t))
+        : kTraceNone;
+    ctx.globals_arena->update_at(uint64_t(view_globals_base) * sizeof(FrameGlobals) + offsetof(FrameGlobals, trace), &word,
                                  sizeof(word));
 }
 
@@ -4897,6 +5233,189 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         state.cut_moves = moves;
         state.cut_moves_known = true;
         state.cut_log_frame = ctx.present_counter;
+    }
+
+    // The trace of one pixel, while the path asks for one: made at once; its notes logged every
+    // 60 frames, summed by what they say, then cleared.
+    if (state.trace_x != kTraceNone) {
+        if (!state.trace.valid()) {
+            state.trace = arena->alloc((size_t(kTraceHeaderWords) + size_t(kTraceCapacity) * kTraceNoteWords) * sizeof(uint32_t));
+            if (state.trace.valid()) {
+                const uint32_t header[kTraceHeaderWords] = {state.trace_x, state.trace_y, 0u, kTraceCapacity, state.trace_entry, 0u};
+                arena->update_at(state.trace.offset(), header, sizeof(header));
+                state.trace_log_frame = ctx.present_counter;
+            }
+        } else if (ctx.present_counter >= state.trace_log_frame + 60u) {
+            state.trace_log_frame = ctx.present_counter;
+            uint32_t count = 0;
+            arena->read_at(state.trace.offset() + 2u * sizeof(uint32_t), &count, sizeof(count));
+            const uint32_t made = count;
+            count = std::min(count, kTraceCapacity);
+            vector<uint32_t> notes(size_t(count) * kTraceNoteWords);
+            if (count != 0) {
+                arena->read_at(state.trace.offset() + kTraceHeaderWords * sizeof(uint32_t), notes.data(),
+                               notes.size() * sizeof(uint32_t));
+            }
+            const uint32_t none = 0;
+            arena->update_at(state.trace.offset() + 2u * sizeof(uint32_t), &none, sizeof(none));
+            // Summed by what came of what: stage and outcome, then entry and cluster, or partition.
+            struct Sum
+            {
+                uint32_t what, a, b, c, n;
+            };
+            vector<Sum> sums;
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t* n = notes.data() + size_t(i) * kTraceNoteWords;
+                auto it = std::find_if(sums.begin(), sums.end(),
+                                       [&](const Sum& s) { return s.what == n[0] && s.a == n[1] && s.b == n[2] && s.c == n[3]; });
+                if (it == sums.end()) {
+                    sums.push_back({n[0], n[1], n[2], n[3], 1u});
+                } else {
+                    ++it->n;
+                }
+            }
+            std::sort(sums.begin(), sums.end(), [](const Sum& l, const Sum& r) {
+                return l.what != r.what ? (l.what & 255u) < (r.what & 255u) || ((l.what & 255u) == (r.what & 255u) && l.what < r.what)
+                                        : l.a != r.a ? l.a < r.a : l.b < r.b;
+            });
+            VELK_LOG(I, "trace at pixel %u,%u: %u notes since the last log%s", state.trace_x, state.trace_y, made,
+                     made > kTraceCapacity ? " (only the first kept)" : "");
+            static constexpr const char* kChoose[] = {"chosen", "LEFT OUT past its count"};
+            static constexpr const char* kPartition[] = {"listed", "OUTSIDE the view", "runs PAST THE ROOM"};
+            static constexpr const char* kDraw[] = {"chosen", "OUTSIDE the view", "held back by occlusion", "compute raster",
+                                                    "CHOSEN LIST FULL"};
+            static constexpr const char* kRaster[] = {"reached the shader", "CUT OUT by its alpha", "written"};
+            for (const Sum& s : sums) {
+                const uint32_t stage = s.what & 255u;
+                const uint32_t outcome = s.what >> 8u;
+                if (stage == kTracePartition) {
+                    VELK_LOG(I, "  partition %u (%u records): %s, %u times", s.a, s.b, outcome < 3u ? kPartition[outcome] : "?",
+                             s.n);
+                    continue;
+                }
+                if (stage == kTraceNumbers) {
+                    float stored = 0.f;
+                    float pixels = 0.f;
+                    std::memcpy(&stored, &s.b, sizeof(stored));
+                    std::memcpy(&pixels, &s.c, sizeof(pixels));
+                    const uint32_t which = s.a & 0x0F000000u;
+                    const uint32_t ref = s.a & ~0x0F000000u;
+                    const char* name = which == 0x08000000u ? "least error under"
+                                     : which == 0x04000000u ? "largest parent error under"
+                                     : which == 0x02000000u ? "own error of cluster"
+                                                            : "parent error of cluster";
+                    VELK_LOG(I, "  numbers: %s %s %u: stored %g, %.3f px, %u times", name,
+                             which >= 0x04000000u ? ((ref & 0x80000000u) != 0u ? "leaf" : "node") : "",
+                             ref & 0x7FFFFFFFu, stored, pixels, s.n);
+                    continue;
+                }
+                if (stage == kTraceShape) {
+                    VELK_LOG(I, "  shape: %s %u is child %u of node %u", (s.a & 0x80000000u) != 0u ? "cluster" : "node",
+                             s.a & 0x7FFFFFFFu, s.c, s.b);
+                    continue;
+                }
+                if (stage == kTraceInstance) {
+                    static constexpr const char* kInstance[] = {"walked", "TOO FAR", "OUTSIDE the view", "held back by occlusion"};
+                    uint32_t triangles = 0;
+                    for (const auto& batch : *batches) {
+                        InstanceCullInfo info{};
+                        if (batch && batch->get_instance_cull(info) && info.cluster_entry_word == s.a) {
+                            if (auto* primitive = batch->primitive().get()) triangles = primitive->get_index_count() / 3u;
+                            break;
+                        }
+                    }
+                    VELK_LOG(I, "  instance of entry %u (%u triangles, %u entries) slot %u, culled every frame: %s, %u times", s.a,
+                             triangles, s.c, s.b, outcome < 4u ? kInstance[outcome] : "?", s.n);
+                    continue;
+                }
+                if (stage == kTraceBlended) {
+                    uint32_t triangles = 0;
+                    for (const auto& batch : *batches) {
+                        if (batch && batch->draw_data_region_offset() / sizeof(DrawDataHeader) == s.a) {
+                            if (auto* primitive = batch->primitive().get()) triangles = primitive->get_index_count() / 3u;
+                            break;
+                        }
+                    }
+                    float opacity = 0.f;
+                    std::memcpy(&opacity, &s.c, sizeof(opacity));
+                    VELK_LOG(I, "  blended draw %u (%u triangles) ids %08x drawn over it with opacity %.3f, %u times", s.a,
+                             triangles, s.b, opacity, s.n);
+                    continue;
+                }
+                if (stage == kTraceResolve) {
+                    VELK_LOG(I, "  resolve: took the %s raster's ids %08x %08x (draw %d), %u times",
+                             outcome == 0u ? "hardware" : "compute", s.a, s.b,
+                             s.a == 0u ? -1 : int((s.a & 0x007FFFFFu) - 1u), s.n);
+                    continue;
+                }
+                if (stage == kTraceForward) {
+                    uint32_t triangles = 0;
+                    bool blended = false;
+                    for (const auto& batch : *batches) {
+                        if (batch && batch->draw_data_region_offset() / sizeof(DrawDataHeader) == s.a) {
+                            if (auto* primitive = batch->primitive().get()) triangles = primitive->get_index_count() / 3u;
+                            blended = batch->pipeline_options().blend_mode == BlendMode::Alpha;
+                            break;
+                        }
+                    }
+                    float depth = 0.f;
+                    std::memcpy(&depth, &s.c, sizeof(depth));
+                    VELK_LOG(I, "  forward draw %u (%u triangles%s) ids %08x depth %.6f: drawn, %u times", s.a, triangles,
+                             blended ? ", blended" : "", s.b, depth, s.n);
+                    continue;
+                }
+                if (stage == kTraceRaster) {
+                    // The batch whose draw record it is: its triangles, and whether blended.
+                    uint32_t triangles = 0;
+                    for (const auto& batch : *batches) {
+                        if (batch && batch->draw_data_region_offset() / sizeof(DrawDataHeader) == s.a) {
+                            if (auto* primitive = batch->primitive().get()) triangles = primitive->get_index_count() / 3u;
+                            break;
+                        }
+                    }
+                    float depth = 0.f;
+                    std::memcpy(&depth, &s.c, sizeof(depth));
+                    VELK_LOG(I, "  raster draw %u (%u triangles) ids %08x depth %.6f: %s, %u times", s.a, triangles, s.b, depth,
+                             outcome < 3u ? kRaster[outcome] : "?", s.n);
+                    continue;
+                }
+                // The batch whose entry it is: its triangles, and whether blended.
+                uint32_t triangles = 0;
+                bool blended = false;
+                uint64_t draw = 0;
+                for (const auto& batch : *batches) {
+                    InstanceCullInfo info{};
+                    if (!batch || !(batch->get_instance_cull(info) || batch->get_ray_cull(info))
+                        || info.cluster_entry_word != s.a) {
+                        continue;
+                    }
+                    if (auto* primitive = batch->primitive().get()) triangles = primitive->get_index_count() / 3u;
+                    blended = batch->pipeline_options().blend_mode == BlendMode::Alpha;
+                    draw = batch->draw_data_region_offset() / sizeof(DrawDataHeader);
+                    break;
+                }
+                static constexpr const char* kWalk[] = {"?", "?", "chosen", "for light only", "skipped, all under its node too coarse",
+                                                        "skipped, all under its node have a parent that will do",
+                                                        "too coarse", "its parent will do",
+                                                        "NODE skipped, all under it too coarse",
+                                                        "NODE skipped, all under it have a parent that will do",
+                                                        "NODE skipped, out of view, all under it have a parent at the light's level",
+                                                        "chosen as a root record"};
+                const char* how = stage == kTraceChoose ? (outcome < 2u ? kChoose[outcome] : "?")
+                                : stage == kTraceDraw  ? (outcome < 5u ? kDraw[outcome] : "?")
+                                : stage == kTraceWalk  ? (outcome < 12u ? kWalk[outcome] : "?")
+                                                       : "?";
+                if (stage == kTraceWalk) {
+                    VELK_LOG(I, "  walk entry %u (draw %llu, %u triangles) %s %u, partition state %u: %s, %u times", s.a,
+                             static_cast<unsigned long long>(draw), triangles, (s.b & 0x40000000u) != 0u ? "node" : "cluster",
+                             s.b & ~0x40000000u, s.c, how, s.n);
+                    continue;
+                }
+                VELK_LOG(I, "  %s entry %u (draw %llu, %u triangles%s) cluster %u: %s, %u times",
+                         stage == kTraceChoose ? "choose" : stage == kTraceDraw ? "draw" : "?", s.a,
+                         static_cast<unsigned long long>(draw), triangles, blended ? ", blended" : "", s.b, how, s.n);
+            }
+        }
     }
 
     // The light pool, with a segment to start, and more when records asked for pages that were

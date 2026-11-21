@@ -65,6 +65,7 @@ void ForwardPath::reserve(IViewEntry& entry, const RenderView& render_view, Fram
     if (inserted) {
         entry.add_render_state_observer(this);
     }
+    trace_pixel_from_env(it->second.instance_cull.trace_x, it->second.instance_cull.trace_y);
     reserve_instance_cull(it->second.instance_cull, render_view.batches, ctx);
 }
 
@@ -114,6 +115,7 @@ void ForwardPath::build_passes(IViewEntry& entry,
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
     const uint32_t culling_generation = cache.instance_cull.arena_generation;
     emit_instance_cull_pass(cache.instance_cull, render_view.batches, render_view.view_globals_base, ctx, graph);
+    publish_trace(cache.instance_cull, render_view.view_globals_base, ctx);
     if (cache.instance_cull.arena_generation != culling_generation) {
         cache.dirty = true;
     }
@@ -150,9 +152,15 @@ void ForwardPath::build_passes(IViewEntry& entry,
             // Hold strong refs to every pipeline this pass binds (cache is
             // weak). resolve runs before set_held_pipelines replaces the
             // pass's old set, so reused pipelines never drop to zero refs.
+            // The culling's trace notes fragments where fragment shaders can write buffers.
+            string driver;
+            if (ctx.backend->supports_fragment_stores()) {
+                driver.append(string_view("#define VELK_FRAGMENT_STORES 1\n"));
+            }
+            driver.append(forward_fragment_driver_template);
             auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
                 auto p = resolve_or_compile_forward(*ctx.render_ctx, b, target_format,
-                                                    target_depth_format);
+                                                    target_depth_format, string_view(driver));
                 if (!p) return nullptr;
                 IGpuPipeline* raw = p.get();
                 rec.held.push_back(std::move(p));

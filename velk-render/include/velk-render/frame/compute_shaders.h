@@ -309,13 +309,27 @@ void main()
     if (inside) {
         uint pixel_index = uint(coord.y) * RESOLVE_WIDTH + uint(coord.x);
         ids_at = RESOLVE_TINY + RESOLVE_WIDTH * RESOLVE_HEIGHT + pixel_index * VELK_PIXEL_RECORD_WORDS;
-        if (resolve_words.data[RESOLVE_TINY + pixel_index] != 0u) {
+        bool tiny = resolve_words.data[RESOLVE_TINY + pixel_index] != 0u;
+        if (tiny) {
             resolve_words.data[RESOLVE_TINY + pixel_index] = 0u;
             ids = uvec2(resolve_words.data[ids_at], resolve_words.data[ids_at + 1u]);
         } else {
             ids = texelFetch(velk_textures_uint[nonuniformEXT(RESOLVE_IDS)], coord, 0).xy;
             resolve_words.data[ids_at] = ids.x;
             resolve_words.data[ids_at + 1u] = ids.y;
+        }
+        // The culling's trace (InstanceCullPass::trace), at its pixel: which raster's ids were
+        // taken, and what they are.
+        uint trace = VELK_GLOBALS.trace;
+        if (trace != 0xFFFFFFFFu && uint(coord.x) == resolve_words.data[trace] && uint(coord.y) == resolve_words.data[trace + 1u]) {
+            uint at = atomicAdd(resolve_words.data[trace + 2u], 1u);
+            if (at < resolve_words.data[trace + 3u]) {
+                uint w = trace + 6u + at * 4u;
+                resolve_words.data[w] = 5u | ((tiny ? 1u : 0u) << 8u);
+                resolve_words.data[w + 1u] = ids.x;
+                resolve_words.data[w + 2u] = ids.y;
+                resolve_words.data[w + 3u] = 0u;
+            }
         }
     }
     bool drawn = ids.x != 0u;
@@ -1076,31 +1090,10 @@ uint velk_light_grid_at(uint first, uint k)
 /// light trace's, VELK_LIGHT_TRACE_MAIN_GLSL): see VELK_LIGHT_GRID_ONLY_GLSL.
 [[maybe_unused]] constexpr string_view light_grid_src = VELK_LIGHT_GRID_ONLY_GLSL VELK_LIGHT_AREA_GLSL VELK_LIGHT_GRID_GLSL;
 
-// Default compute shader for the deferred lighting pass. Samples the
-// G-buffer attachments + light buffer and writes the shaded color to
-// the per-view output storage image.
-//
-// Shader-side responsibilities:
-//   - Unlit path: pass albedo through unchanged.
-//   - Standard path: evaluate Lambertian diffuse from each analytic
-//     light (directional / point / spot) with distance + cone falloff.
-//   - Shadow modulation lands in a later slice (B.3.d) alongside the
-//     shared `velk_eval_shadow` composer.
-[[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
-#version 450
-#include "velk.glsl"
-#include "velk-ui.glsl"
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
-layout(set = 0, binding = 1, rgba8)   uniform writeonly image2D gStorageImages[];
-layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
-layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
-
-// velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
-// selects this view's record.
-#define VELK_GLOBALS velk_globals.data[pc.globals_base]
-
+// What lighting a surface takes, for the deferred lighting and the blended surfaces' fragments:
+// the scene's lights, the environment, the highlight's terms. Follows VELK_GLOBALS and push
+// constants `pc` with env_texture_id and env_params.
+#define VELK_SURFACE_LIGHT_GLSL R"(
 // Mirrors C++ GpuLight (80 bytes) in ray_tracer.cpp / deferred_lighter.cpp.
 struct Light {
     uvec4 flags;           // x = type (0 dir, 1 point, 2 spot), y = shadow_tech_id, zw = _
@@ -1114,55 +1107,6 @@ struct Light {
 // pc.lights_base. Same buffer the RT compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
 
-// Material records as raw words (set = 1 slot 4). This shader does not
-// evaluate materials, but it composes the same intersect snippets the RT
-// compute does, and an intersect may read its shape's record (text reads its
-// glyph-data bases from it) at the word base carried on the shape.
-layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
-
-// Per-primitive ray geometry (set = 1 slot 11), plus the trees it points at (slots 12 / 13).
-// A primitive's runs are allocated once at load and never move.
-layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
-layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
-layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
-
-// RtShape comes from velk.glsl. View-level globals (inverse_view_projection, the
-// view's top tree for rays, present_counter) are read through VELK_GLOBALS.
-)" R"(
-
-// scalar layout: tight packing so the per-dispatch CPU struct (whose
-// `vec4 cam_pos` sits at offset 0 of the struct) lines up with the
-// GPU's view of cam_pos at offset 8 of the push-constant block. Default
-// std430 would round vec4 up to a 16-byte alignment and shift every
-// subsequent field by 8 bytes vs. what the CPU writes.
-layout(push_constant, scalar) uniform PC {
-    uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
-    uint spare0;               // 4
-    vec4 cam_pos;              // 8         (CPU push starts here)
-    uint output_image_id;      // 24
-    uint albedo_tex_id;        // 28
-    uint normal_tex_id;        // 32
-    uint worldpos_tex_id;      // 36
-    uint material_tex_id;      // 40
-    uint emissive_tex_id;      // 44
-    uint width;                // 48
-    uint height;               // 52
-    uint light_count;          // 56
-    uint env_texture_id;       // 60
-    uint cells_header;         // 64  word of the light header. See CELLS_HEADER
-    uint ltc_matrix_id;        // 68  LTC transform table; 0 = area specular off
-    uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
-    uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
-    vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
-    uint spare6;               // 88
-    uint spare1;               // 92
-    uint mode;                 // 96  what a pass is to do, for passes that do more than one thing
-    uint spare3;               // 100
-    uint spare4;               // 104
-    uint spare2;               // 108
-    uint spare5;               // 112
-} pc;
-
 // A scene light, with its position relative to the camera.
 Light velk_light_at(uint index)
 {
@@ -1170,20 +1114,6 @@ Light velk_light_at(uint index)
     light.position.xyz -= VELK_GLOBALS.cam_pos.xyz;
     return light;
 }
-
-#include "velk_intersect.glsl"
-
-// The walk's stack per thread, in shared memory: 48 for 64 threads is 12 KB. The light trace's
-// log gives the deepest a frame's rays got.
-#define VELK_TRACE_STACK_SIZE 48
-#include "velk_trace.glsl"
-)"
-                                                                      R"(
-// Shadow dispatch is composed at pipeline-build time from the snippet
-// registry's frame_shadow_techs() set. The composer appends each
-// tech's snippet #include plus a velk_eval_shadow switch keyed by the
-// registry id. tech_id 0 means "no shadow technique" and returns 1.0.
-float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_normal);
 
 // Equirect env sample with explicit mip LOD. The env texture ships
 // with a bilinear-downsampled mip chain as a rough roughness
@@ -1239,6 +1169,171 @@ vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float roughness)
     vec3 F90 = max(vec3(1.0 - roughness), F0);
     return F0 + (F90 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
+)"
+
+// Each light's diffuse light and highlight on a surface, for the deferred lighting and the
+// blended surfaces' fragments. Follows VELK_SURFACE_LIGHT_GLSL and velk_area_irradiance, with
+// push constants `pc` with light_count, lights_base and ltc_magnitude_id.
+#define VELK_SURFACE_LIGHTS_GLSL R"(
+// At `world_pos` (from the camera) facing `N`, seen along `V`: through what the points of light
+// keep when `points` (the lights `point_lights` and what of each gets through), else every light
+// unshadowed. Area lights in closed form.
+void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float point_through[VELK_LIGHT_SLOTS],
+                         vec3 world_pos, vec3 N, vec3 V, vec3 F0, float roughness,
+                         out vec3 direct, out vec3 highlights, out vec3 area_irr, out vec3 area_spec)
+{
+    direct = vec3(0.0);
+    highlights = vec3(0.0);
+    area_irr = vec3(0.0);
+    area_spec = vec3(0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    float a = roughness * roughness;
+    uint light_count = points ? VELK_LIGHT_SLOTS : pc.light_count;
+    for (uint k = 0u; k < light_count; ++k) {
+        if (points && point_lights[k] == VELK_LIGHT_NONE) continue;
+        uint i = points ? point_lights[k] : k;
+        float through = points ? point_through[k] : 1.0;
+        Light light = velk_light_at(pc.lights_base + i);
+        // Area lights are integrated in closed form, and blocked by what the points say.
+        if (light.flags.x == 3u) {
+            vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
+            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * through;
+            if (es.x > 0.0) {
+                // pi converts clamped-cosine units to the same scale as a
+                // delta light's N.L, so authored intensities stay comparable.
+                area_irr += radiance * es.x * 3.14159265;
+            }
+            if (es.y > 0.0 && pc.ltc_magnitude_id != 0u) {
+                // Split-sum: the fitted pair is (lobe energy, Fresnel
+                // weight), applied the same way the env specular applies
+                // its BRDF LUT, so both specular sources stay on one scale.
+                vec2 t2 = velk_texture(pc.ltc_magnitude_id,
+                                       vec2(clamp(roughness, 0.0, 1.0),
+                                            sqrt(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0)))).xy;
+                area_spec += radiance * es.y * (F0 * t2.x + (1.0 - F0) * t2.y)
+                             * 3.14159265;
+            }
+            continue;
+        }
+        vec3 L;
+        float atten = 1.0;
+        if (light.flags.x == 0u) {
+            L = -light.direction.xyz;
+        } else {
+            vec3 to_light = light.position.xyz - world_pos;
+            float dist = length(to_light);
+            L = to_light / max(dist, 1e-6);
+            float range = max(light.params.x, 1e-6);
+            float t = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten = t * t;
+            if (light.flags.x == 2u) {
+                float cos_a = dot(-L, light.direction.xyz);
+                atten *= smoothstep(light.params.z, light.params.y, cos_a);
+            }
+        }
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL <= 0.0 || atten <= 0.0) continue;
+        vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
+
+        vec3 H = normalize(L + V);
+        float NdotH = max(dot(N, H), 0.0);
+        float VdotH = max(dot(V, H), 0.0);
+        float D = ggx_d(NdotH, a);
+        float G = smith_g(NdotV, NdotL, roughness);
+        vec3 F = fresnel_schlick(VdotH, F0);
+        direct += NdotL * radiance * through;
+        highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
+    }
+}
+)"
+
+// Default compute shader for the deferred lighting pass. Samples the
+// G-buffer attachments + light buffer and writes the shaded color to
+// the per-view output storage image.
+//
+// Shader-side responsibilities:
+//   - Unlit path: pass albedo through unchanged.
+//   - Standard path: evaluate Lambertian diffuse from each analytic
+//     light (directional / point / spot) with distance + cone falloff.
+//   - Shadow modulation lands in a later slice (B.3.d) alongside the
+//     shared `velk_eval_shadow` composer.
+[[maybe_unused]] constexpr string_view deferred_compute_prelude_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 1, rgba8)   uniform writeonly image2D gStorageImages[];
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D gStorageImagesF32[];
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D gStorageImagesF16[];
+
+// velk_globals (set = 1 slot 2) is declared in velk.glsl. pc.globals_base
+// selects this view's record.
+#define VELK_GLOBALS velk_globals.data[pc.globals_base]
+
+// Material records as raw words (set = 1 slot 4). This shader does not
+// evaluate materials, but it composes the same intersect snippets the RT
+// compute does, and an intersect may read its shape's record (text reads its
+// glyph-data bases from it) at the word base carried on the shape.
+layout(set = 1, binding = 4, std430) readonly buffer VelkMaterialWords { uint data[]; } velk_material_words;
+
+// Per-primitive ray geometry (set = 1 slot 11), plus the trees it points at (slots 12 / 13).
+// A primitive's runs are allocated once at load and never move.
+layout(set = 1, binding = 11, std430) readonly buffer VelkMeshStatic { MeshStaticData data[]; } velk_mesh_static_records;
+layout(set = 1, binding = 12, std430) readonly buffer VelkMeshNodes { VelkMeshNode data[]; } velk_mesh_nodes;
+layout(set = 1, binding = 13, std430) readonly buffer VelkClusterWords { uint data[]; } velk_cluster_words;
+
+// RtShape comes from velk.glsl. View-level globals (inverse_view_projection, the
+// view's top tree for rays, present_counter) are read through VELK_GLOBALS.
+)" R"(
+
+// scalar layout: tight packing so the per-dispatch CPU struct (whose
+// `vec4 cam_pos` sits at offset 0 of the struct) lines up with the
+// GPU's view of cam_pos at offset 8 of the push-constant block. Default
+// std430 would round vec4 up to a 16-byte alignment and shift every
+// subsequent field by 8 bytes vs. what the CPU writes.
+layout(push_constant, scalar) uniform PC {
+    uint globals_base;         // offset 0  (4 bytes; view's FrameGlobals index)
+    uint spare0;               // 4
+    vec4 cam_pos;              // 8         (CPU push starts here)
+    uint output_image_id;      // 24
+    uint albedo_tex_id;        // 28
+    uint normal_tex_id;        // 32
+    uint worldpos_tex_id;      // 36
+    uint material_tex_id;      // 40
+    uint emissive_tex_id;      // 44
+    uint width;                // 48
+    uint height;               // 52
+    uint light_count;          // 56
+    uint env_texture_id;       // 60
+    uint cells_header;         // 64  word of the light header. See CELLS_HEADER
+    uint ltc_matrix_id;        // 68  LTC transform table; 0 = area specular off
+    uint lights_base;          // 72  index into velk_lights (set = 1 slot 5)
+    uint ltc_magnitude_id;     // 76  LTC energy / Fresnel table
+    vec2 env_params;           // 80  x = intensity, y = rotation_rad (inline)
+    uint spare6;               // 88
+    uint spare1;               // 92
+    uint mode;                 // 96  what a pass is to do, for passes that do more than one thing
+    uint spare3;               // 100
+    uint spare4;               // 104
+    uint spare2;               // 108
+    uint spare5;               // 112
+} pc;
+)" VELK_SURFACE_LIGHT_GLSL R"(
+#include "velk_intersect.glsl"
+
+// The walk's stack per thread, in shared memory: 48 for 64 threads is 12 KB. The light trace's
+// log gives the deepest a frame's rays got.
+#define VELK_TRACE_STACK_SIZE 48
+#include "velk_trace.glsl"
+)"
+                                                                      R"(
+// Shadow dispatch is composed at pipeline-build time from the snippet
+// registry's frame_shadow_techs() set. The composer appends each
+// tech's snippet #include plus a velk_eval_shadow switch keyed by the
+// registry id. tech_id 0 means "no shadow technique" and returns 1.0.
+float velk_eval_shadow(uint tech_id, uint light_idx, vec3 world_pos, vec3 world_normal);
 
 // ACES Filmic tone map (Krzysztof Narkowicz fit). Maps 0..inf HDR
 // radiance to 0..1 SDR while preserving mid-tone contrast. Stand-in
@@ -1411,9 +1506,121 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 }
 )";
 
+/**
+ * The deferred path's driver for blended surfaces' fragments (the transparent pass), composed with
+ * a material's eval (compose_eval_fragment): lit as the deferred lighting lights a pixel, by the
+ * points of light their record keeps (velk_light_direct, which blended surfaces' fragments list,
+ * light_claim_blended_src), else every light unshadowed; indirect light from what their record
+ * keeps, else the environment; with the Fresnel boosted opacity of glass. Its head, then the area
+ * lights' code (deferred_area_light_src or its stub), then transparent_lit_main_src. Its push
+ * constants are the draw's, then the lighting's (TransparentLitPushC).
+ */
+[[maybe_unused]] constexpr string_view transparent_lit_head_src = R"(
+layout(push_constant, scalar) uniform VelkPC {
+    uint draw_base;
+    uint pool_word;          // the light pool, VELK_LIGHT_NONE for none
+    float light_pixels;      // kLightPixels
+    uint cells_header;       // word of the light header. See CELLS_HEADER
+    uint light_count;
+    uint lights_base;
+    uint env_texture_id;
+    vec2 env_params;         // x = intensity, y = rotation_rad
+    uint ltc_matrix_id;
+    uint ltc_magnitude_id;
+} pc;
+
+#define VELK_GLOBALS velk_globals.data[velk_draw_data.data[pc.draw_base].globals_base]
+layout(set = 1, binding = 16, std430) readonly buffer VelkLightCellWords { uint data[]; } velk_light_cell_words;
+#define CELLS_HEADER pc.cells_header
+#define VELK_LIGHT_WORDS velk_light_cell_words
+)" VELK_SURFACE_LIGHT_GLSL VELK_LIGHT_GRID_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL
+    VELK_FRAGMENT_TRIANGLE_GLSL;
+
+[[maybe_unused]] constexpr string_view transparent_lit_main_src = VELK_SURFACE_LIGHTS_GLSL R"(
+VELK_VARYINGS_IN
+
+VELK_FRAG_OUT(frag_color)
+)" VELK_TRACE_FRAGMENT_GLSL R"(
+
+void main()
+{
+    VelkDrawData d = velk_draw_data.data[pc.draw_base];
+    GlobalData globals = velk_globals.data[d.globals_base];
+    EvalContext ctx;
+    ctx.material_base = d.material_base;
+    ctx.texture_id  = d.texture_id;
+    ctx.shape_param = v_shape_param;
+    ctx.uv          = v_local_uv;
+    ctx.uv1         = v_uv1;
+    ctx.base        = v_color;
+    ctx.ray_dir     = normalize(v_rel_pos);
+    ctx.normal      = v_world_normal;
+    ctx.hit_pos     = v_rel_pos + globals.cam_pos.xyz;
+    ctx.rel_pos     = v_rel_pos;
+    ctx.tangent     = v_world_tangent;
+
+    MaterialEval e = <%EVAL_FN%>(ctx);
+    if (e.color.a < <%DISCARD%>) discard;
+
+    // An unlit material's alpha is its opacity as it stands, its colour as it is.
+    float opacity = e.color.a;
+    vec3 color = e.color.rgb;
+    if (e.lighting_mode == VELK_LIGHTING_STANDARD) {
+        vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
+        vec3 V = normalize(-v_rel_pos);
+        float NdotV = max(dot(N, V), 0.0);
+        float fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
+        opacity = e.color.a + fresnel * (1.0 - e.color.a);
+        float metallic = clamp(e.metallic, 0.0, 1.0);
+        float roughness = clamp(e.roughness, 0.04, 1.0);
+        vec3 F0 = mix(vec3(0.04), e.color.rgb, metallic);
+
+        // The lights its points of light keep and what of each gets through; before they are
+        // traced, every light, unshadowed.
+        uint point_lights[VELK_LIGHT_SLOTS];
+        float point_through[VELK_LIGHT_SLOTS];
+        bool points = false;
+        uint radiance = VELK_LIGHT_NONE;
+        uint radiance_dir = VELK_LIGHT_NONE;
+        if (pc.pool_word != VELK_LIGHT_NONE) {
+            uvec2 ids = uvec2(pc.draw_base + 1u, (v_instance << d.triangle_bits) | uint(gl_PrimitiveID));
+            vec3 b;
+            float longest;
+            velk_fragment_triangle(d, ids, v_rel_pos, b, longest);
+            points = velk_light_direct(pc.pool_word, ids, b, v_rel_pos, longest, pc.light_pixels, point_lights,
+                                       point_through, radiance, radiance_dir);
+        }
+        vec3 direct;
+        vec3 highlights;
+        vec3 area_irr;
+        vec3 area_spec;
+        velk_surface_lights(points, point_lights, point_through, v_rel_pos, N, V, F0, roughness, direct, highlights,
+                            area_irr, area_spec);
+
+        float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
+        vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
+        // What its record keeps of the light other surfaces give it, where the pixels that showed
+        // it faced about as it does; else the environment around its normal.
+        vec3 indirect = env_miss_color_lod(N, env_max_lod);
+        if (radiance != VELK_LIGHT_NONE) {
+            uint kept = velk_light_cell_words.data[radiance];
+            bool facing = radiance_dir == VELK_LIGHT_NONE
+                       || dot(N, unpackSnorm4x8(velk_light_cell_words.data[radiance_dir]).xyz) > 0.5;
+            if (kept != VELK_LIGHT_NONE && facing) indirect = velk_rgb9e5(kept);
+        }
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
+        color = e.color.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
+              + area_spec;
+    }
+    frag_color = vec4(color + e.emissive, opacity);
+    // The culling's trace, at its pixel: drawn over what is there, with this opacity.
+    velk_trace_fragment_note(6u, pc.draw_base, 0u, floatBitsToUint(opacity));
+}
+)";
+
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL R"(
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL R"(
 // The bounce light at a pixel from the screen probes around it (light_probes_main_src, this
 // frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
 // near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
@@ -1499,12 +1706,7 @@ void main()
         vec3 V = normalize(-world_pos);
         float NdotV = max(dot(N, V), 0.0);
         vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
-        float a = roughness * roughness;
 
-        vec3 direct = vec3(0.0);
-        vec3 highlights = vec3(0.0);
-        vec3 area_irr = vec3(0.0);
-        vec3 area_spec = vec3(0.0);
         // The lights its points of light keep and what of each gets through; before its points
         // are traced, every light, unshadowed.
         uint point_lights[VELK_LIGHT_SLOTS];
@@ -1519,62 +1721,12 @@ void main()
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
         if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_UNTRACED_PIXELS], 1u);
-        uint light_count = points ? VELK_LIGHT_SLOTS : pc.light_count;
-        for (uint k = 0u; k < light_count; ++k) {
-            if (points && point_lights[k] == VELK_LIGHT_NONE) continue;
-            uint i = points ? point_lights[k] : k;
-            float through = points ? point_through[k] : 1.0;
-            Light light = velk_light_at(pc.lights_base + i);
-            // Area lights are integrated in closed form, and blocked by what the points say.
-            if (light.flags.x == 3u) {
-                vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
-                vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * through;
-                if (es.x > 0.0) {
-                    // pi converts clamped-cosine units to the same scale as a
-                    // delta light's N.L, so authored intensities stay comparable.
-                    area_irr += radiance * es.x * 3.14159265;
-                }
-                if (es.y > 0.0 && pc.ltc_magnitude_id != 0u) {
-                    // Split-sum: the fitted pair is (lobe energy, Fresnel
-                    // weight), applied the same way the env specular applies
-                    // its BRDF LUT, so both specular sources stay on one scale.
-                    vec2 t2 = velk_texture(pc.ltc_magnitude_id,
-                                           vec2(clamp(roughness, 0.0, 1.0),
-                                                sqrt(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0)))).xy;
-                    area_spec += radiance * es.y * (F0 * t2.x + (1.0 - F0) * t2.y)
-                                 * 3.14159265;
-                }
-                continue;
-            }
-            vec3 L;
-            float atten = 1.0;
-            if (light.flags.x == 0u) {
-                L = -light.direction.xyz;
-            } else {
-                vec3 to_light = light.position.xyz - world_pos;
-                float dist = length(to_light);
-                L = to_light / max(dist, 1e-6);
-                float range = max(light.params.x, 1e-6);
-                float t = clamp(1.0 - dist / range, 0.0, 1.0);
-                atten = t * t;
-                if (light.flags.x == 2u) {
-                    float cos_a = dot(-L, light.direction.xyz);
-                    atten *= smoothstep(light.params.z, light.params.y, cos_a);
-                }
-            }
-            float NdotL = max(dot(N, L), 0.0);
-            if (NdotL <= 0.0 || atten <= 0.0) continue;
-            vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
-
-            vec3 H = normalize(L + V);
-            float NdotH = max(dot(N, H), 0.0);
-            float VdotH = max(dot(V, H), 0.0);
-            float D = ggx_d(NdotH, a);
-            float G = smith_g(NdotV, NdotL, roughness);
-            vec3 F = fresnel_schlick(VdotH, F0);
-            direct += NdotL * radiance * through;
-            highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
-        }
+        vec3 direct;
+        vec3 highlights;
+        vec3 area_irr;
+        vec3 area_spec;
+        velk_surface_lights(points, point_lights, point_through, world_pos, N, V, F0, roughness, direct, highlights,
+                            area_irr, area_spec);
 
         // Env lighting: single-sample approximation. Diffuse reads along N with a deep LOD
         // so it reads roughly the irradiance average; specular reads the mirror reflection

@@ -184,7 +184,7 @@ struct GlobalData {
     mat4 inverse_view_projection;
     vec4 viewport;
     vec4 cam_pos;
-    uint spare0;
+    uint trace;              // the culling's trace of one pixel in the culling arena, or 0xFFFFFFFF
     uint spare1;
     uint present_counter;
     float lod_scale;         // pixels an error of one unit covers at one unit away, over the most a drawn surface may be off by

@@ -1193,7 +1193,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
     // Meshes load the levels of detail the last frames asked for, before anything reads them.
     {
         VELK_PERF_SCOPE("renderer.geometry");
-        resources_->update_geometry();
+        resources_->update_geometry(static_cast<uint32_t>(present_counter_));
     }
 
     if ((slot->id % 10000) == 0) {

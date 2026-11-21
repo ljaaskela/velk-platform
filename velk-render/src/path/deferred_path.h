@@ -21,6 +21,24 @@
 
 namespace velk {
 
+/// What the lit transparent driver (transparent_lit_head_src) pushes after the draw's word, the
+/// first kTransparentLitPushBytes, then which of it a transparent pass was recorded with.
+struct TransparentLitPushC
+{
+    uint32_t pool_word;
+    float light_pixels;
+    uint32_t cells_header;
+    uint32_t light_count;
+    uint32_t lights_base;
+    uint32_t env_texture_id;
+    float env_params[2];
+    uint32_t ltc_matrix_id;
+    uint32_t ltc_magnitude_id;
+    uint32_t area;  ///< Not pushed: with the area lights' code.
+    uint32_t lit;   ///< Not pushed: lit at all.
+};
+inline constexpr uint32_t kTransparentLitPushBytes = 10 * sizeof(uint32_t);
+
 /**
  * @brief Deferred shading path: visibility buffer + material resolve +
  *        compute lighting + blit.
@@ -206,6 +224,7 @@ public:
         /// target it draws into is recreated.
         IRenderPass::Ptr cached_transparent_pass;
         bool transparent_dirty = true;
+        TransparentLitPushC transparent_lit_recorded{};
 
         /// Render test measurements, while VELK_TEST_DIAGNOSTICS is set.
         ArenaRegion test_words;

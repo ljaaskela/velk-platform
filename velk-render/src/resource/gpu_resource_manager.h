@@ -62,7 +62,7 @@ public:
     uint32_t geometry_idle_frames() const override { return geometry_idle_frames_ != 0 ? geometry_idle_frames_ : 64u; }
     bool geometry_pressure() const override;
     void track_geometry(const IMeshPrimitiveInternal::WeakPtr& primitive) override;
-    void update_geometry() override;
+    void update_geometry(uint32_t frame) override;
     IGpuArena::Ptr shared_arena(uint32_t slot, uint32_t element_size,
                                 bool index_buffer = false,
                                 uint64_t reserve_bytes = 0) override;

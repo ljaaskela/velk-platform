@@ -95,7 +95,7 @@ public:
     bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
     bool begin_lod_build() override;
     void build_lod() override;
-    void update_lod(IGpuResourceManager& resources) override;
+    void update_lod(IGpuResourceManager& resources, uint32_t frame) override;
     void set_deforming() override { deforming_ = true; }
 
 private:
@@ -193,6 +193,9 @@ private:
     vector<uint32_t> lod_dirty_clusters_;
     vector<uint32_t> lod_dirty_nodes_;
     uint32_t lod_update_count_ = 0;
+    /// What the clusters whose errors change take (MeshLodCluster::changed): the frame of the
+    /// last update_lod, plus one; 0 before the first.
+    uint32_t lod_stamp_ = 0;
     /// By group: the groups that need it, being those some of whose clusters' stand-ins are
     /// in it; and how many looks at the marks ago it was last wanted, counted while detail is
     /// short of room.
@@ -203,6 +206,9 @@ private:
     uint32_t lod_empty_leaf_word_ = 0;     ///< The leaf without triangles a cluster not loaded has for a tree.
     /// Drops a loaded group: the reverse of load_lod_page.
     void unload_lod_page(uint32_t group, IGpuResourceManager& resources);
+    /// A diagnostic: when VELK_TRACE_LOD_TRIANGLES names this mesh's triangle count, logs its
+    /// hierarchy's clusters and tree as they stand, saying when.
+    void log_lod(const char* when) const;
     /// Writes the changed records, headers and tree nodes to the GPU.
     void flush_lod(IGpuResourceManager& resources);
     MeshLodInfo lod_info_{};

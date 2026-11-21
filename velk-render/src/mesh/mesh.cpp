@@ -15,6 +15,8 @@
 #include <velk-render/interface/intf_render_backend.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -193,10 +195,14 @@ void MeshPrimitive::unload_lod_page(uint32_t group, IGpuResourceManager& resourc
     resources.release_geometry(page.bytes);
     page = LodPage{};
     ++lod_groups_missing_;
+    char when[48];
+    std::snprintf(when, sizeof(when), "group %u unloaded", group);
+    log_lod(when);
 }
 
-void MeshPrimitive::update_lod(IGpuResourceManager& resources)
+void MeshPrimitive::update_lod(IGpuResourceManager& resources, uint32_t frame)
 {
+    lod_stamp_ = frame + 1u;
     if (lod_.group_count == 0 || !lod_marks_region_.valid()) {
         return;
     }
@@ -285,6 +291,8 @@ void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
 {
     lod_records_[c].error = error;
     lod_records_[c].parent_error = parent_error;
+    // A kept cut that chose by its errors before chooses again.
+    lod_records_[c].changed = lod_stamp_;
     lod_dirty_clusters_.push_back(c);
     if (!lod_headers_.empty()) {
         uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
@@ -321,6 +329,49 @@ void MeshPrimitive::set_lod_errors(uint32_t c, float error, float parent_error)
                 largest = std::max(largest, of.max_parent_error);
             }
         }
+    }
+}
+
+void MeshPrimitive::log_lod(const char* when) const
+{
+    unsigned wanted = 0;
+#ifdef _WIN32
+    char* val = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&val, &len, "VELK_TRACE_LOD_TRIANGLES") != 0 || !val) return;
+    const bool read = std::sscanf(val, "%u", &wanted) == 1;
+    std::free(val);
+#else
+    const char* val = std::getenv("VELK_TRACE_LOD_TRIANGLES");
+    const bool read = val && std::sscanf(val, "%u", &wanted) == 1;
+#endif
+    if (!read || get_index_count() / 3u != wanted || lod_records_.size() != lod_.clusters.size()) return;
+    VELK_LOG(I, "lod trace (%u triangles), %s: %zu clusters, %u groups, %zu nodes", wanted, when, lod_.clusters.size(),
+             lod_.group_count, lod_tree_.size());
+    for (size_t c = 0; c < lod_.clusters.size(); ++c) {
+        const uint32_t group = lod_.cluster_group[c];
+        const uint32_t from = lod_.cluster_made_from[c];
+        const auto loaded = [&](uint32_t g) {
+            return g == kLodNoGroup ? "-" : g < lod_pages_.size() && lod_pages_[g].loaded ? "loaded" : "NOT loaded";
+        };
+        VELK_LOG(I, "  cluster %zu level %u tris %u: group %d (%s), made from %d (%s); error %g (true %g), parent error %g (true %g)",
+                 c, lod_.clusters[c].level, lod_records_[c].triangle_count, group == kLodNoGroup ? -1 : int(group),
+                 loaded(group), from == kLodNoGroup ? -1 : int(from), loaded(from), lod_records_[c].error, lod_.clusters[c].error,
+                 lod_records_[c].parent_error, lod_.clusters[c].parent_error);
+    }
+    for (size_t n = 0; n < lod_tree_.size(); ++n) {
+        const MeshLodNode::Child* ch = lod_tree_[n].children;
+        const auto name = [](uint32_t ref, char* buf, size_t size) {
+            if (ref == kLodNoChild) std::snprintf(buf, size, "none");
+            else if ((ref & kLodLeaf) != 0u) std::snprintf(buf, size, "cluster %u", ref & ~kLodLeaf);
+            else std::snprintf(buf, size, "node %u", ref);
+        };
+        char a[32];
+        char b[32];
+        name(ch[0].ref, a, sizeof(a));
+        name(ch[1].ref, b, sizeof(b));
+        VELK_LOG(I, "  node %zu: [%s: least %g, largest parent %g] [%s: least %g, largest parent %g]", n, a, ch[0].min_error,
+                 ch[0].max_parent_error, b, ch[1].min_error, ch[1].max_parent_error);
     }
 }
 
@@ -452,6 +503,9 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
     }
     page.bytes = bytes;
     page.loaded = true;
+    char when[48];
+    std::snprintf(when, sizeof(when), "page %u loaded", page_index);
+    log_lod(when);
     return true;
 }
 

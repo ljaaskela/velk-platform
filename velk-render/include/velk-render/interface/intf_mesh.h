@@ -312,8 +312,9 @@ public:
     virtual void build_lod() = 0;
 
     /// Loads the parts of its hierarchy that drawing or rays asked for since the last call,
-    /// as far as @p resources has room. Called once a frame for a primitive it tracks.
-    virtual void update_lod(IGpuResourceManager& resources) = 0;
+    /// as far as @p resources has room. Called once a frame for a primitive it tracks;
+    /// @p frame is the frame's present counter, which the clusters whose errors change take.
+    virtual void update_lod(IGpuResourceManager& resources, uint32_t frame) = 0;
 
     /// Marks this primitive as one whose vertices will move.
     virtual void set_deforming() = 0;
