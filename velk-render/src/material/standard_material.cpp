@@ -388,6 +388,13 @@ string_view StandardMaterial::get_fn_name(string_view role) const
     return {};
 }
 
+bool StandardMaterial::get_opacity_words(uint32_t& factor_word, uint32_t& texture_word) const
+{
+    factor_word = static_cast<uint32_t>((offsetof(StandardMaterialParams, base_color) + offsetof(BaseColorParams, factor)) / sizeof(uint32_t)) + 3u;
+    texture_word = static_cast<uint32_t>((offsetof(StandardMaterialParams, base_color) + offsetof(BaseColorParams, texture_id)) / sizeof(uint32_t));
+    return true;
+}
+
 color StandardMaterial::get_average_albedo() const
 {
     // Last wins, as in write_draw_data. White as glTF's default.

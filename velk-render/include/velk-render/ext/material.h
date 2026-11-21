@@ -81,6 +81,8 @@ public:
     bool is_lit() const override { return false; }
     /// Untinted, as velk_default_material_eval is: its colour does not take EvalContext::base.
     bool is_tinted() const override { return false; }
+    /// None: solid to rays, as a blended material's own eval says nothing rays read.
+    bool get_opacity_words(uint32_t&, uint32_t&) const override { return false; }
 
     /// Subscribe / unsubscribe to IMaterialOptions attachments so option
     /// writes propagate into pipeline invalidation without polling.

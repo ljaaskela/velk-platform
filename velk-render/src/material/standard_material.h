@@ -50,6 +50,8 @@ public:
     /// Its emissive factor and strength times its emissive texture's mean.
     color get_average_emission() const override;
     bool is_lit() const override { return true; }
+    /// Its base colour factor's alpha and its base colour texture (StandardMaterialParams).
+    bool get_opacity_words(uint32_t& factor_word, uint32_t& texture_word) const override;
 
     /// Fixed slot indices into DrawDataHeader::texture_ids[] used by the
     /// standard material eval shader. Must match the order returned by

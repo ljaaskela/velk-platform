@@ -149,6 +149,12 @@ inline constexpr uint32_t kDrawFlagColor = 1u << 1;
 /// its visible list the words of the quads drawn, and each an instance of the unit quad. Mirrors
 /// VELK_DRAW_QUADS.
 inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
+/// DrawDataHeader::flags: rays read the draw's opacity in its material's record
+/// (IMaterial::get_opacity_words), the factor's word at kDrawOpacityFactorShift and the texture
+/// id's word at kDrawOpacityTextureShift, a byte each. Mirrors VELK_DRAW_OPACITY.
+inline constexpr uint32_t kDrawFlagOpacity = 1u << 3;
+inline constexpr uint32_t kDrawOpacityFactorShift = 8;
+inline constexpr uint32_t kDrawOpacityTextureShift = 16;
 
 /// Words of a draw's shading summary in the draw-shade array (IRenderBackend::kGlobalDrawShade),
 /// at its draw record's index: what a ray that hits it sees without its material's code. The

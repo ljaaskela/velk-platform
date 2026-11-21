@@ -108,6 +108,27 @@ uint velk_facing_side(vec3 n)
          : across.y >= across.z ? (n.y < 0.0 ? 3u : 2u) : (n.z < 0.0 ? 5u : 4u);
 }
 
+// How opaque the blended draw `draw` is where a ray hits triangle `corners` of cluster `cluster`
+// at weights (1 - u - v, u, v): its material's opacity factor, times its texture's alpha at the
+// hit's uv when it has one (VELK_DRAW_OPACITY); 1, solid, when it says nothing of it.
+float velk_ray_opacity(uint draw, uint cluster, uvec3 corners, float u, float v)
+{
+    VelkDrawData d = velk_draw_data.data[draw];
+    if ((d.flags & VELK_DRAW_OPACITY) == 0u) return 1.0;
+    uint factor_word = (d.flags >> VELK_DRAW_OPACITY_FACTOR_SHIFT) & 255u;
+    uint texture_word = (d.flags >> VELK_DRAW_OPACITY_TEXTURE_SHIFT) & 255u;
+    float alpha = uintBitsToFloat(velk_material_words.data[d.material_words + factor_word]);
+    uint texture = velk_material_words.data[d.material_words + texture_word];
+    if (texture != 0u) {
+        uint base = velk_cluster_vertex_word(d, cluster);
+        vec2 uv = velk_unpack_vertex3d(base + corners.x * VELK_VERTEX3D_WORDS).uv * (1.0 - u - v)
+                + velk_unpack_vertex3d(base + corners.y * VELK_VERTEX3D_WORDS).uv * u
+                + velk_unpack_vertex3d(base + corners.z * VELK_VERTEX3D_WORDS).uv * v;
+        alpha *= textureLod(velk_textures[nonuniformEXT(texture)], uv, 0.0).a;
+    }
+    return clamp(alpha, 0.0, 1.0);
+}
+
 // The composer generates the body after intersect snippets have been included.
 // Built-in kinds forward to the functions the shader defines; visual-registered
 // kinds call their snippets.
@@ -229,6 +250,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     vec3 walk_inv_dir = inv_dir;
     float mesh_scale = 1.0;
     uint cur_draw = VELK_RAY_NONE;
+    bool cur_blended = false;  // the record walked is of a blended draw (VELK_LOD_RAYS_ONLY)
     uint cur_instance = VELK_RAY_NONE;
     uint cur_cluster = VELK_NO_CLUSTER;
     uint cur_record = VELK_NO_RECORD;
@@ -315,6 +337,18 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (tt < 1e-4 * max(length(e1), length(e2))) continue;
             float world_t = tt / mesh_scale;
             if (world_t < best_t * 0.99999 || (world_t <= best_t * 1.00001 && cur_key > best_key)) {
+                // A blended surface lets through what it does not cover: a shadow ray keeps that
+                // much of its light and goes on; a closest one goes on past one mostly clear.
+                if (cur_blended && cur_draw != VELK_RAY_NONE) {
+                    float alpha = velk_ray_opacity(cur_draw, cur_cluster, corners, u, v);
+                    if (!closest) {
+                        through *= 1.0 - alpha;
+                        velk_ray_blocker_t = velk_ray_blocker_t > 0.0 ? min(velk_ray_blocker_t, world_t) : world_t;
+                        if (through < 0.01) return 0.0;
+                        continue;
+                    }
+                    if (alpha < 0.5) continue;
+                }
                 if (!closest) {
                     velk_ray_blocker_t = world_t;
                     return 0.0;
@@ -468,6 +502,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 ++velk_ray_hit_clusters;
                 // A cluster of a hierarchy: its triangle tree, or as drawn.
                 cur_draw = velk_culling.data[entry + VELK_CLUSTER_ENTRY_DRAW];
+                cur_blended = (velk_culling.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u;
                 cur_cluster = velk_culling.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
                 walk_inv_dir = velk_ray_inv_dir(walk_ray.dir);
@@ -503,6 +538,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 velk_ray_count_in(velk_ray_mesh_tris, st.triangle_count < 64u ? 0u : st.triangle_count < 512u ? 1u
                                                       : st.triangle_count < 4096u ? 2u : 3u);
                 cur_draw = draw;
+                cur_blended = false;
                 cur_cluster = VELK_NO_CLUSTER;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
                 walk_inv_dir = velk_ray_inv_dir(walk_ray.dir);

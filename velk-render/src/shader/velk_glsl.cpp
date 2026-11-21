@@ -394,6 +394,11 @@ struct VelkDrawData {
 #define VELK_DRAW_UV1 1u
 #define VELK_DRAW_COLOR 2u
 #define VELK_DRAW_QUADS 4u
+// Rays read the draw's opacity in its material's record: the factor's word and the texture id's
+// word, a byte each at these shifts (kDrawFlagOpacity).
+#define VELK_DRAW_OPACITY 8u
+#define VELK_DRAW_OPACITY_FACTOR_SHIFT 8u
+#define VELK_DRAW_OPACITY_TEXTURE_SHIFT 16u
 
 layout(set = 1, binding = 15, std430) readonly buffer VelkDrawDataBuf { VelkDrawData data[]; } velk_draw_data;
 layout(set = 1, binding = 16, std430) readonly buffer VelkCulling { uint data[]; } velk_culling;

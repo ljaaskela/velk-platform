@@ -224,6 +224,13 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
         const auto ref = snippets->resolve_material(material_ptr.get(), *resolve_ctx);
         header.material_id = ref.mat_id;
         header.material_words = ref.mat_base;
+        // Where in its record a ray that hits it reads its opacity (IMaterial::get_opacity_words).
+        uint32_t factor_word = 0;
+        uint32_t texture_word = 0;
+        auto* material = interface_cast<IMaterial>(material_ptr.get());
+        if (material && material->get_opacity_words(factor_word, texture_word) && factor_word < 256u && texture_word < 256u) {
+            header.flags |= kDrawFlagOpacity | (factor_word << kDrawOpacityFactorShift) | (texture_word << kDrawOpacityTextureShift);
+        }
     }
     if (auto* mi = interface_cast<IMaterialInternal>(material_ptr.get())) {
         if (auto* dd = interface_cast<IDrawData>(material_ptr.get())) {

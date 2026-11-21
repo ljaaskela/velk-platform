@@ -61,6 +61,12 @@ public:
     /// Whether its surface's colour is multiplied by its draw's instance colour and vertex
     /// colours (EvalContext::base), so that light bouncing off it takes them too.
     virtual bool is_tinted() const = 0;
+
+    /// Where in its record (the material words a draw names) its opacity is, for a ray that hits
+    /// it while it is blended: @p factor_word the word of a float factor, @p texture_word the
+    /// word of a bindless texture id whose alpha, at the hit's first uv, the factor multiplies
+    /// (0 there for none). False when it has no opacity rays read: it is solid to them.
+    virtual bool get_opacity_words(uint32_t& factor_word, uint32_t& texture_word) const = 0;
 };
 
 } // namespace velk
