@@ -75,6 +75,9 @@ else()
     add_subdirectory(velk-runtime/plugins/glfw)
 endif()
 add_subdirectory(samples)
+if(NOT ANDROID)
+    add_subdirectory(velk-editor)
+endif()
 
 # =============================================================================
 # Route plugin DLL outputs into a `plugins/` subdir alongside the exe, so
