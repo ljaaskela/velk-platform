@@ -366,8 +366,6 @@ int main(int /*argc*/, char* /*argv*/[])
         std::error_code mkdir_ec;
         std::filesystem::create_directories("dumps", mkdir_ec);
 
-        renderer->request_bvh_log();
-
         auto worldpos_out = renderer->get_named_output(
             camera_3d, window_surface, "gbuffer.worldpos");
         if (auto* worldpos_tex = interface_cast<velk::IGpuTexture>(worldpos_out.get())) {
