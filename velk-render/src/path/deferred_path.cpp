@@ -150,7 +150,7 @@ uint32_t env_uint(const char* name, long lo, long hi)
 }
 
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
-uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, 10); }
+uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, static_cast<uint32_t>(DebugView::Light)); }
 
 // Diagnostic: the cut-off for clusters drawn in compute, in pixels, in place of the camera's
 // tiny_cluster_pixels. 0 when not set.

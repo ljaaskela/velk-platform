@@ -342,9 +342,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (cur_blended && cur_draw != VELK_RAY_NONE) {
                     float alpha = velk_ray_opacity(cur_draw, cur_cluster, corners, u, v);
                     if (!closest) {
-                        through *= 1.0 - alpha;
-                        velk_ray_blocker_t = velk_ray_blocker_t > 0.0 ? min(velk_ray_blocker_t, world_t) : world_t;
-                        if (through < 0.01) return 0.0;
+                        // A clear texel blocks nothing, so it is no blocker either.
+                        if (alpha > 0.01) {
+                            through *= 1.0 - alpha;
+                            velk_ray_blocker_t = velk_ray_blocker_t > 0.0 ? min(velk_ray_blocker_t, world_t) : world_t;
+                            if (through < 0.01) return 0.0;
+                        }
                         continue;
                     }
                     if (alpha < 0.5) continue;
