@@ -1690,10 +1690,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     uint laters = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LATER_POINTS], VELK_LIGHT_POINT_CAPACITY);
     uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint first_budget = budget > 0xFFFFFFFFu / VELK_LIGHT_FIRST_BUDGET_SCALE ? 0xFFFFFFFFu : budget * VELK_LIGHT_FIRST_BUDGET_SCALE;
-    // A trace from none takes four rays a light with a size (pc.spare6 when the view has one),
-    // and a coarse point's four a light, at most.
+    // A trace from none takes four rays a light with a size (pc.spare6 when the view has one).
     uint from_none = pc.spare6 != 0u ? 4u * lights : lights;
-    uint used = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED] + coarses * 4u * lights;
+    uint used = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED] + coarses * from_none;
     uint take_firsts = min(firsts, (first_budget - min(used, first_budget)) / from_none);
     used += take_firsts * from_none;
     // A later point traced from none after a change takes as many as a first, the others one;
@@ -1813,15 +1812,15 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     uint blockers = 0u;
     if (traces == 0u || old == VELK_LIGHT_NONE) {
         // From none: the light it had before a change left out. A ray a light, or four for a
-        // light with a size, or a coarse point, so that it starts from a mean instead of all or
-        // nothing: over the light's four quarters, and a coarse point's at the places of its
-        // first four traces. It then counts as traced four times.
+        // light with a size, so that it starts from a mean instead of all or nothing: over the
+        // light's four quarters, and a coarse point's at the places of its first four traces.
+        // It then counts as traced four times.
         bool restart = old != VELK_LIGHT_NONE;
         bool four = false;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             if (slots[s] == VELK_LIGHT_NONE) continue;
             Light l = velk_light_at(pc.lights_base + slots[s]);
-            uint rays = around || l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
+            uint rays = l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
             four = four || rays == 4u;
             float sum = 0.0;
             float nearest = 1e30;
