@@ -1755,9 +1755,10 @@ struct BrdfSample {
     uint sample_count_hint;
 };
 
-// The walk's stack per thread, in shared memory: 32 for 64 threads is 8 KB, for 32 threads 4 KB.
-// The light trace's log gives the deepest the probes' rays got.
-#define VELK_TRACE_STACK_SIZE 32
+// The walk's stack per thread, in shared memory: 48 for 64 threads is 12 KB, for 32 threads 6 KB,
+// as the light trace's, since partitions' trees may be 16 levels deeper than balanced. The light
+// trace's log gives the deepest the probes' rays got.
+#define VELK_TRACE_STACK_SIZE 48
 #include "velk_trace.glsl"
 
 )" R"(

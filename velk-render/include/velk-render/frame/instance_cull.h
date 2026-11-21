@@ -439,12 +439,15 @@ uint velk_lbvh_build(uint node_count, uint n, uint lane, uint lanes)
 }
 
 // Builds the radix tree over `n` leaves (velk_lbvh_build), and a balanced one instead where it
-// is deeper than a balanced one by more than 8 levels, so that the walk's stack holds.
+// is deeper than a balanced one by more than 16 levels, so that the walk's stack holds
+// (VELK_TRACE_STACK_SIZE).
+uint g_lbvh_tried_height = 0u;  // the radix tree's height the last build tried, for the log
 void velk_lbvh_build_bounded(uint node_count, uint n, uint lane, uint lanes, bool balanced)
 {
     g_lbvh_balanced = balanced;
     uint height = velk_lbvh_build(node_count, n, lane, lanes);
-    uint most = (n > 1u ? uint(findMSB(n - 1u)) + 1u : 1u) + 8u;
+    g_lbvh_tried_height = height;
+    uint most = (n > 1u ? uint(findMSB(n - 1u)) + 1u : 1u) + 16u;
     if (!balanced && (height == 0u || height > most)) {
         g_lbvh_balanced = true;
         velk_lbvh_build(node_count, n, lane, lanes);
@@ -2349,7 +2352,10 @@ void main()
     g_leaf_records = leaf_records;
     uint node_count = velk_cut_tree_nodes(count);
     velk_lbvh_build_bounded(node_count, (leaf_records + 3u) / 4u, lane, 64u, !sorted);
-    if (lane == 0u) cull_words.data[state + VELK_PART_ROOT] = velk_lbvh_node_ref(node_count - 1u);
+    if (lane == 0u) {
+        cull_words.data[state + VELK_PART_ROOT] = velk_lbvh_node_ref(node_count - 1u);
+        cull_words.data[state + VELK_PART_BALANCED] = sorted && g_lbvh_balanced ? max(g_lbvh_tried_height, 1u) : 0u;
+    }
 }
 )";
 
@@ -4953,9 +4959,22 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const double steps = double(h[kLightPoolSumSteps]) * 16.0;
             const double tris = double(h[kLightPoolSumTriangles]) * 16.0;
             const double tested = double(h[kLightPoolSumRecords]);
-            VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records, %.0f nodes; points traced %u first, %u later",
-                     tris / rays, tested / rays, std::max(steps - tris - tested, 0.0) / rays, h[kLightPoolSumFirstTraces],
-                     h[kLightPoolSumLaterTraces]);
+            clear(kLightPoolSumRecordsHit, 7u);
+            VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records (%.1f through their box: %.1f patches, %.1f quads, "
+                        "%.1f without an instance, %.1f clusters, %.1f whole meshes, %.1f meshes without a tree), %.0f nodes; "
+                        "points traced %u first, %u later",
+                     tris / rays, tested / rays, double(h[kLightPoolSumRecordsHit]) / rays, double(h[kLightPoolSumHitBy]) / rays,
+                     double(h[kLightPoolSumHitBy + 1u]) / rays, double(h[kLightPoolSumHitBy + 2u]) / rays,
+                     double(h[kLightPoolSumHitBy + 3u]) / rays, double(h[kLightPoolSumHitBy + 4u]) / rays,
+                     double(h[kLightPoolSumHitBy + 5u]) / rays, std::max(steps - tris - tested, 0.0) / rays,
+                     h[kLightPoolSumFirstTraces], h[kLightPoolSumLaterTraces]);
+            clear(kLightPoolSumMeshWide, 8u);
+            VELK_LOG(I, "light trace: whole meshes a ray walks by box size %.1f under 1 unit, %.1f under 4, %.1f under 16, %.1f "
+                        "more; by triangles %.1f under 64, %.1f under 512, %.1f under 4096, %.1f more",
+                     double(h[kLightPoolSumMeshWide]) / rays, double(h[kLightPoolSumMeshWide + 1u]) / rays,
+                     double(h[kLightPoolSumMeshWide + 2u]) / rays, double(h[kLightPoolSumMeshWide + 3u]) / rays,
+                     double(h[kLightPoolSumMeshTris]) / rays, double(h[kLightPoolSumMeshTris + 1u]) / rays,
+                     double(h[kLightPoolSumMeshTris + 2u]) / rays, double(h[kLightPoolSumMeshTris + 3u]) / rays);
             // Since the last log: where traces come from, a change or the view.
             clear(kLightPoolSumRetraces, kLightPoolSumSplitsRefused + 1u - kLightPoolSumRetraces);
             VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
@@ -4995,6 +5014,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             uint32_t all_records = 0;
             uint32_t most_traced = 0;
             uint32_t unsorted = 0;
+            uint32_t balanced = 0;
+            uint32_t tried_most = 0;
+            uint32_t limit_least = 0xFFFFFFFFu;
             for (const auto& c : state.cuts) {
                 uint32_t header[kCutHeaderWords] = {};
                 arena->read_at(c.region.offset(), header, sizeof(header));
@@ -5006,10 +5028,22 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                     all_records += states[size_t(p) * kCutPartitionWords + kPartCount];
                     most_traced = std::max(most_traced, ray_count);
                     unsorted += ray_count > kRaySortMax ? 1u : 0u;
+                    const uint32_t tried = states[size_t(p) * kCutPartitionWords + kPartBalanced];
+                    if (ray_count > 4u && tried != 0u) {
+                        ++balanced;
+                        tried_most = std::max(tried_most, tried);
+                        // As velk_lbvh_build_bounded: a balanced tree's height and 16 more.
+                        const uint32_t leaves = (ray_count + 3u) / 4u;
+                        uint32_t bits = 0;
+                        while (leaves > 1u && (1u << bits) < leaves) ++bits;
+                        limit_least = std::min(limit_least, bits + 16u);
+                    }
                 }
             }
-            VELK_LOG(I, "ray lists: %u of %u records; at most %u in a partition, %u partitions past %u kept in their order",
-                     traced_records, all_records, most_traced, unsorted, kRaySortMax);
+            VELK_LOG(I, "ray lists: %u of %u records; at most %u in a partition, %u partitions past %u sorted in their pages, "
+                        "%u trees balanced for being too deep sorted (sorted heights up to %u, limits from %u)",
+                     traced_records, all_records, most_traced, unsorted, kRaySortMax, balanced, tried_most,
+                     balanced != 0u ? limit_least : 0u);
             // The deepest the walk's stack got since the last log, in the trace and the probes.
             clear(kLightPoolDeepestTrace, 2u);
             VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", h[kLightPoolDeepestTrace],

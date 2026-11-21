@@ -314,7 +314,8 @@ namespace velk {
     X(cp, gp, LightOnly, LIGHT_ONLY, 22)        /* its records for light only, for the log */ \
     X(cp, gp, Quads, QUADS, 23)                 /* its quads, for the log */                   \
     X(cp, gp, Box, BOX, 24)                     /* the world box around what it draws, min then max, six floats */ \
-    X(cp, gp, End, END, 30)
+    X(cp, gp, Balanced, BALANCED, 30)           /* when its tree for rays fell back to a balanced one, the height the sorted one had (0 overflowed as 1); 0 when not; for the log */ \
+    X(cp, gp, End, END, 31)
 
 /// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
 /// and where in its page table.

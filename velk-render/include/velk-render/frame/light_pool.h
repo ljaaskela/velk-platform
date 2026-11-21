@@ -287,7 +287,12 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(SumLeftOutQuarter, SUM_LEFT_OUT_QUARTER, 158) /* summed: and a quarter as strong */                            \
     X(SumListedBy, SUM_LISTED_BY, 159)           /* summed, every 16th frame: points listed by what lists them, four \
                                                     words (VELK_LIGHT_LISTED_*) */                                   \
-    X(HeaderEnd, HEADER_END, 163)
+    X(SumRecordsHit, SUM_RECORDS_HIT, 163)       /* summed: of the records rays tested, those whose box they passed */ \
+    X(SumHitBy, SUM_HIT_BY, 164)                 /* summed: of those, patches, quads, without an instance, clusters, whole \
+                                                    meshes, meshes without a tree: six words */                      \
+    X(SumMeshWide, SUM_MESH_WIDE, 170)           /* summed: whole meshes walked by box size, four words (velk_ray_mesh_wide) */ \
+    X(SumMeshTris, SUM_MESH_TRIS, 174)           /* summed: and by triangles, four words */                          \
+    X(HeaderEnd, HEADER_END, 178)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1625,6 +1630,19 @@ void velk_points_count(uint pool)
     // Added up until the log reads them: triangles tested, records, rays and steps.
     if (velk_ray_tris != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_TRIANGLES], (velk_ray_tris + 15u) / 16u);
     if (velk_ray_records != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RECORDS], velk_ray_records);
+    if (velk_ray_records_hit != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RECORDS_HIT], velk_ray_records_hit);
+    if (velk_ray_hit_patches != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY], velk_ray_hit_patches);
+    if (velk_ray_hit_quads != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY + 1u], velk_ray_hit_quads);
+    if (velk_ray_hit_none != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY + 2u], velk_ray_hit_none);
+    if (velk_ray_hit_clusters != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY + 3u], velk_ray_hit_clusters);
+    if (velk_ray_hit_meshes != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY + 4u], velk_ray_hit_meshes);
+    if (velk_ray_hit_empty != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_HIT_BY + 5u], velk_ray_hit_empty);
+    for (uint b = 0u; b < 4u; ++b) {
+        uint wide = ((b < 2u ? velk_ray_mesh_wide[0] : velk_ray_mesh_wide[1]) >> (16u * (b & 1u))) & 0xFFFFu;
+        uint tris = ((b < 2u ? velk_ray_mesh_tris[0] : velk_ray_mesh_tris[1]) >> (16u * (b & 1u))) & 0xFFFFu;
+        if (wide != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_MESH_WIDE + b], wide);
+        if (tris != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_MESH_TRIS + b], tris);
+    }
     if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_RAYS], g_rays);
     if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_STEPS], (velk_ray_steps + 15u) / 16u);
     if (velk_ray_deepest > 0) atomicMax(VELK_LIGHT_WORDS.data[pool + VELK_POOL_DEEPEST_TRACE], uint(velk_ray_deepest));

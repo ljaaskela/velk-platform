@@ -57,6 +57,30 @@ uint velk_ray_steps = 0u;
 // trees and of meshes' or clusters' trees; and the partitions entered.
 uint velk_ray_tris = 0u;
 uint velk_ray_records = 0u;
+uint velk_ray_records_hit = 0u;  // of the records, those whose box the ray passes through
+// Of those, the patches of small members, the quads, those without an instance, and the clusters.
+uint velk_ray_hit_patches = 0u;
+uint velk_ray_hit_quads = 0u;
+uint velk_ray_hit_none = 0u;
+uint velk_ray_hit_clusters = 0u;
+// And the whole meshes walked, and those without a tree to walk.
+uint velk_ray_hit_meshes = 0u;
+uint velk_ray_hit_empty = 0u;
+// The whole meshes walked, by their box's widest side (under 1, 4, 16 world units, more) and by
+// their triangles (under 64, 512, 4096, more): two counts of 16 bits a word, the first two in
+// the first word.
+uint velk_ray_mesh_wide[2] = uint[2](0u, 0u);
+uint velk_ray_mesh_tris[2] = uint[2](0u, 0u);
+
+// Adds one to count `b` (0 to 3) of `counts`.
+void velk_ray_count_in(inout uint counts[2], uint b)
+{
+    if (b < 2u) {
+        counts[0] += 1u << (16u * b);
+    } else {
+        counts[1] += 1u << (16u * (b - 2u));
+    }
+}
 uint velk_ray_top_nodes = 0u;
 uint velk_ray_partition_nodes = 0u;
 uint velk_ray_mesh_nodes = 0u;
@@ -347,6 +371,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             if (box_lo.x > box_hi.x) continue;
             float box_t;
             if (!ray_aabb(ray.origin, inv_dir, box_lo, box_hi, best_t * 1.00001, box_t)) continue;
+            ++velk_ray_records_hit;
             uint r = records + velk_culling.data[ray_entry + VELK_CUT_RAY_INDEX] * VELK_RECORD_END;
             uint entry = velk_culling.data[r + VELK_RECORD_ENTRY];
             uint cluster = velk_culling.data[r + VELK_RECORD_CLUSTER];
@@ -355,6 +380,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             // by the share of the patch's sphere they cover, the node's quad keeping their area,
             // seen from every way alike (half of it on average). Probe rays pass it.
             if (entry == VELK_CUT_RAY_QUAD) {
+                ++velk_ray_hit_patches;
                 if (closest) continue;
                 vec3 c = velk_ray_vec3(cluster + VELK_QUAD_NODE_CENTER) - cam;
                 float radius = uintBitsToFloat(velk_culling.data[cluster + VELK_QUAD_NODE_RADIUS]);
@@ -373,6 +399,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             // A record for light only is traced as the cluster it is.
             if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
             if (entry == VELK_CUT_QUAD) {
+                ++velk_ray_hit_quads;
                 // A quad: its plane, then where on it along its two sides, 0 to 1 within it.
                 vec3 c = velk_ray_vec3(cluster + VELK_QUAD_NODE_CENTER) - cam;
                 vec3 u = velk_ray_vec3(cluster + VELK_QUAD_NODE_U);
@@ -425,13 +452,20 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 key = named + 1u;
             }
             // An instance without a place in its raster region is nothing to rays.
-            if (instance == VELK_RAY_NONE) continue;
+            if (instance == VELK_RAY_NONE) {
+                ++velk_ray_hit_none;
+                continue;
+            }
             ElementInstance inst = velk_instances.data[instance];
-            if (inst.world_matrix[3][3] == 0.0) continue;
+            if (inst.world_matrix[3][3] == 0.0) {
+                ++velk_ray_hit_none;
+                continue;
+            }
             cur_instance = instance;
             cur_record = r;
             cur_key = key;
             if (entry != VELK_RAY_NONE) {
+                ++velk_ray_hit_clusters;
                 // A cluster of a hierarchy: its triangle tree, or as drawn.
                 cur_draw = velk_culling.data[entry + VELK_CLUSTER_ENTRY_DRAW];
                 cur_cluster = velk_culling.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
@@ -453,9 +487,21 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 }
             } else if (kind == 255u) {
                 // A whole mesh: its own tree.
-                if (mesh == VELK_INVALID_MESH_STATIC) continue;
+                if (mesh == VELK_INVALID_MESH_STATIC) {
+                    ++velk_ray_hit_empty;
+                    continue;
+                }
                 MeshStaticData st = velk_mesh_static_records.data[mesh];
-                if (st.blas_node_count == 0u || st.triangle_count == 0u) continue;
+                if (st.blas_node_count == 0u || st.triangle_count == 0u) {
+                    ++velk_ray_hit_empty;
+                    continue;
+                }
+                ++velk_ray_hit_meshes;
+                vec3 box_side = box_hi - box_lo;
+                float wide = max(max(box_side.x, box_side.y), box_side.z);
+                velk_ray_count_in(velk_ray_mesh_wide, wide < 1.0 ? 0u : wide < 4.0 ? 1u : wide < 16.0 ? 2u : 3u);
+                velk_ray_count_in(velk_ray_mesh_tris, st.triangle_count < 64u ? 0u : st.triangle_count < 512u ? 1u
+                                                      : st.triangle_count < 4096u ? 2u : 3u);
                 cur_draw = draw;
                 cur_cluster = VELK_NO_CLUSTER;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
