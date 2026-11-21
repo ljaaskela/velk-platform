@@ -2295,6 +2295,15 @@ bool velk_change_enters(uint changes, vec3 center, float radius, inout uint slot
         slots[weakest] = light;
         entered = true;
     }
+    // The lights it keeps first, so that a free first slot still means none chosen yet.
+    if (entered) {
+        uint kept = 0u;
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+            uint light = slots[s];
+            slots[s] = VELK_LIGHT_NONE;
+            if (light != VELK_LIGHT_NONE) slots[kept++] = light;
+        }
+    }
     return entered;
 }
 
