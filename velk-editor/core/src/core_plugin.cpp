@@ -6,7 +6,9 @@ namespace velk::editor {
 
 ReturnValue CorePlugin::initialize(IVelk& velk, PluginConfig&)
 {
-    return register_type<EditorCore>(velk);
+    auto rv = register_type<EditorCore>(velk);
+    rv &= register_type<EditorNode>(velk);
+    return rv;
 }
 
 ReturnValue CorePlugin::shutdown(IVelk&)

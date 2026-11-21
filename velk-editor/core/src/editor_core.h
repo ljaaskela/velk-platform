@@ -3,6 +3,7 @@
 
 #include <velk/api/event.h>
 #include <velk/ext/object.h>
+#include <velk/interface/intf_hierarchy.h>
 #include <velk/plugins/remote/api/remote.h>
 
 #include <velk-editor/core/intf_editor_core.h>
@@ -13,17 +14,23 @@
 
 namespace velk::editor {
 
+class EditorNode final : public ::velk::ext::Object<EditorNode, IEditorNode>
+{
+public:
+    VELK_CLASS_UID(ClassId::EditorNode, "EditorNode");
+};
+
 class EditorCore final : public ::velk::ext::Object<EditorCore, IEditorCore>
 {
 public:
     VELK_CLASS_UID(ClassId::EditorCore, "EditorCore");
 
+    EditorCore();
+
     // IEditorCore
-    ReturnValue attach(string_view host, uint16_t port) override;
-    void detach() override;
-    bool is_attached() const override;
-    void refresh() override;
-    vector<EditorNode> tree() const override { return tree_; }
+    ReturnValue fn_attach(string host, uint32_t port) override;
+    void fn_detach() override;
+    void fn_refresh() override;
 
 private:
     /** @brief A tree read in progress: a few batched round trips, one per hierarchy level. */
@@ -47,11 +54,19 @@ private:
     void next_level();
     void level_read(const RemoteChildrenList& level);
     void objects_described(const RemoteDescriptions& described);
-    void add_subtree(RemoteHandle object, uint32_t depth, vector<EditorNode>& out) const;
+
+    /** @brief The node of @p object, reused from the last read when it was there. */
+    IObject::Ptr node_for(RemoteHandle object, string_view label);
+    void add_subtree(const IObject::Ptr& parent, RemoteHandle object);
+    /** @brief Empties the tree and marks the core detached. */
+    void detached();
 
     RemoteClient client_;
     ScopedHandler disconnected_;
-    vector<EditorNode> tree_;
+    IHierarchy::Ptr tree_;
+    IObject::Ptr top_;
+    std::unordered_map<RemoteHandle, IObject::Ptr> nodes_;
+    std::unordered_map<RemoteHandle, IObject::Ptr> next_nodes_;
     std::unique_ptr<Walk> walk_;
     uint32_t generation_ = 0;
 };

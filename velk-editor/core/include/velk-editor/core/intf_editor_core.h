@@ -1,52 +1,47 @@
 #ifndef VELK_EDITOR_INTF_EDITOR_CORE_H
 #define VELK_EDITOR_INTF_EDITOR_CORE_H
 
+#include <velk/api/object_ref.h>
 #include <velk/interface/intf_metadata.h>
-#include <velk/plugins/remote/types.h>
 #include <velk/string.h>
-#include <velk/vector.h>
 
 #include <cstdint>
 
 namespace velk::editor {
 
-/** @brief One object in the attached application's tree. */
-struct EditorNode
+/**
+ * @brief One object of the attached application, in the core's tree.
+ *
+ * Nodes are reused while their object exists, so a front end can keep them.
+ */
+class IEditorNode : public Interface<IEditorNode>
 {
-    RemoteHandle object = 0;
-    uint32_t depth = 0; ///< 0 for a published root, 1 for a hierarchy's root object, and so on.
-    string label;       ///< Root name, or class name with the classes of its attachments.
+public:
+    VELK_INTERFACE(
+        (RPROP, uint64_t, object, 0), ///< The application object's RemoteHandle; 0 for the tree's top node.
+        (RPROP, string, label, {})    ///< Root name, or class name with the classes of its attachments.
+    )
 };
 
 /**
  * @brief The editor's state for one attached application.
  *
- * Works through velk_remote and needs nothing from velk-ui, so it runs in the
- * editor application or headless. Belongs to the thread that created it;
- * events fire during instance().update().
+ * Its state is properties and its commands are functions, so front ends in
+ * other processes use it through velk_remote like any object. Needs nothing
+ * from velk-ui, so it also runs headless.
  */
 class IEditorCore : public Interface<IEditorCore>
 {
 public:
     VELK_INTERFACE(
-        (EVT, on_attached),     ///< attach() connected.
-        (EVT, on_detached),     ///< The connection closed.
-        (EVT, on_tree_changed)  ///< tree() was read again.
+        (RPROP, bool, attached, false),        ///< True while connected to an application.
+        (RPROP, string, target, {}),           ///< "host:port" of the attached application.
+        (RPROP, ObjectRef, tree, {}),          ///< IHierarchy of IEditorNode: a top node, the published roots under it, their trees under them.
+        (RPROP, uint32_t, revision, 0),        ///< Increases each time the tree is read again.
+        (FN, ReturnValue, attach, (string, host), (uint32_t, port)), ///< Attaches to an application's editor endpoint.
+        (FN, void, detach),                    ///< Closes the connection.
+        (FN, void, refresh)                    ///< Reads the tree again; ignored while a read runs.
     )
-
-    /** @brief Attaches to an application whose editor endpoint listens on @p host and @p port. */
-    virtual ReturnValue attach(string_view host, uint16_t port) = 0;
-
-    /** @brief Closes the connection. */
-    virtual void detach() = 0;
-
-    virtual bool is_attached() const = 0;
-
-    /** @brief Reads the application's object tree again. Ignored while a read is running. */
-    virtual void refresh() = 0;
-
-    /** @brief The tree as last read: each published root, then its hierarchy depth first. */
-    virtual vector<EditorNode> tree() const = 0;
 };
 
 } // namespace velk::editor
