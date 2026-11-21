@@ -657,7 +657,8 @@ velk::Light add_look_light(SceneBuilder& b, const velk::vec3& position, bool sun
 
 /// A street of detailed building fronts, each its own mesh, with crates along it, under a sun by
 /// day and two strings of small lights with a size by night, switched by intensity alone, as
-/// bistro's look is: in a run, day, then night from frame 200, then day again from frame 400.
+/// bistro's look is: in a run, day, then night from frame 200, then day again from frame 400;
+/// in verify its views, day, night, and day again after the night against the day's reference.
 /// For the light trace in a scene like bistro: partitions of more records for rays than their
 /// trees sort, a point's rays to many lights, and lights going dark and coming back.
 void build_street(SceneBuilder& b)
@@ -805,7 +806,9 @@ const velk::vector<SceneSpec>& scenes()
          {{"start", {{0.f, -60.f, 300.f}, 0.f, -8.f}}, {"far", {{0.f, -400.f, 300.f}, 0.f, -15.f}}},
          build_field},
         {"street", "a street of detailed fronts, a sun by day and strings of small lights by night: the light trace as in bistro",
-         {{"along", {{0.f, -80.f, 380.f}, 0.f, -6.f}}},
+         {{"day", {{0.f, -80.f, 380.f}, 0.f, -6.f}},
+          {"night", {{0.f, -80.f, 380.f}, 0.f, -6.f}, {}, 0, true},
+          {"again", {{0.f, -80.f, 380.f}, 0.f, -6.f}, {}, 0, false, "day"}},
          build_street, nullptr, false},
     };
     return list;

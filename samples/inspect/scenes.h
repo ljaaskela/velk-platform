@@ -28,6 +28,11 @@ struct ViewSpec
     Place place;
     Place move_to{};
     int move_frames = 0;
+    /// In a scene with a look switch, whether the view is at night.
+    bool night = false;
+    /// Another view of the scene whose reference this one is judged against, which a reference
+    /// run then makes no reference of its own for: the same place and look, reached otherwise.
+    const char* reference = nullptr;
 };
 
 /// Where the camera is at step @p k of @p view's motion, 0 its start.

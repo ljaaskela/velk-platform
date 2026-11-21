@@ -206,7 +206,8 @@ struct Job
 velk::string reference_path(const inspect::SceneSpec& spec, const inspect::ViewSpec& view, const char* ext)
 {
     char buf[512];
-    std::snprintf(buf, sizeof(buf), "%s/%s_%s%s", INSPECT_REFERENCE_DIR, spec.name, view.name, ext);
+    std::snprintf(buf, sizeof(buf), "%s/%s_%s%s", INSPECT_REFERENCE_DIR, spec.name, view.reference ? view.reference : view.name,
+                  ext);
     return velk::string(buf);
 }
 
@@ -543,7 +544,10 @@ int main(int argc, char* argv[])
             for (const Job& job : jobs) {
                 const inspect::SceneSpec& spec = specs[job.scene];
                 const inspect::ViewSpec& view = spec.views[job.view];
+                // A view judged against another's reference has none of its own to make.
+                if (mode == Mode::Reference && view.reference) continue;
                 show_scene(job.scene);
+                if (!built.look.empty()) inspect::set_look(built, view.night);
                 place_camera(main_camera, view.place);
                 char name[64];
                 std::snprintf(name, sizeof(name), "%s/%s", spec.name, view.name);
