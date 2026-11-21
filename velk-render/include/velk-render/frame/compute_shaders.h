@@ -1500,10 +1500,11 @@ void main()
         float point_through[VELK_LIGHT_SLOTS];
         bool points = false;
         uint radiance = VELK_LIGHT_NONE;
+        uint radiance_dir = VELK_LIGHT_NONE;
         if (pc.spare3 != VELK_LIGHT_NONE) {
             points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord),
                                        velk_pixel_weights(pc.spare4, pc.spare2, coord), world_pos, position.w,
-                                       uintBitsToFloat(pc.spare5), point_lights, point_through, radiance);
+                                       uintBitsToFloat(pc.spare5), point_lights, point_through, radiance, radiance_dir);
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
         if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_UNTRACED_PIXELS], 1u);
@@ -1581,10 +1582,16 @@ void main()
                    && ((uint(coord.x) & 3u) | ((uint(coord.y) & 3u) << 2u)) == (VELK_GLOBALS.present_counter * 7u & 15u)) {
             // A pixel in 16 each frame, a 4 by 4 pattern that moves every frame, keeps its record's
             // indirect light for rays that hit it off screen (velk_probe_hit_indirect): the first
-            // as it is, then a little of each. Pixels of one record race; any of them will do.
+            // as it is, then a little of each; and the way it faces, likewise, not made of unit
+            // length again, so that a record seen facing many ways keeps a short one. Pixels of one
+            // record race; any of them will do.
             uint kept = velk_light_cell_words.data[radiance];
-            vec3 blended = kept == VELK_LIGHT_NONE ? indirect : mix(velk_rgb9e5(kept), indirect, 0.125);
-            velk_light_cell_words.data[radiance] = velk_pack_rgb9e5(blended);
+            bool first = kept == VELK_LIGHT_NONE;
+            velk_light_cell_words.data[radiance] = velk_pack_rgb9e5(first ? indirect : mix(velk_rgb9e5(kept), indirect, 0.125));
+            if (radiance_dir != VELK_LIGHT_NONE) {
+                vec3 way = first ? N : mix(unpackSnorm4x8(velk_light_cell_words.data[radiance_dir]).xyz, N, 0.125);
+                velk_light_cell_words.data[radiance_dir] = packSnorm4x8(vec4(way, 0.0));
+            }
         }
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular

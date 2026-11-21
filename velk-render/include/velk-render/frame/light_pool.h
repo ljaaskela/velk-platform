@@ -78,8 +78,10 @@ namespace velk {
 ///
 /// A record's radiance word, and a quad node's, is the indirect light its surface gets, RGB9E5,
 /// kLightNone until a pixel the screen probes light shows it: a pixel in 16 a frame blends its
-/// own into it (deferred_lighting_main_src). A probe ray's hit that the screen probes do not
-/// cover takes it before the environment (velk_probe_hit_indirect).
+/// own into it (deferred_lighting_main_src). A record also keeps the way those pixels face on
+/// average (kCutRecordRadianceDir), short for a record seen facing many ways. A probe ray's hit
+/// that the screen probes do not cover takes it before the environment where it faces about that
+/// way (velk_probe_hit_indirect); a quad faces one way.
 inline constexpr uint32_t kLightNone = 0xFFFFFFFFu;
 inline constexpr uint32_t kLightPending = 0xFFFFFFFEu;
 inline constexpr uint32_t kLightOneValue = 0x80000000u;
@@ -1403,9 +1405,11 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
 // how much of each gets through. False when it has no traced light yet. `b` is where the pixel
 // is in its triangle (velk_pixel_weights), `tri_size` the triangle's longest edge in world
 // units, `light_pixels` kLightPixels. `radiance` is the word of its record's radiance, or its
-// quad node's, VELK_LIGHT_NONE for none, even when it returns false.
+// quad node's, and `radiance_dir` that of the way its pixels face (a record's only), each
+// VELK_LIGHT_NONE for none, even when it returns false.
 bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, float light_pixels,
-                       out uint lights[VELK_LIGHT_SLOTS], out float through[VELK_LIGHT_SLOTS], out uint radiance)
+                       out uint lights[VELK_LIGHT_SLOTS], out float through[VELK_LIGHT_SLOTS], out uint radiance,
+                       out uint radiance_dir)
 {
     vec2 sums[VELK_LIGHT_SLOTS];
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
@@ -1414,12 +1418,14 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
         through[k] = 0.0;
     }
     radiance = VELK_LIGHT_NONE;
+    radiance_dir = VELK_LIGHT_NONE;
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
     uint record = velk_ids_record(d, ids);
     if (record == VELK_NO_RECORD) return false;
     GlobalData g = velk_globals.data[d.globals_base];
     uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
     radiance = record + VELK_RECORD_RADIANCE;
+    radiance_dir = record + VELK_RECORD_RADIANCE_DIR;
 
     if (entry == VELK_CUT_QUAD) {
         mat4 vp = g.view_projection;
@@ -1427,6 +1433,7 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
         uint node = velk_light_quad_node(VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_TREE], VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_NODE],
                                          g.cam_pos.xyz, pixels_per_unit, light_pixels);
         radiance = node + VELK_QUAD_NODE_RADIANCE;
+        radiance_dir = VELK_LIGHT_NONE;
         uint value = VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_LIGHT];
         if (value >= VELK_LIGHT_PENDING || (value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
         vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_CENTER]),
@@ -2264,16 +2271,19 @@ vec3 velk_probe_light(uint index, vec3 at, vec3 n)
     return light.color_intensity.rgb * light.color_intensity.a * atten * max(dot(n, l), 0.0);
 }
 
-// Where a hit at `at` keeps its light: the word of its light, of its radiance, and the place its
-// one value's lights are chosen at. Its record's, at the hit; for a quad, the node as wide as
+// Where a hit at `at` keeps its light: the word of its light, of its radiance and of the way the
+// pixels that gave that face (a record's only; a quad faces one way), and the place its one
+// value's lights are chosen at. Its record's, at the hit; for a quad, the node as wide as
 // kLightPixels over it, at the node's centre, as the lighting pass finds it. All VELK_LIGHT_NONE
 // for none. `ask` is whether a hit may ask for its one value to be traced (velk_probe_ask): not
 // for a record for light only, which light_search_src lays out only from none, nor for a whole
 // mesh without the sphere it is traced from.
-void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance, out vec3 center, out bool ask)
+void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance, out uint radiance_dir, out vec3 center,
+                          out bool ask)
 {
     light = VELK_LIGHT_NONE;
     radiance = VELK_LIGHT_NONE;
+    radiance_dir = VELK_LIGHT_NONE;
     center = at;
     ask = false;
     if (hit.record == VELK_NO_RECORD) return;
@@ -2296,7 +2306,8 @@ void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance
     if (entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE) return;
     light = hit.record + VELK_RECORD_LIGHT;
     radiance = hit.record + VELK_RECORD_RADIANCE;
-    ask = !velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
+    radiance_dir = hit.record + VELK_RECORD_RADIANCE_DIR;
+    ask =!velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
 }
 
 // Asks for the light at `word` to be traced, for a hit: none yet becomes an untraced one value,
@@ -2362,9 +2373,10 @@ vec3 velk_probe_sky(vec3 rd)
 // The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: the
 // last frame's probe where the hit was on screen, when that probe was on the same surface, so
 // that light bounces once more each frame; else what its record or quad node keeps at
-// `radiance` from the pixels that showed it; else the environment around its normal,
-// unshadowed.
-vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint radiance, uint width, uint height, uint across)
+// `radiance` from the pixels that showed it, where those faced about as it does (`radiance_dir`,
+// their way on average, VELK_LIGHT_NONE for a quad's); else the environment around its normal,
+// unshadowed. A record seen all round averages to a short way, which no hit agrees with.
+vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint radiance, uint radiance_dir, uint width, uint height, uint across)
 {
     GlobalData g = VELK_GLOBALS;
     uint was_store = pc.env.w;
@@ -2384,7 +2396,8 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint radiance, uint width, uint he
     }
     if (radiance != VELK_LIGHT_NONE) {
         uint kept = probe_words.data[radiance];
-        if (kept != VELK_LIGHT_NONE) return velk_rgb9e5(kept);
+        bool facing = radiance_dir == VELK_LIGHT_NONE || dot(n, unpackSnorm4x8(probe_words.data[radiance_dir]).xyz) > 0.5;
+        if (kept != VELK_LIGHT_NONE && facing) return velk_rgb9e5(kept);
     }
     return velk_probe_sky(n);
 }
@@ -2460,13 +2473,14 @@ void velk_probes_gather(uint lane)
             velk_probe_surface(hit, albedo, emission, lit);
             uint light_word;
             uint radiance;
+            uint radiance_dir;
             vec3 center;
             bool ask;
-            velk_probe_hit_words(hit, at, light_word, radiance, center, ask);
+            velk_probe_hit_words(hit, at, light_word, radiance, radiance_dir, center, ask);
             if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
-            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, width, height, across) : vec3(0.0);
+            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
             light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);

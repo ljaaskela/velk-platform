@@ -1240,16 +1240,19 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
         else atomicAnd(cull_words.data[mark], ~bit);
         uint light = 0xFFFFFFFFu;
         uint radiance = 0xFFFFFFFFu;
+        uint radiance_dir = 0u;
         if (g_takeover) {
             uint was = velk_takeover_find(pc.cut_word, entry, cluster, slot);
             if (was != 0xFFFFFFFFu) {
                 light = cull_words.data[was + VELK_RECORD_LIGHT];
                 radiance = cull_words.data[was + VELK_RECORD_RADIANCE];
+                radiance_dir = cull_words.data[was + VELK_RECORD_RADIANCE_DIR];
                 ++g_took;
             }
         }
         cull_words.data[record + VELK_RECORD_LIGHT] = light;
         cull_words.data[record + VELK_RECORD_RADIANCE] = radiance;
+        cull_words.data[record + VELK_RECORD_RADIANCE_DIR] = radiance_dir;
     }
     ++g_count;
 }

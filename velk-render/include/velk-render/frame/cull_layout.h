@@ -332,7 +332,8 @@ namespace velk {
     X(cp, gp, QuadTree, QUAD_TREE, 2)   /* for a quad, the word of its partition's quad tree */    \
     X(cp, gp, Light, LIGHT, 3)          /* its light: see light_pool.h */                          \
     X(cp, gp, Radiance, RADIANCE, 4)    /* the indirect light it gets, RGB9E5 or kLightNone: see light_pool.h */ \
-    X(cp, gp, End, END, 5)
+    X(cp, gp, RadianceDir, RADIANCE_DIR, 5) /* the way the pixels that gave it face, on average, snorm8 */ \
+    X(cp, gp, End, END, 6)
 
 /// A slot of a kept cut's takeover table (kTakeover, VELK_TAKEOVER): the old records of the
 /// partitions choosing again, for each new record to find the one that was the same.
