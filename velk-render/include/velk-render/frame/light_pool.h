@@ -1806,7 +1806,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     vec3 n;
     float lift;
     velk_point_place(at, traces, p, n, lift);
-    uint seed = velk_points_hash((piece == VELK_LIGHT_NONE ? first : pw) * 977u + q) ^ (frame * 0x9e3779b9u);
+    // Its rays by which trace this is, not by the frame: traced again from none while things move
+    // near it, it casts the same rays, so that its light changes only where what is in its way does.
+    uint seed = velk_points_hash((piece == VELK_LIGHT_NONE ? first : pw) * 977u + q) ^ (traces * 0x9e3779b9u);
     uint value = 0u;
     uint bw = piece == VELK_LIGHT_NONE ? velk_light_blocker_word(pool, first, q) : velk_light_page_blocker(pool, piece, 2u * q);
     uint blockers = 0u;
@@ -1814,7 +1816,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         // From none: the light it had before a change left out. A ray a light, or four for a
         // light with a size, so that it starts from a mean instead of all or nothing: over the
         // light's four quarters, and a coarse point's at the places of its first four traces.
-        // It then counts as traced four times.
+        // It then counts as traced four times, or after a change as settled: traced on to more
+        // rays, it would step from those four rays' light to its mean each time a change comes
+        // near it, and flicker while things keep moving there.
         bool restart = old != VELK_LIGHT_NONE;
         bool four = false;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
@@ -1838,7 +1842,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
             if (nearest < 1e29) blockers |= velk_light_blocker_code(nearest) << (4u * s);
         }
         // Stored as one more.
-        traces = four ? 3u : 0u;
+        traces = four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
         atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
     } else {
         // Warming up, a running mean of its rays.
@@ -1847,7 +1851,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         blockers = VELK_LIGHT_WORDS.data[bw];
         uint s = velk_points_pick(slots, p, seed);
         if (slots[s] != VELK_LIGHT_NONE) {
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, 4u);
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, traces & 3u);
             if (blocked > 0.0) {
                 blockers = (blockers & ~(15u << (4u * s))) | (velk_light_blocker_code(velk_ray_blocker_t) << (4u * s));
             }
@@ -1950,7 +1954,9 @@ void main()
         }
     }
     barrier();
-    uint seed = velk_points_hash(at) ^ (frame * 0x9e3779b9u);
+    // The same rays each time it is traced, two in each quarter of the light, so that it changes
+    // only where what is in its way does.
+    uint seed = velk_points_hash(at);
     // Out of its own sphere toward each light, facing it. Traced once, and again only when
     // something changes it: a few rays a light, so that it is settled at once.
     uint s = lane / 8u;
@@ -1960,7 +1966,7 @@ void main()
         Light l = velk_light_at(pc.lights_base + light);
         vec3 toward = l.flags.x == 0u ? -l.direction.xyz : normalize(l.position.xyz - center);
         ++g_first_rays;
-        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane, 4u);
+        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane, lane & 3u);
     }
     s_blocked[lane] = blocked;
     barrier();
