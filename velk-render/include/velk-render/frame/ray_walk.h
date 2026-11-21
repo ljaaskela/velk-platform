@@ -341,13 +341,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             uint ray_entry = record_at;
             record_at += VELK_CUT_RAY_WORDS;
             --records_left;
-            // The sphere around the record first, so that a record the ray misses is never read.
-            float radius = uintBitsToFloat(velk_culling.data[ray_entry + VELK_CUT_RAY_RADIUS]);
-            if (radius < 0.0) continue;
-            vec3 to_centre = velk_ray_vec3(ray_entry + VELK_CUT_RAY_CENTER) - cam - ray.origin;
-            float along = dot(to_centre, ray.dir);
-            if (along + radius < 0.0 || along - radius > best_t * 1.00001) continue;
-            if (dot(to_centre, to_centre) - along * along > radius * radius) continue;
+            // The record's box first, so that a record the ray misses is never read.
+            vec3 box_lo = velk_ray_vec3(ray_entry + VELK_CUT_RAY_MIN) - cam;
+            vec3 box_hi = velk_ray_vec3(ray_entry + VELK_CUT_RAY_MAX) - cam;
+            if (box_lo.x > box_hi.x) continue;
+            float box_t;
+            if (!ray_aabb(ray.origin, inv_dir, box_lo, box_hi, best_t * 1.00001, box_t)) continue;
             uint r = records + velk_culling.data[ray_entry + VELK_CUT_RAY_INDEX] * VELK_RECORD_END;
             uint entry = velk_culling.data[r + VELK_RECORD_ENTRY];
             uint cluster = velk_culling.data[r + VELK_RECORD_CLUSTER];

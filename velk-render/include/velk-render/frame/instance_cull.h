@@ -78,7 +78,7 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// makes it choose again. A partition's ray list holds, in the order of its pages, an entry
 /// (kCutRayWords) for each record rays trace (those at the light's level: records for light
 /// only, clusters as coarse as the light, quads, whole objects): its record's place in the pool
-/// and a sphere around it. Its tree is over them; the ray marks have a bit for each record of the
+/// and its box. Its tree is over them; the ray marks have a bit for each record of the
 /// pool, set by the choosing where the record's member is in a patch for rays (kCutRayQuad), so
 /// that the tree pass leaves it out, read only for the partitions that chose this frame.
 /// A partition's records are in the order of its chunks, each chunk's in the order of its
@@ -2003,16 +2003,24 @@ vec3 velk_load_vec3(uint at)
 }
 
 // Writes the ray list entry at word `at` for the record at pool place `place`: the place and
-// the sphere around the record's box, grown by the pad as the box is.
+// the record's box, grown by the pad.
 void velk_write_ray_entry(uint at, uint place)
 {
     vec3 rlo, rhi;
     velk_cut_record_box(velk_cut_record_word(pc.cut_word, place), pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
     cull_words.data[at + VELK_CUT_RAY_INDEX] = place;
-    vec3 centre = (rlo + rhi) * 0.5;
-    float radius = rlo.x <= rhi.x ? length(rhi - rlo) * 0.5 : -1.0;
-    for (uint k = 0u; k < 3u; ++k) cull_words.data[at + VELK_CUT_RAY_CENTER + k] = floatBitsToUint(centre[k]);
-    cull_words.data[at + VELK_CUT_RAY_RADIUS] = floatBitsToUint(radius);
+    velk_store_box(at + VELK_CUT_RAY_MIN, rlo, rhi);
+}
+
+// The box of the ray list entry at word `at`, and its centre and the radius of the sphere round
+// it, which the sorts go by; false for a record without a box.
+bool velk_ray_entry_box(uint at, out vec3 lo, out vec3 hi, out vec3 centre, out float radius)
+{
+    lo = velk_load_vec3(at + VELK_CUT_RAY_MIN);
+    hi = velk_load_vec3(at + VELK_CUT_RAY_MAX);
+    centre = (lo + hi) * 0.5;
+    radius = length(hi - lo) * 0.5;
+    return lo.x <= hi.x;
 }
 
 // The partition the tree is built over: the word of its page table in the current one, and how
@@ -2036,9 +2044,9 @@ void velk_sort_ray_list(uint count, uint lane)
     vec3 lo = vec3(1e30);
     vec3 hi = vec3(-1e30);
     for (uint i = lane; i < count; i += 64u) {
-        uint at = velk_tree_ray_word(i);
-        if (uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]) < 0.0) continue;
-        vec3 c = velk_load_vec3(at + VELK_CUT_RAY_CENTER);
+        vec3 blo, bhi, c;
+        float radius;
+        if (!velk_ray_entry_box(velk_tree_ray_word(i), blo, bhi, c, radius)) continue;
         lo = min(lo, c);
         hi = max(hi, c);
     }
@@ -2058,13 +2066,13 @@ void velk_sort_ray_list(uint count, uint lane)
         uint key = 0xFFFFFFFFu;
         if (i < count) {
             uint at = velk_tree_ray_word(i);
-            float radius = uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]);
+            vec3 blo, bhi, c;
+            float radius;
             // 20 bits of Morton code under a bit for the wide ones; a record without a box last,
             // its code above every other.
             uint code = 0x1FFFFFu;
-            if (radius >= 0.0) {
-                code = ((radius >= 0.25 * extent ? 1u : 0u) << 20u)
-                     | min(velk_morton(velk_load_vec3(at + VELK_CUT_RAY_CENTER), lo, hi) >> 10u, 0xFFFFEu);
+            if (velk_ray_entry_box(at, blo, bhi, c, radius)) {
+                code = ((radius >= 0.25 * extent ? 1u : 0u) << 20u) | min(velk_morton(c, lo, hi) >> 10u, 0xFFFFEu);
                 atomicAdd(s_bounded, 1u);
             }
             key = (code << kSortIndexBits) | i;
@@ -2115,9 +2123,10 @@ uint velk_sort_scratch(uint w)
 // Morton code under the bit for the wide ones, and above every other for one without a box.
 uint velk_ray_code_large(uint at)
 {
-    float radius = uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]);
-    if (radius < 0.0) return 0xFFFFFFFFu;
-    return ((radius >= 0.25 * g_sort_extent ? 1u : 0u) << 30u) | velk_morton(velk_load_vec3(at + VELK_CUT_RAY_CENTER), g_sort_lo, g_sort_hi);
+    vec3 blo, bhi, c;
+    float radius;
+    if (!velk_ray_entry_box(at, blo, bhi, c, radius)) return 0xFFFFFFFFu;
+    return ((radius >= 0.25 * g_sort_extent ? 1u : 0u) << 30u) | velk_morton(c, g_sort_lo, g_sort_hi);
 }
 
 // velk_sort_ray_list for more than kSortMax entries. Leaves s_bounded. All threads of the group
@@ -2127,9 +2136,9 @@ void velk_sort_ray_list_large(uint count, uint lane)
     vec3 lo = vec3(1e30);
     vec3 hi = vec3(-1e30);
     for (uint i = lane; i < count; i += 64u) {
-        uint at = velk_tree_ray_word(i);
-        if (uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]) < 0.0) continue;
-        vec3 c = velk_load_vec3(at + VELK_CUT_RAY_CENTER);
+        vec3 blo, bhi, c;
+        float radius;
+        if (!velk_ray_entry_box(velk_tree_ray_word(i), blo, bhi, c, radius)) continue;
         lo = min(lo, c);
         hi = max(hi, c);
     }
@@ -2234,11 +2243,9 @@ void velk_lbvh_leaf_box(uint ref, out vec3 lo, out vec3 hi)
     uint first = (ref & 0x7FFFFFFFu) >> 2u;
     uint n = (ref & 3u) + 1u;
     for (uint r = 0u; r < n; ++r) {
-        vec3 rlo, rhi;
-        uint place = cull_words.data[velk_cut_ray_word(pc.cut_word, first + r) + VELK_CUT_RAY_INDEX];
-        velk_cut_record_box(velk_cut_record_word(pc.cut_word, place), pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
-        lo = min(lo, rlo);
-        hi = max(hi, rhi);
+        uint at = velk_cut_ray_word(pc.cut_word, first + r);
+        lo = min(lo, velk_load_vec3(at + VELK_CUT_RAY_MIN));
+        hi = max(hi, velk_load_vec3(at + VELK_CUT_RAY_MAX));
     }
 }
 

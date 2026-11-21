@@ -116,13 +116,14 @@ namespace velk {
     X(cp, gp, Root, ROOT, 15)                   /* 1 for the root */                           \
     X(cp, gp, Words, WORDS, 16)
 
-/// An entry of a partition's ray list (kCutRay, VELK_CUT_RAY): a record rays trace and a sphere
-/// around it in world space, which a ray is tested against before the record's instance is read.
+/// An entry of a partition's ray list (kCutRay, VELK_CUT_RAY): a record rays trace and its box in
+/// world space, which a ray is tested against before the record's instance is read; min above max
+/// for a record without one.
 #define VELK_CUT_RAY(X, cp, gp)                                                                    \
     X(cp, gp, Index, INDEX, 0)                  /* the record's place in its cut's pool */     \
-    X(cp, gp, Center, CENTER, 1)                /* its sphere's centre, three floats */        \
-    X(cp, gp, Radius, RADIUS, 4)                                                               \
-    X(cp, gp, Words, WORDS, 5)
+    X(cp, gp, Min, MIN, 1)                      /* its box's corners, three floats each */     \
+    X(cp, gp, Max, MAX, 4)                                                                     \
+    X(cp, gp, Words, WORDS, 7)
 
 /// A view's top tree for rays (kRayTop, VELK_RAY_TOP), then a VELK_RAY_TOP_CUT a cut, a
 /// VELK_RAY_TOP_LEAF a leaf, and its nodes, VELK_CUT_NODE each.
