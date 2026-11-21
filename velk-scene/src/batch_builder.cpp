@@ -198,6 +198,10 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     auto get_visuals = [](const ElementCache& cache, VisualPhase phase) -> const vector<VisualCommands>& {
         return phase == VisualPhase::AfterChildren ? cache.after_visuals : cache.before_visuals;
     };
+    // Mesh batches by how they draw, for the log.
+    uint32_t by_cluster = 0;
+    uint32_t blended = 0;
+    uint32_t plain = 0;
 
     auto emit_visuals = [&](const vector<IElement*>& entries, VisualPhase phase,
                             vector<IBatch::Ptr>& target_batches,
@@ -280,9 +284,18 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                         batch->set_pipeline_options(po);
                         // Lists are per view, so a render target's subtree stays out, and
                         // the order of blended triangles matters.
-                        if (track_slots && de.primitive && !de.instance_source && po.blend_mode != BlendMode::Alpha
-                            && de.instance_size == sizeof(ElementInstance)) {
-                            batch->enable_lod_cull();
+                        // A blended one is drawn by its own pass in order, but rays still see
+                        // its clusters.
+                        if (track_slots && de.primitive && !de.instance_source && de.instance_size == sizeof(ElementInstance)) {
+                            if (po.blend_mode != BlendMode::Alpha) {
+                                batch->enable_lod_cull();
+                                ++by_cluster;
+                            } else {
+                                batch->enable_ray_clusters();
+                                ++blended;
+                            }
+                        } else if (de.primitive && !de.instance_source) {
+                            ++plain;
                         }
 
                         target_batches.push_back(std::move(batch_ptr));
@@ -499,6 +512,13 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     };
     for (auto& rtp : render_target_passes_) finalize_batches(rtp.batches);
     finalize_batches(out_batches);
+    if (by_cluster != logged_by_cluster_ || blended != logged_blended_ || plain != logged_plain_) {
+        logged_by_cluster_ = by_cluster;
+        logged_blended_ = blended;
+        logged_plain_ = plain;
+        VELK_LOG(I, "batches: %u mesh batches chosen by cluster, %u blended (their clusters for rays only), %u plain", by_cluster,
+                 blended, plain);
+    }
 }
 
 // build_draw_calls and build_gbuffer_draw_calls moved to

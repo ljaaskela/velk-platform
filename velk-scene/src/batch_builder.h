@@ -132,6 +132,11 @@ private:
     /// What draws the quad batch: a 3D mesh visual of no element, for the shaders and options
     /// every 3D mesh is drawn with.
     IShaderSource::Ptr quad_source_;
+    /// The last rebuild's batches by how they draw, for the log: chosen by cluster, blended
+    /// (drawn plain, their clusters for rays only), plain. Logged when they change.
+    uint32_t logged_by_cluster_ = 0;
+    uint32_t logged_blended_ = 0;
+    uint32_t logged_plain_ = 0;
 };
 
 } // namespace velk

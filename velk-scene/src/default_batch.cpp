@@ -256,7 +256,8 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         entry[kClusterEntryCursorsWord] = cursors_word;
         entry[kClusterEntryCommandsWord] = commands_word;
         entry[kClusterEntryNodesWord] = draw.lod.node_word;
-        entry[kClusterEntryFlagsWord] = (draw.lod.deforming ? kLodDeforming : 0u) | (moved ? kLodMoved : 0u);
+        entry[kClusterEntryFlagsWord] = (draw.lod.deforming ? kLodDeforming : 0u) | (moved ? kLodMoved : 0u)
+                                      | (rays_only_ ? kLodRaysOnly : 0u);
         entry[kClusterEntryRayWord] = draw.lod.ray_word;
         entry[kClusterEntrySecondCommandsWord] = second_commands_word;
         entry[kClusterEntryDrawWord] = 0xFFFFFFFFu;
@@ -269,6 +270,16 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
 }
 
 bool DefaultBatch::get_instance_cull(InstanceCullInfo& out) const
+{
+    return !rays_only_ && fill_cull_info(out);
+}
+
+bool DefaultBatch::get_ray_cull(InstanceCullInfo& out) const
+{
+    return rays_only_ && fill_cull_info(out);
+}
+
+bool DefaultBatch::fill_cull_info(InstanceCullInfo& out) const
 {
     if (!instance_cull_) {
         return false;

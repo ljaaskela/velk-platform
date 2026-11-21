@@ -70,6 +70,13 @@ public:
     /// Draws this batch's own instances by cluster if its primitive has several. Otherwise
     /// it stays a plain indexed draw of all of them.
     void enable_lod_cull() { instance_cull_ = true; }
+    /// Gives rays this batch's clusters, while it stays drawn by its own pass as a plain
+    /// indexed draw (a blended batch): see IBatch::get_ray_cull.
+    void enable_ray_clusters()
+    {
+        instance_cull_ = true;
+        rays_only_ = true;
+    }
     /// Allocates the culling arena region, if this batch holds one and has none yet.
     void ensure_instance_cull(IGpuResourceManager& resources);
     /// Readies the level of detail builds ensure_instance_cull will publish, to run apart from
@@ -77,6 +84,9 @@ public:
     /// to run go to @p out.
     void begin_lod_builds(vector<IMeshPrimitiveInternal*>& out);
     bool get_instance_cull(InstanceCullInfo& out) const override;
+    bool get_ray_cull(InstanceCullInfo& out) const override;
+    /// What get_instance_cull and get_ray_cull give, as the batch's culling is set up.
+    bool fill_cull_info(InstanceCullInfo& out) const;
     /// Makes it the view's quad draw: see IBatch::draws_quads.
     void set_draws_quads() { draws_quads_ = true; }
     bool draws_quads() const override { return draws_quads_; }
@@ -179,6 +189,7 @@ private:
     ArenaRegion cull_second_args_;
     IInstancedMeshInternal::Ptr instance_source_;
     bool instance_cull_ = false;
+    bool rays_only_ = false;  ///< Its clusters are for rays only (enable_ray_clusters).
     bool draws_quads_ = false;
     IBatch::Ptr cull_owner_;
     uint32_t cull_mesh_ = 0;

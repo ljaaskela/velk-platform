@@ -251,6 +251,11 @@ public:
     ///        culling pass.
     virtual bool get_instance_cull(InstanceCullInfo& out) const = 0;
 
+    /// @brief Fills @p out and returns true if this batch, drawn by its own pass (as blended
+    ///        batches are), has clusters for rays only: rays see its clusters, and the culling
+    ///        never draws them (kLodRaysOnly). get_instance_cull is false for it.
+    virtual bool get_ray_cull(InstanceCullInfo& out) const = 0;
+
     /// @brief Whether it draws its view's quads (kDrawFlagQuads): the unit quad, an instance
     ///        for each quad in the view's quad list (kQuadListHeaderWords), with that list's
     ///        draw arguments, rather than instances of its own.

@@ -1933,9 +1933,9 @@ shared uint s_always[64];
 shared uint s_light_only[64];
 shared uint s_quads[64];
 
-// Adds `record`'s share to the partition's box and counts: none for one for light only or a
-// patch for rays, which are not drawn; a deforming mesh's or an item drawn by its own pass
-// makes the partition always visited.
+// Adds `record`'s share to the partition's box and counts: none for one for light only, a patch
+// for rays or a cluster for rays only, which are not drawn; a deforming mesh's or an item drawn
+// by its own pass makes the partition always visited.
 void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint always, inout uint light_only, inout uint quads)
 {
     uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
@@ -1947,7 +1947,9 @@ void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint alway
     if (entry == VELK_CUT_QUAD) {
         ++quads;
     } else if (entry != 0xFFFFFFFFu) {
-        if ((cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u) always = 1u;
+        uint flags = cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS];
+        if ((flags & VELK_LOD_RAYS_ONLY) != 0u) return;
+        if ((flags & VELK_LOD_DEFORMING) != 0u) always = 1u;
     } else if (pc.items_word != 0xFFFFFFFFu) {
         uint item = pc.items_word + cull_words.data[record + VELK_RECORD_SLOT] * VELK_PLAIN_ITEM_WORDS;
         if (cull_words.data[item + VELK_PLAIN_ITEM_TABLE] == 0xFFFFFFFFu) always = 1u;
@@ -2878,8 +2880,11 @@ void main()
 
     uint c = cluster_or_table;
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
+    // Clusters for rays only: their batch draws itself.
+    uint entry_flags = cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS];
+    if ((entry_flags & VELK_LOD_RAYS_ONLY) != 0u) return;
     // A deforming mesh's spheres are where it is at rest, which says nothing about where it is.
-    bool deforming = (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) != 0u;
+    bool deforming = (entry_flags & VELK_LOD_DEFORMING) != 0u;
     if (!deforming && pc.whole == 0u) {
         float own_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
         if (velk_cut_outside(vp, velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam), own_radius)) return;
@@ -3006,6 +3011,8 @@ bool velk_lod_occluded(uint word, mat4 world, float scale, vec3 cam, uint entry,
 void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec3 cam, vec3 lod_cam, float pixels_per_unit,
                      bool deforming)
 {
+    // Clusters for rays only: their batch draws itself.
+    if ((cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u) return;
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
     if (deforming || !velk_lod_occluded(cluster + VELK_LOD_CLUSTER_SPHERE, world, scale, cam, entry, c, slot)) {
         velk_lod_take(entry, c, slot, 0xFFFFFFFFu, world, scale, cam, lod_cam, pixels_per_unit);
@@ -4262,8 +4269,20 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 continue;
             }
             if (!batch->get_instance_cull(info)) {
-                // Drawn by its own pass, but rays see it: an item without a table, for the
-                // plain objects' kept cut.
+                // Drawn by its own pass, but rays see it, by its clusters when it has them for
+                // rays only (a blended batch): an item with its table, whose clusters the
+                // culling never draws (kLodRaysOnly), for the plain objects' kept cut.
+                // Only a mesh: an analytic shape (a glyph) keeps its own intersect.
+                uint32_t ray_draw;
+                uint32_t ray_kind;
+                uint32_t ray_mesh;
+                batch_ray_words(*batch, ctx, ray_draw, ray_kind, ray_mesh);
+                if (plain_table_word != kCullNoSlot && ray_kind == kRayShapeMesh && batch->get_ray_cull(info)) {
+                    note_tables(info);
+                    add_items(*batch, info.instances_base, info.slot_count, info.table_word);
+                    continue;
+                }
+                // Else an item without a table.
                 if (plain_table_word != kCullNoSlot && batch->instance_stride() == 128u && batch->instance_count() != 0
                     && batch->instance_region_size() != 0) {
                     state.own_items.push_back(

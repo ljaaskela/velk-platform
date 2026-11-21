@@ -136,6 +136,8 @@ R"(
 #define VELK_LOD_DEFORMING 0x80000000u
 // In a cluster draw entry's flags: its material moves vertices (kLodMoved).
 #define VELK_LOD_MOVED 0x40000000u
+// In a cluster draw entry's flags: its clusters are for rays only, never drawn (kLodRaysOnly).
+#define VELK_LOD_RAYS_ONLY 0x20000000u
 
 )"
 // mesh_static_base value for a mesh whose static record is not resolvable yet

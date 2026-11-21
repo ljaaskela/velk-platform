@@ -251,9 +251,14 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
         static_cast<uint32_t>(draw_data_offset / sizeof(DrawDataHeader));
     out.draw_base = draw_base;
     write_draw_shade(resources, *draw_arena, draw_base, interface_cast<IMaterial>(material_ptr.get()));
-    if (cull_info.cluster_count != 0) {
+    // The draw its clusters' entry names, for rays that hit one: its own, drawn by cluster or,
+    // with clusters for rays only (IBatch::get_ray_cull), drawn plain as it is.
+    InstanceCullInfo ray_info{};
+    const InstanceCullInfo* entry_info = cull_info.cluster_count != 0 ? &cull_info
+                                       : batch.get_ray_cull(ray_info) && ray_info.cluster_count != 0 ? &ray_info : nullptr;
+    if (entry_info) {
         if (auto culling = resources.shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t))) {
-            culling->update_at(uint64_t(cull_info.cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
+            culling->update_at(uint64_t(entry_info->cluster_entry_word + kClusterEntryDrawWord) * sizeof(uint32_t),
                                &draw_base, sizeof(draw_base));
         }
     }
