@@ -1292,9 +1292,14 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The lights listed for tracing, built on the deferred prelude, which has the lights and the
     // walk, and the light grid. Without the light header there is no grid yet: nothing is traced.
     const bool trace = vs.light_header.valid();
-    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_points_trace_main_src, 0x4c50'5452'4143ULL, false, 5u)
+    // Its three shaders: the sizes, the one values, the points.
+    auto args_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_args_src, 0x4c50'5452'4141ULL, false, 5u)
+                               : IGpuPipeline::Ptr{};
+    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_ones_src, 0x4c50'5452'4143ULL, false, 5u)
                                 : IGpuPipeline::Ptr{};
-    if (!pipeline || !search_pipeline || (trace && !trace_pipeline)) return;
+    auto points_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_points_src, 0x4c50'5452'4150ULL, false, 5u)
+                                 : IGpuPipeline::Ptr{};
+    if (!pipeline || !search_pipeline || (trace && (!args_pipeline || !trace_pipeline || !points_pipeline))) return;
 
     struct PushC
     {
@@ -1335,11 +1340,11 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The rays a first trace or restart is charged (velk_points_trace_point): one a lit light,
     // four with a size.
     trace_pc.spare6 = std::max(lights, 1u) * (sized ? 4u : 1u);
-    // The lanes a point traced from none spreads its light slots over, in a power of two: as
-    // many as still leaves a lane some eight rays, so that a lane's rays outweigh the point's
-    // setup each lane repeats.
-    trace_pc.spare1 = 1u;
-    while (trace_pc.spare1 * 2u <= trace_pc.spare6 / 8u && trace_pc.spare1 < kLightSlots) trace_pc.spare1 *= 2u;
+    // Whether a point traced from none spreads its rays over lanes, a ray each (32,
+    // VELK_LIGHT_RAY_LANES), or casts them all on one (1): spread when it has some sixteen rays or
+    // more, so that no lane walks them all in a row, and fewer are not worth the point's setup
+    // each lane repeats.
+    trace_pc.spare1 = trace_pc.spare6 >= 16u ? 32u : 1u;
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;
@@ -1406,22 +1411,16 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     emit_one(vs.light_claim_again_pass, view_pass_name(other, "deferred.light_claim2", "other:deferred.light_claim2"),
              "DeferredPath: light claim again", pipeline, &again_pc, sizeof(again_pc), (vs.visibility_size.x + 7u) / 8u,
              (vs.visibility_size.y + 7u) / 8u, true);
-    // Then the trace: what the claims listed sizes its dispatches (a group, pc.mode 1), then the
-    // one values, a work group each (mode 0), then the points (mode 2), timed apart.
+    // Then the trace: what the claims listed sizes its dispatches (a group), then the one
+    // values, a work group each, then the points, timed apart.
     if (trace && arena_buffer) {
-        DeferredComputePushC args_pc = trace_pc;
-        args_pc.mode = 1u;
         emit_one(vs.light_trace_args_pass, view_pass_name(other, "deferred.light_trace_args", "other:deferred.light_trace_args"),
-                 "DeferredPath: light trace sizes", trace_pipeline, &args_pc, sizeof(args_pc), 1u, 1u, false);
-        DeferredComputePushC ones_pc = trace_pc;
-        ones_pc.mode = 0u;
+                 "DeferredPath: light trace sizes", args_pipeline, &trace_pc, sizeof(trace_pc), 1u, 1u, false);
         emit_one(vs.light_trace_pass, view_pass_name(other, "deferred.light_trace", "other:deferred.light_trace"),
-                 "DeferredPath: light trace", trace_pipeline, &ones_pc, sizeof(ones_pc), 0u, 0u, false,
+                 "DeferredPath: light trace", trace_pipeline, &trace_pc, sizeof(trace_pc), 0u, 0u, false,
                  pool.word() + kLightPoolTraceArgs);
-        DeferredComputePushC points_pc = trace_pc;
-        points_pc.mode = 2u;
         emit_one(vs.light_points_pass, view_pass_name(other, "deferred.light_points", "other:deferred.light_points"),
-                 "DeferredPath: light points", trace_pipeline, &points_pc, sizeof(points_pc), 0u, 0u, false,
+                 "DeferredPath: light points", points_pipeline, &trace_pc, sizeof(trace_pc), 0u, 0u, false,
                  pool.word() + kLightPoolPointArgs);
     }
 }

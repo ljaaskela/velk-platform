@@ -1073,7 +1073,7 @@ uint velk_light_grid_at(uint first, uint k)
 )"
 
 /// The light code the points of light's passes are built with (the lighting pass and
-/// light_points_trace_main_src): see VELK_LIGHT_GRID_ONLY_GLSL.
+/// light trace's, VELK_LIGHT_TRACE_MAIN_GLSL): see VELK_LIGHT_GRID_ONLY_GLSL.
 [[maybe_unused]] constexpr string_view light_grid_src = VELK_LIGHT_GRID_ONLY_GLSL VELK_LIGHT_AREA_GLSL VELK_LIGHT_GRID_GLSL;
 
 // Default compute shader for the deferred lighting pass. Samples the
