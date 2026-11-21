@@ -811,7 +811,9 @@ void velk_lod_take(uint entry, uint c, uint slot, uint cut_record, mat4 world, f
         }
     }
     uint draw = cull_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
-    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu && (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_MOVED) == 0u) {
+    // Compute raster draws opaque into the visibility buffer: not what a blended batch's own pass draws.
+    if (pc.tiny_pixels > 0.0 && draw != 0xFFFFFFFFu
+        && (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & (VELK_LOD_MOVED | VELK_LOD_RAYS_ONLY)) == 0u) {
         uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
         float radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
         float away = length(velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam));
@@ -1948,7 +1950,6 @@ void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint alway
         ++quads;
     } else if (entry != 0xFFFFFFFFu) {
         uint flags = cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS];
-        if ((flags & VELK_LOD_RAYS_ONLY) != 0u) return;
         if ((flags & VELK_LOD_DEFORMING) != 0u) always = 1u;
     } else if (pc.items_word != 0xFFFFFFFFu) {
         uint item = pc.items_word + cull_words.data[record + VELK_RECORD_SLOT] * VELK_PLAIN_ITEM_WORDS;
@@ -2880,17 +2881,16 @@ void main()
 
     uint c = cluster_or_table;
     uint cluster = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + c * VELK_LOD_CLUSTER_WORDS;
-    // Clusters for rays only: their batch draws itself.
     uint entry_flags = cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS];
-    if ((entry_flags & VELK_LOD_RAYS_ONLY) != 0u) return;
     // A deforming mesh's spheres are where it is at rest, which says nothing about where it is.
     bool deforming = (entry_flags & VELK_LOD_DEFORMING) != 0u;
     if (!deforming && pc.whole == 0u) {
         float own_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 3u]) * scale;
         if (velk_cut_outside(vp, velk_lod_center(cluster + VELK_LOD_CLUSTER_OWN_SPHERE, world, cam), own_radius)) return;
-        // Tested where it was last frame, against what was drawn then.
+        // Tested where it was last frame, against what was drawn then. A blended batch's own pass
+        // draws only the first phase; its depth test hides what is behind.
         float test_radius = uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 3u]) * scale;
-        if (pc.pyramid_word != 0xFFFFFFFFu
+        if (pc.pyramid_word != 0xFFFFFFFFu && (entry_flags & VELK_LOD_RAYS_ONLY) == 0u
             && velk_behind_pyramid(pc.pyramid_word, globals.prev_view_projection,
                                    velk_lod_center(cluster + VELK_LOD_CLUSTER_SPHERE, world, cam) + globals.cam_moved, test_radius)
             && velk_retest(entry, c, slot, record)) {
@@ -3610,6 +3610,8 @@ struct InstanceCullPass
     ArenaRegion together;
     /// Each batch drawn by its own pass that rays see, its first item (in `word`) and its items.
     vector<CutDrawWords::OwnRecords> own_items;
+    /// Each batch drawn by its own pass whose clusters (IBatch::get_ray_cull) the culling lays out.
+    vector<const IBatch*> own_clusters;
     uint32_t together_items = 0;
     uint32_t together_entries = 0;
     uint32_t together_chosen = 0;  ///< How many records fit.
@@ -4077,6 +4079,7 @@ inline CutDrawWords instance_cut_draw_words(const InstanceCullPass& state)
             words.own_records.push_back({own.batch, records + own.word, own.count});
         }
     }
+    words.own_clusters = state.own_clusters;
     return words;
 }
 
@@ -4194,6 +4197,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         state.count_words.clear();
         state.pending_meshes.clear();
         state.own_items.clear();
+        state.own_clusters.clear();
         old_tables = std::move(state.batch_tables);
         old_items = std::move(state.item_names);
         state.batch_tables.clear();
@@ -4270,8 +4274,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             if (!batch->get_instance_cull(info)) {
                 // Drawn by its own pass, but rays see it, by its clusters when it has them for
-                // rays only (a blended batch): an item with its table, whose clusters the
-                // culling never draws (kLodRaysOnly), for the plain objects' kept cut.
+                // that (a blended batch): an item with its table for the plain objects' kept cut,
+                // whose clusters' draws the culling lays out for its pass (kLodRaysOnly).
                 // Only a mesh: an analytic shape (a glyph) keeps its own intersect.
                 uint32_t ray_draw;
                 uint32_t ray_kind;
@@ -4279,6 +4283,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 batch_ray_words(*batch, ctx, ray_draw, ray_kind, ray_mesh);
                 if (plain_table_word != kCullNoSlot && ray_kind == kRayShapeMesh && batch->get_ray_cull(info)) {
                     note_tables(info);
+                    chosen += info.cluster_capacity;
+                    entries.push_back(info.cluster_entry_word);
+                    state.own_clusters.push_back(batch.get());
                     add_items(*batch, info.instances_base, info.slot_count, info.table_word);
                     continue;
                 }

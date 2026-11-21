@@ -104,8 +104,9 @@ inline constexpr uint32_t kLodDeforming = 0x80000000u;
 /// Set in a cluster draw entry's flags when its material moves vertices, which compute
 /// raster does not (VELK_LOD_MOVED).
 inline constexpr uint32_t kLodMoved = 0x40000000u;
-/// Set in a cluster draw entry's flags when its clusters are for rays only: its batch is drawn
-/// by its own pass, as blended batches are, so the culling never draws them (VELK_LOD_RAYS_ONLY).
+/// Set in a cluster draw entry's flags when its batch is drawn by its own pass, as blended batches
+/// are (VELK_LOD_RAYS_ONLY): the culling lays out its clusters' draws, which that pass draws, never
+/// by compute raster nor held back by occlusion, and rays see them.
 inline constexpr uint32_t kLodRaysOnly = 0x20000000u;
 
 /// A tree over a set of primitives. `triangle_indices` is the per-leaf

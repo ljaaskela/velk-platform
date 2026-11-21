@@ -780,16 +780,20 @@ void DeferredPath::build_passes(IViewEntry& entry,
         vs.visibility_dirty = true;
         vs.transparent_dirty = true;
     }
-    // The draws name the view's quad list and the records of items drawn by their own pass,
-    // which culling makes again when batches change.
+    // The draws name the view's quad list, the records of items drawn by their own pass and
+    // which of those are drawn by their clusters, which culling makes again when batches change.
     CutDrawWords cut_draw_words = instance_cut_draw_words(vs.instance_cull);
     if (cut_draw_words.quads_word != vs.cut_draw_words.quads_word
         || cut_draw_words.quad_capacity != vs.cut_draw_words.quad_capacity
         || cut_draw_words.own_records.size() != vs.cut_draw_words.own_records.size()
         || !std::equal(cut_draw_words.own_records.begin(), cut_draw_words.own_records.end(),
-                       vs.cut_draw_words.own_records.begin())) {
+                       vs.cut_draw_words.own_records.begin())
+        || cut_draw_words.own_clusters.size() != vs.cut_draw_words.own_clusters.size()
+        || !std::equal(cut_draw_words.own_clusters.begin(), cut_draw_words.own_clusters.end(),
+                       vs.cut_draw_words.own_clusters.begin())) {
         vs.cut_draw_words = std::move(cut_draw_words);
         vs.visibility_dirty = true;
+        vs.transparent_dirty = true;
     }
     emit_visibility_pass(vs, render_view, ctx, graph, false);
     emit_depth_pyramid_pass(vs, ctx, graph, false);
@@ -2314,7 +2318,8 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
             emit_draw_calls(
                 draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
                 default_stream_buffers, render_view.view_globals_base, resolve,
-                render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx);
+                render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx, false,
+                &vs.cut_draw_words);
 
             // No transparent geometry this view: leave an empty (no-op) pass.
             if (draw_calls.empty()) return;

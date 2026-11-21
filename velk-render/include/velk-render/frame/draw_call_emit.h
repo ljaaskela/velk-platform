@@ -5,6 +5,7 @@
 
 #include <velk/api/perf.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <velk-render/interface/intf_batch.h>
@@ -52,6 +53,9 @@ struct CutDrawWords
         }
     };
     vector<OwnRecords> own_records;
+    /// Each batch drawn by its own pass by its clusters (IBatch::get_ray_cull), whose draws the
+    /// culling lays out.
+    vector<const IBatch*> own_clusters;
 };
 
 /// What write_draw_data found of a batch that a draw of it needs.
@@ -159,7 +163,16 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     header.instances_base = instances_base;
     header.texture_id = texture_id;
     InstanceCullInfo& cull_info = out.cull_info;
-    const bool culled = batch.get_instance_cull(cull_info);
+    bool culled = batch.get_instance_cull(cull_info);
+    // A batch drawn by its own pass by the clusters the culling lays out for it.
+    if (!culled && cut_words
+        && std::find(cut_words->own_clusters.begin(), cut_words->own_clusters.end(), &batch) != cut_words->own_clusters.end()) {
+        InstanceCullInfo ray_cull{};
+        if (batch.get_ray_cull(ray_cull) && ray_cull.cluster_count != 0) {
+            cull_info = ray_cull;
+            culled = true;
+        }
+    }
     header.visible_base = culled ? cull_info.visible_word : kNoVisibleList;
     header.record_base = culled ? cull_info.records_word : kNoVisibleList;
     header.record_count = culled ? cull_info.records_count : 0u;
