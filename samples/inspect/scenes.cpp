@@ -491,6 +491,26 @@ void build_cornell(SceneBuilder& b)
     add_mesh(b, build_box(raw(b), {80.f, 80.f, 80.f}, 8, standard(0.73f, 0.73f, 0.73f)), {60.f, 0.f, -100.f});
 }
 
+/// Four metal panels of rising roughness on a rough plane under a sun, with coloured boxes in
+/// front of them, a metal one among them, and one behind the camera that only the panels show:
+/// reflections, sharp to blurred.
+void build_mirror(SceneBuilder& b)
+{
+    set_sky(b, "mirror", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    const float roughness[4] = {0.02f, 0.1f, 0.25f, 0.5f};
+    for (int i = 0; i < 4; ++i) {
+        auto metal = velk::material::create_standard(velk::color{0.9f, 0.92f, 0.95f, 1.f}, 1.f, roughness[i]);
+        add_mesh(b, build_box(raw(b), {70.f, 120.f, 4.f}, 8, metal), {-120.f + static_cast<float>(i) * 80.f, 0.f, -100.f});
+    }
+    add_mesh(b, build_box(raw(b), {40.f, 40.f, 40.f}, 8, standard(0.7f, 0.15f, 0.1f)), {-70.f, 0.f, 20.f});
+    add_mesh(b, build_box(raw(b), {30.f, 60.f, 30.f}, 8, standard(0.15f, 0.55f, 0.2f)), {60.f, 0.f, 0.f});
+    auto gold = velk::material::create_standard(velk::color{0.95f, 0.7f, 0.4f, 1.f}, 0.9f, 0.15f);
+    add_mesh(b, build_box(raw(b), {30.f, 30.f, 30.f}, 8, gold), {0.f, 0.f, 60.f});
+    add_mesh(b, build_box(raw(b), {80.f, 80.f, 80.f}, 8, standard(0.15f, 0.25f, 0.7f)), {0.f, 0.f, 520.f});
+}
+
 /// A fence of thin boards and a canopy of small leaves under a sun: detail near the size of
 /// the light's spacing.
 void build_thin(SceneBuilder& b)
@@ -670,6 +690,9 @@ const velk::vector<SceneSpec>& scenes()
         {"cornell", "a closed room, a red and a green wall, a point light: bounce and colour bleeding",
          {{"front", {{0.f, -150.f, 420.f}, 0.f, 0.f}}},
          build_cornell},
+        {"mirror", "metal panels from sharp to rough, coloured boxes before them and behind the camera: reflections",
+         {{"front", {{0.f, -90.f, 330.f}, 0.f, -8.f}}, {"angle", {{240.f, -80.f, 230.f}, 40.f, -8.f}}},
+         build_mirror},
         {"thin", "a fence of thin boards and a canopy of small leaves: detail near the light's spacing",
          {{"front", {{0.f, -100.f, 320.f}, 0.f, -15.f}}, {"above", {{150.f, -320.f, 250.f}, 30.f, -45.f}}},
          build_thin},
