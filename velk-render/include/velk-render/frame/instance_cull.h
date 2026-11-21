@@ -4737,12 +4737,14 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
     // not there. Its pages are swept every frame, so a new segment's are free on the next.
     if (!state.cuts.empty() && ensure_light_pool(state.light_pool, *arena, ctx.backend->device_memory_bytes())) {
         LightPool& pool = state.light_pool;
-        // Its budget in rays, by what the view's trace took (its pass's GPU time).
-        const char* trace_pass = state.chosen_by_other ? "other:deferred.light_trace" : "deferred.light_trace";
+        // Its budget in rays, by what the view's trace took: its passes' GPU time, the one values'
+        // and the points'.
+        const char* trace_passes[2] = {state.chosen_by_other ? "other:deferred.light_trace" : "deferred.light_trace",
+                                       state.chosen_by_other ? "other:deferred.light_points" : "deferred.light_points"};
         float trace_ms = 0.f;
         for (const auto& t : ctx.backend->last_gpu_timings()) {
-            if (std::strcmp(t.label, trace_pass) == 0) {
-                trace_ms = t.ms;
+            if (std::strcmp(t.label, trace_passes[0]) == 0 || std::strcmp(t.label, trace_passes[1]) == 0) {
+                trace_ms += t.ms;
             }
         }
         adjust_light_rays(pool, *arena, trace_ms, state.light_trace_ms);

@@ -1304,8 +1304,19 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
         uint32_t again;
         uint32_t position_id;
     };
-    // What a first trace casts a ray a point to: the scene's lights, as many as a point has slots.
-    const auto lights = static_cast<uint32_t>(std::min<size_t>(render_view.lights.size(), kLightSlots));
+    // What a first trace casts a ray a point to: the scene's lit lights, as many as a point has
+    // slots. A dark light takes no slot (velk_light_slots_at), so no ray either. Whether one of
+    // them has a size, for the four rays a light such a trace then takes.
+    uint32_t lit = 0;
+    bool sized = false;
+    for (const GpuLight& l : render_view.lights) {
+        const float bright = (0.2126f * l.color_intensity[0] + 0.7152f * l.color_intensity[1] + 0.0722f * l.color_intensity[2])
+                           * l.color_intensity[3];
+        if (bright <= 0.f) continue;
+        ++lit;
+        if (l.params[3] > 0.f || l.flags[0] == static_cast<uint32_t>(LightType::Area)) sized = true;
+    }
+    const uint32_t lights = std::min(lit, kLightSlots);
     const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights, 0u,
                    vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos))};
     static_assert(sizeof(PushC) == sizeof(vs.light_claim_recorded), "What the claim was recorded with");
@@ -1321,18 +1332,25 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The light's level, as the culling's error on screen, for the log.
     const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
     std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
-    // Whether a light has a size, for the rays a first trace or restart takes
-    // (velk_points_trace_point): 1 when one has.
-    trace_pc.spare6 = 0u;
-    for (const GpuLight& l : render_view.lights) {
-        if (l.params[3] > 0.f || l.flags[0] == static_cast<uint32_t>(LightType::Area)) trace_pc.spare6 = 1u;
-    }
+    // The rays a first trace or restart is charged (velk_points_trace_point): one a lit light,
+    // four with a size.
+    trace_pc.spare6 = std::max(lights, 1u) * (sized ? 4u : 1u);
+    // The lanes a point traced from none spreads its light slots over, in a power of two: as
+    // many as still leaves a lane some eight rays, so that a lane's rays outweigh the point's
+    // setup each lane repeats.
+    trace_pc.spare1 = 1u;
+    while (trace_pc.spare1 * 2u <= trace_pc.spare6 / 8u && trace_pc.spare1 < kLightSlots) trace_pc.spare1 *= 2u;
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;
     // One dispatch as its own pass, timed apart: the claim, the search, the trace.
+    // A dispatch of groups_x by groups_y groups, or with args_word one whose size the culling
+    // arena holds at that word.
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
     const auto emit_one = [&](IRenderPass::Ptr& pass, const char* name, const char* label, const IGpuPipeline::Ptr& used,
-                              const void* used_pc, uint32_t pc_size, uint32_t groups_x, uint32_t groups_y, bool reads_pixels) {
+                              const void* used_pc, uint32_t pc_size, uint32_t groups_x, uint32_t groups_y, bool reads_pixels,
+                              uint32_t args_word = 0u) {
         bool dirty = true;
         emit_cached_view_pass(pass, dirty, name, graph, [&](CachedPassRecording& rec) {
             auto cmd = ctx.backend->create_command_buffer();
@@ -1347,7 +1365,11 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
             cmd->begin_recording();
             cmd->push_label(label);
             cmd->record_global_barrier();
-            cmd->record_dispatch(dc);
+            if (args_word != 0u) {
+                cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(args_word) * sizeof(uint32_t));
+            } else {
+                cmd->record_dispatch(dc);
+            }
             cmd->record_global_barrier();
             cmd->pop_label();
             cmd->end_recording();
@@ -1384,12 +1406,23 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     emit_one(vs.light_claim_again_pass, view_pass_name(other, "deferred.light_claim2", "other:deferred.light_claim2"),
              "DeferredPath: light claim again", pipeline, &again_pc, sizeof(again_pc), (vs.visibility_size.x + 7u) / 8u,
              (vs.visibility_size.y + 7u) / 8u, true);
-    // Then the one values the claim listed for tracing, a work group each, and the points it
-    // listed, a thread each.
-    if (trace) {
+    // Then the trace: what the claims listed sizes its dispatches (a group, pc.mode 1), then the
+    // one values, a work group each (mode 0), then the points (mode 2), timed apart.
+    if (trace && arena_buffer) {
+        DeferredComputePushC args_pc = trace_pc;
+        args_pc.mode = 1u;
+        emit_one(vs.light_trace_args_pass, view_pass_name(other, "deferred.light_trace_args", "other:deferred.light_trace_args"),
+                 "DeferredPath: light trace sizes", trace_pipeline, &args_pc, sizeof(args_pc), 1u, 1u, false);
+        DeferredComputePushC ones_pc = trace_pc;
+        ones_pc.mode = 0u;
         emit_one(vs.light_trace_pass, view_pass_name(other, "deferred.light_trace", "other:deferred.light_trace"),
-                 "DeferredPath: light trace", trace_pipeline, &trace_pc, sizeof(trace_pc), kLightTraceCapacity + kLightPointGroups,
-                 1u, false);
+                 "DeferredPath: light trace", trace_pipeline, &ones_pc, sizeof(ones_pc), 0u, 0u, false,
+                 pool.word() + kLightPoolTraceArgs);
+        DeferredComputePushC points_pc = trace_pc;
+        points_pc.mode = 2u;
+        emit_one(vs.light_points_pass, view_pass_name(other, "deferred.light_points", "other:deferred.light_points"),
+                 "DeferredPath: light points", trace_pipeline, &points_pc, sizeof(points_pc), 0u, 0u, false,
+                 pool.word() + kLightPoolPointArgs);
     }
 }
 

@@ -109,7 +109,10 @@ public:
         IRenderPass::Ptr light_search_pass;
         /// The claim again after the search, for the records and pieces it made (light_claim_src).
         IRenderPass::Ptr light_claim_again_pass;
+        /// The light trace: its dispatches' sizes, then the one values, then the points.
+        IRenderPass::Ptr light_trace_args_pass;
         IRenderPass::Ptr light_trace_pass;
+        IRenderPass::Ptr light_points_pass;
         /// What changed this frame for the light (kLightChangeWords a change), and the lights as
         /// each was when last listed as changed. See light_changes_main_src.
         ArenaRegion light_changes;
