@@ -61,6 +61,12 @@ public:
     /// and sampler set by loaders in the meantime. Fires on_loaded.
     void finish_loading(int width, int height, vector<uint8_t> pixels, const ImageAverages& averages);
 
+    /// Completes an asynchronous load of a file with levels of its own (KTX): @p levels of
+    /// @p format in @p data. A colour space a loader set in the meantime (set_format) is kept,
+    /// on the file's format. Fires on_loaded.
+    void finish_loading_levels(int width, int height, PixelFormat format, uint32_t levels, vector<uint8_t> data,
+                               const ImageAverages& averages);
+
     /// Completes an asynchronous load as Failed. Fires on_loaded.
     void fail_loading();
 
@@ -73,7 +79,8 @@ public:
 
     /// Overrides the GPU pixel format / color space before upload. Used by
     /// loaders to mark non-color data (normal / MR / occlusion) maps linear.
-    void set_format(PixelFormat format) override { format_ = format; }
+    /// RGBA8 or RGBA8_SRGB on a compressed image only sets its colour space.
+    void set_format(PixelFormat format) override;
 
     /// IImage interface entry: copy pixels and call init().
     void init_from_pixels(string_view uri, int width, int height, PixelFormat format,
@@ -88,6 +95,7 @@ public:
 
     // IImage
     ImageStatus status() const override { return status_; }
+    uint32_t get_mip_levels() const override { return mip_levels_; }
 
     // IBuffer
     size_t get_data_size() const override { return pixels_.size(); }
@@ -117,6 +125,10 @@ private:
     int width_{};
     int height_{};
     PixelFormat format_{PixelFormat::RGBA8_SRGB};
+    /// The colour space a loader set (set_format): 0 none, 1 linear, 2 sRGB.
+    uint8_t color_space_{0};
+    /// Levels its data holds (IImage::get_mip_levels), 0 for none of its own.
+    uint32_t mip_levels_{0};
     vector<uint8_t> pixels_;
     ImageStatus status_{ImageStatus::Unloaded};
     bool dirty_{false};

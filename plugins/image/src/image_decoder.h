@@ -5,6 +5,7 @@
 #include <velk/ext/object.h>
 #include <velk/interface/resource/intf_resource_decoder.h>
 
+#include <velk-ui/plugins/image/intf_image_decoder.h>
 #include <velk-ui/plugins/image/plugin.h>
 
 namespace velk::ui::impl {
@@ -23,7 +24,7 @@ namespace velk::ui::impl {
  * from its pre_update(). Both pools are owned by the decoder, so releasing
  * the decoder joins the workers and drops pending work.
  */
-class ImageDecoder final : public ::velk::ext::Object<ImageDecoder, IResourceDecoder>
+class ImageDecoder final : public ::velk::ext::Object<ImageDecoder, IResourceDecoder, IImageDecoder>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::ImageDecoder, "ImageDecoder");
@@ -33,10 +34,15 @@ public:
     string_view name() const override { return "image"; }
     IResource::Ptr decode(const IResource::Ptr& inner) const override;
 
+    // IImageDecoder
+    void set_sampled_formats(const vector<PixelFormat>& formats) override;
+
     /// Hands decoded results back to their images. Call on the main thread.
     void drain_commits();
 
 private:
+    /// The block formats the device samples (IImageDecoder), handed to each decode.
+    vector<PixelFormat> sampled_;
     // Declared first so it is destroyed last: decode_pool_ joins its workers,
     // which post into this pool, before it goes away.
     mutable ManualTaskPool commit_pool_;   ///< Hand-backs, run by drain_commits().

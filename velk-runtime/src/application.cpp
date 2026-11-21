@@ -12,6 +12,7 @@
 #include <thread>
 #include <velk-render/api/render_context.h>
 #include <velk-render/interface/intf_image.h>
+#include <velk-ui/plugins/image/intf_image_decoder.h>
 #include <velk-ui/plugins/image/plugin.h>
 #include <velk-render/detail/intf_renderer_internal.h>
 #include <velk-runtime/interface/intf_window.h>
@@ -142,6 +143,19 @@ bool Application::ensure_render_context()
     if (!renderer_) {
         VELK_LOG(E, "Failed to create renderer");
         return false;
+    }
+
+    // The image decoder transcodes and decodes KTX files for what this device samples.
+    if (auto backend = render_ctx_->backend()) {
+        auto decoder = instance().resource_store().find_decoder("image");
+        if (auto* image_decoder = interface_cast<ui::IImageDecoder>(decoder.get())) {
+            vector<PixelFormat> sampled;
+            for (uint8_t f = static_cast<uint8_t>(PixelFormat::BC1_RGBA);
+                 f <= static_cast<uint8_t>(PixelFormat::ASTC_8x8_SRGB); ++f) {
+                if (backend->supports_sampling(static_cast<PixelFormat>(f))) sampled.push_back(static_cast<PixelFormat>(f));
+            }
+            image_decoder->set_sampled_formats(sampled);
+        }
     }
     return true;
 }

@@ -48,6 +48,32 @@ VkFormat vk_format_for(PixelFormat f)
         case PixelFormat::RGBA32F:    return VK_FORMAT_R32G32B32A32_SFLOAT;
         case PixelFormat::RG32UI:     return VK_FORMAT_R32G32_UINT;
         case PixelFormat::R32F:       return VK_FORMAT_R32_SFLOAT;
+        case PixelFormat::BC1_RGBA:        return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        case PixelFormat::BC1_RGBA_SRGB:   return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case PixelFormat::BC2_RGBA:        return VK_FORMAT_BC2_UNORM_BLOCK;
+        case PixelFormat::BC2_RGBA_SRGB:   return VK_FORMAT_BC2_SRGB_BLOCK;
+        case PixelFormat::BC3_RGBA:        return VK_FORMAT_BC3_UNORM_BLOCK;
+        case PixelFormat::BC3_RGBA_SRGB:   return VK_FORMAT_BC3_SRGB_BLOCK;
+        case PixelFormat::BC4_R:           return VK_FORMAT_BC4_UNORM_BLOCK;
+        case PixelFormat::BC5_RG:          return VK_FORMAT_BC5_UNORM_BLOCK;
+        case PixelFormat::BC6H_RGB_UFLOAT: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        case PixelFormat::BC6H_RGB_SFLOAT: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+        case PixelFormat::BC7_RGBA:        return VK_FORMAT_BC7_UNORM_BLOCK;
+        case PixelFormat::BC7_RGBA_SRGB:   return VK_FORMAT_BC7_SRGB_BLOCK;
+        case PixelFormat::ETC2_RGB8:       return VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+        case PixelFormat::ETC2_RGB8_SRGB:  return VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK;
+        case PixelFormat::ETC2_RGBA8:      return VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+        case PixelFormat::ETC2_RGBA8_SRGB: return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
+        case PixelFormat::EAC_R11:         return VK_FORMAT_EAC_R11_UNORM_BLOCK;
+        case PixelFormat::EAC_RG11:        return VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
+        case PixelFormat::ASTC_4x4:        return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        case PixelFormat::ASTC_4x4_SRGB:   return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+        case PixelFormat::ASTC_5x5:        return VK_FORMAT_ASTC_5x5_UNORM_BLOCK;
+        case PixelFormat::ASTC_5x5_SRGB:   return VK_FORMAT_ASTC_5x5_SRGB_BLOCK;
+        case PixelFormat::ASTC_6x6:        return VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
+        case PixelFormat::ASTC_6x6_SRGB:   return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+        case PixelFormat::ASTC_8x8:        return VK_FORMAT_ASTC_8x8_UNORM_BLOCK;
+        case PixelFormat::ASTC_8x8_SRGB:   return VK_FORMAT_ASTC_8x8_SRGB_BLOCK;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -1755,17 +1781,33 @@ IGpuTexture::Ptr VkBackend::create_texture(const TextureDesc& desc)
     return t;
 }
 
-void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height)
+bool VkBackend::supports_sampling(PixelFormat format) const
+{
+    const VkFormat vk_format = vk_format_for(format);
+    if (vk_format == VK_FORMAT_UNDEFINED || physical_device_ == VK_NULL_HANDLE) return false;
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(physical_device_, vk_format, &props);
+    const VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return (props.optimalTilingFeatures & needed) == needed;
+}
+
+void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height, uint32_t levels)
 {
     auto* vk_t = interface_cast<IVkGpuTexture>(&texture);
     if (!vk_t || vk_t->vk_image() == VK_NULL_HANDLE) return;
 
-    PixelFormat fmt = texture.format();
-    size_t bpp = 4;
-    if (fmt == PixelFormat::R8) bpp = 1;
-    else if (fmt == PixelFormat::RGBA16F || fmt == PixelFormat::RG32UI) bpp = 8;
-    else if (fmt == PixelFormat::RGBA32F) bpp = 16;
-    size_t data_size = static_cast<size_t>(width) * height * bpp;
+    const PixelFormat fmt = texture.format();
+    const uint32_t texture_levels = vk_t->vk_mip_levels();
+    // The levels given, as many as the texture has; the rest made by blitting only from one
+    // level of an uncompressed format.
+    const uint32_t given = levels < 1 ? 1u : (levels < texture_levels ? levels : texture_levels);
+    const bool generate = given == 1 && texture_levels > 1 && !is_block_compressed(fmt);
+    size_t data_size = 0;
+    for (uint32_t i = 0; i < given; ++i) {
+        const uint32_t w = static_cast<uint32_t>(width) >> i;
+        const uint32_t h = static_cast<uint32_t>(height) >> i;
+        data_size += pixel_format_level_bytes(fmt, w > 0 ? w : 1u, h > 0 ? h : 1u);
+    }
 
     // Create staging buffer
     VkBufferCreateInfo buf_ci{};
@@ -1803,7 +1845,7 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
         cb = begin_one_shot_commands();
     }
 
-    const uint32_t mip_levels = vk_t->vk_mip_levels();
+    const uint32_t mip_levels = texture_levels;
     const VkImage image = vk_t->vk_image();
 
     // Transition all mip levels to TRANSFER_DST for the initial upload.
@@ -1811,15 +1853,28 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
         cb, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mip_levels);
 
-    // Upload the source pixels to mip 0.
-    VkBufferImageCopy region{};
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-    vkCmdCopyBufferToImage(cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    // Upload the given levels, one after another in the staging buffer.
+    vector<VkBufferImageCopy> regions(given);
+    VkDeviceSize offset = 0;
+    for (uint32_t i = 0; i < given; ++i) {
+        const uint32_t w = std::max(static_cast<uint32_t>(width) >> i, 1u);
+        const uint32_t h = std::max(static_cast<uint32_t>(height) >> i, 1u);
+        VkBufferImageCopy& region = regions[i];
+        region = {};
+        region.bufferOffset = offset;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = i;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {w, h, 1};
+        offset += pixel_format_level_bytes(fmt, w, h);
+    }
+    vkCmdCopyBufferToImage(cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, given, regions.data());
 
-    if (mip_levels > 1) {
+    if (!generate) {
+        // Every level written (or as many as were given): all to sampling layout.
+        transition_image_layout(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, mip_levels);
+    } else {
         // Generate the rest of the chain by progressively blitting from
         // level i (TRANSFER_SRC) into level i+1 (TRANSFER_DST). Each
         // level is transitioned to SHADER_READ_ONLY once we're done
@@ -1888,11 +1943,6 @@ void VkBackend::upload_texture(IGpuTexture& texture, const uint8_t* pixels, int 
         tail.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &tail);
-    } else {
-        // Single-level image: flip mip 0 back to sampling layout.
-        transition_image_layout(
-            cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
     }
 
     if (upload_batching_) {

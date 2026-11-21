@@ -58,7 +58,135 @@ enum class PixelFormat : uint8_t
     RGBA32F,    ///< 16 bytes per pixel, 32-bit float per channel (precision-critical, e.g. world position).
     RG32UI,     ///< 8 bytes per pixel, two 32-bit unsigned integers (IDs). Read with texelFetch.
     R32F,       ///< 4 bytes per pixel, one 32-bit float. Read with texelFetch.
+
+    // Block compressed, for sampling only. Their textures have the mip levels their data holds.
+    BC1_RGBA,        ///< 8 bytes a 4 by 4 block, 1 bit alpha.
+    BC1_RGBA_SRGB,   ///< BC1, sRGB.
+    BC2_RGBA,        ///< 16 bytes a 4 by 4 block, 4 bit alpha.
+    BC2_RGBA_SRGB,   ///< BC2, sRGB.
+    BC3_RGBA,        ///< 16 bytes a 4 by 4 block, interpolated alpha.
+    BC3_RGBA_SRGB,   ///< BC3, sRGB.
+    BC4_R,           ///< 8 bytes a 4 by 4 block, one channel.
+    BC5_RG,          ///< 16 bytes a 4 by 4 block, two channels (normal maps).
+    BC6H_RGB_UFLOAT, ///< 16 bytes a 4 by 4 block, unsigned half float colour (HDR).
+    BC6H_RGB_SFLOAT, ///< 16 bytes a 4 by 4 block, signed half float colour (HDR).
+    BC7_RGBA,        ///< 16 bytes a 4 by 4 block.
+    BC7_RGBA_SRGB,   ///< BC7, sRGB.
+    ETC2_RGB8,       ///< 8 bytes a 4 by 4 block.
+    ETC2_RGB8_SRGB,  ///< ETC2 RGB, sRGB.
+    ETC2_RGBA8,      ///< 16 bytes a 4 by 4 block, with EAC alpha.
+    ETC2_RGBA8_SRGB, ///< ETC2 RGBA, sRGB.
+    EAC_R11,         ///< 8 bytes a 4 by 4 block, one channel.
+    EAC_RG11,        ///< 16 bytes a 4 by 4 block, two channels.
+    ASTC_4x4,        ///< 16 bytes a 4 by 4 block.
+    ASTC_4x4_SRGB,   ///< ASTC 4 by 4, sRGB.
+    ASTC_5x5,        ///< 16 bytes a 5 by 5 block.
+    ASTC_5x5_SRGB,   ///< ASTC 5 by 5, sRGB.
+    ASTC_6x6,        ///< 16 bytes a 6 by 6 block.
+    ASTC_6x6_SRGB,   ///< ASTC 6 by 6, sRGB.
+    ASTC_8x8,        ///< 16 bytes an 8 by 8 block.
+    ASTC_8x8_SRGB,   ///< ASTC 8 by 8, sRGB.
 };
+
+/// How a pixel format lays out its texels: in blocks of block_width by block_height texels of
+/// block_bytes each, 1 by 1 for an uncompressed format.
+struct PixelFormatLayout
+{
+    uint32_t block_width = 1;
+    uint32_t block_height = 1;
+    uint32_t block_bytes = 4;
+};
+
+/// The layout of @p format.
+constexpr PixelFormatLayout pixel_format_layout(PixelFormat format)
+{
+    switch (format) {
+        case PixelFormat::RGBA8:
+        case PixelFormat::RGBA8_SRGB:
+        case PixelFormat::R32F:            return {1, 1, 4};
+        case PixelFormat::R8:              return {1, 1, 1};
+        case PixelFormat::RGBA16F:
+        case PixelFormat::RG32UI:          return {1, 1, 8};
+        case PixelFormat::RGBA32F:         return {1, 1, 16};
+        case PixelFormat::BC1_RGBA:
+        case PixelFormat::BC1_RGBA_SRGB:
+        case PixelFormat::BC4_R:
+        case PixelFormat::ETC2_RGB8:
+        case PixelFormat::ETC2_RGB8_SRGB:
+        case PixelFormat::EAC_R11:         return {4, 4, 8};
+        case PixelFormat::ASTC_5x5:
+        case PixelFormat::ASTC_5x5_SRGB:   return {5, 5, 16};
+        case PixelFormat::ASTC_6x6:
+        case PixelFormat::ASTC_6x6_SRGB:   return {6, 6, 16};
+        case PixelFormat::ASTC_8x8:
+        case PixelFormat::ASTC_8x8_SRGB:   return {8, 8, 16};
+        default:                           return {4, 4, 16};
+    }
+}
+
+/// Whether @p format is block compressed.
+constexpr bool is_block_compressed(PixelFormat format)
+{
+    return static_cast<uint8_t>(format) >= static_cast<uint8_t>(PixelFormat::BC1_RGBA);
+}
+
+/// Whether @p format is sRGB-tagged.
+constexpr bool is_srgb(PixelFormat format)
+{
+    switch (format) {
+        case PixelFormat::RGBA8_SRGB:
+        case PixelFormat::BC1_RGBA_SRGB:
+        case PixelFormat::BC2_RGBA_SRGB:
+        case PixelFormat::BC3_RGBA_SRGB:
+        case PixelFormat::BC7_RGBA_SRGB:
+        case PixelFormat::ETC2_RGB8_SRGB:
+        case PixelFormat::ETC2_RGBA8_SRGB:
+        case PixelFormat::ASTC_4x4_SRGB:
+        case PixelFormat::ASTC_5x5_SRGB:
+        case PixelFormat::ASTC_6x6_SRGB:
+        case PixelFormat::ASTC_8x8_SRGB:   return true;
+        default:                           return false;
+    }
+}
+
+/// @p format with its colour space sRGB when @p srgb, linear otherwise; @p format itself for a
+/// format without both.
+constexpr PixelFormat with_srgb(PixelFormat format, bool srgb)
+{
+    switch (format) {
+        case PixelFormat::RGBA8:
+        case PixelFormat::RGBA8_SRGB:      return srgb ? PixelFormat::RGBA8_SRGB : PixelFormat::RGBA8;
+        case PixelFormat::BC1_RGBA:
+        case PixelFormat::BC1_RGBA_SRGB:   return srgb ? PixelFormat::BC1_RGBA_SRGB : PixelFormat::BC1_RGBA;
+        case PixelFormat::BC2_RGBA:
+        case PixelFormat::BC2_RGBA_SRGB:   return srgb ? PixelFormat::BC2_RGBA_SRGB : PixelFormat::BC2_RGBA;
+        case PixelFormat::BC3_RGBA:
+        case PixelFormat::BC3_RGBA_SRGB:   return srgb ? PixelFormat::BC3_RGBA_SRGB : PixelFormat::BC3_RGBA;
+        case PixelFormat::BC7_RGBA:
+        case PixelFormat::BC7_RGBA_SRGB:   return srgb ? PixelFormat::BC7_RGBA_SRGB : PixelFormat::BC7_RGBA;
+        case PixelFormat::ETC2_RGB8:
+        case PixelFormat::ETC2_RGB8_SRGB:  return srgb ? PixelFormat::ETC2_RGB8_SRGB : PixelFormat::ETC2_RGB8;
+        case PixelFormat::ETC2_RGBA8:
+        case PixelFormat::ETC2_RGBA8_SRGB: return srgb ? PixelFormat::ETC2_RGBA8_SRGB : PixelFormat::ETC2_RGBA8;
+        case PixelFormat::ASTC_4x4:
+        case PixelFormat::ASTC_4x4_SRGB:   return srgb ? PixelFormat::ASTC_4x4_SRGB : PixelFormat::ASTC_4x4;
+        case PixelFormat::ASTC_5x5:
+        case PixelFormat::ASTC_5x5_SRGB:   return srgb ? PixelFormat::ASTC_5x5_SRGB : PixelFormat::ASTC_5x5;
+        case PixelFormat::ASTC_6x6:
+        case PixelFormat::ASTC_6x6_SRGB:   return srgb ? PixelFormat::ASTC_6x6_SRGB : PixelFormat::ASTC_6x6;
+        case PixelFormat::ASTC_8x8:
+        case PixelFormat::ASTC_8x8_SRGB:   return srgb ? PixelFormat::ASTC_8x8_SRGB : PixelFormat::ASTC_8x8;
+        default:                           return format;
+    }
+}
+
+/// Bytes of a @p width by @p height level of @p format, whole blocks.
+constexpr size_t pixel_format_level_bytes(PixelFormat format, uint32_t width, uint32_t height)
+{
+    const PixelFormatLayout l = pixel_format_layout(format);
+    return size_t((width + l.block_width - 1) / l.block_width) * size_t((height + l.block_height - 1) / l.block_height)
+           * l.block_bytes;
+}
 
 /// Format of a surface's per-frame composite intermediate. Whitelisted
 /// subset of `PixelFormat`; numeric values match `PixelFormat` so a

@@ -51,7 +51,15 @@ bool extension_is_safelisted(const char* name)
     if (!name) return false;
     return std::strcmp(name, "KHR_materials_specular") == 0
         || std::strcmp(name, "KHR_materials_emissive_strength") == 0
-        || std::strcmp(name, "KHR_texture_transform") == 0;
+        || std::strcmp(name, "KHR_texture_transform") == 0
+        || std::strcmp(name, "KHR_texture_basisu") == 0;
+}
+
+/// The image a texture reads: its KTX2 one (KHR_texture_basisu) where it has one, else its source.
+const cgltf_image* texture_image(const cgltf_texture* tex)
+{
+    if (!tex) return nullptr;
+    return tex->has_basisu && tex->basisu_image ? tex->basisu_image : tex->image;
 }
 
 bool check_required_extensions(const cgltf_data* data)
@@ -83,6 +91,7 @@ string_view ext_from_mime(string_view mime)
 {
     if (mime == "image/jpeg") return "jpg";
     if (mime == "image/png") return "png";
+    if (mime == "image/ktx2") return "ktx2";
     return "bin";
 }
 
@@ -187,6 +196,7 @@ ISurface::Ptr decode_image(IMemoryProtocol& mem, IResourceStore& rs,
                 string_view ext = uri_view.substr(dot + 1);
                 if (ext == "jpg" || ext == "jpeg") mime = "image/jpeg";
                 else if (ext == "png") mime = "image/png";
+                else if (ext == "ktx2") mime = "image/ktx2";
             }
         }
     }
@@ -296,8 +306,9 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
     auto mat = material::create_standard();
 
     auto image_for = [&](const cgltf_texture* tex) -> ISurface::Ptr {
-        if (!tex || !tex->image) return nullptr;
-        size_t idx = static_cast<size_t>(tex->image - data->images);
+        const cgltf_image* image = texture_image(tex);
+        if (!image) return nullptr;
+        size_t idx = static_cast<size_t>(image - data->images);
         return idx < images.size() ? images[idx] : nullptr;
     };
 
@@ -885,8 +896,9 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
     // caveat: an image used in two roles with different color spaces gets the
     // last writer's format; rare in practice, same as the sampler model above.)
     auto mark_linear = [&](const cgltf_texture_view& tv) {
-        if (!tv.texture || !tv.texture->image) return;
-        size_t idx = static_cast<size_t>(tv.texture->image - data->images);
+        const cgltf_image* image = texture_image(tv.texture);
+        if (!image) return;
+        size_t idx = static_cast<size_t>(image - data->images);
         if (idx < images.size() && images[idx]) {
             if (auto* img = interface_cast<IImage>(images[idx].get())) {
                 img->set_format(PixelFormat::RGBA8);

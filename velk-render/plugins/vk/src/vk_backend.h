@@ -55,7 +55,9 @@ public:
     void set_global_buffer(uint32_t binding, IGpuBuffer* buffer) override;
 
     IGpuTexture::Ptr create_texture(const TextureDesc& desc) override;
-    void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) override;
+    void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height,
+                        uint32_t levels = 1) override;
+    bool supports_sampling(PixelFormat format) const override;
     void begin_upload_batch() override;
     void end_upload_batch() override;
     bool read_texture(IGpuTexture& texture, vector<uint8_t>& out_pixels,

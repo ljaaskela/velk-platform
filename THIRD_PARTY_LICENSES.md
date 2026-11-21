@@ -15,6 +15,7 @@ velk-ui bundles or links the following third-party software:
 | [stb_image](https://github.com/nothings/stb) | latest (single header) | MIT or Public Domain (dual) | `plugins/image/third_party/stb/stb_image.h` |
 | [cgltf](https://github.com/jkuhlmann/cgltf) | latest (single header) | MIT | `plugins/gltf/third_party/cgltf/cgltf.h` |
 | [MikkTSpace](https://github.com/mmikk/MikkTSpace) | latest | Zlib | `plugins/gltf/third_party/mikktspace/` |
+| [KTX-Software](https://github.com/KhronosGroup/KTX-Software) (libktx reading side) | 4.4.2 | Apache 2.0, with Basis Universal (Apache 2.0), zstd (BSD), ASTC encoder (Apache 2.0) and the Khronos data format utilities | `plugins/image/third_party/KTX-Software-4.4.2-read.zip` |
 
 ## Inter font
 
@@ -27,6 +28,10 @@ FreeType is distributed under the FreeType License (FTL), a BSD-style license. T
 ## HarfBuzz
 
 HarfBuzz is distributed under the MIT license. The full license is included in the HarfBuzz source archive.
+
+## KTX-Software
+
+The image plugin builds libktx's reading side from a subset of the KTX-Software 4.4.2 source: libktx, the Basis Universal transcoder, zstd, the ASTC encoder's decompressor, the Khronos data format utilities and an ETC decoder. Each component's license is included in the archive (`LICENSE.md`, `LICENSES/` and the license files under `external/`).
 
 ## GLFW
 

@@ -89,6 +89,15 @@ public:
     virtual void init_from_pixels(string_view uri, int width, int height,
                                   PixelFormat format,
                                   const uint8_t* pixels, size_t pixel_size) = 0;
+
+    /**
+     * @brief Returns the mip levels its pixel data holds, largest first, each tightly packed
+     *        in its format; its texture has exactly these.
+     *
+     * 0 for an image whose file has no levels of its own (PNG, JPEG): its data is the full
+     * size image, and the renderer makes a full chain from it.
+     */
+    virtual uint32_t get_mip_levels() const = 0;
 };
 
 /**

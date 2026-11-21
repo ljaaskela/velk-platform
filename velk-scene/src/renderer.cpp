@@ -714,20 +714,27 @@ std::unordered_map<IScene*, SceneState> Renderer::consume_scenes(const FrameDesc
                             tdesc.height = th;
                             tdesc.format = surf->format();
                             tdesc.sampler = surf->get_sampler_desc();
-                            // Full mip chain. Minified material textures —
-                            // notably normal maps on receding surfaces (the
-                            // road, distant facades) — alias into per-pixel
-                            // shading sparkle without it. The sampler defaults
-                            // to linear mipmap mode + unlimited LOD, so trilinear
-                            // engages once the mips exist; upload_texture
-                            // generates them by blit.
-                            int mip_side = tw > th ? tw : th;
+                            // An image with levels of its own (a KTX file) has
+                            // exactly those. Otherwise a full mip chain:
+                            // minified material textures, notably normal maps on
+                            // receding surfaces (the road, distant facades),
+                            // alias into per-pixel shading sparkle without it.
+                            // The sampler defaults to linear mipmap mode +
+                            // unlimited LOD, so trilinear engages once the mips
+                            // exist; upload_texture generates them by blit.
+                            auto* image = interface_cast<IImage>(buf);
+                            const uint32_t given = image ? image->get_mip_levels() : 0u;
                             int mip_levels = 1;
-                            while (mip_side > 1) { mip_side >>= 1; ++mip_levels; }
+                            if (given > 0) {
+                                mip_levels = static_cast<int>(given);
+                            } else if (!is_block_compressed(tdesc.format)) {
+                                int mip_side = tw > th ? tw : th;
+                                while (mip_side > 1) { mip_side >>= 1; ++mip_levels; }
+                            }
                             tdesc.mip_levels = mip_levels;
                             IGpuTexture* tex = resources_->ensure_texture_storage(surf, tdesc);
                             if (tex) {
-                                backend_->upload_texture(*tex, pixels, tw, th);
+                                backend_->upload_texture(*tex, pixels, tw, th, given > 0 ? given : 1u);
                                 buf->clear_dirty();
                                 resources_uploaded = true;
                             }

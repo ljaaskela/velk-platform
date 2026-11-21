@@ -71,9 +71,28 @@ void Image::init(string_view uri, int width, int height, PixelFormat format,
 color Image::get_average_color() const
 {
     if (!averages_.known) return color::white();
-    if (format_ == PixelFormat::RGBA8_SRGB) return averages_.from_srgb;
-    if (format_ == PixelFormat::RGBA8) return averages_.raw;
-    return color::white();
+    return is_srgb(format_) ? averages_.from_srgb : averages_.raw;
+}
+
+void Image::set_format(PixelFormat format)
+{
+    const bool color_space_only = format == PixelFormat::RGBA8 || format == PixelFormat::RGBA8_SRGB;
+    format_ = color_space_only ? with_srgb(format_, is_srgb(format)) : format;
+    color_space_ = is_srgb(format) ? 2 : 1;
+}
+
+void Image::finish_loading_levels(int width, int height, PixelFormat format, uint32_t levels, vector<uint8_t> data,
+                                  const ImageAverages& averages)
+{
+    width_ = width;
+    height_ = height;
+    format_ = color_space_ == 0 ? format : with_srgb(format, color_space_ == 2);
+    mip_levels_ = levels;
+    pixels_ = std::move(data);
+    averages_ = averages;
+    status_ = ImageStatus::Loaded;
+    dirty_ = true; // The renderer will pick this up on next frame.
+    on_loaded().invoke();
 }
 
 void Image::init_from_pixels(string_view uri, int width, int height, PixelFormat format,

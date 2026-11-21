@@ -436,8 +436,19 @@ public:
     virtual IGpuTexture::Ptr create_depth_attachment_texture(
         int width, int height, DepthFormat format) = 0;
 
-    /** @brief Uploads pixel data to a texture via a staging buffer. */
-    virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height) = 0;
+    /**
+     * @brief Uploads pixel data to a texture via a staging buffer.
+     *
+     * @p pixels holds @p levels mip levels, largest first, each tightly packed in the texture's
+     * format (pixel_format_level_bytes). With one level and a texture of more, the rest are
+     * made from it by blitting, which an uncompressed format allows; otherwise the texture's
+     * levels are those given.
+     */
+    virtual void upload_texture(IGpuTexture& texture, const uint8_t* pixels, int width, int height,
+                                uint32_t levels = 1) = 0;
+
+    /** @brief Whether textures of @p format can be created and sampled on this device. */
+    virtual bool supports_sampling(PixelFormat format) const = 0;
 
     /**
      * @brief Opens a texture upload batch.

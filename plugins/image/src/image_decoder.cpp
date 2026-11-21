@@ -1,6 +1,7 @@
 #include "image_decoder.h"
 
 #include "image.h"
+#include "ktx_decode.h"
 
 #include <velk/api/perf.h>
 #include <velk/ext/core_object.h>
@@ -22,18 +23,32 @@ struct DecodedPixels
 {
     int width{};
     int height{};
-    vector<uint8_t> pixels; ///< RGBA8. Empty on failure.
+    vector<uint8_t> pixels; ///< RGBA8, or for a KTX file its levels in `format`. Empty on failure.
     ImageAverages averages; ///< Worked out here, off the main thread.
+    PixelFormat format{PixelFormat::RGBA8_SRGB};
+    uint32_t levels{};      ///< Levels of its own (KTX); 0 for a file without.
 };
 
-/// Reads @p file and decodes it to RGBA8. Safe to call from any thread.
-DecodedPixels read_and_decode(const IFile& file)
+/// Reads @p file and decodes it: a KTX file for a device that samples @p sampled, anything
+/// else to RGBA8. Safe to call from any thread.
+DecodedPixels read_and_decode(const IFile& file, const vector<PixelFormat>& sampled)
 {
     VELK_PERF_SCOPE("image.decode");
 
     DecodedPixels out;
     vector<uint8_t> bytes;
     if (!succeeded(file.read(bytes)) || bytes.empty()) {
+        return out;
+    }
+
+    if (is_ktx(bytes.data(), bytes.size())) {
+        KtxImage ktx = decode_ktx(bytes.data(), bytes.size(), sampled, file.uri());
+        out.width = ktx.width;
+        out.height = ktx.height;
+        out.pixels = std::move(ktx.data);
+        out.averages = ktx.averages;
+        out.format = ktx.format;
+        out.levels = ktx.levels;
         return out;
     }
 
@@ -66,6 +81,18 @@ ImageDecoder::ImageDecoder()
     : commit_pool_(create_manual_task_pool()),
       decode_pool_(create_threaded_task_pool())
 {
+    // Until told what the device samples: the block formats such devices commonly do.
+#if defined(__ANDROID__) || defined(__APPLE__) && defined(__arm64__)
+    sampled_ = {PixelFormat::ASTC_4x4, PixelFormat::ASTC_4x4_SRGB, PixelFormat::ETC2_RGBA8, PixelFormat::ETC2_RGBA8_SRGB};
+#else
+    sampled_ = {PixelFormat::BC7_RGBA, PixelFormat::BC7_RGBA_SRGB, PixelFormat::BC1_RGBA, PixelFormat::BC1_RGBA_SRGB,
+                PixelFormat::BC3_RGBA, PixelFormat::BC3_RGBA_SRGB, PixelFormat::BC4_R, PixelFormat::BC5_RG};
+#endif
+}
+
+void ImageDecoder::set_sampled_formats(const vector<PixelFormat>& formats)
+{
+    sampled_ = formats;
 }
 
 IResource::Ptr ImageDecoder::decode(const IResource::Ptr& inner) const
@@ -87,12 +114,15 @@ IResource::Ptr ImageDecoder::decode(const IResource::Ptr& inner) const
 
     // The worker only touches the file and its own locals; the image is
     // updated in drain_commits() on the main thread.
-    decode_pool_.post([file, image, commits = commit_pool_]() mutable {
-        auto result = read_and_decode(*file);
+    decode_pool_.post([file, image, commits = commit_pool_, sampled = sampled_]() mutable {
+        auto result = read_and_decode(*file, sampled);
         commits.post([image, result = std::move(result)]() mutable {
             auto* img = static_cast<Image*>(image.get());
             if (result.pixels.empty()) {
                 img->fail_loading();
+            } else if (result.levels > 0) {
+                img->finish_loading_levels(result.width, result.height, result.format, result.levels,
+                                           std::move(result.pixels), result.averages);
             } else {
                 img->finish_loading(result.width, result.height, std::move(result.pixels), result.averages);
             }
