@@ -520,6 +520,12 @@ public:
     /// primitive is immutable and carries no material.
     virtual IMesh::Ptr get_unit_quad() = 0;
 
+    /// Returns the shared unit quad as an indexed triangle list, the same surface as
+    /// get_unit_quad: for 2D visuals that are surfaces in a scene (rects), which culling,
+    /// rays and light then treat as a mesh with one cluster, so that light has points
+    /// across them. The same IMesh instance is returned across calls; immutable, no material.
+    virtual IMesh::Ptr get_rect_quad() = 0;
+
     /// Returns a procedural cube mesh. Each call produces a fresh
     /// IMesh + IMeshPrimitive so the caller may set a per-instance
     /// material; the underlying IMeshBuffer is cached by `subdivisions`

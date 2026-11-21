@@ -183,12 +183,13 @@ void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
         next_list += capacity * 2u;
     }
 
-    // Whether the material moves vertices, which compute raster does not: its clusters then
-    // stay with the hardware.
+    // Whether the material moves vertices, or the visual cuts its shape out of its triangles,
+    // neither of which compute raster does: its clusters then stay with the hardware.
     bool moved = false;
     if (auto* source = interface_cast<IShaderSource>(material_.get())) {
         moved = !source->get_source(shader_role::kVertexFunction).empty();
     }
+    if (shader_source_ && !shader_source_->get_source(shader_role::kDiscard).empty()) moved = true;
 
     // Each mesh's entries in a row, then each entry's counts, cursors, commands and list.
     cull_cluster_draws_.clear();

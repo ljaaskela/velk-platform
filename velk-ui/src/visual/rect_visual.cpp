@@ -6,7 +6,7 @@
 
 namespace velk::ui {
 
-vector<DrawEntry> RectVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
+vector<DrawEntry> RectVisual::get_draw_entries(::velk::IRenderContext& ctx,
                                                 const ::velk::size& bounds)
 {
     auto state = read_state<IVisual2D>(this);
@@ -16,6 +16,10 @@ vector<DrawEntry> RectVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
 
     DrawEntry entry{};
     entry.pipeline_key = get_pipeline_key();
+    // The quad as a mesh, so that light has points across it.
+    if (auto quad = ctx.get_mesh_builder().get_rect_quad(); quad && !quad->get_primitives().empty()) {
+        entry.primitive = quad->get_primitives()[0];
+    }
     entry.bounds = {0, 0, bounds.width, bounds.height};
     if (state->paint) {
         entry.material = state->paint.get<IProgram>();

@@ -67,6 +67,7 @@ public:
     IMesh::Ptr build_deforming(const IMesh::Ptr& source) override;
 
     IMesh::Ptr get_unit_quad() override;
+    IMesh::Ptr get_rect_quad() override;
     IMesh::Ptr get_cube(uint32_t subdivisions = 0) override;
     IMesh::Ptr get_sphere(uint32_t subdivisions = 0) override;
 
@@ -92,6 +93,7 @@ private:
     IMesh::Ptr mesh_from_geometry(const CachedGeometry& g);
 
     IMesh::Ptr unit_quad_;
+    IMesh::Ptr rect_quad_;
     std::unordered_map<uint32_t, CachedGeometry> cube_cache_;
     std::unordered_map<uint32_t, CachedGeometry> sphere_cache_;
 };

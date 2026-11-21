@@ -175,6 +175,47 @@ IMesh::Ptr MeshBuilder::get_unit_quad()
     return unit_quad_;
 }
 
+IMesh::Ptr MeshBuilder::get_rect_quad()
+{
+    if (rect_quad_) {
+        return rect_quad_;
+    }
+
+    // The unit quad's vertices as a triangle list, both triangles facing +Z as the strip's do.
+    struct Vertex { float pos[3]; float normal[3]; float uv[2]; float tangent[4]; };
+    static const Vertex verts[] = {
+        { {0.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 0.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 1.f}, {1.f, 0.f, 0.f, 1.f} },
+        { {1.f, 1.f, 0.f}, {0.f, 0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f, 0.f, 1.f} },
+    };
+    static const uint32_t indices[] = {0u, 1u, 2u, 1u, 3u, 2u};
+    static const VertexAttribute attrs[] = {
+        { VertexAttributeSemantic::Position,  VertexAttributeFormat::Float3, 0 },
+        { VertexAttributeSemantic::Normal,    VertexAttributeFormat::Float3, 12 },
+        { VertexAttributeSemantic::TexCoord0, VertexAttributeFormat::Float2, 24 },
+        { VertexAttributeSemantic::Tangent,   VertexAttributeFormat::Float4, 32 },
+    };
+
+    aabb bounds{};
+    bounds.position = { 0.f, 0.f, 0.f };
+    bounds.extent = { 1.f, 1.f, 0.f };
+
+    rect_quad_ = build({ attrs, 4 },
+                       /*vertex_stride*/ sizeof(Vertex),
+                       verts, /*vertex_count*/ 4,
+                       indices, /*index_count*/ 6,
+                       MeshTopology::TriangleList,
+                       bounds);
+    // Its tree and cluster now: culling looks for its cluster on the first frame a rect draws.
+    if (rect_quad_) {
+        for (auto& primitive : rect_quad_->get_primitives()) {
+            if (primitive) primitive->get_surface_area();
+        }
+    }
+    return rect_quad_;
+}
+
 IMesh::Ptr MeshBuilder::get_cube(uint32_t subdivisions)
 {
     auto it = cube_cache_.find(subdivisions);
