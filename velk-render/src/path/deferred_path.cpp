@@ -1318,6 +1318,12 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The light's level, as the culling's error on screen, for the log.
     const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
     std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
+    // Whether a light has a size, for the rays a first trace or restart takes
+    // (velk_points_trace_point): 1 when one has.
+    trace_pc.spare6 = 0u;
+    for (const GpuLight& l : render_view.lights) {
+        if (l.params[3] > 0.f || l.flags[0] == static_cast<uint32_t>(LightType::Area)) trace_pc.spare6 = 1u;
+    }
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;

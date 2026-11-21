@@ -1536,11 +1536,13 @@ uint g_first_rays = 0u;  // of those, for lights traced for the first time
 // How much of the light from a point of `light` chosen by `seed` is kept from `p` (facing `n`,
 // `lift` off its surface): 1 where something is in the way, 0 where nothing is, between for
 // patches of small members on the way (VELK_CUT_RAY_QUAD). How far away what kept it was is in
-// velk_ray_blocker_t, 0 when the surface faces away.
-float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed)
+// velk_ray_blocker_t, 0 when the surface faces away. With `stratum` 0 to 3, the point is in that
+// quarter of the light's samples, so that four rays with each cover the light evenly; 4 for anywhere.
+float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, uint stratum)
 {
     velk_ray_blocker_t = 0.0;
     vec2 r = vec2(float(velk_points_hash(seed) & 0xFFFFu), float(velk_points_hash(seed ^ 0x9e3779b9u) & 0xFFFFu)) / 65535.0;
+    if (stratum < 4u) r = (vec2(float(stratum & 1u), float(stratum >> 1u)) + r) * 0.5;
     vec3 dir;
     float t_max = 1e30;
     if (light.flags.x == 0u) {
@@ -1624,6 +1626,61 @@ uint velk_points_pick(uint slots[VELK_LIGHT_SLOTS], vec3 p, uint seed)
 // change, takes a ray for each of its record's lights, choosing them at its cluster's centre when
 // nothing has yet; a warm-up trace one ray, to one light chosen by how much each could bring,
 // moving that slot toward what the ray found.
+// Where a point of light is: a vertex of a cluster (`vertex`), or weights `b` of the corners of
+// triangle `triangle`, which for a coarse point (`around`) move up to half a step of its grid
+// (`step_a`, `step_b`) each way, by an R2 sequence from `start`.
+struct VelkPointPlace
+{
+    uint instance;
+    uint vertex_word;
+    uint first_index;
+    uint triangle;
+    uint vertex;
+    bool around;
+    vec3 b;
+    vec3 step_a;
+    vec3 step_b;
+    vec2 start;
+};
+
+// The place of `at` at its trace `trace`, relative to the camera, its normal, and how far off its
+// surface its rays start: a share of the light spacing where it is, so that it does not shadow
+// itself and still sees what stands on it.
+void velk_point_place(VelkPointPlace at, uint trace, out vec3 p, out vec3 n, out float lift)
+{
+    GlobalData g = VELK_GLOBALS;
+    ElementInstance inst = velk_instances.data[at.instance];
+    vec3 local = vec3(0.0);
+    vec3 normal = vec3(0.0);
+    if (at.vertex != VELK_LIGHT_NONE) {
+        uint vw = at.vertex_word + at.vertex * VELK_VERTEX3D_WORDS;
+        local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                     uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+        normal = vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
+                      uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+    } else {
+        vec3 b = at.b;
+        if (at.around) {
+            vec2 r = fract(at.start + float(trace) * vec2(0.7548777, 0.5698403)) - 0.5;
+            b += r.x * at.step_a + r.y * at.step_b;
+            b = max(b, vec3(0.0));
+            b /= max(b.x + b.y + b.z, 1e-6);
+        }
+        for (uint k = 0u; k < 3u; ++k) {
+            uint vw = at.vertex_word + velk_mesh_words.data[at.first_index + at.triangle * 3u + k] * VELK_VERTEX3D_WORDS;
+            local += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                                 uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+            normal += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
+                                  uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+        }
+    }
+    p = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
+    n = normalize(mat3(inst.world_matrix) * (normal / max(abs(inst.size.xyz), vec3(1e-6))));
+    mat4 vp = g.view_projection;
+    float spacing = VELK_LIGHT_PIXELS / max(length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5, 1e-6);
+    lift = max(0.05 * spacing * length(p), length(p) * 1e-4);
+}
+
 void velk_points_trace_point(uint pool, uint i, uint frame)
 {
     GlobalData g = VELK_GLOBALS;
@@ -1633,14 +1690,17 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     uint laters = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LATER_POINTS], VELK_LIGHT_POINT_CAPACITY);
     uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint first_budget = budget > 0xFFFFFFFFu / VELK_LIGHT_FIRST_BUDGET_SCALE ? 0xFFFFFFFFu : budget * VELK_LIGHT_FIRST_BUDGET_SCALE;
-    uint used = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED] + coarses * lights;
-    uint take_firsts = min(firsts, (first_budget - min(used, first_budget)) / lights);
-    used += take_firsts * lights;
-    // A later point traced from none after a change takes a ray a light, the others one; taken
-    // in proportion, as they are mixed in the list.
+    // A trace from none takes four rays a light with a size (pc.spare6 when the view has one),
+    // and a coarse point's four a light, at most.
+    uint from_none = pc.spare6 != 0u ? 4u * lights : lights;
+    uint used = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED] + coarses * 4u * lights;
+    uint take_firsts = min(firsts, (first_budget - min(used, first_budget)) / from_none);
+    used += take_firsts * from_none;
+    // A later point traced from none after a change takes as many as a first, the others one;
+    // taken in proportion, as they are mixed in the list.
     uint left = budget - min(used, budget);
     uint restarts = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LATER_RESTARTS], laters);
-    uint later_rays = laters + restarts * (lights - 1u);
+    uint later_rays = laters + restarts * (from_none - 1u);
     uint take_laters = later_rays <= left ? laters : uint(float(left) * float(laters) / float(later_rays));
     // Some every frame, so that light always moves on.
     if (coarses + take_firsts + take_laters == 0u) {
@@ -1708,73 +1768,78 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
     // A vertex, or a piece's point in a triangle at weights of its corners.
     uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
     uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_INDEX];
-    vec3 local;
-    vec3 normal;
-    if (piece == VELK_LIGHT_NONE) {
-        if (q >= vertices) return;
-        uint vw = vertex_word + q * VELK_VERTEX3D_WORDS;
-        local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
-                     uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
-        normal = vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
-                      uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
-    } else {
-        uint t = piece_triangle;
-        uint place = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + VELK_PIECE_PLACE];
-        uvec2 ab = velk_piece_place(q);
-        if (ab.x + ab.y > velk_piece_level(place)) return;
-        vec3 b = velk_piece_weights(place, ab);
-        if (around) {
-            // A coarse point: somewhere within half a step of its grid each way, a different place
-            // each of its traces, spread evenly over them (an R2 sequence from a start of its own),
-            // kept in its triangle.
-            uint state_now = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + 2u * q + 1u];
-            uint trace = state_now == VELK_LIGHT_NONE ? 0u : state_now >> 28u;
-            uint own = velk_points_hash(piece * 977u + q);
-            vec2 start = vec2(float(own & 0xFFFFu), float(own >> 16u)) / 65536.0;
-            vec2 r = fract(start + float(trace) * vec2(0.7548777, 0.5698403)) - 0.5;
-            vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
-            b += r.x * (velk_piece_weights(place, uvec2(1u, 0u)) - b0) + r.y * (velk_piece_weights(place, uvec2(0u, 1u)) - b0);
-            b = max(b, vec3(0.0));
-            b /= max(b.x + b.y + b.z, 1e-6);
-        }
-        local = vec3(0.0);
-        normal = vec3(0.0);
-        for (uint k = 0u; k < 3u; ++k) {
-            uint vw = vertex_word + velk_mesh_words.data[first_index + t * 3u + k] * VELK_VERTEX3D_WORDS;
-            local += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
-                                 uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
-            normal += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
-                                  uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
-        }
-    }
-    vec3 p = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-    vec3 n = normalize(to_world * (normal / max(abs(inst.size.xyz), vec3(1e-6))));
-    // Off the surface by a share of the light spacing where the point is, so that it does not
-    // shadow itself and still sees what stands on it.
-    mat4 vp = g.view_projection;
-    float spacing = VELK_LIGHT_PIXELS / max(length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5, 1e-6);
-    float lift = max(0.05 * spacing * length(p), length(p) * 1e-4);
-
     uint pw = piece == VELK_LIGHT_NONE ? velk_light_own_word(pool, first, q) : velk_light_page(pool, piece) + 2u * q;
     uint old = VELK_LIGHT_WORDS.data[pw];
     uint state = VELK_LIGHT_WORDS.data[pw + 1u];
     // Which trace this is, as its listing counted it.
     uint traces = state == VELK_LIGHT_NONE ? 0u : state >> 28u;
+    VelkPointPlace at;
+    at.instance = instance;
+    at.vertex_word = vertex_word;
+    at.first_index = first_index;
+    at.triangle = piece_triangle;
+    at.vertex = VELK_LIGHT_NONE;
+    at.around = around;
+    at.b = vec3(0.0);
+    at.step_a = vec3(0.0);
+    at.step_b = vec3(0.0);
+    at.start = vec2(0.0);
+    if (piece == VELK_LIGHT_NONE) {
+        if (q >= vertices) return;
+        at.vertex = q;
+    } else {
+        uint place = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + VELK_PIECE_PLACE];
+        uvec2 ab = velk_piece_place(q);
+        if (ab.x + ab.y > velk_piece_level(place)) return;
+        at.b = velk_piece_weights(place, ab);
+        if (around) {
+            // A coarse point: somewhere within half a step of its grid each way, a different place
+            // each of its traces, spread evenly over them (an R2 sequence from a start of its own),
+            // kept in its triangle.
+            uint own = velk_points_hash(piece * 977u + q);
+            at.start = vec2(float(own & 0xFFFFu), float(own >> 16u)) / 65536.0;
+            vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
+            at.step_a = velk_piece_weights(place, uvec2(1u, 0u)) - b0;
+            at.step_b = velk_piece_weights(place, uvec2(0u, 1u)) - b0;
+        }
+    }
+    vec3 p;
+    vec3 n;
+    float lift;
+    velk_point_place(at, traces, p, n, lift);
     uint seed = velk_points_hash((piece == VELK_LIGHT_NONE ? first : pw) * 977u + q) ^ (frame * 0x9e3779b9u);
     uint value = 0u;
     uint bw = piece == VELK_LIGHT_NONE ? velk_light_blocker_word(pool, first, q) : velk_light_page_blocker(pool, piece, 2u * q);
     uint blockers = 0u;
     if (traces == 0u || old == VELK_LIGHT_NONE) {
-        // From none: a ray a light, the light it had before a change left out.
+        // From none: the light it had before a change left out. A ray a light, or four for a
+        // light with a size, or a coarse point, so that it starts from a mean instead of all or
+        // nothing: over the light's four quarters, and a coarse point's at the places of its
+        // first four traces. It then counts as traced four times.
         bool restart = old != VELK_LIGHT_NONE;
+        bool four = false;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             if (slots[s] == VELK_LIGHT_NONE) continue;
-            if (!restart) ++g_first_rays;
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + s);
-            value |= uint(blocked * 15.0 + 0.5) << (4u * s);
-            if (blocked > 0.0) blockers |= velk_light_blocker_code(velk_ray_blocker_t) << (4u * s);
+            Light l = velk_light_at(pc.lights_base + slots[s]);
+            uint rays = around || l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
+            four = four || rays == 4u;
+            float sum = 0.0;
+            float nearest = 1e30;
+            for (uint j = 0u; j < rays; ++j) {
+                if (!restart) ++g_first_rays;
+                vec3 pj = p;
+                vec3 nj = n;
+                float lj = lift;
+                if (around && j > 0u) velk_point_place(at, j, pj, nj, lj);
+                float blocked = velk_points_blocked(l, pj, nj, lj, seed + s * 4u + j, rays == 4u ? j : 4u);
+                sum += blocked;
+                if (blocked > 0.0) nearest = min(nearest, velk_ray_blocker_t);
+            }
+            value |= uint(sum / float(rays) * 15.0 + 0.5) << (4u * s);
+            if (nearest < 1e29) blockers |= velk_light_blocker_code(nearest) << (4u * s);
         }
-        traces = 0u;
+        // Stored as one more.
+        traces = four ? 3u : 0u;
         atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
     } else {
         // Warming up, a running mean of its rays.
@@ -1783,7 +1848,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame)
         blockers = VELK_LIGHT_WORDS.data[bw];
         uint s = velk_points_pick(slots, p, seed);
         if (slots[s] != VELK_LIGHT_NONE) {
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u);
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, 4u);
             if (blocked > 0.0) {
                 blockers = (blockers & ~(15u << (4u * s))) | (velk_light_blocker_code(velk_ray_blocker_t) << (4u * s));
             }
@@ -1896,7 +1961,7 @@ void main()
         Light l = velk_light_at(pc.lights_base + light);
         vec3 toward = l.flags.x == 0u ? -l.direction.xyz : normalize(l.position.xyz - center);
         ++g_first_rays;
-        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane);
+        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane, 4u);
     }
     s_blocked[lane] = blocked;
     barrier();

@@ -202,7 +202,7 @@ constexpr string_view text_intersect_src = R"(
 bool velk_intersect_text_glyph(Ray ray, RtShape shape, out RayHit hit)
 {
     if (!intersect_rect(ray, shape, hit)) return false;
-    if (shape.material_base == 0u) return true;
+    if (shape.material_id == 0u) return true;
     // The shape carries the word base of its TextMaterial record. The three
     // bases are read straight out of the material arena rather than through
     // the material's generated reader: intersect snippets and material
