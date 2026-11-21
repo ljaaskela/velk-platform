@@ -44,6 +44,12 @@ public:
 
     /** @brief Sets the spacing between children in pixels. */
     void set_spacing(float v) { write_state_value<IStack>(&IStack::State::spacing, v); }
+
+    /** @brief Returns the children's placement across the axis. */
+    auto get_align() const { return read_state_value<IStack>(&IStack::State::align); }
+
+    /** @brief Sets the children's placement across the axis. */
+    void set_align(Alignment v) { write_state_value<IStack>(&IStack::State::align, v); }
 };
 
 namespace trait::layout {

@@ -16,7 +16,9 @@ namespace velk::ui {
  *
  *   auto fs = trait::layout::create_fixed_size();
  *   fs.set_width(dim::px(200.f));
- *   fs.set_height(dim::pct(50.f));
+ *   fs.set_height(dim::auto_size()); // fit the content
+ *
+ * dim::none() takes the space offered.
  */
 class FixedSize : public Trait
 {
@@ -33,25 +35,25 @@ public:
     /** @brief Implicit conversion to IFixedSize::Ptr. */
     operator IFixedSize::Ptr() const { return as_ptr<IFixedSize>(); }
 
-    /** @brief Returns the fixed width. None = unconstrained. */
+    /** @brief Returns the width. */
     auto get_width() const { return read_state_value<IFixedSize>(&IFixedSize::State::width); }
 
-    /** @brief Sets the fixed width. Use dim::none() to leave unconstrained. */
+    /** @brief Sets the width. */
     void set_width(dim v) { write_state_value<IFixedSize>(&IFixedSize::State::width, v); }
 
-    /** @brief Returns the fixed height. None = unconstrained. */
+    /** @brief Returns the height. */
     auto get_height() const { return read_state_value<IFixedSize>(&IFixedSize::State::height); }
 
-    /** @brief Sets the fixed height. Use dim::none() to leave unconstrained. */
+    /** @brief Sets the height. */
     void set_height(dim v) { write_state_value<IFixedSize>(&IFixedSize::State::height, v); }
 
-    /** @brief Returns the fixed depth. None = leaves element depth at 0. */
+    /** @brief Returns the fixed depth. None = 0. */
     auto get_depth() const { return read_state_value<IFixedSize>(&IFixedSize::State::depth); }
 
     /** @brief Sets the fixed depth (used by 3D shape visuals such as cube/sphere). */
     void set_depth(dim v) { write_state_value<IFixedSize>(&IFixedSize::State::depth, v); }
 
-    /** @brief Sets the fixed width and height. Use dim::none() to leave unconstrained. */
+    /** @brief Sets the width and height. */
     void set_size(dim w, dim h)
     {
         write_state<IFixedSize>([&](auto& s) {

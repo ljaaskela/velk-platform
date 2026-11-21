@@ -7,6 +7,7 @@
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-scene/ext/trait.h>
+#include <velk-ui/interface/intf_content_size.h>
 #include <velk-ui/interface/intf_font.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/intf_text_visual.h>
@@ -25,10 +26,13 @@ namespace velk::ui {
  * ChangeCache so it only re-runs when inputs change.
  */
 class TextVisual : public ::velk::ext::Visual2D<TextVisual, ITextVisual,
-                                         ::velk::IAnalyticShape>
+                                         ::velk::IAnalyticShape, IContentSize>
 {
 public:
     VELK_CLASS_UID(ClassId::Visual::Text, "TextVisual");
+
+    // IContentSize: the laid-out text, wrapped at the available width in WordWrap.
+    size content_size(const size& available) override;
 
     // IVisual
     vector<DrawEntry> get_draw_entries(::velk::IRenderContext& ctx,

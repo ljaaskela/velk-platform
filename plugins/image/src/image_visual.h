@@ -6,6 +6,7 @@
 #include <velk-render/interface/intf_image.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-scene/ext/trait.h>
+#include <velk-ui/interface/intf_content_size.h>
 #include <velk-ui/plugins/image/intf_image_visual.h>
 #include <velk-ui/plugins/image/plugin.h>
 
@@ -22,12 +23,15 @@ class ImageMaterial;
  * `ImageMaterial`. Apps can either set this directly or use the underlying
  * `ImageMaterial` if they want to attach the same image to a custom visual.
  */
-class ImageVisual : public ::velk::ext::Visual2D<ImageVisual, IImageVisual>
+class ImageVisual : public ::velk::ext::Visual2D<ImageVisual, IImageVisual, IContentSize>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Visual::Image, "ImageVisual");
 
     ImageVisual();
+
+    // IContentSize: the image's pixel size once loaded.
+    size content_size(const size& available) override;
 
     vector<DrawEntry> get_draw_entries(::velk::IRenderContext& ctx,
                                        const ::velk::size& bounds) override;

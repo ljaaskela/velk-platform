@@ -71,6 +71,20 @@ void ImageVisual::ensure_loaded()
     }
 }
 
+size ImageVisual::content_size(const size&)
+{
+    ensure_loaded();
+    if (!image_ || image_->status() != ImageStatus::Loaded) {
+        return {};
+    }
+    auto* surface = interface_cast<ISurface>(image_);
+    if (!surface) {
+        return {};
+    }
+    const uvec2 dims = surface->get_dimensions();
+    return {static_cast<float>(dims.x), static_cast<float>(dims.y), 0.f};
+}
+
 vector<DrawEntry> ImageVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
                                                  const ::velk::size& bounds)
 {

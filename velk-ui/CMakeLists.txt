@@ -7,6 +7,8 @@ add_library(velk_ui SHARED
     src/layout/stack.cpp
     src/constraint/fixed_size.h
     src/constraint/fixed_size.cpp
+    src/constraint/insets.h
+    src/constraint/insets.cpp
     src/visual/rect_visual.h
     src/visual/rect_visual.cpp
     src/visual/rounded_rect_visual.h
@@ -52,8 +54,11 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/intf_layout_trait.h
     include/velk-ui/interface/trait/intf_stack.h
     include/velk-ui/interface/trait/intf_fixed_size.h
+    include/velk-ui/interface/trait/intf_insets.h
+    include/velk-ui/interface/intf_content_size.h
     include/velk-ui/ext/trait.h
     include/velk-ui/api/trait/fixed_size.h
+    include/velk-ui/api/trait/insets.h
     include/velk-ui/api/trait/stack.h
     include/velk-ui/api/material/gradient.h
     include/velk-ui/api/visual/rect.h

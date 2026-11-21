@@ -15,8 +15,17 @@ namespace Constraint {
 /** @brief Lays out children along a single axis with optional spacing. */
 inline constexpr Uid Stack{"677eae5c-efde-4130-97f6-5a09e9087629"};
 
-/** @brief Clamps an element to a fixed width and/or height. */
+/** @brief Sets an element's width, height and depth: fixed, auto or the space offered. */
 inline constexpr Uid FixedSize{"f237dfd2-1a17-4078-9741-e0a7afd7b6a4"};
+
+/** @brief Space between an element's edges and its children. */
+inline constexpr Uid Padding{"cbd6d59c-4a05-4c98-ba3d-4436ee5519fd"};
+
+/** @brief Space around an element. */
+inline constexpr Uid Margin{"cf78e3f9-4756-4e91-8057-60ec58828874"};
+
+/** @brief An element's own alignment in the space its parent gives it. */
+inline constexpr Uid Align{"137667f4-5932-4855-8f72-72e931986af7"};
 
 } // namespace Constraint
 

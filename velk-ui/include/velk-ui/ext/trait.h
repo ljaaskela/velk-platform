@@ -9,7 +9,7 @@ namespace velk::ui::ext {
 /**
  * @brief CRTP base for ILayoutTrait implementations.
  *
- * Provides default no-op measure/apply and a compile-time phase. Any
+ * Provides no-op describe, measure and arrange and a compile-time phase. Any
  * property change fires on_trait_dirty(Layout) so the owning element
  * triggers a re-solve.
  */
@@ -18,8 +18,9 @@ class LayoutTrait : public ::velk::ext::Trait<T, ILayoutTrait, Extra...>
 {
 public:
     TraitPhase get_phase() const override { return Phase; }
-    Constraint measure(const Constraint& c, IElement&, IHierarchy&) override { return c; }
-    void apply(const Constraint&, IElement&, IHierarchy&) override {}
+    void describe(LayoutBox&) const override {}
+    size measure(const size&, IElement&, ILayoutContext&) override { return {}; }
+    void arrange(const aabb&, IElement&, ILayoutContext&) override {}
 
 protected:
     void on_state_changed(string_view, IMetadata&, Uid) override

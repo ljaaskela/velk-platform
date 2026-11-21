@@ -14,14 +14,19 @@
 
     { "id": "hierarchy", "class": "velk-scene.Element" },
     { "id": "hierarchy_title", "class": "velk-scene.Element" },
+    { "id": "hierarchy_title_label", "class": "velk-scene.Element" },
     { "id": "hierarchy_body", "class": "velk-scene.Element" },
+    { "id": "hierarchy_tree", "class": "velk-scene.Element" },
 
     { "id": "viewport", "class": "velk-scene.Element" },
     { "id": "viewport_title", "class": "velk-scene.Element" },
+    { "id": "viewport_title_label", "class": "velk-scene.Element" },
     { "id": "viewport_body", "class": "velk-scene.Element" },
+    { "id": "viewport_label", "class": "velk-scene.Element" },
 
     { "id": "inspector", "class": "velk-scene.Element" },
     { "id": "inspector_title", "class": "velk-scene.Element" },
+    { "id": "inspector_title_label", "class": "velk-scene.Element" },
     { "id": "inspector_body", "class": "velk-scene.Element" },
     { "id": "row_class", "class": "velk-scene.Element" },
     { "id": "row_class_name", "class": "velk-scene.Element" },
@@ -36,7 +41,8 @@
     { "id": "row_color_name", "class": "velk-scene.Element" },
     { "id": "row_color_value", "class": "velk-scene.Element" },
 
-    { "id": "statusbar", "class": "velk-scene.Element" }
+    { "id": "statusbar", "class": "velk-scene.Element" },
+    { "id": "status_label", "class": "velk-scene.Element" }
   ],
   "hierarchies": {
     "scene": {
@@ -45,13 +51,19 @@
       "menubar": ["menu_file", "menu_edit", "menu_view"],
       "body": ["hierarchy", "viewport", "inspector"],
       "hierarchy": ["hierarchy_title", "hierarchy_body"],
+      "hierarchy_title": ["hierarchy_title_label"],
+      "hierarchy_body": ["hierarchy_tree"],
       "viewport": ["viewport_title", "viewport_body"],
+      "viewport_title": ["viewport_title_label"],
+      "viewport_body": ["viewport_label"],
       "inspector": ["inspector_title", "inspector_body"],
+      "inspector_title": ["inspector_title_label"],
       "inspector_body": ["row_class", "row_text", "row_size", "row_color"],
       "row_class": ["row_class_name", "row_class_value"],
       "row_text": ["row_text_name", "row_text_value"],
       "row_size": ["row_size_name", "row_size_value"],
-      "row_color": ["row_color_name", "row_color_value"]
+      "row_color": ["row_color_name", "row_color_value"],
+      "statusbar": ["status_label"]
     }
   },
   "resources": [
@@ -65,8 +77,10 @@
 
     { "targets": ["menubar"], "class": "velk-ui.Stack", "properties": { "axis": 0, "spacing": 0 } },
     { "targets": ["menubar"], "class": "velk-ui.FixedSize", "properties": { "height": "28px" } },
+    { "targets": ["menubar"], "class": "velk-ui.Padding", "properties": { "left": "4px" } },
     { "targets": ["menubar"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.14, "g": 0.14, "b": 0.16, "a": 1.0 } } },
-    { "targets": ["menu_file", "menu_edit", "menu_view"], "class": "velk-ui.FixedSize", "properties": { "width": "56px" } },
+    { "targets": ["menu_file", "menu_edit", "menu_view"], "class": "velk-ui.FixedSize", "properties": { "width": "auto" } },
+    { "targets": ["menu_file", "menu_edit", "menu_view"], "class": "velk-ui.Padding", "properties": { "left": "10px", "right": "10px" } },
     { "targets": ["menu_file"], "class": "velk-text.TextVisual", "properties": { "text": "File", "font_size": 14.0, "h_align": "center", "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
     { "targets": ["menu_edit"], "class": "velk-text.TextVisual", "properties": { "text": "Edit", "font_size": 14.0, "h_align": "center", "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
     { "targets": ["menu_view"], "class": "velk-text.TextVisual", "properties": { "text": "View", "font_size": 14.0, "h_align": "center", "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
@@ -78,32 +92,39 @@
     { "targets": ["inspector"], "class": "velk-ui.FixedSize", "properties": { "width": "300px" } },
 
     { "targets": ["hierarchy_title", "viewport_title", "inspector_title"], "class": "velk-ui.FixedSize", "properties": { "height": "26px" } },
+    { "targets": ["hierarchy_title", "viewport_title", "inspector_title"], "class": "velk-ui.Padding", "properties": { "left": "8px" } },
     { "targets": ["hierarchy_title", "viewport_title", "inspector_title"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.16, "g": 0.16, "b": 0.19, "a": 1.0 } } },
-    { "targets": ["hierarchy_title"], "class": "velk-text.TextVisual", "properties": { "text": "  Hierarchy", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
-    { "targets": ["viewport_title"], "class": "velk-text.TextVisual", "properties": { "text": "  Viewport", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
-    { "targets": ["inspector_title"], "class": "velk-text.TextVisual", "properties": { "text": "  Inspector", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
+    { "targets": ["hierarchy_title_label"], "class": "velk-text.TextVisual", "properties": { "text": "Hierarchy", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
+    { "targets": ["viewport_title_label"], "class": "velk-text.TextVisual", "properties": { "text": "Viewport", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
+    { "targets": ["inspector_title_label"], "class": "velk-text.TextVisual", "properties": { "text": "Inspector", "font_size": 13.0, "v_align": "center", "color": { "r": 0.75, "g": 0.75, "b": 0.8, "a": 1.0 } } },
 
     { "targets": ["hierarchy_body", "inspector_body"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.11, "g": 0.11, "b": 0.13, "a": 1.0 } } },
-    { "targets": ["hierarchy_body"], "class": "velk-text.TextVisual", "properties": { "text": "  scene_root\n    root\n      header\n      body\n        sidebar\n        content\n    camera", "font_size": 13.0, "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
+    { "targets": ["hierarchy_body"], "class": "velk-ui.Padding", "properties": { "left": "8px", "top": "6px", "right": "8px", "bottom": "6px" } },
+    { "targets": ["hierarchy_tree"], "class": "velk-text.TextVisual", "properties": { "text": "scene_root\n  root\n    header\n    body\n      sidebar\n      content\n  camera", "font_size": 13.0, "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
 
     { "targets": ["viewport_body"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.07, "g": 0.07, "b": 0.08, "a": 1.0 } } },
-    { "targets": ["viewport_body"], "class": "velk-text.TextVisual", "properties": { "text": "No application attached", "font_size": 14.0, "h_align": "center", "v_align": "center", "color": { "r": 0.45, "g": 0.45, "b": 0.5, "a": 1.0 } } },
+    { "targets": ["viewport_label"], "class": "velk-ui.FixedSize", "properties": { "width": "auto", "height": "auto" } },
+    { "targets": ["viewport_label"], "class": "velk-ui.Align", "properties": { "horizontal": "center", "vertical": "center" } },
+    { "targets": ["viewport_label"], "class": "velk-text.TextVisual", "properties": { "text": "No application attached", "font_size": 14.0, "color": { "r": 0.45, "g": 0.45, "b": 0.5, "a": 1.0 } } },
 
     { "targets": ["inspector_body"], "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 0 } },
+    { "targets": ["inspector_body"], "class": "velk-ui.Padding", "properties": { "top": "4px" } },
     { "targets": ["row_class", "row_text", "row_size", "row_color"], "class": "velk-ui.Stack", "properties": { "axis": 0, "spacing": 0 } },
     { "targets": ["row_class", "row_text", "row_size", "row_color"], "class": "velk-ui.FixedSize", "properties": { "height": "24px" } },
     { "targets": ["row_class_name", "row_text_name", "row_size_name", "row_color_name"], "class": "velk-ui.FixedSize", "properties": { "width": "110px" } },
-    { "targets": ["row_class_name"], "class": "velk-text.TextVisual", "properties": { "text": "  class", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
-    { "targets": ["row_text_name"], "class": "velk-text.TextVisual", "properties": { "text": "  text", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
-    { "targets": ["row_size_name"], "class": "velk-text.TextVisual", "properties": { "text": "  font_size", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
-    { "targets": ["row_color_name"], "class": "velk-text.TextVisual", "properties": { "text": "  color", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
+    { "targets": ["row_class_name", "row_text_name", "row_size_name", "row_color_name"], "class": "velk-ui.Margin", "properties": { "left": "8px" } },
+    { "targets": ["row_class_name"], "class": "velk-text.TextVisual", "properties": { "text": "class", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
+    { "targets": ["row_text_name"], "class": "velk-text.TextVisual", "properties": { "text": "text", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
+    { "targets": ["row_size_name"], "class": "velk-text.TextVisual", "properties": { "text": "font_size", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
+    { "targets": ["row_color_name"], "class": "velk-text.TextVisual", "properties": { "text": "color", "font_size": 13.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } },
     { "targets": ["row_class_value"], "class": "velk-text.TextVisual", "properties": { "text": "TextVisual", "font": { "ref": "resources.mono" }, "font_size": 13.0, "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
     { "targets": ["row_text_value"], "class": "velk-text.TextVisual", "properties": { "text": "\"Dashboard\"", "font": { "ref": "resources.mono" }, "font_size": 13.0, "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
     { "targets": ["row_size_value"], "class": "velk-text.TextVisual", "properties": { "text": "16.0", "font": { "ref": "resources.mono" }, "font_size": 13.0, "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
     { "targets": ["row_color_value"], "class": "velk-text.TextVisual", "properties": { "text": "0.85 0.85 0.90 1.00", "font": { "ref": "resources.mono" }, "font_size": 13.0, "v_align": "center", "color": { "r": 0.85, "g": 0.85, "b": 0.88, "a": 1.0 } } },
 
     { "targets": ["statusbar"], "class": "velk-ui.FixedSize", "properties": { "height": "22px" } },
+    { "targets": ["statusbar"], "class": "velk-ui.Padding", "properties": { "left": "8px" } },
     { "targets": ["statusbar"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.14, "g": 0.14, "b": 0.16, "a": 1.0 } } },
-    { "targets": ["statusbar"], "class": "velk-text.TextVisual", "properties": { "text": "  Ready", "font_size": 12.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } }
+    { "targets": ["status_label"], "class": "velk-text.TextVisual", "properties": { "text": "Ready", "font_size": 12.0, "v_align": "center", "color": { "r": 0.6, "g": 0.6, "b": 0.65, "a": 1.0 } } }
   ]
 }

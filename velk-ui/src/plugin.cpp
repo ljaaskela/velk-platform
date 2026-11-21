@@ -7,6 +7,7 @@
 #include <velk-scene/plugin.h>
 
 #include "constraint/fixed_size.h"
+#include "constraint/insets.h"
 #include "import/align_type_extension.h"
 #include "import/dim_type_extension.h"
 #include "import/light_type_extension.h"
@@ -35,6 +36,9 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
 
     auto rv = register_type<Stack>(velk);
     rv &= register_type<FixedSize>(velk);
+    rv &= register_type<Padding>(velk);
+    rv &= register_type<Margin>(velk);
+    rv &= register_type<Align>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);
@@ -58,6 +62,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<::velk::ext::AnyValue<DirtyFlags>>(velk);
     rv &= register_type<::velk::ext::AnyValue<HAlign>>(velk);
     rv &= register_type<::velk::ext::AnyValue<VAlign>>(velk);
+    rv &= register_type<::velk::ext::AnyValue<Alignment>>(velk);
     rv &= register_type<::velk::ext::AnyValue<Projection>>(velk);
     rv &= register_type<::velk::ext::AnyValue<VisualPhase>>(velk);
     rv &= register_type<::velk::ext::AnyValue<LightType>>(velk);

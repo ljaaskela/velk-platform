@@ -9,13 +9,27 @@ array_view<Uid> AlignTypeExtension::supported_types() const
 {
     static const Uid types[] = {
         type_uid<HAlign>(),
-        type_uid<VAlign>()
+        type_uid<VAlign>(),
+        type_uid<Alignment>()
     };
-    return { types, 2 };
+    return { types, 3 };
 }
 
 IAny::Ptr AlignTypeExtension::deserialize(Uid uid, const IImportData& data) const
 {
+    if (uid == type_uid<Alignment>()) {
+        if (data.kind() == IImportData::Kind::String) {
+            auto s = data.as_string();
+            if (s == "start")  return Any<Alignment>(Alignment::Start);
+            if (s == "center") return Any<Alignment>(Alignment::Center);
+            if (s == "end")    return Any<Alignment>(Alignment::End);
+            if (s == "fill")   return Any<Alignment>(Alignment::Fill);
+        }
+        if (data.kind() == IImportData::Kind::Number) {
+            return Any<Alignment>(static_cast<Alignment>(static_cast<uint8_t>(data.as_number())));
+        }
+    }
+
     if (uid == type_uid<HAlign>()) {
         if (data.kind() == IImportData::Kind::String) {
             auto s = data.as_string();

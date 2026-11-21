@@ -4,6 +4,7 @@
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_surface.h>
 #include <velk-scene/ext/trait.h>
+#include <velk-ui/interface/intf_content_size.h>
 #include <velk-ui/interface/intf_texture_visual.h>
 #include <velk-ui/plugin.h>
 
@@ -15,10 +16,13 @@ namespace velk::ui::impl {
  * References a texture via ObjectRef. The texture can be any ISurface,
  * including a RenderTexture from a RenderToTexture trait.
  */
-class TextureVisual : public ::velk::ext::Visual2D<TextureVisual, ITextureVisual>
+class TextureVisual : public ::velk::ext::Visual2D<TextureVisual, ITextureVisual, IContentSize>
 {
 public:
     VELK_CLASS_UID(::velk::ui::ClassId::Visual::Texture, "TextureVisual");
+
+    // IContentSize: the texture's pixel size.
+    size content_size(const size& available) override;
 
     vector<DrawEntry> get_draw_entries(::velk::IRenderContext& ctx,
                                        const ::velk::size& bounds) override;

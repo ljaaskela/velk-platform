@@ -2,170 +2,115 @@
 
 #include <velk/api/state.h>
 #include <velk/interface/intf_hierarchy.h>
-#include <velk/interface/intf_object_storage.h>
 
 #include <algorithm>
-#include <velk-scene/interface/intf_element.h>
 
 namespace velk::ui {
 
 namespace {
 
-struct ChildInfo
+float& main_of(size& s, bool vertical) { return vertical ? s.height : s.width; }
+float main_of(const size& s, bool vertical) { return vertical ? s.height : s.width; }
+float cross_of(const size& s, bool vertical) { return vertical ? s.width : s.height; }
+bool fills_main(const LayoutMeasure& m, bool vertical) { return vertical ? m.fill_y : m.fill_x; }
+
+struct Child
 {
-    IObject::Ptr obj;
-    IElement* element;
-    vector<ILayoutTrait*> layout_traits;
-    float measured_main = 0.f;
-    bool fixed = false;
+    IElement::Ptr element;
+    LayoutMeasure measure;
 };
 
-void collect_layout_traits(IObject* obj, vector<ILayoutTrait*>& out)
+vector<Child> measure_children(IElement& element, const size& available, ILayoutContext& ctx)
 {
-    auto* storage = interface_cast<IObjectStorage>(obj);
-    if (!storage) {
-        return;
+    vector<Child> out;
+    auto* obj = interface_cast<IObject>(&element);
+    if (!obj) {
+        return out;
     }
-
-    static constexpr AttachmentQuery query{ILayoutTrait::UID, {}};
-    auto matches = storage->find_attachments(query);
-    for (auto& att : matches) {
-        auto* lt = interface_cast<ILayoutTrait>(att);
-        if (lt) {
-            out.push_back(lt);
+    for (auto& child : ctx.hierarchy().children_of(obj->get_self())) {
+        if (auto e = interface_pointer_cast<IElement>(child)) {
+            out.push_back({e, ctx.measure(*e, available)});
         }
     }
+    return out;
 }
 
 } // namespace
 
-Constraint Stack::measure(const Constraint& c, IElement& element, IHierarchy& hierarchy)
+size Stack::measure(const size& available, IElement& element, ILayoutContext& ctx)
 {
-    // Stack fills its parent bounds
-    return c;
+    auto state = read_state<IStack>(this);
+    if (!state) {
+        return {};
+    }
+    const bool vertical = state->axis == 1;
+    const auto children = measure_children(element, available, ctx);
+
+    // A child that fills along the axis takes what is left, so the stack then wants all of it.
+    float main = 0.f;
+    float cross = 0.f;
+    bool any_fill = false;
+    for (auto& c : children) {
+        if (fills_main(c.measure, vertical)) {
+            any_fill = true;
+        } else {
+            main += main_of(c.measure.desired, vertical);
+        }
+        cross = std::max(cross, cross_of(c.measure.desired, vertical));
+    }
+    if (children.size() > 1) {
+        main += state->spacing * static_cast<float>(children.size() - 1);
+    }
+    if (any_fill) {
+        main = std::max(main, main_of(available, vertical));
+    }
+
+    size out{};
+    main_of(out, vertical) = main;
+    (vertical ? out.width : out.height) = cross;
+    return out;
 }
 
-void Stack::apply(const Constraint& c, IElement& element, IHierarchy& hierarchy)
+void Stack::arrange(const aabb& content, IElement& element, ILayoutContext& ctx)
 {
     auto state = read_state<IStack>(this);
     if (!state) {
         return;
     }
-
-    uint8_t axis = state->axis; // 0 = horizontal, 1 = vertical
-    float spacing = state->spacing;
-
-    auto* obj = interface_cast<IObject>(&element);
-    if (!obj) {
-        return;
-    }
-    auto self = obj->get_self();
-    auto children = hierarchy.children_of(self);
+    const bool vertical = state->axis == 1;
+    const auto children = measure_children(element, content.extent, ctx);
     if (children.empty()) {
         return;
     }
 
-    float total_available = (axis == 1) ? c.bounds.extent.height : c.bounds.extent.width;
-    float cross_available = (axis == 1) ? c.bounds.extent.width : c.bounds.extent.height;
-    float total_spacing = spacing * static_cast<float>(children.size() - 1);
-    float remaining = total_available - total_spacing;
-
-    // Gather child info and run constraint-phase measure on each
-    vector<ChildInfo> infos;
-    infos.reserve(children.size());
-
-    for (auto& child_ptr : children) {
-        ChildInfo info;
-        info.obj = child_ptr;
-        info.element = interface_cast<IElement>(child_ptr);
-        if (!info.element) {
-            continue;
-        }
-
-        collect_layout_traits(child_ptr.get(), info.layout_traits);
-
-        // Run measure on constraint-phase traits to determine fixed sizes
-        Constraint child_c;
-        child_c.bounds.extent.width = (axis == 1) ? cross_available : remaining;
-        child_c.bounds.extent.height = (axis == 1) ? remaining : cross_available;
-
-        for (auto* lt : info.layout_traits) {
-            if (has_phase(lt, TraitPhase::Constraint)) {
-                child_c = lt->measure(child_c, *info.element, hierarchy);
-            }
-        }
-
-        float measured = (axis == 1) ? child_c.bounds.extent.height : child_c.bounds.extent.width;
-
-        // Check if a constraint-phase trait set a fixed size on the main axis
-        float original = (axis == 1) ? remaining : remaining;
-        if (measured != original) {
-            info.fixed = true;
-            info.measured_main = measured;
-            remaining -= measured;
-        }
-
-        infos.push_back(std::move(info));
-    }
-
-    // Distribute remaining space to non-fixed children equally
-    size_t flex_count = 0;
-    for (auto& info : infos) {
-        if (!info.fixed) {
-            ++flex_count;
+    float fixed = state->spacing * static_cast<float>(children.size() - 1);
+    size_t fill_count = 0;
+    for (auto& c : children) {
+        if (fills_main(c.measure, vertical)) {
+            ++fill_count;
+        } else {
+            fixed += main_of(c.measure.desired, vertical);
         }
     }
+    const float left = std::max(0.f, main_of(content.extent, vertical) - fixed);
+    const float share = fill_count ? left / static_cast<float>(fill_count) : 0.f;
 
-    float flex_size = (flex_count > 0 && remaining > 0.f) ? remaining / static_cast<float>(flex_count) : 0.f;
-
-    for (auto& info : infos) {
-        if (!info.fixed) {
-            info.measured_main = flex_size;
+    // Along the axis every child gets exactly its size, so only the cross axis aligns.
+    const Alignment cross_align = state->align == Alignment::Unset ? Alignment::Fill : state->align;
+    float cursor = vertical ? content.position.y : content.position.x;
+    for (auto& c : children) {
+        const float main = fills_main(c.measure, vertical) ? share : main_of(c.measure.desired, vertical);
+        aabb slot = content;
+        if (vertical) {
+            slot.position.y = cursor;
+            slot.extent.height = main;
+        } else {
+            slot.position.x = cursor;
+            slot.extent.width = main;
         }
-    }
-
-    // Position children along the axis
-    float cursor = (axis == 1) ? c.bounds.position.y : c.bounds.position.x;
-
-    for (auto& info : infos) {
-        float child_main = info.measured_main;
-        float child_cross = cross_available;
-
-        // The solver reports a moved child when it recomputes the world matrix,
-        // but only this code sees a size-only change.
-        bool size_changed = false;
-        write_state<IElement>(info.element, [&](IElement::State& s) {
-            const ::velk::size old_size = s.size;
-            if (axis == 1) {
-                s.position.x = c.bounds.position.x;
-                s.position.y = cursor;
-                s.size.width = child_cross;
-                s.size.height = child_main;
-            } else {
-                s.position.x = cursor;
-                s.position.y = c.bounds.position.y;
-                s.size.width = child_main;
-                s.size.height = child_cross;
-            }
-            size_changed = s.size != old_size;
-        });
-        if (size_changed) {
-            info.element->mark_dirty(DirtyFlags::Layout);
-        }
-
-        // Apply constraint-phase traits on the child
-        Constraint child_c;
-        child_c.bounds.position = read_state<IElement>(info.element)->position;
-        child_c.bounds.extent.width = (axis == 1) ? child_cross : child_main;
-        child_c.bounds.extent.height = (axis == 1) ? child_main : child_cross;
-
-        for (auto* lt : info.layout_traits) {
-            if (has_phase(lt, TraitPhase::Constraint)) {
-                lt->apply(child_c, *info.element, hierarchy);
-            }
-        }
-
-        cursor += child_main + spacing;
+        ctx.arrange(*c.element, slot, vertical ? cross_align : Alignment::Start,
+                    vertical ? Alignment::Start : cross_align);
+        cursor += main + state->spacing;
     }
 }
 

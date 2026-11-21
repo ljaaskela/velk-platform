@@ -12,8 +12,8 @@ class Stack : public ext::LayoutTrait<Stack, TraitPhase::Layout, IStack>
 public:
     VELK_CLASS_UID(ClassId::Constraint::Stack, "Stack");
 
-    Constraint measure(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
-    void apply(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
+    size measure(const size& available, IElement& element, ILayoutContext& ctx) override;
+    void arrange(const aabb& content, IElement& element, ILayoutContext& ctx) override;
 };
 
 } // namespace velk::ui

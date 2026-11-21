@@ -12,8 +12,7 @@ class FixedSize : public ext::LayoutTrait<FixedSize, TraitPhase::Constraint, IFi
 public:
     VELK_CLASS_UID(ClassId::Constraint::FixedSize, "FixedSize");
 
-    Constraint measure(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
-    void apply(const Constraint& c, IElement& element, IHierarchy& hierarchy) override;
+    void describe(LayoutBox& box) const override;
 };
 
 } // namespace velk::ui

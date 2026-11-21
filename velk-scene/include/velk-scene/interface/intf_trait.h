@@ -14,8 +14,8 @@ namespace velk {
  * A trait can participate in one or more phases. The solver tests
  * each trait's phase mask with bitwise AND.
  *
- * 1. Layout: walks children, divides space (e.g. Stack)
- * 2. Constraint: touches self only, refines size (e.g. FixedSize)
+ * 1. Layout: measures and places children (e.g. Stack)
+ * 2. Constraint: describes the element's own box: size, padding, margin (e.g. FixedSize)
  * 3. Transform: modifies the world matrix after layout (e.g. Trs)
  * 4. Visual: produces draw commands for rendering (e.g. RectVisual)
  * 5. Render: defines how the scene is observed (e.g. Camera)

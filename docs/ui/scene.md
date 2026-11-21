@@ -111,7 +111,7 @@ The JSON format declares objects, hierarchy, and trait attachments:
 }
 ```
 
-Available class names: `velk-scene.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-scene.Trs`, `velk-scene.Matrix`, `velk-ui.RectVisual`, `velk-ui.RoundedRectVisual`, `velk-ui.Font`, `velk_text.TextVisual`.
+Available class names: `velk-scene.Element`, `velk-ui.Stack`, `velk-ui.FixedSize`, `velk-ui.Padding`, `velk-ui.Margin`, `velk-ui.Align`, `velk-scene.Trs`, `velk-scene.Matrix`, `velk-ui.RectVisual`, `velk-ui.RoundedRectVisual`, `velk-ui.Font`, `velk_text.TextVisual`.
 
 ## Classes
 

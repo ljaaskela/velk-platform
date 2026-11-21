@@ -36,8 +36,8 @@ Every trait implements `ITrait` and reports which phases of the element pipeline
 
 | Phase | Purpose | Typical interface |
 |-------|---------|-------------------|
-| **Layout** | Walks children, divides space | `ILayoutTrait` |
-| **Constraint** | Refines own size | `ILayoutTrait` |
+| **Layout** | Measures and places children | `ILayoutTrait` |
+| **Constraint** | Describes the element's own box | `ILayoutTrait` |
 | **Transform** | Modifies the world matrix | `ITransformTrait` |
 | **Visual** | Produces draw commands | `IVisual` |
 | **Input** | Handles pointer, scroll, key events | `IInputTrait` |
@@ -76,7 +76,7 @@ Each trait category has a CRTP base in `velk::ui::ext` that provides sensible de
 
 | Base | Phase | Defaults |
 |------|-------|----------|
-| `ext::Layout<T, Phase, ...>` | Layout or Constraint | No-op measure/apply |
+| `ext::LayoutTrait<T, Phase, ...>` | Layout or Constraint | No-op describe, measure and arrange |
 | `ext::Transform<T, ...>` | Transform | No-op transform |
 | `ext::Visual2D<T, ...>` | Visual | 2D visual base (color, paint, visual phase). Fires `on_visual_changed` on any property change |
 | `ext::Visual3D<T, ...>` | Visual | 3D visual base (mesh reference). Fires `on_visual_changed` on any property change |
@@ -87,23 +87,57 @@ Subclass the appropriate base and override only what you need.
 
 ## Layout traits
 
-Layout traits implement `ILayoutTrait` and control how elements are sized and positioned. The solver calls `measure()` in a top-down pass to compute desired sizes, then `apply()` to write final positions.
+Layout traits implement `ILayoutTrait` and control how elements are sized and positioned.
 
 | Trait | Interface | Phase | Description |
 |-------|-----------|-------|-------------|
-| Stack | `IStack` | Layout | Arranges children along an axis with spacing |
-| FixedSize | `IFixedSize` | Constraint | Clamps width and/or height to a fixed value |
+| Stack | `IStack` | Layout | Places children one after another along an axis |
+| FixedSize | `IFixedSize` | Constraint | Width, height and depth: fixed, auto or the space offered |
+| Padding | `IPadding` | Constraint | Space between the element's edges and its children |
+| Margin | `IMargin` | Constraint | Space around the element |
+| Align | `IAlign` | Constraint | The element's own alignment, overriding its parent's |
 
 ```cpp
 auto stack = velk::ui::trait::layout::create_stack();
 stack.set_axis(1);       // vertical
 stack.set_spacing(10.f);
+stack.set_align(velk::Alignment::Center);
 
 auto fs = velk::ui::trait::layout::create_fixed_size();
-fs.set_size(velk::ui::dim::px(200.f), velk::ui::dim::px(100.f));
+fs.set_size(velk::dim::px(200.f), velk::dim::auto_size());
+
+auto padding = velk::ui::trait::layout::create_padding(velk::dim::px(8.f));
 ```
 
-Dimensions can be absolute (`dim::px(100.f)`) or relative to parent (`dim::pct(0.5f)`). Use `dim::none()` to leave an axis unconstrained.
+In a store file:
+
+```json
+{ "targets": ["label"], "class": "velk-ui.FixedSize", "properties": { "width": "auto", "height": "24px" } },
+{ "targets": ["label"], "class": "velk-ui.Margin", "properties": { "left": "8px" } },
+{ "targets": ["label"], "class": "velk-ui.Align", "properties": { "vertical": "center" } }
+```
+
+### Sizes
+
+Each axis of `FixedSize` is one of:
+
+* none (`dim::none()`, the default): the space the parent offers.
+* px (`"200px"` or `200`): fixed.
+* pct (`"50%"`): a share of the space offered.
+* auto (`"auto"`): fits the content, which is the largest of the children's sizes and the content size of the element's visuals. Text, image and texture visuals have a content size (`IContentSize`).
+
+Padding and margin values are px or pct of the space offered on that axis. Padding moves the children, not the element's own visuals: a background fills the whole element, and text with padding around it goes on a child element.
+
+### How the solver works
+
+Each element's Constraint-phase traits describe its box (`describe()`): size, margin, padding and alignment. The solver runs one box model over it, so the order of the traits does not matter: margin outside, then the size, then padding around the children.
+
+* **Measure** (bottom-up): an element reports the size it wants for the space offered, and per axis whether it takes whatever it is given. Content is measured only where the size is auto, or by a Layout-phase trait such as Stack.
+* **Arrange** (top-down): the parent gives each child a rectangle. The child takes its margin off, sizes itself, and places itself by its alignment: its own `Align`, else the parent's. Then it arranges its children in its content rectangle.
+
+A Layout-phase trait measures and places the children through `ILayoutContext`. Without one, children pile up at the start of the content rectangle; an element with no layout traits fills its parent.
+
+`Stack` gives children with a fixed or auto size along its axis that size, and shares what is left between the children that take the space offered. Across the axis it places them by its `align` property (`fill` by default).
 
 ## Transform traits
 

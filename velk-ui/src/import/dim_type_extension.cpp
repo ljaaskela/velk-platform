@@ -13,6 +13,9 @@ dim parse_dim(string_view str)
     if (s.empty()) {
         return dim::none();
     }
+    if (s == "auto") {
+        return dim::auto_size();
+    }
 
     // Check for "px" suffix
     if (s.size() > 2 && s.compare(s.size() - 2, 2, "px") == 0) {

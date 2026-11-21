@@ -44,6 +44,23 @@ void TextVisual::update_font()
     cache_.invalidate();
 }
 
+size TextVisual::content_size(const size& available)
+{
+    if (!font_) {
+        update_font();
+    }
+    auto font = font_.as_ptr<IFont>();
+    auto state = read_state<ITextVisual>(this);
+    if (!font || !state || state->text.empty()) {
+        return {};
+    }
+    const float width = state->layout == TextLayout::WordWrap ? available.width : 0.f;
+    IFont::TextLayoutResult result;
+    font->layout_text(string_view(state->text.data(), state->text.size()), state->font_size, state->layout, width,
+                      result);
+    return {result.total_width, result.total_height, 0.f};
+}
+
 void TextVisual::bind_font_material()
 {
     auto font = font_.as_ptr<IFont>();

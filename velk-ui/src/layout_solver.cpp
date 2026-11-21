@@ -6,15 +6,9 @@
 
 #include <algorithm>
 #include <velk-scene/api/element.h>
-#include <velk-ui/interface/intf_layout_trait.h>
 #include <velk-scene/interface/intf_transform_trait.h>
 #include <velk-scene/interface/intf_visual.h>
-
-#ifdef VELK_LAYOUT_DEBUG
-#define LAYOUT_LOG(...) VELK_LOG(I, __VA_ARGS__)
-#else
-#define LAYOUT_LOG(...) ((void)0)
-#endif
+#include <velk-ui/interface/intf_content_size.h>
 
 namespace velk::ui {
 
@@ -32,51 +26,97 @@ void sort_unique(vector<IElement*>& elements)
     elements.resize(static_cast<size_t>(std::unique(elements.begin(), elements.end()) - elements.begin()));
 }
 
-bool has_layout_phase_trait(const Element& element)
+/// An element's layout traits: its box and the trait that places its children, if any.
+struct Traits
 {
-    for (auto&& trait : element.find_attachments<ILayoutTrait>()) {
-        if (has_phase(trait.get(), TraitPhase::Layout)) {
-            return true;
+    vector<ILayoutTrait::Ptr> attached;
+    LayoutBox box;
+    ILayoutTrait* layout = nullptr;
+};
+
+Traits collect(const Element& element)
+{
+    Traits t;
+    t.attached = element.find_attachments<ILayoutTrait>();
+    for (auto& trait : t.attached) {
+        auto* lt = trait.get();
+        if (has_phase(lt, TraitPhase::Constraint)) {
+            lt->describe(t.box);
+        }
+        if (!t.layout && has_phase(lt, TraitPhase::Layout)) {
+            t.layout = lt;
         }
     }
-    return false;
+    return t;
 }
 
-/// A size change under a parent with a Layout-phase trait can affect that
-/// parent and its other children, so solving starts from the topmost such
-/// parent. A parent without one is a boundary: its children fill its bounds and
-/// do not affect its size.
-IElement::Ptr find_layout_root(IHierarchy& hierarchy, IElement::Ptr element)
+bool is_auto(const LayoutBox& box)
 {
-    while (auto parent = interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(element)))) {
-        if (!has_layout_phase_trait(Element(parent))) {
-            break;
-        }
-        element = parent;
-    }
-    return element;
+    return box.width.unit == DimUnit::Auto || box.height.unit == DimUnit::Auto;
 }
 
-/// Whether any ancestor of @p element is in the sorted list @p elements.
-bool has_ancestor_in(IHierarchy& hierarchy, IElement::Ptr element, const vector<IElement*>& elements)
+/// True when @p element's size or its children's placement follows its children.
+bool depends_on_children(const Element& element)
 {
-    if (elements.empty()) {
-        return false;
-    }
-    while (auto parent = interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(element)))) {
-        if (std::binary_search(elements.begin(), elements.end(), parent.get())) {
-            return true;
-        }
-        element = parent;
-    }
-    return false;
+    const auto t = collect(element);
+    return t.layout || is_auto(t.box);
 }
 
-mat4 parent_world_of(IHierarchy& hierarchy, const IElement::Ptr& element)
+struct Edges
 {
-    auto parent = interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(element)));
-    auto state = read_state<IElement>(parent);
-    return state ? state->world_matrix : mat4::identity();
+    float left = 0.f;
+    float top = 0.f;
+    float right = 0.f;
+    float bottom = 0.f;
+};
+
+float resolve_inset(dim d, float space)
+{
+    switch (d.unit) {
+    case DimUnit::Px:
+        return d.value;
+    case DimUnit::Pct:
+        return d.value * space;
+    default:
+        return 0.f;
+    }
+}
+
+Edges resolve(const Insets& insets, const size& space)
+{
+    return {resolve_inset(insets.left, space.width), resolve_inset(insets.top, space.height),
+            resolve_inset(insets.right, space.width), resolve_inset(insets.bottom, space.height)};
+}
+
+size shrink(const size& s, const Edges& e)
+{
+    return {std::max(0.f, s.width - e.left - e.right), std::max(0.f, s.height - e.top - e.bottom), s.depth};
+}
+
+/// The size on one axis: the space offered, fixed, or the content plus padding.
+float axis_size(dim d, float offered, float content)
+{
+    switch (d.unit) {
+    case DimUnit::Px:
+    case DimUnit::Pct:
+        return resolve_dim(d, offered);
+    case DimUnit::Auto:
+        return content;
+    default:
+        return offered;
+    }
+}
+
+float align_factor(Alignment a)
+{
+    switch (a) {
+    case Alignment::Center:
+        return 0.5f;
+    case Alignment::End:
+        return 1.f;
+    default:
+        return 0.f;
+    }
 }
 
 mat4 compute_world(const Element& traits, IElement& element, const vec3& position, const mat4& parent_world)
@@ -88,8 +128,6 @@ mat4 compute_world(const Element& traits, IElement& element, const vec3& positio
     return world;
 }
 
-/// Bounds of the element's own box and visuals. Visuals can extend past the
-/// layout box (text overflow, shadows, outlines).
 void update_bounds(const Element& traits, const IElement::Ptr& element)
 {
     auto reader = read_state<IElement>(element);
@@ -108,7 +146,6 @@ void update_bounds(const Element& traits, const IElement::Ptr& element)
     }
 }
 
-/// Returns whether the world matrix changed.
 bool write_world(const IElement::Ptr& element, const mat4& world)
 {
     auto reader = read_state<IElement>(element);
@@ -120,6 +157,12 @@ bool write_world(const IElement::Ptr& element, const mat4& world)
     return true;
 }
 
+mat4 world_of(const IElement::Ptr& element)
+{
+    auto state = read_state<IElement>(element);
+    return state ? state->world_matrix : mat4::identity();
+}
+
 } // namespace
 
 void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const PendingLayout& pending)
@@ -128,26 +171,56 @@ void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const Pend
         return;
     }
     VELK_PERF_SCOPE("layout.solve");
+    hierarchy_ = &hierarchy;
 
+    const auto parent_of = [&](const IElement::Ptr& e) {
+        return interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(e)));
+    };
+    const auto has_ancestor_in = [&](IElement::Ptr e, const vector<IElement*>& set) {
+        while (auto parent = parent_of(e)) {
+            if (std::binary_search(set.begin(), set.end(), parent.get())) {
+                return true;
+            }
+            e = parent;
+        }
+        return false;
+    };
+
+    vector<IElement*> layout_roots;
     if (pending.full) {
         if (auto root = interface_pointer_cast<IElement>(hierarchy.root())) {
-            solve_element(hierarchy, root, viewport, mat4::identity());
+            arrange_from_parent(root, viewport);
         }
     } else {
-        vector<IElement*> layout_roots;
-        layout_roots.reserve(pending.layout.size());
-        for (auto* element : pending.layout) {
-            if (auto ptr = to_ptr(element)) {
-                layout_roots.push_back(find_layout_root(hierarchy, ptr).get());
+        // An element whose content size changed lays out again when its size follows its content.
+        vector<IElement*> changed = pending.layout;
+        for (auto* element : pending.visual) {
+            if (auto ptr = to_ptr(element); ptr && is_auto(collect(Element(ptr)).box)) {
+                changed.push_back(element);
             }
+        }
+
+        // Climb to the highest ancestor whose layout depends on the changed element.
+        layout_roots.reserve(changed.size());
+        for (auto* element : changed) {
+            auto ptr = to_ptr(element);
+            if (!ptr) {
+                continue;
+            }
+            while (auto parent = parent_of(ptr)) {
+                if (!depends_on_children(Element(parent))) {
+                    break;
+                }
+                ptr = parent;
+            }
+            layout_roots.push_back(ptr.get());
         }
         sort_unique(layout_roots);
 
-        // A subtree solve covers everything below it.
         for (auto* element : layout_roots) {
             auto ptr = to_ptr(element);
-            if (ptr && !has_ancestor_in(hierarchy, ptr, layout_roots)) {
-                solve_from_parent(hierarchy, ptr, viewport);
+            if (ptr && !has_ancestor_in(ptr, layout_roots)) {
+                arrange_from_parent(ptr, viewport);
             }
         }
 
@@ -156,10 +229,10 @@ void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const Pend
         for (auto* element : transforms) {
             auto ptr = to_ptr(element);
             if (!ptr || std::binary_search(layout_roots.begin(), layout_roots.end(), element)
-                || has_ancestor_in(hierarchy, ptr, layout_roots)) {
+                || has_ancestor_in(ptr, layout_roots)) {
                 continue;
             }
-            update_transform(hierarchy, ptr, parent_world_of(hierarchy, ptr));
+            update_transform(ptr, world_of(parent_of(ptr)));
         }
 
         for (auto* element : pending.visual) {
@@ -169,32 +242,167 @@ void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const Pend
         }
     }
 
-    // After everything else, since these read other elements' matrices.
     for (auto* element : pending.dependents) {
         if (auto ptr = to_ptr(element)) {
-            update_transform(hierarchy, ptr, parent_world_of(hierarchy, ptr));
+            update_transform(ptr, world_of(parent_of(ptr)));
         }
     }
+    hierarchy_ = nullptr;
 }
 
-void LayoutSolver::solve_from_parent(IHierarchy& hierarchy, const IElement::Ptr& element, const aabb& viewport)
+void LayoutSolver::arrange_from_parent(const IElement::Ptr& element, const aabb& viewport)
 {
-    auto parent = interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(element)));
+    auto parent = interface_pointer_cast<IElement>(hierarchy_->parent_of(as_object(element)));
     auto parent_state = read_state<IElement>(parent);
     if (!parent_state) {
-        solve_element(hierarchy, element, viewport, mat4::identity());
+        parent_world_ = mat4::identity();
+        arrange(*element, viewport, Alignment::Start, Alignment::Start);
         return;
     }
 
-    // find_layout_root stops at a parent with no Layout-phase trait, so the
-    // child fills the parent's bounds.
-    aabb bounds;
-    bounds.extent.width = parent_state->size.width;
-    bounds.extent.height = parent_state->size.height;
-    solve_element(hierarchy, element, bounds, parent_state->world_matrix);
+    // The parent places no children itself (or the climb would have gone past it), so the
+    // element sits in the parent's content rectangle.
+    const auto traits = collect(Element(parent));
+    const Edges pad = resolve(traits.box.padding, parent_state->size);
+    aabb content;
+    content.position = {pad.left, pad.top, 0.f};
+    content.extent = shrink(parent_state->size, pad);
+    parent_world_ = parent_state->world_matrix;
+    arrange(*element, content, Alignment::Start, Alignment::Start);
 }
 
-void LayoutSolver::update_transform(IHierarchy& hierarchy, const IElement::Ptr& element, const mat4& parent_world)
+size LayoutSolver::measure_content(IElement& element, ILayoutTrait* layout, const size& available)
+{
+    size content{};
+    if (layout) {
+        content = layout->measure(available, element, *this);
+    } else if (auto* obj = interface_cast<IObject>(&element)) {
+        for (auto& child : hierarchy_->children_of(obj->get_self())) {
+            if (auto e = interface_pointer_cast<IElement>(child)) {
+                const auto m = measure(*e, available);
+                content.width = std::max(content.width, m.desired.width);
+                content.height = std::max(content.height, m.desired.height);
+            }
+        }
+    }
+    for (auto&& visual : Element(to_ptr(&element)).find_attachments<IContentSize>()) {
+        const size s = visual->content_size(available);
+        content.width = std::max(content.width, s.width);
+        content.height = std::max(content.height, s.height);
+    }
+    return content;
+}
+
+LayoutMeasure LayoutSolver::measure(IElement& element, const size& available)
+{
+    const auto traits = collect(Element(to_ptr(&element)));
+    const LayoutBox& box = traits.box;
+    const Edges margin = resolve(box.margin, available);
+    const size outer = shrink(available, margin);
+    const Edges pad = resolve(box.padding, outer);
+
+    size content{};
+    if (is_auto(box)) {
+        // Fixed axes offer their own size to the content; the others offer what they are offered.
+        size space = outer;
+        if (box.width.unit == DimUnit::Px || box.width.unit == DimUnit::Pct) {
+            space.width = resolve_dim(box.width, outer.width);
+        }
+        if (box.height.unit == DimUnit::Px || box.height.unit == DimUnit::Pct) {
+            space.height = resolve_dim(box.height, outer.height);
+        }
+        content = measure_content(element, traits.layout, shrink(space, pad));
+    }
+
+    LayoutMeasure out;
+    out.fill_x = box.width.unit == DimUnit::None;
+    out.fill_y = box.height.unit == DimUnit::None;
+    out.desired.width = axis_size(box.width, outer.width, content.width + pad.left + pad.right) + margin.left
+                        + margin.right;
+    out.desired.height = axis_size(box.height, outer.height, content.height + pad.top + pad.bottom) + margin.top
+                         + margin.bottom;
+    out.desired.depth = box.depth.unit == DimUnit::None ? 0.f : resolve_dim(box.depth, available.depth);
+    return out;
+}
+
+void LayoutSolver::arrange(IElement& child, const aabb& slot, Alignment default_x, Alignment default_y)
+{
+    auto element = to_ptr(&child);
+    auto reader = read_state<IElement>(element);
+    if (!reader) {
+        return;
+    }
+    Element e(element);
+    const auto traits = collect(e);
+    const LayoutBox& box = traits.box;
+
+    const Edges margin = resolve(box.margin, slot.extent);
+    const size outer = shrink(slot.extent, margin);
+    const Edges pad = resolve(box.padding, outer);
+    const Alignment ax = box.align_x != Alignment::Unset ? box.align_x : default_x;
+    const Alignment ay = box.align_y != Alignment::Unset ? box.align_y : default_y;
+
+    // Content is measured only for auto axes that are not stretched by Fill.
+    const bool auto_x = box.width.unit == DimUnit::Auto && ax != Alignment::Fill;
+    const bool auto_y = box.height.unit == DimUnit::Auto && ay != Alignment::Fill;
+    size content{};
+    if (auto_x || auto_y) {
+        size space = outer;
+        if (box.width.unit == DimUnit::Px || box.width.unit == DimUnit::Pct) {
+            space.width = resolve_dim(box.width, outer.width);
+        }
+        if (box.height.unit == DimUnit::Px || box.height.unit == DimUnit::Pct) {
+            space.height = resolve_dim(box.height, outer.height);
+        }
+        content = measure_content(child, traits.layout, shrink(space, pad));
+    }
+
+    size s;
+    s.width = auto_x ? content.width + pad.left + pad.right
+                     : axis_size(box.width.unit == DimUnit::Auto ? dim::none() : box.width, outer.width, 0.f);
+    s.height = auto_y ? content.height + pad.top + pad.bottom
+                      : axis_size(box.height.unit == DimUnit::Auto ? dim::none() : box.height, outer.height, 0.f);
+    s.depth = box.depth.unit == DimUnit::None ? 0.f : resolve_dim(box.depth, slot.extent.depth);
+
+    vec3 position;
+    position.x = slot.position.x + margin.left + (outer.width - s.width) * align_factor(ax);
+    position.y = slot.position.y + margin.top + (outer.height - s.height) * align_factor(ay);
+    position.z = slot.position.z;
+
+    const bool size_changed = reader->size != s;
+    if (size_changed || reader->position != position) {
+        write_state<IElement>(element, [&](IElement::State& st) {
+            st.position = position;
+            st.size = s;
+        });
+    }
+    if (size_changed) {
+        element->mark_dirty(DirtyFlags::Layout);
+    }
+
+    const mat4 world = compute_world(e, child, position, parent_world_);
+    write_world(element, world);
+    update_bounds(e, element);
+
+    aabb inner;
+    inner.position = {pad.left, pad.top, 0.f};
+    inner.extent = shrink(s, pad);
+
+    const mat4 saved = parent_world_;
+    parent_world_ = world;
+    if (traits.layout) {
+        traits.layout->arrange(inner, child, *this);
+    } else {
+        for (auto& c : hierarchy_->children_of(as_object(element))) {
+            if (auto ce = interface_pointer_cast<IElement>(c)) {
+                arrange(*ce, inner, Alignment::Start, Alignment::Start);
+            }
+        }
+    }
+    parent_world_ = saved;
+}
+
+void LayoutSolver::update_transform(const IElement::Ptr& element, const mat4& parent_world)
 {
     auto reader = read_state<IElement>(element);
     if (!reader) {
@@ -208,87 +416,10 @@ void LayoutSolver::update_transform(IHierarchy& hierarchy, const IElement::Ptr& 
     }
     update_bounds(e, element);
 
-    for (auto& child : hierarchy.children_of(as_object(element))) {
+    for (auto& child : hierarchy_->children_of(as_object(element))) {
         if (auto child_elem = interface_pointer_cast<IElement>(child)) {
-            update_transform(hierarchy, child_elem, world);
+            update_transform(child_elem, world);
         }
-    }
-}
-
-void LayoutSolver::solve_element(IHierarchy& hierarchy, const IElement::Ptr& element,
-                                 const aabb& parent_bounds, const mat4& parent_world)
-{
-    // Collect layout traits, split by phase
-    Element e(element);
-    auto layouts = e.find_attachments<ILayoutTrait>();
-    vector<ILayoutTrait*> layout_traits;     // TraitPhase::Layout (e.g. Stack)
-    vector<ILayoutTrait*> constraint_traits; // TraitPhase::Constraint (e.g. FixedSize)
-    for (auto&& l : layouts) {
-        auto* lt = l.get();
-        if (has_phase(lt, TraitPhase::Layout)) {
-            layout_traits.push_back(lt);
-        }
-        if (has_phase(lt, TraitPhase::Constraint)) {
-            constraint_traits.push_back(lt);
-        }
-    }
-
-    // Available space from parent
-    Constraint c;
-    c.bounds = parent_bounds;
-
-    // Layout phase: measure + apply
-    for (auto* lt : layout_traits) {
-        c = lt->measure(c, *element, hierarchy);
-    }
-    for (auto* lt : layout_traits) {
-        lt->apply(c, *element, hierarchy);
-    }
-
-    // Constraint phase: measure + apply
-    for (auto* lt : constraint_traits) {
-        c = lt->measure(c, *element, hierarchy);
-    }
-
-    auto reader = read_state<IElement>(element);
-    if (!reader) {
-        return;
-    }
-
-    if (reader->size != c.bounds.extent) {
-        write_state<IElement>(element, [&](IElement::State& s) { s.size = c.bounds.extent; });
-        element->mark_dirty(DirtyFlags::Layout);
-    }
-
-    for (auto* lt : constraint_traits) {
-        lt->apply(c, *element, hierarchy);
-    }
-
-    const mat4 world = compute_world(e, *element, reader->position, parent_world);
-    write_world(element, world);
-    update_bounds(e, element);
-
-    for (auto& child : hierarchy.children_of(as_object(element))) {
-        auto child_elem = interface_pointer_cast<IElement>(child);
-        if (!child_elem) {
-            continue;
-        }
-
-        aabb child_bounds;
-        if (!layout_traits.empty()) {
-            // A Layout trait (e.g. Stack) positioned this child; use the size it assigned
-            auto child_state = read_state<IElement>(child_elem);
-            if (child_state) {
-                child_bounds.extent.width = child_state->size.width;
-                child_bounds.extent.height = child_state->size.height;
-            }
-        } else {
-            // No layout trait on parent; child fills the parent bounds
-            child_bounds.extent.width = reader->size.width;
-            child_bounds.extent.height = reader->size.height;
-        }
-
-        solve_element(hierarchy, child_elem, child_bounds, world);
     }
 }
 

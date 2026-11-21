@@ -47,9 +47,10 @@ inline constexpr DirtyFlags operator~(DirtyFlags a)
 
 enum class DimUnit : uint8_t
 {
-    None,
+    None, ///< Not set. As a size: take the space offered.
     Px,
-    Pct
+    Pct,
+    Auto  ///< As a size: fit the content. Written "auto" in store files.
 };
 
 struct dim
@@ -62,16 +63,13 @@ struct dim
     static constexpr dim zero() { return {0.f, DimUnit::Px}; }
     static constexpr dim px(float v) { return {v, DimUnit::Px}; }
     static constexpr dim pct(float v) { return {v, DimUnit::Pct}; }
+    static constexpr dim auto_size() { return {0.f, DimUnit::Auto}; }
 
     constexpr bool operator==(const dim& rhs) const { return value == rhs.value && unit == rhs.unit; }
     constexpr bool operator!=(const dim& rhs) const { return !(*this == rhs); }
 };
 
-struct Constraint
-{
-    aabb bounds{};
-};
-
+/// Resolves @p d against @p available: px as is, pct of @p available, otherwise @p available.
 inline float resolve_dim(dim d, float available)
 {
     switch (d.unit) {
@@ -83,6 +81,16 @@ inline float resolve_dim(dim d, float available)
         return available;
     }
 }
+
+/// Where an element sits on one axis of the space its parent gives it.
+enum class Alignment : uint8_t
+{
+    Unset,  ///< The parent decides.
+    Start,
+    Center,
+    End,
+    Fill    ///< Stretches to the space unless the size is fixed.
+};
 
 /** @brief Controls whether an element renders to the main surface, to traits, or both. */
 enum class RenderMode : uint8_t

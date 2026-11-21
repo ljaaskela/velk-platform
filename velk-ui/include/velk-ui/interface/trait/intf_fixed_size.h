@@ -8,18 +8,18 @@
 namespace velk::ui {
 
 /**
- * @brief Constraint that clamps an element to a specific width and/or height.
+ * @brief Sets an element's width, height and depth.
  *
- * Either axis can be dim::none() to leave it unconstrained. Values are
- * resolved against the parent's available space (px = absolute, pct = relative).
+ * Each axis is none (take the space offered), px, pct of the space offered,
+ * or auto (fit the content: the visuals' content size and the children).
  */
 class IFixedSize : public Interface<IFixedSize>
 {
 public:
     VELK_INTERFACE(
-        (PROP, dim, width, dim::none()),  ///< Fixed width. None = use parent's width.
-        (PROP, dim, height, dim::none()), ///< Fixed height. None = use parent's height.
-        (PROP, dim, depth, dim::none())   ///< Fixed depth (3D shapes only). None = leaves element depth at 0.
+        (PROP, dim, width, dim::none()),  ///< Width. None = the space offered.
+        (PROP, dim, height, dim::none()), ///< Height. None = the space offered.
+        (PROP, dim, depth, dim::none())   ///< Depth (3D shapes only), px. None = 0.
     )
 };
 

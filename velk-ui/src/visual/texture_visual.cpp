@@ -73,6 +73,17 @@ vector<DrawEntry> TextureVisual::get_draw_entries(::velk::IRenderContext& /*ctx*
     return {entry};
 }
 
+size TextureVisual::content_size(const size&)
+{
+    auto state = read_state<ITextureVisual>(this);
+    auto tex = state ? state->texture.get<ISurface>() : nullptr;
+    if (!tex) {
+        return {};
+    }
+    const uvec2 dims = tex->get_dimensions();
+    return {static_cast<float>(dims.x), static_cast<float>(dims.y), 0.f};
+}
+
 vector<IBuffer::Ptr> TextureVisual::get_gpu_resources(::velk::IRenderContext& /*ctx*/) const
 {
     auto state = read_state<ITextureVisual>(this);
