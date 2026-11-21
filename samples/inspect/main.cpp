@@ -17,6 +17,8 @@
 //   K, L  the ray tree views' level down and up
 //   P  scripted path on or off, the same motion every time
 //   C  logs the camera's place, as at= takes it
+//   N  day or night, in a scene with a look switch (street), which a run otherwise switches
+//      over its frames
 //
 // verify: every scene at each of its views: loads for 10 frames, and what it moves moves; then
 // `settle` frames (10), measuring how much changes from frame to frame from the load on, or
@@ -349,7 +351,7 @@ int main(int argc, char* argv[])
     FlyCamera main_camera;
 
     // The scenes and views a run goes through, in order: those scene= names (a comma separated
-    // list, all by default), less those skip= names.
+    // list, by default all of the set's), less those skip= names.
     const auto& specs = inspect::scenes();
     const auto listed = [](const char* list, const char* name) {
         const size_t length = std::strlen(name);
@@ -375,7 +377,10 @@ int main(int argc, char* argv[])
     }
     velk::vector<Job> jobs;
     for (size_t s = 0; s < specs.size(); ++s) {
-        if ((only_scene && !listed(only_scene, specs[s].name)) || listed(skip_scenes, specs[s].name)) continue;
+        if ((only_scene && !listed(only_scene, specs[s].name)) || (!only_scene && !specs[s].in_set)
+            || listed(skip_scenes, specs[s].name)) {
+            continue;
+        }
         for (size_t v = 0; v < specs[s].views.size(); ++v) jobs.push_back({s, v});
     }
     const inspect::SceneSpec* interactive_spec = jobs.empty() ? inspect::find_scene("field") : &specs[jobs[0].scene];
@@ -952,6 +957,7 @@ int main(int argc, char* argv[])
 
     size_t view_index = 0;
     bool scripted = start_scripted;
+    bool look_by_hand = false;  ///< Once N switched the look, the run's schedule no longer does.
     bool text_stale = true;
     velk::vec3 shown_at{};
     float shown_yaw = 0.f;
@@ -1055,6 +1061,10 @@ int main(int argc, char* argv[])
             scripted_frame = 0;
             text_stale = true;
             VELK_LOG(I, "inspect: scripted path %s", scripted ? "on" : "off");
+        } else if (e.key == 78 && !built.look.empty()) {  // N
+            look_by_hand = true;
+            inspect::set_look(built, built.night != 1);
+            VELK_LOG(I, "inspect: %s", built.night == 1 ? "night" : "day");
         } else if (e.key == 67) {  // C
             auto [orbit_state, focus_state] = camera_state();
             if (orbit_state && focus_state) {
@@ -1127,6 +1137,12 @@ int main(int argc, char* argv[])
         const long cycle = std::max(built.frames, 1l) * 2;
         const long at = frame % cycle;
         inspect::place_movers(built, at <= built.frames ? at : cycle - at);
+        // A look switch: night over its frames of the run, until N switches it by hand.
+        if (!built.look.empty() && !look_by_hand) {
+            const bool night = frame >= built.night_from && frame < built.night_to;
+            if (built.night != (night ? 1 : 0)) VELK_LOG(I, "inspect: %s at frame %ld", night ? "night" : "day", frame);
+            inspect::set_look(built, night);
+        }
         ++frame;
         if (scripted) {
             // Out along the view and back, rising and falling, the same every time, from the start.

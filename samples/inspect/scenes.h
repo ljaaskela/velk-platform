@@ -6,6 +6,7 @@
 #include <velk-scene/api/camera.h>
 #include <velk-scene/api/element.h>
 #include <velk-scene/api/scene.h>
+#include <velk-scene/api/trait/light.h>
 #include <velk-scene/api/trait/trs.h>
 
 namespace inspect {
@@ -40,17 +41,34 @@ struct Mover
     velk::vec3 to{};
 };
 
+/// A light a scene's look switch sets: its intensity by day and by night.
+struct LookLight
+{
+    velk::Light light;
+    float day = 0.f;
+    float night = 0.f;
+};
+
 /// What a scene built: its elements, each a child of the scene's root (shapes take their place
-/// from layout, so they stay at the top), and what it moves over its first `frames` frames.
+/// from layout, so they stay at the top), and what it moves over its first `frames` frames. A
+/// scene with a look switch: its lights, and the frames from `night_from` to `night_to` it is
+/// night in a run, day before and after.
 struct BuiltScene
 {
     velk::vector<velk::Element> elements;
     velk::vector<Mover> movers;
     long frames = 0;
+    velk::vector<LookLight> look;
+    long night_from = 0;
+    long night_to = 0;
+    int night = -1;  ///< The look its lights have: 1 night, 0 day, -1 not set yet.
 };
 
 /// Places each of @p built's movers where it is at frame @p frame: on its way, then at its end.
 void place_movers(BuiltScene& built, long frame);
+
+/// Sets @p built's look switch lights to night or day, when they are not that already.
+void set_look(BuiltScene& built, bool night);
 
 /// What a scene builder gets: the scene, its root to build under, the render context, and the
 /// camera, whose environment the scene sets.
@@ -72,6 +90,9 @@ struct SceneSpec
     velk::vector<ViewSpec> views;
     void (*build)(SceneBuilder&);
     void (*build_reference)(SceneBuilder&) = nullptr;
+    /// Whether verify and reference run it without scene= naming it: false for a scene too
+    /// heavy for every run, kept for looking into one problem.
+    bool in_set = true;
 };
 
 /// The verification scenes, simplest first.

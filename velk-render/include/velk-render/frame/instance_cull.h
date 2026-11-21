@@ -4845,17 +4845,23 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             // The ray lists: records rays trace against all records, from the partitions' states.
             uint32_t traced_records = 0;
             uint32_t all_records = 0;
+            uint32_t most_traced = 0;
+            uint32_t unsorted = 0;
             for (const auto& c : state.cuts) {
                 uint32_t header[kCutHeaderWords] = {};
                 arena->read_at(c.region.offset(), header, sizeof(header));
                 vector<uint32_t> states(size_t(c.partitions) * kCutPartitionWords);
                 arena->read_at(uint64_t(header[kCutStatesWord]) * sizeof(uint32_t), states.data(), states.size() * sizeof(uint32_t));
                 for (uint32_t p = 0; p < c.partitions; ++p) {
-                    traced_records += states[size_t(p) * kCutPartitionWords + kPartRayCount];
+                    const uint32_t ray_count = states[size_t(p) * kCutPartitionWords + kPartRayCount];
+                    traced_records += ray_count;
                     all_records += states[size_t(p) * kCutPartitionWords + kPartCount];
+                    most_traced = std::max(most_traced, ray_count);
+                    unsorted += ray_count > kRaySortMax ? 1u : 0u;
                 }
             }
-            VELK_LOG(I, "ray lists: %u of %u records", traced_records, all_records);
+            VELK_LOG(I, "ray lists: %u of %u records; at most %u in a partition, %u partitions past %u kept in their order",
+                     traced_records, all_records, most_traced, unsorted, kRaySortMax);
             // The deepest the walk's stack got since the last log, in the trace and the probes.
             clear(kLightPoolDeepestTrace, 2u);
             VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", h[kLightPoolDeepestTrace],

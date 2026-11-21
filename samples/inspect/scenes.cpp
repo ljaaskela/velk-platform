@@ -633,6 +633,60 @@ void build_forest(SceneBuilder& b)
     }
 }
 
+/// A light of the street's look switch: a point light of @p size at @p position, or with
+/// @p sun a sun from @p position as its rotation, at @p day's intensity until the switch sets it.
+velk::Light add_look_light(SceneBuilder& b, const velk::vec3& position, bool sun, float size, float day, float night)
+{
+    auto light = sun ? velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, day)
+                     : velk::trait::render::create_point_light(velk::color{1.f, 0.78f, 0.5f, 1.f}, day, 320.f);
+    light.add_technique(velk::technique::create_rt_shadow());
+    light.set_size(size);
+    auto element = velk::create_element();
+    auto trs = velk::trait::transform::create_trs();
+    if (sun) {
+        trs.set_rotation(position);
+    } else {
+        trs.set_translate(position);
+    }
+    element.add_trait(trs);
+    element.add_trait(light);
+    place(b, element);
+    b.out.look.push_back({light, day, night});
+    return light;
+}
+
+/// A street of detailed building fronts, each its own mesh, with crates along it, under a sun by
+/// day and two strings of small lights with a size by night, switched by intensity alone, as
+/// bistro's look is: in a run, day, then night from frame 200, then day again from frame 400.
+/// For the light trace in a scene like bistro: partitions of more records for rays than their
+/// trees sort, a point's rays to many lights, and lights going dark and coming back.
+void build_street(SceneBuilder& b)
+{
+    set_sky(b, "street", 0.2f, 0.25f, 0.33f);
+    add_mesh(b, build_ground(raw(b), 3000.f, 96, standard(0.4f, 0.38f, 0.35f)), {});
+    for (long i = 0; i < 24; ++i) {
+        const float side = i % 2 == 0 ? -1.f : 1.f;
+        const float z = 250.f - static_cast<float>(i / 2) * 110.f;
+        const velk::vec3 size{70.f + 30.f * jitter(i, 2.3f), 220.f + 80.f * jitter(i, 4.7f), 100.f};
+        const float shade = 0.6f + 0.3f * jitter(i, 6.1f);
+        add_mesh(b, build_box(raw(b), size, 40, standard(shade, shade * 0.9f, shade * 0.8f)), {side * (150.f + size.x * 0.5f), 0.f, z});
+    }
+    for (long i = 0; i < 40; ++i) {
+        const float x = 90.f * jitter(i, 1.7f) * 2.f;
+        const float z = 250.f - static_cast<float>(i) * 32.f + 10.f * jitter(i, 3.3f);
+        const float s = 14.f + 8.f * jitter(i, 5.5f);
+        add_mesh(b, build_box(raw(b), {s, s, s}, 4, standard(0.55f, 0.4f, 0.25f)), {x, 0.f, z});
+    }
+    add_look_light(b, {50.f, 30.f, 0.f}, true, 2.f, 0.8f, 0.f);
+    for (long i = 0; i < 48; ++i) {
+        const float side = i % 2 == 0 ? -1.f : 1.f;
+        const float z = 250.f - static_cast<float>(i / 2) * 55.f;
+        add_look_light(b, {side * 110.f, -150.f + 10.f * jitter(i, 7.9f), z}, false, 3.f, 0.f, 0.6f);
+    }
+    b.out.night_from = 200;
+    b.out.night_to = 400;
+}
+
 /// The large field: rocks at rising distances, pebbles, tree sized solids and tufts of blades out
 /// to where they are a pixel or two, plain rocks and a wall, under a strong sun.
 void build_field(SceneBuilder& b)
@@ -750,6 +804,9 @@ const velk::vector<SceneSpec>& scenes()
         {"field", "the large field: instances out to a pixel or two, tufts of blades, a wall",
          {{"start", {{0.f, -60.f, 300.f}, 0.f, -8.f}}, {"far", {{0.f, -400.f, 300.f}, 0.f, -15.f}}},
          build_field},
+        {"street", "a street of detailed fronts, a sun by day and strings of small lights by night: the light trace as in bistro",
+         {{"along", {{0.f, -80.f, 380.f}, 0.f, -6.f}}},
+         build_street, nullptr, false},
     };
     return list;
 }
@@ -777,6 +834,13 @@ void place_movers(BuiltScene& built, long frame)
 {
     const float t = built.frames > 0 ? std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f) : 1.f;
     for (Mover& m : built.movers) m.trs.set_translate(m.from + (m.to - m.from) * t);
+}
+
+void set_look(BuiltScene& built, bool night)
+{
+    if (built.night == (night ? 1 : 0)) return;
+    built.night = night ? 1 : 0;
+    for (LookLight& l : built.look) l.light.set_intensity(night ? l.night : l.day);
 }
 
 Place motion_place(const ViewSpec& view, int k)
