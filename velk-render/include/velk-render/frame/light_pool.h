@@ -4780,8 +4780,9 @@ inline uint32_t grow_light_pool(LightPool& pool, IGpuArena& arena, uint32_t coun
 
 /// Moves @p pool's budget in rays a frame toward what @p target_ms of GPU time would take,
 /// by @p trace_ms, what its trace took the last frame measured (0 when not known); no limit when
-/// @p target_ms is 0 or less. A quarter of the way a frame and at most twice or half as much, as
-/// the time comes a frame or two late. It grows only while the frame's work used the budget, so
+/// @p target_ms is 0 or less. A quarter of the way up a frame, half of it down, at most twice or a
+/// quarter as much, as the time comes a frame or two late. It grows only while the frame's work
+/// used the budget, so
 /// that frames needing little do not leave a budget that heavier work would spend all at once.
 inline void adjust_light_rays(LightPool& pool, IGpuArena& arena, float trace_ms, float target_ms)
 {
@@ -4799,11 +4800,12 @@ inline void adjust_light_rays(LightPool& pool, IGpuArena& arena, float trace_ms,
             arena.read_at(pool.header.offset() + uint64_t(kLightPoolLastRaysCharged) * sizeof(uint32_t), &charged,
                           sizeof(charged));
             float scale = target_ms / trace_ms;
-            scale = scale < 0.5f ? 0.5f : scale > 2.f ? 2.f : scale;
+            scale = scale < 0.25f ? 0.25f : scale > 2.f ? 2.f : scale;
             if (scale > 1.f && float(charged) < 0.9f * pool.rays) {
                 scale = 1.f;
             }
-            pool.rays *= 1.f + 0.25f * (scale - 1.f);
+            // Half the way down, a quarter up: a frame far over its time is cut back in a few.
+            pool.rays *= 1.f + (scale < 1.f ? 0.5f : 0.25f) * (scale - 1.f);
             pool.rays = pool.rays < 1024.f ? 1024.f : pool.rays > float(kLightTraceRaysUnlimited) ? float(kLightTraceRaysUnlimited) : pool.rays;
         }
         budget = static_cast<uint32_t>(pool.rays);
