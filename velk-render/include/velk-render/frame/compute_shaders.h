@@ -1581,14 +1581,13 @@ void main()
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
 
         // Light from other surfaces and the sky: the screen probes around it, or the environment
-        // where none has a surface like it yet. The same probes seen along the reflection's lobe
-        // (its dominant way, nearer the normal the rougher the surface) stand in for a rough
-        // reflection, shadowed as the environment is not, as far as they matched the surface.
+        // where none has a surface like it yet. The same probes seen along the reflection stand in
+        // for a rough reflection, shadowed as the environment is not, as far as they matched the
+        // surface.
         vec3 indirect;
         vec3 probe_specular;
         float match;
-        vec3 lobe = reflect(-V, N);
-        bool probed = velk_probe_indirect(coord, world_pos, N, lobe, indirect, probe_specular, match);
+        bool probed = velk_probe_indirect(coord, world_pos, N, reflect(-V, N), indirect, probe_specular, match);
         if (probed) env_specular = mix(env_specular, probe_specular, clamp(match * 4.0, 0.0, 1.0));
         // Traced reflections (reflect_resolve_src, pc.spare0) where the surface is smooth enough
         // for them, fading into the rough reflection toward the roughness they stop at.
