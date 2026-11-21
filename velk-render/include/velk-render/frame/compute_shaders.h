@@ -1415,11 +1415,12 @@ vec2 velk_area_irradiance(Light light, vec3 world_pos, vec3 N, vec3 V, float rou
 // frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
 // near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
 // surface's plane. `along` is the same probes' light seen from `r`, for a rough reflection along
-// it. False where none of them has a surface like it.
-bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along)
+// it, and `match` how well they matched, 0 to 1. False where none of them has a surface like it.
+bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along, out float match)
 {
     light = vec3(0.0);
     along = vec3(0.0);
+    match = 0.0;
     if (pc.spare1 == 0xFFFFFFFFu) return false;
     const float kProbe = 16.0;
     uint across = (pc.width + 15u) / 16u;
@@ -1447,6 +1448,8 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, 
     if (total <= 1e-5) return false;
     light /= total;
     along /= total;
+    // The bilinear weights add up to one: what is left of them is how much matched.
+    match = clamp(total, 0.0, 1.0);
     return true;
 }
 
@@ -1578,12 +1581,15 @@ void main()
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
 
         // Light from other surfaces and the sky: the screen probes around it, or the environment
-        // where none has a surface like it yet. The same probes seen along the reflection stand in
-        // for a rough reflection, shadowed as the environment is not.
+        // where none has a surface like it yet. The same probes seen along the reflection's lobe
+        // (its dominant way, nearer the normal the rougher the surface) stand in for a rough
+        // reflection, shadowed as the environment is not, as far as they matched the surface.
         vec3 indirect;
         vec3 probe_specular;
-        bool probed = velk_probe_indirect(coord, world_pos, N, reflect(-V, N), indirect, probe_specular);
-        if (probed) env_specular = probe_specular;
+        float match;
+        vec3 lobe = reflect(-V, N);
+        bool probed = velk_probe_indirect(coord, world_pos, N, lobe, indirect, probe_specular, match);
+        if (probed) env_specular = mix(env_specular, probe_specular, clamp(match * 4.0, 0.0, 1.0));
         // Traced reflections (reflect_resolve_src, pc.spare0) where the surface is smooth enough
         // for them, fading into the rough reflection toward the roughness they stop at.
         if (pc.spare0 != VELK_LIGHT_NONE) {
