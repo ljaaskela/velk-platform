@@ -76,8 +76,10 @@ private:
     void tick_overlays(double cpu_time, double frame_time,
                        std::chrono::steady_clock::time_point now);
 
-    /// Saves the first window's composite to auto_capture_path_ as a PNG.
-    void capture_first_window();
+    /// Reads the first window's composite as RGBA8 into @p pixels and @p dims.
+    bool read_first_window(vector<uint8_t>& pixels, uvec2& dims);
+    /// Saves RGBA8 @p pixels as a PNG at @p path.
+    void save_capture(const vector<uint8_t>& pixels, uvec2 dims, const string& path);
 
     ApplicationConfig config_;
     /// Development aids, from VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE: poll()
@@ -86,6 +88,16 @@ private:
     long auto_exit_frames_ = 0;
     long presented_frames_ = 0;
     string auto_capture_path_;
+    /// VELK_AUTO_CAPTURE_FRAMES: how many of the last frames before the exit are saved, each
+    /// as the capture path with _1, _2 ... before its extension; kept in memory until the exit,
+    /// so that saving does not hold up the frames between them.
+    long auto_capture_frames_ = 1;
+    struct AutoCapture
+    {
+        vector<uint8_t> pixels;
+        uvec2 dims{};
+    };
+    vector<AutoCapture> auto_captures_;
     /// VELK_AUTO_GPU_STATS: logs GPU pass medians when VELK_AUTO_EXIT_FRAMES exits.
     bool auto_gpu_stats_ = false;
     struct AutoGpuPass

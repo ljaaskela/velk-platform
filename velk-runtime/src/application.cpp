@@ -75,6 +75,9 @@ bool Application::init(const ApplicationConfig& config)
     if (const char* path = std::getenv("VELK_AUTO_CAPTURE")) {
         auto_capture_path_ = path;
     }
+    if (const char* frames = std::getenv("VELK_AUTO_CAPTURE_FRAMES")) {
+        auto_capture_frames_ = std::max(1l, std::strtol(frames, nullptr, 10));
+    }
     auto_gpu_stats_ = std::getenv("VELK_AUTO_GPU_STATS") != nullptr;
 
     auto& v = instance();
@@ -304,9 +307,24 @@ bool Application::poll()
     if (!window_provider_) {
         return false;
     }
+    // The last frames before the exit, read back as each is presented.
+    if (auto_exit_frames_ > 0 && !auto_capture_path_.empty() && presented_frames_ > 0
+        && presented_frames_ > auto_exit_frames_ - auto_capture_frames_ && presented_frames_ <= auto_exit_frames_) {
+        AutoCapture capture;
+        if (read_first_window(capture.pixels, capture.dims)) auto_captures_.push_back(std::move(capture));
+    }
     if (auto_exit_frames_ > 0 && presented_frames_ >= auto_exit_frames_) {
-        if (!auto_capture_path_.empty()) {
-            capture_first_window();
+        for (size_t i = 0; i < auto_captures_.size(); ++i) {
+            if (auto_captures_.size() == 1) {
+                save_capture(auto_captures_[i].pixels, auto_captures_[i].dims, auto_capture_path_);
+                continue;
+            }
+            const char* path = auto_capture_path_.c_str();
+            const char* dot = std::strrchr(path, '.');
+            const int stem = dot ? static_cast<int>(dot - path) : static_cast<int>(std::strlen(path));
+            char named[1024];
+            std::snprintf(named, sizeof(named), "%.*s_%zu%s", stem, path, i + 1, dot ? dot : "");
+            save_capture(auto_captures_[i].pixels, auto_captures_[i].dims, string(named));
         }
         for (auto& pass : auto_gpu_samples_) {
             std::sort(pass.ms.begin(), pass.ms.end());
@@ -322,25 +340,22 @@ bool Application::poll()
     return window_provider_->poll_events();
 }
 
-void Application::capture_first_window()
+bool Application::read_first_window(vector<uint8_t>& pixels, uvec2& dims)
 {
     auto backend = render_ctx_ ? render_ctx_->backend() : nullptr;
     auto* window = windows_.empty() ? nullptr : interface_cast<IWindow>(windows_[0]);
-    auto writer = instance().create<IImageWriter>(ui::ClassId::ImageEncoder);
-    if (!backend || !window || !writer) {
-        VELK_LOG(E, "auto capture: backend, window or image writer missing");
-        return;
+    if (!backend || !window) {
+        VELK_LOG(E, "auto capture: backend or window missing");
+        return false;
     }
 
     // Already acquired by the frame just presented, so this does not clear it.
     auto target = backend->acquire_swapchain_texture(get_render_target_id(window->surface()));
     auto* texture = interface_cast<IGpuTexture>(target.get());
-    vector<uint8_t> pixels;
     PixelFormat format{};
-    uvec2 dims{};
     if (!texture || !backend->read_texture(*texture, pixels, format, dims)) {
         VELK_LOG(E, "auto capture: could not read the composite");
-        return;
+        return false;
     }
 
     if (format == PixelFormat::RGBA16F) {
@@ -357,10 +372,19 @@ void Application::capture_first_window()
         pixels = std::move(converted);
         format = PixelFormat::RGBA8;
     }
+    return format == PixelFormat::RGBA8;
+}
 
-    const bool saved = writer->save_png(static_cast<int>(dims.x), static_cast<int>(dims.y), format,
-                                        pixels.data(), pixels.size(), auto_capture_path_);
-    VELK_LOG(I, "auto capture: %s %s", auto_capture_path_.c_str(), saved ? "saved" : "FAILED");
+void Application::save_capture(const vector<uint8_t>& pixels, uvec2 dims, const string& path)
+{
+    auto writer = instance().create<IImageWriter>(ui::ClassId::ImageEncoder);
+    if (!writer) {
+        VELK_LOG(E, "auto capture: image writer missing");
+        return;
+    }
+    const bool saved = writer->save_png(static_cast<int>(dims.x), static_cast<int>(dims.y), PixelFormat::RGBA8,
+                                        pixels.data(), pixels.size(), path);
+    VELK_LOG(I, "auto capture: %s %s", path.c_str(), saved ? "saved" : "FAILED");
 }
 
 void Application::update()
