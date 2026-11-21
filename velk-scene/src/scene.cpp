@@ -83,7 +83,7 @@ IFuture::Ptr Scene::load_from(string_view path)
     }
 
     auto importer = create_json_importer();
-    auto result = importer.import_from(json);
+    auto result = importer.import_from(json, path);
 
     for (auto& err : result.errors) {
         VELK_LOG(E, "Scene::load_from: import error: %s", err.c_str());

@@ -47,7 +47,11 @@ class IAppEndpoint : public Interface<IAppEndpoint>
 public:
     VELK_INTERFACE(
         (RPROP, uint32_t, window_count, 0),                    ///< Windows the application created.
-        (FN, vector<uint8_t>, capture, (uint32_t, window))     ///< The window's last frame as PNG; empty on failure.
+        (FN, vector<uint8_t>, capture, (uint32_t, window)),    ///< The window's last frame as PNG; empty on failure.
+        /// Takes one object reference. Returns where the object was imported from as two strings,
+        /// the source file and the entry ("objects/<id>" and so on); empty when the application
+        /// does not track sources or the object was not imported.
+        (FN_RAW, source)
     )
 };
 

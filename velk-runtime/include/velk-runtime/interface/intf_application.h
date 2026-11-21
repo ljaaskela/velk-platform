@@ -43,6 +43,9 @@ struct ApplicationConfig
     /// Port on localhost the editor attaches to; 0 leaves the editor endpoint off. The
     /// VELK_EDITOR_PORT environment variable overrides it.
     uint16_t editor_port{0};
+    /// Records which file and entry each imported object came from (IImporterPlugin::source_of),
+    /// for editing. The VELK_TRACK_SOURCES environment variable (0 or 1) overrides it.
+    bool track_sources{false};
 };
 
 /**

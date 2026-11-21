@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
         VELK_LOG(E, "velk-editor: cannot read ui/editor.json");
         return 1;
     }
-    auto imported = velk::create_json_importer().import_from(json);
+    auto imported = velk::create_json_importer().import_from(json, "app://ui/editor.json");
     if (!imported.store) {
         VELK_LOG(E, "velk-editor: cannot import ui/editor.json");
         return 1;

@@ -107,6 +107,7 @@ if (!app) {
 1. Loads `velk_runtime.dll` (registers the Application class).
 2. Calls `IApplication::init(config)`, which:
    - Loads all standard plugins (`velk_ui`, `velk_render`, `velk_vk`, `velk_text`, `velk_image`, `velk_importer`).
+   - Switches on the importer's source tracking when `track_sources` is set.
    - Loads the platform plugin (`velk_runtime_glfw` on desktop, `velk_runtime_android` on Android — selected via `#ifdef`).
    - Resolves the `IWindowProvider` from the platform plugin.
 
@@ -120,6 +121,7 @@ The render context and the default renderer are NOT created at this point. Both 
 | `app_root` | empty | Override path for the `app://` resource scheme. |
 | `assets_root` | empty | Override path for the `assets://` resource scheme. |
 | `editor_port` | 0 | Port on localhost the editor attaches to. 0 leaves the editor endpoint off. The `VELK_EDITOR_PORT` environment variable overrides it, so any application can be started with the endpoint on. With it on, the runtime loads `velk_remote` and `velk_editor_endpoint` and makes every scene it shows visible to the editor. |
+| `track_sources` | false | Records which file and entry each imported object came from, so the editor can write changes back to the files. The `VELK_TRACK_SOURCES` environment variable (0 or 1) overrides it. It switches on the importer plugin's source tracking before any content loads; see the importer docs in velk. |
 
 ## Window
 

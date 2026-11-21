@@ -1,7 +1,11 @@
 #include "endpoint_plugin.h"
 
+#include <velk/api/any.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk/interface/intf_object_ref.h>
+#include <velk/plugins/importer/interface/intf_importer_plugin.h>
+#include <velk/plugins/importer/plugin.h>
 #include <velk/plugins/remote/plugin.h>
 
 #include <velk-render/interface/intf_image.h>
@@ -41,6 +45,22 @@ vector<uint8_t> AppEndpoint::fn_capture(uint32_t window)
         png.clear();
     }
     return png;
+}
+
+IAny::Ptr AppEndpoint::fn_source(FnArgs args)
+{
+    vector<string> out;
+    auto* ref = args.count == 1 ? interface_cast<IObjectRef>(const_cast<IAny*>(args[0])) : nullptr;
+    auto object = ref ? ref->get_object() : nullptr;
+    auto plugin = instance().plugin_registry().find_plugin(::velk::PluginId::ImporterPlugin);
+    auto* importer = interface_cast<IImporterPlugin>(plugin);
+    if (object && importer) {
+        if (auto source = importer->source_of(*object)) {
+            out.push_back(source.source);
+            out.push_back(source.entry);
+        }
+    }
+    return Any<vector<string>>(out);
 }
 
 ReturnValue EndpointPlugin::initialize(IVelk& velk, PluginConfig&)

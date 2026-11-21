@@ -12,6 +12,8 @@
 #include <thread>
 #include <velk-editor/endpoint/intf_editor_endpoint.h>
 #include <velk-editor/endpoint/plugin.h>
+#include <velk/plugins/importer/interface/intf_importer_plugin.h>
+#include <velk/plugins/importer/plugin.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-ui/plugins/image/plugin.h>
@@ -97,6 +99,7 @@ bool Application::init(const ApplicationConfig& config)
     reg.load_plugin("plugin:velk_image");
     reg.load_plugin("plugin:velk_gltf");
     reg.load_plugin("plugin:velk_importer");
+    start_source_tracking();
 
     // Load the platform plugin (compile-time selection).
 #if defined(__ANDROID__)
@@ -119,6 +122,23 @@ bool Application::init(const ApplicationConfig& config)
 
     start_editor_endpoint();
     return true;
+}
+
+void Application::start_source_tracking()
+{
+    bool on = config_.track_sources;
+    if (const char* env = std::getenv("VELK_TRACK_SOURCES")) {
+        on = std::strtol(env, nullptr, 10) != 0;
+    }
+    if (!on) {
+        return;
+    }
+    auto* importer = interface_cast<IImporterPlugin>(instance().plugin_registry().find_plugin(PluginId::ImporterPlugin));
+    if (!importer) {
+        VELK_LOG(E, "track_sources: importer plugin not found");
+        return;
+    }
+    importer->set_track_sources(true);
 }
 
 void Application::start_editor_endpoint()

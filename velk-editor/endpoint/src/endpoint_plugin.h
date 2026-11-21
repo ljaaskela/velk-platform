@@ -22,6 +22,7 @@ public:
 
     // IAppEndpoint
     vector<uint8_t> fn_capture(uint32_t window) override;
+    IAny::Ptr fn_source(FnArgs args) override;
 
 private:
     IObject::WeakPtr application_;
