@@ -36,6 +36,7 @@ public:
     uint64_t frame_completion_marker() const override;
     void wait_for_frame_completion(uint64_t marker) override;
     uint64_t pending_frame_completion_marker() const override;
+    uint64_t closed_frame_completion_marker() const override;
     bool is_frame_complete(uint64_t marker) const override;
 
     uint64_t create_surface(const SurfaceDesc& desc) override;
@@ -291,7 +292,9 @@ private:
     /// pushes; end_frame pops. Bridges the prepare (main) → submit (render)
     /// thread split so end_frame knows which slot to consume.
     std::deque<uint32_t> in_flight_slots_;
-    std::mutex in_flight_mutex_;
+    /// Guards in_flight_slots_, and makes a submit's pop and its timeline value one step, so
+    /// that a closed frame is either queued or has its value (closed_frame_completion_marker).
+    mutable std::mutex in_flight_mutex_;
 
     // pending_buffer_update_barrier moved into FrameSync (per-slot).
 

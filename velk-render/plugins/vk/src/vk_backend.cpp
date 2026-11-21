@@ -3278,6 +3278,11 @@ void VkBackend::submit_frame()
     // the swapchain is never touched from two threads. All present inputs come
     // from the per-slot snapshot taken at close_frame, not shared SurfaceData.
     uint32_t slot;
+    // Allocate this submit's timeline value with the pop, so that a closed frame is either
+    // queued or has its value (closed_frame_completion_marker). The signal value rides along
+    // on every queue submit below; renderer pulls it via frame_completion_marker() right after
+    // this returns.
+    uint64_t timeline_value;
     {
         std::lock_guard<std::mutex> lk(in_flight_mutex_);
         if (in_flight_slots_.empty()) {
@@ -3285,6 +3290,7 @@ void VkBackend::submit_frame()
         }
         slot = in_flight_slots_.front();
         in_flight_slots_.pop_front();
+        timeline_value = next_frame_value_.fetch_add(1);
     }
     auto& sync = frame_sync_[slot];
 
@@ -3298,10 +3304,6 @@ void VkBackend::submit_frame()
     cmd_pop_label(sync.command_buffer);  // "Frame"
     vkEndCommandBuffer(sync.command_buffer);
 
-    // Allocate this submit's timeline value. The signal value rides
-    // along on every queue submit below; renderer pulls it via
-    // frame_completion_marker() right after this returns.
-    const uint64_t timeline_value = next_frame_value_.fetch_add(1);
 
     if (present_ok) {
         // Surface was used: submit with swapchain synchronization, reading
@@ -3467,6 +3469,15 @@ void VkBackend::wait_for_frame_completion(uint64_t marker)
 uint64_t VkBackend::pending_frame_completion_marker() const
 {
     return next_frame_value_.load();
+}
+
+uint64_t VkBackend::closed_frame_completion_marker() const
+{
+    // The queued frames take the next values in order, the one being recorded (frame_open_,
+    // which only this thread changes) the last of them.
+    std::lock_guard<std::mutex> lk(in_flight_mutex_);
+    const uint64_t queued = in_flight_slots_.size() - (frame_open_ && !in_flight_slots_.empty() ? 1u : 0u);
+    return next_frame_value_.load() + queued - 1u;
 }
 
 bool VkBackend::is_frame_complete(uint64_t marker) const

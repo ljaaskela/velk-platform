@@ -151,9 +151,10 @@ bool GpuArena::grow_persistent(uint64_t want)
     if (!new_buffer) return false;
     const auto created = Clock::now();
     if (persistent_buffer_) {
-        // Rebinding rewrites a descriptor that submitted frames are using, and
-        // the copy below reads what their queued writes left in the old buffer.
-        backend_->wait_for_frame_completion(backend_->frame_completion_marker());
+        // Rebinding rewrites a descriptor that recorded frames are using, and the copy below
+        // reads what their queued writes left in the old buffer: every frame closed, also one
+        // still waiting for its submit, finishes first.
+        backend_->wait_for_frame_completion(backend_->closed_frame_completion_marker());
         backend_->retarget_buffer_writes(persistent_buffer_.get(), new_buffer);
     }
     const auto waited = Clock::now();

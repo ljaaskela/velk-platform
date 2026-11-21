@@ -260,6 +260,16 @@ public:
      */
     virtual uint64_t pending_frame_completion_marker() const = 0;
 
+    /** @brief Marker of the last frame closed, submitted yet or not: waiting for it
+     *         (wait_for_frame_completion) waits for every frame before the one being recorded
+     *         to be submitted and to finish. 0 when there is none.
+     *
+     * Use this before changing what frames already recorded use, such as a shared buffer's
+     * binding: frame_completion_marker counts only the frames submitted, and a closed frame
+     * can still wait for its submit.
+     */
+    virtual uint64_t closed_frame_completion_marker() const = 0;
+
     /** @brief Non-blocking query: has GPU work tagged with @p marker
      *         finished? @p marker == 0 returns true.
      */
