@@ -1,6 +1,7 @@
 #include "gltf_asset.h"
 
 #include <velk/api/attachment.h>
+#include <velk/api/perf.h>
 #include <velk/api/hierarchy.h>
 #include <velk/api/object.h>
 #include <velk/api/state.h>
@@ -243,6 +244,7 @@ void instantiate_node(const cgltf_data* data, const cgltf_node* node,
 
 IStore::Ptr GltfAsset::instantiate() const
 {
+    VELK_PERF_SCOPE("gltf.instantiate");
     if (!loaded_ || !cgltf_data_) {
         return nullptr;
     }

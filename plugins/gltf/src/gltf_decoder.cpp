@@ -3,6 +3,8 @@
 #include "gltf_asset.h"
 
 #include <velk/api/event.h>
+#include <velk/api/perf.h>
+#include <velk/api/task_pool.h>
 #include <velk/api/object.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
@@ -269,6 +271,7 @@ SamplerDesc sampler_desc_from(const cgltf_sampler* s)
 void split_spec_gloss(ISurface& src, IImage& mr, string_view mr_uri,
                       IImage& sp, string_view sp_uri)
 {
+    VELK_PERF_SCOPE("gltf.split_spec_gloss");
     auto* buf = interface_cast<IBuffer>(&src);
     const uint8_t* src_pixels = buf ? buf->get_data() : nullptr;
     size_t src_size = buf ? buf->get_data_size() : 0;
@@ -523,10 +526,31 @@ bool read_indices_to_uint32(const cgltf_accessor* acc, vector<uint32_t>& out)
     return true;
 }
 
+/// A mesh's interleaved vertices and indices, kept for its primitives' BVH builds.
+struct MeshGeometry
+{
+    vector<InterleavedVertex> vbo;
+    vector<uint32_t> ibo;
+};
+
+/// A primitive's BVH for rays, built once every mesh is: from the triangles at @p i_offset of
+/// @p geometry, into @p built.
+struct PendingBlas
+{
+    IMeshPrimitive::Ptr prim;
+    size_t geometry = 0;
+    uint32_t i_offset = 0;
+    uint32_t tri_count = 0;
+    BlasBuild built;
+};
+
+/// Builds the mesh's buffers and primitives. Its primitives' BVHs go to @p pending, and the
+/// geometry they are built from to @p geometries, for the caller to build them all together.
 IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
                       const cgltf_mesh& mesh,
                       const vector<IMaterial::Ptr>& materials,
-                      IMeshBuffer::Ptr& uv1_buffer_out)
+                      IMeshBuffer::Ptr& uv1_buffer_out,
+                      vector<PendingBlas>& pending, vector<MeshGeometry>& geometries)
 {
     using namespace ::velk;
 
@@ -737,6 +761,7 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
 
     vector<IMeshPrimitive::Ptr> prims;
     prims.reserve(ranges.size());
+    bool kept_geometry = false;
     for (auto& r : ranges) {
         auto prim = builder.build_primitive_in_buffer(
             buffer,
@@ -750,19 +775,19 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
             r.v_offset * static_cast<uint32_t>(sizeof(float) * 2));
         if (!prim) continue;
 
-        // Build a per-primitive BLAS so RT shadow + path-trace queries
-        // skip the linear triangle scan. We have the CPU vbo + ibo
-        // around right here; nodes/triangle-indices are uploaded with
-        // the primitive's MeshStaticData on first GPU pickup.
+        // A per-primitive BLAS so RT shadow + path-trace queries skip the
+        // linear triangle scan, from the CPU vbo + ibo kept for it; built
+        // with every other mesh's by the caller. Nodes/triangle-indices are
+        // uploaded with the primitive's MeshStaticData on first GPU pickup.
         const uint32_t tri_count = r.i_count / 3;
         if (tri_count > 0) {
-            const uint32_t* prim_indices = ibo.data() + r.i_offset;
-            const float*    vbo_floats   = reinterpret_cast<const float*>(vbo.data());
-            const uint32_t  total_vertex_count = static_cast<uint32_t>(vbo.size());
-            auto blas = ::velk::build_mesh_blas(
-                vbo_floats, kVertexStride, total_vertex_count,
-                prim_indices, tri_count);
-            prim->set_rt_blas(std::move(blas));
+            PendingBlas job;
+            job.prim = prim;
+            job.geometry = geometries.size();
+            job.i_offset = r.i_offset;
+            job.tri_count = tri_count;
+            pending.push_back(std::move(job));
+            kept_geometry = true;
         }
         if (r.material) {
             // glTF materials are deduplicated to our `materials` array
@@ -771,6 +796,13 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
             //  in build phase.)
         }
         prims.push_back(prim);
+    }
+
+    if (kept_geometry) {
+        MeshGeometry geometry;
+        geometry.vbo = std::move(vbo);
+        geometry.ibo = std::move(ibo);
+        geometries.push_back(std::move(geometry));
     }
 
     auto mesh_obj = builder.build({prims.data(), prims.size()});
@@ -797,6 +829,7 @@ IMesh::Ptr build_mesh(IMeshBuilder& builder, const cgltf_data* /*data*/,
 
 IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
 {
+    VELK_PERF_SCOPE("gltf.decode");
     if (!inner) return nullptr;
 
     auto* file = interface_cast<IFile>(inner);
@@ -833,7 +866,12 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
     // cgltf needs a null-terminated base path for sibling-URI resolution; our
     // IResource exposes only string_view, so make a temporary copy.
     string base_uri(inner->uri());
-    if (cgltf_load_buffers(&opts, data, base_uri.c_str()) != cgltf_result_success) {
+    cgltf_result buffers_loaded;
+    {
+        VELK_PERF_SCOPE("gltf.buffers");
+        buffers_loaded = cgltf_load_buffers(&opts, data, base_uri.c_str());
+    }
+    if (buffers_loaded != cgltf_result_success) {
         VELK_LOG(E, "gltf: load_buffers failed for '%.*s'",
                  static_cast<int>(inner->uri().size()), inner->uri().data());
         cgltf_free(data);
@@ -869,6 +907,7 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
     images.resize(data->images_count);
     vector<string> memory_uris;
     if (memory_proto) {
+        VELK_PERF_SCOPE("gltf.images");
         for (cgltf_size i = 0; i < data->images_count; ++i) {
             images[i] = decode_image(*memory_proto, rs, data, data->images[i],
                                      inner->uri(), i, memory_uris);
@@ -921,6 +960,21 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
         materials[i] = build_material(data, data->materials[i], images);
     }
+    // Spec/gloss materials with a texture have it split on the main thread as it loads.
+    size_t spec_gloss = 0;
+    for (cgltf_size i = 0; i < data->materials_count; ++i) {
+        const cgltf_material& m = data->materials[i];
+        if (m.has_pbr_specular_glossiness && !m.has_pbr_metallic_roughness
+            && m.pbr_specular_glossiness.specular_glossiness_texture.texture) {
+            ++spec_gloss;
+        }
+    }
+    if (spec_gloss > 0) {
+        VELK_LOG(W, "gltf: '%.*s' has %zu KHR_materials_pbrSpecularGlossiness materials whose textures are converted "
+                    "to metallic-roughness on the main thread as they load, which is slow; convert the asset "
+                    "offline (gltf-transform metalrough) to avoid it",
+                 static_cast<int>(inner->uri().size()), inner->uri().data(), spec_gloss);
+    }
 
     // Build meshes (one IMeshBuffer per glTF mesh, primitives sharing it).
     vector<IMesh::Ptr> meshes;
@@ -930,9 +984,11 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
     vector<IMeshBuffer::Ptr> mesh_buffers;
     mesh_buffers.resize(data->meshes_count);
 
+    vector<PendingBlas> pending_blas;
+    vector<MeshGeometry> geometries;
     for (cgltf_size mi = 0; mi < data->meshes_count; ++mi) {
         IMeshBuffer::Ptr uv1_buf;
-        meshes[mi] = build_mesh(builder, data, data->meshes[mi], materials, uv1_buf);
+        meshes[mi] = build_mesh(builder, data, data->meshes[mi], materials, uv1_buf, pending_blas, geometries);
         uv1_buffers[mi] = uv1_buf;
 
         // Patch each primitive's material from the cgltf primitive's
@@ -955,6 +1011,30 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
                 }
                 ++pk;
             }
+        }
+    }
+
+    // The primitives' BVHs, built together on the shared task pool rather than one after
+    // another, then handed to their primitives here.
+    if (!pending_blas.empty()) {
+        VELK_PERF_SCOPE("gltf.blas");
+        TaskPool pool = default_task_pool();
+        vector<Future<void>> done;
+        done.reserve(pending_blas.size());
+        for (PendingBlas& job : pending_blas) {
+            PendingBlas* j = &job;
+            const MeshGeometry* g = &geometries[job.geometry];
+            done.push_back(pool.submit([j, g]() {
+                j->built = ::velk::build_mesh_blas(reinterpret_cast<const float*>(g->vbo.data()), kVertexStride,
+                                                   static_cast<uint32_t>(g->vbo.size()), g->ibo.data() + j->i_offset,
+                                                   j->tri_count);
+            }));
+        }
+        for (auto& d : done) {
+            if (d) d.wait();
+        }
+        for (PendingBlas& job : pending_blas) {
+            if (job.prim) job.prim->set_rt_blas(std::move(job.built));
         }
     }
 

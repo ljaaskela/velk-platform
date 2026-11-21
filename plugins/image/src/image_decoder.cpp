@@ -134,6 +134,7 @@ IResource::Ptr ImageDecoder::decode(const IResource::Ptr& inner) const
 
 void ImageDecoder::drain_commits()
 {
+    VELK_PERF_SCOPE("image.drain_commits");
     commit_pool_.drain();
 }
 
