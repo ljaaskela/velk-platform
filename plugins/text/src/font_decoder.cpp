@@ -25,8 +25,7 @@ IResource::Ptr FontDecoder::decode(const IResource::Ptr& inner) const
         bytes.clear();
     }
     if (!font->init(inner->uri(), std::move(bytes))) {
-        const string_view uri = file->uri();
-        VELK_LOG(E, "FontDecoder: Cannot load '%.*s' as a font", static_cast<int>(uri.size()), uri.data());
+        VELK_LOG(E, "FontDecoder: Cannot load '%s' as a font", file->uri());
     }
 
     return interface_pointer_cast<IResource>(font);
