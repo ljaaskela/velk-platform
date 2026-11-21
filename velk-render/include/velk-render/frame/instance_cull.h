@@ -2090,8 +2090,132 @@ void velk_sort_ray_list(uint count, uint lane)
     barrier();
 }
 
+)" R"(
+// Past kSortMax entries, the sort is a radix sort in the partition's node pages, before the tree
+// is built on them: a page's kCutPageNodes nodes are four words for each of its kCutPageRecords
+// entries, two buffers of (code, place in the list) pairs. A thread's run of entries is counted
+// by digit, the counts summed in order of digit then thread, and the run moved in its order, so
+// that each pass keeps the order of the one before.
+shared uint s_radix[16u * 64u];
+shared uint s_radix_sum[64];
+// Whether the radix sort made the order: a leaf's key is then its code, made again from its entry
+// (velk_lbvh_key); the box its codes are within.
+bool g_large_sort = false;
+vec3 g_sort_lo = vec3(0.0);
+vec3 g_sort_hi = vec3(0.0);
+float g_sort_extent = 0.0;
+
+// Word `w` of the radix sort's scratch, in the partition's node pages.
+uint velk_sort_scratch(uint w)
+{
+    return velk_lbvh_node_word(w / VELK_CUT_NODE_WORDS) + w % VELK_CUT_NODE_WORDS;
+}
+
+// The radix sort's code of the entry at word `at`: as velk_sort_ray_list's, all 30 bits of its
+// Morton code under the bit for the wide ones, and above every other for one without a box.
+uint velk_ray_code_large(uint at)
+{
+    float radius = uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]);
+    if (radius < 0.0) return 0xFFFFFFFFu;
+    return ((radius >= 0.25 * g_sort_extent ? 1u : 0u) << 30u) | velk_morton(velk_load_vec3(at + VELK_CUT_RAY_CENTER), g_sort_lo, g_sort_hi);
+}
+
+// velk_sort_ray_list for more than kSortMax entries. Leaves s_bounded. All threads of the group
+// call it.
+void velk_sort_ray_list_large(uint count, uint lane)
+{
+    vec3 lo = vec3(1e30);
+    vec3 hi = vec3(-1e30);
+    for (uint i = lane; i < count; i += 64u) {
+        uint at = velk_tree_ray_word(i);
+        if (uintBitsToFloat(cull_words.data[at + VELK_CUT_RAY_RADIUS]) < 0.0) continue;
+        vec3 c = velk_load_vec3(at + VELK_CUT_RAY_CENTER);
+        lo = min(lo, c);
+        hi = max(hi, c);
+    }
+    s_lo[lane] = lo;
+    s_hi[lane] = hi;
+    if (lane == 0u) s_bounded = 0u;
+    memoryBarrierShared();
+    barrier();
+    for (uint i = 0u; i < 64u; ++i) {
+        lo = min(lo, s_lo[i]);
+        hi = max(hi, s_hi[i]);
+    }
+    g_sort_lo = lo;
+    g_sort_hi = hi;
+    g_sort_extent = max(max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z);
+    g_large_sort = true;
+    for (uint i = lane; i < count; i += 64u) {
+        uint code = velk_ray_code_large(velk_tree_ray_word(i));
+        if (code != 0xFFFFFFFFu) atomicAdd(s_bounded, 1u);
+        cull_words.data[velk_sort_scratch(2u * i)] = code;
+        cull_words.data[velk_sort_scratch(2u * i + 1u)] = i;
+    }
+    memoryBarrierBuffer();
+    memoryBarrierShared();
+    barrier();
+    uint run = (count + 63u) / 64u;
+    uint begin = min(lane * run, count);
+    uint end = min(begin + run, count);
+    uint from = 0u;
+    uint to = 2u * count;
+    for (uint pass = 0u; pass < 8u; ++pass) {
+        uint shift = 4u * pass;
+        for (uint d = 0u; d < 16u; ++d) s_radix[d * 64u + lane] = 0u;
+        memoryBarrierShared();
+        barrier();
+        for (uint i = begin; i < end; ++i) {
+            uint d = (cull_words.data[velk_sort_scratch(from + 2u * i)] >> shift) & 15u;
+            s_radix[d * 64u + lane] += 1u;
+        }
+        memoryBarrierShared();
+        barrier();
+        // Where each thread's entries of each digit go: the counts before it, digit then thread.
+        uint sum = 0u;
+        for (uint k = 0u; k < 16u; ++k) sum += s_radix[lane * 16u + k];
+        s_radix_sum[lane] = sum;
+        memoryBarrierShared();
+        barrier();
+        uint before = 0u;
+        for (uint t = 0u; t < lane; ++t) before += s_radix_sum[t];
+        for (uint k = 0u; k < 16u; ++k) {
+            uint n = s_radix[lane * 16u + k];
+            s_radix[lane * 16u + k] = before;
+            before += n;
+        }
+        memoryBarrierShared();
+        barrier();
+        for (uint i = begin; i < end; ++i) {
+            uint code = cull_words.data[velk_sort_scratch(from + 2u * i)];
+            uint place = cull_words.data[velk_sort_scratch(from + 2u * i + 1u)];
+            uint d = (code >> shift) & 15u;
+            uint dst = s_radix[d * 64u + lane];
+            s_radix[d * 64u + lane] = dst + 1u;
+            cull_words.data[velk_sort_scratch(to + 2u * dst)] = code;
+            cull_words.data[velk_sort_scratch(to + 2u * dst + 1u)] = place;
+        }
+        memoryBarrierBuffer();
+        barrier();
+        uint swap = from;
+        from = to;
+        to = swap;
+    }
+    // Each place's record in the new order, into the other buffer before any entry is written again.
+    for (uint i = lane; i < count; i += 64u) {
+        uint place = cull_words.data[velk_sort_scratch(from + 2u * i + 1u)];
+        cull_words.data[velk_sort_scratch(to + i)] = cull_words.data[velk_tree_ray_word(place) + VELK_CUT_RAY_INDEX];
+    }
+    memoryBarrierBuffer();
+    barrier();
+    for (uint i = lane; i < count; i += 64u) velk_write_ray_entry(velk_tree_ray_word(i), cull_words.data[velk_sort_scratch(to + i)]);
+    memoryBarrierBuffer();
+    barrier();
+}
+
 uint velk_lbvh_key(uint g)
 {
+    if (g_large_sort) return velk_ray_code_large(velk_tree_ray_word(min(g * 4u + 3u, max(s_bounded, 1u) - 1u)));
     return s_leaf_key[g] >> kSortIndexBits;
 }
 
@@ -2204,11 +2328,14 @@ void main()
     memoryBarrierBuffer();
     barrier();
     if (count == 0u) return;
-    // Where they are, as far as a sort in the group's memory takes, those without a box last and
-    // left out of the leaves; more stay in their order and get a balanced tree.
-    bool sorted = count > 4u && count <= kSortMax;
+    // Where they are, those without a box last and left out of the leaves: sorted in the group's
+    // memory as far as it holds them, past that in the partition's node pages.
+    bool sorted = count > 4u;
     uint leaf_records = count;
-    if (sorted) {
+    if (count > kSortMax) {
+        velk_sort_ray_list_large(count, lane);
+        leaf_records = s_bounded;
+    } else if (sorted) {
         velk_sort_ray_list(count, lane);
         leaf_records = s_bounded;
     }
@@ -4827,6 +4954,18 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
                         "for records grown from one value %u, for records for light only %u",
                      h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidLightOnly]);
+            // Since the last log: records whose lights were chosen, and of them those that left out
+            // a light at least a tenth, or a quarter, as strong as the strongest they took.
+            // Since the last log, in every 16th frame: points listed by what listed them.
+            clear(kLightPoolSumListedBy, 4u);
+            VELK_LOG(I, "light listed (every 16th frame): %u points by records without pieces, by triangles in pieces %u under 8 "
+                        "px on screen, %u under 64, %u larger",
+                     h[kLightPoolSumListedBy], h[kLightPoolSumListedBy + 1u], h[kLightPoolSumListedBy + 2u],
+                     h[kLightPoolSumListedBy + 3u]);
+            clear(kLightPoolSumSlotChoices, 3u);
+            VELK_LOG(I, "light slots: %u records chose their lights, %u left out one a tenth as strong as their strongest, %u "
+                        "one a quarter as strong",
+                     h[kLightPoolSumSlotChoices], h[kLightPoolSumLeftOutTenth], h[kLightPoolSumLeftOutQuarter]);
             // Pieces: those kept at the last frame's mark and the deepest of them, and since the
             // last log those made, freed and asked for but not made.
             VELK_LOG(I, "light pieces: %u kept, the deepest at %u; last frame %u asks; since the last log %u made, %u freed, "

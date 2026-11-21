@@ -282,7 +282,12 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(PointTakes, POINT_TAKES, 147)              /* each point list's points traced this frame (velk_points_takes) */ \
     X(PointCounts, POINT_COUNTS, 151)            /* and its points, in their room */                                 \
     X(SpreadGroups, SPREAD_GROUPS, 155)          /* the point dispatch's groups for points traced from none */       \
-    X(HeaderEnd, HEADER_END, 156)
+    X(SumSlotChoices, SUM_SLOT_CHOICES, 156)     /* summed: records' lights chosen at their centre */                \
+    X(SumLeftOutTenth, SUM_LEFT_OUT_TENTH, 157)  /* summed: of them, those leaving out a light a tenth as strong as their strongest */ \
+    X(SumLeftOutQuarter, SUM_LEFT_OUT_QUARTER, 158) /* summed: and a quarter as strong */                            \
+    X(SumListedBy, SUM_LISTED_BY, 159)           /* summed, every 16th frame: points listed by what lists them, four \
+                                                    words (VELK_LIGHT_LISTED_*) */                                   \
+    X(HeaderEnd, HEADER_END, 163)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1069,6 +1074,15 @@ uint velk_light_quad_node(uint tree, uint node, vec3 cam, float pixels_per_unit,
 // (the claim and the search); apart, since it writes the pool and shaders that only read it
 // declare it read-only.
 #define VELK_LIGHT_LIST_GLSL R"(
+// What lists the points the caller lists next, for the log (VELK_POOL_SUM_LISTED_BY, every 16th
+// frame): a record without pieces, at its vertex points; or a triangle in pieces less than 8
+// pixels across on screen, less than 64, or more.
+#define VELK_LIGHT_LISTED_VERTICES 0u
+#define VELK_LIGHT_LISTED_SMALL 1u
+#define VELK_LIGHT_LISTED_MID 2u
+#define VELK_LIGHT_LISTED_LARGE 3u
+uint g_listed_by = VELK_LIGHT_LISTED_VERTICES;
+
 // Takes `rays` of the frame's budget in rays (pool header 106) for a light on the trace list.
 // A first trace may take all of it; another takes only what the last frame's first traces did
 // not ask for, so that new light comes first. A light larger than all it may take goes alone,
@@ -1150,6 +1164,7 @@ void velk_light_list_at(uint pool, uint word, uint first, uint entry_first, uint
     VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_FIRST] = entry_first;
     VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_POINT] = entry_point;
     VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_INSTANCE] = instance;
+    if ((frame & 15u) == 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LISTED_BY + g_listed_by], 1u);
 }
 
 // Puts own point `p` of the record whose first page starts at `first` on a point list
@@ -1189,6 +1204,10 @@ float velk_light_strength(Light light, vec3 at)
     return bright * t * t;
 }
 
+// The strongest light velk_light_slots_at last left out, and the strongest it took, for the log.
+float g_slots_left_out = 0.0;
+float g_slots_strongest = 0.0;
+
 // The lights that could bring the place at `at` the most, strongest first, as light indices
 // from pc.lights_base, VELK_LIGHT_NONE in the slots left over.
 void velk_light_slots_at(vec3 at, out uint slots[VELK_LIGHT_SLOTS])
@@ -1198,12 +1217,17 @@ void velk_light_slots_at(vec3 at, out uint slots[VELK_LIGHT_SLOTS])
         slots[s] = VELK_LIGHT_NONE;
         most[s] = 0.0;
     }
+    g_slots_left_out = 0.0;
     uint first;
     uint candidates = velk_light_grid_count(at + VELK_GLOBALS.cam_pos.xyz, first);
     for (uint c = 0u; c < candidates; ++c) {
         uint i = velk_light_grid_at(first, c);
         float strength = velk_light_strength(velk_light_at(pc.lights_base + i), at);
-        if (strength <= most[VELK_LIGHT_SLOTS - 1u]) continue;
+        if (strength <= most[VELK_LIGHT_SLOTS - 1u]) {
+            g_slots_left_out = max(g_slots_left_out, strength);
+            continue;
+        }
+        g_slots_left_out = max(g_slots_left_out, most[VELK_LIGHT_SLOTS - 1u]);
         uint s = VELK_LIGHT_SLOTS - 1u;
         while (s > 0u && most[s - 1u] < strength) {
             most[s] = most[s - 1u];
@@ -1213,6 +1237,7 @@ void velk_light_slots_at(vec3 at, out uint slots[VELK_LIGHT_SLOTS])
         most[s] = strength;
         slots[s] = i;
     }
+    g_slots_strongest = most[0];
 }
 )"
 
@@ -1825,6 +1850,17 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
                         uintBitsToFloat(VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 2u]));
         velk_light_slots_at(velk_rel_position(inst.world_matrix, inst.offset.xyz + own * inst.size.xyz, g), slots);
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = slots[s];
+        // For the log: how often the lights a record could have outnumber its slots, by how strong
+        // the strongest it left out is against the strongest it took.
+        if (lane == 0u) {
+            atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_SLOT_CHOICES], 1u);
+            if (g_slots_left_out >= 0.1 * g_slots_strongest && g_slots_left_out > 0.0) {
+                atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LEFT_OUT_TENTH], 1u);
+            }
+            if (g_slots_left_out >= 0.25 * g_slots_strongest && g_slots_left_out > 0.0) {
+                atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LEFT_OUT_QUARTER], 1u);
+            }
+        }
     }
 
     // A vertex, or a piece's point in a triangle at weights of its corners.
@@ -2445,6 +2481,16 @@ void main()
     bool entered = own_points && !all && velk_change_enters(changes, center, radius, slots);
     if (entered) {
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = slots[s];
+        // For the log, as the trace's choice counts: the lights it could have at its centre.
+        uint could[VELK_LIGHT_SLOTS];
+        velk_light_slots_at(center, could);
+        atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_SLOT_CHOICES], 1u);
+        if (g_slots_left_out >= 0.1 * g_slots_strongest && g_slots_left_out > 0.0) {
+            atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LEFT_OUT_TENTH], 1u);
+        }
+        if (g_slots_left_out >= 0.25 * g_slots_strongest && g_slots_left_out > 0.0) {
+            atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LEFT_OUT_QUARTER], 1u);
+        }
     }
     if (!all && !entered && !velk_change_alters(changes, center, radius, slots)) return;
     atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_CHANGED], 1u);
@@ -3576,9 +3622,11 @@ void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, u
         mat4 vp = g.view_projection;
         float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
         float tri_px = position.w * px_per_world;
+        g_listed_by = tri_px < 8.0 ? VELK_LIGHT_LISTED_SMALL : tri_px < 64.0 ? VELK_LIGHT_LISTED_MID : VELK_LIGHT_LISTED_LARGE;
         velk_light_list_way(first, corners, triangle, b, tri_px, instance, frame);
         return;
     }
+    g_listed_by = VELK_LIGHT_LISTED_VERTICES;
     // A point per vertex, its own or those it links to: a vertex's point is coarse.
     uint words[9];
     uint points[9];
