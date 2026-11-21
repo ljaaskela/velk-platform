@@ -4918,8 +4918,14 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             grow_light_pool(pool, *arena, 1u);
         } else if (ctx.present_counter >= pool.check_frame + 16u) {
             pool.check_frame = ctx.present_counter;
+            // The most any frame since the last look asked for and did not get.
+            const uint64_t wanted_at = pool.header.offset() + uint64_t(kLightPoolMostPagesWanted) * sizeof(uint32_t);
             uint32_t wanted = 0;
-            arena->read_at(pool.header.offset() + uint64_t(kLightPoolPagesWanted) * sizeof(uint32_t), &wanted, sizeof(wanted));
+            arena->read_at(wanted_at, &wanted, sizeof(wanted));
+            if (wanted != 0) {
+                const uint32_t none = 0;
+                arena->update_at(wanted_at, &none, sizeof(none));
+            }
             if (wanted != 0 && pool.segments.size() < pool.max_segments) {
                 uint32_t free_pages = 0;
                 arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages,
