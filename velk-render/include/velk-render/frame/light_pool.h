@@ -732,14 +732,15 @@ float velk_piece_spacing(uint depth, uint root_level, float tri_px)
 }
 
 // The level of a root's grid for a triangle whose longest edge is `tri_px` pixels long, its points
-// about `light_pixels` apart: one of VELK_PIECE_ROOT_LEVELS. A triangle at least twice
+// about `light_pixels` apart: one of VELK_PIECE_ROOT_LEVELS. A triangle at least three times
 // VELK_LIGHT_COARSE_PIECES times that long gets the coarsest grid whose points are still that far
 // apart, so that its root is its coarse level, whose points look for thin shadows between them
-// (VELK_LIGHT_POINT_COARSE), and not its vertices.
+// (VELK_LIGHT_POINT_COARSE), and not its vertices. Not from twice: as many roots more cost
+// moving lights about a third more trace, for no thinner shadow found.
 uint velk_piece_root_level(float tri_px, float light_pixels)
 {
     float coarse = VELK_LIGHT_COARSE_PIECES * light_pixels;
-    if (tri_px >= 2.0 * coarse) {
+    if (tri_px >= 3.0 * coarse) {
         uint n = uint(clamp(floor(tri_px / coarse), 2.0, float(VELK_PIECE_LEVEL)));
         return n == 5u ? 4u : n;
     }
