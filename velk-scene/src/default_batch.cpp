@@ -68,6 +68,33 @@ const DefaultBatch::ClusterDraw* DefaultBatch::find_cluster_draw(uint32_t mesh, 
     return nullptr;
 }
 
+void DefaultBatch::begin_lod_builds(vector<IMeshPrimitiveInternal*>& out)
+{
+    if (!instance_cull_ || cull_owner_ || cull_region_.valid()) {
+        return;
+    }
+    const auto begin = [&](const IMeshPrimitive::Ptr& primitive) {
+        auto* internal = interface_cast<IMeshPrimitiveInternal>(primitive.get());
+        if (internal && internal->begin_lod_build()) {
+            out.push_back(internal);
+        }
+    };
+    if (!instance_source_) {
+        if (primitive_) {
+            begin(primitive_);
+        }
+        return;
+    }
+    const uint32_t mesh_count = instance_source_->get_mesh_count();
+    for (uint32_t m = 0; m < mesh_count; ++m) {
+        if (auto mesh = instance_source_->get_mesh(m)) {
+            for (const auto& primitive : mesh->get_primitives()) {
+                begin(primitive);
+            }
+        }
+    }
+}
+
 void DefaultBatch::ensure_instance_cull(IGpuResourceManager& resources)
 {
     if (instance_cull_ && instance_source_ && primitive_ && !cull_second_args_.valid()) {

@@ -300,6 +300,17 @@ public:
     /// since a hierarchy's bounds and errors hold for one shape.
     virtual bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) = 0;
 
+    /// Readies the build of its level of detail hierarchy to run apart from the main thread,
+    /// ahead of ensure_lod_data, which then publishes what it built. True when there is a
+    /// build to run (build_lod); false when there is none, or it is one ensure_lod_data does
+    /// itself (a deforming mesh's). Call on the main thread.
+    virtual bool begin_lod_build() = 0;
+
+    /// Runs the build begin_lod_build readied, reading the mesh's geometry. Safe on any
+    /// thread, one at a time per primitive, while the main thread neither uses the primitive
+    /// nor writes the GPU arenas until it returns.
+    virtual void build_lod() = 0;
+
     /// Loads the parts of its hierarchy that drawing or rays asked for since the last call,
     /// as far as @p resources has room. Called once a frame for a primitive it tracks.
     virtual void update_lod(IGpuResourceManager& resources) = 0;

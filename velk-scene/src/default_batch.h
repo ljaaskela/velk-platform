@@ -72,6 +72,10 @@ public:
     void enable_lod_cull() { instance_cull_ = true; }
     /// Allocates the culling arena region, if this batch holds one and has none yet.
     void ensure_instance_cull(IGpuResourceManager& resources);
+    /// Readies the level of detail builds ensure_instance_cull will publish, to run apart from
+    /// the main thread (IMeshPrimitiveInternal::begin_lod_build): the primitives with a build
+    /// to run go to @p out.
+    void begin_lod_builds(vector<IMeshPrimitiveInternal*>& out);
     bool get_instance_cull(InstanceCullInfo& out) const override;
     /// Makes it the view's quad draw: see IBatch::draws_quads.
     void set_draws_quads() { draws_quads_ = true; }

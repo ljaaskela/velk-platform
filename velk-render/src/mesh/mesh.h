@@ -93,6 +93,8 @@ public:
     void set_gpu_displacement(float max_displacement) override;
     bool prepare_gpu_refit(IGpuResourceManager& resources, MeshRefitInfo& out) override;
     bool ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out) override;
+    bool begin_lod_build() override;
+    void build_lod() override;
     void update_lod(IGpuResourceManager& resources) override;
     void set_deforming() override { deforming_ = true; }
 
@@ -206,6 +208,17 @@ private:
     MeshLodInfo lod_info_{};
     /// The hierarchy as built, which pages are loaded from.
     MeshLod lod_;
+    /// What the hierarchy's build reads, copied on the main thread (read_lod_input): the
+    /// vertices and indices, the second uvs and the colours, empty for none.
+    vector<uint8_t> lod_geometry_;
+    vector<uint8_t> lod_uv1_bytes_;
+    vector<uint8_t> lod_color_bytes_;
+    bool lod_read_ = false;   ///< lod_geometry_ holds the mesh's own vertices.
+    bool lod_built_ = false;  ///< lod_ is built and not published yet.
+    bool lod_readied_ = false; ///< begin_lod_build readied a build that has not run yet.
+    /// Copies what the hierarchy's build reads, and for a deforming mesh where its live
+    /// vertices are. False where it cannot be built.
+    bool read_lod_input();
     /// The cluster table, the headers and the tree as they are on the GPU: with where each
     /// loaded cluster's data is, and errors that keep what is not loaded from being chosen.
     vector<MeshLodCluster> lod_records_;

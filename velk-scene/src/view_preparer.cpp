@@ -8,6 +8,7 @@
 
 #include <velk/api/perf.h>
 #include <velk/api/state.h>
+#include <velk/api/task_pool.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_object_storage.h>
 
@@ -227,6 +228,31 @@ void ViewPreparer::prepare_batches(IViewEntry& entry, const SceneState& scene_st
             ensure_draw_data_region(bp);
             batch->ensure_instance_cull(*ctx.resources);
         };
+        // The level of detail hierarchies the batches are about to publish, built first on the
+        // shared task pool: a scene load's meshes build in parallel rather than one after
+        // another here, and every one is ready before the batches set up their culling.
+        {
+            vector<IMeshPrimitiveInternal*> builds;
+            const auto begin_builds = [&](const IBatch::Ptr& bp) {
+                if (bp) static_cast<impl::DefaultBatch*>(bp.get())->begin_lod_builds(builds);
+            };
+            for (auto& bp : cache.batches) begin_builds(bp);
+            for (auto& rtp : batch_builder.render_target_passes()) {
+                for (auto& bp : rtp.batches) begin_builds(bp);
+            }
+            if (!builds.empty()) {
+                VELK_PERF_SCOPE("renderer.lod_build");
+                TaskPool pool = default_task_pool();
+                vector<Future<void>> done;
+                done.reserve(builds.size());
+                for (IMeshPrimitiveInternal* primitive : builds) {
+                    done.push_back(pool.submit([primitive]() { primitive->build_lod(); }));
+                }
+                for (auto& d : done) {
+                    if (d) d.wait();
+                }
+            }
+        }
         for (auto& bp : cache.batches) upload_batch(bp);
         for (auto& rtp : batch_builder.render_target_passes()) {
             for (auto& bp : rtp.batches) upload_batch(bp);

@@ -455,6 +455,101 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
     return true;
 }
 
+bool MeshPrimitive::read_lod_input()
+{
+    auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
+    lod_geometry_.clear();
+    lod_uv1_bytes_.clear();
+    lod_color_bytes_.clear();
+    bool read = buffer && buffer->read_geometry(lod_geometry_);
+    // The second uv is a stream of its own, by vertex, so clusters need runs of it too.
+    if (read && uv1_buffer_) {
+        auto* uv1_buffer = interface_cast<IMeshBufferInternal>(uv1_buffer_.get());
+        const size_t needed = size_t(uv1_offset_) + buffer_->get_vbo_size() / vertex_stride_ * sizeof(float) * 2;
+        if (!uv1_buffer || !uv1_buffer->read_geometry(lod_uv1_bytes_) || lod_uv1_bytes_.size() < needed) {
+            read = false;
+        }
+    }
+    // Colours likewise, one word for each vertex of the buffer.
+    if (read && color_buffer_) {
+        auto* color_buffer = interface_cast<IMeshBufferInternal>(color_buffer_.get());
+        const size_t needed = buffer_->get_vbo_size() / vertex_stride_ * sizeof(uint32_t);
+        if (!color_buffer || !color_buffer->read_geometry(lod_color_bytes_) || lod_color_bytes_.size() < needed) {
+            read = false;
+        }
+    }
+    lod_read_ = read;
+    // A deforming mesh's clusters name its live vertices, which must be on the GPU by now.
+    // Any other mesh's get copies of their own, which takes reading them.
+    lod_live_vertex_word_ = 0;
+    lod_live_uv1_word_ = kLodNoAttribute;
+    lod_live_color_word_ = kLodNoAttribute;
+    if (deforming_) {
+        const GpuRef live = get_gpu_ref(buffer_);
+        if (live.kind != GpuRef::Kind::Index) {
+            return false;
+        }
+        lod_live_vertex_word_ = live.get_base();
+        if (uv1_buffer_) {
+            const GpuRef live_uv1 = get_gpu_ref(uv1_buffer_);
+            if (live_uv1.kind != GpuRef::Kind::Index) {
+                return false;
+            }
+            lod_live_uv1_word_ = live_uv1.get_base() + uv1_offset_ / 4u;
+        }
+        if (color_buffer_) {
+            const GpuRef live_color = get_gpu_ref(color_buffer_);
+            if (live_color.kind != GpuRef::Kind::Index) {
+                return false;
+            }
+            lod_live_color_word_ = live_color.get_base();
+        }
+    } else if (!read) {
+        if (!lod_unreadable_) {
+            VELK_LOG(E, "MeshPrimitive: could not read the mesh's vertices, so it cannot be drawn by cluster or hit by rays");
+            lod_unreadable_ = true;
+        }
+        return false;
+    }
+    return true;
+}
+
+void MeshPrimitive::build_lod()
+{
+    // Readied for another thread: its input read there too, as reading geometry back from
+    // GPU-mapped memory is slow and runs in parallel this way. Nothing grows the arenas
+    // meanwhile, as the main thread waits for the builds.
+    if (lod_readied_) {
+        lod_readied_ = false;
+        if (!read_lod_input()) {
+            return;
+        }
+    }
+    uint32_t normal_offset;
+    uint32_t uv_offset;
+    attribute_offsets(attributes_, normal_offset, uv_offset);
+    const float* uv1 = lod_read_ && uv1_buffer_ ? reinterpret_cast<const float*>(lod_uv1_bytes_.data() + uv1_offset_) : nullptr;
+    const uint32_t* colors = lod_read_ && color_buffer_ ? reinterpret_cast<const uint32_t*>(lod_color_bytes_.data()) : nullptr;
+    // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
+    // the tree that is refit, not the hierarchy.
+    lod_ = build_mesh_lod(rt_blas_, lod_read_ ? lod_geometry_.data() : nullptr, uv1, colors, vertex_stride_, normal_offset,
+                          deforming_);
+    lod_geometry_ = vector<uint8_t>{};
+    lod_uv1_bytes_ = vector<uint8_t>{};
+    lod_color_bytes_ = vector<uint8_t>{};
+    lod_built_ = true;
+}
+
+bool MeshPrimitive::begin_lod_build()
+{
+    // Once: a primitive several batches draw is readied by the first.
+    if (lod_table_region_.valid() || lod_built_ || lod_readied_ || deforming_ || rt_blas_.clusters.empty()) {
+        return false;
+    }
+    lod_readied_ = true;
+    return true;
+}
+
 bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo& out)
 {
     if (!lod_table_region_.valid()) {
@@ -468,72 +563,14 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         if (!culling || !mesh_words) {
             return false;
         }
-        vector<uint8_t> geometry;
-        auto* buffer = interface_cast<IMeshBufferInternal>(buffer_.get());
-        uint32_t normal_offset;
-        uint32_t uv_offset;
-        attribute_offsets(attributes_, normal_offset, uv_offset);
-        bool read = buffer && buffer->read_geometry(geometry);
-        // The second uv is a stream of its own, by vertex, so clusters need runs of it too.
-        vector<uint8_t> uv1_bytes;
-        const float* uv1 = nullptr;
-        if (read && uv1_buffer_) {
-            auto* uv1_buffer = interface_cast<IMeshBufferInternal>(uv1_buffer_.get());
-            const size_t needed = size_t(uv1_offset_) + buffer_->get_vbo_size() / vertex_stride_ * sizeof(float) * 2;
-            if (uv1_buffer && uv1_buffer->read_geometry(uv1_bytes) && uv1_bytes.size() >= needed) {
-                uv1 = reinterpret_cast<const float*>(uv1_bytes.data() + uv1_offset_);
-            } else {
-                read = false;
-            }
-        }
-        // Colours likewise, one word for each vertex of the buffer.
-        vector<uint8_t> color_bytes;
-        const uint32_t* colors = nullptr;
-        if (read && color_buffer_) {
-            auto* color_buffer = interface_cast<IMeshBufferInternal>(color_buffer_.get());
-            const size_t needed = buffer_->get_vbo_size() / vertex_stride_ * sizeof(uint32_t);
-            if (color_buffer && color_buffer->read_geometry(color_bytes) && color_bytes.size() >= needed) {
-                colors = reinterpret_cast<const uint32_t*>(color_bytes.data());
-            } else {
-                read = false;
-            }
-        }
-        // A deforming mesh's clusters name its live vertices, which must be on the GPU by now.
-        // Any other mesh's get copies of their own, which takes reading them.
-        lod_live_vertex_word_ = 0;
-        lod_live_uv1_word_ = kLodNoAttribute;
-        lod_live_color_word_ = kLodNoAttribute;
-        if (deforming_) {
-            const GpuRef live = get_gpu_ref(buffer_);
-            if (live.kind != GpuRef::Kind::Index) {
+        // Built already where it was readied for another thread (begin_lod_build).
+        if (!lod_built_) {
+            if (!read_lod_input()) {
                 return false;
             }
-            lod_live_vertex_word_ = live.get_base();
-            if (uv1_buffer_) {
-                const GpuRef live_uv1 = get_gpu_ref(uv1_buffer_);
-                if (live_uv1.kind != GpuRef::Kind::Index) {
-                    return false;
-                }
-                lod_live_uv1_word_ = live_uv1.get_base() + uv1_offset_ / 4u;
-            }
-            if (color_buffer_) {
-                const GpuRef live_color = get_gpu_ref(color_buffer_);
-                if (live_color.kind != GpuRef::Kind::Index) {
-                    return false;
-                }
-                lod_live_color_word_ = live_color.get_base();
-            }
-        } else if (!read) {
-            if (!lod_unreadable_) {
-                VELK_LOG(E, "MeshPrimitive: could not read the mesh's vertices, so it cannot be drawn by cluster or hit by rays");
-                lod_unreadable_ = true;
-            }
-            return false;
+            build_lod();
         }
-        // A deforming mesh's coarser levels would be drawn in its rest pose, and its rays walk
-        // the tree that is refit, not the hierarchy.
-        lod_ = build_mesh_lod(rt_blas_, read ? geometry.data() : nullptr, uv1, colors, vertex_stride_, normal_offset,
-                              deforming_);
+        lod_built_ = false;
         auto nodes_arena = resources.shared_arena(IRenderBackend::kGlobalBlasNodes, sizeof(BlasNode));
         auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
         if (!nodes_arena || !words_arena || lod_.clusters.empty() || lod_.nodes.empty()) {
