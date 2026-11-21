@@ -2523,7 +2523,7 @@ void VkBackend::begin_frame()
 
     // Reset this slot's timestamp range on the primary before any pass
     // records into it, and start a fresh region count for the frame.
-    if (gpu_timing_enabled_ && timestamp_pool_) {
+    if (timestamp_pool_) {
         vkCmdResetQueryPool(sync.command_buffer, timestamp_pool_,
                             recording_slot_ * 2 * kMaxTimedPasses,
                             2 * kMaxTimedPasses);
@@ -2891,7 +2891,7 @@ void VkBackend::execute(const ::velk::IGpuCommandBuffer::Ptr& cmd)
 
 void VkBackend::begin_gpu_timer(const char* label)
 {
-    if (!gpu_timing_enabled_ || !timestamp_pool_) return;
+    if (!timestamp_pool_) return;
     auto& slot = timer_slots_[recording_slot_];
     if (slot.count >= kMaxTimedPasses) {
         // Region budget exhausted this frame; drop the pair so the
@@ -2920,7 +2920,7 @@ uint32_t VkBackend::pass_marker(uint32_t index) const
 
 void VkBackend::end_gpu_timer()
 {
-    if (!gpu_timing_enabled_ || !timestamp_pool_ || !timer_region_open_) return;
+    if (!timestamp_pool_ || !timer_region_open_) return;
     auto& slot = timer_slots_[recording_slot_];
     uint32_t base = recording_slot_ * 2 * kMaxTimedPasses + 2 * slot.count + 1;
     vkCmdWriteTimestamp(frame_sync_[recording_slot_].command_buffer,
@@ -2937,7 +2937,7 @@ void VkBackend::end_gpu_timer()
 
 void VkBackend::resolve_gpu_timings(uint32_t slot)
 {
-    if (!gpu_timing_enabled_ || !timestamp_pool_ || timestamp_period_ns_ <= 0.f) return;
+    if (!timestamp_pool_ || timestamp_period_ns_ <= 0.f) return;
     const TimerSlot& ts = timer_slots_[slot];
     if (ts.count == 0) return;
 

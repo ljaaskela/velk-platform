@@ -80,6 +80,9 @@ public:
         /// Clusters whose mean triangle is smaller than this on screen, in pixels across, are
         /// rasterized in compute instead of by the hardware, by the deferred path. 0 for none.
         (PROP, float, tiny_cluster_pixels, 2.f),
+        /// The GPU time in milliseconds the deferred path's light trace aims for a frame: the
+        /// rays it casts follow what it took. 0 for no limit.
+        (PROP, float, light_trace_ms, 4.f),
         (PROP, ObjectRef, environment, {}), ///< Optional IEnvironment for skybox/background.
         /// What the deferred path shows in place of the lit image. VELK_VISIBILITY_DEBUG overrides it.
         (PROP, DebugView, debug_view, DebugView::None),

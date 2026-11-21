@@ -645,24 +645,24 @@ public:
     /// @}
     /// @name GPU timing
     ///
-    /// Per-pass GPU timestamps for ground-truth profiling. Disabled by
-    /// default: when off, `begin_gpu_timer` / `end_gpu_timer` are no-ops
-    /// and no query work is recorded, so there is zero overhead. The perf
-    /// overlay flips it on while it is shown. Results lag by the
+    /// Per-pass GPU timestamps, recorded every frame: the renderer keeps
+    /// budgets by them (the light trace's rays). The enabled flag only
+    /// says whether a profiler wants them shown; the perf overlay flips it
+    /// on while it is shown. Results lag by the
     /// frames-in-flight depth (the backend reads a slot's timestamps only
     /// after that slot's fence has fired), so `last_gpu_timings()` returns
     /// the most recently resolved frame, not the one being recorded.
     /// @{
 
-    /** @brief Enables or disables per-pass GPU timestamp capture. */
+    /** @brief Says whether a profiler wants per-pass GPU timings shown. */
     virtual void set_gpu_timing_enabled(bool enabled) = 0;
 
-    /** @brief Whether GPU timestamp capture is currently enabled. */
+    /** @brief Whether a profiler wants per-pass GPU timings shown. */
     virtual bool gpu_timing_enabled() const = 0;
 
     /** @brief Opens a timed GPU region labeled @p label on the current
-     *         frame's command stream. No-op when timing is disabled or the
-     *         per-frame region budget is exhausted. @p label must point at
+     *         frame's command stream. No-op when the device has no
+     *         timestamps or the per-frame region budget is exhausted. @p label must point at
      *         storage that outlives the frame (a static literal). */
     virtual void begin_gpu_timer(const char* label) = 0;
 

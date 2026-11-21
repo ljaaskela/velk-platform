@@ -759,6 +759,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // holds only for the camera that chooses (occlusion, compute raster, far instances) is off.
     const bool chosen = render_view.chosen_by_other;
     vs.instance_cull.chosen_by_other = chosen;
+    vs.instance_cull.light_trace_ms = camera_state ? camera_state->light_trace_ms : 4.f;
     const uint32_t cull_globals = chosen ? render_view.cull_globals_base : render_view.view_globals_base;
     const bool occlusion = !chosen && (!camera_state || camera_state->occlusion_culling) && vs.depth_pyramid.valid()
                         && !no_occlusion_culling();

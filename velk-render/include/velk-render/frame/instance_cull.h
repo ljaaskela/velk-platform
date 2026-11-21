@@ -3440,6 +3440,8 @@ struct InstanceCullPass
     bool dirty = true;
     /// The view is chosen as another camera: its passes are timed under kCullOtherStageNames.
     bool chosen_by_other = false;
+    /// The GPU time the light trace aims for a frame (ICamera::light_trace_ms); 0 for no limit.
+    float light_trace_ms = 4.f;
     vector<uint32_t> count_words;  ///< Reset before every cull.
     IGpuBuffer* arena_buffer = nullptr;
     size_t arena_size = 0;
@@ -4735,6 +4737,15 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
     // not there. Its pages are swept every frame, so a new segment's are free on the next.
     if (!state.cuts.empty() && ensure_light_pool(state.light_pool, *arena, ctx.backend->device_memory_bytes())) {
         LightPool& pool = state.light_pool;
+        // Its budget in rays, by what the view's trace took (its pass's GPU time).
+        const char* trace_pass = state.chosen_by_other ? "other:deferred.light_trace" : "deferred.light_trace";
+        float trace_ms = 0.f;
+        for (const auto& t : ctx.backend->last_gpu_timings()) {
+            if (std::strcmp(t.label, trace_pass) == 0) {
+                trace_ms = t.ms;
+            }
+        }
+        adjust_light_rays(pool, *arena, trace_ms, state.light_trace_ms);
         if (pool.segments.empty()) {
             grow_light_pool(pool, *arena, 1u);
         } else if (ctx.present_counter >= pool.check_frame + 16u) {
@@ -4770,12 +4781,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             clear(kLightPoolSumChanged, 1u);
             VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
-                        "traced, %u coarse points listed for a first trace, %u other points for a first trace and %u for a "
-                        "later one, %u records changed since the last log, %u records "
+                        "traced, points listed: %u untraced, %u stale coarse, %u stale fine, %u warming up; "
+                        "%u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
                      h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsLinked],
                      h[kLightPoolLastRecordsOneValue], h[kLightPoolLastSearched], h[kLightPoolLastTraces],
-                     h[kLightPoolLastCoarsePoints], h[kLightPoolLastFirstPoints], h[kLightPoolLastLaterPoints],
+                     h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
+                     h[kLightPoolLastWarmupPoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
             uint32_t longest = 0;
             uint32_t most = 0;

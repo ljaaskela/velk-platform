@@ -189,9 +189,8 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
         RENDER_LOG("graph.pass[%zu] has_cmd=%d", i, gp.command_buffer() ? 1 : 0);
 
         // Time the pass's own GPU work (after the inter-pass barrier so
-        // sync cost isn't attributed to it). No-op when timing is off.
-        const bool timed = backend.gpu_timing_enabled();
-        if (timed) backend.begin_gpu_timer(gp.name());
+        // sync cost isn't attributed to it).
+        backend.begin_gpu_timer(gp.name());
 
         if (auto cmd = gp.command_buffer()) {
             // Every cmd-buffer pass is self-contained — raster passes
@@ -201,7 +200,7 @@ void RenderGraph::execute(::velk::IRenderBackend& backend)
             backend.execute(cmd);
         }
 
-        if (timed) backend.end_gpu_timer();
+        backend.end_gpu_timer();
     }
 }
 
