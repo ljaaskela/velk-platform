@@ -221,6 +221,16 @@ public:
                                          const PerformanceOverlayConfig& config) = 0;
 
     /**
+     * @brief Reads the last presented frame of @p window back from the GPU.
+     *
+     * Waits for the GPU, so it is for captures and tools, not every frame.
+     * @param pixels Receives RGBA, 8 bits per channel, sRGB encoded, rows top to bottom.
+     * @param size   Receives the width and height.
+     * @return False when the window has no frame yet or its format cannot be read.
+     */
+    virtual bool read_window(const IObject::Ptr& window, vector<uint8_t>& pixels, uvec2& size) = 0;
+
+    /**
      * @brief Releases all resources.
      *
      * Destroys overlays, scene links, windows, the renderer, and the render context,

@@ -17,6 +17,9 @@ public:
     bool save_png(int width, int height, PixelFormat format,
                   const uint8_t* pixels, size_t pixel_size,
                   string_view path) const override;
+    bool encode_png(int width, int height, PixelFormat format,
+                    const uint8_t* pixels, size_t pixel_size,
+                    vector<uint8_t>& out) const override;
     bool save_hdr(const IImage& image, string_view path) const override;
     bool save_hdr(int width, int height, PixelFormat format,
                   const uint8_t* pixels, size_t pixel_size,

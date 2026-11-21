@@ -2,6 +2,8 @@
 
 #include <velk/api/perf.h>
 #include <velk/string.h>
+
+#include <cstring>
 #include <velk-render/interface/intf_buffer.h>
 #include <velk-render/interface/intf_surface.h>
 
@@ -76,6 +78,31 @@ bool ImageEncoder::save_png(int width, int height, PixelFormat format,
     string path_str(path);
     const int stride = width * channels;
     return stbi_write_png(path_str.c_str(), width, height, channels, pixels, stride) != 0;
+}
+
+bool ImageEncoder::encode_png(int width, int height, PixelFormat format,
+                              const uint8_t* pixels, size_t pixel_size,
+                              vector<uint8_t>& out) const
+{
+    VELK_PERF_SCOPE("image.encode_png");
+
+    int channels = 0;
+    if (!channels_for_format(format, channels) || width <= 0 || height <= 0 || !pixels) {
+        return false;
+    }
+    const size_t expected =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(channels);
+    if (pixel_size < expected) {
+        return false;
+    }
+    out.clear();
+    const auto append = [](void* context, void* data, int size) {
+        auto& bytes = *static_cast<vector<uint8_t>*>(context);
+        const size_t at = bytes.size();
+        bytes.resize(at + static_cast<size_t>(size));
+        std::memcpy(bytes.data() + at, data, static_cast<size_t>(size));
+    };
+    return stbi_write_png_to_func(append, &out, width, height, channels, pixels, width * channels) != 0;
 }
 
 bool ImageEncoder::save_png(const IImage& image, string_view path) const

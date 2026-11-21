@@ -122,6 +122,11 @@ public:
                           const uint8_t* pixels, size_t pixel_size,
                           string_view path) const = 0;
 
+    /** @brief Encodes raw pixel data as PNG into @p out, for callers that send it rather than save it. */
+    virtual bool encode_png(int width, int height, PixelFormat format,
+                            const uint8_t* pixels, size_t pixel_size,
+                            vector<uint8_t>& out) const = 0;
+
     /**
      * @brief Saves @p image as a Radiance .hdr file at @p path.
      *

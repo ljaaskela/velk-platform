@@ -80,6 +80,7 @@ private:
 
     /// Reads the first window's composite as RGBA8 into @p pixels and @p dims.
     bool read_first_window(vector<uint8_t>& pixels, uvec2& dims);
+    bool read_window(const IObject::Ptr& window, vector<uint8_t>& pixels, uvec2& size) override;
     /// Saves RGBA8 @p pixels as a PNG at @p path.
     void save_capture(const vector<uint8_t>& pixels, uvec2 dims, const string& path);
 

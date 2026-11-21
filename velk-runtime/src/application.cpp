@@ -140,6 +140,7 @@ void Application::start_editor_endpoint()
         editor_endpoint_ = nullptr;
         return;
     }
+    endpoint->set_application(get_self());
     const uint16_t bound = endpoint->listen(port);
     if (bound) {
         VELK_LOG(I, "editor endpoint: listening on port %u", static_cast<unsigned>(bound));
@@ -207,6 +208,9 @@ IWindow::Ptr Application::create_window(const WindowConfig& config)
     }
 
     windows_.emplace_back(as_object(win));
+    if (auto* endpoint = interface_cast<editor::IEditorEndpoint>(editor_endpoint_)) {
+        endpoint->add_window(as_object(win));
+    }
     return win;
 }
 
@@ -231,6 +235,9 @@ IWindow::Ptr Application::wrap_native_surface(void* native_handle)
     }
 
     windows_.emplace_back(as_object(win));
+    if (auto* endpoint = interface_cast<editor::IEditorEndpoint>(editor_endpoint_)) {
+        endpoint->add_window(as_object(win));
+    }
     return win;
 }
 
@@ -381,10 +388,15 @@ bool Application::poll()
 
 bool Application::read_first_window(vector<uint8_t>& pixels, uvec2& dims)
 {
+    return !windows_.empty() && read_window(windows_[0], pixels, dims);
+}
+
+bool Application::read_window(const IObject::Ptr& window_object, vector<uint8_t>& pixels, uvec2& dims)
+{
     auto backend = render_ctx_ ? render_ctx_->backend() : nullptr;
-    auto* window = windows_.empty() ? nullptr : interface_cast<IWindow>(windows_[0]);
+    auto* window = interface_cast<IWindow>(window_object);
     if (!backend || !window) {
-        VELK_LOG(E, "auto capture: backend or window missing");
+        VELK_LOG(E, "read_window: backend or window missing");
         return false;
     }
 
@@ -393,8 +405,13 @@ bool Application::read_first_window(vector<uint8_t>& pixels, uvec2& dims)
     auto* texture = interface_cast<IGpuTexture>(target.get());
     PixelFormat format{};
     if (!texture || !backend->read_texture(*texture, pixels, format, dims)) {
-        VELK_LOG(E, "auto capture: could not read the composite");
+        VELK_LOG(E, "read_window: could not read the composite");
         return false;
+    }
+
+    // An sRGB-tagged 8-bit composite already holds the bytes a PNG wants.
+    if (format == PixelFormat::RGBA8_SRGB) {
+        format = PixelFormat::RGBA8;
     }
 
     if (format == PixelFormat::RGBA16F) {
@@ -411,7 +428,11 @@ bool Application::read_first_window(vector<uint8_t>& pixels, uvec2& dims)
         pixels = std::move(converted);
         format = PixelFormat::RGBA8;
     }
-    return format == PixelFormat::RGBA8;
+    if (format != PixelFormat::RGBA8) {
+        VELK_LOG(E, "read_window: composite format %d cannot be read", static_cast<int>(format));
+        return false;
+    }
+    return true;
 }
 
 void Application::save_capture(const vector<uint8_t>& pixels, uvec2 dims, const string& path)

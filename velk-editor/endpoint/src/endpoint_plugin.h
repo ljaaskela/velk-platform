@@ -1,6 +1,7 @@
 #ifndef VELK_EDITOR_ENDPOINT_PLUGIN_IMPL_H
 #define VELK_EDITOR_ENDPOINT_PLUGIN_IMPL_H
 
+#include <velk/ext/object.h>
 #include <velk/ext/plugin.h>
 #include <velk/plugins/remote/interface/intf_remote.h>
 #include <velk/string.h>
@@ -10,6 +11,22 @@
 #include <velk-editor/endpoint/plugin.h>
 
 namespace velk::editor {
+
+class AppEndpoint final : public ::velk::ext::Object<AppEndpoint, IAppEndpoint>
+{
+public:
+    VELK_CLASS_UID("8482a456-0c50-451f-9911-1108815241d5", "AppEndpoint");
+
+    void set_application(const IObject::Ptr& application) { application_ = application; }
+    void add_window(const IObject::Ptr& window);
+
+    // IAppEndpoint
+    vector<uint8_t> fn_capture(uint32_t window) override;
+
+private:
+    IObject::WeakPtr application_;
+    vector<IObject::WeakPtr> windows_;
+};
 
 class EndpointPlugin final : public ::velk::ext::Plugin<EndpointPlugin, IEditorEndpoint>
 {
@@ -23,6 +40,8 @@ public:
 
     // IEditorEndpoint
     uint16_t listen(uint16_t port) override;
+    void set_application(const IObject::Ptr& application) override;
+    void add_window(const IObject::Ptr& window) override;
     void add_scene(const IScene::Ptr& scene) override;
     void remove_scene(const IScene::Ptr& scene) override;
 
@@ -34,6 +53,7 @@ private:
     };
 
     IRemoteServer::Ptr server_;
+    IObject::Ptr app_;
     vector<Published> scenes_;
     uint32_t next_scene_ = 0;
 };
