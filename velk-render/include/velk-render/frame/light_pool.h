@@ -1964,6 +1964,56 @@ bool velk_change_alters(uint changes, vec3 center, float radius, uint slots[VELK
     return false;
 }
 
+// How much `light` could bring some place of a sphere at `center` (relative to the camera) of
+// `radius`, as velk_light_strength judges a place: from the sphere's nearest point, and for a spot
+// light within its cone widened by the sphere, or anywhere when the light is inside it.
+float velk_change_strength(Light light, vec3 center, float radius)
+{
+    float bright = dot(light.color_intensity.rgb, vec3(0.2126, 0.7152, 0.0722)) * light.color_intensity.a;
+    if (light.flags.x == 0u) return bright;
+    vec3 to = light.position.xyz - center;
+    float d = length(to);
+    float dist = max(d - radius, 0.0);
+    float range = light.params.x;
+    if (range > 0.0 && dist >= range) return 0.0;
+    if (light.flags.x == 2u && d > radius && dot(-to / d, light.direction.xyz) <= light.params.z - radius / d) return 0.0;
+    float t = range > 0.0 ? 1.0 - dist / range : 1.0 / (1.0 + dist * dist);
+    return bright * t * t;
+}
+
+// Puts each light a change this frame names that could now reach a sphere at `center` of `radius`
+// and is not among `slots` (a record's PAGE_SLOTS, all chosen) into them: a free slot, else in
+// place of the weakest when it is stronger, all judged by velk_change_strength. A light that left
+// is the weakest, with nothing. True when a slot changed.
+bool velk_change_enters(uint changes, vec3 center, float radius, inout uint slots[VELK_LIGHT_SLOTS])
+{
+    if (slots[0] == VELK_LIGHT_NONE) return false;
+    bool entered = false;
+    uint count = min(VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_COUNT], VELK_CHANGES_MAX);
+    for (uint k = 0u; k < count; ++k) {
+        uint light = VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS + VELK_CHANGE_LIGHT];
+        if (light == VELK_LIGHT_NONE) continue;
+        bool kept = false;
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) kept = kept || slots[s] == light;
+        if (kept) continue;
+        float strength = velk_change_strength(velk_light_at(pc.lights_base + light), center, radius);
+        if (strength <= 0.0) continue;
+        uint weakest = 0u;
+        float least = 3.4e38;
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+            float st = slots[s] == VELK_LIGHT_NONE ? -1.0 : velk_change_strength(velk_light_at(pc.lights_base + slots[s]), center, radius);
+            if (st < least) {
+                least = st;
+                weakest = s;
+            }
+        }
+        if (strength <= least) continue;
+        slots[weakest] = light;
+        entered = true;
+    }
+    return entered;
+}
+
 // A one value at `word` traced again on its next listing.
 void velk_change_one(uint word)
 {
@@ -2049,7 +2099,13 @@ void main()
     } else {
         velk_light_slots_at(center, slots);
     }
-    if (!all && !velk_change_alters(changes, center, radius, slots)) return;
+    // Own points keep the lights chosen at their first trace: a light that moved into reach
+    // takes a slot, and all its points are traced again. One values choose theirs as they are read.
+    bool entered = own_points && !all && velk_change_enters(changes, center, radius, slots);
+    if (entered) {
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = slots[s];
+    }
+    if (!all && !entered && !velk_change_alters(changes, center, radius, slots)) return;
     atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_CHANGED], 1u);
     if (own_points) {
         // Its coarse light traced again at once, and its points and its pieces' stale
