@@ -334,6 +334,7 @@ VELK_GPU_STRUCT RtPushC {
     float    env_params[2];
     uint32_t extras[4];        // what the pass's main() takes
     uint32_t env[4];           // x = env material, y = env texture
+    uint32_t more[4];          // what the pass's main() takes past extras
 };
 
 } // namespace
@@ -811,6 +812,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // A debug view covers every pixel, so nothing is lit under it.
     if (visibility_mode == 0) {
         emit_light_probes_pass(vs, render_view, ctx, graph);
+        emit_reflection_pass(vs, render_view, ctx, graph);
         emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
@@ -1479,6 +1481,141 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     });
 }
 
+void DeferredPath::emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    const LightPool& pool = vs.instance_cull.light_pool;
+    if (!vs.gbuffer || !ctx.snippets || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    const uint32_t width = vs.gbuffer_size.x;
+    const uint32_t height = vs.gbuffer_size.y;
+    if (!vs.reflect_samples || vs.reflect_size != vs.gbuffer_size) {
+        TextureDesc td{};
+        td.width = static_cast<int>(width);
+        td.height = static_cast<int>(height);
+        td.format = PixelFormat::RGBA16F;
+        td.usage = TextureUsage::Storage;
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        vs.reflect_samples = graph.resources().create_render_texture(td);
+        vs.reflect_result[0] = graph.resources().create_render_texture(td);
+        vs.reflect_result[1] = graph.resources().create_render_texture(td);
+        vs.reflect_size = vs.gbuffer_size;
+        vs.reflect_fresh = true;
+    }
+    if (!vs.reflect_samples || !vs.reflect_result[0] || !vs.reflect_result[1]) return;
+
+    // The trace is the probes' shader with VELK_REFLECT: their hit shading, no material code.
+    constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
+    uint64_t key = 0xcbf29ce484222325ULL ^ 0x5245'464c'4543'0001ULL;
+    for (auto id : ctx.snippets->frame_intersects()) key = (key ^ static_cast<uint64_t>(id)) * kFnvPrime;
+    key |= 0x2000000000000000ULL;
+    auto pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{key, PixelFormat::RGBA8, DepthFormat::None, 0});
+    if (!pipeline) {
+        string main_src;
+        main_src += "#define VELK_REFLECT 1\n";
+        main_src += light_probes_main_src;
+        pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(compose_rt_trace(*ctx.snippets, string_view(main_src), kReflectGroupThreads)), key);
+    }
+    if (!pipeline) return;
+    constexpr uint64_t kResolveKey = 0x5245'464c'5253'0001ULL;
+    auto resolve_pipeline = ctx.render_ctx->pipelines().find(PipelineCacheKey{kResolveKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+    if (!resolve_pipeline) {
+        string src;
+        src += rt_compute_prelude_src;
+        src += reflect_resolve_src;
+        resolve_pipeline = ctx.render_ctx->pipelines().compile_compute(string_view(src), kResolveKey);
+    }
+    if (!resolve_pipeline) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    vs.reflect_parity ^= 1u;
+    auto previous = vs.reflect_result[vs.reflect_parity ^ 1u];
+    auto current = vs.reflect_result[vs.reflect_parity];
+    const uint32_t material_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+
+    RtPushC pc{};
+    pc.shapes_base = pool.segments.empty() ? kLightNone : pool.word();
+    pc.globals_base = render_view.view_globals_base;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.lights_base = render_view.lights_base;
+    pc.env_params[0] = render_view.env.intensity;
+    pc.env_params[1] = render_view.env.rotation_rad;
+    pc.extras[0] = handle(vs.reflect_samples);
+    pc.extras[1] = width | (height << 16u);
+    pc.extras[2] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.extras[3] = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.env[0] = render_view.env.material_id;
+    pc.env[1] = render_view.env.texture_id;
+    pc.env[2] = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
+    // A hit's bounce light from the last frame's probes, as a probe's ray takes it.
+    pc.env[3] = vs.light_probe_count != 0 ? static_cast<uint32_t>(vs.light_probes[vs.light_probe_parity ^ 1u].offset() / sizeof(uint32_t))
+                                          : kLightNone;
+    pc.more[0] = material_id;
+    RtPushC resolve_pc = pc;
+    resolve_pc.more[1] = handle(previous);
+    resolve_pc.more[2] = handle(current);
+    resolve_pc.more[3] = vs.reflect_fresh ? 1u : 0u;
+    vs.reflect_fresh = false;
+
+    // A thread a 2 by 2 block of pixels, a group 8 by 4 blocks.
+    const uint32_t groups_across = ((width + 1u) / 2u + 7u) / 8u;
+    const uint32_t groups_down = ((height + 1u) / 2u + 3u) / 4u;
+    bool dirty = true;
+    emit_cached_view_pass(vs.reflect_trace_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.reflect_trace", "other:deferred.reflect_trace"),
+                          graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = groups_across * groups_down;
+        dc.groups_y = 1;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: reflection trace");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.reflect_samples));
+        rec.held.push_back(pipeline);
+    });
+    bool resolve_dirty = true;
+    emit_cached_view_pass(vs.reflect_resolve_pass, resolve_dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.reflect_resolve", "other:deferred.reflect_resolve"),
+                          graph, [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        DispatchCall dc{};
+        dc.pipeline = resolve_pipeline.get();
+        dc.groups_x = (width + 7u) / 8u;
+        dc.groups_y = (height + 7u) / 8u;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(resolve_pc);
+        std::memcpy(dc.root_constants, &resolve_pc, sizeof(resolve_pc));
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: reflection resolve");
+        cmd->record_global_barrier();
+        cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.reflect_samples));
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(previous));
+        rec.writes.push_back(interface_pointer_cast<IGpuResource>(current));
+        rec.held.push_back(resolve_pipeline);
+    });
+}
+
 void DeferredPath::emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                               FrameContext& ctx, uint32_t mode, IRenderGraph& graph)
 {
@@ -1999,6 +2136,10 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.spare1 = vs.light_probe_count != 0 ? static_cast<uint32_t>(vs.light_probes[vs.light_probe_parity].offset() / sizeof(uint32_t))
                                           : kLightNone;
     if (vs.light_probe_count != 0) vs.lighting_dirty = true;
+    // Traced reflections, whose result swaps each frame too.
+    IRenderTarget::Ptr reflections = vs.reflect_result[vs.reflect_parity];
+    pc.spare0 = reflections && !vs.reflect_fresh ? static_cast<uint32_t>(reflections->get_gpu_handle(GpuResourceKey::Default)) : kLightNone;
+    if (reflections) vs.lighting_dirty = true;
 
     // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
@@ -2026,6 +2167,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                 rec.cmd = std::move(cmd);
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            if (reflections) rec.reads.push_back(interface_pointer_cast<IGpuResource>(reflections));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

@@ -1571,6 +1571,12 @@ void main()
         float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
         vec3 env_diffuse = env_miss_color_lod(N, env_max_lod);
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
+        // Traced reflections (reflect_resolve_src, pc.spare0) where the surface is smooth enough
+        // for them, fading into the environment toward the roughness they stop at.
+        if (pc.spare0 != VELK_LIGHT_NONE) {
+            vec4 traced = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], coord, 0);
+            if (traced.a > 0.0) env_specular = mix(env_specular, traced.rgb, 1.0 - smoothstep(0.21, 0.3, roughness));
+        }
         vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
 
         // Light from other surfaces and the sky: the screen probes around it, or the environment
@@ -1689,6 +1695,7 @@ layout(push_constant, scalar) uniform PC {
     vec2 env_params;            // x = intensity, y = rotation_rad (inline)
     uvec4 extras;               // the main's own: for the RT path x=image_index, y=width, z=height
     uvec4 env;                  // x=env_material_id, y=env_texture_id, zw=_
+    uvec4 more;                 // the main's own, past what extras holds; unset where unused
 } pc;
 // This view's FrameGlobals, read by index from the bound globals buffer
 // (set = 1 slot 2, declared in velk.glsl) instead of a device address.

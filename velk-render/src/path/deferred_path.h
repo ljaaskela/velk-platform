@@ -132,6 +132,17 @@ public:
         IRenderPass::Ptr light_probes_pass;
         /// The probes' filter, after their gather (light_probes_filter_src).
         IRenderPass::Ptr light_probes_filter_pass;
+        /// Reflections: each pixel's last traced sample, and the resolved result, two that swap
+        /// each frame (light_probes_main_src with VELK_REFLECT, reflect_resolve_src). The
+        /// result the lighting reads is reflect_result[reflect_parity]; `reflect_fresh` while the
+        /// last one is not a result yet.
+        IRenderTarget::Ptr reflect_samples;
+        IRenderTarget::Ptr reflect_result[2];
+        uvec2 reflect_size{};
+        uint32_t reflect_parity = 0;
+        bool reflect_fresh = true;
+        IRenderPass::Ptr reflect_trace_pass;
+        IRenderPass::Ptr reflect_resolve_pass;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
@@ -258,6 +269,9 @@ private:
     void emit_light_changes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Gathers the screen probes' bounce light (light_probes_main_src), before the lighting.
     void emit_light_probes_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Traces and resolves reflections of smooth surfaces (light_probes_main_src with
+    /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
+    void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);

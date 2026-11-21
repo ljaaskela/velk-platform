@@ -2140,6 +2140,8 @@ inline constexpr uint32_t kLightProbeWords = kProbeWords;
 inline constexpr uint32_t kLightProbeRays = 4;
 /// Threads in a work group of the probes' gather: a 2 by 2 tile of probes, kLightProbeRays each.
 inline constexpr uint32_t kLightProbeGroupThreads = 16;
+/// Threads in a work group of the reflections' trace: 8 by 4 blocks of 2 by 2 pixels, a block each.
+inline constexpr uint32_t kReflectGroupThreads = 32;
 static_assert(kLightProbeRays * 4u == kLightProbeGroupThreads, "a group is a 2 by 2 tile of probes");
 
 // A probe's light (VELK_PROBE_LIGHT), for a shader that defines VELK_LIGHT_WORDS as the buffer
@@ -2460,16 +2462,23 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
     return total;
 }
 
-// The environment along `rd`, as a miss sees it. Black without one.
-vec3 velk_probe_sky(vec3 rd)
+// The environment along `rd`, `blur` of the way (0 to 1) from its sharpest mip level to its
+// blurriest. Black without one.
+vec3 velk_probe_env(vec3 rd, float blur)
 {
     if (pc.env.y == 0u) return vec3(0.0);
     float c = cos(pc.env_params.y);
     float s = sin(pc.env_params.y);
     vec3 dir = vec3(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
     vec2 uv = vec2(atan(dir.z, dir.x) / 6.28318531 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265 + 0.5);
-    float lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env.y)])) - 1.0;
-    return textureLod(velk_textures[nonuniformEXT(pc.env.y)], uv, lod).rgb * pc.env_params.x;
+    float last = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env.y)])) - 1.0;
+    return textureLod(velk_textures[nonuniformEXT(pc.env.y)], uv, clamp(blur, 0.0, 1.0) * last).rgb * pc.env_params.x;
+}
+
+// The environment along `rd`, as a probe's miss sees it: its blurriest level.
+vec3 velk_probe_sky(vec3 rd)
+{
+    return velk_probe_env(rd, 1.0);
 }
 
 // The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: the
@@ -2630,9 +2639,181 @@ void velk_probes_gather(uint lane)
     velk_probe_write(raw, p, pos, n, 1.0);
 }
 
+)" R"(
+#ifdef VELK_REFLECT
+// Roughness from which a surface reflects nothing traced (the lighting's own lobe instead), and
+// below which its reflection is a mirror's.
+#define VELK_REFLECT_CUTOFF 0.3
+#define VELK_REFLECT_SHARP 0.05
+
+// Reflections, as emit_reflection_pass runs this shader with VELK_REFLECT: a thread a 2 by 2
+// block of pixels, a group 8 by 4 blocks, and each frame one pixel of each block, the next of
+// the four the next frame. A lit pixel smoother than VELK_REFLECT_CUTOFF sends a ray along its
+// reflection, the mirror one below VELK_REFLECT_SHARP, else one of its GGX lobe. What the ray
+// hits is lit as a probe's ray finds it (velk_probe_surface, velk_probe_direct,
+// velk_probe_hit_indirect), and its metal reflects the environment; a miss is the environment,
+// as sharp as the reflection is. Into the samples image (pc.extras.x) at the pixel: the light,
+// and how far the ray went, -1 for a miss, 0 for no reflection. pc.extras.y is the G-buffer's
+// size (x low, y high), z its positions, w its normals, pc.more.x its material parameters.
+void velk_reflect_trace(uint lane)
+{
+    uint width = pc.extras.y & 0xFFFFu;
+    uint height = pc.extras.y >> 16u;
+    uint across = (width + VELK_PROBE_PIXELS - 1u) / VELK_PROBE_PIXELS;
+    uint groups_across = ((width + 1u) / 2u + 7u) / 8u;
+    uvec2 block = uvec2((gl_WorkGroupID.x % groups_across) * 8u + lane % 8u, (gl_WorkGroupID.x / groups_across) * 4u + lane / 8u);
+    GlobalData g = VELK_GLOBALS;
+    uint k = g.present_counter & 3u;
+    ivec2 pixel = ivec2(block * 2u + uvec2(k & 1u, k >> 1u));
+    if (pixel.x >= int(width) || pixel.y >= int(height)) return;
+    vec4 mat = texelFetch(velk_textures[nonuniformEXT(pc.more.x)], pixel, 0);
+    float roughness = clamp(mat.g, 0.04, 1.0);
+    uint mode = uint(mat.b * 255.0 + 0.5);
+    vec3 n4 = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], pixel, 0).xyz;
+    if (mode == 0u || dot(n4, n4) < 1e-6 || roughness >= VELK_REFLECT_CUTOFF) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], pixel, vec4(0.0));
+        return;
+    }
+    vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], pixel, 0).xyz;
+    vec3 n = normalize(n4);
+    vec3 v = -normalize(pos);
+    vec3 dir = reflect(-v, n);
+    if (roughness >= VELK_REFLECT_SHARP) {
+        rng_init(uvec2(pixel), g.present_counter);
+        vec3 sampled = ggx_sample_reflect(v, n, roughness, rng_next_vec2());
+        if (dot(sampled, n) > 0.0) dir = sampled;
+    }
+    Ray rr;
+    rr.origin = pos + n * max(length(pos) * 1e-3, 1e-3);
+    rr.dir = dir;
+    RayHit hit;
+    vec3 light = vec3(0.0);
+    float t = -1.0;
+    if (trace_closest_hit(rr, 1e30, hit)) {
+        vec3 at = rr.origin + dir * hit.t;
+        vec3 hn = normalize(hit.normal);
+        if (dot(hn, dir) > 0.0) hn = -hn;
+        vec3 albedo;
+        vec3 metal;
+        vec3 emission;
+        bool lit;
+        velk_probe_surface(hit, albedo, metal, emission, lit);
+        uint light_word;
+        uint radiance;
+        uint radiance_dir;
+        vec3 center;
+        bool ask;
+        velk_probe_hit_words(hit, at, light_word, radiance, radiance_dir, center, ask);
+        if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
+        vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
+        // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
+        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission
+              + metal * velk_probe_env(reflect(dir, hn), 0.5);
+        t = max(hit.t, 1e-4);
+    } else {
+        // As the lighting blurs the environment for a lobe; a sampled ray is one of the lobe already.
+        light = velk_probe_env(dir, roughness < VELK_REFLECT_SHARP ? roughness : 0.0);
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.x)], pixel, vec4(light, t));
+}
+#endif
+
 void main()
 {
+#ifdef VELK_REFLECT
+    velk_reflect_trace(gl_LocalInvocationIndex);
+#else
     velk_probes_gather(gl_LocalInvocationIndex);
+#endif
+}
+)";
+
+/**
+ * The reflections' resolve, after their trace (light_probes_main_src with VELK_REFLECT): a thread a
+ * pixel, 8 by 8 a group. A pixel that reflects takes the samples of its 2 by 2 block, each traced
+ * within the last four frames, by how much their surfaces agree with its own; a mirror's own
+ * sample where it has one. Then, but for a mirror, blended with the last frame's result where the
+ * reflection was then: through its image along the view ray, behind the surface by how far the
+ * ray went, or for a miss the view ray's direction; kept to the spread of the block's samples.
+ * Into this frame's result (pc.more.z): the light, and how many frames it holds, 0 for no
+ * reflection. Traces nothing: composed after rt_compute_prelude_src alone. pc.extras.x is the
+ * samples image, y the G-buffer's size (x low, y high), z its positions, w its normals; pc.more.x
+ * its material parameters, y the last frame's result, w not 0 when there is none.
+ */
+inline constexpr string_view reflect_resolve_src = R"(
+#define VELK_REFLECT_CUTOFF 0.3
+#define VELK_REFLECT_SHARP 0.05
+
+void main()
+{
+    uint width = pc.extras.y & 0xFFFFu;
+    uint height = pc.extras.y >> 16u;
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(width) || coord.y >= int(height)) return;
+    vec4 mat = texelFetch(velk_textures[nonuniformEXT(pc.more.x)], coord, 0);
+    float roughness = clamp(mat.g, 0.04, 1.0);
+    vec3 n4 = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], coord, 0).xyz;
+    if (uint(mat.b * 255.0 + 0.5) == 0u || dot(n4, n4) < 1e-6 || roughness >= VELK_REFLECT_CUTOFF) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(0.0));
+        return;
+    }
+    vec3 n = normalize(n4);
+    vec3 pos = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], coord, 0).xyz;
+    ivec2 last = ivec2(int(width) - 1, int(height) - 1);
+    ivec2 base = coord & ivec2(~1);
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    vec3 lo = vec3(1e30);
+    vec3 hi = vec3(-1e30);
+    float t_any = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        ivec2 q = min(base + ivec2(k & 1, k >> 1), last);
+        vec4 s = texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], q, 0);
+        if (s.a == 0.0) continue;
+        vec3 qn = texelFetch(velk_textures[nonuniformEXT(pc.extras.w)], q, 0).xyz;
+        if (dot(qn, qn) < 1e-6) continue;
+        vec3 qp = texelFetch(velk_textures[nonuniformEXT(pc.extras.z)], q, 0).xyz;
+        float w = pow(max(dot(normalize(qn), n), 0.0), 8.0) * exp(-abs(dot(n, qp - pos)) / (0.02 * length(pos) + 1e-3));
+        if (w <= 1e-4) continue;
+        sum += w * s.rgb;
+        total += w;
+        lo = min(lo, s.rgb);
+        hi = max(hi, s.rgb);
+        if (t_any == 0.0) t_any = s.a;
+    }
+    if (total <= 0.0) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(0.0));
+        return;
+    }
+    vec3 now = sum / total;
+    vec4 own = texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], coord, 0);
+    // A mirror: its own ray, which is the same every time it is traced.
+    if (roughness < VELK_REFLECT_SHARP) {
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(own.a != 0.0 ? own.rgb : now, 1.0));
+        return;
+    }
+    float t = own.a != 0.0 ? own.a : t_any;
+    vec3 history = now;
+    float frames = 0.0;
+    if (pc.more.w == 0u) {
+        GlobalData g = VELK_GLOBALS;
+        vec3 view = normalize(pos);
+        vec4 clip = t > 0.0 ? g.prev_view_projection * vec4(pos + view * t + g.cam_moved, 1.0)
+                            : g.prev_view_projection * vec4(view, 0.0);
+        if (clip.w > 1e-5) {
+            vec2 p = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
+            if (all(greaterThanEqual(p, vec2(0.0))) && p.x < float(width) && p.y < float(height)) {
+                vec4 h = texelFetch(velk_textures[nonuniformEXT(pc.more.y)], ivec2(p), 0);
+                if (h.a > 0.0) {
+                    vec3 spread = (hi - lo) * 0.25 + vec3(0.02);
+                    history = clamp(h.rgb, lo - spread, hi + spread);
+                    frames = h.a;
+                }
+            }
+        }
+    }
+    frames = min(frames + 1.0, 16.0);
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(mix(history, now, 1.0 / frames), frames));
 }
 )";
 
