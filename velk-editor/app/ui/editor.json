@@ -88,7 +88,7 @@
     { "targets": ["body"], "class": "velk-ui.Stack", "properties": { "axis": 0, "spacing": 1 } },
 
     { "targets": ["hierarchy", "viewport", "inspector"], "class": "velk-ui.Stack", "properties": { "axis": 1, "spacing": 0 } },
-    { "targets": ["hierarchy"], "class": "velk-ui.FixedSize", "properties": { "width": "240px" } },
+    { "targets": ["hierarchy"], "class": "velk-ui.FixedSize", "properties": { "width": "360px" } },
     { "targets": ["inspector"], "class": "velk-ui.FixedSize", "properties": { "width": "300px" } },
 
     { "targets": ["hierarchy_title", "viewport_title", "inspector_title"], "class": "velk-ui.FixedSize", "properties": { "height": "26px" } },
