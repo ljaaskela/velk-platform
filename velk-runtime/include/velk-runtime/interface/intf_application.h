@@ -40,6 +40,9 @@ struct ApplicationConfig
     RenderBackendType backend{RenderBackendType::Default}; ///< GPU backend selection (Default = platform best).
     string_view app_root;                                  ///< Override path for the @c app:// resource scheme.
     string_view assets_root;                               ///< Override path for the @c assets:// resource scheme.
+    /// Port on localhost the editor attaches to; 0 leaves the editor endpoint off. The
+    /// VELK_EDITOR_PORT environment variable overrides it.
+    uint16_t editor_port{0};
 };
 
 /**

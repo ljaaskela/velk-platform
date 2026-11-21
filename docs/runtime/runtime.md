@@ -119,6 +119,7 @@ The render context and the default renderer are NOT created at this point. Both 
 | `backend` | `RenderBackendType::Default` | GPU backend (Default = platform best). |
 | `app_root` | empty | Override path for the `app://` resource scheme. |
 | `assets_root` | empty | Override path for the `assets://` resource scheme. |
+| `editor_port` | 0 | Port on localhost the editor attaches to. 0 leaves the editor endpoint off. The `VELK_EDITOR_PORT` environment variable overrides it, so any application can be started with the endpoint on. With it on, the runtime loads `velk_remote` and `velk_editor_endpoint` and makes every scene it shows visible to the editor. |
 
 ## Window
 

@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <velk-editor/endpoint/intf_editor_endpoint.h>
+#include <velk-editor/endpoint/plugin.h>
 #include <velk-render/api/render_context.h>
 #include <velk-render/interface/intf_image.h>
 #include <velk-ui/plugins/image/plugin.h>
@@ -115,7 +117,35 @@ bool Application::init(const ApplicationConfig& config)
         return false;
     }
 
+    start_editor_endpoint();
     return true;
+}
+
+void Application::start_editor_endpoint()
+{
+    uint16_t port = config_.editor_port;
+    if (const char* env = std::getenv("VELK_EDITOR_PORT")) {
+        port = static_cast<uint16_t>(std::strtol(env, nullptr, 10));
+    }
+    if (port == 0) {
+        return;
+    }
+    auto& reg = instance().plugin_registry();
+    reg.load_plugin("plugin:velk_remote");
+    reg.load_plugin("plugin:velk_editor_endpoint");
+    editor_endpoint_ = reg.find_plugin(editor::PluginId::EndpointPlugin);
+    auto* endpoint = interface_cast<editor::IEditorEndpoint>(editor_endpoint_);
+    if (!endpoint) {
+        VELK_LOG(E, "editor endpoint: plugin not found");
+        editor_endpoint_ = nullptr;
+        return;
+    }
+    const uint16_t bound = endpoint->listen(port);
+    if (bound) {
+        VELK_LOG(I, "editor endpoint: listening on port %u", static_cast<unsigned>(bound));
+    } else {
+        VELK_LOG(E, "editor endpoint: cannot listen on port %u", static_cast<unsigned>(port));
+    }
 }
 
 bool Application::ensure_render_context()
@@ -263,6 +293,10 @@ void Application::bind_scene_to_window(const IObject::Ptr& window,
     link.resize_handler = std::move(resize_handler);
     link.views = 1;
     scene_links_.emplace_back(std::move(link));
+
+    if (auto* endpoint = interface_cast<editor::IEditorEndpoint>(editor_endpoint_)) {
+        endpoint->add_scene(scene);
+    }
 }
 
 void Application::remove_view(const IObject::Ptr& window, const ::velk::IElement::Ptr& camera)
@@ -292,12 +326,17 @@ void Application::remove_view(const IObject::Ptr& window, const ::velk::IElement
         scene_links_.erase(scene_links_.begin() + i);
         // Input goes to the scene of the window's latest remaining view.
         shared_ptr<::velk::IScene> input_scene;
+        bool still_shown = false;
         for (auto& other : scene_links_) {
             if (interface_cast<IWindow>(other.window) == iwin) {
                 input_scene = other.scene;
             }
+            still_shown = still_shown || other.scene == scene;
         }
         iwin->input().set_scene(input_scene);
+        if (auto* endpoint = interface_cast<editor::IEditorEndpoint>(editor_endpoint_); endpoint && !still_shown) {
+            endpoint->remove_scene(scene);
+        }
         return;
     }
 }

@@ -71,6 +71,8 @@ private:
 
     /// Ensures render context + renderer exist after the first window is created.
     bool ensure_render_context();
+    /** @brief Loads the editor endpoint and listens, when a port is configured. */
+    void start_editor_endpoint();
 
     /// Updates performance overlay timings (called after each submit).
     void tick_overlays(double cpu_time, double frame_time,
@@ -110,6 +112,7 @@ private:
     ::velk::IRenderer::Ptr renderer_;
     IWindowProvider* window_provider_ = nullptr;
     IPlugin::Ptr platform_plugin_;
+    IPlugin::Ptr editor_endpoint_; ///< Set when the editor endpoint is on.
     vector<IObject::Ptr> windows_;
     vector<WindowSceneLink> scene_links_;
     vector<PerformanceOverlay> overlays_;

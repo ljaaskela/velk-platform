@@ -17,6 +17,7 @@ target_include_directories(velk_runtime
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/plugins/image/include
+            ${CMAKE_SOURCE_DIR}/velk-editor/endpoint/include
 )
 
 target_compile_definitions(velk_runtime PRIVATE VELK_EXPORTS)
