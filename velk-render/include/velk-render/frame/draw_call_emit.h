@@ -84,18 +84,15 @@ inline void write_draw_shade(IGpuResourceManager& resources, const IGpuArena& dr
         shade->reserve(want);
         if (shade->capacity() < at + kBytes) return;
     }
-    color albedo = material ? material->get_average_albedo() : color::white();
+    const color albedo = material ? material->get_average_albedo() : color::white();
     const color emission = material ? material->get_average_emission() : color::black();
     const bool lit = material ? material->is_lit() : true;
-    if (lit && material) {
-        // What a lit surface reflects diffusely: its base colour less what metal reflects.
-        const float m = material->get_average_metallic();
-        const float diffuse = 1.f - (m < 0.f ? 0.f : m > 1.f ? 1.f : m);
-        albedo = {albedo.r * diffuse, albedo.g * diffuse, albedo.b * diffuse, albedo.a};
-    }
+    // Kept apart from the albedo: a hit takes what metal reflects from it, and reflects the rest
+    // diffusely.
+    const float metallic = lit && material ? material->get_average_metallic() : 0.f;
     const bool tinted = material ? material->is_tinted() : true;
     uint32_t words[kDrawShadeWords];
-    pack_draw_shade(albedo.r, albedo.g, albedo.b, lit, tinted, emission.r, emission.g, emission.b, words);
+    pack_draw_shade(albedo.r, albedo.g, albedo.b, lit, tinted, metallic, emission.r, emission.g, emission.b, words);
     shade->update_at(at, words, kBytes);
 }
 

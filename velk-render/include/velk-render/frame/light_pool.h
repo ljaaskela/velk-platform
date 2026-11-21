@@ -2293,6 +2293,7 @@ layout(set = 1, binding = 6, std430) readonly buffer VelkDrawShade { uint data[]
 #define VELK_DRAW_SHADE_WORDS 2u
 #define VELK_DRAW_SHADE_UNLIT 0x01000000u
 #define VELK_DRAW_SHADE_TINTED 0x02000000u
+#define VELK_DRAW_SHADE_METALLIC_SHIFT 26u
 
 vec3 velk_srgb_to_linear(vec3 s)
 {
@@ -2301,11 +2302,14 @@ vec3 velk_srgb_to_linear(vec3 s)
 
 // What a ray sees of the surface it hit, without its material's code: its draw's shading
 // summary, its albedo times, where its material takes them, its instance's colour and its vertex
-// colours, and on a quad the quad's colour. A lit surface reflects that albedo; an unlit one
-// gives it off, on top of its emission. White and lit where the hit names no draw.
-void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool lit)
+// colours, and on a quad the quad's colour. A lit surface reflects that albedo less its metallic
+// diffusely (`albedo`), and its metal reflects the rest tinted by it (`metal`, for what it
+// reflects from the way a ray would mirror off it); an unlit one gives it off, on top of its
+// emission. White, lit and not metal where the hit names no draw.
+void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 metal, out vec3 emission, out bool lit)
 {
     albedo = vec3(1.0);
+    metal = vec3(0.0);
     emission = vec3(0.0);
     lit = true;
     if (hit.draw == 0xFFFFFFFFu || hit.instance == 0xFFFFFFFFu) return;
@@ -2335,7 +2339,10 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 emission, out bool
     }
     vec3 surface = velk_srgb_to_linear(unpackUnorm4x8(look).rgb) * tint.rgb;
     lit = (look & VELK_DRAW_SHADE_UNLIT) == 0u;
-    albedo = lit ? surface : vec3(0.0);
+    float metallic = float(look >> VELK_DRAW_SHADE_METALLIC_SHIFT) / 63.0;
+    albedo = lit ? surface * (1.0 - metallic) : vec3(0.0);
+    // As F0 is, the dielectric base reflecting 4% of what is not metal.
+    metal = lit ? mix(vec3(0.04), surface, metallic) : vec3(0.0);
     emission = velk_rgb9e5(glow) + (lit ? vec3(0.0) : surface);
 }
 
@@ -2563,9 +2570,10 @@ void velk_probes_gather(uint lane)
             vec3 hn = normalize(hit.normal);
             if (dot(hn, dir) > 0.0) hn = -hn;
             vec3 albedo;
+            vec3 metal;
             vec3 emission;
             bool lit;
-            velk_probe_surface(hit, albedo, emission, lit);
+            velk_probe_surface(hit, albedo, metal, emission, lit);
             uint light_word;
             uint radiance;
             uint radiance_dir;
