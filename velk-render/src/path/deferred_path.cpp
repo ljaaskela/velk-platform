@@ -2250,11 +2250,14 @@ void DeferredPath::emit_transparent_pass(IViewEntry& /*entry*/, ViewState& vs,
                 return raw;
             };
 
+            // With the frame's snippets, so that the draw records of blended batches name their
+            // material for rays (a glyph's coverage) as the visibility pass's records do.
             vector<DrawCall> draw_calls;
+            const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
             emit_draw_calls(
                 draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
                 default_stream_buffers, render_view.view_globals_base, resolve,
-                render_view.has_frustum ? &render_view.frustum : nullptr);
+                render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx);
 
             // No transparent geometry this view: leave an empty (no-op) pass.
             if (draw_calls.empty()) return;
