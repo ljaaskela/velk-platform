@@ -662,6 +662,10 @@ bool VkBackend::create_device()
     const char* no_primitive_id = std::getenv("VELK_NO_PRIMITIVE_ID");
     primitive_id_supported_ = available.geometryShader == VK_TRUE && !(no_primitive_id && no_primitive_id[0] == '1');
     features2.features.geometryShader = primitive_id_supported_ ? VK_TRUE : VK_FALSE;
+    // Lets fragment shaders write storage buffers, for blended surfaces' fragments to list the
+    // light they read.
+    fragment_stores_supported_ = available.fragmentStoresAndAtomics == VK_TRUE;
+    features2.features.fragmentStoresAndAtomics = fragment_stores_supported_ ? VK_TRUE : VK_FALSE;
     features2.pNext = &features12;
 
     if (!check_required_features(features12, dynamic_rendering)) {

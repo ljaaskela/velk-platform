@@ -292,7 +292,9 @@ inline constexpr uint32_t kLightMaxSegments = 64;
                                                     meshes, meshes without a tree: six words */                      \
     X(SumMeshWide, SUM_MESH_WIDE, 170)           /* summed: whole meshes walked by box size, four words (velk_ray_mesh_wide) */ \
     X(SumMeshTris, SUM_MESH_TRIS, 174)           /* summed: and by triangles, four words */                          \
-    X(HeaderEnd, HEADER_END, 178)
+    X(MostPagesWanted, MOST_PAGES_WANTED, 178)   /* the most pages any frame asked for that were not there, since \
+                                                    the pool was last grown or looked at */                          \
+    X(HeaderEnd, HEADER_END, 179)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -3437,36 +3439,13 @@ void main()
  * this frame, and puts nothing on the search or split list, which the next frame's search would
  * not see.
  */
-inline constexpr string_view light_claim_src = R"(
-#version 450
-#include "velk.glsl"
-
-layout(local_size_x = 8, local_size_y = 8) in;
-
-struct LightInstance {
-    mat4 world_matrix;
-    vec4 offset;
-    vec4 size;
-    vec4 color;
-    uvec4 params;
-};
-
-layout(set = 1, binding = 3, scalar) readonly buffer LightInstances { LightInstance data[]; } light_instances;
-layout(set = 1, binding = 16, std430) buffer LightWords { uint data[]; } light_words;
-
-layout(push_constant) uniform PC {
-    uint ids_word;
-    uint width;
-    uint height;
-    uint pool_word;
-    float light_pixels;
-    uint lights;  // the scene's lights, at most VELK_LIGHT_SLOTS
-    uint again;   // after the search, for the records it laid out
-    uint position_id;  // the G-buffer's positions, with each triangle's longest edge
-} pc;
-
-#define VELK_LIGHT_WORDS light_words
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL R"(
+// The claim's own code, shared by its pass over the visibility buffer's pixels (light_claim_src)
+// and its pass over blended surfaces' fragments (light_claim_blended_src). Who includes it has
+// `light_words` writable as VELK_LIGHT_WORDS, push constants `pc` with pool_word, light_pixels,
+// lights and again, and says before it where the pixel is in its triangle (velk_claim_weights),
+// how long its triangle's longest edge is on screen (velk_claim_tri_px) and its instance's world
+// (velk_claim_world).
+#define VELK_LIGHT_CLAIM_GLSL R"(
 // Puts `record`, now pending, on the search list with the light it had and its instance; with
 // no room, gives its light back.
 void velk_light_search(uint record, uint was, uint instance)
@@ -3620,26 +3599,23 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
 }
 
 )" R"(
-// Lists the points of light the pixel at `coord` (ids `ids`, of draw `d`) reads from the record
-// whose first page starts at `first`, those it reads with any weight, when they are due
+// Lists the points of light the pixel with ids `ids`, of draw `d`, reads from the record whose
+// first page starts at `first`, those it reads with any weight, when they are due
 // (velk_light_list_point). Where the pixel is in its triangle, and its triangle's size, are as
-// the resolve left them for the lighting too (velk_pixel_weights, the G-buffer's positions), so
-// that both read the same points.
-void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uvec2 coord, uint instance, uint frame, GlobalData g)
+// its lighting finds them too (velk_claim_weights, velk_claim_tri_px), so that both read the same
+// points.
+void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uint instance, uint frame, GlobalData g)
 {
     uint cluster = velk_ids_cluster(d, ids);
     if (cluster == VELK_NO_CLUSTER) return;
     uint triangle = velk_ids_triangle(d, ids);
     uint word = d.index_base + velk_cluster_first_index(cluster) + triangle * 3u;
     uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
-    vec3 b = velk_pixel_weights(pc.ids_word, pc.width, ivec2(coord));
+    vec3 b = velk_claim_weights();
     // In pieces: the pixel's way down its triangle's levels, from its vertex points.
     uint pool = pc.pool_word;
     if (triangle < velk_light_pieced(first)) {
-        vec4 position = texelFetch(velk_textures[nonuniformEXT(pc.position_id)], ivec2(coord), 0);
-        mat4 vp = g.view_projection;
-        float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
-        float tri_px = position.w * px_per_world;
+        float tri_px = velk_claim_tri_px(g);
         g_listed_by = tri_px < 8.0 ? VELK_LIGHT_LISTED_SMALL : tri_px < 64.0 ? VELK_LIGHT_LISTED_MID : VELK_LIGHT_LISTED_LARGE;
         velk_light_list_way(first, corners, triangle, b, tri_px, instance, frame);
         return;
@@ -3669,22 +3645,17 @@ void velk_light_list_one(uint at, uint kind, uint target, uint instance, uint ta
     velk_light_trace(kind, target, instance, table, 8u * max(pc.lights, 1u));
 }
 
-void main()
+// After the search, the claim again only when it laid records out or made pieces this frame.
+bool velk_light_claim_idle()
 {
-    uvec2 coord = gl_GlobalInvocationID.xy;
-    // The scene's lights, for what the next frame's mark lists (light_mark_src).
-    if (coord.x == 0u && coord.y == 0u && pc.again == 0u) light_words.data[pc.pool_word + VELK_POOL_LIGHTS] = pc.lights;
-    if (coord.x >= pc.width || coord.y >= pc.height) return;
-    // Again after the search only when it laid records out or made pieces this frame.
-    if (pc.again != 0u && light_words.data[pc.pool_word + VELK_POOL_SEARCHED] == 0u
-        && light_words.data[pc.pool_word + VELK_POOL_SPLITS] == 0u) {
-        return;
-    }
-    uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, ivec2(coord));
-    if (ids.x == 0u) return;
-    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
-    uint record = velk_ids_record(d, ids);
-    if (record == VELK_NO_RECORD) return;
+    return pc.again != 0u && light_words.data[pc.pool_word + VELK_POOL_SEARCHED] == 0u
+        && light_words.data[pc.pool_word + VELK_POOL_SPLITS] == 0u;
+}
+
+// Gives the record `record` that the pixel with ids `ids`, of draw `d`, shows its light, and
+// lists the points it reads.
+void velk_light_claim(VelkDrawData d, uvec2 ids, uint record)
+{
     GlobalData g = velk_globals.data[d.globals_base];
     mat4 vp = g.view_projection;
     float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
@@ -3720,8 +3691,7 @@ void main()
     // A cluster: as wide on screen as it is now, and its largest triangle.
     uint cluster = clusters + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
     uint vertices = light_words.data[cluster + VELK_LOD_CLUSTER_VERTICES];
-    LightInstance li = light_instances.data[d.instances_base + velk_ids_slot(d, ids)];
-    mat4 world = velk_sized_world(li.world_matrix, li.offset.xyz, li.size.xyz);
+    mat4 world = velk_claim_world(d, ids);
     float scale = max(max(length(world[0].xyz), length(world[1].xyz)), length(world[2].xyz));
     vec3 own = vec3(uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE]),
                     uintBitsToFloat(light_words.data[cluster + VELK_LOD_CLUSTER_OWN_SPHERE + 1u]),
@@ -3738,7 +3708,7 @@ void main()
         uint first = velk_light_page(pc.pool_word, was);
         if (light_words.data[first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED) {
             velk_light_list_record(was, instance, frame);
-            velk_light_list_pixel(first, d, ids, coord, instance, frame, g);
+            velk_light_list_pixel(first, d, ids, instance, frame, g);
             return;
         }
         uint cluster = velk_ids_cluster(d, ids);
@@ -3749,7 +3719,7 @@ void main()
             if (corner >= light_words.data[first + VELK_PAGE_VERTICES]) continue;
             velk_light_list_record(light_words.data[velk_light_point_word(pc.pool_word, first, corner * 3u)], instance, frame);
         }
-        velk_light_list_pixel(first, d, ids, coord, instance, frame, g);
+        velk_light_list_pixel(first, d, ids, instance, frame, g);
         return;
     }
 
@@ -3771,6 +3741,170 @@ void main()
     }
     if (atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], was, VELK_LIGHT_PENDING) != was) return;
     velk_light_search(record, was, instance);
+}
+)"
+
+inline constexpr string_view light_claim_src = R"(
+#version 450
+#include "velk.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct LightInstance {
+    mat4 world_matrix;
+    vec4 offset;
+    vec4 size;
+    vec4 color;
+    uvec4 params;
+};
+
+layout(set = 1, binding = 3, scalar) readonly buffer LightInstances { LightInstance data[]; } light_instances;
+layout(set = 1, binding = 16, std430) buffer LightWords { uint data[]; } light_words;
+
+layout(push_constant) uniform PC {
+    uint ids_word;
+    uint width;
+    uint height;
+    uint pool_word;
+    float light_pixels;
+    uint lights;  // the scene's lights, at most VELK_LIGHT_SLOTS
+    uint again;   // after the search, for the records it laid out
+    uint position_id;  // the G-buffer's positions, with each triangle's longest edge
+} pc;
+
+#define VELK_LIGHT_WORDS light_words
+
+uvec2 g_coord;  // the thread's pixel
+
+// As the resolve left them for the lighting: where the pixel is in its triangle, and from the
+// G-buffer's positions, its distance and its triangle's longest edge.
+vec3 velk_claim_weights() { return velk_pixel_weights(pc.ids_word, pc.width, ivec2(g_coord)); }
+
+float velk_claim_tri_px(GlobalData g)
+{
+    vec4 position = texelFetch(velk_textures[nonuniformEXT(pc.position_id)], ivec2(g_coord), 0);
+    mat4 vp = g.view_projection;
+    float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
+    return position.w * px_per_world;
+}
+
+mat4 velk_claim_world(VelkDrawData d, uvec2 ids)
+{
+    LightInstance li = light_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    return velk_sized_world(li.world_matrix, li.offset.xyz, li.size.xyz);
+}
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL VELK_LIGHT_CLAIM_GLSL R"(
+void main()
+{
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    // The scene's lights, for what the next frame's mark lists (light_mark_src).
+    if (coord.x == 0u && coord.y == 0u && pc.again == 0u) light_words.data[pc.pool_word + VELK_POOL_LIGHTS] = pc.lights;
+    if (coord.x >= pc.width || coord.y >= pc.height) return;
+    if (velk_light_claim_idle()) return;
+    g_coord = coord;
+    uvec2 ids = velk_pixel_ids(pc.ids_word, pc.width, ivec2(coord));
+    if (ids.x == 0u) return;
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint record = velk_ids_record(d, ids);
+    if (record == VELK_NO_RECORD) return;
+    velk_light_claim(d, ids, record);
+}
+)";
+
+/**
+ * The claim (light_claim_src) for the fragments of blended surfaces, which the visibility buffer
+ * does not hold: a raster pass over their clusters' draws against the visibility buffer's depth,
+ * with no colour, whose fragment shader this is, before the claim's search and again after it.
+ * A fragment's ids are those the visibility pass would write (VELK_WRITE_VISIBILITY); where it is
+ * in its triangle comes from its triangle's corners. Its push constants are the draw's, then the
+ * claim's.
+ */
+inline constexpr string_view light_claim_blended_src = R"(
+#version 450
+#include "velk.glsl"
+#include "velk-ui.glsl"
+
+layout(early_fragment_tests) in;
+
+VELK_VARYINGS_IN
+
+layout(set = 1, binding = 16, std430) buffer LightWords { uint data[]; } light_words;
+
+layout(push_constant, std430) uniform VelkPC {
+    uint draw_base;
+    uint pool_word;
+    float light_pixels;
+    uint lights;
+    uint again;
+} pc;
+
+#define VELK_LIGHT_WORDS light_words
+
+uvec2 g_ids;       // the fragment's, as the visibility buffer would hold them
+vec3 g_weights;    // where it is in its triangle
+float g_longest;   // its triangle's longest edge, in world units
+
+// The fragment's triangle's corners from the camera, as its vertices are (velk_default_varyings):
+// where the fragment is in it, and its longest edge.
+void velk_claim_triangle(VelkDrawData d)
+{
+    g_weights = vec3(1.0 / 3.0);
+    g_longest = 0.0;
+    uint cluster = velk_ids_cluster(d, g_ids);
+    if (cluster == VELK_NO_CLUSTER) return;
+    uint word = d.index_base + velk_cluster_first_index(cluster) + velk_ids_triangle(d, g_ids) * 3u;
+    uint base = velk_cluster_vertex_word(d, cluster);
+    ElementInstance inst = velk_draw_instance(d, velk_ids_slot(d, g_ids));
+    GlobalData g = velk_globals.data[d.globals_base];
+    vec3 p0 = velk_rel_position(inst.world_matrix, inst.offset.xyz
+        + velk_unpack_vertex3d(base + velk_mesh_words.data[word] * VELK_VERTEX3D_WORDS).position * inst.size.xyz, g);
+    vec3 p1 = velk_rel_position(inst.world_matrix, inst.offset.xyz
+        + velk_unpack_vertex3d(base + velk_mesh_words.data[word + 1u] * VELK_VERTEX3D_WORDS).position * inst.size.xyz, g);
+    vec3 p2 = velk_rel_position(inst.world_matrix, inst.offset.xyz
+        + velk_unpack_vertex3d(base + velk_mesh_words.data[word + 2u] * VELK_VERTEX3D_WORDS).position * inst.size.xyz, g);
+    vec3 e0 = p1 - p0;
+    vec3 e1 = p2 - p0;
+    vec3 e2 = v_rel_pos - p0;
+    float d00 = dot(e0, e0);
+    float d01 = dot(e0, e1);
+    float d11 = dot(e1, e1);
+    float d20 = dot(e2, e0);
+    float d21 = dot(e2, e1);
+    float denom = d00 * d11 - d01 * d01;
+    if (denom > 0.0) {
+        float v = (d11 * d20 - d01 * d21) / denom;
+        float w = (d00 * d21 - d01 * d20) / denom;
+        vec3 b = max(vec3(1.0 - v - w, v, w), vec3(0.0));
+        g_weights = b / max(b.x + b.y + b.z, 1e-6);
+    }
+    g_longest = sqrt(max(max(d00, d11), dot(p2 - p1, p2 - p1)));
+}
+
+vec3 velk_claim_weights() { return g_weights; }
+
+float velk_claim_tri_px(GlobalData g)
+{
+    mat4 vp = g.view_projection;
+    float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(v_rel_pos), 1e-4);
+    return g_longest * px_per_world;
+}
+
+mat4 velk_claim_world(VelkDrawData d, uvec2 ids)
+{
+    ElementInstance inst = velk_draw_instance(d, velk_ids_slot(d, ids));
+    return velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz);
+}
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL VELK_LIGHT_CLAIM_GLSL R"(
+void main()
+{
+    // A helper invocation's atomics give nothing back to go by.
+    if (gl_HelperInvocation || velk_light_claim_idle()) return;
+    VelkDrawData d = velk_draw_data.data[pc.draw_base];
+    g_ids = uvec2(pc.draw_base + 1u, (v_instance << d.triangle_bits) | uint(gl_PrimitiveID));
+    uint record = velk_ids_record(d, g_ids);
+    if (record == VELK_NO_RECORD) return;
+    velk_claim_triangle(d);
+    velk_light_claim(d, g_ids, record);
 }
 )";
 
@@ -4729,6 +4863,9 @@ void main()
             light_words.data[pool + VELK_POOL_STEPS] = 0u;
             light_words.data[pool + VELK_POOL_FIRST_RAYS] = 0u;
             light_words.data[pool + VELK_POOL_FREE_PAGES] = 0u;
+            // Kept for the pool's growth, which looks only now and then.
+            light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED] = max(light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED],
+                                                                       light_words.data[pool + VELK_POOL_PAGES_WANTED]);
             light_words.data[pool + VELK_POOL_PAGES_WANTED] = 0u;
             light_words.data[pool + VELK_POOL_RECORDS_PAGED] = 0u;
             light_words.data[pool + VELK_POOL_RECORDS_ONE_VALUE] = 0u;

@@ -94,6 +94,34 @@ IGpuPipeline::Ptr resolve_or_compile_visibility(IRenderContext& ctx, const IBatc
     return ctx.pipelines().compile_dynamic(string_view(composed), vsrc, key, formats, DepthFormat::Default, po);
 }
 
+/// The pipeline the claim's pass over blended surfaces (light_claim_blended_src) draws a blended
+/// batch with: its vertices as its own pass has them, no colour, tested against the visibility
+/// buffer's depth without writing it.
+IGpuPipeline::Ptr resolve_or_compile_blended_claim(IRenderContext& ctx, const IBatch& batch)
+{
+    constexpr uint64_t kBlendedClaimContentTag = 0x426c6e64'436c6d73ULL; // "BlndClms"
+    auto material_ptr = batch.material();
+    auto* src = material_ptr ? interface_cast<IShaderSource>(material_ptr.get()) : nullptr;
+    string_view vsrc = src ? src->get_source(shader_role::kVertex) : string_view{};
+    if (vsrc.empty()) {
+        vsrc = ext::element_vertex_src;
+    }
+    PipelineOptions po = batch.pipeline_options();
+    po.blend_mode = BlendMode::Opaque;
+    po.depth_write = false;
+    PipelineContentHasher hasher(kBlendedClaimContentTag);
+    hasher.str(vsrc);
+    hasher.options(po);
+    const uint64_t key = hasher.key();
+
+    const auto formats = array_view<const PixelFormat>();
+    PipelineCacheKey cache_key{key, PixelFormat::RGBA8, DepthFormat::Default, pipeline_target_layout(formats)};
+    if (auto pipeline = ctx.pipelines().find(cache_key)) {
+        return pipeline;
+    }
+    return ctx.pipelines().compile_dynamic(light_claim_blended_src, vsrc, key, formats, DepthFormat::Default, po);
+}
+
 } // namespace
 
 namespace {
@@ -1391,9 +1419,67 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
             rec.held.push_back(used);
         });
     };
+    // The claim over the fragments of blended surfaces drawn by their clusters, which the
+    // visibility buffer does not hold: their draws with no colour against its depth, their
+    // fragments claiming as its pixels do. Their push constants: the draw's, then the claim's.
+    IGpuTexture* blended_depth = vs.visibility->depth_attachment();
+    const bool blended = ctx.backend->supports_fragment_stores() && render_view.batches && blended_depth
+                      && !vs.cut_draw_words.own_clusters.empty();
+    uint32_t blended_pc[3] = {pool.word(), 0u, lights};
+    std::memcpy(&blended_pc[1], &kLightPixels, sizeof(float));
+    const bool blended_changed = vs.transparent_dirty || blended_depth != vs.last_claim_blended_depth
+                              || std::memcmp(blended_pc, vs.light_claim_blended_recorded, sizeof(blended_pc)) != 0;
+    const auto emit_blended = [&](IRenderPass::Ptr& pass, const char* name, const char* label, uint32_t again) {
+        bool dirty = blended_changed;
+        emit_cached_view_pass(pass, dirty, name, graph, [&](CachedPassRecording& rec) {
+            const auto& own = vs.cut_draw_words.own_clusters;
+            auto resolve = [&](const IBatch& b) -> IGpuPipeline* {
+                if (std::find(own.begin(), own.end(), &b) == own.end()) return nullptr;
+                auto p = resolve_or_compile_blended_claim(*ctx.render_ctx, b);
+                if (!p) return nullptr;
+                IGpuPipeline* raw = p.get();
+                rec.held.push_back(std::move(p));
+                return raw;
+            };
+            vector<DrawCall> draw_calls;
+            const FrameResolveContext resolve_ctx = ctx.make_resolve_context();
+            emit_draw_calls(draw_calls, *render_view.batches, *ctx.frame_buffer, *ctx.resources,
+                            default_streams(*ctx.render_ctx), render_view.view_globals_base, resolve,
+                            render_view.has_frustum ? &render_view.frustum : nullptr, ctx.snippets, &resolve_ctx,
+                            false, &vs.cut_draw_words);
+            if (draw_calls.empty()) return;
+            const uint32_t constants[4] = {blended_pc[0], blended_pc[1], blended_pc[2], again};
+            for (DrawCall& call : draw_calls) {
+                std::memcpy(call.root_constants + sizeof(uint32_t), constants, sizeof(constants));
+                call.root_constants_size = sizeof(uint32_t) + sizeof(constants);
+            }
+            auto cmd = ctx.backend->create_command_buffer();
+            if (!cmd) return;
+            DepthAttachment depth_att{};
+            depth_att.texture = blended_depth;
+            depth_att.clear = false;
+            cmd->begin_recording();
+            cmd->push_label(label);
+            cmd->record_global_barrier();
+            cmd->record_begin_rendering(array_view<const ColorAttachment>(), &depth_att);
+            cmd->set_viewport(render_view.viewport);
+            cmd->record_draws({draw_calls.data(), draw_calls.size()});
+            cmd->record_end_rendering();
+            cmd->record_global_barrier();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.visibility));
+        });
+    };
     emit_one(vs.light_claim_pass, view_pass_name(other, "deferred.light_claim", "other:deferred.light_claim"),
              "DeferredPath: light claim", pipeline, &pc, sizeof(pc), (vs.visibility_size.x + 7u) / 8u,
              (vs.visibility_size.y + 7u) / 8u, true);
+    if (blended) {
+        emit_blended(vs.light_claim_blended_pass,
+                     view_pass_name(other, "deferred.light_claim_blended", "other:deferred.light_claim_blended"),
+                     "DeferredPath: light claim blended", 0u);
+    }
     // Then the records it put on the search list, a work group each.
     struct SearchPushC
     {
@@ -1415,6 +1501,13 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     emit_one(vs.light_claim_again_pass, view_pass_name(other, "deferred.light_claim2", "other:deferred.light_claim2"),
              "DeferredPath: light claim again", pipeline, &again_pc, sizeof(again_pc), (vs.visibility_size.x + 7u) / 8u,
              (vs.visibility_size.y + 7u) / 8u, true);
+    if (blended) {
+        emit_blended(vs.light_claim_blended_again_pass,
+                     view_pass_name(other, "deferred.light_claim_blended2", "other:deferred.light_claim_blended2"),
+                     "DeferredPath: light claim blended again", 1u);
+        vs.last_claim_blended_depth = blended_depth;
+        std::memcpy(vs.light_claim_blended_recorded, blended_pc, sizeof(blended_pc));
+    }
     // Then the trace: what the claims listed sizes its dispatches (a group), then the one
     // values, a work group each, then the points, timed apart.
     if (trace && arena_buffer) {

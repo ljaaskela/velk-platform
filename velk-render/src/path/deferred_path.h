@@ -109,6 +109,13 @@ public:
         IRenderPass::Ptr light_search_pass;
         /// The claim again after the search, for the records and pieces it made (light_claim_src).
         IRenderPass::Ptr light_claim_again_pass;
+        /// The claim over blended surfaces' fragments (light_claim_blended_src), before the search
+        /// and again after it: rebuilt with the transparent pass, or when the depth it tests
+        /// against or what it pushes changes.
+        IRenderPass::Ptr light_claim_blended_pass;
+        IRenderPass::Ptr light_claim_blended_again_pass;
+        uint32_t light_claim_blended_recorded[3] = {};
+        IGpuTexture* last_claim_blended_depth = nullptr;
         /// The light trace: its dispatches' sizes, then the one values, then the points.
         IRenderPass::Ptr light_trace_args_pass;
         IRenderPass::Ptr light_trace_pass;

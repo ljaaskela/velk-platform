@@ -230,6 +230,10 @@ public:
     /// Whether shaders can use 64-bit atomics on storage buffers (shaderBufferInt64Atomics).
     virtual bool supports_buffer_int64_atomics() const = 0;
 
+    /// Whether fragment shaders can write storage buffers and use atomics on them
+    /// (fragmentStoresAndAtomics).
+    virtual bool supports_fragment_stores() const = 0;
+
     /** @brief Returns a monotonically increasing marker tagging the GPU
      *         work submitted by the most recent `submit_frame()` call.
      *
