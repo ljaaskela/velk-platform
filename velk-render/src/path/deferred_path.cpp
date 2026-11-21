@@ -1104,10 +1104,6 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     uint32_t count = 0;
     bool all = render_view.bvh.changed_all;
     const auto add = [&](const float lo[3], const float hi[3], uint32_t light) {
-        if (count == kLightChanges) {
-            all = true;
-            return;
-        }
         uint32_t change[kLightChangeWords] = {};
         std::memcpy(change + kChangeMin, lo, sizeof(float) * 3);
         change[kChangeLight] = light;
@@ -1116,6 +1112,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         ++count;
     };
     // What moved, came or went, as boxes; under a pixel on screen it changes no light that shows.
+    vector<WorldBox> boxes;
     if (!all) {
         const mat4& vp = render_view.view_projection;
         const float row = std::sqrt(vp(1, 0) * vp(1, 0) + vp(1, 1) * vp(1, 1) + vp(1, 2) * vp(1, 2));
@@ -1130,7 +1127,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
                 distance += out * out;
             }
             if (extent < pixel * std::sqrt(distance)) continue;
-            add(box.min, box.max, kLightNone);
+            boxes.push_back(box);
         }
     }
     // Lights, compared with how each was when last listed, so that one drifting a little each
@@ -1144,6 +1141,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         return (0.2126f * l.color_intensity[0] + 0.7152f * l.color_intensity[1] + 0.0722f * l.color_intensity[2])
              * l.color_intensity[3];
     };
+    vector<uint32_t> changed_lights;
     for (size_t i = 0; !all_lights && i < lights.size(); ++i) {
         const GpuLight& a = listed[i];
         const GpuLight& b = lights[i];
@@ -1161,11 +1159,38 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
             all_lights = true;
             break;
         }
-        add(b.position, b.position, static_cast<uint32_t>(i));
+        changed_lights.push_back(static_cast<uint32_t>(i));
         listed[i] = b;
     }
-    if (all_lights) {
+    // The lights first, then the boxes in what is left, those past it in one box around them all:
+    // only what that box could shadow changes, not everything. Everything only when the lights
+    // alone leave no room.
+    if (all_lights || changed_lights.size() > kLightChanges || (changed_lights.size() == kLightChanges && !boxes.empty())) {
         all = true;
+    }
+    if (!all) {
+        for (uint32_t i : changed_lights) add(lights[i].position, lights[i].position, i);
+        const uint32_t room = kLightChanges - count;
+        for (size_t b = 0; b < boxes.size(); ++b) {
+            if (b < room) {
+                add(boxes[b].min, boxes[b].max, kLightNone);
+                continue;
+            }
+            uint32_t* last = words.data() + kLightChangeHeaderWords + (count - 1u) * kLightChangeWords;
+            for (int k = 0; k < 3; ++k) {
+                float lo;
+                float hi;
+                std::memcpy(&lo, last + kChangeMin + k, sizeof(float));
+                std::memcpy(&hi, last + kChangeMax + k, sizeof(float));
+                lo = std::min(lo, boxes[b].min[k]);
+                hi = std::max(hi, boxes[b].max[k]);
+                std::memcpy(last + kChangeMin + k, &lo, sizeof(float));
+                std::memcpy(last + kChangeMax + k, &hi, sizeof(float));
+            }
+        }
+    }
+    // Everything changed: every light counts as listed as it is now.
+    if (all) {
         listed.resize(lights.size());
         if (!lights.empty()) std::memcpy(listed.data(), lights.data(), lights.size() * sizeof(GpuLight));
     }

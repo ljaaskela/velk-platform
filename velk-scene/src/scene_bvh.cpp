@@ -1610,12 +1610,16 @@ void SceneBvh::flush_object_transforms(FrameContext& ctx)
 
 void SceneBvh::note_changed(const BvhItemBounds& bounds)
 {
-    // Past this many, saying that everything changed costs readers less than the list.
+    // Past this many, the rest go into the last box, so that readers see one box around them
+    // rather than everything changed.
     constexpr size_t kMaxChanged = 256;
     if (changed_all_) return;
     if (changed_.size() >= kMaxChanged) {
-        changed_all_ = true;
-        changed_.clear();
+        WorldBox& last = changed_.back();
+        for (int k = 0; k < 3; ++k) {
+            last.min[k] = std::min(last.min[k], bounds.min[k]);
+            last.max[k] = std::max(last.max[k], bounds.max[k]);
+        }
         return;
     }
     WorldBox box;

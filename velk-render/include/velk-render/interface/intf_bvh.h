@@ -62,7 +62,7 @@ public:
      *        that moved, before and after, appeared or went away.
      *
      * For whatever keeps results of rays, to know which to trace again. Valid until the
-     * next update.
+     * next update. The list is bounded: past its length, its last box grows around the rest.
      *
      * @param all Set if everything may have changed, in which case the list does not say.
      */
