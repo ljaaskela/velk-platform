@@ -1239,14 +1239,17 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
         if (g_no_rays) atomicOr(cull_words.data[mark], bit);
         else atomicAnd(cull_words.data[mark], ~bit);
         uint light = 0xFFFFFFFFu;
+        uint radiance = 0xFFFFFFFFu;
         if (g_takeover) {
             uint was = velk_takeover_find(pc.cut_word, entry, cluster, slot);
             if (was != 0xFFFFFFFFu) {
                 light = cull_words.data[was + VELK_RECORD_LIGHT];
+                radiance = cull_words.data[was + VELK_RECORD_RADIANCE];
                 ++g_took;
             }
         }
         cull_words.data[record + VELK_RECORD_LIGHT] = light;
+        cull_words.data[record + VELK_RECORD_RADIANCE] = radiance;
     }
     ++g_count;
 }
@@ -5289,7 +5292,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 dispatch(sweep_pipeline.get(), begin_pc, sizeof(begin_pc), 1u);
                 cmd->record_global_barrier();
                 for (const CutJob& job : jobs) {
-                    const uint32_t mark_pc[2] = {job.cut, light_pool_word};
+                    const uint32_t mark_pc[5] = {job.cut, light_pool_word, job.instances_base, job.items_word, view_globals_base};
                     dispatch(mark_pipeline.get(), mark_pc, sizeof(mark_pc), 1u, job.cut + kCutDrawGroups);
                 }
                 cmd->record_global_barrier();

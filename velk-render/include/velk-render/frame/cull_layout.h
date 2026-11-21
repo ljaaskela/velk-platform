@@ -55,7 +55,8 @@ namespace velk {
     X(cp, gp, Color, COLOR, 9)                  /* RGBA8, red in the low byte */               \
     X(cp, gp, Radius, RADIUS, 10)               /* of a sphere at its centre around it and every quad under it, negative for an empty node */ \
     X(cp, gp, Light, LIGHT, 11)                 /* the light of the members under it, one value or kLightNone */ \
-    X(cp, gp, Words, WORDS, 12)
+    X(cp, gp, Radiance, RADIANCE, 12)           /* the indirect light they get, RGB9E5 or kLightNone: see light_pool.h */ \
+    X(cp, gp, Words, WORDS, 13)
 
 /// A view's quad list (kQuadList, VELK_QUAD_LIST), in the culling arena: the quad draw's
 /// indirect arguments and count, then the word of each quad drawn, and after the list's capacity
@@ -330,7 +331,8 @@ namespace velk {
     X(cp, gp, Slot, SLOT, 2)            /* its instance's slot */                                  \
     X(cp, gp, QuadTree, QUAD_TREE, 2)   /* for a quad, the word of its partition's quad tree */    \
     X(cp, gp, Light, LIGHT, 3)          /* its light: see light_pool.h */                          \
-    X(cp, gp, End, END, 4)
+    X(cp, gp, Radiance, RADIANCE, 4)    /* the indirect light it gets, RGB9E5 or kLightNone: see light_pool.h */ \
+    X(cp, gp, End, END, 5)
 
 /// A slot of a kept cut's takeover table (kTakeover, VELK_TAKEOVER): the old records of the
 /// partitions choosing again, for each new record to find the one that was the same.

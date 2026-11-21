@@ -277,6 +277,7 @@ void store_node(uint w, Quad q)
     build_words.data[w + VELK_QUAD_NODE_RADIUS] = floatBitsToUint(q.radius);
     // Its light, none until a pixel under it is lit (light_claim_src).
     build_words.data[w + VELK_QUAD_NODE_LIGHT] = kNone;
+    build_words.data[w + VELK_QUAD_NODE_RADIANCE] = kNone;
 }
 
 Quad no_quad()

@@ -14,7 +14,7 @@
 namespace velk {
 
 /// A view's light pool, in the culling arena: where the light of the kept cuts' records is kept
-/// (kCutRecordWords, its last word). A record's light word is one of:
+/// (kCutRecordWords, its kCutRecordLight word). A record's light word is one of:
 ///   kLightNone      not read yet
 ///   kLightPending   being given its light, for the moment it takes
 ///   below kLightOneValue  the first page of its light
@@ -70,13 +70,21 @@ namespace velk {
 ///
 /// A record of one value (kLightOneValue and up), a quad's node likewise, holds in the bits
 /// under it: how much of each of its lights it does not get, 3 bits a slot, the first lowest
-/// (kLightOneShadeBits); whether it has been traced (kLightOneTraced); and the last frame it was
-/// put on the trace list, its low 5 bits (kLightOneQueuedShift). Its lights are the strongest at
-/// its centre, found where they are needed (velk_light_slots_at), not kept.
+/// (kLightOneShadeBits); whether it has been traced (kLightOneTraced); whether a screen probe's
+/// ray hit it while it was not (kLightOneAsked), so that the next frame's mark (light_mark_src)
+/// lists it for tracing; and the last frame it was put on the trace list, its low 5 bits
+/// (kLightOneQueuedShift). A trace clears the ask. Its lights are the strongest at its centre,
+/// found where they are needed (velk_light_slots_at), not kept.
+///
+/// A record's radiance word, and a quad node's, is the indirect light its surface gets, RGB9E5,
+/// kLightNone until a pixel the screen probes light shows it: a pixel in 16 a frame blends its
+/// own into it (deferred_lighting_main_src). A probe ray's hit that the screen probes do not
+/// cover takes it before the environment (velk_probe_hit_indirect).
 inline constexpr uint32_t kLightNone = 0xFFFFFFFFu;
 inline constexpr uint32_t kLightPending = 0xFFFFFFFEu;
 inline constexpr uint32_t kLightOneValue = 0x80000000u;
 inline constexpr uint32_t kLightOneTraced = 0x40000000u;
+inline constexpr uint32_t kLightOneAsked = 0x20000000u;
 inline constexpr uint32_t kLightOneShadeBits = 0x00FFFFFFu;
 inline constexpr uint32_t kLightOneQueuedShift = 24;
 inline constexpr uint32_t kLightOwn = 1u;
@@ -261,7 +269,8 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(MarkDeepest, MARK_DEEPEST, 134)            /* and the deepest of them */                                       \
     X(LastMarkPieces, LAST_MARK_PIECES, 135)                                                                         \
     X(LastMarkDeepest, LAST_MARK_DEEPEST, 136)                                                                       \
-    X(HeaderEnd, HEADER_END, 137)
+    X(Lights, LIGHTS, 137)                       /* the scene's lights, at most kLightSlots, as the last claim had them */ \
+    X(HeaderEnd, HEADER_END, 138)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -315,6 +324,7 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 #define VELK_LIGHT_PIECED 0x40000000u
 #define VELK_LIGHT_SLOTS 8u
 #define VELK_LIGHT_ONE_TRACED 0x40000000u
+#define VELK_LIGHT_ONE_ASKED 0x20000000u
 #define VELK_LIGHT_ONE_SHADE_BITS 0x00FFFFFFu
 #define VELK_LIGHT_ONE_QUEUED_SHIFT 24u
 // kLightPieceLevel, kLightPiecePoints, kLightPieceDeepest, kLightPieceAsked, kLightCoarsePieces,
@@ -366,6 +376,29 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 #define VELK_LIGHT_TRUSTED_TRACES 8.0
 // kLightPixels.
 #define VELK_LIGHT_PIXELS 4.0
+
+// An RGB9E5 colour (rgb9e5 in gpu_data.h).
+vec3 velk_rgb9e5(uint w)
+{
+    return vec3(float(w & 511u), float((w >> 9u) & 511u), float((w >> 18u) & 511u)) * exp2(float(int(w >> 27u) - 24));
+}
+
+// `c` as RGB9E5, as rgb9e5 in gpu_data.h packs it, each colour below 65000 so that it never
+// packs to VELK_LIGHT_NONE.
+uint velk_pack_rgb9e5(vec3 c)
+{
+    c = clamp(c, vec3(0.0), vec3(65000.0));
+    float most = max(max(c.r, c.g), c.b);
+    int e = most > 0.0 ? clamp(int(floor(log2(most))) + 1, -15, 16) : 0;
+    float scale = exp2(float(9 - e));
+    // Rounding can carry the largest mantissa to 512: one exponent more.
+    if (uint(most * scale + 0.5) >= 512u && e < 16) {
+        ++e;
+        scale *= 0.5;
+    }
+    uvec3 m = min(uvec3(c * scale + 0.5), uvec3(511u));
+    return m.r | (m.g << 9u) | (m.b << 18u) | (uint(e + 15) << 27u);
+}
 
 // The first word of page `page` of the pool at `pool`.
 uint velk_light_page(uint pool, uint page)
@@ -1369,9 +1402,10 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
 // points of light: up to VELK_LIGHT_SLOTS lights, filled in order, the rest VELK_LIGHT_NONE, and
 // how much of each gets through. False when it has no traced light yet. `b` is where the pixel
 // is in its triangle (velk_pixel_weights), `tri_size` the triangle's longest edge in world
-// units, `light_pixels` kLightPixels.
+// units, `light_pixels` kLightPixels. `radiance` is the word of its record's radiance, or its
+// quad node's, VELK_LIGHT_NONE for none, even when it returns false.
 bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, float light_pixels,
-                       out uint lights[VELK_LIGHT_SLOTS], out float through[VELK_LIGHT_SLOTS])
+                       out uint lights[VELK_LIGHT_SLOTS], out float through[VELK_LIGHT_SLOTS], out uint radiance)
 {
     vec2 sums[VELK_LIGHT_SLOTS];
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
@@ -1379,17 +1413,20 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
         sums[k] = vec2(0.0);
         through[k] = 0.0;
     }
+    radiance = VELK_LIGHT_NONE;
     VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
     uint record = velk_ids_record(d, ids);
     if (record == VELK_NO_RECORD) return false;
     GlobalData g = velk_globals.data[d.globals_base];
     uint entry = VELK_LIGHT_WORDS.data[record + VELK_RECORD_ENTRY];
+    radiance = record + VELK_RECORD_RADIANCE;
 
     if (entry == VELK_CUT_QUAD) {
         mat4 vp = g.view_projection;
         float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
         uint node = velk_light_quad_node(VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_TREE], VELK_LIGHT_WORDS.data[record + VELK_RECORD_QUAD_NODE],
                                          g.cam_pos.xyz, pixels_per_unit, light_pixels);
+        radiance = node + VELK_QUAD_NODE_RADIANCE;
         uint value = VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_LIGHT];
         if (value >= VELK_LIGHT_PENDING || (value & VELK_LIGHT_ONE_TRACED) == 0u) return false;
         vec3 center = vec3(uintBitsToFloat(VELK_LIGHT_WORDS.data[node + VELK_QUAD_NODE_CENTER]),
@@ -2163,12 +2200,6 @@ vec3 velk_srgb_to_linear(vec3 s)
     return mix(s / 12.92, pow((s + 0.055) / 1.055, vec3(2.4)), greaterThan(s, vec3(0.04045)));
 }
 
-// An RGB9E5 colour (rgb9e5 in gpu_data.h).
-vec3 velk_rgb9e5(uint w)
-{
-    return vec3(float(w & 511u), float((w >> 9u) & 511u), float((w >> 18u) & 511u)) * exp2(float(int(w >> 27u) - 24));
-}
-
 // What a ray sees of the surface it hit, without its material's code: its draw's shading
 // summary, its albedo times, where its material takes them, its instance's colour and its vertex
 // colours, and on a quad the quad's colour. A lit surface reflects that albedo; an unlit one
@@ -2233,16 +2264,65 @@ vec3 velk_probe_light(uint index, vec3 at, vec3 n)
     return light.color_intensity.rgb * light.color_intensity.a * atten * max(dot(n, l), 0.0);
 }
 
-// The direct light a surface at `at`, facing `n`, gets as its light points there say, for a hit:
-// its one value, or its record's points at its triangle's corners (no triangle index on a hit:
-// without the grid between them), each light by how much of it gets through.
-vec3 velk_probe_direct(RayHit hit, vec3 at, vec3 n)
+// Where a hit at `at` keeps its light: the word of its light, of its radiance, and the place its
+// one value's lights are chosen at. Its record's, at the hit; for a quad, the node as wide as
+// kLightPixels over it, at the node's centre, as the lighting pass finds it. All VELK_LIGHT_NONE
+// for none. `ask` is whether a hit may ask for its one value to be traced (velk_probe_ask): not
+// for a record for light only, which light_search_src lays out only from none, nor for a whole
+// mesh without the sphere it is traced from.
+void velk_probe_hit_words(RayHit hit, vec3 at, out uint light, out uint radiance, out vec3 center, out bool ask)
+{
+    light = VELK_LIGHT_NONE;
+    radiance = VELK_LIGHT_NONE;
+    center = at;
+    ask = false;
+    if (hit.record == VELK_NO_RECORD) return;
+    uint entry = probe_words.data[hit.record + VELK_RECORD_ENTRY];
+    if (entry == VELK_CUT_QUAD) {
+        GlobalData g = VELK_GLOBALS;
+        mat4 vp = g.view_projection;
+        float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+        uint node = velk_light_quad_node(probe_words.data[hit.record + VELK_RECORD_QUAD_TREE],
+                                         probe_words.data[hit.record + VELK_RECORD_QUAD_NODE], g.cam_pos.xyz, pixels_per_unit,
+                                         VELK_LIGHT_PIXELS);
+        light = node + VELK_QUAD_NODE_LIGHT;
+        radiance = node + VELK_QUAD_NODE_RADIANCE;
+        center = vec3(uintBitsToFloat(probe_words.data[node + VELK_QUAD_NODE_CENTER]),
+                      uintBitsToFloat(probe_words.data[node + VELK_QUAD_NODE_CENTER + 1u]),
+                      uintBitsToFloat(probe_words.data[node + VELK_QUAD_NODE_CENTER + 2u])) - g.cam_pos.xyz;
+        ask = true;
+        return;
+    }
+    if (entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE) return;
+    light = hit.record + VELK_RECORD_LIGHT;
+    radiance = hit.record + VELK_RECORD_RADIANCE;
+    ask = !velk_cut_light_only(entry) && (entry != 0xFFFFFFFFu || probe_words.data[hit.record + VELK_RECORD_MESH_TABLE] != 0xFFFFFFFFu);
+}
+
+// Asks for the light at `word` to be traced, for a hit: none yet becomes an untraced one value,
+// and an untraced one value is marked asked, which the next frame's mark lists for tracing
+// (light_mark_src). Light with pages, or being given them, is left as it is.
+void velk_probe_ask(uint word)
+{
+    uint value = probe_words.data[word];
+    if (value == VELK_LIGHT_NONE) {
+        atomicCompSwap(probe_words.data[word], VELK_LIGHT_NONE, VELK_LIGHT_ONE_VALUE | VELK_LIGHT_ONE_ASKED);
+        return;
+    }
+    if (value < VELK_LIGHT_ONE_VALUE || value >= VELK_LIGHT_PENDING) return;
+    if ((value & (VELK_LIGHT_ONE_TRACED | VELK_LIGHT_ONE_ASKED)) == 0u) atomicOr(probe_words.data[word], VELK_LIGHT_ONE_ASKED);
+}
+
+// The direct light a surface at `at`, facing `n`, gets as its light points there say, for a hit
+// whose light is at `word`: its one value, its lights chosen at `center`, or its record's points
+// at its triangle's corners (no triangle index on a hit: without the grid between them), each
+// light by how much of it gets through.
+vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
 {
     uint pool = pc.shapes_base;
-    if (hit.record == VELK_NO_RECORD || pool == 0xFFFFFFFFu) return vec3(0.0);
-    uint entry = probe_words.data[hit.record];
-    uint value = probe_words.data[hit.record + VELK_RECORD_LIGHT];
-    if (entry == VELK_CUT_QUAD || value >= VELK_LIGHT_PENDING) return vec3(0.0);
+    if (word == VELK_LIGHT_NONE || pool == 0xFFFFFFFFu) return vec3(0.0);
+    uint value = probe_words.data[word];
+    if (value >= VELK_LIGHT_PENDING) return vec3(0.0);
     uint lights[VELK_LIGHT_SLOTS];
     vec2 sums[VELK_LIGHT_SLOTS];
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
@@ -2251,7 +2331,7 @@ vec3 velk_probe_direct(RayHit hit, vec3 at, vec3 n)
     }
     if (value >= VELK_LIGHT_ONE_VALUE) {
         if ((value & VELK_LIGHT_ONE_TRACED) == 0u) return vec3(0.0);
-        velk_light_add_one(value, at, lights, sums);
+        velk_light_add_one(value, center, lights, sums);
     } else {
         if (value >= probe_words.data[pool + VELK_POOL_PAGES] || hit.corners.x == VELK_NO_CORNERS) return vec3(0.0);
         vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
@@ -2281,8 +2361,10 @@ vec3 velk_probe_sky(vec3 rd)
 
 // The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: the
 // last frame's probe where the hit was on screen, when that probe was on the same surface, so
-// that light bounces once more each frame; else the environment around its normal, unshadowed.
-vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint across)
+// that light bounces once more each frame; else what its record or quad node keeps at
+// `radiance` from the pixels that showed it; else the environment around its normal,
+// unshadowed.
+vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint radiance, uint width, uint height, uint across)
 {
     GlobalData g = VELK_GLOBALS;
     uint was_store = pc.env.w;
@@ -2299,6 +2381,10 @@ vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint width, uint height, uint acro
                 }
             }
         }
+    }
+    if (radiance != VELK_LIGHT_NONE) {
+        uint kept = probe_words.data[radiance];
+        if (kept != VELK_LIGHT_NONE) return velk_rgb9e5(kept);
     }
     return velk_probe_sky(n);
 }
@@ -2372,10 +2458,16 @@ void velk_probes_gather(uint lane)
             vec3 emission;
             bool lit;
             velk_probe_surface(hit, albedo, emission, lit);
+            uint light_word;
+            uint radiance;
+            vec3 center;
+            bool ask;
+            velk_probe_hit_words(hit, at, light_word, radiance, center, ask);
+            if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
-            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, width, height, across) : vec3(0.0);
-            light = albedo * (velk_probe_direct(hit, at, hn) + indirect) + emission;
+            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, width, height, across) : vec3(0.0);
+            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);
         }
@@ -2820,6 +2912,8 @@ void velk_light_list_one(uint at, uint kind, uint target, uint instance, uint ta
 void main()
 {
     uvec2 coord = gl_GlobalInvocationID.xy;
+    // The scene's lights, for what the next frame's mark lists (light_mark_src).
+    if (coord.x == 0u && coord.y == 0u && pc.again == 0u) light_words.data[pc.pool_word + VELK_POOL_LIGHTS] = pc.lights;
     if (coord.x >= pc.width || coord.y >= pc.height) return;
     // Again after the search only when it laid records out or made pieces this frame.
     if (pc.again != 0u && light_words.data[pc.pool_word + VELK_POOL_SEARCHED] == 0u
@@ -3510,8 +3604,10 @@ void main()
 
 /**
  * Marks the pages the records of a kept cut name, and those of the records for light only their
- * vertices link to, and counts its records with pages and with one value. A thread per record
- * of the cut's pool, a group a page up to the last in use (VELK_CUT_DRAW_GROUPS).
+ * vertices link to, and counts its records with pages and with one value. Lists the one values a
+ * screen probe's ray asked for (kLightOneAsked) that are due, a record's or a quad's node's, as
+ * later traces. A thread per record of the cut's pool, a group a page up to the last in use
+ * (VELK_CUT_DRAW_GROUPS). Runs after the sweep's begin, so before the claim lists this frame's.
  */
 inline constexpr string_view light_mark_src = R"(
 #version 450
@@ -3524,10 +3620,54 @@ layout(set = 1, binding = 16, std430) buffer LightWords { uint data[]; } light_w
 layout(push_constant) uniform PC {
     uint cut_word;
     uint pool_word;
+    uint instances_base;  // the cut's, as instance_cut_choose_src has them
+    uint items_word;
+    uint globals_base;    // the view's
 } pc;
 
 #define VELK_LIGHT_WORDS light_words
 )" VELK_LIGHT_POOL_GLSL R"(
+// Lists the one value at `at`, of kind `kind` (VELK_LIGHT_TRACE_*), when a probe's ray asked for
+// it and it is due, as a later trace: of the rays the last frame's first traces left, at most
+// half the frame's, and at most half the trace list, so that the claim's first traces after it
+// always have room. Its frame goes into it, so that nothing lists it again this frame; when it
+// finds no room it is given back, so that a pixel's claim can still list it, and it is listed
+// again on a later frame.
+void velk_light_list_asked(uint at, uint kind, uint target, uint instance, uint table, uint frame)
+{
+    uint pool = pc.pool_word;
+    uint value = light_words.data[at];
+    if (value < VELK_LIGHT_ONE_VALUE || value >= VELK_LIGHT_PENDING) return;
+    if ((value & VELK_LIGHT_ONE_ASKED) == 0u || !velk_light_one_due(value)) return;
+    uint listed = (value & ~(31u << VELK_LIGHT_ONE_QUEUED_SHIFT)) | ((frame & 31u) << VELK_LIGHT_ONE_QUEUED_SHIFT);
+    if (listed == value || atomicCompSwap(light_words.data[at], value, listed) != value) return;
+    uint rays = 8u * clamp(light_words.data[pool + VELK_POOL_LIGHTS], 1u, VELK_LIGHT_SLOTS);
+    uint budget = light_words.data[pool + VELK_POOL_RAY_BUDGET];
+    uint most = min(budget - min(light_words.data[pool + VELK_POOL_LAST_FIRST_RAYS_ASKED], budget), budget / 2u);
+    bool room = light_words.data[pool + VELK_POOL_TRACES] < VELK_LIGHT_TRACE_CAPACITY / 2u;
+    if (room) {
+        uint before = atomicAdd(light_words.data[pool + VELK_POOL_RAYS_LISTED], rays);
+        if (before + rays > most) {
+            atomicAdd(light_words.data[pool + VELK_POOL_RAYS_LISTED], 0u - rays);
+            room = false;
+        }
+    }
+    if (room) {
+        // Every place under the count is written, as velk_light_list_entry writes them.
+        uint i = atomicAdd(light_words.data[pool + VELK_POOL_TRACES], 1u);
+        if (i < VELK_LIGHT_TRACE_CAPACITY) {
+            uint w = light_words.data[pool + VELK_POOL_TRACE_WORD] + i * VELK_LIGHT_TRACE_WORDS;
+            light_words.data[w + VELK_TRACE_ENTRY_HOW] = kind;
+            light_words.data[w + VELK_TRACE_ENTRY_AT] = target;
+            light_words.data[w + VELK_TRACE_ENTRY_INSTANCE] = instance;
+            light_words.data[w + VELK_TRACE_ENTRY_TABLE] = table;
+            return;
+        }
+        atomicAdd(light_words.data[pool + VELK_POOL_RAYS_LISTED], 0u - rays);
+    }
+    atomicCompSwap(light_words.data[at], listed, value);
+}
+
 // Never past the pool's pages, whatever a record says.
 void velk_light_mark(uint page)
 {
@@ -3551,10 +3691,39 @@ void main()
     uint state;
     uint at;
     if (!velk_cut_live_record(cut, gl_GlobalInvocationID.x, record, state, at)) return;
+    uint entry = light_words.data[record + VELK_RECORD_ENTRY];
+    GlobalData g = velk_globals.data[pc.globals_base];
+    uint frame = g.present_counter;
+    // A quad's light is on the node over it as wide as the light spacing, as the claim finds it.
+    if (entry == VELK_CUT_QUAD) {
+        mat4 vp = g.view_projection;
+        float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+        uint node = velk_light_quad_node(light_words.data[record + VELK_RECORD_QUAD_TREE], light_words.data[record + VELK_RECORD_QUAD_NODE],
+                                         g.cam_pos.xyz, pixels_per_unit, VELK_LIGHT_PIXELS);
+        velk_light_list_asked(node + VELK_QUAD_NODE_LIGHT, VELK_LIGHT_TRACE_NODE, node, 0u, 0u, frame);
+        return;
+    }
     uint light = light_words.data[record + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
     if (light >= VELK_LIGHT_ONE_VALUE) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);
+        // Asked for by a probe's ray: traced as the claim traces it, from its cluster's sphere or
+        // its whole mesh's.
+        if ((light & VELK_LIGHT_ONE_ASKED) == 0u || entry == VELK_CUT_RAY_QUAD || entry == VELK_CUT_STALE
+            || velk_cut_light_only(entry)) {
+            return;
+        }
+        uint slot = light_words.data[record + VELK_RECORD_SLOT];
+        uint instance = pc.instances_base + slot;
+        if (pc.items_word != VELK_LIGHT_NONE) instance = light_words.data[pc.items_word + slot * VELK_PLAIN_ITEM_WORDS];
+        if (instance == VELK_LIGHT_NONE) return;
+        if (entry == 0xFFFFFFFFu) {
+            uint table = light_words.data[record + VELK_RECORD_MESH_TABLE];
+            if (table != VELK_LIGHT_NONE) velk_light_list_asked(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_MESH, record, instance, table, frame);
+        } else {
+            uint cluster = light_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + light_words.data[record + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
+            velk_light_list_asked(record + VELK_RECORD_LIGHT, VELK_LIGHT_TRACE_CLUSTER, record, instance, cluster, frame);
+        }
         return;
     }
     uint pages = light_words.data[pc.pool_word + VELK_POOL_PAGES];

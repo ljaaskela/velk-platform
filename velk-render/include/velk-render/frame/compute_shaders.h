@@ -1499,10 +1499,11 @@ void main()
         uint point_lights[VELK_LIGHT_SLOTS];
         float point_through[VELK_LIGHT_SLOTS];
         bool points = false;
+        uint radiance = VELK_LIGHT_NONE;
         if (pc.spare3 != VELK_LIGHT_NONE) {
             points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord),
                                        velk_pixel_weights(pc.spare4, pc.spare2, coord), world_pos, position.w,
-                                       uintBitsToFloat(pc.spare5), point_lights, point_through);
+                                       uintBitsToFloat(pc.spare5), point_lights, point_through, radiance);
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
         if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_UNTRACED_PIXELS], 1u);
@@ -1574,7 +1575,17 @@ void main()
         // Light from other surfaces and the sky: the screen probes around it, or the environment
         // where none has a surface like it yet.
         vec3 indirect;
-        if (!velk_probe_indirect(coord, world_pos, N, indirect)) indirect = env_diffuse;
+        if (!velk_probe_indirect(coord, world_pos, N, indirect)) {
+            indirect = env_diffuse;
+        } else if (radiance != VELK_LIGHT_NONE
+                   && ((uint(coord.x) & 3u) | ((uint(coord.y) & 3u) << 2u)) == (VELK_GLOBALS.present_counter * 7u & 15u)) {
+            // A pixel in 16 each frame, a 4 by 4 pattern that moves every frame, keeps its record's
+            // indirect light for rays that hit it off screen (velk_probe_hit_indirect): the first
+            // as it is, then a little of each. Pixels of one record race; any of them will do.
+            uint kept = velk_light_cell_words.data[radiance];
+            vec3 blended = kept == VELK_LIGHT_NONE ? indirect : mix(velk_rgb9e5(kept), indirect, 0.125);
+            velk_light_cell_words.data[radiance] = velk_pack_rgb9e5(blended);
+        }
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
