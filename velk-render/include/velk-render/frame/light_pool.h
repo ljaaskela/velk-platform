@@ -276,7 +276,8 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(Lights, LIGHTS, 137)                       /* the scene's lights, at most kLightSlots, as the last claim had them */ \
     X(FinePointsWord, FINE_POINTS_WORD, 138)     /* the word of the fine list */                                     \
     X(LastFinePoints, LAST_FINE_POINTS, 139)                                                                         \
-    X(HeaderEnd, HEADER_END, 140)
+    X(LongestWalk, LONGEST_WALK, 140)            /* the most walk steps one thread of the trace took, since the log */ \
+    X(HeaderEnd, HEADER_END, 141)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1591,6 +1592,7 @@ void velk_points_count(uint pool)
     if (g_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_CAST], g_rays);
     if (g_rays_charged != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_POINT_RAYS_CHARGED], g_rays_charged);
     if (velk_ray_steps != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_STEPS], velk_ray_steps);
+    if (velk_ray_steps != 0u) atomicMax(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LONGEST_WALK], velk_ray_steps);
     if (g_first_rays != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS], g_first_rays);
     // Added up until the log reads them: triangles tested, records, rays and steps.
     if (velk_ray_tris != 0u) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_TRIANGLES], (velk_ray_tris + 15u) / 16u);
@@ -4518,6 +4520,8 @@ struct LightPool
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
+    float trace_ms = 0.f;          ///< The GPU time of its trace's last measured frame.
+    float most_trace_ms = 0.f;     ///< And the most of it since its counts were last logged.
     uint32_t written_rays = kLightTraceRays; ///< What the header holds of it.
 
     uint32_t word() const
@@ -4611,6 +4615,10 @@ inline void adjust_light_rays(LightPool& pool, IGpuArena& arena, float trace_ms,
 {
     if (!pool.header.valid()) {
         return;
+    }
+    if (trace_ms > 0.f) {
+        pool.trace_ms = trace_ms;
+        pool.most_trace_ms = trace_ms > pool.most_trace_ms ? trace_ms : pool.most_trace_ms;
     }
     uint32_t budget = kLightTraceRaysUnlimited;
     if (target_ms > 0.f) {

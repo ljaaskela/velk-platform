@@ -4804,8 +4804,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             clear(kLightPoolWorstRays, kLightPoolWorstFirstRays + 1u - kLightPoolWorstRays);
             const uint32_t worst_rays = h[kLightPoolWorstRays];
             const uint32_t worst_steps = h[kLightPoolWorstSteps];
-            VELK_LOG(I, "light trace: worst frame %u rays (%u for first traces), %u walk steps, %.0f steps a ray", worst_rays,
-                     h[kLightPoolWorstFirstRays], worst_steps, worst_rays != 0 ? double(worst_steps) / double(worst_rays) : 0.0);
+            clear(kLightPoolLongestWalk, 1u);
+            VELK_LOG(I, "light trace: worst frame %u rays (%u for first traces), %u walk steps, %.0f steps a ray; longest walk "
+                        "of one thread %u steps; GPU %.2f ms the last frame, %.2f ms at most",
+                     worst_rays, h[kLightPoolWorstFirstRays], worst_steps,
+                     worst_rays != 0 ? double(worst_steps) / double(worst_rays) : 0.0, h[kLightPoolLongestWalk],
+                     double(pool.trace_ms), double(pool.most_trace_ms));
+            pool.most_trace_ms = 0.f;
             // Since the last log: what a ray's walk tests, and which own points were traced.
             clear(kLightPoolSumTriangles, kLightPoolSumLaterTraces + 1u - kLightPoolSumTriangles);
             const double rays = h[kLightPoolSumRays] != 0 ? double(h[kLightPoolSumRays]) : 1.0;
