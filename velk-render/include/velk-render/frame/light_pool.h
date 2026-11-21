@@ -357,6 +357,9 @@ inline constexpr uint32_t kLightAssumedSteps = 64;
 #define VELK_LIGHT_POINT_COARSE 0x40000000u
 // A split list entry's how (VELK_SPLIT_ENTRY_HOW) with this asks for a triangle's root.
 #define VELK_LIGHT_SPLIT_ROOT 0x80000000u
+// From this bit of a split list entry's how, 2 bits a level from the first made under the top: the
+// child the asking pixel is in, the one whose children are made next (velk_split).
+#define VELK_SPLIT_PATH_SHIFT 20u
 // kLightSearchCapacity, kLightSplitCapacity, kLightTraceCapacity, kLightTraceWords.
 #define VELK_LIGHT_SEARCH_CAPACITY 1024u
 #define VELK_LIGHT_SPLIT_CAPACITY 2048u
@@ -2901,11 +2904,17 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
         // Every light's four bits all clear or all set, the same at all three.
         if (s0 == s1 && s1 == s2 && s0 == (s0 & 0x11111111u) * 15u) return;
     }
+    // The pixel's way down the levels made at once: which child it is in at each, 2 bits a level
+    // (VELK_SPLIT_PATH_SHIFT), so that only the pieces along it are split further.
+    vec3 l = on_piece ? way.at : b;
+    uint path = 0u;
+    for (uint r = 0u; r + 1u < VELK_PIECE_LEVELS_AT_ONCE; ++r) path |= velk_piece_step(l) << (2u * r);
+    path <<= VELK_SPLIT_PATH_SHIFT;
     if (on_piece) {
         uint before = atomicOr(light_words.data[piece_first + VELK_PIECE_READ], VELK_PIECE_ASKED);
-        if ((before & VELK_PIECE_ASKED) == 0u) velk_light_split(way.piece, depth << 8u);
+        if ((before & VELK_PIECE_ASKED) == 0u) velk_light_split(way.piece, (depth << 8u) | path);
     } else if (atomicCompSwap(light_words.data[root_word], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) == VELK_LIGHT_NONE) {
-        if (!velk_light_split(light_words.data[first + VELK_PAGE_FIRST], VELK_LIGHT_SPLIT_ROOT | triangle | (depth << 8u) | (level << 16u))) {
+        if (!velk_light_split(light_words.data[first + VELK_PAGE_FIRST], VELK_LIGHT_SPLIT_ROOT | triangle | (depth << 8u) | (level << 16u) | path)) {
             light_words.data[root_word] = VELK_LIGHT_NONE;
         }
     }
@@ -3075,8 +3084,9 @@ void main()
  * and asks again.
  *
  * Then, in kLightSplitCapacity more groups, makes the pieces the split list asks for, a work
- * group an ask: a triangle's root, or a piece's children, down to the depth asked, every level
- * whole. Their points start untraced, but for a root's corners, which take the vertices' points'
+ * group an ask: a triangle's root, or a piece's children, down to the depth asked along the
+ * asking pixel's way (VELK_SPLIT_PATH_SHIFT): at each level the four children of the piece it is
+ * in, so that every piece has its four children or none. Their points start untraced, but for a root's corners, which take the vertices' points'
  * light. They are linked in last, so that nothing reads them before they are written.
  */
 inline constexpr string_view light_search_src = R"(
@@ -3234,31 +3244,38 @@ shared uint s_record;       // the record's first page, and its first page's wor
 shared uint s_record_first;
 shared uint s_triangle;
 shared uint s_root_word;
+shared uint s_path;         // the asking pixel's way down (VELK_SPLIT_PATH_SHIFT), 2 bits a level
 
-// Pieces at levels from `from` up to, not with, `level`.
-uint velk_split_before(uint from, uint level)
+// Which child of the path's piece at level `level` (1 and on) the path goes on in: the one whose
+// four children make the next level.
+uint velk_split_digit(uint level)
 {
-    uint n = 0u;
-    for (uint r = from; r < level && r <= VELK_PIECE_LEVELS_AT_ONCE; ++r) n += 1u << (2u * r);
-    return n;
+    return (s_path >> (2u * (level - 1u))) & 3u;
 }
 
-// The page of piece `q` at level `level` of the pieces being made, or the top piece at level 0.
+// The pieces made: the root at level 0 when it is new, then at each level the four children of the
+// path's piece of the level above.
+uint velk_split_count()
+{
+    return (s_from == 0u ? 1u : 0u) + 4u * s_to;
+}
+
+// The page of piece `q` (0 to 3, the child of the path's piece above it) at level `level` of the
+// pieces being made, or the top piece at level 0.
 uint velk_split_page(uint level, uint q)
 {
-    if (level == 0u && s_from == 1u) return s_top;
-    return velk_light_taken(pc.pool_word, s_base, velk_split_before(s_from, level) + q);
+    if (level == 0u) return s_top;
+    return velk_light_taken(pc.pool_word, s_base, (s_from == 0u ? 1u : 0u) + 4u * (level - 1u) + q);
 }
 
-// The place of piece `q` at level `level` under the top piece: its digits in base 4, the
-// highest first, the children it is in from the top down.
+// The place of piece `q` at level `level` under the top piece: down the path to the level above,
+// then its child `q`.
 uint velk_split_place(uint level, uint q)
 {
+    if (level == 0u) return s_top_place;
     uint place = s_top_place;
-    for (uint r = level; r > 0u && r <= VELK_PIECE_LEVELS_AT_ONCE; --r) {
-        place = velk_piece_child_place(place, (q >> (2u * (r - 1u))) & 3u);
-    }
-    return place;
+    for (uint r = 1u; r < level && r <= VELK_PIECE_LEVELS_AT_ONCE; ++r) place = velk_piece_child_place(place, velk_split_digit(r));
+    return velk_piece_child_place(place, q);
 }
 
 // Writes piece `q` at level `level` of the pieces being made, its points untraced but for a root's
@@ -3271,12 +3288,15 @@ void velk_split_write(uint level, uint q, uint frame)
     uint page = velk_split_page(level, q);
     uint at = velk_light_page(pool, page);
     uint place = velk_split_place(level, q);
+    // Children only on the path: all four or none.
+    bool on_path = level < s_to && (level == 0u || q == velk_split_digit(level));
     for (uint k = 0u; k < 4u; ++k) {
-        light_words.data[at + VELK_PIECE_CHILDREN + k] = level < s_to ? velk_split_page(level + 1u, 4u * q + k) : VELK_LIGHT_NONE;
+        light_words.data[at + VELK_PIECE_CHILDREN + k] = on_path ? velk_split_page(level + 1u, k) : VELK_LIGHT_NONE;
     }
     light_words.data[at + VELK_PIECE_PLACE] = place;
     light_words.data[at + VELK_PIECE_OWNER] = s_record | (s_triangle << 24u);
-    light_words.data[at + VELK_PIECE_PARENT] = level == 0u ? VELK_LIGHT_NONE : velk_split_page(level - 1u, q >> 2u);
+    light_words.data[at + VELK_PIECE_PARENT] = level == 0u ? VELK_LIGHT_NONE
+                                             : velk_split_page(level - 1u, level == 1u ? 0u : velk_split_digit(level - 1u));
     light_words.data[at + VELK_PIECE_READ] = frame;
     for (uint p = 0u; p < VELK_PIECE_POINTS; ++p) {
         uint shade = VELK_LIGHT_NONE;
@@ -3326,6 +3346,7 @@ void velk_split(uint index)
         uint how = light_words.data[w + VELK_SPLIT_ENTRY_HOW];
         uint depth = min((how >> 8u) & 255u, VELK_PIECE_DEEPEST);
         bool root = (how & VELK_LIGHT_SPLIT_ROOT) != 0u;
+        s_path = (how >> VELK_SPLIT_PATH_SHIFT) & 0xFFu;
         if (page < pages) {
             if (root) {
                 // The root word is pending while the ask is on the list: it is this group's.
@@ -3361,7 +3382,7 @@ void velk_split(uint index)
             }
         }
         if (s_split != 0u) {
-            uint count = velk_split_before(s_from, s_to + 1u);
+            uint count = velk_split_count();
             uint base;
             if (velk_light_take(pool, count, base)) {
                 s_base = base;
@@ -3385,13 +3406,18 @@ void velk_split(uint index)
     memoryBarrierShared();
     barrier();
     if (s_split == 0u) return;
-    // Level by level, so that each level's shared points come from the one above, written.
-    for (uint level = s_from; level <= s_to && level <= VELK_PIECE_LEVELS_AT_ONCE; ++level) {
-        uint pieces = 1u << (2u * level);
-        for (uint q = lane; q < pieces; q += 64u) velk_split_write(level, q, frame);
-        memoryBarrierBuffer();
-        barrier();
+    // All at once: no piece takes anything from another.
+    uint made = velk_split_count();
+    uint root_made = s_from == 0u ? 1u : 0u;
+    for (uint i = lane; i < made; i += 64u) {
+        if (i < root_made) {
+            velk_split_write(0u, 0u, frame);
+        } else {
+            velk_split_write((i - root_made) / 4u + 1u, (i - root_made) % 4u, frame);
+        }
     }
+    memoryBarrierBuffer();
+    barrier();
     // Then linked in, for the passes after this one.
     if (lane == 0u) {
         if (s_split == 1u) {
