@@ -21,6 +21,7 @@
 #include <velk-scene/api/visual/sphere.h>
 #include <velk-ui/api/trait/fixed_size.h>
 #include <velk-ui/plugins/image/api/environment.h>
+#include <velk-ui/plugins/text/api/text_visual.h>
 
 namespace inspect {
 
@@ -305,10 +306,11 @@ void add_shape_sphere(SceneBuilder& b, const velk::vec3& center, float radius, c
 }
 
 /// A sun from @p rotation (degrees), with the shadow technique the reference path traces.
-void add_sun(SceneBuilder& b, const velk::vec3& rotation, float intensity)
+void add_sun(SceneBuilder& b, const velk::vec3& rotation, float intensity, float size = 0.f)
 {
     auto light = velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, intensity);
     light.add_technique(velk::technique::create_rt_shadow());
+    if (size > 0.f) light.set_size(size);
     auto sun = velk::create_element();
     auto trs = velk::trait::transform::create_trs();
     trs.set_rotation(rotation);
@@ -563,6 +565,40 @@ void build_moving_lights(SceneBuilder& b)
                             {-120.f, -80.f, -120.f}});
 }
 
+/// A row of posts on a plane under a sun of size 2, as wide as fluent's, and a box moving
+/// through their shadows, then standing still: soft shadows that follow a moving box.
+void build_soft(SceneBuilder& b)
+{
+    set_sky(b, "soft", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f, 2.f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    const velk::IMesh::Ptr post = build_box(raw(b), {12.f, 90.f, 12.f}, 4, standard(0.75f, 0.75f, 0.75f));
+    for (int i = 0; i < 7; ++i) add_mesh(b, post, {-150.f + static_cast<float>(i) * 50.f, 0.f, -60.f});
+    const velk::vec3 from{-200.f, 0.f, 40.f};
+    b.out.frames = 120;
+    b.out.movers.push_back(
+        {add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), from), from, {150.f, 0.f, 40.f}});
+}
+
+/// A line of text standing on a plane under a sun: the shadow of glyphs, not of their quads.
+void build_text(SceneBuilder& b)
+{
+    set_sky(b, "text", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    auto element = velk::create_element();
+    element.add_trait(velk::ui::trait::layout::create_fixed_size(velk::dim::px(300.f), velk::dim::px(70.f)));
+    auto trs = velk::trait::transform::create_trs();
+    trs.set_translate({-150.f, -70.f, -40.f});
+    element.add_trait(trs);
+    auto text = velk::ui::trait::visual::create_text();
+    text.set_text("velk-ui");
+    text.set_font_size(80.f);
+    text.set_color({0.95f, 0.55f, 1.0f, 1.f});
+    element.add_trait(text);
+    place(b, element);
+}
+
 /// A small forest of tree sized solids and a field of pebbles, instanced: the instanced cases.
 void build_forest(SceneBuilder& b)
 {
@@ -702,6 +738,12 @@ const velk::vector<SceneSpec>& scenes()
         {"moving_lights", "the moving box, lit by a red and a blue point light moving past each other: light following both",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_moving_lights},
+        {"soft", "a row of posts and a box moving through their shadows under a wide sun: soft shadows following a mover",
+         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
+         build_soft},
+        {"text", "a line of text standing on a plane under a sun: glyph shadows",
+         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
+         build_text},
         {"forest", "instanced tree sized solids and pebbles",
          {{"near", {{0.f, -60.f, 250.f}, 0.f, -8.f}}, {"far", {{0.f, -260.f, 500.f}, 0.f, -20.f}}},
          build_forest},
