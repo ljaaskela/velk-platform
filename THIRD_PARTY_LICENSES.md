@@ -11,6 +11,7 @@ velk-ui bundles or links the following third-party software:
 | [FreeType](https://freetype.org/) | 2.13.3 | FreeType License (BSD-style) | `plugins/text/third_party/freetype-2.13.3.zip` |
 | [HarfBuzz](https://harfbuzz.github.io/) | 10.2.0 | MIT | `plugins/text/third_party/harfbuzz-10.2.0.zip` |
 | [Inter](https://rsms.me/inter/) | 4.x | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
+| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | 2.304 | SIL Open Font License 1.1 | Embedded in `velk_text.dll` |
 | [Slug reference shaders](https://github.com/EricLengyel/Slug) | 2025 reference | MIT / Apache 2.0 (patent in public domain) | Translated to GLSL in `plugins/text/src/embedded/velk_text_glsl.h` |
 | [stb_image](https://github.com/nothings/stb) | latest (single header) | MIT or Public Domain (dual) | `plugins/image/third_party/stb/stb_image.h` |
 | [cgltf](https://github.com/jkuhlmann/cgltf) | latest (single header) | MIT | `plugins/gltf/third_party/cgltf/cgltf.h` |
@@ -19,6 +20,10 @@ velk-ui bundles or links the following third-party software:
 ## Inter font
 
 The Inter typeface by Rasmus Andersson is embedded as the default font in the text plugin (`velk_text`). The full SIL Open Font License is at [`plugins/text/third_party/inter/OFL.txt`](plugins/text/third_party/inter/OFL.txt).
+
+## JetBrains Mono font
+
+The JetBrains Mono typeface (Regular) is embedded as the monospace font in the text plugin (`velk_text`). The full SIL Open Font License is at [`plugins/text/third_party/jetbrains-mono/OFL.txt`](plugins/text/third_party/jetbrains-mono/OFL.txt).
 
 ## FreeType
 

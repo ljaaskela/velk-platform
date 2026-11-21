@@ -35,10 +35,10 @@ public:
     /** @brief Implicit conversion to ITextVisual::Ptr. */
     operator ITextVisual::Ptr() const { return as_ptr<ITextVisual>(); }
 
-    /** @brief Sets the font used for shaping and rasterization. */
+    /** @brief Sets the font used for shaping and rasterization. An empty Font means the default font. */
     void set_font(const Font& font)
     {
-        with<ITextVisual>([&](auto& tv) { tv.set_font(font); });
+        write_state<ITextVisual>([&](ITextVisual::State& s) { set_object_ref(s.font, IFont::Ptr(font)); });
     }
 
     /** @brief Returns the text content. */

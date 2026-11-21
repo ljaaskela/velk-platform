@@ -19,6 +19,9 @@ namespace velk::ui {
  * @brief A font that shapes text and exposes glyph outline data for
  *        analytic Bezier rendering.
  *
+ * Fonts are resources, loaded through the resource store with
+ * `font:<uri>` (for example `font:app://fonts/x.ttf`).
+ *
  * Conceptually a Font owns:
  *  - A FreeType face for outline extraction.
  *  - A HarfBuzz shaper for converting text strings into glyph runs.
@@ -97,9 +100,6 @@ public:
         (RPROP, float, line_height, 0.f),  ///< Line height in font units.
         (RPROP, float, units_per_em, 0.f)  ///< Font units per em (constant per face).
     )
-
-    /** @brief Initializes the font from a built-in default (embedded Inter Regular). */
-    virtual bool init_default() = 0;
 
     /** @brief Shapes a text string into a sequence of positioned glyphs (in font units). */
     virtual float shape_text(string_view text, vector<GlyphPosition>& out) = 0;

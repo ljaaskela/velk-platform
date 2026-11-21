@@ -7,8 +7,11 @@ namespace velk::ui {
 
 namespace ClassId {
 
-/** @brief FreeType + HarfBuzz font. Shapes text and rasterizes glyphs. */
+/** @brief FreeType + HarfBuzz font. Shapes text and rasterizes glyphs. Loaded through `font:<uri>`. */
 inline constexpr Uid Font{"b31d28e5-2502-45fe-8b27-3997c882bfde"};
+
+/** @brief Resource decoder for `font:<inner_uri>` URIs. */
+inline constexpr Uid FontDecoder{"d6ce6266-1ecc-4aa4-8fab-0b9c427c410d"};
 
 /** @brief IMaterial that renders shaped text via analytic Bezier coverage. */
 inline constexpr Uid TextMaterial{"e0d0f4f6-0c4b-4a8b-b7e4-7e2d6e1a0002"};

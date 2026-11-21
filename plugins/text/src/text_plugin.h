@@ -2,6 +2,7 @@
 #define VELK_UI_TEXT_PLUGIN_IMPL_H
 
 #include <velk/ext/plugin.h>
+#include <velk/interface/resource/intf_resource_decoder.h>
 
 #include <velk-ui/plugins/text/intf_text_plugin.h>
 #include <velk-ui/plugins/text/plugin.h>
@@ -20,9 +21,12 @@ public:
 
     // ITextPlugin
     IFont::Ptr get_default_font() const override;
+    IFont::Ptr get_monospace_font() const override;
 
 private:
+    IResourceDecoder::Ptr font_decoder_;
     IFont::Ptr default_font_;
+    IFont::Ptr monospace_font_;
 };
 
 } // namespace velk::ui

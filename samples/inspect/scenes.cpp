@@ -599,6 +599,42 @@ void build_text(SceneBuilder& b)
     place(b, element);
 }
 
+/// Three lines of text: the default font, the built-in monospace font, and a font file that
+/// does not exist, which falls back to the default font.
+void build_fonts(SceneBuilder& b)
+{
+    set_sky(b, "fonts", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    auto& store = velk::instance().resource_store();
+    const struct
+    {
+        velk::string_view text;
+        velk::ui::Font font;
+    } lines[] = {
+        {"Inter: default", velk::ui::get_default_font()},
+        {"JetBrains Mono: {}[]()", velk::ui::get_monospace_font()},
+        {"Missing file: default",
+         velk::ui::Font(store.get_resource<velk::ui::IFont>("font:file://velk-inspect-missing-font.ttf"))},
+    };
+    float y = -150.f;
+    for (const auto& line : lines) {
+        auto element = velk::create_element();
+        element.add_trait(velk::ui::trait::layout::create_fixed_size(velk::dim::px(400.f), velk::dim::px(45.f)));
+        auto trs = velk::trait::transform::create_trs();
+        trs.set_translate({-200.f, y, -40.f});
+        element.add_trait(trs);
+        auto text = velk::ui::trait::visual::create_text();
+        text.set_text(line.text);
+        text.set_font(line.font);
+        text.set_font_size(36.f);
+        text.set_color({0.95f, 0.55f, 1.0f, 1.f});
+        element.add_trait(text);
+        place(b, element);
+        y += 50.f;
+    }
+}
+
 /// A small forest of tree sized solids and a field of pebbles, instanced: the instanced cases.
 void build_forest(SceneBuilder& b)
 {
@@ -744,6 +780,9 @@ const velk::vector<SceneSpec>& scenes()
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
          build_text},
+        {"fonts", "the default font, the monospace font, and a missing font file falling back to the default",
+         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}},
+         build_fonts},
         {"forest", "instanced tree sized solids and pebbles",
          {{"near", {{0.f, -60.f, 250.f}, 0.f, -8.f}}, {"far", {{0.f, -260.f, 500.f}, 0.f, -20.f}}},
          build_forest},

@@ -4,6 +4,8 @@
 #include "font_buffers.h"
 
 #include <velk/ext/object.h>
+#include <velk/interface/resource/intf_resource.h>
+#include <velk/string.h>
 #include <velk/vector.h>
 
 #include <ft2build.h>
@@ -17,9 +19,19 @@
 
 namespace velk::ui::impl {
 
+class IFontInternal : public Interface<IFontInternal>
+{
+public:
+    /// Opens the face from @p bytes. Returns false if FreeType or HarfBuzz
+    /// cannot use them; the font then reports exists() == false.
+    virtual bool init(string_view uri, vector<uint8_t> bytes) = 0;
+};
+
 /**
  * @brief Font implementation: FreeType outline source + HarfBuzz shaper +
  *        FontBuffers, published into the shared text arenas.
+ *
+ * Created by the "font" resource decoder (`font:<inner_uri>`).
  *
  * No glyph atlas. Glyph outlines are extracted lazily by the GlyphBaker
  * (via FontBuffers::ensure_glyph) and packed into three runs (curves, bands,
@@ -29,7 +41,7 @@ namespace velk::ui::impl {
  *
  * Font is not an ISurface: there are no pixels to bind.
  */
-class Font : public ::velk::ext::Object<Font, IFont>
+class Font : public ::velk::ext::Object<Font, IFont, IResource, IFontInternal>
 {
 public:
     VELK_CLASS_UID(ClassId::Font, "Font");
@@ -37,10 +49,17 @@ public:
     Font();
     ~Font() override;
 
-    bool init_from_memory(const uint8_t* data, uint32_t size);
+    // IFontInternal
+    bool init(string_view uri, vector<uint8_t> bytes) override;
+
+    // IResource
+    string_view uri() const override { return uri_; }
+    bool exists() const override { return loaded_; }
+    int64_t size() const override { return static_cast<int64_t>(font_data_.size()); }
+    bool is_persistent() const override { return persistent_; }
+    void set_persistent(bool value) override { persistent_ = value; }
 
     // IFont
-    bool init_default() override;
     float shape_text(string_view text, vector<IFont::GlyphPosition>& out) override;
     GlyphInfo ensure_glyph(uint32_t glyph_id) override;
     void layout_text(string_view text, float font_size, TextLayout mode,
@@ -74,6 +93,9 @@ private:
                           float line_height_px, float available_width,
                           TextLayoutResult& out);
 
+    string uri_;
+    bool loaded_ = false;
+    bool persistent_ = false;
     vector<uint8_t> font_data_;
     FT_Library ft_library_ = nullptr;
     FT_Face ft_face_ = nullptr;

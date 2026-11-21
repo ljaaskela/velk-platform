@@ -15,9 +15,7 @@ namespace velk::ui {
  *
  * Provides null-safe access to font operations.
  *
- *   auto font = create_font();
- *   font.init_default();
- *   font.set_size(32.f);
+ *   Font font(instance().resource_store().get_resource<IFont>("font:app://fonts/x.ttf"));
  */
 class Font : public Object
 {
@@ -36,9 +34,6 @@ public:
     /** @brief Implicit conversion to IFont::Ptr. */
     operator IFont::Ptr() const { return as_ptr<IFont>(); }
 
-    /** @brief Initializes with the built-in default font (Inter Regular). */
-    bool init_default() { return with<IFont>([](auto& f) { return f.init_default(); }); }
-
     /** @brief Returns the font ascender in pixels. */
     auto get_ascender() const { return read_state_value<IFont>(&IFont::State::ascender); }
 
@@ -49,16 +44,18 @@ public:
     auto get_line_height() const { return read_state_value<IFont>(&IFont::State::line_height); }
 };
 
-/** @brief Creates a new Font. */
-inline Font create_font()
-{
-    return Font(instance().create<IObject>(ClassId::Font));
-}
-
+/** @brief Returns the default font (Inter Regular). */
 inline Font get_default_font()
 {
     auto plugin = get_or_load_plugin<ITextPlugin>(PluginId::TextPlugin);
     return Font(plugin ? plugin->get_default_font() : nullptr);
+}
+
+/** @brief Returns the built-in monospace font (JetBrains Mono Regular). */
+inline Font get_monospace_font()
+{
+    auto plugin = get_or_load_plugin<ITextPlugin>(PluginId::TextPlugin);
+    return Font(plugin ? plugin->get_monospace_font() : nullptr);
 }
 
 } // namespace velk::ui

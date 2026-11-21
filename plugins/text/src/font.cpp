@@ -1,6 +1,5 @@
 #include "font.h"
 
-#include "embedded/inter_regular.h"
 #include "visual/text_material.h"
 
 #include <velk-render/interface/intf_gpu_resource_manager.h>
@@ -107,11 +106,14 @@ void Font::ensure_gpu_data(IRenderContext& ctx)
     }
 }
 
-bool Font::init_from_memory(const uint8_t* data, uint32_t size)
+bool Font::init(string_view uri, vector<uint8_t> bytes)
 {
-    // Keep a copy: FreeType requires font data to stay alive
-    font_data_.resize(size);
-    std::memcpy(font_data_.data(), data, size);
+    uri_ = string(uri);
+    // FreeType reads from this buffer for the lifetime of the face.
+    font_data_ = std::move(bytes);
+    if (font_data_.empty()) {
+        return false;
+    }
 
     if (FT_Init_FreeType(&ft_library_) != 0) {
         return false;
@@ -156,12 +158,8 @@ bool Font::init_from_memory(const uint8_t* data, uint32_t size)
         writer->line_height = static_cast<float>(ft_face_->height);
     }
 
+    loaded_ = true;
     return true;
-}
-
-bool Font::init_default()
-{
-    return init_from_memory(embedded::inter_regular_ttf, embedded::inter_regular_ttf_size);
 }
 
 float Font::shape_text(string_view text, vector<IFont::GlyphPosition>& out)

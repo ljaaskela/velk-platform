@@ -30,9 +30,6 @@ class TextVisual : public ::velk::ext::Visual2D<TextVisual, ITextVisual,
 public:
     VELK_CLASS_UID(ClassId::Visual::Text, "TextVisual");
 
-    // ITextVisual
-    void set_font(const IFont::Ptr& font) override;
-
     // IVisual
     vector<DrawEntry> get_draw_entries(::velk::IRenderContext& ctx,
                                        const ::velk::size& bounds) override;
@@ -77,7 +74,9 @@ private:
         bool operator!=(const CacheKey& o) const { return !(*this == o); }
     };
 
-    void ensure_default_font();
+    /// Resolves the font to use from the `font` property, falling back to
+    /// the default font when it is empty or failed to load.
+    void update_font();
     void bind_font_material();
 
     // Populates `layout_result_` lazily based on the current state and

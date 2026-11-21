@@ -53,6 +53,8 @@ add_library(velk_text SHARED
     src/text_plugin.cpp
     src/font.h
     src/font.cpp
+    src/font_decoder.h
+    src/font_decoder.cpp
     src/glyph_baker.h
     src/glyph_baker.cpp
     src/font_buffers.h
@@ -63,6 +65,8 @@ add_library(velk_text SHARED
     src/visual/text_material.cpp
     src/embedded/inter_regular.h
     src/embedded/inter_regular.cpp
+    src/embedded/jetbrains_mono_regular.h
+    src/embedded/jetbrains_mono_regular.cpp
     src/embedded/velk_text_glsl.h
     include/velk-ui/plugins/text/api/font.h
     include/velk-ui/plugins/text/api/text_visual.h

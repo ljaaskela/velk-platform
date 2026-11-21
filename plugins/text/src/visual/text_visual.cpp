@@ -5,6 +5,7 @@
 #include <velk/api/object_ref.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk/interface/resource/intf_resource.h>
 #include <velk-render/interface/material/intf_material.h>
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-scene/instance_types.h>
@@ -12,16 +13,12 @@
 
 namespace velk::ui {
 
-void TextVisual::set_font(const IFont::Ptr& font)
-{
-    font_ = Font(font);
-    bind_font_material();
-    cache_.invalidate();
-    invoke_visual_changed();
-}
-
 void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interfaceId)
 {
+    constexpr string_view font_names[] = {"font"};
+    if (has_state_changed<ITextVisual>(interfaceId, name, font_names)) {
+        update_font();
+    }
     constexpr string_view names[] = {"text", "font_size", "layout"};
     if (has_state_changed<ITextVisual>(interfaceId, name, names)) {
         cache_.invalidate();
@@ -29,15 +26,22 @@ void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interf
     invoke_visual_changed();
 }
 
-void TextVisual::ensure_default_font()
+void TextVisual::update_font()
 {
-    if (font_) {
+    IFont::Ptr font;
+    if (auto state = read_state<ITextVisual>(this)) {
+        font = state->font.get<IFont>();
+    }
+    auto* resource = interface_cast<IResource>(font);
+    if (!font || (resource && !resource->exists())) {
+        font = get_default_font();
+    }
+    if (font == font_.as_ptr<IFont>()) {
         return;
     }
-    font_ = get_default_font();
-    if (font_) {
-        bind_font_material();
-    }
+    font_ = Font(font);
+    bind_font_material();
+    cache_.invalidate();
 }
 
 void TextVisual::bind_font_material()
@@ -112,7 +116,9 @@ aabb TextVisual::get_local_bounds(const ::velk::size& bounds) const
 vector<DrawEntry> TextVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
                                                 const ::velk::size& bounds)
 {
-    ensure_default_font();
+    if (!font_) {
+        update_font();
+    }
     auto* font = ensure_layout(bounds);
     if (!font) {
         return {};

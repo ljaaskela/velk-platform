@@ -33,7 +33,7 @@ In typical situations this approach offers very acceptable performance, see [per
 
 ## Usage
 
-The plugin is loaded automatically by `velk::create_app()`. Its `initialize()` registers `Font`, `TextMaterial`, and `TextVisual`, and creates a shared default font (embedded Inter Regular) accessible via `ITextPlugin::default_font()` or the convenience helper `velk::ui::get_default_font()`.
+The plugin is loaded automatically by `velk::create_app()`. Its `initialize()` registers `Font`, `TextMaterial`, `TextVisual` and the `font` resource decoder, and loads two built-in fonts: Inter Regular (the default) and JetBrains Mono Regular (monospace). They are returned by `velk::ui::get_default_font()` and `velk::ui::get_monospace_font()`.
 
 If you're not using the runtime, load it manually:
 
@@ -83,9 +83,35 @@ A `TextVisual` trait can be added as an attachment to one or more `Element` to r
 }
 ```
 
-`text`, `font_size`, `h_align`, and `v_align` are all standard properties. `color` lives on the `IVisual2D` interface shared by all 2D visuals.
+`text`, `font`, `font_size`, `h_align`, and `v_align` are all standard properties. `color` lives on the `IVisual2D` interface shared by all 2D visuals.
 
-The default font is created automatically by the plugin and used unless the visual's `set_font` method is called explicitly with a different font. There is no need to declare the font in the scene file.
+### Fonts
+
+Fonts are resources. The `font` decoder loads a TrueType or OpenType file from any protocol:
+
+```cpp
+auto& store = velk::instance().resource_store();
+velk::ui::Font font(store.get_resource<velk::ui::IFont>("font:app://fonts/Inter-Bold.ttf"));
+text.set_font(font);
+```
+
+Loading is synchronous and deduplicated by URI. Glyphs are baked when first drawn.
+
+In a scene file, declare the font as a resource and reference it from the `font` property:
+
+```json
+"resources": [
+  { "id": "bold", "uri": "font:app://fonts/Inter-Bold.ttf" }
+],
+"attachments": [
+  { "targets": ["title"], "class": "velk-text.TextVisual",
+    "properties": { "text": "Title", "font": { "ref": "resources.bold" } } }
+]
+```
+
+The built-in fonts are available as `font:memory://velk-text/Inter-Regular.ttf` and `font:memory://velk-text/JetBrainsMono-Regular.ttf`.
+
+When `font` is empty, or the font failed to load (its `IResource::exists()` returns false), the visual uses the default font.
 
 ### Font size
 
@@ -184,8 +210,9 @@ Public ClassIds for the plugin's main types. Construct via `instance().create<I>
 
 | ClassId | Implements | Description |
 |---|---|---|
-| `velk::ui::ClassId::Font` | `IFont` | FreeType + HarfBuzz font instance. Shapes text and lazy-bakes glyphs into GPU curve / band / glyph buffers. Properties (in font units): `ascender`, `descender`, `line_height`, `units_per_em`. |
-| `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
+| `velk::ui::ClassId::Font` | `IFont`, `IResource` | FreeType + HarfBuzz font instance, created by the `font` decoder. Shapes text and lazy-bakes glyphs into GPU curve / band / glyph buffers. Properties (in font units): `ascender`, `descender`, `line_height`, `units_per_em`. |
+| `velk::ui::ClassId::FontDecoder` | `IResourceDecoder` | Decoder for `font:<uri>`. Registered by the plugin. |
+| `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
 | `velk::ui::ClassId::TextMaterial` | `IMaterial` | Material that runs the analytic-coverage fragment shader. Owned by each `Font` and shared by all `TextVisual`s using that font (so they batch into one draw call). Not normally constructed by user code. |
 
-The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `default_font()`, usually accessed through the header-only convenience `velk::ui::get_default_font()`.
+The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `get_default_font()` and `get_monospace_font()`, usually accessed through the header-only helpers `velk::ui::get_default_font()` and `velk::ui::get_monospace_font()`.
