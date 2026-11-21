@@ -105,6 +105,7 @@ inline constexpr uint32_t kLightPageWords = 64;
     X(Reset, RESET, 19)               /* the frame its lights were last chosen again, or kLightNone */               \
     X(Slots, SLOTS, 20)               /* its lights, a light index a slot (kLightSlots), kLightNone for none */      \
     X(Index, INDEX, 28)               /* its draw's first index word */                                              \
+    X(Instance, INSTANCE, 29)         /* its instance when something last changed what it could get, for its pieces */ \
     X(Coarse, COARSE, 30)             /* its coarse light: a one value from its cluster's sphere with its points'    \
                                          lights, read under its points until they are trusted */                     \
     X(Read, READ, 31)                 /* not 0 when a pixel read its points since the last mark; for the log */      \
@@ -524,17 +525,29 @@ float velk_light_blocker_distance(uint code)
 // A point's trace count (its state's top 4 bits): VELK_LIGHT_WARM_TRACES traces warm it up from
 // none, after which it is settled.
 
+// The word of the piece at page `page` that holds the frame something last changed what its
+// points could get (light_changes_main_src), VELK_LIGHT_NONE for never: the blocker word of the
+// point past its last, which no point uses.
+uint velk_piece_changed_word(uint pool, uint page)
+{
+    return velk_light_page_blocker(pool, page, 2u * VELK_PIECE_POINTS);
+}
+
 // The trace count of the own point of the record whose first page starts at `first` with trace
-// state `state`: none when its record's lights were chosen again, or something changed what it
-// could get, since it was last listed. Such a point keeps its light word until it is traced
-// again, but its light is stale: pixels read what is under it, and its next trace starts over.
-uint velk_light_point_traces(uint first, uint state)
+// state `state`, a point of the piece at page `piece` or VELK_LIGHT_NONE for a vertex's: none
+// when its record's lights were chosen again, or something changed what it could get (its
+// piece's, or its record's), since it was last listed. Such a point keeps its light word until it
+// is traced again, but its light is stale: pixels read what is under it, and its next trace starts over.
+uint velk_light_point_traces(uint pool, uint first, uint piece, uint state)
 {
     if (state == VELK_LIGHT_NONE) return 0u;
     uint listed = state & 0x0FFFFFFFu;
     uint reset = VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET];
     if (reset != VELK_LIGHT_NONE && listed < reset) return 0u;
-    uint changed = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED];
+    // A piece's point: what changed in the way of that piece (velk_piece_changed_word), not of
+    // its whole record.
+    uint changed = piece == VELK_LIGHT_NONE ? VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED]
+                                            : VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, piece)];
     if (changed != VELK_LIGHT_NONE && listed < changed) return 0u;
     return state >> 28u;
 }
@@ -925,7 +938,8 @@ uint velk_way_cell(uint pool, uint first, uvec3 corners, VelkPieceWay way, bool 
     for (uint k = 0u; k < 3u; ++k) {
         uint s = VELK_LIGHT_WORDS.data[words[k]];
         if (s == VELK_LIGHT_NONE) return 0u;
-        bool old = velk_light_point_traces(first, VELK_LIGHT_WORDS.data[words[k] + 1u]) == 0u;
+        uint piece = way.coarse == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : way.coarse;
+        bool old = velk_light_point_traces(pool, first, piece, VELK_LIGHT_WORDS.data[words[k] + 1u]) == 0u;
         if (fresh && old) return 0u;
         stale = stale || old;
         if (k == 0u) shade = s;
@@ -1111,7 +1125,8 @@ void velk_light_list_at(uint pool, uint word, uint first, uint entry_first, uint
 {
     uint at = word + 1u;
     uint state = VELK_LIGHT_WORDS.data[at];
-    uint traces = velk_light_point_traces(first, state);
+    uint piece = (entry_point & VELK_LIGHT_POINT_PIECE) != 0u ? entry_first : VELK_LIGHT_NONE;
+    uint traces = velk_light_point_traces(pool, first, piece, state);
     if (!velk_light_point_due(traces)) return;
     uint now = frame & 0x0FFFFFFFu;
     if (state != VELK_LIGHT_NONE && (state & 0x0FFFFFFFu) == now) return;
@@ -1248,7 +1263,7 @@ bool velk_light_add_point(uint word, uint owner, float weight, inout uint lights
     uint coarse = VELK_LIGHT_WORDS.data[owner + VELK_PAGE_COARSE];
     bool has_coarse = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
     if (shade == VELK_LIGHT_NONE && !has_coarse) return false;
-    uint traces = velk_light_point_traces(owner, VELK_LIGHT_WORDS.data[word + 1u]);
+    uint traces = velk_light_point_traces(0u, owner, VELK_LIGHT_NONE, VELK_LIGHT_WORDS.data[word + 1u]);
     float trust = shade == VELK_LIGHT_NONE ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
     if (!has_coarse) trust = 1.0;
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
@@ -1286,7 +1301,8 @@ bool velk_piece_light(uint pool, uint page, uint first, uvec3 corners, vec3 l, b
         }
         float trust = 0.0;
         if (shade != VELK_LIGHT_NONE) {
-            uint traces = velk_light_point_traces(first, VELK_LIGHT_WORDS.data[words[k] + 1u]);
+            uint traces = velk_light_point_traces(pool, first, page == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : page,
+                                                  VELK_LIGHT_WORDS.data[words[k] + 1u]);
             trust = !known ? 1.0 : min(float(traces), 1.0);
             if (trust < 1.0) full = false;
             if (trust > 0.0 && sized) {
@@ -2031,10 +2047,58 @@ void velk_change_one(uint word)
     if (value >= VELK_LIGHT_ONE_VALUE && value < VELK_LIGHT_PENDING) atomicAnd(VELK_LIGHT_WORDS.data[word], ~VELK_LIGHT_ONE_TRACED);
 }
 
+// The pieces pass (pc.mode 1), after the records': a thread a page of the pool. A piece of a
+// record a change altered this frame is stale only where the change is in its own way: its
+// triangle's part, placed by the record's instance, in a sphere a little wider than its points
+// reach (a coarse point's rays start around it), tested as the record was.
+void velk_change_pieces(uint pool, uint changes, uint page)
+{
+    if (page >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES] || !velk_light_is_piece(pool, page)) return;
+    uint at = velk_light_page(pool, page);
+    uint owner = VELK_LIGHT_WORDS.data[at + VELK_PIECE_OWNER];
+    if ((owner & 0xFFFFFFu) >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
+    uint first = velk_light_page(pool, owner & 0xFFFFFFu);
+    GlobalData g = VELK_GLOBALS;
+    if (VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] != (g.present_counter & 0x0FFFFFFFu)) return;
+    uint instance = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INSTANCE];
+    uint triangle = owner >> 24u;
+    if (instance == VELK_LIGHT_NONE || triangle >= velk_light_pieced(first)) return;
+    ElementInstance inst = velk_instances.data[instance];
+    uint cluster = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER];
+    uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
+    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_INDEX];
+    vec3 v[3];
+    for (uint k = 0u; k < 3u; ++k) {
+        uint vw = vertex_word + velk_mesh_words.data[first_index + triangle * 3u + k] * VELK_VERTEX3D_WORDS;
+        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                          uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+        v[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
+    }
+    uint place = VELK_LIGHT_WORDS.data[at + VELK_PIECE_PLACE];
+    uint n = velk_piece_level(place);
+    vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
+    vec3 b1 = velk_piece_weights(place, uvec2(n, 0u));
+    vec3 b2 = velk_piece_weights(place, uvec2(0u, n));
+    vec3 p0 = b0.x * v[0] + b0.y * v[1] + b0.z * v[2];
+    vec3 p1 = b1.x * v[0] + b1.y * v[1] + b1.z * v[2];
+    vec3 p2 = b2.x * v[0] + b2.y * v[1] + b2.z * v[2];
+    vec3 center = (p0 + p1 + p2) / 3.0;
+    float radius = max(max(length(p0 - center), length(p1 - center)), length(p2 - center)) * (1.0 + 0.5 / float(n));
+    uint slots[VELK_LIGHT_SLOTS];
+    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
+    if (velk_change_alters(changes, center, radius, slots)) {
+        VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, page)] = g.present_counter & 0x0FFFFFFFu;
+    }
+}
+
 void main()
 {
     uint pool = pc.spare3;
     uint changes = pc.spare4;
+    if (pc.mode == 1u) {
+        velk_change_pieces(pool, changes, gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex);
+        return;
+    }
     uint cut_entry = pc.spare1 + VELK_RAY_TOP_HEADER_WORDS + pc.spare2 * VELK_RAY_TOP_CUT_WORDS;
     uint cut = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_CUT];
     uint instances_base = VELK_LIGHT_WORDS.data[cut_entry + VELK_RAY_TOP_CUT_INSTANCES_BASE];
@@ -2122,12 +2186,16 @@ void main()
         // (velk_light_point_traces): pixels read the light under them, its coarse pieces' points
         // traced again this frame as pixels read them, the rest from none as the budget allows.
         // When everything changed, their lights chosen again too: what changed may be one of them.
+        // A light that came into reach is new to every point too. Else its vertices' points are
+        // stale, and its pieces' as far as the change is in their way (the pieces pass, pc.mode 1,
+        // which finds its instance here).
         velk_change_one(first + VELK_PAGE_COARSE);
         uint now = VELK_GLOBALS.present_counter & 0x0FFFFFFFu;
+        if (all || entered) VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET] = now;
         if (all) {
-            VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET] = now;
             for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s] = VELK_LIGHT_NONE;
-        } else {
+        } else if (!entered) {
+            VELK_LIGHT_WORDS.data[first + VELK_PAGE_INSTANCE] = instance;
             VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] = now;
         }
     } else {
@@ -3602,7 +3670,10 @@ void velk_split_write(uint level, uint q, uint frame)
                 }
             }
         }
-        if (from_word != VELK_LIGHT_NONE) {
+        // Not a stale vertex point's: the root's own changes start from none, so it would read
+        // as fresh.
+        if (from_word != VELK_LIGHT_NONE
+            && velk_light_point_traces(pool, s_record_first, VELK_LIGHT_NONE, light_words.data[from_word + 1u]) > 0u) {
             shade = light_words.data[from_word];
             state = light_words.data[from_word + 1u];
             blockers = light_words.data[from_blocker];
@@ -3611,6 +3682,8 @@ void velk_split_write(uint level, uint q, uint frame)
         light_words.data[at + 2u * p + 1u] = state;
         light_words.data[velk_light_page_blocker(pool, page, 2u * p)] = blockers;
     }
+    // Nothing has changed in its way yet.
+    light_words.data[velk_piece_changed_word(pool, page)] = VELK_LIGHT_NONE;
     // A piece now, for the pool's sweep.
     atomicOr(light_words.data[light_words.data[pool + VELK_POOL_PIECES_WORD] + (page >> 5u)], 1u << (page & 31u));
 }

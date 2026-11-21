@@ -1253,6 +1253,21 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
             cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(cuts[c] + 8u) * sizeof(uint32_t));
         }
         cmd->record_global_barrier();
+        // Then the pieces of the records it altered, a thread a page of the pool: stale only where
+        // the change is in their own way.
+        if (pool.pages() != 0) {
+            DispatchCall pieces{};
+            pieces.pipeline = pipeline.get();
+            pieces.groups_x = (pool.pages() + 63u) / 64u;
+            pieces.groups_y = 1;
+            pieces.groups_z = 1;
+            DeferredComputePushC pieces_pc = pc;
+            pieces_pc.mode = 1u;
+            pieces.root_constants_size = sizeof(pieces_pc);
+            std::memcpy(pieces.root_constants, &pieces_pc, sizeof(pieces_pc));
+            cmd->record_dispatch(pieces);
+            cmd->record_global_barrier();
+        }
         cmd->pop_label();
         cmd->end_recording();
         rec.cmd = std::move(cmd);

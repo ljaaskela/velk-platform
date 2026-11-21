@@ -809,7 +809,10 @@ vec3 light_color(uvec2 ids, ivec2 coord)
         float stale = 0.0;
         for (uint k = 0u; k < 3u; ++k) {
             if (velk_culling.data[words[k]] == VELK_LIGHT_NONE) untraced += w[k];
-            else if (velk_light_point_traces(first, velk_culling.data[words[k] + 1u]) == 0u) stale += w[k];
+            else if (velk_light_point_traces(pc.pool_word, first, way.piece == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : way.piece,
+                                             velk_culling.data[words[k] + 1u]) == 0u) {
+                stale += w[k];
+            }
         }
         vec3 shown = way.piece == VELK_PIECE_VERTICES ? vec3(0.3) : kDepthColors[way.depth & 7u];
         vec3 color = shown * (0.55 + 0.45 * max(max(w.x, w.y), w.z));
@@ -826,7 +829,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     float retracing = 0.0;
     for (uint k = 0u; k < read; ++k) {
         color += weights[k] * id_color(words[k] * 2654435761u);
-        uint traces = velk_light_point_traces(owners[k], velk_culling.data[words[k] + 1u]);
+        uint traces = velk_light_point_traces(pc.pool_word, owners[k], VELK_LIGHT_NONE, velk_culling.data[words[k] + 1u]);
         bool none = velk_culling.data[words[k]] == VELK_LIGHT_NONE;
         float trust = none ? 0.0 : min(float(traces), VELK_LIGHT_TRUSTED_TRACES) / VELK_LIGHT_TRUSTED_TRACES;
         untrusted += weights[k] * (1.0 - trust);
