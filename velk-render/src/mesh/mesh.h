@@ -229,6 +229,18 @@ private:
     /// loaded cluster's data is, and errors that keep what is not loaded from being chosen.
     vector<MeshLodCluster> lod_records_;
     vector<uint32_t> lod_headers_;
+    /// A deforming mesh's clusters are subtrees of its tree as published (lod_.level0_tree_nodes),
+    /// so that rays walk them in the tree the GPU refits. False once the tree is built again,
+    /// which can group its triangles otherwise; its clusters are then tested as drawn.
+    bool lod_tree_rays_ = false;
+    /// The published tree: each of its build's nodes' reference, and where its nodes and words are.
+    vector<uint32_t> rt_node_refs_;
+    uint32_t rt_node_base_ = 0;
+    uint32_t rt_word_base_ = 0;
+    /// Points a deforming mesh's cluster headers at their subtrees of the published tree, or, where
+    /// that is not there or no longer matches, at none (VELK_RAY_NONE), which has rays test the
+    /// cluster's triangles as drawn; and writes them.
+    void write_tree_ray_headers(IGpuResourceManager& resources);
     vector<MeshLodNode> lod_tree_;
     vector<LodPage> lod_pages_;                        ///< By group, then one for what is of no group.
     vector<vector<uint32_t>> lod_page_clusters_;       ///< Likewise: the clusters in it.

@@ -82,8 +82,9 @@ vector<float> gather_positions(const BlasBuild& blas)
     return positions;
 }
 
-/// Level 0 as index lists over the mesh's vertices, a list per cluster.
-vector<vector<uint32_t>> gather_clusters(const BlasBuild& blas)
+/// Level 0 as index lists over the mesh's vertices, a list per cluster, and in @p roots the
+/// node of @p blas whose subtree holds each list's triangles.
+vector<vector<uint32_t>> gather_clusters(const BlasBuild& blas, vector<uint32_t>& roots)
 {
     vector<BlasBuild::Cluster> sorted;
     sorted.reserve(blas.clusters.size());
@@ -92,6 +93,10 @@ vector<vector<uint32_t>> gather_clusters(const BlasBuild& blas)
     }
     std::sort(sorted.begin(), sorted.end(),
               [](const BlasBuild::Cluster& a, const BlasBuild::Cluster& b) { return a.position_word < b.position_word; });
+    roots.clear();
+    for (const auto& cluster : sorted) {
+        roots.push_back(cluster.root_node);
+    }
 
     vector<vector<uint32_t>> lists;
     lists.resize(sorted.size());
@@ -1040,8 +1045,13 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
     }
 
     // Index lists of all clusters so far, parallel to lod.clusters.
-    vector<vector<uint32_t>> lists = gather_clusters(blas);
-    gather_pieces(lists, remap);
+    vector<vector<uint32_t>> lists = gather_clusters(blas, lod.level0_tree_nodes);
+    // Pieces gathered whole only matter to coarser levels, which a deforming mesh has none of; its
+    // clusters stay the subtrees of the mesh's tree, which rays then walk.
+    if (!deforming) {
+        gather_pieces(lists, remap);
+        lod.level0_tree_nodes.clear();
+    }
     vector<uint32_t> pending;
     for (size_t i = 0; i < lists.size(); ++i) {
         add_cluster(lod, lists[i], positions, 0, nullptr, 0.f);

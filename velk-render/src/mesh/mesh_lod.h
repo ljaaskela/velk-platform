@@ -152,6 +152,9 @@ struct MeshLod
     vector<uint32_t> cluster_group;      ///< By cluster: the group it is in.
     vector<uint32_t> cluster_made_from;  ///< By cluster: the group it was simplified from.
     uint32_t group_count = 0;
+    /// For a deforming mesh, by cluster: the node of the mesh's tree (BlasBuild) whose subtree
+    /// holds its triangles, which rays walk as that tree is refit. Empty otherwise.
+    vector<uint32_t> level0_tree_nodes;
 };
 
 /// For MeshLod: no group.

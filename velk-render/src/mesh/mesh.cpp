@@ -382,7 +382,8 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
         return true;
     }
     const vector<uint32_t>& clusters = lod_page_clusters_[page_index];
-    const bool rays = lod_words_region_.valid();
+    // Clusters with trees of their own; a deforming mesh's headers name its tree instead.
+    const bool rays = lod_words_region_.valid() && !lod_.ray_words.empty();
     const bool is_group = page_index < lod_.group_count;
 
     uint64_t geometry_bytes = 0;
@@ -588,6 +589,7 @@ void MeshPrimitive::build_lod()
     // the tree that is refit, not the hierarchy.
     lod_ = build_mesh_lod(rt_blas_, lod_read_ ? lod_geometry_.data() : nullptr, uv1, colors, vertex_stride_, normal_offset,
                           deforming_);
+    lod_tree_rays_ = deforming_ && !lod_.level0_tree_nodes.empty();
     lod_geometry_ = vector<uint8_t>{};
     lod_uv1_bytes_ = vector<uint8_t>{};
     lod_color_bytes_ = vector<uint8_t>{};
@@ -631,7 +633,9 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             release_lod();
             return false;
         }
-        const bool rays = !lod_.ray_words.empty();
+        // Headers for rays: of clusters with trees of their own, or of a deforming mesh's clusters,
+        // naming their subtrees of its tree (write_tree_ray_headers).
+        const bool rays = !lod_.ray_words.empty() || lod_tree_rays_;
         const size_t cluster_count = lod_.clusters.size();
         const size_t upper = lod_.nodes.size();
         const uint32_t group_count = lod_.group_count;
@@ -692,8 +696,10 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         // from a group is chosen wherever its own parent will not do.
         lod_records_.assign(lod_.clusters.begin(), lod_.clusters.end());
         lod_tree_.assign(lod_.nodes.begin(), lod_.nodes.end());
-        if (rays) {
+        if (!lod_.ray_words.empty()) {
             lod_headers_.assign(lod_.ray_words.begin(), lod_.ray_words.begin() + cluster_count * kClusterHeaderWords);
+        }
+        if (rays) {
             lod_headers_.resize(cluster_count * kClusterHeaderWords + 4, 0u);
         }
         const auto empty_leaf_word = static_cast<uint32_t>(lod_words_region_.offset() / sizeof(uint32_t)
@@ -803,6 +809,9 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
         lod_info_.node_word = static_cast<uint32_t>((lod_nodes_region_.offset() + sizeof(BlasGpuNode)) / sizeof(uint32_t));
         lod_info_.ray_word = rays ? header_base : 0xFFFFFFFFu;
         lod_info_.deforming = deforming_;
+        if (lod_tree_rays_) {
+            write_tree_ray_headers(resources);
+        }
     }
     out = lod_info_;
     return true;
@@ -939,7 +948,39 @@ bool MeshPrimitive::publish_tree(IGpuResourceManager& resources, MeshStaticData&
     rt_blas_nodes_region_ = std::move(nodes_region);
     rt_cluster_words_region_ = std::move(words_region);
     rt_surface_region_ = std::move(surface_region);
+    rt_node_refs_ = tree.node_refs;
+    rt_node_base_ = out.blas_node_base;
+    rt_word_base_ = out.cluster_word_base;
+    write_tree_ray_headers(resources);
     return true;
+}
+
+void MeshPrimitive::write_tree_ray_headers(IGpuResourceManager& resources)
+{
+    if (!deforming_ || lod_headers_.empty() || !lod_words_region_.valid() || !lod_.ray_words.empty()) {
+        return;
+    }
+    auto words_arena = resources.shared_arena(IRenderBackend::kGlobalClusterWords, sizeof(uint32_t));
+    if (!words_arena) {
+        return;
+    }
+    const bool published = rt_blas_nodes_region_.valid() && !rt_node_refs_.empty();
+    const size_t cluster_count = lod_records_.size();
+    for (size_t c = 0; c < cluster_count; ++c) {
+        uint32_t* header = lod_headers_.data() + c * kClusterHeaderWords;
+        const uint32_t node = c < lod_.level0_tree_nodes.size() ? lod_.level0_tree_nodes[c] : kBlasNoChild;
+        if (lod_tree_rays_ && published && node < rt_node_refs_.size()) {
+            header[10] = rt_node_refs_[node];
+            header[13] = rt_node_base_;
+            header[14] = rt_word_base_;
+        } else {
+            header[10] = kBlasNoChild;
+            header[13] = 0;
+            header[14] = 0;
+        }
+    }
+    // Frames on the GPU may be reading them, so the write takes its place in its order.
+    words_arena->update_at(lod_words_region_.offset(), lod_headers_.data(), cluster_count * kClusterHeaderWords * sizeof(uint32_t));
 }
 
 void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<const uint32_t> indices,
@@ -962,6 +1003,11 @@ void MeshPrimitive::refit(array_view<const MeshVertex> vertices, array_view<cons
                                    indices.begin() + index_offset_ / sizeof(uint32_t), index_count_ / 3);
         rt_built_cost_ = blas_tree_cost(rt_blas_);
         rebuilt = true;
+        // Its triangles may be grouped otherwise now: the clusters' subtrees are gone.
+        if (lod_tree_rays_) {
+            lod_tree_rays_ = false;
+            write_tree_ray_headers(resources);
+        }
     }
     const auto* vertex_bytes = reinterpret_cast<const uint8_t*>(vertices.begin());
 

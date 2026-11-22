@@ -85,6 +85,8 @@ struct BlasGpuTree
     vector<uint32_t> parent_links;
     /// Two words per leaf: its word offset, and its parent link.
     vector<uint32_t> leaf_links;
+    /// For each node of the build, the reference to it, as `root_ref` is to the root.
+    vector<uint32_t> node_refs;
 };
 
 /// Most triangles and vertices in one cluster. Local vertex indices are 8 bits.
@@ -141,11 +143,13 @@ inline constexpr float kSurfaceDirections[kSurfaceDirectionCount][3] = {
 
 struct BlasBuild
 {
-    /// Where one cluster's positions are in `cluster_words`.
+    /// Where one cluster's positions are in `cluster_words`, and the node whose subtree holds
+    /// its triangles.
     struct Cluster
     {
         uint32_t position_word;
         uint32_t vertex_count;
+        uint32_t root_node;
     };
 
     vector<BlasNode> nodes;
@@ -469,7 +473,7 @@ struct ClusterBuilder
             words.push_back(id);
         }
         stamp_leaves(n, triangle_word, position_word, vertex_count);
-        out.clusters.push_back({position_word, vertex_count});
+        out.clusters.push_back({position_word, vertex_count, n});
     }
 
     /// The largest subtrees that fit in a cluster become clusters.
@@ -784,6 +788,10 @@ inline BlasGpuTree blas_gpu_tree(const BlasBuild& blas)
     if (node_count != 0) {
         tree.root_ref = reference(blas.root_index);
         set_parent(blas.root_index, kBlasNoParent);
+    }
+    tree.node_refs.resize(node_count);
+    for (uint32_t n = 0; n < node_count; ++n) {
+        tree.node_refs[n] = reference(n);
     }
     return tree;
 }

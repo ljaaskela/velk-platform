@@ -509,16 +509,20 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 cur_cluster = velk_culling.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
                 walk_ray = velk_instance_ray(ray, inst, true, mesh_scale);
                 walk_inv_dir = velk_ray_inv_dir(walk_ray.dir);
+                // Its header names its tree: its own, or for a deforming mesh its part of the mesh's
+                // tree, which the GPU refits as the vertices move.
                 uint rays = velk_culling.data[entry + VELK_CLUSTER_ENTRY_RAY];
-                if (rays != VELK_RAY_NONE) {
-                    uint header = rays + cluster * 20u;
+                uint header = rays + cluster * 20u;
+                uint root = rays != VELK_RAY_NONE ? velk_cluster_words.data[header + 10u] : VELK_RAY_NONE;
+                if (root != VELK_RAY_NONE) {
                     mesh_base = velk_cluster_words.data[header + 13u];
                     word_base = velk_cluster_words.data[header + 14u];
                     level = kMesh;
                     mesh_scope = sp;
-                    if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_cluster_words.data[header + 10u];
+                    if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = root;
                 } else {
-                    // Its vertices move, so its triangles are tested as they are drawn.
+                    // Without a tree, such as a deforming mesh's whose tree was built again, its
+                    // triangles are tested as they are drawn.
                     drawn_at = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_INDEX];
                     drawn_left = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_TRIANGLES];
                     drawn_vertices = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_VERTEX];
