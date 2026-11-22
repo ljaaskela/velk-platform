@@ -25,10 +25,10 @@
 #include <velk-ui/interface/intf_input_dispatcher.h>
 #include <velk-ui/interface/trait/intf_list_view.h>
 #include <velk-ui/interface/trait/intf_scroll_view.h>
+#include <velk-ui/interface/trait/intf_tree_view.h>
 #include <velk-ui/plugins/image/plugin.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 #include <velk-ui/plugins/text/intf_text_field.h>
-#include <velk-ui/plugins/text/intf_tree_view.h>
 
 #include <cstdio>
 #include <cstring>
@@ -186,8 +186,9 @@ int main(int argc, char* argv[])
     auto tree_element = scene.find_first<velk::ui::ITreeView>();
     auto tree_source = make_tree();
     auto tree = tree_element.find_attachment<velk::ui::ITreeView>();
+    auto tree_items = velk::create_hierarchy_source(tree_source);
     velk::write_state<velk::ui::ITreeView>(tree, [&](velk::ui::ITreeView::State& s) {
-        velk::set_object_ref(s.source, tree_source.as_ptr<velk::IObject>());
+        velk::set_object_ref(s.source, tree_items);
     });
     // The list: 10,000 items, rows only for those that show.
     auto items = velk::create_object_list();

@@ -1,11 +1,13 @@
 // Launches a copy of the fixture app with velk_run and edits it through the core: apply, undo,
 // redo, reset, save.
 
+#include <velk/api/callback.h>
 #include <velk/api/future.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_hierarchy.h>
 #include <velk/json.h>
+#include <velk/plugins/data/api/data.h>
 #include <velk/plugins/remote/api/remote.h>
 
 #include <velk-editor/core/intf_editor_core.h>
@@ -95,6 +97,7 @@ protected:
         plugins.load_plugin("plugin:velk_scene");
         plugins.load_plugin("plugin:velk_ui");
         plugins.load_plugin("plugin:velk_editor_core");
+        plugins.load_plugin("plugin:velk_data");
     }
 
     void SetUp() override
@@ -442,4 +445,46 @@ TEST_F(CoreTest, ModifiedFollowsTheSavedState)
     EXPECT_EQ(set_width(size, "80px"), string("{\"ok\":true}"));
     EXPECT_TRUE(undo());
     EXPECT_TRUE(state()->modified);
+}
+
+TEST_F(CoreTest, TreeThroughHierarchySource)
+{
+    // The core's tree is an IHierarchy, so a tree view shows it through a HierarchySource.
+    auto tree = state()->tree.get<IHierarchy>();
+    ASSERT_TRUE(tree);
+    auto source = create_hierarchy_source(tree);
+    ASSERT_TRUE(source);
+    ASSERT_EQ(source->child_count({}), 1u);
+    auto top = source->child_at({}, 0);
+    EXPECT_EQ(top, tree->root());
+    ASSERT_TRUE(source->has_children(top));
+
+    // Every object the core lists is an item, with the same children in the same order.
+    size_t items = 0;
+    vector<IObject::Ptr> pending{top};
+    while (!pending.empty()) {
+        auto item = pending.back();
+        pending.pop_back();
+        ++items;
+        const size_t n = source->child_count(item);
+        ASSERT_EQ(n, tree->child_count(item));
+        for (size_t i = 0; i < n; ++i) {
+            EXPECT_EQ(source->child_at(item, i), tree->child_at(item, i));
+            pending.push_back(source->child_at(item, i));
+        }
+    }
+    EXPECT_EQ(items, tree->size());
+    EXPECT_GT(items, 2u);
+
+    // Reading the tree again resets the source.
+    int resets = 0;
+    source->on_items_changed().add_handler(create_callback([&](const ItemChange& c) {
+        resets += c.type == ItemChange::Type::Reset ? 1 : 0;
+    }));
+    core_->fn_refresh();
+    for (int i = 0; i < 200 && resets == 0; ++i) {
+        instance().update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_GT(resets, 0);
 }

@@ -33,6 +33,9 @@ inline constexpr Uid ScrollView{"aaf6476d-7c22-4f43-8285-efe8d760b683"};
 /** @brief Rows for the items of an item source, only where they show. See IListView. */
 inline constexpr Uid ListView{"6e2b9f41-8c3d-4a57-b1e0-4f7a2c9d3e58"};
 
+/** @brief Rows for the shown items of an item source tree, expandable. See ITreeView. */
+inline constexpr Uid TreeView{"9b5c2e17-4d8a-4f63-a2c9-1e7f3b6d8a40"};
+
 } // namespace Constraint
 
 // Note: Transform/* moved to velk-scene/plugin.h.

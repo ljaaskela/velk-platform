@@ -24,8 +24,6 @@ inline constexpr Uid Text{"51366e92-5d79-494b-9f5e-7185f8bc547b"};
 /** @brief Single-line editable text: a text visual that takes keyboard focus. See ITextField. */
 inline constexpr Uid TextField{"ce6953c7-125d-4d09-91d4-b31dc9a79459"};
 
-/** @brief Rows of a velk object hierarchy, expandable and selectable. See ITreeView. */
-inline constexpr Uid TreeView{"cc614ccf-4287-4c05-89d0-5cc8258a8d9b"};
 
 } // namespace Visual
 

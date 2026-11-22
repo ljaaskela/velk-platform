@@ -10,6 +10,7 @@ Traits are the primary extension mechanism in velk-ui. An element on its own has
 - [Layout traits](#layout-traits)
   - [Scroll view](#scroll-view)
   - [List view](#list-view)
+  - [Tree view](#tree-view)
 - [Clipping](#clipping)
 - [Transform traits](#transform-traits)
 - [Visual traits](#visual-traits)
@@ -153,6 +154,19 @@ A click selects the item under it (`selected`), and the selected row gets a back
 ```cpp
 auto items = create_object_list();
 write_state<IListView>(view, [&](IListView::State& s) { set_object_ref(s.source, items); });
+```
+
+### Tree view
+
+`TreeView` shows an item source as a tree (for example a `HierarchySource` over an `IHierarchy`). It works like a list view: the element is as tall as its shown rows, it belongs in a ScrollView, and it creates rows only where they show. The view keeps the shown rows as a flat list and updates it per source change and per expand or collapse.
+
+* An item's children show while it is expanded; the top level starts expanded.
+* Each row is indented `indent` per level, after a marker column `indent` wide where the view draws + or - (`marker_color`) for an item with children. A click on the marker expands or collapses; a click elsewhere selects (`selected`, background in the visual's `color`).
+* Rows get `depth`, `has_children` and `expanded` on their `row` attachment besides `item`, `index` and `selected`.
+* `row_template` is optional: without one, a row is the item's `label` as text.
+
+```json
+{ "targets": ["tree"], "class": "velk-ui.TreeView", "properties": { "color": { "r": 0.25, "g": 0.4, "b": 0.7, "a": 1.0 } } }
 ```
 
 ## Clipping

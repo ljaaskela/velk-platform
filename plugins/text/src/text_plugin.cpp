@@ -7,7 +7,6 @@
 #include "visual/text_field.h"
 #include "visual/text_material.h"
 #include "visual/text_visual.h"
-#include "visual/tree_view.h"
 
 #include <velk/interface/resource/intf_resource_protocol.h>
 #include <velk/interface/resource/intf_resource_store.h>
@@ -41,7 +40,6 @@ ReturnValue TextPlugin::initialize(IVelk& velk, PluginConfig&)
     rv &= register_type<TextMaterial>(velk);
     rv &= register_type<TextVisual>(velk);
     rv &= register_type<TextField>(velk);
-    rv &= register_type<TreeView>(velk);
 
     auto& store = velk.resource_store();
 

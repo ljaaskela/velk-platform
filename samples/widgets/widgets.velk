@@ -64,7 +64,7 @@
     {"targets": ["tree_scroll"], "class": "velk-ui.RectVisual", "properties": {"color": {"r": 0.16, "g": 0.17, "b": 0.2, "a": 1.0}}},
     {"id": "tree_scroll_view", "targets": ["tree_scroll"], "class": "velk-ui.ScrollView", "properties": {"color": {"r": 0.7, "g": 0.72, "b": 0.78, "a": 0.8}}},
     {"targets": ["tree"], "class": "velk-ui.FixedSize", "properties": {"height": "auto"}},
-    {"id": "tree_view", "targets": ["tree"], "class": "velk-text.TreeView", "properties": {"color": {"r": 0.9, "g": 0.9, "b": 0.9, "a": 1.0}}},
+    {"id": "tree_view", "targets": ["tree"], "class": "velk-ui.TreeView", "properties": {"color": {"r": 0.25, "g": 0.4, "b": 0.7, "a": 1.0}}},
     {"targets": ["items_scroll"], "class": "velk-ui.FixedSize", "properties": {"width": "220px", "height": "220px"}},
     {"targets": ["items_scroll"], "class": "velk-ui.RectVisual", "properties": {"color": {"r": 0.16, "g": 0.17, "b": 0.2, "a": 1.0}}},
     {"id": "items_scroll_view", "targets": ["items_scroll"], "class": "velk-ui.ScrollView", "properties": {"color": {"r": 0.7, "g": 0.72, "b": 0.78, "a": 0.8}}},

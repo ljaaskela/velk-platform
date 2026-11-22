@@ -8,7 +8,6 @@ The text plugin (`velk_text`) brings font loading and text rendering support int
 - [Drawing text](#drawing-text)
   - [TextVisual](#textvisual)
   - [TextField](#textfield)
-  - [TreeView](#treeview)
 - [JSON declaration](#json-declaration)
   - [Font size](#font-size)
 - [How it works](#how-it-works)
@@ -83,35 +82,6 @@ Clicking the field focuses it and starts editing, with the caret at the click. T
 ```
 
 Not yet: selection, clipboard, IME, multiple lines, a blinking caret, Tab between fields.
-
-### TreeView
-
-`TreeView` shows a velk object hierarchy as rows. Set `source` to an `IHierarchy`; each object's `label_property` (`label` by default) is its text. The root starts expanded. Clicking the `+` or `-` in front of a row expands or collapses it, and clicking elsewhere on a row sets `selected` to its object. The rows follow the hierarchy's changes.
-
-| Property | Description |
-|---|---|
-| `source` | The `IHierarchy` shown. |
-| `label_property` | The property shown as each object's text. |
-| `selected` | The selected object, or none. |
-| `row_height`, `indent`, `font_size` | Row height, indentation per level and text size, in pixels. |
-| `selection_color` | Background of the selected row. The text has the visual's `color`. |
-
-Its content size is its rows, so in a `ScrollView` with an `auto` height it scrolls. Every shown row is drawn; the scroll view clips the rest.
-
-```json
-{ "targets": ["tree"], "class": "velk-ui.FixedSize", "properties": { "height": "auto" } },
-{ "targets": ["tree"], "class": "velk-text.TreeView", "properties": { "color": { "r": 0.9, "g": 0.9, "b": 0.9, "a": 1.0 } } }
-```
-
-The source is set in code, since a store file cannot name a hierarchy:
-
-```cpp
-velk::write_state<velk::ui::ITreeView>(tree, [&](velk::ui::ITreeView::State& s) {
-    velk::set_object_ref(s.source, hierarchy.as_ptr<velk::IObject>());
-});
-```
-
-Not yet: keyboard navigation, rows made only for what shows (virtualization), a data source other than a velk hierarchy.
 
 ## JSON declaration
 
@@ -262,7 +232,6 @@ Public ClassIds for the plugin's main types. Construct via `instance().create<I>
 | `velk::ui::ClassId::FontDecoder` | `IResourceDecoder` | Decoder for `font:<uri>`. Registered by the plugin. |
 | `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
 | `velk::ui::ClassId::Visual::TextField` | `ITextField`, `ITextVisual`, `IVisual2D`, `IInputTrait`, `IFocusTarget`, `IClip` | Single-line editable text. See [TextField](#textfield). |
-| `velk::ui::ClassId::Visual::TreeView` | `ITreeView`, `IVisual2D`, `IInputTrait` | Rows of a velk object hierarchy. See [TreeView](#treeview). |
 | `velk::ui::ClassId::TextMaterial` | `IMaterial` | Material that runs the analytic-coverage fragment shader. Owned by each `Font` and shared by all `TextVisual`s using that font (so they batch into one draw call). Not normally constructed by user code. |
 
 The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `get_default_font()` and `get_monospace_font()`, usually accessed through the header-only helpers `velk::ui::get_default_font()` and `velk::ui::get_monospace_font()`.

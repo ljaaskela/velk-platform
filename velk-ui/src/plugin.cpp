@@ -24,6 +24,7 @@
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
 #include "layout/list_view.h"
+#include "layout/tree_view.h"
 #include "render_cache.h"
 #include "visual/texture_material.h"
 #include "visual/texture_visual.h"
@@ -44,6 +45,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<ScrollView>(velk);
     rv &= register_type<ListView>(velk);
     rv &= register_type<ListRow>(velk);
+    rv &= register_type<TreeView>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);

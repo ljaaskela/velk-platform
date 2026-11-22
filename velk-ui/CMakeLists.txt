@@ -9,6 +9,8 @@ add_library(velk_ui SHARED
     src/layout/scroll_view.cpp
     src/layout/list_view.h
     src/layout/list_view.cpp
+    src/layout/tree_view.h
+    src/layout/tree_view.cpp
     src/constraint/fixed_size.h
     src/constraint/fixed_size.cpp
     src/constraint/insets.h
@@ -48,6 +50,7 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/intf_input_trait.h
     include/velk-ui/interface/intf_list_row.h
     include/velk-ui/interface/trait/intf_list_view.h
+    include/velk-ui/interface/trait/intf_tree_view.h
     include/velk-ui/interface/intf_input_dispatcher.h
     include/velk-ui/interface/intf_focus_target.h
     include/velk-ui/ext/input.h
