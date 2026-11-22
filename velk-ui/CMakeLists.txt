@@ -43,6 +43,7 @@ add_library(velk_ui SHARED
     include/velk-ui/input_types.h
     include/velk-ui/interface/intf_input_trait.h
     include/velk-ui/interface/intf_input_dispatcher.h
+    include/velk-ui/interface/intf_focus_target.h
     include/velk-ui/ext/input.h
     include/velk-ui/api/input_dispatcher.h
     include/velk-ui/api/input/click.h

@@ -7,6 +7,7 @@ The text plugin (`velk_text`) brings font loading and text rendering support int
 - [Usage](#usage)
 - [Drawing text](#drawing-text)
   - [TextVisual](#textvisual)
+  - [TextField](#textfield)
 - [JSON declaration](#json-declaration)
   - [Font size](#font-size)
 - [How it works](#how-it-works)
@@ -64,6 +65,23 @@ element.add_trait(text);
 ```
 
 The visual shapes the text with HarfBuzz on every change to `text` or `font_size`, lazy-bakes any glyphs it hasn't seen before, and emits one quad per laid-out glyph. All quads in one text element share a single draw call.
+
+### TextField
+
+`TextField` is a single-line editable text: a text visual and an input trait in one attachment. It has the `ITextVisual` properties and `ITextField`:
+
+| Member | Description |
+|---|---|
+| `editing` (read-only) | True while the field takes typed text. |
+| `on_commit(string text)` | An edit changed `text`. |
+
+Clicking the field focuses it and starts editing, with the caret at the click. Typed text goes to an edit buffer; `text` keeps its value until the edit is committed. Enter or clicking elsewhere commits, Escape restores the buffer from `text`. Backspace, Delete, Left, Right, Home and End edit and move the caret. Text is left aligned (`v_align` applies). Text wider than the field scrolls to keep the caret in view, and glyphs not entirely inside the field are not drawn.
+
+```json
+{ "targets": ["name"], "class": "velk-text.TextField", "properties": { "text": "Panel", "v_align": "center" } }
+```
+
+Not yet: selection, clipboard, IME, multiple lines, a blinking caret, Tab between fields.
 
 ## JSON declaration
 
@@ -213,6 +231,7 @@ Public ClassIds for the plugin's main types. Construct via `instance().create<I>
 | `velk::ui::ClassId::Font` | `IFont`, `IResource` | FreeType + HarfBuzz font instance, created by the `font` decoder. Shapes text and lazy-bakes glyphs into GPU curve / band / glyph buffers. Properties (in font units): `ascender`, `descender`, `line_height`, `units_per_em`. |
 | `velk::ui::ClassId::FontDecoder` | `IResourceDecoder` | Decoder for `font:<uri>`. Registered by the plugin. |
 | `velk::ui::ClassId::Visual::Text` | `ITextVisual`, `IVisual2D` | Text visual trait. Properties: `text`, `font`, `font_size`, `h_align`, `v_align`; `color` / `paint` from `IVisual2D`. Attaches to any element. |
+| `velk::ui::ClassId::Visual::TextField` | `ITextField`, `ITextVisual`, `IVisual2D`, `IInputTrait`, `IFocusTarget` | Single-line editable text. See [TextField](#textfield). |
 | `velk::ui::ClassId::TextMaterial` | `IMaterial` | Material that runs the analytic-coverage fragment shader. Owned by each `Font` and shared by all `TextVisual`s using that font (so they batch into one draw call). Not normally constructed by user code. |
 
 The plugin also exposes `ITextPlugin` (`velk-ui/plugins/text/intf_text_plugin.h`) via `PluginId::TextPlugin`, which provides `get_default_font()` and `get_monospace_font()`, usually accessed through the header-only helpers `velk::ui::get_default_font()` and `velk::ui::get_monospace_font()`.

@@ -4,6 +4,7 @@
 #include "embedded/jetbrains_mono_regular.h"
 #include "font.h"
 #include "font_decoder.h"
+#include "visual/text_field.h"
 #include "visual/text_material.h"
 #include "visual/text_visual.h"
 
@@ -38,6 +39,7 @@ ReturnValue TextPlugin::initialize(IVelk& velk, PluginConfig&)
     rv &= register_type<impl::FontDecoder>(velk);
     rv &= register_type<TextMaterial>(velk);
     rv &= register_type<TextVisual>(velk);
+    rv &= register_type<TextField>(velk);
 
     auto& store = velk.resource_store();
 

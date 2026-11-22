@@ -21,6 +21,9 @@ namespace Visual {
 /** @brief Shaped text rendered as textured glyph quads from a glyph atlas. */
 inline constexpr Uid Text{"51366e92-5d79-494b-9f5e-7185f8bc547b"};
 
+/** @brief Single-line editable text: a text visual that takes keyboard focus. See ITextField. */
+inline constexpr Uid TextField{"ce6953c7-125d-4d09-91d4-b31dc9a79459"};
+
 } // namespace Visual
 
 } // namespace ClassId

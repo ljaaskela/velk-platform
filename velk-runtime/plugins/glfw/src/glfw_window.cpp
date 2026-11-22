@@ -5,6 +5,29 @@
 
 namespace velk::impl {
 
+namespace {
+
+ui::Key named_key(int key)
+{
+    switch (key) {
+    case GLFW_KEY_BACKSPACE: return ui::Key::Backspace;
+    case GLFW_KEY_DELETE: return ui::Key::Delete;
+    case GLFW_KEY_LEFT: return ui::Key::Left;
+    case GLFW_KEY_RIGHT: return ui::Key::Right;
+    case GLFW_KEY_UP: return ui::Key::Up;
+    case GLFW_KEY_DOWN: return ui::Key::Down;
+    case GLFW_KEY_HOME: return ui::Key::Home;
+    case GLFW_KEY_END: return ui::Key::End;
+    case GLFW_KEY_ENTER:
+    case GLFW_KEY_KP_ENTER: return ui::Key::Enter;
+    case GLFW_KEY_ESCAPE: return ui::Key::Escape;
+    case GLFW_KEY_TAB: return ui::Key::Tab;
+    default: return ui::Key::Unknown;
+    }
+}
+
+} // namespace
+
 GlfwWindow::~GlfwWindow()
 {
     if (window_) {
@@ -24,6 +47,7 @@ void GlfwWindow::set_glfw_handle(GLFWwindow* window)
         glfwSetMouseButtonCallback(window_, mouse_button_callback);
         glfwSetScrollCallback(window_, scroll_callback);
         glfwSetKeyCallback(window_, key_callback);
+        glfwSetCharCallback(window_, char_callback);
     }
 }
 
@@ -164,6 +188,7 @@ void GlfwWindow::key_callback(GLFWwindow* window, int key, int scancode, int act
     ui::KeyEvent ev;
     ev.key = key;
     ev.scancode = scancode;
+    ev.named = named_key(key);
     ev.action = (action == GLFW_PRESS)    ? ui::KeyAction::Down
                 : (action == GLFW_REPEAT) ? ui::KeyAction::Repeat
                                           : ui::KeyAction::Up;
@@ -171,6 +196,19 @@ void GlfwWindow::key_callback(GLFWwindow* window, int key, int scancode, int act
     if (mods & GLFW_MOD_CONTROL) ev.modifiers = ev.modifiers | ui::Modifier::Ctrl;
     if (mods & GLFW_MOD_ALT)     ev.modifiers = ev.modifiers | ui::Modifier::Alt;
     if (mods & GLFW_MOD_SUPER)   ev.modifiers = ev.modifiers | ui::Modifier::Super;
+    self->input_->key_event(ev);
+}
+
+void GlfwWindow::char_callback(GLFWwindow* window, unsigned int codepoint)
+{
+    auto* self = static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
+    if (!self || !self->input_) {
+        return;
+    }
+
+    ui::KeyEvent ev;
+    ev.action = ui::KeyAction::Text;
+    ev.codepoint = static_cast<char32_t>(codepoint);
     self->input_->key_event(ev);
 }
 

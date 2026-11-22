@@ -78,6 +78,12 @@ Scroll events hit-test and then bubble from target to root (no intercept pass).
 
 Key events dispatch to the focused element's `IInputTrait` and bubble upward through ancestors.
 
+A typed character arrives as a key event with `action == KeyAction::Text` and `codepoint` set (`key` is 0). Keys used for editing and navigation also carry a platform-independent `named` value (`Key::Backspace`, `Key::Left`, `Key::Enter`, `Key::Escape` and so on); other keys have `Key::Unknown`.
+
+### Focus
+
+An input trait that also implements `IFocusTarget` can take keyboard focus. On pointer down the dispatcher gives focus to the innermost element under the pointer whose input trait is a focus target, or clears focus when there is none (including a click on empty space). The old and new targets get `on_focus_changed(false)` and `on_focus_changed(true)`. `set_focus()` notifies them the same way.
+
 ### Hover tracking
 
 The dispatcher compares the hit element on each move event with the previous one. When it changes, `on_pointer_leave` fires on the old element and `on_pointer_enter` on the new one. These do not bubble.
@@ -165,7 +171,7 @@ All event structs are PODs defined in `input_types.h`. Position fields are in sc
 |--------|--------|
 | `PointerEvent` | `position`, `local_position`, `button`, `action`, `modifiers`, `pointer_id` |
 | `ScrollEvent` | `position`, `local_position`, `delta`, `unit`, `modifiers` |
-| `KeyEvent` | `key`, `scancode`, `action`, `modifiers`, `codepoint` |
+| `KeyEvent` | `key`, `scancode`, `action`, `modifiers`, `codepoint`, `named` |
 
 ## Custom input traits
 

@@ -6,6 +6,7 @@
 #include <velk/interface/intf_object_storage.h>
 
 #include <velk-scene/api/element.h>
+#include <velk-ui/interface/intf_focus_target.h>
 
 #ifdef VELK_INPUT_DEBUG
 #define INPUT_LOG(...) VELK_LOG(I, __VA_ARGS__)
@@ -21,6 +22,12 @@ namespace {
 IInputTrait::Ptr get_input_trait(const IElement::Ptr& element)
 {
     return Element(element).find_trait<IInputTrait>();
+}
+
+/** @brief The focus target of an element's input trait, or nullptr. */
+IFocusTarget* get_focus_target(const IElement::Ptr& element)
+{
+    return element ? interface_cast<IFocusTarget>(get_input_trait(element)) : nullptr;
 }
 
 } // namespace
@@ -79,11 +86,16 @@ void InputDispatcher::pointer_event(const PointerEvent& event)
     update_hover(hit, ev);
 
     if (!hit) {
-        // Pointer down on empty space clears press
+        // Pointer down on empty space clears press and focus
         if (ev.action == PointerAction::Down) {
             pressed_ = {};
+            set_focus(nullptr);
         }
         return;
+    }
+
+    if (ev.action == PointerAction::Down) {
+        update_focus(hit);
     }
 
     // Dispatch through intercept + bubble
@@ -122,8 +134,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
     // state, mirroring the on_pointer_event / on_scroll_event paths.
     ::velk::invoke_event(get_interface(IInterface::UID), "on_key_event", event);
 
-    // Key events dispatch to focused element and bubble up.
-    // Stub for now: full implementation comes with focus management.
+    // Key events dispatch to the focused element and bubble up.
     if (!focused_) {
         return;
     }
@@ -174,8 +185,32 @@ void InputDispatcher::set_focus(const IElement::Ptr& element)
     if (focused_ == element) {
         return;
     }
+    auto old = focused_;
     focused_ = element;
+    if (auto* target = get_focus_target(old)) {
+        target->on_focus_changed(false);
+    }
+    if (auto* target = get_focus_target(focused_)) {
+        target->on_focus_changed(true);
+    }
     invoke_event(this->get_interface(IInterface::UID), "on_focus_changed", static_cast<bool>(focused_));
+}
+
+void InputDispatcher::update_focus(const IElement::Ptr& hit)
+{
+    if (get_focus_target(hit)) {
+        set_focus(hit);
+        return;
+    }
+    vector<IElement::Ptr> chain;
+    build_ancestor_chain(hit, chain);
+    for (auto& ancestor : chain) {
+        if (get_focus_target(ancestor)) {
+            set_focus(ancestor);
+            return;
+        }
+    }
+    set_focus(nullptr);
 }
 
 // ============================================================================

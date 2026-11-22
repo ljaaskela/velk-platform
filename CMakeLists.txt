@@ -78,6 +78,7 @@ endif()
 add_subdirectory(samples)
 if(NOT ANDROID)
     add_subdirectory(velk-editor)
+    add_subdirectory(tests/unit)
 endif()
 
 # =============================================================================

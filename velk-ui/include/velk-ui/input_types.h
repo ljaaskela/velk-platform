@@ -122,7 +122,25 @@ enum class KeyAction : uint8_t
 {
     Down,
     Up,
-    Repeat
+    Repeat,
+    Text ///< A character was typed: codepoint is set, key is 0.
+};
+
+/** @brief Keys with a platform-independent meaning, for editing and navigation. */
+enum class Key : uint8_t
+{
+    Unknown,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Enter,
+    Escape,
+    Tab
 };
 
 /**
@@ -136,7 +154,8 @@ struct KeyEvent
     int scancode{};        ///< Hardware scan code.
     KeyAction action{};
     Modifier modifiers{};
-    char32_t codepoint{};  ///< Unicode character (0 if not a text input key).
+    char32_t codepoint{};  ///< Unicode character, set for KeyAction::Text.
+    Key named{};           ///< The key as a named key, Key::Unknown for the others.
 };
 
 } // namespace velk::ui

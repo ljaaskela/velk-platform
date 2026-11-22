@@ -15,6 +15,30 @@
 
 namespace velk::ui {
 
+/** @brief Helpers shared by TextVisual and TextField. */
+namespace text_detail {
+
+/** @brief The font @p ref names, or the default font when it is empty or failed to load. */
+IFont::Ptr resolve_font(const ObjectRef& ref);
+
+/** @brief Writes @p font's material to @p visual's paint. */
+void bind_font_material(IVisual2D* visual, const IFont::Ptr& font);
+
+/**
+ * @brief Appends one draw entry per laid-out glyph, aligned in @p bounds and moved right by
+ *        @p shift_x. With @p clip, glyphs not entirely inside the bounds' width are skipped.
+ */
+void append_glyphs(const IFont::TextLayoutResult& layout, const ::velk::size& bounds, HAlign ha, VAlign va,
+                   ::velk::color col, const IProgram::Ptr& material, float shift_x, bool clip,
+                   vector<DrawEntry>& out);
+
+/** @brief The glyph-silhouette shape intersect snippet, for IShaderSource kIntersect. */
+string_view intersect_source();
+/** @brief The function name of intersect_source(). */
+string_view intersect_fn_name();
+
+} // namespace text_detail
+
 /**
  * @brief Renders shaped text as glyph quads with multiline support.
  *
@@ -81,7 +105,6 @@ private:
     /// Resolves the font to use from the `font` property, falling back to
     /// the default font when it is empty or failed to load.
     void update_font();
-    void bind_font_material();
 
     // Populates `layout_result_` lazily based on the current state and
     // `bounds.width`. Returns the font used (nullptr if none available).

@@ -48,6 +48,9 @@ private:
     /** @brief Dispatches a scroll event through the intercept + bubble pipeline. */
     InputResult dispatch_scroll(ScrollEvent& event, const IElement::Ptr& hit);
 
+    /** @brief Gives focus to @p hit or its nearest ancestor that is a focus target, or clears it. */
+    void update_focus(const IElement::Ptr& hit);
+
     /** @brief Updates hover state and fires enter/leave. */
     void update_hover(const IElement::Ptr& new_hover, const PointerEvent& event);
 

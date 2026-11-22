@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "objects": [
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "field", "class": "velk-scene.Element" }
+  ],
+  "hierarchies": {
+    "scene": { "root": ["field"] }
+  },
+  "attachments": [
+    { "targets": ["field"], "class": "velk-ui.FixedSize", "properties": { "width": "200px", "height": "30px" } },
+    { "id": "field_text", "targets": ["field"], "class": "velk-text.TextField", "properties": { "text": "ab" } }
+  ]
+}

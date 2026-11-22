@@ -26,21 +26,86 @@ void TextVisual::on_state_changed(string_view name, IMetadata& owner, Uid interf
     invoke_visual_changed();
 }
 
-void TextVisual::update_font()
+namespace text_detail {
+
+IFont::Ptr resolve_font(const ObjectRef& ref)
 {
-    IFont::Ptr font;
-    if (auto state = read_state<ITextVisual>(this)) {
-        font = state->font.get<IFont>();
-    }
+    auto font = ref.get<IFont>();
     auto* resource = interface_cast<IResource>(font);
     if (!font || (resource && !resource->exists())) {
         font = get_default_font();
     }
+    return font;
+}
+
+void bind_font_material(IVisual2D* visual, const IFont::Ptr& font)
+{
+    auto material = font ? font->get_material() : nullptr;
+    if (!material) {
+        return;
+    }
+    write_state<IVisual2D>(visual, [&](IVisual2D::State& s) { set_object_ref(s.paint, material); });
+}
+
+void append_glyphs(const IFont::TextLayoutResult& layout, const ::velk::size& bounds, HAlign ha, VAlign va,
+                   ::velk::color col, const IProgram::Ptr& material, float shift_x, bool clip,
+                   vector<DrawEntry>& out)
+{
+    float offset_y = 0.f;
+    switch (va) {
+    case VAlign::Center: offset_y += (bounds.height - layout.total_height) * 0.5f; break;
+    case VAlign::Bottom: offset_y += bounds.height - layout.total_height; break;
+    default: break;
+    }
+
+    out.reserve(out.size() + layout.glyphs.size());
+    for (auto& line : layout.lines) {
+        float offset_x = shift_x;
+        switch (ha) {
+        case HAlign::Center: offset_x += (bounds.width - line.width) * 0.5f; break;
+        case HAlign::Right:  offset_x += bounds.width - line.width; break;
+        default: break;
+        }
+
+        for (uint32_t i = 0; i < line.glyph_count; ++i) {
+            auto& pg = layout.glyphs[line.first_glyph + i];
+            const float x = pg.pos.x + offset_x;
+            const float y = pg.pos.y + offset_y;
+            if (clip && (x < 0.f || x + pg.size.x > bounds.width)) {
+                continue;
+            }
+
+            DrawEntry entry{};
+            entry.pipeline_key = 0;
+            entry.bounds = {x, y, pg.size.x, pg.size.y};
+            entry.material = material;
+
+            ElementInstance inst{};
+            inst.offset = {x, y, 0.f, 0.f};
+            inst.size = {pg.size.x, pg.size.y, 0.f, 0.f};
+            inst.col = col;
+            inst.params[0] = pg.glyph_index;
+            entry.set_instance(inst);
+
+            out.push_back(entry);
+        }
+    }
+}
+
+} // namespace text_detail
+
+void TextVisual::update_font()
+{
+    ObjectRef ref;
+    if (auto state = read_state<ITextVisual>(this)) {
+        ref = state->font;
+    }
+    auto font = text_detail::resolve_font(ref);
     if (font == font_.as_ptr<IFont>()) {
         return;
     }
     font_ = Font(font);
-    bind_font_material();
+    text_detail::bind_font_material(this, font);
     cache_.invalidate();
 }
 
@@ -59,21 +124,6 @@ size TextVisual::content_size(const size& available)
     font->layout_text(string_view(state->text.data(), state->text.size()), state->font_size, state->layout, width,
                       result);
     return {result.total_width, result.total_height, 0.f};
-}
-
-void TextVisual::bind_font_material()
-{
-    auto font = font_.as_ptr<IFont>();
-    if (!font) {
-        return;
-    }
-    auto material = font->get_material();
-    if (!material) {
-        return;
-    }
-    write_state<IVisual2D>(this, [&](IVisual2D::State& s) {
-        set_object_ref(s.paint, material);
-    });
 }
 
 IFont* TextVisual::ensure_layout(const ::velk::size& bounds) const
@@ -149,49 +199,13 @@ vector<DrawEntry> TextVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
     HAlign ha = text_state ? text_state->h_align : HAlign::Left;
     VAlign va = text_state ? text_state->v_align : VAlign::Top;
 
-    float offset_y = 0.f;
-    switch (va) {
-    case VAlign::Center: offset_y += (bounds.height - layout_result_.total_height) * 0.5f; break;
-    case VAlign::Bottom: offset_y += bounds.height - layout_result_.total_height; break;
-    default: break;
-    }
-
     IProgram::Ptr material;
     if (visual_state && visual_state->paint) {
         material = visual_state->paint.get<IProgram>();
     }
 
     vector<DrawEntry> result;
-    result.reserve(layout_result_.glyphs.size());
-
-    for (auto& line : layout_result_.lines) {
-        float offset_x = 0.f;
-        switch (ha) {
-        case HAlign::Center: offset_x += (bounds.width - line.width) * 0.5f; break;
-        case HAlign::Right:  offset_x += bounds.width - line.width; break;
-        default: break;
-        }
-
-        for (uint32_t i = 0; i < line.glyph_count; ++i) {
-            auto& pg = layout_result_.glyphs[line.first_glyph + i];
-
-            DrawEntry entry{};
-            entry.pipeline_key = 0;
-            entry.bounds = {pg.pos.x + offset_x, pg.pos.y + offset_y,
-                            pg.size.x, pg.size.y};
-            entry.material = material;
-
-            ElementInstance inst{};
-            inst.offset = {pg.pos.x + offset_x, pg.pos.y + offset_y, 0.f, 0.f};
-            inst.size = {pg.size.x, pg.size.y, 0.f, 0.f};
-            inst.col = col;
-            inst.params[0] = pg.glyph_index;
-            entry.set_instance(inst);
-
-            result.push_back(entry);
-        }
-    }
-
+    text_detail::append_glyphs(layout_result_, bounds, ha, va, col, material, 0.f, false, result);
     return result;
 }
 
@@ -244,15 +258,25 @@ bool velk_intersect_text_glyph(Ray ray, RtShape shape, out RayHit hit)
 
 } // namespace
 
+string_view text_detail::intersect_source()
+{
+    return text_intersect_src;
+}
+
+string_view text_detail::intersect_fn_name()
+{
+    return "velk_intersect_text_glyph";
+}
+
 string_view TextVisual::get_source(::velk::string_view role) const
 {
-    if (role == ::velk::shader_role::kIntersect) return text_intersect_src;
+    if (role == ::velk::shader_role::kIntersect) return text_detail::intersect_source();
     return {};
 }
 
 string_view TextVisual::get_fn_name(::velk::string_view role) const
 {
-    if (role == ::velk::shader_role::kIntersect) return "velk_intersect_text_glyph";
+    if (role == ::velk::shader_role::kIntersect) return text_detail::intersect_fn_name();
     return {};
 }
 
