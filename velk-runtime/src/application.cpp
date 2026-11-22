@@ -78,6 +78,11 @@ bool Application::init(const ApplicationConfig& config)
     }
     if (const char* frames = std::getenv("VELK_AUTO_CAPTURE_FRAMES")) {
         auto_capture_frames_ = std::max(1l, std::strtol(frames, nullptr, 10));
+        auto_capture_on_close_ = auto_exit_frames_ <= 0;
+    }
+    if (const char* fps = std::getenv("VELK_MAX_FPS")) {
+        const long most = std::strtol(fps, nullptr, 10);
+        if (most > 0) max_fps_frame_time_ = std::chrono::nanoseconds(1'000'000'000LL / most);
     }
     auto_gpu_stats_ = std::getenv("VELK_AUTO_GPU_STATS") != nullptr;
 
@@ -327,19 +332,20 @@ bool Application::poll()
         AutoCapture capture;
         if (read_first_window(capture.pixels, capture.dims)) auto_captures_.push_back(std::move(capture));
     }
-    if (auto_exit_frames_ > 0 && presented_frames_ >= auto_exit_frames_) {
-        for (size_t i = 0; i < auto_captures_.size(); ++i) {
-            if (auto_captures_.size() == 1) {
-                save_capture(auto_captures_[i].pixels, auto_captures_[i].dims, auto_capture_path_);
-                continue;
+    // Without an exit frame, every frame, the oldest of auto_capture_frames_ replaced.
+    if (auto_capture_on_close_ && !auto_capture_path_.empty() && presented_frames_ > 0) {
+        AutoCapture capture;
+        if (read_first_window(capture.pixels, capture.dims)) {
+            if (static_cast<long>(auto_captures_.size()) < auto_capture_frames_) {
+                auto_captures_.push_back(std::move(capture));
+            } else {
+                auto_captures_[auto_capture_oldest_] = std::move(capture);
+                auto_capture_oldest_ = (auto_capture_oldest_ + 1u) % auto_captures_.size();
             }
-            const char* path = auto_capture_path_.c_str();
-            const char* dot = std::strrchr(path, '.');
-            const int stem = dot ? static_cast<int>(dot - path) : static_cast<int>(std::strlen(path));
-            char named[1024];
-            std::snprintf(named, sizeof(named), "%.*s_%zu%s", stem, path, i + 1, dot ? dot : "");
-            save_capture(auto_captures_[i].pixels, auto_captures_[i].dims, string(named));
         }
+    }
+    if (auto_exit_frames_ > 0 && presented_frames_ >= auto_exit_frames_) {
+        save_auto_captures();
         for (auto& pass : auto_gpu_samples_) {
             std::sort(pass.ms.begin(), pass.ms.end());
             VELK_LOG(I, "gpu pass %-24s med=%7.3f ms  p90=%7.3f ms  n=%zu", pass.label.c_str(),
@@ -351,7 +357,29 @@ bool Application::poll()
         }
         return false;
     }
-    return window_provider_->poll_events();
+    const bool open = window_provider_->poll_events();
+    if (!open && auto_capture_on_close_) save_auto_captures();
+    return open;
+}
+
+void Application::save_auto_captures()
+{
+    for (size_t k = 0; k < auto_captures_.size(); ++k) {
+        // Oldest first: on close the frames kept go round from auto_capture_oldest_.
+        const AutoCapture& capture = auto_captures_[(auto_capture_oldest_ + k) % auto_captures_.size()];
+        if (auto_captures_.size() == 1) {
+            save_capture(capture.pixels, capture.dims, auto_capture_path_);
+            continue;
+        }
+        const char* path = auto_capture_path_.c_str();
+        const char* dot = std::strrchr(path, '.');
+        const int stem = dot ? static_cast<int>(dot - path) : static_cast<int>(std::strlen(path));
+        char named[1024];
+        std::snprintf(named, sizeof(named), "%.*s_%zu%s", stem, path, k + 1, dot ? dot : "");
+        save_capture(capture.pixels, capture.dims, string(named));
+    }
+    auto_captures_.clear();
+    auto_capture_oldest_ = 0;
 }
 
 bool Application::read_first_window(vector<uint8_t>& pixels, uvec2& dims)
@@ -426,15 +454,17 @@ void Application::submit(::velk::Frame frame)
     ++presented_frames_;
     auto frame_end = std::chrono::steady_clock::now();
 
-    // Software pacing for UpdateRate::Targeted: sleep until the next frame deadline.
-    if (target_frame_time_ > std::chrono::nanoseconds::zero()) {
+    // Software pacing for UpdateRate::Targeted, and VELK_MAX_FPS: sleep until the next frame
+    // deadline, the longer frame time of the two.
+    const auto pace = std::max(target_frame_time_, max_fps_frame_time_);
+    if (pace > std::chrono::nanoseconds::zero()) {
         if (next_present_deadline_.time_since_epoch().count() == 0) {
-            next_present_deadline_ = frame_end + target_frame_time_;
+            next_present_deadline_ = frame_end + pace;
         } else {
-            next_present_deadline_ += target_frame_time_;
+            next_present_deadline_ += pace;
             // If we fell badly behind, snap forward instead of trying to catch up.
             if (next_present_deadline_ < frame_end) {
-                next_present_deadline_ = frame_end + target_frame_time_;
+                next_present_deadline_ = frame_end + pace;
             }
             std::this_thread::sleep_until(next_present_deadline_);
             frame_end = std::chrono::steady_clock::now();

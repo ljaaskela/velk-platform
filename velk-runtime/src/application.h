@@ -80,6 +80,8 @@ private:
     bool read_first_window(vector<uint8_t>& pixels, uvec2& dims);
     /// Saves RGBA8 @p pixels as a PNG at @p path.
     void save_capture(const vector<uint8_t>& pixels, uvec2 dims, const string& path);
+    /// Saves the frames kept in auto_captures_, oldest first, and lets them go.
+    void save_auto_captures();
 
     ApplicationConfig config_;
     /// Development aids, from VELK_AUTO_EXIT_FRAMES and VELK_AUTO_CAPTURE: poll()
@@ -90,14 +92,19 @@ private:
     string auto_capture_path_;
     /// VELK_AUTO_CAPTURE_FRAMES: how many of the last frames before the exit are saved, each
     /// as the capture path with _1, _2 ... before its extension; kept in memory until the exit,
-    /// so that saving does not hold up the frames between them.
+    /// so that saving does not hold up the frames between them. Without VELK_AUTO_EXIT_FRAMES,
+    /// the last ones before the window closes (auto_capture_on_close_), every frame read back.
     long auto_capture_frames_ = 1;
+    bool auto_capture_on_close_ = false;
     struct AutoCapture
     {
         vector<uint8_t> pixels;
         uvec2 dims{};
     };
     vector<AutoCapture> auto_captures_;
+    size_t auto_capture_oldest_ = 0; ///< On close, the oldest of auto_captures_.
+    /// VELK_MAX_FPS: the shortest frame time, slept to in submit(); zero for no limit.
+    std::chrono::nanoseconds max_fps_frame_time_{0};
     /// VELK_AUTO_GPU_STATS: logs GPU pass medians when VELK_AUTO_EXIT_FRAMES exits.
     bool auto_gpu_stats_ = false;
     struct AutoGpuPass
