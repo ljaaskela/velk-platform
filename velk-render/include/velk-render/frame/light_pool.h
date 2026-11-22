@@ -389,9 +389,10 @@ inline constexpr uint32_t kLightTraceRaysUnlimited = 1u << 30;
 #define VELK_LIGHT_POINT_CAPACITY 65536u
 #define VELK_LIGHT_POINT_WORDS VELK_POINT_ENTRY_WORDS
 // The point lists (velk_light_list_at), traced in this order of priority from one budget:
-// points never traced; stale points of a pixel's coarse level, which judges where pieces split
-// and join and which the lighting falls back to; stale points finer than it, and vertices only
-// bounces read; points warming up. Their counts and words in the pool's header.
+// points of a pixel's coarse level never traced; its stale points (the coarse level judges where
+// pieces split and join, and the lighting falls back to it); points finer than it, and vertices
+// only bounces read, never traced or stale; points warming up. Their counts and words in the
+// pool's header.
 #define VELK_LIGHT_LIST_UNTRACED 0u
 #define VELK_LIGHT_LIST_WARMUP 1u
 #define VELK_LIGHT_LIST_COARSE 2u
@@ -1176,8 +1177,8 @@ void velk_light_list_coarse(uint pool, uint page, uint instance, uint frame, uin
 // Puts the point of light whose words start at `word` on a point list, as `entry_first` and
 // `entry_point` (VELK_POINT_ENTRY), once a frame, when it is due (velk_light_point_due); `first`
 // is the first page of its record, whose changes make it stale. By the order its trace comes in
-// (VELK_LIGHT_LIST_UNTRACED and the others): never traced; stale since a change, of a pixel's
-// `coarse` level; stale, finer; warming up. Its trace state takes the frame, and its count as
+// (VELK_LIGHT_LIST_UNTRACED and the others): of a pixel's `coarse` level, never traced; of it,
+// stale since a change; finer, never traced or stale; warming up. Its trace state takes the frame, and its count as
 // velk_light_point_traces says, so that the trace reads which trace this is. A settled point with
 // a light untraced or stale (its blocker word `bw` has a code VELK_LIGHT_BLOCKER_UNTRACED or
 // VELK_LIGHT_BLOCKER_STALE) warms up again. Past the list's room it waits for a later frame.
@@ -1198,11 +1199,13 @@ void velk_light_list_at(uint pool, uint word, uint bw, uint first, uint entry_fi
     uint now = frame & 0x0FFFFFFFu;
     if (state != VELK_LIGHT_NONE && (state & 0x0FFFFFFFu) == now) return;
     if (atomicCompSwap(VELK_LIGHT_WORDS.data[at], state, (traces << 28u) | now) != state) return;
+    // Coarse before fine, never traced or stale: a new view's coarse light comes in first, the
+    // finer points' over it after.
     bool never = VELK_LIGHT_WORDS.data[at - 1u] == VELK_LIGHT_NONE;
     uint list = traces > 0u ? VELK_LIGHT_LIST_WARMUP
+              : !coarse     ? VELK_LIGHT_LIST_FINE
               : never       ? VELK_LIGHT_LIST_UNTRACED
-              : coarse      ? VELK_LIGHT_LIST_COARSE
-                            : VELK_LIGHT_LIST_FINE;
+                            : VELK_LIGHT_LIST_COARSE;
     uint i = atomicAdd(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(list)], 1u);
     if (i >= VELK_LIGHT_POINT_CAPACITY) return;
     uint w = VELK_LIGHT_WORDS.data[pool + velk_light_list_word_word(list)] + i * VELK_LIGHT_POINT_WORDS;
