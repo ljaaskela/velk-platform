@@ -110,6 +110,8 @@ inline constexpr uint32_t kLodMoved = 0x40000000u;
 /// are (VELK_LOD_RAYS_ONLY): the culling lays out its clusters' draws, which that pass draws, never
 /// by compute raster nor held back by occlusion, and rays see them.
 inline constexpr uint32_t kLodRaysOnly = 0x20000000u;
+/// A cluster triangle word's top 8 bits when its index is not kept (see BlasGpuTree).
+inline constexpr uint32_t kBlasTriangleUnknown = 255u;
 
 /// A tree over a set of primitives. `triangle_indices` is the per-leaf
 /// permutation: leaf node `n` covers items
@@ -118,7 +120,9 @@ inline constexpr uint32_t kLodRaysOnly = 0x20000000u;
 /// `build_mesh_blas` also groups the tree's leaves into clusters and fills
 /// `cluster_words`, one block per cluster:
 ///
-///   triangles   one word each, three 8-bit local vertex indices
+///   triangles   one word each, three 8-bit local vertex indices, and in the top 8 bits the
+///               triangle's index among those built from (build_triangles_blas's, a level of
+///               detail cluster's), kBlasTriangleUnknown past 254 or for build_mesh_blas
 ///   positions   three float words per local vertex
 ///   vertex ids  one word per local vertex, its index in the mesh's vertices
 ///
@@ -336,6 +340,9 @@ struct ClusterBuilder
     const float* vertices;
     uint32_t floats_per_vertex;
     const uint32_t* indices;
+    /// Whether a triangle's word keeps its index among the indices built from in its top 8 bits
+    /// (kBlasTriangleUnknown past 254, and always where not kept).
+    bool store_triangles = false;
     vector<uint32_t> subtree_triangles;  ///< Per node.
     vector<uint32_t> leaf_triangles;     ///< Triangle ids of the leaves being grouped.
     vector<uint32_t> local_vertices;     ///< Sorted vertex ids of the current cluster.
@@ -452,7 +459,7 @@ struct ClusterBuilder
         auto triangle_word = static_cast<uint32_t>(words.size());
         const auto position_word = triangle_word + static_cast<uint32_t>(leaf_triangles.size());
         for (uint32_t triangle : leaf_triangles) {
-            uint32_t word = 0;
+            uint32_t word = (store_triangles && triangle < kBlasTriangleUnknown ? triangle : kBlasTriangleUnknown) << 24;
             for (uint32_t c = 0; c < 3; ++c) {
                 const uint32_t id = indices[size_t(triangle) * 3 + c];
                 const auto local = static_cast<uint32_t>(
@@ -665,7 +672,7 @@ inline BlasBuild build_triangles_blas(const float* vertices, uint32_t floats_per
     out.nodes.push_back({});
     out.root_index = 0;
     detail::blas_fill_node(out, 0, tris, 0, tris.size());
-    detail::ClusterBuilder{out, vertices, floats_per_vertex, indices}.build();
+    detail::ClusterBuilder{out, vertices, floats_per_vertex, indices, true}.build();
     return out;
 }
 

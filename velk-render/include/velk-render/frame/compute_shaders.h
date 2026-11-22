@@ -48,8 +48,11 @@ struct RayHit {
     uvec3 corners;
     vec2 weights;
     // The kept cut record that was hit (VELK_NO_RECORD for none), as velk_ids_record names a
-    // pixel's. Only set by trace_closest_hit, and not kept by velk_hit_words.
+    // pixel's, and the triangle's index in its cluster's index order, as the record's light
+    // counts its triangles (VELK_NO_CORNERS where not known). Only set by trace_closest_hit, and
+    // not kept by velk_hit_words.
     uint record;
+    uint triangle;
 };
 
 #define VELK_NO_CORNERS 0xFFFFFFFFu
@@ -79,6 +82,7 @@ RayHit velk_hit_from_words(uvec4 a, uvec3 b)
     hit.uv = a.w == VELK_NO_CORNERS ? unpackHalf2x16(b.z) : vec2(0.0);
     hit.weights = a.w == VELK_NO_CORNERS ? vec2(0.0) : unpackUnorm2x16(b.z);
     hit.record = VELK_NO_RECORD;
+    hit.triangle = VELK_NO_CORNERS;
     return hit;
 }
 

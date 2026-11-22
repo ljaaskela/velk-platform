@@ -1441,20 +1441,68 @@ bool velk_piece_light(uint pool, uint page, uint first, uvec3 corners, vec3 l, b
     return full;
 }
 
+// Whether the three points around weights `l` of level `page` (velk_way_around) are all traced
+// and none stale since a change.
+bool velk_way_fresh(uint pool, uint first, uvec3 corners, uint page, vec3 l)
+{
+    uint words[3];
+    vec3 w;
+    velk_way_around(pool, first, corners, page, l, words, w);
+    for (uint k = 0u; k < 3u; ++k) {
+        if (w[k] <= 0.0) continue;
+        if (VELK_LIGHT_WORDS.data[words[k]] == VELK_LIGHT_NONE) return false;
+        if (velk_light_point_traces(pool, first, page == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : page,
+                                    VELK_LIGHT_WORDS.data[words[k] + 1u]) == 0u) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The lights of the points a pixel or hit at weights `b` of triangle `t` (corners `corners`) of
 // the record whose first page starts at `first` reads, added one at a time. False when none of
 // them is traced yet. `at` is relative to the camera, `px_per_world` the pixels a world unit is
-// there and `tri_size` the triangle's longest edge; a hit passes 0 for both and reads its
-// triangle's corners.
+// there and `tri_size` the triangle's longest edge; a hit passes 0 for both.
 //
 // In pieces: the level the pixel's way down reaches (velk_piece_way), over the record's coarse
 // light; its coarse level where that level's cell is exact (velk_way_cell, its points traced and
 // not stale). Where a point of it is not traced yet, or stale since a change, the levels above
-// show through: its coarse level, then the one above it, then it.
+// show through: its coarse level, then the one above it, then it. A hit, which has no size on
+// screen, reads the deepest level down its triangle's pieces whose points around it are all
+// traced and fresh (velk_way_fresh), over the record's coarse light; a hit whose triangle is not
+// known, its triangle's corners.
 bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b, vec3 at, float px_per_world,
                            float tri_size, inout uint lights[VELK_LIGHT_SLOTS], inout vec2 sums[VELK_LIGHT_SLOTS])
 {
     bool traced = false;
+    if (px_per_world <= 0.0 && t < velk_light_pieced(first)) {
+        uint pages = VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES];
+        uint best = VELK_PIECE_VERTICES;
+        vec3 best_at = b;
+        uint page = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
+        vec3 l = b;
+        for (uint depth = 0u; depth <= VELK_PIECE_DEEPEST && page < pages; ++depth) {
+            if (velk_way_fresh(pool, first, corners, page, l)) {
+                best = page;
+                best_at = l;
+            }
+            vec3 down = l;
+            uint k = velk_piece_step(down);
+            page = VELK_LIGHT_WORDS.data[velk_light_page(pool, page) + VELK_PIECE_CHILDREN + k];
+            l = down;
+        }
+        uint coarse = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
+        bool known = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
+        float under[VELK_LIGHT_SLOTS];
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) under[s] = 1.0 - float((coarse >> (3u * s)) & 7u) / 7.0;
+        uint nearest = 0xFFFFFFFFu;
+        velk_piece_light(pool, best, first, corners, best_at, false, known, under, nearest);
+        if (!known) return false;
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+            velk_light_add(VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s], 1.0, under[s], lights, sums);
+        }
+        return true;
+    }
     if (px_per_world > 0.0 && t < velk_light_pieced(first)) {
         uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
         float tri_px = tri_size * px_per_world;
@@ -3415,9 +3463,10 @@ void velk_probe_ask(uint word)
 }
 
 // The direct light a surface at `at`, facing `n`, gets as its light points there say, for a hit
-// whose light is at `word`: its one value, its lights chosen at `center`, or its record's points
-// at its triangle's corners (no triangle index on a hit: without the grid between them), each
-// light by how much of it gets through.
+// whose light is at `word`: its one value, its lights chosen at `center`, or its record's points:
+// down its triangle's pieces where the hit knows its triangle (RayHit::triangle,
+// velk_light_add_points), else at its triangle's corners; each light by how much of it gets
+// through.
 vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
 {
     uint pool = pc.shapes_base;
@@ -3436,7 +3485,11 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
     } else {
         if (value >= probe_words.data[pool + VELK_POOL_PAGES] || hit.corners.x == VELK_NO_CORNERS) return vec3(0.0);
         vec3 b = vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights.x, hit.weights.y);
-        if (!velk_light_add_points(pool, velk_light_page(pool, value), 0xFFFFFFFFu, hit.corners, b, vec3(0.0), 0.0, 0.0, lights, sums)) {
+        // Where the hit knows its triangle: down its pieces to the deepest whose points around
+        // it are traced and fresh (velk_light_add_points). Else its triangle's corners.
+        uint first = velk_light_page(pool, value);
+        uint t = hit.triangle != VELK_NO_CORNERS ? hit.triangle : 0xFFFFFFFFu;
+        if (!velk_light_add_points(pool, first, t, hit.corners, b, at, 0.0, 0.0, lights, sums)) {
             return vec3(0.0);
         }
     }

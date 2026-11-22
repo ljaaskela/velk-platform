@@ -211,6 +211,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.corners = uvec3(VELK_NO_CORNERS);
     hit.weights = vec2(0.0);
     hit.record = VELK_NO_RECORD;
+    hit.triangle = VELK_NO_CORNERS;
 
     uint top = VELK_GLOBALS.ray_top;
     if (top == VELK_RAY_NONE || velk_culling.data[top + VELK_RAY_TOP_LEAVES] == 0u) return closest ? 0.0 : 1.0;
@@ -266,6 +267,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint drawn_at = 0u;
     uint drawn_left = 0u;
     uint drawn_vertices = 0u;
+    uint drawn_first = 0u;
 
     float best_t = t_max;
     uint best_key = 0u;
@@ -274,6 +276,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     uint best_cluster = VELK_NO_CLUSTER;
     uint best_record = VELK_NO_RECORD;
     uvec3 best_corners = uvec3(VELK_NO_CORNERS);
+    uint best_triangle = VELK_NO_CORNERS;
     vec2 best_weights = vec2(0.0);
     vec2 best_uv = vec2(0.0);
     vec3 best_normal = vec3(0.0);  // where nothing better is known: in the shape's or mesh's space
@@ -288,10 +291,14 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
         bool tested = false;
         vec3 v0, v1, v2;
         uvec3 corners;
+        // Its index in its cluster's index order: the cluster tree's word keeps it in its top 8
+        // bits (255 where it does not, kBlasTriangleUnknown); as drawn, from its index word.
+        uint cur_triangle = VELK_NO_CORNERS;
         if ((leaf_counts & 0xFFFFu) != 0u) {
             uint tri = velk_cluster_words.data[triangle_at];
             ++triangle_at;
             --leaf_counts;
+            cur_triangle = (tri >> 24u) == 255u ? VELK_NO_CORNERS : tri >> 24u;
             uvec3 local_ids = uvec3(tri & 0xFFu, (tri >> 8u) & 0xFFu, (tri >> 16u) & 0xFFu);
             uint p0 = positions + local_ids.x * 3u;
             uint p1 = positions + local_ids.y * 3u;
@@ -308,6 +315,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                             velk_cluster_words.data[ids + local_ids.z]);
             tested = true;
         } else if (drawn_left != 0u) {
+            cur_triangle = (drawn_at - drawn_first) / 3u;
             corners = uvec3(velk_mesh_words.data[drawn_at], velk_mesh_words.data[drawn_at + 1u],
                             velk_mesh_words.data[drawn_at + 2u]);
             drawn_at += 3u;
@@ -363,6 +371,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 best_cluster = cur_cluster;
                 best_record = cur_record;
                 best_corners = corners;
+                best_triangle = cur_triangle;
                 best_weights = vec2(u, v);
                 best_normal = cross(e1, e2);
                 best_quad = false;
@@ -461,6 +470,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     best_instance = cluster;
                     best_cluster = VELK_NO_CLUSTER;
                     best_record = r;
+                    best_triangle = VELK_NO_CORNERS;
                     // The unit quad is a strip: corners 0 (0, 0), 1 (1, 0), 2 (0, 1) and 3 (1, 1),
                     // its triangles 0, 1, 2 and 1, 2, 3.
                     if (a + b <= 1.0) {
@@ -524,6 +534,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     // Without a tree, such as a deforming mesh's whose tree was built again, its
                     // triangles are tested as they are drawn.
                     drawn_at = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_INDEX];
+                    drawn_first = drawn_at;
                     drawn_left = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_TRIANGLES];
                     drawn_vertices = velk_culling.data[cur_cluster + VELK_LOD_CLUSTER_VERTEX];
                 }
@@ -573,6 +584,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                         best_cluster = VELK_NO_CLUSTER;
                         best_record = r;
                         best_corners = uvec3(VELK_NO_CORNERS);
+                        best_triangle = VELK_NO_CORNERS;
                         best_uv = h.uv;
                         best_normal = h.normal;
                         best_quad = false;
@@ -656,6 +668,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.cluster = best_cluster;
     hit.record = best_record;
     hit.corners = best_corners;
+    hit.triangle = best_triangle;
     hit.weights = best_weights;
     ElementInstance inst = best_quad ? velk_quad_instance(best_instance) : velk_instances.data[best_instance];
     hit.object = inst.params.w;
