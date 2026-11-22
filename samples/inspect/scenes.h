@@ -33,6 +33,10 @@ struct ViewSpec
     /// Another view of the scene whose reference this one is judged against, which a reference
     /// run then makes no reference of its own for: the same place and look, reached otherwise.
     const char* reference = nullptr;
+    /// Frames the camera stays at `move_to` after its motion before it comes back; with any, the
+    /// view is also judged at the kSettleFrom-th frame back, before it settles again: what is seen
+    /// on turning back to what was out of view that long.
+    int away_frames = 0;
 };
 
 /// Where the camera is at step @p k of @p view's motion, 0 its start.

@@ -605,14 +605,21 @@ void build_soft(SceneBuilder& b)
 }
 
 /// Paving of long thin triangles fanned round a corner, under a sun of size 2 as bistro's, with
-/// a tall block whose shadow crosses it with a wide penumbra, a few posts and a thin board as a
-/// sign: shadows on long thin triangles, settled, coming into view, and after turning away and back.
+/// a tall block whose shadow crosses it with a wide penumbra, buildings all round, a few posts and
+/// a thin board as a sign: shadows on long thin triangles, settled, coming into view, and on
+/// turning back after long enough away that what was out of view went (the turn view).
 void build_pavement(SceneBuilder& b)
 {
     set_sky(b, "pavement", 0.2f, 0.25f, 0.33f);
     add_sun(b, {50.f, 30.f, 0.f}, 0.8f, 2.f);
     add_mesh(b, build_fan(raw(b), {-150.f, 0.f, 150.f}, 900.f, 128, standard(0.55f, 0.55f, 0.55f)), {});
     add_mesh(b, build_box(raw(b), {70.f, 400.f, 260.f}, 8, standard(0.75f, 0.72f, 0.68f)), {300.f, 0.f, 120.f});
+    // Buildings all round, so that every way the camera turns has shadows across the paving.
+    const velk::IMesh::Ptr building = build_box(raw(b), {120.f, 300.f, 120.f}, 8, standard(0.72f, 0.7f, 0.66f));
+    for (int i = 0; i < 6; ++i) {
+        const float a = 2.f * kPi * (static_cast<float>(i) + 0.5f) / 6.f;
+        add_mesh(b, building, {std::cos(a) * 420.f, 0.f, 300.f + std::sin(a) * 420.f});
+    }
     const velk::IMesh::Ptr post = build_box(raw(b), {6.f, 70.f, 6.f}, 2, standard(0.2f, 0.2f, 0.2f));
     for (int i = 0; i < 3; ++i) add_mesh(b, post, {-120.f + static_cast<float>(i) * 70.f, 0.f, 40.f});
     add_mesh(b, build_box(raw(b), {40.f, 60.f, 3.f}, 2, standard(0.4f, 0.28f, 0.15f)), {60.f, 0.f, 70.f});
@@ -835,8 +842,8 @@ const velk::vector<SceneSpec>& scenes()
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_soft},
         {"pavement", "paving of long thin triangles under a wide sun, a tall block's shadow across it: shadows on long triangles",
-         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}},
-          {"turn", {{0.f, -110.f, 300.f}, 0.f, -15.f}, {{0.f, -110.f, 300.f}, 160.f, -15.f}, 10}},
+         {{"front", {{0.f, -110.f, 300.f}, -35.f, -15.f}},
+          {"turn", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 10, false, nullptr, 1100}},
          build_pavement},
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},

@@ -27,7 +27,8 @@
 // frames how far the image is from the view's reference, how much it still changes, the GPU
 // time and memory. In a scene that moves things, five frames of the movement are each judged
 // against their own reference. A view with a motion then moves, a step a frame, each step
-// against its own reference, and comes back to be compared with how it looked before. Writes, overwriting the
+// against its own reference, stays away as long as the view says, and comes back to be compared
+// with how it looked before, after a while away also its first frames back. Writes, overwriting the
 // last run, the images, their difference maps and a report to build/verify; then exits. GPU
 // times are checked against the median of the view's last runs on committed code in the
 // history (reference_images/verify/timings.tsv), and a run of every scene adds its times to
@@ -860,10 +861,33 @@ int main(int argc, char* argv[])
                 if (steps_slower) slower_passes("slower moving", times.moving_passes, base.moving_passes, base_since);
                 run_times.push_back(std::move(times));
 
-                // There and back: the view again after the motion, against how it looked before.
+                // Away a while first, when the view says so.
+                for (int f = 0; f < view.away_frames; ++f) {
+                    if (!frame()) return 1;
+                }
+                // There and back: the view again after the motion, against how it looked before;
+                // after a while away, also its first frames back against its reference.
                 place_camera(main_camera, view.place);
                 for (long f = 0; f < kBackFrames; ++f) {
                     if (!frame()) return 1;
+                    if (view.away_frames <= 0 || f + 1 != kSettleFrom) continue;
+                    inspect::Image back_first;
+                    if (!grab(back_first)) return 1;
+                    inspect::save_png(*writer, back_first, run_path(spec, view, "_back_first.png"));
+                    inspect::Image back_reference;
+                    if (!inspect::load_reference(reference_path(spec, view, ".ref"), back_reference)) continue;
+                    const inspect::Image small = inspect::downscale(back_first, kCompareScale);
+                    const inspect::Difference bf = inspect::compare(small, back_reference, tile);
+                    inspect::save_png(*writer, inspect::difference_map(small, back_reference), run_path(spec, view, "_back_first_diff.png"));
+                    char bf_verdict[160];
+                    verdict_of(bf, "", bf_verdict, sizeof(bf_verdict));
+                    char bf_name[64];
+                    std::snprintf(bf_name, sizeof(bf_name), "%s back first", name);
+                    std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  at frame %ld back, after %d away  %s", bf_name,
+                                  static_cast<double>(bf.mean), static_cast<double>(bf.p95), static_cast<double>(bf.worst_tile),
+                                  kSettleFrom, view.away_frames, bf_verdict);
+                    line(buf);
+                    count(bf_verdict);
                 }
                 inspect::Image back;
                 if (!grab(back)) return 1;
