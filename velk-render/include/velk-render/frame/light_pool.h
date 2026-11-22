@@ -89,6 +89,10 @@ inline constexpr uint32_t kLightOneTraced = 0x40000000u;
 inline constexpr uint32_t kLightOneAsked = 0x20000000u;
 inline constexpr uint32_t kLightOneShadeBits = 0x00FFFFFFu;
 inline constexpr uint32_t kLightOneQueuedShift = 24;
+/// A record's light before it has its own: this with the first page of the record it replaced in
+/// a cut chosen again, one of coarser detail made from its cluster's group, whose lights and coarse
+/// light its own start from (light_search_src). The light mark keeps that page meanwhile.
+inline constexpr uint32_t kLightInherit = 0x40000000u;
 inline constexpr uint32_t kLightOwn = 1u;
 inline constexpr uint32_t kLightLinked = 0x80000000u;
 inline constexpr uint32_t kLightPageWords = 64;
@@ -300,7 +304,8 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(FillThreads, FILL_THREADS, 179)            /* threads that fill the device (compute_fill_threads) */           \
     X(SpreadLanes, SPREAD_LANES, 180)            /* the lanes this frame's points traced from none spread over */    \
     X(FirstRaysNow, FIRST_RAYS_NOW, 181)         /* the rays this frame's points traced from none cast at most */    \
-    X(HeaderEnd, HEADER_END, 182)
+    X(SumLaidInherited, SUM_LAID_INHERITED, 182) /* summed: own points laid out from a coarser record's (kLightInherit) */ \
+    X(HeaderEnd, HEADER_END, 183)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -350,6 +355,12 @@ inline constexpr uint32_t kLightTraceRaysUnlimited = 1u << 30;
 #define VELK_LIGHT_ONE_ASKED 0x20000000u
 #define VELK_LIGHT_ONE_SHADE_BITS 0x00FFFFFFu
 #define VELK_LIGHT_ONE_QUEUED_SHIFT 24u
+#define VELK_LIGHT_INHERIT 0x40000000u
+// Whether a record's light `value` is kLightInherit with the page it inherits from.
+bool velk_light_inherits(uint value)
+{
+    return value < VELK_LIGHT_ONE_VALUE && (value & VELK_LIGHT_INHERIT) != 0u;
+}
 // kLightPieceLevel, kLightPiecePoints, kLightPieceDeepest, kLightPieceAsked, kLightCoarsePieces,
 // kLightPieceLevelsAtOnce, kLightPieceKeepFrames.
 #define VELK_PIECE_LEVEL 6u
@@ -4054,6 +4065,18 @@ void velk_light_claim(VelkDrawData d, uvec2 ids, uint record)
     float away = length(mat3(world) * own + (world[3].xyz - g.cam_pos.xyz));
     float across = 2.0 * radius * pixels_per_unit / max(away, 1e-3);
 
+    // Finer detail where a record of coarser detail had points (kLightInherit): its own laid out
+    // from those (light_search_src), or a one value when it is small.
+    if (velk_light_inherits(was)) {
+        if (pc.again != 0u) return;
+        if (atomicCompSwap(light_words.data[record + VELK_RECORD_LIGHT], was, VELK_LIGHT_PENDING) != was) return;
+        if (vertices == 0u || across < pc.light_pixels) {
+            light_words.data[record + VELK_RECORD_LIGHT] = VELK_LIGHT_ONE_VALUE;
+            return;
+        }
+        velk_light_search(record, was, instance);
+        return;
+    }
     // Pages are laid out once; pieces follow how near the camera is. The points this pixel reads
     // are traced when due, and the coarse light of the records they are in: its own, or those of
     // the records for light only it links to at this pixel's corners.
@@ -4822,10 +4845,27 @@ void main()
             if (was >= VELK_LIGHT_ONE_VALUE && was < VELK_LIGHT_PENDING && (was & VELK_LIGHT_ONE_TRACED) != 0u) {
                 light_words.data[s_first + VELK_PAGE_COARSE] = VELK_LIGHT_ONE_VALUE | (was & VELK_LIGHT_ONE_SHADE_BITS);
             }
+            // Finer detail where a record of coarser detail had points (kLightInherit): its lights
+            // and its coarse light, chosen and traced around the same place, which the light mark
+            // kept for this.
+            uint parent = was & ~VELK_LIGHT_INHERIT;
+            if (velk_light_inherits(was) && parent < light_words.data[pool + VELK_POOL_PAGES]) {
+                uint parent_first = velk_light_page(pool, parent);
+                uint coarse = light_words.data[parent_first + VELK_PAGE_COARSE];
+                if (light_words.data[parent_first + VELK_PAGE_KIND] != VELK_LIGHT_LINKED
+                    && light_words.data[parent_first + VELK_PAGE_SLOTS] != VELK_LIGHT_NONE && coarse >= VELK_LIGHT_ONE_VALUE
+                    && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u) {
+                    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                        light_words.data[s_first + VELK_PAGE_SLOTS + s] = light_words.data[parent_first + VELK_PAGE_SLOTS + s];
+                    }
+                    light_words.data[s_first + VELK_PAGE_COARSE] = VELK_LIGHT_ONE_VALUE | (coarse & VELK_LIGHT_ONE_SHADE_BITS);
+                }
+            }
             light_words.data[record + VELK_RECORD_LIGHT] = s_page;
             velk_light_trace_now(s_page, instance);
-            // For the log, why: no light before, or one value before.
-            uint why = was == VELK_LIGHT_NONE ? VELK_POOL_SUM_LAID_NEW : VELK_POOL_SUM_LAID_FROM_ONE;
+            // For the log, why: no light before, one value before, or a coarser record's points.
+            uint why = was == VELK_LIGHT_NONE ? VELK_POOL_SUM_LAID_NEW
+                     : velk_light_inherits(was) ? VELK_POOL_SUM_LAID_INHERITED : VELK_POOL_SUM_LAID_FROM_ONE;
             atomicAdd(light_words.data[pool + why], s_points);
         }
         return;
@@ -4978,6 +5018,12 @@ void main()
     }
     uint light = light_words.data[record + VELK_RECORD_LIGHT];
     if (light == VELK_LIGHT_NONE || light == VELK_LIGHT_PENDING) return;
+    // Inheriting (kLightInherit): the coarser record's pages it lays its own out from are kept.
+    if (velk_light_inherits(light)) {
+        uint parent = light & ~VELK_LIGHT_INHERIT;
+        if (parent < light_words.data[pc.pool_word + VELK_POOL_PAGES]) velk_light_mark_record(parent);
+        return;
+    }
     if (light >= VELK_LIGHT_ONE_VALUE) {
         atomicAdd(light_words.data[pc.pool_word + VELK_POOL_RECORDS_ONE_VALUE], 1u);
         // Asked for by a probe's ray: traced as the claim traces it, from its cluster's sphere or

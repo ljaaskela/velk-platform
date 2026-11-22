@@ -1334,15 +1334,24 @@ uint velk_takeover_hash(uint entry, uint cluster, uint slot)
 // The most slots a lookup in the takeover table tries.
 #define VELK_TAKEOVER_PROBES 64u
 
-// Lists the old record at word `was` in the takeover table (kCutHeaderWords 30), for the
-// records chosen again to find by what they are.
-void velk_takeover_put(uint cut, uint was)
+// The mark of the group cluster `cluster` of the cluster entry `entry` was made from, or with
+// `own` of its own group: a cluster made from another's own group is of coarser detail over the
+// same place (VELK_LOD_CLUSTER).
+uint velk_takeover_mark(uint entry, uint cluster, bool own)
 {
-    uint table = cull_words.data[cut + VELK_CUT_TAKEOVER_WORD];
-    uint mask = cull_words.data[cut + VELK_CUT_TAKEOVER_SLOTS] - 1u;
-    uint stamp = cull_words.data[cut + VELK_CUT_TAKEOVER_FRAME];
-    uint h = velk_takeover_hash(cull_words.data[was + VELK_RECORD_ENTRY], cull_words.data[was + VELK_RECORD_CLUSTER],
-                                cull_words.data[was + VELK_RECORD_SLOT]);
+    uint word = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS;
+    return cull_words.data[word + (own ? VELK_LOD_CLUSTER_OWN_MARK : VELK_LOD_CLUSTER_MARK)];
+}
+
+// A takeover table key for the old records made from group `mark`, apart from the records' own.
+uint velk_takeover_mark_hash(uint entry, uint mark, uint slot)
+{
+    return velk_takeover_hash(entry ^ 0x5bd1e995u, mark, slot);
+}
+
+// Puts the old record at word `was` in the takeover table under key `h`.
+void velk_takeover_insert(uint table, uint mask, uint stamp, uint h, uint was)
+{
     for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
         uint s = table + ((h + p) & mask) * VELK_TAKEOVER_END;
         uint seen = cull_words.data[s + VELK_TAKEOVER_FRAME];
@@ -1352,6 +1361,60 @@ void velk_takeover_put(uint cut, uint was)
             return;
         }
     }
+}
+
+// Lists the old record at word `was` in the takeover table (kCutHeaderWords 30), for the
+// records chosen again to find by what they are; a cluster's also by the group it was made from,
+// for those of finer detail to find their light (velk_takeover_parent).
+void velk_takeover_put(uint cut, uint was)
+{
+    uint table = cull_words.data[cut + VELK_CUT_TAKEOVER_WORD];
+    uint mask = cull_words.data[cut + VELK_CUT_TAKEOVER_SLOTS] - 1u;
+    uint stamp = cull_words.data[cut + VELK_CUT_TAKEOVER_FRAME];
+    uint entry = cull_words.data[was + VELK_RECORD_ENTRY];
+    uint cluster = cull_words.data[was + VELK_RECORD_CLUSTER];
+    uint slot = cull_words.data[was + VELK_RECORD_SLOT];
+    velk_takeover_insert(table, mask, stamp, velk_takeover_hash(entry, cluster, slot), was);
+    if (entry < VELK_CUT_LIGHT_ONLY) {
+        uint mark = velk_takeover_mark(entry, cluster, false);
+        if (mark != 0xFFFFFFFFu) velk_takeover_insert(table, mask, stamp, velk_takeover_mark_hash(entry, mark, slot), was);
+    }
+}
+
+// The old record of coarser detail that cluster `cluster` of `entry` at `slot` replaces: made
+// from its group, and of those the one whose own sphere's centre is nearest its own. 0xFFFFFFFF
+// for none.
+uint velk_takeover_parent(uint cut, uint entry, uint cluster, uint slot)
+{
+    uint own = velk_takeover_mark(entry, cluster, true);
+    if (own == 0xFFFFFFFFu) return 0xFFFFFFFFu;
+    uint table = cull_words.data[cut + VELK_CUT_TAKEOVER_WORD];
+    uint mask = cull_words.data[cut + VELK_CUT_TAKEOVER_SLOTS] - 1u;
+    uint stamp = cull_words.data[cut + VELK_CUT_TAKEOVER_FRAME];
+    uint clusters = cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE];
+    uint sphere = clusters + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE;
+    vec3 at = vec3(uintBitsToFloat(cull_words.data[sphere]), uintBitsToFloat(cull_words.data[sphere + 1u]),
+                   uintBitsToFloat(cull_words.data[sphere + 2u]));
+    uint h = velk_takeover_mark_hash(entry, own, slot);
+    uint best = 0xFFFFFFFFu;
+    float nearest = 3.4e38;
+    for (uint p = 0u; p < VELK_TAKEOVER_PROBES; ++p) {
+        uint s = table + ((h + p) & mask) * VELK_TAKEOVER_END;
+        if (cull_words.data[s + VELK_TAKEOVER_FRAME] != stamp) break;
+        uint was = cull_words.data[s + VELK_TAKEOVER_RECORD];
+        if (cull_words.data[was + VELK_RECORD_ENTRY] != entry || cull_words.data[was + VELK_RECORD_SLOT] != slot) continue;
+        uint other = cull_words.data[was + VELK_RECORD_CLUSTER];
+        if (velk_takeover_mark(entry, other, false) != own) continue;
+        uint other_sphere = clusters + other * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE;
+        vec3 d = vec3(uintBitsToFloat(cull_words.data[other_sphere]), uintBitsToFloat(cull_words.data[other_sphere + 1u]),
+                      uintBitsToFloat(cull_words.data[other_sphere + 2u])) - at;
+        float dd = dot(d, d);
+        if (dd < nearest) {
+            nearest = dd;
+            best = was;
+        }
+    }
+    return best;
 }
 
 // The word of the old record that is (entry, cluster, slot), or 0xFFFFFFFF.
@@ -1401,6 +1464,23 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
                 radiance = cull_words.data[was + VELK_RECORD_RADIANCE];
                 radiance_dir = cull_words.data[was + VELK_RECORD_RADIANCE_DIR];
                 ++g_took;
+            } else if (entry < VELK_CUT_LIGHT_ONLY) {
+                // Finer detail where coarser was: its light starts from the coarser record's, a
+                // traced one value as it is, points by their page (kLightInherit), and its indirect
+                // light likewise.
+                uint parent = velk_takeover_parent(pc.cut_word, entry, cluster, slot);
+                if (parent != 0xFFFFFFFFu) {
+                    // kLightOneValue with kLightOneTraced, under kLightPending; or a page, under
+                    // kLightInherit.
+                    uint had = cull_words.data[parent + VELK_RECORD_LIGHT];
+                    if (had >= 0x80000000u && had < 0xFFFFFFFEu && (had & 0x40000000u) != 0u) {
+                        light = had;
+                    } else if (had < 0x40000000u) {
+                        light = 0x40000000u | had;
+                    }
+                    radiance = cull_words.data[parent + VELK_RECORD_RADIANCE];
+                    radiance_dir = cull_words.data[parent + VELK_RECORD_RADIANCE_DIR];
+                }
             }
         }
         cull_words.data[record + VELK_RECORD_LIGHT] = light;
@@ -5079,9 +5159,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const uint32_t record_pool = tables_word + pages * 2u;
             const uint32_t ray_pool = record_pool + cut.capacity * kCutRecordWords;
             const uint32_t node_pool = ray_pool + cut.capacity * kCutRayWords;
-            // The takeover table: at least two slots a record, so that lookups stay short.
+            // The takeover table: two entries a record (by what it is, and by the group it was made
+            // from), at least two slots each, so that lookups stay short.
             uint32_t takeover_slots = 1;
-            while (takeover_slots < cut.capacity * 2u) takeover_slots <<= 1;
+            while (takeover_slots < cut.capacity * 4u) takeover_slots <<= 1;
             const uint32_t takeover_word = node_pool + cut.node_capacity * kCutNodeWords;
             // The ray marks, a bit a record of the pool.
             const uint32_t marks_word = takeover_word + takeover_slots * kCutTakeoverWords;
@@ -5547,9 +5628,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      double(h[kLightPoolSumMeshTris + 2u]) / rays, double(h[kLightPoolSumMeshTris + 3u]) / rays);
             // Since the last log: where traces come from, a change or the view.
             clear(kLightPoolSumRetraces, kLightPoolSumSplitsRefused + 1u - kLightPoolSumRetraces);
+            clear(kLightPoolSumLaidInherited, 1u);
             VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
-                        "for records grown from one value %u, for records for light only %u",
-                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidLightOnly]);
+                        "for records grown from one value %u, from a coarser record's %u, for records for light only %u",
+                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidInherited],
+                     h[kLightPoolSumLaidLightOnly]);
             // Since the last log: records whose lights were chosen, and of them those that left out
             // a light at least a tenth, or a quarter, as strong as the strongest they took.
             // Since the last log, in every 16th frame: points listed by what listed them.
