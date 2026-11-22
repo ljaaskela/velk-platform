@@ -303,7 +303,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
                                                     the pool was last grown or looked at */                          \
     X(FillThreads, FILL_THREADS, 179)            /* threads that fill the device (compute_fill_threads) */           \
     X(SpreadLanes, SPREAD_LANES, 180)            /* the lanes this frame's points traced from none spread over */    \
-    X(FirstRaysNow, FIRST_RAYS_NOW, 181)         /* the rays this frame's points traced from none cast at most */    \
+    X(FirstRaysNow, FIRST_RAYS_NOW, 181)         /* the rays this frame's never traced coarse points cast at most */ \
     X(SumLaidInherited, SUM_LAID_INHERITED, 182) /* summed: own points laid out from a coarser record's (kLightInherit) */ \
     X(SumPiecesUnread, SUM_PIECES_UNREAD, 183)   /* summed: pieces let go of as no pixel read them */                \
     X(SumPiecesMerged, SUM_PIECES_MERGED, 184)   /* summed: pieces let go of with their parent's light */            \
@@ -1835,34 +1835,32 @@ uint velk_points_list(uint k)
 }
 
 // The rays a point traced from none casts this frame: a ray a lit light, four with a size
-// (pc.spare6, as the path counts them), up to four; but one, to its light that could bring the
-// most, while the points waiting to be traced from none would take more than the budget in rays
-// has left. Its other lights stay untraced, and its warm-ups trace them next: a new view's points
-// each get their own light four times as fast.
+// (pc.spare6, as the path counts them), up to four; but for a coarse point never traced, one, to
+// its light that could bring the most, while those waiting would take more than the budget in
+// rays has left. Its other lights stay untraced, and its warm-ups trace them next: a new view's
+// points each get their own light four times as fast. A point traced again after a change takes
+// all its rays: it had light, which its new rays replace at once.
 uint velk_points_first_rays(uint pool)
 {
     uint from_none = max(pc.spare6, 1u);
     uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint left = budget - min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED], budget);
-    uint waiting = 0u;
-    for (uint k = 0u; k < 3u; ++k) {
-        waiting += min(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(velk_points_list(k))], VELK_LIGHT_POINT_CAPACITY);
-    }
+    uint waiting = min(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(VELK_LIGHT_LIST_UNTRACED)], VELK_LIGHT_POINT_CAPACITY);
     return waiting * from_none > left ? 1u : from_none;
 }
 
 // The points of each list (velk_points_list's order) the frame has, and those it traces: each
 // list taking what it can of what the budget in rays has left after the trace list's lights
 // (pool header 85 of 106) and the lists before it, a point traced from none charged its rays
-// (`from_none`, velk_points_first_rays), a warm-up one.
-void velk_points_takes(uint pool, uint from_none, out uint counts[4], out uint takes[4])
+// (`from_none`, the never traced coarse ones `now_rays`, velk_points_first_rays), a warm-up one.
+void velk_points_takes(uint pool, uint now_rays, uint from_none, out uint counts[4], out uint takes[4])
 {
     uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint left = budget - min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED], budget);
     uint taken = 0u;
     for (uint k = 0u; k < 4u; ++k) {
         counts[k] = min(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(velk_points_list(k))], VELK_LIGHT_POINT_CAPACITY);
-        uint cost = k == 3u ? 1u : from_none;
+        uint cost = k == 3u ? 1u : k == 0u ? now_rays : from_none;
         takes[k] = min(counts[k], left / cost);
         left -= takes[k] * cost;
         taken += takes[k];
@@ -1929,7 +1927,6 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
                              uint first_rays, uint point_in_group)
 {
     GlobalData g = VELK_GLOBALS;
-    uint from_none = first_rays;
     uint list = VELK_LIGHT_NONE;
     uint listed_points = 0u;
     uint place = i;
@@ -1944,6 +1941,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     if (list == VELK_LIGHT_NONE) {
         return;
     }
+    // A coarse point never traced: as many as the sizing chose (velk_points_first_rays).
+    if (list == VELK_LIGHT_LIST_UNTRACED) first_rays = clamp(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS_NOW], 1u, first_rays);
+    uint from_none = first_rays;
     place = (place + velk_points_hash(frame * 2654435761u + list) % listed_points) % listed_points;
     uint w = VELK_LIGHT_WORDS.data[pool + velk_light_list_word_word(list)] + place * VELK_LIGHT_POINT_WORDS;
     uint first = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_FIRST];
@@ -2308,10 +2308,9 @@ void main()
         if (lane != 0u) return;
         uint counts[4];
         uint takes[4];
-        first_rays = min(first_rays, velk_points_first_rays(pool));
-        most_lanes = min(most_lanes, first_rays);
-        VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS_NOW] = first_rays;
-        velk_points_takes(pool, first_rays, counts, takes);
+        uint now_rays = min(first_rays, velk_points_first_rays(pool));
+        VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS_NOW] = now_rays;
+        velk_points_takes(pool, now_rays, first_rays, counts, takes);
         // Points traced from none spread their rays over as many lanes as keep the threads near
         // what fills the device (a power of two up to most_lanes): fewer threads would leave it
         // waiting on the longest of them walking its rays in a row, more only repeat each point's
@@ -2354,8 +2353,6 @@ void main()
             takes[k] = VELK_LIGHT_WORDS.data[pool + VELK_POOL_POINT_TAKES + k];
             counts[k] = VELK_LIGHT_WORDS.data[pool + VELK_POOL_POINT_COUNTS + k];
         }
-        // As the sizing chose: one while a backlog waits (velk_points_first_rays).
-        first_rays = clamp(VELK_LIGHT_WORDS.data[pool + VELK_POOL_FIRST_RAYS_NOW], 1u, first_rays);
         uint spread = takes[0] + takes[1] + takes[2];
         uint spread_groups = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SPREAD_GROUPS];
         // As the sizing chose, a power of two up to most_lanes.
