@@ -2024,7 +2024,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
         // Alone, what each ray found: blocked and the nearest blocker.
         float ray_blocked[4] = float[4](0.0, 0.0, 0.0, 0.0);
         float ray_nearest[4] = float[4](1e30, 1e30, 1e30, 1e30);
-        for (uint r = 0u; r < first_rays; ++r) {
+        for (uint r = 0u; r < 4u; ++r) {
+            if (r >= first_rays) break;
             uint s = (ray_table >> (8u * r)) & 15u;
             if (s == 15u || (spread && r % lanes != lane)) continue;
             uint j = (ray_table >> (8u * r + 4u)) & 3u;
@@ -2077,7 +2078,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
                 }
                 float sum = 0.0;
                 float nearest = 1e30;
-                for (uint r = 0u; r < first_rays; ++r) {
+                for (uint r = 0u; r < 4u; ++r) {
+                    if (r >= first_rays) break;
                     if (((ray_table >> (8u * r)) & 15u) != s) continue;
                     sum += ray_blocked[r];
                     nearest = min(nearest, ray_nearest[r]);
