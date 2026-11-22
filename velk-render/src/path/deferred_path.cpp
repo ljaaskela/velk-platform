@@ -1405,17 +1405,17 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The light's level, as the culling's error on screen, for the log.
     const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
     std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
-    // The rays a first trace or restart is charged (velk_points_trace_point): one a lit light,
-    // four with a size.
-    trace_pc.spare6 = std::max(lights, 1u) * (sized ? 4u : 1u);
+    // The rays a first trace or restart casts and is charged (velk_points_trace_point): a ray a lit
+    // light, four with a size, but at most four whatever the lights, so that what a point costs
+    // does not grow with them.
+    const uint32_t first_rays = std::min(std::max(lights, 1u) * (sized ? 4u : 1u), 4u);
+    trace_pc.spare6 = first_rays;
     // The lanes a point traced from none spreads its rays over when the trace spreads them (while
-    // they would not fill the device), a ray each: as many as a slot has rays (four with a size,
-    // else one) for each lit light, rounded up to a power of two. Low byte the lanes, the next a
-    // slot's lanes.
-    const uint32_t per_slot = sized ? 4u : 1u;
+    // they would not fill the device), a ray each, rounded up to a power of two. Low byte the
+    // lanes, the next the rays.
     uint32_t ray_lanes = 1u;
-    while (ray_lanes < std::max(lights, 1u) * per_slot) ray_lanes *= 2u;
-    trace_pc.spare1 = ray_lanes | (per_slot << 8u);
+    while (ray_lanes < first_rays) ray_lanes *= 2u;
+    trace_pc.spare1 = ray_lanes | (first_rays << 8u);
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;

@@ -1681,9 +1681,9 @@ uint velk_points_pick(uint slots[VELK_LIGHT_SLOTS], vec3 p, uint seed)
 // their order (VELK_LIGHT_LIST_UNTRACED and the others), as many as the frame's one budget in
 // rays has left, each starting at a place that moves every frame, so that what waits is not
 // always the same. A point never traced, or stale since a
-// change, takes a ray for each of its record's lights, choosing them at its cluster's centre when
-// nothing has yet; a warm-up trace one ray, to one light chosen by how much each could bring,
-// moving that slot toward what the ray found.
+// change, takes at most four rays, to its record's lights by how much each could bring, choosing
+// them at its cluster's centre when nothing has yet; a warm-up trace one ray, to one light chosen
+// the same way, moving that slot toward what the ray found.
 // Where a point of light is: a vertex of a cluster (`vertex`), or weights `b` of the corners of
 // triangle `triangle`, which for a coarse point (`around`) move up to half a step of its grid
 // (`step_a`, `step_b`) each way, by an R2 sequence from `start`, from its trace 1 on: its first
@@ -1782,9 +1782,8 @@ void velk_points_takes(uint pool, out uint counts[4], out uint takes[4])
 // The threads of a work group of the trace.
 #define VELK_LIGHT_TRACE_THREADS 64u
 
-// The most lanes a point traced from none spreads its rays over: one a ray, four a light slot
-// (VELK_LIGHT_SLOTS of them), so that a light's rays are on lanes side by side.
-#define VELK_LIGHT_RAY_LANES 32u
+// The most lanes a point traced from none spreads its rays over: one a ray, of its four at most.
+#define VELK_LIGHT_RAY_LANES 4u
 
 // The most points a work group traces spread, two lanes or more each.
 #define VELK_LIGHT_SPREAD_POINTS (VELK_LIGHT_TRACE_THREADS / 2u)
@@ -1800,6 +1799,9 @@ void velk_points_takes(uint pool, out uint counts[4], out uint takes[4])
 shared uint s_point_word[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_point_blocker_word[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_point_state[VELK_LIGHT_SPREAD_POINTS];
+// And what its lights no ray reached keep: their light and blockers, a nibble a slot.
+shared uint s_point_kept[VELK_LIGHT_SPREAD_POINTS];
+shared uint s_point_kept_blockers[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_slot_blocked[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
 shared uint s_slot_nearest[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
 shared uint s_slot_rays[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
@@ -1819,12 +1821,12 @@ void velk_points_store(uint pw, uint bw, uint value, uint blockers, uint traces,
 
 // Traces the point of light at place `i` of the frame's points to trace (velk_points_takes'
 // `counts` and `takes`), on lane `lane` of `lanes` the point has: alone, a lane does all of it and
-// stores it; spread, a point traced from none numbers its rays slot by slot, `per_slot` a slot,
-// each lane casting those whose number is its lane modulo `lanes`, and adds what they found into
-// the group's s_slot arrays for its place among the group's points (`group_lane` / `lanes`),
-// which velk_points_store_spread puts together.
+// stores it; spread, a point traced from none numbers its `first_rays` rays, each lane casting
+// those whose number is its lane modulo `lanes`, and adds what they found into the group's s_slot
+// arrays for its place among the group's points, `point_in_group`, which velk_points_store_spread
+// puts together.
 void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint takes[4], uint lane, uint lanes,
-                             uint per_slot, uint group_lane)
+                             uint first_rays, uint point_in_group)
 {
     GlobalData g = VELK_GLOBALS;
     uint from_none = max(pc.spare6, 1u);
@@ -1943,48 +1945,149 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     uint blockers = 0u;
     bool from_none_spread = false;
     if (traces == 0u || old == VELK_LIGHT_NONE) {
-        // From none: the light it had before a change left out. A ray a light, or four for a
-        // light with a size, so that it starts from a mean instead of all or nothing: over the
-        // light's four quarters, and a coarse point's at the places of its first four traces.
-        // It then counts as traced four times, or after a change as settled: traced on to more
-        // rays, it would step from those four rays' light to its mean each time a change comes
-        // near it, and flicker while things keep moving there.
-        // Spread, its rays numbered slot by slot, `per_slot` a slot, and each lane casting every
-        // lanes-th of them from its own on; whether any light has a size, on every lane.
+        // From none: the light it had before a change left out. Its `first_rays` rays (at most
+        // four, whatever its lights: what one costs does not grow with them) go to its lights by
+        // what each could bring here, a light with a size taking up to four (its four quarters,
+        // and a coarse point's places of its first four traces), one without a size one. Where
+        // that covers all its lights, as with one light with a size or a few without, each gets
+        // them all and the point counts as traced four times, or after a change as settled:
+        // traced on to more rays, it would step from those rays' light to its mean each time a
+        // change comes near it, and flicker while things keep moving there. Otherwise the
+        // strongest get them, and a light none reached keeps what it had before a change, or
+        // starts from its record's coarse light; the point then warms up.
+        // Spread, its rays numbered in order, each lane casting every lanes-th of them from its
+        // own on; every lane works out the same rays.
         bool restart = old != VELK_LIGHT_NONE;
         bool four = false;
         bool spread = lanes > 1u;
         from_none_spread = spread;
-        uint slot_base = (group_lane / lanes) * VELK_LIGHT_SLOTS;
+        uint slot_base = point_in_group * VELK_LIGHT_SLOTS;
+        // Per slot, 4 bits each: the rays its light takes in full (4 with a size, 1 without, 0 for
+        // none), and those it is given.
+        uint full = 0u;
+        uint given = 0u;
+        uint capacity = 0u;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             if (slots[s] == VELK_LIGHT_NONE) continue;
             Light l = velk_light_at(pc.lights_base + slots[s]);
-            uint rays = l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
-            four = four || rays == 4u;
-            if (spread && (s * per_slot) % lanes == lane) s_slot_rays[slot_base + s] = rays;
-            float sum = 0.0;
-            float nearest = 1e30;
-            for (uint j = 0u; j < rays; ++j) {
-                if (spread && (s * per_slot + j) % lanes != lane) continue;
-                if (!restart) ++g_first_rays;
-                vec3 pj = p;
-                vec3 nj = n;
-                float lj = lift;
-                if (around && j > 0u) velk_point_place(at, j, pj, nj, lj);
-                float blocked = velk_points_blocked(l, pj, nj, lj, seed + s * 4u + j, rays == 4u ? j : 4u);
-                sum += blocked;
-                if (blocked > 0.0) nearest = min(nearest, velk_ray_blocker_t);
+            uint f = l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
+            four = four || f == 4u;
+            full |= f << (4u * s);
+            capacity += f;
+        }
+)" R"(
+        // Each ray's slot (low 4 bits, 15 for none) and its place among that slot's rays (the next
+        // 2), 8 bits a ray.
+        uint ray_table = 0xFFFFFFFFu;
+        if (capacity <= first_rays) {
+            // All of every light's rays, slot by slot.
+            uint r = 0u;
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                uint f = (full >> (4u * s)) & 15u;
+                for (uint k = 0u; k < f && r < 4u; ++k, ++r) ray_table = (ray_table & ~(0xFFu << (8u * r))) | ((s | (k << 4u)) << (8u * r));
             }
+            given = full;
+        } else {
+            // By what each could bring here, over the slots that can take another, evenly spaced
+            // over the rays.
+            float strengths[VELK_LIGHT_SLOTS];
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                strengths[s] = slots[s] == VELK_LIGHT_NONE ? 0.0 : max(velk_light_strength(velk_light_at(pc.lights_base + slots[s]), p), 1e-12);
+            }
+            float jitter = float(velk_points_hash(seed ^ 0x2545f491u) & 0xFFFFFFu) / 16777216.0;
+            for (uint r = 0u; r < first_rays; ++r) {
+                float left = 0.0;
+                for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                    if (((given >> (4u * s)) & 15u) < ((full >> (4u * s)) & 15u)) left += strengths[s];
+                }
+                float pick = (float(r) + jitter) / float(first_rays) * left;
+                uint chosen = 15u;
+                uint last_open = 15u;
+                for (uint s = 0u; s < VELK_LIGHT_SLOTS && chosen == 15u; ++s) {
+                    if (((given >> (4u * s)) & 15u) >= ((full >> (4u * s)) & 15u)) continue;
+                    last_open = s;
+                    if (pick < strengths[s]) {
+                        chosen = s;
+                    } else {
+                        pick -= strengths[s];
+                    }
+                }
+                // Past the last by rounding: the last that can take one.
+                if (chosen == 15u) chosen = last_open;
+                if (chosen == 15u) continue;
+                uint rank = (given >> (4u * chosen)) & 15u;
+                ray_table = (ray_table & ~(0xFFu << (8u * r))) | ((chosen | (rank << 4u)) << (8u * r));
+                given += 1u << (4u * chosen);
+            }
+        }
+        bool fully = given == full;
+        // Alone, what each ray found: blocked and the nearest blocker.
+        float ray_blocked[4] = float[4](0.0, 0.0, 0.0, 0.0);
+        float ray_nearest[4] = float[4](1e30, 1e30, 1e30, 1e30);
+        for (uint r = 0u; r < first_rays; ++r) {
+            uint s = (ray_table >> (8u * r)) & 15u;
+            if (s == 15u || (spread && r % lanes != lane)) continue;
+            uint j = (ray_table >> (8u * r + 4u)) & 3u;
+            uint n_s = (given >> (4u * s)) & 15u;
+            if (!restart) ++g_first_rays;
+            vec3 pj = p;
+            vec3 nj = n;
+            float lj = lift;
+            if (around && j > 0u) velk_point_place(at, j, pj, nj, lj);
+            // A light's rays over its quarters: all four, or two opposite ones.
+            uint stratum = ((full >> (4u * s)) & 15u) == 4u ? (n_s == 4u ? j : n_s == 2u ? j * 3u : 4u) : 4u;
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), pj, nj, lj, seed + s * 4u + j, stratum);
             if (spread) {
-                if (sum > 0.0) atomicAdd(s_slot_blocked[slot_base + s], uint(sum * VELK_LIGHT_SPREAD_UNIT + 0.5));
-                if (nearest < 1e29) atomicMin(s_slot_nearest[slot_base + s], floatBitsToUint(max(nearest, 0.0)));
+                atomicAdd(s_slot_rays[slot_base + s], 1u);
+                if (blocked > 0.0) {
+                    atomicAdd(s_slot_blocked[slot_base + s], uint(blocked * VELK_LIGHT_SPREAD_UNIT + 0.5));
+                    atomicMin(s_slot_nearest[slot_base + s], floatBitsToUint(max(velk_ray_blocker_t, 0.0)));
+                }
             } else {
-                value |= uint(sum / float(rays) * 15.0 + 0.5) << (4u * s);
+                ray_blocked[r] = blocked;
+                if (blocked > 0.0) ray_nearest[r] = velk_ray_blocker_t;
+            }
+        }
+)" R"(
+        // What a light no ray reached keeps: after a change what it had, else its record's coarse
+        // light where that is traced, else nothing in its way.
+        uint kept_blockers = 0u;
+        uint kept = 0u;
+        if (!fully) {
+            uint coarse = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
+            bool coarse_known = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
+            kept_blockers = restart ? VELK_LIGHT_WORDS.data[bw] : 0u;
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                uint nibble = restart ? (old >> (4u * s)) & 15u : coarse_known ? (((coarse >> (3u * s)) & 7u) * 15u + 3u) / 7u : 0u;
+                kept |= (slots[s] == VELK_LIGHT_NONE ? 0u : nibble) << (4u * s);
+            }
+        }
+        if (spread) {
+            if (lane == 0u) {
+                s_point_kept[point_in_group] = kept;
+                s_point_kept_blockers[point_in_group] = kept_blockers;
+            }
+        } else {
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                uint n_s = (given >> (4u * s)) & 15u;
+                if (n_s == 0u) {
+                    value |= kept & (15u << (4u * s));
+                    blockers |= kept_blockers & (15u << (4u * s));
+                    continue;
+                }
+                float sum = 0.0;
+                float nearest = 1e30;
+                for (uint r = 0u; r < first_rays; ++r) {
+                    if (((ray_table >> (8u * r)) & 15u) != s) continue;
+                    sum += ray_blocked[r];
+                    nearest = min(nearest, ray_nearest[r]);
+                }
+                value |= uint(sum / float(n_s) * 15.0 + 0.5) << (4u * s);
                 if (nearest < 1e29) blockers |= velk_light_blocker_code(nearest) << (4u * s);
             }
         }
         // Stored as one more.
-        traces = four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
+        traces = fully && four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
         if (lane == 0u) {
             atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
             // What the budget charged it (velk_points_trace_point's from_none), whatever it cast.
@@ -2015,19 +2118,19 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     }
     if (from_none_spread) {
         if (lane != 0u) return;
-        uint point = group_lane / lanes;
-        s_point_word[point] = pw;
-        s_point_blocker_word[point] = bw;
-        s_point_state[point] = (min(traces + 1u, 15u) << 28u) | (state == VELK_LIGHT_NONE ? frame & 0x0FFFFFFFu
-                                                                                          : state & 0x0FFFFFFFu);
+        s_point_word[point_in_group] = pw;
+        s_point_blocker_word[point_in_group] = bw;
+        s_point_state[point_in_group] = (min(traces + 1u, 15u) << 28u) | (state == VELK_LIGHT_NONE ? frame & 0x0FFFFFFFu
+                                                                                                   : state & 0x0FFFFFFFu);
         return;
     }
     velk_points_store(pw, bw, value, blockers, traces + 1u, state, frame);
 }
 )" R"(
 // Puts together and stores the group's point `point` traced spread, after a barrier: each light's
-// share blocked, the mean of its rays, and its nearest blocker, from what its lanes added up; the
-// rest as its first lane left it. Nothing when it had no point.
+// share blocked, the mean of its rays, and its nearest blocker, from what its lanes added up; a
+// light no ray reached as its first lane kept it; the rest as its first lane left it. Nothing when
+// it had no point.
 void velk_points_store_spread(uint point)
 {
     uint pw = s_point_word[point];
@@ -2037,7 +2140,11 @@ void velk_points_store_spread(uint point)
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
         uint at = point * VELK_LIGHT_SLOTS + s;
         uint rays = s_slot_rays[at];
-        if (rays == 0u) continue;
+        if (rays == 0u) {
+            value |= s_point_kept[point] & (15u << (4u * s));
+            blockers |= s_point_kept_blockers[point] & (15u << (4u * s));
+            continue;
+        }
         float sum = float(s_slot_blocked[at]) / VELK_LIGHT_SPREAD_UNIT;
         value |= uint(min(sum / float(rays), 1.0) * 15.0 + 0.5) << (4u * s);
         if (s_slot_nearest[at] != VELK_LIGHT_NONE) blockers |= velk_light_blocker_code(uintBitsToFloat(s_slot_nearest[at])) << (4u * s);
@@ -2059,10 +2166,9 @@ void main()
     uint index = gl_WorkGroupID.x;
     uint lane = gl_LocalInvocationIndex;
     // The lanes a point traced from none spreads its rays over at most, a ray each: a power of
-    // two up to VELK_LIGHT_RAY_LANES (pc.spare1's low byte), and those of a light slot (its next
-    // byte).
+    // two up to VELK_LIGHT_RAY_LANES (pc.spare1's low byte); and its rays (the next byte).
     uint most_lanes = clamp(pc.spare1 & 0xFFu, 1u, VELK_LIGHT_RAY_LANES);
-    uint per_slot = clamp((pc.spare1 >> 8u) & 0xFFu, 1u, 4u);
+    uint first_rays = clamp((pc.spare1 >> 8u) & 0xFFu, 1u, 4u);
 #if VELK_LIGHT_TRACE_MODE == 1
     // The dispatches' sizes (a group): the trace list's, a group a one value, and the point
     // lists' from the points each traces this frame (velk_points_takes), kept for them.
@@ -2132,16 +2238,19 @@ void main()
                 memoryBarrierShared();
                 barrier();
             }
-            uint point = group * per_group + lane / lanes;
-            if (point < spread) velk_points_trace_point(pool, point, frame, counts, takes, lane % lanes, lanes, per_slot, lane);
+            // By ray first: side by side, the same ray of neighbouring points, which mostly goes
+            // to the same light, so that a wave's walks go one way.
+            uint in_group = lane % per_group;
+            uint point = group * per_group + in_group;
+            if (point < spread) velk_points_trace_point(pool, point, frame, counts, takes, lane / per_group, lanes, first_rays, in_group);
             if (lanes > 1u) {
                 memoryBarrierShared();
                 barrier();
-                if (lane % lanes == 0u) velk_points_store_spread(lane / lanes);
+                if (lane < per_group) velk_points_store_spread(lane);
             }
         } else {
             uint point = spread + (group - spread_groups) * VELK_LIGHT_TRACE_THREADS + lane;
-            velk_points_trace_point(pool, point, frame, counts, takes, 0u, 1u, per_slot, lane);
+            velk_points_trace_point(pool, point, frame, counts, takes, 0u, 1u, first_rays, 0u);
         }
         velk_points_count(pool);
     }
