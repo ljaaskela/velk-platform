@@ -9,6 +9,7 @@ Traits are the primary extension mechanism in velk-ui. An element on its own has
 - [CRTP base classes](#crtp-base-classes)
 - [Layout traits](#layout-traits)
   - [Scroll view](#scroll-view)
+  - [List view](#list-view)
 - [Clipping](#clipping)
 - [Transform traits](#transform-traits)
 - [Visual traits](#visual-traits)
@@ -136,6 +137,24 @@ The offsets are kept within the content. One attachment does the layout, the cli
 { "targets": ["list"], "class": "velk-ui.FixedSize", "properties": { "width": "auto", "height": "auto" } }
 ```
 
+### List view
+
+`ListView` shows the top-level items of an item source (`IItemSource` from velk_data, for example an `ObjectList`) as rows of `row_height` pixels. The element is as tall as all its rows. Placed in a ScrollView, it creates rows only for the items in its visible part and reuses them as it scrolls.
+
+A row is an instance of the store file `row_template`. Its root has a `velk-ui.ListRow` attachment with id `row`; the view writes the row's `item`, `index` and `selected` there, and the row's elements bind through it:
+
+```json
+{ "id": "row", "targets": ["root"], "class": "velk-ui.ListRow" },
+{ "targets": ["label"], "class": "velk-text.TextVisual", "properties": { "text": { "bind": "row.item.label" } } }
+```
+
+A click selects the item under it (`selected`), and the selected row gets a background in the visual's `color`. `source` is set from code:
+
+```cpp
+auto items = create_object_list();
+write_state<IListView>(view, [&](IListView::State& s) { set_object_ref(s.source, items); });
+```
+
 ## Clipping
 
 `velk-scene.Clip` (`IClip`) cuts an element and everything under it at the element's box: what lies outside is not drawn, to the pixel, and takes no pointer input. Nested clips intersect. `enabled` turns it off. `ScrollView` and `TextField` are clips themselves.
@@ -171,6 +190,10 @@ Each element's Constraint-phase traits describe its box (`describe()`): size, ma
 A Layout-phase trait measures and places the children through `ILayoutContext`. Without one, each child is placed on its own in the parent's content rectangle, so children overlap: at its top-left corner plus the child's margin, sized by the child's `FixedSize` (filling the rectangle without one), unless the child sets its own alignment with `Align`.
 
 `Stack` gives children with a fixed or auto size along its axis that size, and shares what is left between the children that take the space offered. Across the axis it places them by its `align` property (`fill` by default).
+
+**Visible part.** Arranging an element also gives it the part of its box that shows: the parent's visible part cut to the element's box, and cut again by any `Clip` above it. A ScrollView's children therefore see its viewport, moved by the scroll position. A Layout-phase trait reads it in `arrange` with `ILayoutContext::visible()`, in the element's own space, for example to create only the rows that show.
+
+**Measures are kept.** An element's content size is measured again only when the element or something under it changed, or it is offered different space (`ILayoutContext::changed()` tells a trait which). Scrolling arranges the content again without measuring it.
 
 ## Transform traits
 

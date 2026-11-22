@@ -584,9 +584,14 @@ ReturnValue Scene::insert(const IObject::Ptr& parent, size_t index,
 
 ReturnValue Scene::remove(const IObject::Ptr& object)
 {
+    auto parent = interface_pointer_cast<IElement>(parent_of(object));
     auto rv = logical_.remove(object);
     if (rv == ReturnValue::Success) {
         detach_subtree(object);
+        // The parent's content changed with it.
+        if (parent) {
+            parent->mark_dirty(DirtyFlags::Layout);
+        }
     }
     return rv;
 }

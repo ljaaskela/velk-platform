@@ -12,6 +12,8 @@
     {"id": "list", "class": "velk-scene.Element"},
     {"id": "tree_scroll", "class": "velk-scene.Element"},
     {"id": "tree", "class": "velk-scene.Element"},
+    {"id": "items_scroll", "class": "velk-scene.Element"},
+    {"id": "items", "class": "velk-scene.Element"},
     {"id": "row0", "class": "velk-scene.Element"},
     {"id": "row1", "class": "velk-scene.Element"},
     {"id": "row2", "class": "velk-scene.Element"},
@@ -32,10 +34,11 @@
   "hierarchies": {
     "scene": {
       "scene_root": ["camera", "columns"],
-      "columns": ["left", "scroll", "tree_scroll"],
+      "columns": ["left", "scroll", "tree_scroll", "items_scroll"],
       "left": ["name", "path", "status"],
       "scroll": ["list"],
       "tree_scroll": ["tree"],
+      "items_scroll": ["items"],
       "list": ["row0", "row1", "row2", "row3", "row4", "row5", "row6", "row7", "row8", "row9", "row10", "row11", "row12", "row13", "row14", "row15"]
     }
   },
@@ -62,6 +65,10 @@
     {"id": "tree_scroll_view", "targets": ["tree_scroll"], "class": "velk-ui.ScrollView", "properties": {"color": {"r": 0.7, "g": 0.72, "b": 0.78, "a": 0.8}}},
     {"targets": ["tree"], "class": "velk-ui.FixedSize", "properties": {"height": "auto"}},
     {"id": "tree_view", "targets": ["tree"], "class": "velk-text.TreeView", "properties": {"color": {"r": 0.9, "g": 0.9, "b": 0.9, "a": 1.0}}},
+    {"targets": ["items_scroll"], "class": "velk-ui.FixedSize", "properties": {"width": "220px", "height": "220px"}},
+    {"targets": ["items_scroll"], "class": "velk-ui.RectVisual", "properties": {"color": {"r": 0.16, "g": 0.17, "b": 0.2, "a": 1.0}}},
+    {"id": "items_scroll_view", "targets": ["items_scroll"], "class": "velk-ui.ScrollView", "properties": {"color": {"r": 0.7, "g": 0.72, "b": 0.78, "a": 0.8}}},
+    {"id": "items_view", "targets": ["items"], "class": "velk-ui.ListView", "properties": {"row_template": "app://widgets_row.velk", "row_height": 22.0, "color": {"r": 0.25, "g": 0.4, "b": 0.7, "a": 1.0}}},
     {"targets": ["row0"], "class": "velk-ui.FixedSize", "properties": {"width": "280px", "height": "28px"}},
     {"targets": ["row0"], "class": "velk-ui.RectVisual", "properties": {"color": {"r": 0.26, "g": 0.28, "b": 0.34, "a": 1.0}}},
     {"targets": ["row0"], "class": "velk-text.TextVisual", "properties": {"text": "Row 0", "font_size": 16.0, "v_align": "center", "color": {"r": 0.9, "g": 0.9, "b": 0.9, "a": 1.0}}},

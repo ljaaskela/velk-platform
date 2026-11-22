@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "objects": [
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "label", "class": "velk-scene.Element" }
+  ],
+  "hierarchies": {
+    "scene": { "root": ["label"] }
+  },
+  "attachments": [
+    { "id": "row", "targets": ["root"], "class": "velk-ui.ListRow" },
+    { "targets": ["label"], "class": "velk-text.TextVisual", "properties": { "text": { "bind": "row.item.label" } } }
+  ]
+}

@@ -19,10 +19,13 @@ add_executable(velk_ui_tests
     test_text_field.cpp
     test_scroll_view.cpp
     test_tree_view.cpp
+    test_layout_visible.cpp
+    test_list_view.cpp
 )
 
 target_link_libraries(velk_ui_tests PRIVATE velk velk_scene velk_ui velk_render velk_text GTest::gtest_main)
+target_include_directories(velk_ui_tests PRIVATE $<TARGET_PROPERTY:velk_data,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(velk_ui_tests PRIVATE
     VELK_UI_TEST_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixture"
 )
-add_dependencies(velk_ui_tests velk_importer)
+add_dependencies(velk_ui_tests velk_importer velk_data)

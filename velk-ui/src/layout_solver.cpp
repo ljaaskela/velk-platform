@@ -8,6 +8,7 @@
 #include <velk-scene/api/element.h>
 #include <velk-scene/interface/intf_transform_trait.h>
 #include <velk-scene/interface/intf_visual.h>
+#include <velk-scene/interface/trait/intf_clip.h>
 #include <velk-ui/interface/intf_content_size.h>
 
 namespace velk::ui {
@@ -163,7 +164,58 @@ mat4 world_of(const IElement::Ptr& element)
     return state ? state->world_matrix : mat4::identity();
 }
 
+rect intersect(const rect& a, const rect& b)
+{
+    const float x0 = std::max(a.x, b.x);
+    const float y0 = std::max(a.y, b.y);
+    const float x1 = std::min(a.x + a.width, b.x + b.width);
+    const float y1 = std::min(a.y + a.height, b.y + b.height);
+    return {x0, y0, std::max(0.f, x1 - x0), std::max(0.f, y1 - y0)};
+}
+
+/// An element's box in world x and y, from the translation of its world matrix.
+rect world_box(const mat4& world, const size& s)
+{
+    return {world(0, 3), world(1, 3), s.width, s.height};
+}
+
+/// @p visible cut to @p element's enabled clip, if it has one.
+rect apply_clip(const Element& element, const mat4& world, const size& s, const rect& visible)
+{
+    if (auto clip = element.find_attachment<IClip>()) {
+        auto cs = read_state<IClip>(clip);
+        if (cs && cs->enabled) {
+            const rect r = clip->clip_rect(s);
+            return intersect(visible, {world(0, 3) + r.x, world(1, 3) + r.y, r.width, r.height});
+        }
+    }
+    return visible;
+}
+
 } // namespace
+
+bool LayoutSolver::changed(IElement& element) const
+{
+    return all_changed_ || std::binary_search(changed_.begin(), changed_.end(), &element);
+}
+
+rect LayoutSolver::children_visible(const IElement::Ptr& element) const
+{
+    vector<IElement::Ptr> chain;
+    for (auto e = element; e; e = interface_pointer_cast<IElement>(hierarchy_->parent_of(as_object(e)))) {
+        chain.push_back(e);
+    }
+    rect visible = parent_visible_;
+    for (size_t i = chain.size(); i-- > 0;) {
+        auto state = read_state<IElement>(chain[i]);
+        if (!state) {
+            continue;
+        }
+        visible = intersect(visible, world_box(state->world_matrix, state->size));
+        visible = apply_clip(Element(chain[i]), state->world_matrix, state->size, visible);
+    }
+    return visible;
+}
 
 void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const PendingLayout& pending)
 {
@@ -172,10 +224,32 @@ void LayoutSolver::solve(IHierarchy& hierarchy, const aabb& viewport, const Pend
     }
     VELK_PERF_SCOPE("layout.solve");
     hierarchy_ = &hierarchy;
+    parent_visible_ = {viewport.position.x, viewport.position.y, viewport.extent.width, viewport.extent.height};
 
     const auto parent_of = [&](const IElement::Ptr& e) {
         return interface_pointer_cast<IElement>(hierarchy.parent_of(as_object(e)));
     };
+
+    // What changed, with its ancestors, so a layout trait can tell a stale measure from a fresh one.
+    all_changed_ = pending.full;
+    changed_.clear();
+    if (all_changed_ || measured_.size() > 65536) {
+        measured_.clear();
+    }
+    if (!all_changed_) {
+        auto add_chain = [&](IElement* element) {
+            for (auto e = to_ptr(element); e; e = parent_of(e)) {
+                changed_.push_back(e.get());
+            }
+        };
+        for (auto* e : pending.layout) {
+            add_chain(e);
+        }
+        for (auto* e : pending.visual) {
+            add_chain(e);
+        }
+        sort_unique(changed_);
+    }
     const auto has_ancestor_in = [&](IElement::Ptr e, const vector<IElement*>& set) {
         while (auto parent = parent_of(e)) {
             if (std::binary_search(set.begin(), set.end(), parent.get())) {
@@ -254,11 +328,15 @@ void LayoutSolver::arrange_from_parent(const IElement::Ptr& element, const aabb&
 {
     auto parent = interface_pointer_cast<IElement>(hierarchy_->parent_of(as_object(element)));
     auto parent_state = read_state<IElement>(parent);
+    const rect root_visible = {viewport.position.x, viewport.position.y, viewport.extent.width, viewport.extent.height};
     if (!parent_state) {
         parent_world_ = mat4::identity();
+        parent_visible_ = root_visible;
         arrange(*element, viewport, Alignment::Start, Alignment::Start);
         return;
     }
+    parent_visible_ = root_visible;
+    parent_visible_ = children_visible(parent);
 
     // The parent places no children itself (or the climb would have gone past it), so the
     // element sits in the parent's content rectangle.
@@ -273,6 +351,14 @@ void LayoutSolver::arrange_from_parent(const IElement::Ptr& element, const aabb&
 
 size LayoutSolver::measure_content(IElement& element, ILayoutTrait* layout, const size& available)
 {
+    // An unchanged subtree measures the same for the same space: a scroll moves content
+    // without measuring it again.
+    if (!changed(element)) {
+        auto it = measured_.find(&element);
+        if (it != measured_.end() && it->second.available == available) {
+            return it->second.content;
+        }
+    }
     size content{};
     if (layout) {
         content = layout->measure(available, element, *this);
@@ -290,6 +376,7 @@ size LayoutSolver::measure_content(IElement& element, ILayoutTrait* layout, cons
         content.width = std::max(content.width, s.width);
         content.height = std::max(content.height, s.height);
     }
+    measured_[&element] = {available, content};
     return content;
 }
 
@@ -388,8 +475,14 @@ void LayoutSolver::arrange(IElement& child, const aabb& slot, Alignment default_
     inner.position = {pad.left, pad.top, 0.f};
     inner.extent = shrink(s, pad);
 
+    // The visible part: the parent's cut to this box, then to this element's clip for its children.
+    const rect visible = intersect(parent_visible_, world_box(world, s));
     const mat4 saved = parent_world_;
+    const rect saved_parent_visible = parent_visible_;
+    const rect saved_visible = element_visible_;
     parent_world_ = world;
+    parent_visible_ = apply_clip(e, world, s, visible);
+    element_visible_ = {visible.x - world(0, 3), visible.y - world(1, 3), visible.width, visible.height};
     if (traits.layout) {
         traits.layout->arrange(inner, child, *this);
     } else {
@@ -400,6 +493,8 @@ void LayoutSolver::arrange(IElement& child, const aabb& slot, Alignment default_
         }
     }
     parent_world_ = saved;
+    parent_visible_ = saved_parent_visible;
+    element_visible_ = saved_visible;
 }
 
 void LayoutSolver::update_transform(const IElement::Ptr& element, const mat4& parent_world)

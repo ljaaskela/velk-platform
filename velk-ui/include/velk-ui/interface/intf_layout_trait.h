@@ -65,6 +65,21 @@ public:
      */
     virtual void arrange(IElement& child, const aabb& slot, Alignment default_x, Alignment default_y) = 0;
 
+    /**
+     * @brief The visible part of the element being arranged, in its own space.
+     *
+     * The parent's visible part cut to the element's box. A Clip on an ancestor (a ScrollView's
+     * viewport, moved by its scroll position) cuts it further. Empty when none of the element
+     * shows. Valid in the element's Layout-phase arrange.
+     */
+    virtual rect visible() const = 0;
+
+    /**
+     * @brief True when @p element or anything under it changed since the last layout, so a
+     *        size measured then may be stale. Always true on a full layout.
+     */
+    virtual bool changed(IElement& element) const = 0;
+
 protected:
     ~ILayoutContext() = default;
 };

@@ -66,24 +66,48 @@ void ScrollView::arrange(const aabb& content, IElement& element, ILayoutContext&
         return need;
     };
 
-    // A bar takes its width from the content's space, which can make the other axis need one.
+    // A scroll alone moves the content: the last measure holds while the space, the bar width
+    // and the children are the same and none of the children changed.
     const float bw = std::max(0.f, state->bar_width);
+    vector<IElement*> ids;
+    ids.reserve(children.size());
+    bool stale = false;
+    for (auto& c : children) {
+        ids.push_back(c.get());
+        stale = stale || ctx.changed(*c);
+    }
+    const bool reuse = !stale && measured_.valid && measured_.space == content.extent && measured_.bar_width == bw
+                       && measured_.children == ids;
+
     float vw = content.extent.width;
     float vh = content.extent.height;
-    size need = measure_all(vw, vh);
-    bool v_bar = need.height > vh;
-    if (v_bar) {
-        vw = std::max(0.f, vw - bw);
+    size need{};
+    bool v_bar = false;
+    bool h_bar = false;
+    if (reuse) {
+        vw = measured_.vw;
+        vh = measured_.vh;
+        need = measured_.need;
+        v_bar = measured_.v_bar;
+        h_bar = measured_.h_bar;
+    } else {
+        // A bar takes its width from the content's space, which can make the other axis need one.
         need = measure_all(vw, vh);
-    }
-    bool h_bar = need.width > vw;
-    if (h_bar) {
-        vh = std::max(0.f, vh - bw);
-        if (!v_bar && need.height > vh) {
-            v_bar = true;
+        v_bar = need.height > vh;
+        if (v_bar) {
             vw = std::max(0.f, vw - bw);
             need = measure_all(vw, vh);
         }
+        h_bar = need.width > vw;
+        if (h_bar) {
+            vh = std::max(0.f, vh - bw);
+            if (!v_bar && need.height > vh) {
+                v_bar = true;
+                vw = std::max(0.f, vw - bw);
+                need = measure_all(vw, vh);
+            }
+        }
+        measured_ = {true, content.extent, bw, std::move(ids), vw, vh, need, v_bar, h_bar};
     }
 
     const Axis old_x = x_;

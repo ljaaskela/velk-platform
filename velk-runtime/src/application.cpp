@@ -90,6 +90,7 @@ bool Application::init(const ApplicationConfig& config)
 
     // Load all standard plugins. The "plugin:" URI scheme resolves to
     // <exe_dir>/plugins/<name>.<dll|so> on the host platform.
+    reg.load_plugin("plugin:velk_data");
     reg.load_plugin("plugin:velk_ui");
     reg.load_plugin("plugin:velk_render");
     reg.load_plugin("plugin:velk_scene");

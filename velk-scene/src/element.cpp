@@ -70,21 +70,17 @@ ReturnValue Element::add_attachment(const IInterface::Ptr& attachment)
     if (succeeded(rv) && scene_.lock()) {
         subscribe_trait(attachment);
         sync_dependent_registration();
-        notify_if_clip(attachment);
+        notify_attachments_changed();
     }
     return rv;
 }
 
-void Element::notify_if_clip(const IInterface::Ptr& attachment)
+void Element::notify_attachments_changed()
 {
-    // A clip changes what its whole subtree draws, which a visual change rebuilds.
-    if (!interface_cast<IClip>(attachment)) {
-        return;
-    }
-    if (auto scene = get_scene()) {
-        pending_dirty_ |= DirtyFlags::Visual;
-        scene->notify_dirty(*this, DirtyFlags::Visual);
-    }
+    // A trait added or removed can change the element's box, its children's placement and
+    // what it draws; a clip changes what its whole subtree draws, which a visual change
+    // rebuilds.
+    mark_dirty(DirtyFlags::Layout | DirtyFlags::Visual);
 }
 
 ReturnValue Element::remove_attachment(const IInterface::Ptr& attachment)
@@ -98,7 +94,7 @@ ReturnValue Element::remove_attachment(const IInterface::Ptr& attachment)
             render_trait_count--;
         }
         subscribe_traits();
-        notify_if_clip(attachment);
+        notify_attachments_changed();
     }
     return rv;
 }

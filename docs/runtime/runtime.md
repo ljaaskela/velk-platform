@@ -107,7 +107,7 @@ if (!app) {
 `create_app()` does several things in order:
 1. Loads `velk_runtime.dll` (registers the Application class).
 2. Calls `IApplication::init(config)`, which:
-   - Loads all standard plugins (`velk_ui`, `velk_render`, `velk_vk`, `velk_text`, `velk_image`, `velk_importer`).
+   - Loads all standard plugins (`velk_data`, `velk_ui`, `velk_render`, `velk_vk`, `velk_text`, `velk_image`, `velk_importer`).
    - Switches on the importer's source tracking when `track_sources` is set.
    - Loads the platform plugin (`velk_runtime_glfw` on desktop, `velk_runtime_android` on Android — selected via `#ifdef`).
    - Resolves the `IWindowProvider` from the platform plugin.
@@ -336,6 +336,7 @@ The dispatcher routes events through the bound scene's element hierarchy via hit
 
 | Plugin | Purpose |
 |---|---|
+| `velk_data` | Item sources for list and tree views. |
 | `velk_ui` | UI element / scene / input system, built-in visuals. |
 | `velk_render` | Render context, surface, shader material, base renderer. |
 | `velk_vk` | Vulkan backend (selected by `RenderBackendType::Default` on desktop). |

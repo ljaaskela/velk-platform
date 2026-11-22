@@ -23,6 +23,7 @@
 #include "layout_solver.h"
 #include "visual/rect_visual.h"
 #include "visual/rounded_rect_visual.h"
+#include "layout/list_view.h"
 #include "render_cache.h"
 #include "visual/texture_material.h"
 #include "visual/texture_visual.h"
@@ -41,6 +42,8 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Margin>(velk);
     rv &= register_type<Align>(velk);
     rv &= register_type<ScrollView>(velk);
+    rv &= register_type<ListView>(velk);
+    rv &= register_type<ListRow>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);
@@ -93,9 +96,8 @@ void VelkUiPlugin::post_update(const IPlugin::PostUpdateInfo& info)
     auto* scene_svc = interface_cast<IScenePlugin>(plugin_ptr.get());
     if (!scene_svc) return;
 
-    LayoutSolver solver;
     struct Ctx { LayoutSolver* solver; const IPlugin::PostUpdateInfo* info; };
-    Ctx ctx{&solver, &info};
+    Ctx ctx{&solver_, &info};
     scene_svc->for_each_scene(+[](IScene* scene, void* user) {
         if (!scene) return;
         auto& c = *static_cast<Ctx*>(user);

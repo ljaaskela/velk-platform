@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "objects": [
+    { "id": "root", "class": "velk-scene.Element" },
+    { "id": "scroll", "class": "velk-scene.Element" },
+    { "id": "content", "class": "velk-scene.Element" }
+  ],
+  "hierarchies": {
+    "scene": { "root": ["scroll"], "scroll": ["content"] }
+  },
+  "attachments": [
+    { "id": "scroll_size", "targets": ["scroll"], "class": "velk-ui.FixedSize", "properties": { "width": "100px", "height": "50px" } },
+    { "id": "view", "targets": ["scroll"], "class": "velk-ui.ScrollView" }
+  ]
+}

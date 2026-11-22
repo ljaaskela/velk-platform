@@ -56,6 +56,7 @@ add_subdirectory("${VELK_SOURCE_DIR}/velk"                  "${CMAKE_BINARY_DIR}
 add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/importer"  "${CMAKE_BINARY_DIR}/velk_importer")
 add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/animator"  "${CMAKE_BINARY_DIR}/velk_animator")
 add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/remote"    "${CMAKE_BINARY_DIR}/velk_remote")
+add_subdirectory("${VELK_SOURCE_DIR}/velk/plugins/data"      "${CMAKE_BINARY_DIR}/velk_data")
 
 # =============================================================================
 # Subdirectories
@@ -94,7 +95,7 @@ endif()
 # are always a sibling subdir of the exe.
 # =============================================================================
 set(VELK_PLUGIN_TARGETS
-    velk_importer velk_animator velk_tracy velk_remote velk_editor_endpoint velk_editor_core
+    velk_importer velk_animator velk_tracy velk_remote velk_data velk_editor_endpoint velk_editor_core
     velk_render velk_glsl velk_vk velk_rt velk_scene velk_ui
     velk_text velk_image velk_gltf
     velk_runtime velk_runtime_glfw velk_runtime_android

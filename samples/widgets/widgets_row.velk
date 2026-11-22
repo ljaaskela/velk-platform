@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "objects": [
+    {"id": "root", "class": "velk-scene.Element"},
+    {"id": "label", "class": "velk-scene.Element"}
+  ],
+  "hierarchies": {
+    "scene": {"root": ["label"]}
+  },
+  "attachments": [
+    {"id": "row", "targets": ["root"], "class": "velk-ui.ListRow"},
+    {"targets": ["root"], "class": "velk-ui.Padding", "properties": {"left": "8px"}},
+    {"targets": ["label"], "class": "velk-text.TextVisual", "properties": {"text": {"bind": "row.item.label"}, "font_size": 14.0, "v_align": "center", "color": {"r": 0.9, "g": 0.9, "b": 0.9, "a": 1.0}}}
+  ]
+}

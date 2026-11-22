@@ -71,8 +71,23 @@ private:
     /** @brief Writes the offset of @p vertical's axis, clamped; returns true if it changed. */
     bool scroll_to(bool vertical, float offset);
 
+    /// The last measure of the children, reused when only the scroll position changed.
+    struct Measured
+    {
+        bool valid = false;
+        size space{};              ///< The content space it was taken in.
+        float bar_width = 0.f;
+        vector<IElement*> children;
+        float vw = 0.f;            ///< The view's width and height left after the bars.
+        float vh = 0.f;
+        size need{};
+        bool v_bar = false;
+        bool h_bar = false;
+    };
+
     Axis x_;
     Axis y_;
+    Measured measured_;
     /// Cross-axis position of each bar: the vertical bar's x, the horizontal bar's y.
     float v_bar_x_ = 0.f;
     float h_bar_y_ = 0.f;

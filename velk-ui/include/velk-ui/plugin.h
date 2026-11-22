@@ -30,6 +30,9 @@ inline constexpr Uid Align{"137667f4-5932-4855-8f72-72e931986af7"};
 /** @brief Scrolls and clips its children, with scroll bars. See IScrollView. */
 inline constexpr Uid ScrollView{"aaf6476d-7c22-4f43-8285-efe8d760b683"};
 
+/** @brief Rows for the items of an item source, only where they show. See IListView. */
+inline constexpr Uid ListView{"6e2b9f41-8c3d-4a57-b1e0-4f7a2c9d3e58"};
+
 } // namespace Constraint
 
 // Note: Transform/* moved to velk-scene/plugin.h.
@@ -83,6 +86,9 @@ inline constexpr Uid Hover{"0cf025ae-8a07-4b76-9559-1b4afb14c1f0"};
 inline constexpr Uid Drag{"e83b9c3e-36e5-4a45-b4e0-c72fcb8ed378"};
 
 } // namespace Input
+
+/** @brief What a list view tells a row: its item, index and state. See IListRow. */
+inline constexpr Uid ListRow{"3a8d1c52-9e4f-4b71-a6c3-7d2e5f8b1a09"};
 
 namespace Import {
 

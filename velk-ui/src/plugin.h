@@ -5,6 +5,8 @@
 
 #include <velk-ui/plugin.h>
 
+#include "layout_solver.h"
+
 namespace velk::ui {
 
 class VelkUiPlugin final : public ::velk::ext::Plugin<VelkUiPlugin>
@@ -18,6 +20,9 @@ public:
     ReturnValue shutdown(IVelk& velk) override;
 
     void post_update(const IPlugin::PostUpdateInfo& info) override;
+
+private:
+    LayoutSolver solver_; ///< Kept across frames for its measure cache.
 };
 
 } // namespace velk::ui

@@ -7,6 +7,8 @@ add_library(velk_ui SHARED
     src/layout/stack.cpp
     src/layout/scroll_view.h
     src/layout/scroll_view.cpp
+    src/layout/list_view.h
+    src/layout/list_view.cpp
     src/constraint/fixed_size.h
     src/constraint/fixed_size.cpp
     src/constraint/insets.h
@@ -44,6 +46,8 @@ add_library(velk_ui SHARED
     src/input/drag.cpp
     include/velk-ui/input_types.h
     include/velk-ui/interface/intf_input_trait.h
+    include/velk-ui/interface/intf_list_row.h
+    include/velk-ui/interface/trait/intf_list_view.h
     include/velk-ui/interface/intf_input_dispatcher.h
     include/velk-ui/interface/intf_focus_target.h
     include/velk-ui/ext/input.h
@@ -77,7 +81,10 @@ target_link_libraries(velk_ui PRIVATE velk velk_importer velk_render velk_scene)
 target_include_directories(velk_ui
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            $<TARGET_PROPERTY:velk_data,INTERFACE_INCLUDE_DIRECTORIES>
 )
+# Views read velk_data's interfaces; the plugin itself is loaded at runtime.
+add_dependencies(velk_ui velk_data)
 
 option(VELK_LAYOUT_DEBUG "Enable verbose layout logging" OFF)
 option(VELK_INPUT_DEBUG "Enable verbose input logging" OFF)
