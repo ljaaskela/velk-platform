@@ -1226,6 +1226,12 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         const float was = brightness(a);
         const float now = brightness(b);
         if (still && std::abs(now - was) <= std::max(was, now) / 16.f) continue;
+        // Dark before and after, it changes no light wherever it goes (a light switched off
+        // still swaying): not listed, so neither shadows nor the probes' history start over.
+        if (was <= 0.f && now <= 0.f) {
+            listed[i] = b;
+            continue;
+        }
         if (!still && (a.flags[0] == static_cast<uint32_t>(LightType::Directional)
                        || b.flags[0] == static_cast<uint32_t>(LightType::Directional))) {
             all_lights = true;
