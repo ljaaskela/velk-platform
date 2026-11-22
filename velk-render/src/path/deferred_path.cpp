@@ -517,6 +517,15 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 si
         }
         if (vs.light_probes[0].valid() && vs.light_probes[1].valid() && vs.light_probe_rays.valid()) vs.light_probe_count = probes;
     }
+    // The probes' cells, once, all free.
+    if (!vs.probe_cells.valid()) {
+        vs.probe_cells = arena->alloc(uint64_t(kProbeCellSlots) * kProbeCellWords * sizeof(uint32_t));
+        if (vs.probe_cells.valid()) {
+            vector<uint32_t> empty;
+            empty.resize(size_t(kProbeCellSlots) * kProbeCellWords, 0u);
+            arena->write_at(vs.probe_cells.offset(), empty.data(), empty.size() * sizeof(uint32_t));
+        }
+    }
 
     // The list of clusters drawn in compute and the words of each pixel, made again when the
     // frame's size changes. The depth plane compute raster draws to starts clear, and the
@@ -1628,26 +1637,20 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.env[1] = render_view.env.texture_id;
     pc.env[2] = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
     pc.env[3] = store_word(vs.light_probe_parity ^ 1u);
-    // The filter: the ray store and the last frame's probes into this frame's store.
+    // The cells (more.x), and the frame light last changed (more.y), from which a cell takes new
+    // rays again. vs.lights_moved is this frame's: emit_light_changes_pass runs first and sets it
+    // on every path.
+    const uint32_t cells_word = vs.probe_cells.valid() ? static_cast<uint32_t>(vs.probe_cells.offset() / sizeof(uint32_t)) : kLightNone;
+    if (vs.lights_moved) vs.probe_cells_woken = static_cast<uint32_t>(ctx.present_counter);
+    pc.more[0] = cells_word;
+    pc.more[1] = vs.probe_cells_woken;
+    // The filter: the ray store into this frame's store; then the cells no probe reads any more.
     RtPushC filter_pc = pc;
     filter_pc.extras[2] = store_word(vs.light_probe_parity);
-    // The most frames a probe blends over: few while lights move and for 32 frames after, as their
-    // bounce changes a little each frame; many once they stand still, so that light that does not
-    // change settles. A camera that turns more than 5 degrees in a frame (a cut, not a turn)
-    // starts it over too: the probes' history then comes from another view. vs.lights_moved is
-    // this frame's: emit_light_changes_pass runs first and sets it on every path.
-    const vec4 w_row = render_view.view_projection.row(3);
-    vec3 forward{w_row.x, w_row.y, w_row.z};
-    const float forward_length = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
-    bool cut = false;
-    if (forward_length > 0.f) {
-        forward = {forward.x / forward_length, forward.y / forward_length, forward.z / forward_length};
-        const vec3& was = vs.probe_forward;
-        cut = forward.x * was.x + forward.y * was.y + forward.z * was.z < 0.9962f;
-        vs.probe_forward = forward;
-    }
-    vs.lights_still_frames = vs.lights_moved || cut ? 0u : std::min(vs.lights_still_frames + 1u, 32u);
-    filter_pc.extras[3] = vs.lights_still_frames >= 32u ? 64u : 16u;
+    filter_pc.extras[3] = 0u;
+    filter_pc.env[3] = cells_word;
+    RtPushC age_pc = filter_pc;
+    age_pc.extras[3] = 1u;
 
     bool dirty = true;
     emit_cached_view_pass(vs.light_probes_pass, dirty,
@@ -1694,6 +1697,17 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
         cmd->push_label("DeferredPath: light probes filter");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        // A thread a cell slot.
+        if (cells_word != kLightNone) {
+            DispatchCall age{};
+            age.pipeline = filter_pipeline.get();
+            age.groups_x = kProbeCellSlots / 64u;
+            age.groups_y = 1;
+            age.groups_z = 1;
+            age.root_constants_size = sizeof(age_pc);
+            std::memcpy(age.root_constants, &age_pc, sizeof(age_pc));
+            cmd->record_dispatch(age);
+        }
         cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();

@@ -2923,6 +2923,17 @@ inline constexpr uint32_t kLightProbeRays = 4;
 inline constexpr uint32_t kLightProbeGroupThreads = 16;
 /// Threads in a work group of the reflections' trace: 8 by 4 blocks of 2 by 2 pixels, a block each.
 inline constexpr uint32_t kReflectGroupThreads = 32;
+/// The probes' light kept in world space (VELK_PROBE_CELL_GLSL): a cell for a place and the way a
+/// surface there faces, as wide as a probe's square is at its distance from the camera, found by
+/// a hash. A probe whose cell has kProbeCellSettled samples and nothing changed since casts no
+/// rays and takes its light; else one probe a frame adds its rays to it. Cells unread for
+/// kProbeCellKeepFrames are let go of. Light changing anywhere starts every cell's light moving
+/// again, from kProbeCellWoken samples.
+inline constexpr uint32_t kProbeCellSlots = 1u << 17;
+inline constexpr uint32_t kProbeCellWords = 12;
+inline constexpr uint32_t kProbeCellSettled = 64;
+inline constexpr uint32_t kProbeCellWoken = 4;
+inline constexpr uint32_t kProbeCellKeepFrames = 240;
 static_assert(kLightProbeRays * 4u == kLightProbeGroupThreads, "a group is a 2 by 2 tile of probes");
 
 // A probe's light (VELK_PROBE_LIGHT), for a shader that defines VELK_LIGHT_WORDS as the buffer
@@ -3000,6 +3011,17 @@ uint velk_probe_halves(float a, float b)
     return packHalf2x16(clamp(vec2(a, b), vec2(-65000.0), vec2(65000.0)));
 }
 
+// Writes the light `p` at `at`, six words as VELK_PROBE_LIGHT holds them.
+void velk_probe_write_light(uint at, VelkProbeLight p)
+{
+    VELK_LIGHT_WORDS.data[at] = velk_probe_halves(p.e.x, p.e.y);
+    VELK_LIGHT_WORDS.data[at + 1u] = velk_probe_halves(p.e.z, p.r.x);
+    VELK_LIGHT_WORDS.data[at + 2u] = velk_probe_halves(p.r.y, p.r.z);
+    VELK_LIGHT_WORDS.data[at + 3u] = velk_probe_halves(p.g.x, p.g.y);
+    VELK_LIGHT_WORDS.data[at + 4u] = velk_probe_halves(p.g.z, p.b.x);
+    VELK_LIGHT_WORDS.data[at + 5u] = velk_probe_halves(p.b.y, p.b.z);
+}
+
 // Writes probe `at` whole: its light, where it is, its normal and its frames.
 void velk_probe_write(uint at, VelkProbeLight p, vec3 pos, vec3 n, float frames)
 {
@@ -3014,6 +3036,86 @@ void velk_probe_write(uint at, VelkProbeLight p, vec3 pos, vec3 n, float frames)
     VELK_LIGHT_WORDS.data[at + VELK_PROBE_POSITION + 2u] = floatBitsToUint(pos.z);
     VELK_LIGHT_WORDS.data[at + VELK_PROBE_NORMAL] = velk_probe_oct_encode(n);
     VELK_LIGHT_WORDS.data[at + VELK_PROBE_FRAMES] = floatBitsToUint(frames);
+}
+)"
+
+// The probes' cells (kProbeCellSlots), for a shader with VELK_PROBE_GLSL and VELK_PROBE_WRITE_GLSL:
+// a cell's words, and finding one.
+#define VELK_PROBE_CELL_GLSL R"(
+#define VELK_CELL_SLOTS 131072u
+#define VELK_CELL_WORDS 12u
+#define VELK_CELL_KEY 0u       // its key's hash, 0 for a free slot
+#define VELK_CELL_CHECK 1u     // a second hash of its key
+#define VELK_CELL_LIGHT 2u     // six words, as VELK_PROBE_LIGHT
+#define VELK_CELL_SAMPLES 8u   // the rays' frames it holds, up to VELK_CELL_SETTLED
+#define VELK_CELL_READ 9u      // the frame a probe last read it
+#define VELK_CELL_UPDATED 10u  // the frame a probe last added its rays to it
+#define VELK_CELL_NORMAL 11u   // the normal its light is at, octahedral
+#define VELK_CELL_SETTLED 64u
+#define VELK_CELL_WOKEN 4u
+#define VELK_CELL_KEEP 240u
+#define VELK_CELL_PROBES 8u
+
+vec3 velk_cell_normal(uint cell)
+{
+    vec2 e = unpackSnorm2x16(VELK_LIGHT_WORDS.data[cell + VELK_CELL_NORMAL]);
+    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+
+uint velk_cell_hash(uvec3 v)
+{
+    uint h = (v.x * 0x8da6b343u) ^ (v.y * 0xd8163841u) ^ (v.z * 0xcb1ab31fu);
+    h ^= h >> 16; h *= 0x7feb352du;
+    h ^= h >> 15; h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+// The cell of a place at `pos` (relative to the camera) facing `n`: its key and second hash. A cell
+// is a cube of the world a power of two wide, the widest no wider than a probe's square is at the
+// place's distance (at least an eighth), and one of six ways a surface faces.
+void velk_cell_key(vec3 pos, vec3 n, out uint key, out uint check)
+{
+    GlobalData g = VELK_GLOBALS;
+    mat4 vp = g.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+    float square = float(VELK_PROBE_PIXELS) * length(pos) / max(pixels_per_unit, 1e-6);
+    int level = int(floor(log2(max(square, 0.125))));
+    float size = exp2(float(level));
+    // The camera's place in whole cells and what is left of it, so that far from the origin the
+    // cell is found without adding a large number to a small one. At most as wide as the square, so
+// that a cell has about one probe and gets as many rays as a probe while light changes.
+    vec3 cam = g.cam_pos.xyz;
+    vec3 cam_cells = floor(cam / size);
+    ivec3 c = ivec3(cam_cells) + ivec3(floor((pos + (cam - cam_cells * size)) / size));
+    vec3 a = abs(n);
+    uint face = a.x >= a.y && a.x >= a.z ? (n.x >= 0.0 ? 0u : 1u) : a.y >= a.z ? (n.y >= 0.0 ? 2u : 3u) : (n.z >= 0.0 ? 4u : 5u);
+    uint level_face = (uint(level + 32) << 3u) | face;
+    key = velk_cell_hash(uvec3(c) ^ uvec3(level_face * 0x9e3779b9u, level_face, 0u)) | 1u;
+    check = velk_cell_hash(uvec3(c.yzx) + uvec3(level_face, 0x51ed270bu, level_face * 0x2545f491u));
+}
+
+// The cell with `key` and `check` in the table at word `table`, or a free slot taken for it:
+// `claimed` when this call took it. 0xFFFFFFFF when its slots are all others'.
+uint velk_cell_find(uint table, uint key, uint check, out bool claimed)
+{
+    claimed = false;
+    for (uint p = 0u; p < VELK_CELL_PROBES; ++p) {
+        uint cell = table + ((key + p) & (VELK_CELL_SLOTS - 1u)) * VELK_CELL_WORDS;
+        uint k = VELK_LIGHT_WORDS.data[cell + VELK_CELL_KEY];
+        if (k == 0u) {
+            k = atomicCompSwap(VELK_LIGHT_WORDS.data[cell + VELK_CELL_KEY], 0u, key);
+            if (k == 0u) {
+                VELK_LIGHT_WORDS.data[cell + VELK_CELL_CHECK] = check;
+                claimed = true;
+                return cell;
+            }
+        }
+        if (k == key && VELK_LIGHT_WORDS.data[cell + VELK_CELL_CHECK] == check) return cell;
+    }
+    return 0xFFFFFFFFu;
 }
 )"
 
@@ -3041,7 +3143,7 @@ layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_w
 )" VELK_LIGHT_POOL_GLSL R"(
 #define VELK_PROBE_PIXELS 16u
 #define VELK_PROBE_RAYS 4u
-)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL R"(
+)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL R"(
 uint velk_light_grid_hash(ivec3 cube)
 {
     uint h = (uint(cube.x) * 0x8da6b343u) ^ (uint(cube.y) * 0xd8163841u) ^ (uint(cube.z) * 0xcb1ab31fu);
@@ -3135,6 +3237,15 @@ shared vec3 s_light[VELK_RT_GROUP_THREADS];
 shared vec3 s_dir[VELK_RT_GROUP_THREADS];
 // The deepest any thread's walk stack got, for one write to the log's word a group.
 shared uint s_deepest;
+// Each of the group's four probes' cell (VELK_PROBE_CELL_GLSL), what it does with it
+// (VELK_CELL_OWN and the others) and the samples it held before.
+shared uint s_cell[4];
+shared uint s_mode[4];
+shared uint s_had[4];
+// A probe's rays alone, its cell read without rays, or its rays added to its cell.
+#define VELK_CELL_OWN 0u
+#define VELK_CELL_READ_ONLY 1u
+#define VELK_CELL_ADD 2u
 
 // What light `index` brings a surface at `at` facing `n`, unshadowed.
 vec3 velk_probe_light(uint index, vec3 at, vec3 n)
@@ -3315,6 +3426,7 @@ vec3 velk_probe_ray_dir(uint probe, uvec2 square, uint ray, uint frame, vec3 n)
     return normalize(a * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
 }
 
+)" R"(
 // The gather: a 2 by 2 tile of probes a group of 16 threads, a ray a thread, each probe's light
 // from its rays into the ray store.
 void velk_probes_gather(uint lane)
@@ -3343,12 +3455,48 @@ void velk_probes_gather(uint lane)
     vec3 n = surface ? normalize(n4) : vec3(0.0, 1.0, 0.0);
 
     if (lane == 0u) s_deepest = 0u;
+    // Its cell (pc.more.x the table, pc.more.y the frame light last changed), as its first thread
+    // finds it: settled and nothing changed since, read without rays; else this probe adds its
+    // rays to it unless another does this frame, which leaves it to be read, or its rays alone
+    // while it has none yet. Light changing starts a settled cell moving again from fewer samples.
+    if (ray == 0u) {
+        uint mode = VELK_CELL_OWN;
+        uint cell = 0xFFFFFFFFu;
+        uint had = 0u;
+        if (surface && pc.more.x != 0xFFFFFFFFu) {
+            uint key;
+            uint check;
+            velk_cell_key(pos, n, key, check);
+            bool claimed;
+            cell = velk_cell_find(pc.more.x, key, check, claimed);
+            if (cell != 0xFFFFFFFFu) {
+                uint now = g.present_counter;
+                probe_words.data[cell + VELK_CELL_READ] = now;
+                uint samples = claimed ? 0u : probe_words.data[cell + VELK_CELL_SAMPLES];
+                uint updated = probe_words.data[cell + VELK_CELL_UPDATED];
+                bool woken = updated < pc.more.y;
+                had = woken ? min(samples, VELK_CELL_WOKEN) : samples;
+                if (samples >= VELK_CELL_SETTLED && !woken) {
+                    mode = VELK_CELL_READ_ONLY;
+                } else if (updated != now && atomicCompSwap(probe_words.data[cell + VELK_CELL_UPDATED], updated, now) == updated) {
+                    mode = VELK_CELL_ADD;
+                } else if (samples > 0u) {
+                    mode = VELK_CELL_READ_ONLY;
+                }
+            }
+        }
+        s_cell[local] = cell;
+        s_mode[local] = mode;
+        s_had[local] = had;
+    }
     memoryBarrierShared();
     barrier();
+    uint mode = s_mode[local];
+    uint cell = s_cell[local];
 
     vec3 light = vec3(0.0);
     vec3 dir = n;
-    if (surface) {
+    if (surface && mode != VELK_CELL_READ_ONLY) {
         dir = velk_probe_ray_dir(probe, square, ray, g.present_counter, n);
         Ray rr;
         rr.origin = pos + n * max(length(pos) * 1e-3, 1e-3);
@@ -3393,6 +3541,11 @@ void velk_probes_gather(uint lane)
         for (uint w = 0u; w < VELK_PROBE_WORDS; ++w) probe_words.data[raw + w] = 0u;
         return;
     }
+    if (mode == VELK_CELL_READ_ONLY) {
+        velk_probe_write(raw, velk_probe_read(cell + VELK_CELL_LIGHT), pos, velk_cell_normal(cell),
+                         float(max(probe_words.data[cell + VELK_CELL_SAMPLES], 1u)));
+        return;
+    }
 
     // By cosine: the mean radiance weighted by cosine, as the lighting pass takes it, is the mean
     // of what the rays found. Each colour's direction: along the normal one and a half times
@@ -3416,6 +3569,30 @@ void velk_probes_gather(uint lane)
     p.r = 1.5 * p.e.r * n + p.r * (4.0 / float(VELK_PROBE_RAYS));
     p.g = 1.5 * p.e.g * n + p.g * (4.0 / float(VELK_PROBE_RAYS));
     p.b = 1.5 * p.e.b * n + p.b * (4.0 / float(VELK_PROBE_RAYS));
+    if (mode == VELK_CELL_ADD) {
+        // Into its cell, at the cell's normal: the mean of all the rays it holds, up to
+        // VELK_CELL_SETTLED frames of them; its count written last, so that a probe reading it
+        // finds the light it counts.
+        uint had = s_had[local];
+        vec3 cn = had == 0u ? n : velk_cell_normal(cell);
+        p.e = velk_probe_eval_raw(p, n, cn);
+        if (had > 0u) {
+            VelkProbeLight c = velk_probe_read(cell + VELK_CELL_LIGHT);
+            float w = 1.0 / float(had + 1u);
+            p.e = mix(c.e, p.e, w);
+            p.r = mix(c.r, p.r, w);
+            p.g = mix(c.g, p.g, w);
+            p.b = mix(c.b, p.b, w);
+        } else {
+            probe_words.data[cell + VELK_CELL_NORMAL] = velk_probe_oct_encode(cn);
+        }
+        velk_probe_write_light(cell + VELK_CELL_LIGHT, p);
+        memoryBarrierBuffer();
+        uint samples = min(had + 1u, VELK_CELL_SETTLED);
+        probe_words.data[cell + VELK_CELL_SAMPLES] = samples;
+        velk_probe_write(raw, p, pos, cn, float(samples));
+        return;
+    }
     velk_probe_write(raw, p, pos, n, 1.0);
 }
 
@@ -3627,31 +3804,20 @@ void main()
 
 /**
  * The screen probes' filter, after the gather (light_probes_main_src): a thread a probe. Its light
- * is the mean of its own and its 3 by 3 neighbours' light from their rays, each by how near its
- * surface is to the probe's plane and the probe to its, and how much their normals agree; then
- * blended with the last frame's light where it was, the 2 by 2 probes around that place that were
- * on the same surface, kept to the spread of the neighbours' light where enough of them agree.
- * Traces nothing: composed after rt_compute_prelude_src alone. pc.env.w is the last frame's probe
- * store, pc.extras.x the ray store, pc.extras.y the G-buffer's size (x low, y high), pc.extras.z
- * this frame's probe store.
+ * is the mean of its own and its 3 by 3 neighbours' light, each by how near its surface is to the
+ * probe's plane and the probe to its, and how much their normals agree. What a probe brings over
+ * frames is its cell's (VELK_PROBE_CELL_GLSL), which keeps it in the world while the camera
+ * moves. With pc.extras.w 1 it instead lets go of cells no probe read for VELK_CELL_KEEP frames, a
+ * thread a slot, after the filter, so that the next gather only takes free slots. Traces nothing:
+ * composed after rt_compute_prelude_src alone. pc.extras.x is the ray store, pc.extras.y the
+ * G-buffer's size (x low, y high), pc.extras.z this frame's probe store, pc.env.w the cells.
  */
 inline constexpr string_view light_probes_filter_src = R"(
 layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_words;
 #define VELK_LIGHT_WORDS probe_words
 #define VELK_PROBE_PIXELS 16u
-)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL R"(
-// Probe `at`'s light added `w` times to a sum, seen from the normal `n`: its light at `n`,
-// unclamped, and its directions as they are.
-void velk_probe_add(inout VelkProbeLight sum, uint at, vec3 at_n, vec3 n, float w)
-{
-    VelkProbeLight q = velk_probe_read(at);
-    sum.e += w * velk_probe_eval_raw(q, at_n, n);
-    sum.r += w * q.r;
-    sum.g += w * q.g;
-    sum.b += w * q.b;
-}
-
-// The filter: a thread a probe, from the ray store and the last frame's probes into this frame's.
+)" VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL R"(
+// The filter: a thread a probe, from the ray store into this frame's.
 void velk_probes_filter()
 {
     uint width = pc.extras.y & 0xFFFFu;
@@ -3661,28 +3827,25 @@ void velk_probes_filter()
     uint probe = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
     if (probe >= across * down) return;
     uint raw_store = pc.extras.x;
-    uint was_store = pc.env.w;
     uint mine = raw_store + probe * VELK_PROBE_WORDS;
     uint now = pc.extras.z + probe * VELK_PROBE_WORDS;
-    if (uintBitsToFloat(probe_words.data[mine + VELK_PROBE_FRAMES]) <= 0.0) {
+    float frames = uintBitsToFloat(probe_words.data[mine + VELK_PROBE_FRAMES]);
+    if (frames <= 0.0) {
         for (uint w = 0u; w < VELK_PROBE_WORDS; ++w) probe_words.data[now + w] = 0u;
         return;
     }
-    GlobalData g = VELK_GLOBALS;
     vec3 pos = velk_probe_position(mine);
     vec3 n = velk_probe_normal(mine);
     float near = 0.02 * length(pos) + 1e-3;
 
-    // Its own and its 3 by 3 neighbours' light from their rays, each by how near the two surfaces
-    // are to each other's planes and how much their normals agree; and the spread of their light
-    // at its normal.
+    // Its own and its 3 by 3 neighbours' light, each by how near the two surfaces are to each
+    // other's planes and how much their normals agree.
     ivec2 cell = ivec2(int(probe % across), int(probe / across));
-    VelkProbeLight fresh;
-    fresh.e = vec3(0.0);
-    fresh.r = vec3(0.0);
-    fresh.g = vec3(0.0);
-    fresh.b = vec3(0.0);
-    vec3 squares = vec3(0.0);
+    VelkProbeLight light;
+    light.e = vec3(0.0);
+    light.r = vec3(0.0);
+    light.g = vec3(0.0);
+    light.b = vec3(0.0);
     float total = 0.0;
     for (int k = 0; k < 9; ++k) {
         ivec2 c = cell + ivec2(k % 3 - 1, k / 3 - 1);
@@ -3695,101 +3858,40 @@ void velk_probes_filter()
         float w = exp(-off / near) * pow(max(dot(n, at_n), 0.0), 4.0);
         if (w <= 1e-4) continue;
         VelkProbeLight q = velk_probe_read(at);
-        vec3 e = velk_probe_eval_raw(q, at_n, n);
-        fresh.e += w * e;
-        fresh.r += w * q.r;
-        fresh.g += w * q.g;
-        fresh.b += w * q.b;
-        squares += w * e * e;
+        light.e += w * velk_probe_eval_raw(q, at_n, n);
+        light.r += w * q.r;
+        light.g += w * q.g;
+        light.b += w * q.b;
         total += w;
     }
     // Its own probe is always among them, with weight 1.
-    fresh.e /= total;
-    fresh.r /= total;
-    fresh.g /= total;
-    fresh.b /= total;
-    vec3 spread = sqrt(max(squares / total - fresh.e * fresh.e, vec3(0.0)));
-    fresh.e = max(fresh.e, vec3(0.0));
-
-    // The last frame's probes around where it was: the 2 by 2 around that place on the last
-    // frame's grid, by how near, each where it was on the same surface.
-    VelkProbeLight had;
-    had.e = vec3(0.0);
-    had.r = vec3(0.0);
-    had.g = vec3(0.0);
-    had.b = vec3(0.0);
-    float had_weight = 0.0;
-    float had_frames = 0.0;
-    vec4 clip = g.prev_view_projection * vec4(pos + g.cam_moved, 1.0);
-    if (was_store != 0xFFFFFFFFu && clip.w > 1e-5) {
-        vec2 at_px = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(width), float(height));
-        // A probe sits at the middle pixel of its square, whose centre is half a pixel on: a
-        // still camera lands exactly on it.
-        vec2 on_grid = (at_px - (float(VELK_PROBE_PIXELS / 2u) + 0.5)) / float(VELK_PROBE_PIXELS);
-        ivec2 base = ivec2(floor(on_grid));
-        vec2 f = on_grid - vec2(base);
-        for (int k = 0; k < 4; ++k) {
-            ivec2 c = base + ivec2(k & 1, k >> 1);
-            if (c.x < 0 || c.y < 0 || c.x >= int(across) || c.y >= int(down)) continue;
-            float bilinear = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
-            if (bilinear <= 0.0) continue;
-            uint at = was_store + (uint(c.y) * across + uint(c.x)) * VELK_PROBE_WORDS;
-            float frames = uintBitsToFloat(probe_words.data[at + VELK_PROBE_FRAMES]);
-            if (frames <= 0.0) continue;
-            vec3 then_pos = velk_probe_position(at) - g.cam_moved;
-            vec3 then_n = velk_probe_normal(at);
-            if (dot(then_n, n) <= 0.9 || abs(dot(then_n, pos - then_pos)) >= 0.05 * length(pos) + 1e-3) continue;
-            velk_probe_add(had, at, then_n, n, bilinear);
-            had_weight += bilinear;
-            had_frames += bilinear * frames;
-        }
-    }
-
-    // Blended with it over up to 16 frames; where enough neighbours agree, its light kept within
-    // two and a half spreads of theirs, its directions scaled with it. While no light has moved for
-    // a while (pc.extras.w more than 16), a probe that was not cut grows past 16 frames, up to
-    // pc.extras.w, so that light that does not change settles. Settled, it is no longer cut: its
-    // light away from theirs by more than three spreads, or a quarter of it, halves the frames it
-    // counts instead, down to 16, so that a single frame whose few rays all missed the light costs
-    // little while a change that lasts brings it back in a few frames.
-    VelkProbeLight light = fresh;
-    float frames = 1.0;
-    if (had_weight > 1e-4) {
-        had.e = max(had.e / had_weight, vec3(0.0));
-        had.r /= had_weight;
-        had.g /= had_weight;
-        had.b /= had_weight;
-        float had_mean = had_frames / had_weight;
-        frames = min(had_mean + 1.0, 16.0);
-        if (total >= 3.0) {
-            float most = max(float(pc.extras.w), 16.0);
-            if (most > 16.0 && had_mean > 16.0) {
-                vec3 margin = max(3.0 * spread, 0.25 * max(had.e, fresh.e) + vec3(0.01));
-                bool away = any(notEqual(clamp(had.e, max(fresh.e - margin, vec3(0.0)), fresh.e + margin), had.e));
-                frames = away ? max(had_mean * 0.5, 16.0) : min(had_mean + 1.0, most);
-            } else {
-                vec3 kept = clamp(had.e, max(fresh.e - 2.5 * spread, vec3(0.0)), fresh.e + 2.5 * spread);
-                bool cut = any(notEqual(kept, had.e));
-                vec3 scale = vec3(had.e.r > 1e-6 ? kept.r / had.e.r : 1.0, had.e.g > 1e-6 ? kept.g / had.e.g : 1.0,
-                                  had.e.b > 1e-6 ? kept.b / had.e.b : 1.0);
-                had.e = kept;
-                had.r *= scale.r;
-                had.g *= scale.g;
-                had.b *= scale.b;
-                frames = min(had_mean + 1.0, cut ? 16.0 : most);
-            }
-        }
-        float t = 1.0 / frames;
-        light.e = mix(had.e, fresh.e, t);
-        light.r = mix(had.r, fresh.r, t);
-        light.g = mix(had.g, fresh.g, t);
-        light.b = mix(had.b, fresh.b, t);
-    }
+    light.e = max(light.e / total, vec3(0.0));
+    light.r /= total;
+    light.g /= total;
+    light.b /= total;
     velk_probe_write(now, light, pos, n, frames);
+}
+
+// Lets go of the cell in slot `slot` when no probe read it for VELK_CELL_KEEP frames.
+void velk_probe_cells_age(uint slot)
+{
+    if (slot >= VELK_CELL_SLOTS || pc.env.w == 0xFFFFFFFFu) return;
+    uint cell = pc.env.w + slot * VELK_CELL_WORDS;
+    if (probe_words.data[cell + VELK_CELL_KEY] == 0u) return;
+    uint now = VELK_GLOBALS.present_counter;
+    if (now - probe_words.data[cell + VELK_CELL_READ] <= VELK_CELL_KEEP) return;
+    probe_words.data[cell + VELK_CELL_SAMPLES] = 0u;
+    probe_words.data[cell + VELK_CELL_UPDATED] = 0u;
+    probe_words.data[cell + VELK_CELL_CHECK] = 0u;
+    probe_words.data[cell + VELK_CELL_KEY] = 0u;
 }
 
 void main()
 {
+    if (pc.extras.w == 1u) {
+        velk_probe_cells_age(gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex);
+        return;
+    }
     velk_probes_filter();
 }
 )";

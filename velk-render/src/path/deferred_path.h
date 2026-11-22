@@ -146,12 +146,12 @@ public:
         /// each was when last listed as changed. See light_changes_main_src.
         ArenaRegion light_changes;
         vector<GpuLight> light_changes_lights;
-        /// Whether a light was listed as changed this frame, and the frames since one last was or
-        /// the camera last turned at once (probe_forward, its forward direction last frame): the
-        /// probes keep a long history only once those have stood still for a while.
+        /// Whether a light was listed as changed this frame, and the frame one last was, from
+        /// which the probes' cells take new rays again (kProbeCellWoken).
         bool lights_moved = false;
-        uint32_t lights_still_frames = 0;
-        vec3 probe_forward{};
+        uint32_t probe_cells_woken = 0;
+        /// The probes' cells (kProbeCellSlots of kProbeCellWords), kept in world space.
+        ArenaRegion probe_cells;
         IRenderPass::Ptr light_changes_pass;
         /// For the log: frames with changes since it last printed, their changes, the times
         /// everything changed, and the frame it last printed.
