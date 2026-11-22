@@ -203,11 +203,13 @@ namespace velk {
 
 /// A change (kChange, VELK_CHANGE): a box in the world, and the light that changed, with
 /// kLightChangeSmall when it only moved and by less than its size, or kLightNone for something in
-/// the box that moved, came or went.
+/// the box that moved, came or went; and the widths of the screen probes' cells it wakes, bit k
+/// for cells 2^(k - 3) wide (kProbeCellLevels).
 #define VELK_CHANGE(X, cp, gp)                                                                     \
     X(cp, gp, Min, MIN, 0)                      /* three floats */                             \
     X(cp, gp, Light, LIGHT, 3)                                                                 \
     X(cp, gp, Max, MAX, 4)                      /* three floats */                             \
+    X(cp, gp, Wakes, WAKES, 7)                                                                 \
     X(cp, gp, Words, WORDS, 8)
 
 /// A primitive's entry for drawing by cluster (kClusterEntry, VELK_CLUSTER_ENTRY). See

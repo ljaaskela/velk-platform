@@ -153,6 +153,13 @@ public:
         bool light_changes_all = false;
         bool light_changes_listed = false;
         uint32_t probe_cells_woken = 0;
+        /// For each light, where it was when it last woke the probes' cells of each width
+        /// (kProbeCellLevels of three floats), and its brightness when it last woke them all.
+        vector<float> probe_wake_at;
+        vector<float> probe_wake_brightness;
+        /// The probes that cast rays this frame (kProbeListHeaderWords, then kProbeListEntryWords
+        /// a probe).
+        ArenaRegion light_probe_list;
         /// The probes' cells (kProbeCellSlots of kProbeCellWords), kept in world space.
         ArenaRegion probe_cells;
         IRenderPass::Ptr light_changes_pass;

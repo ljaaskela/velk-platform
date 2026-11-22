@@ -5704,6 +5704,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             clear(kLightPoolDeepestTrace, 2u);
             VELK_LOG(I, "walk stack: deepest %u in the light trace, %u in the probes", h[kLightPoolDeepestTrace],
                      h[kLightPoolDeepestProbes]);
+            // What the screen probes did with their cells since the last log.
+            clear(kLightPoolSumProbesRead, 4u);
+            VELK_LOG(I, "probes: %u read their cell without rays, %u added rays to it, %u cast rays alone; %u settled cells woken",
+                     h[kLightPoolSumProbesRead], h[kLightPoolSumProbesRead + 1u], h[kLightPoolSumProbesRead + 2u],
+                     h[kLightPoolSumProbesRead + 3u]);
             // Where a ray's walk spends its steps, since the last log (the same rays as above).
             clear(kLightPoolSumTopNodes, kLightPoolSumPartitions + 1u - kLightPoolSumTopNodes);
             VELK_LOG(I, "light trace: a ray walks %.0f top tree nodes, enters %.1f partitions, walks %.0f of their tree nodes "

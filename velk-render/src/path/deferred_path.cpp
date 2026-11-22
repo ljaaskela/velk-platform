@@ -515,7 +515,15 @@ void DeferredPath::ensure_arena_words(ViewState& vs, FrameContext& ctx, uvec2 si
                 arena->write_at(store->offset(), empty.data(), empty.size() * sizeof(uint32_t));
             }
         }
-        if (vs.light_probes[0].valid() && vs.light_probes[1].valid() && vs.light_probe_rays.valid()) vs.light_probe_count = probes;
+        // The list of probes that cast rays, empty, its trace's dispatch one group high and deep.
+        vs.light_probe_list = probes != 0 ? arena->alloc(uint64_t(kProbeListHeaderWords + probes * kProbeListEntryWords) * sizeof(uint32_t)) : ArenaRegion{};
+        if (vs.light_probe_list.valid()) {
+            const uint32_t header[kProbeListHeaderWords] = {0u, 0u, 1u, 1u};
+            arena->write_at(vs.light_probe_list.offset(), header, sizeof(header));
+        }
+        if (vs.light_probes[0].valid() && vs.light_probes[1].valid() && vs.light_probe_rays.valid() && vs.light_probe_list.valid()) {
+            vs.light_probe_count = probes;
+        }
     }
     // The probes' cells, once, all free.
     if (!vs.probe_cells.valid()) {
@@ -1186,11 +1194,12 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     vector<uint32_t> words(kLightChangeHeaderWords, 0u);
     uint32_t count = 0;
     bool all = render_view.bvh.changed_all;
-    const auto add = [&](const float lo[3], const float hi[3], uint32_t light) {
+    const auto add = [&](const float lo[3], const float hi[3], uint32_t light, uint32_t wakes) {
         uint32_t change[kLightChangeWords] = {};
         std::memcpy(change + kChangeMin, lo, sizeof(float) * 3);
         change[kChangeLight] = light;
         std::memcpy(change + kChangeMax, hi, sizeof(float) * 3);
+        change[kChangeWakes] = wakes;
         words.insert(words.end(), change, change + kLightChangeWords);
         ++count;
     };
@@ -1225,6 +1234,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
              * l.color_intensity[3];
     };
     vector<uint32_t> changed_lights;
+    vector<uint32_t> changed_kind;
     for (size_t i = 0; !all_lights && i < lights.size(); ++i) {
         const GpuLight& a = listed[i];
         const GpuLight& b = lights[i];
@@ -1253,6 +1263,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         const bool small = same_kind && b.params[3] > 0.f && moved < b.params[3] * b.params[3]
                         && std::abs(now - was) <= std::max(was, now) / 16.f;
         changed_lights.push_back(static_cast<uint32_t>(i) | (small ? kLightChangeSmall : 0u));
+        if (!same_kind) changed_kind.push_back(static_cast<uint32_t>(i));
         listed[i] = b;
     }
     vs.lights_moved = all_lights || !changed_lights.empty();
@@ -1262,15 +1273,51 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     if (all_lights || changed_lights.size() > kLightChanges || (changed_lights.size() == kLightChanges && !boxes.empty())) {
         all = true;
     }
+    // The probes' cells each light wakes (kProbeCellLevels): those a width it moved by since it
+    // last woke them, or all of them when its brightness changed by a sixteenth or it changed kind.
+    auto& wake_at = vs.probe_wake_at;
+    auto& wake_brightness = vs.probe_wake_brightness;
+    const auto wake_all_at = [&](size_t i) {
+        for (uint32_t k = 0; k < kProbeCellLevels; ++k) std::memcpy(&wake_at[(i * kProbeCellLevels + k) * 3], lights[i].position, sizeof(float) * 3);
+        wake_brightness[i] = brightness(lights[i]);
+    };
+    if (all || wake_brightness.size() != lights.size()) {
+        wake_at.resize(lights.size() * kProbeCellLevels * 3);
+        wake_brightness.resize(lights.size());
+        for (size_t i = 0; i < lights.size(); ++i) wake_all_at(i);
+    }
+    const auto wakes_of = [&](size_t i) -> uint32_t {
+        const GpuLight& b = lights[i];
+        const float was = wake_brightness[i];
+        const float now = brightness(b);
+        bool kind = false;
+        for (uint32_t c : changed_kind) kind = kind || c == i;
+        if (kind || std::abs(now - was) > std::max(was, now) / 16.f) {
+            wake_all_at(i);
+            return ~0u;
+        }
+        uint32_t wakes = 0;
+        for (uint32_t k = 0; k < kProbeCellLevels; ++k) {
+            float* at = &wake_at[(i * kProbeCellLevels + k) * 3];
+            float moved = 0.f;
+            for (int c = 0; c < 3; ++c) moved += (at[c] - b.position[c]) * (at[c] - b.position[c]);
+            const float width = std::ldexp(1.f, static_cast<int>(k) - 3);
+            if (moved < width * width) continue;
+            wakes |= 1u << k;
+            std::memcpy(at, b.position, sizeof(float) * 3);
+        }
+        return wakes;
+    };
     if (!all) {
         for (uint32_t i : changed_lights) {
-            const GpuLight& light = lights[i & ~kLightChangeSmall];
-            add(light.position, light.position, i);
+            const uint32_t index = i & ~kLightChangeSmall;
+            const GpuLight& light = lights[index];
+            add(light.position, light.position, i, wakes_of(index));
         }
         const uint32_t room = kLightChanges - count;
         for (size_t b = 0; b < boxes.size(); ++b) {
             if (b < room) {
-                add(boxes[b].min, boxes[b].max, kLightNone);
+                add(boxes[b].min, boxes[b].max, kLightNone, ~0u);
                 continue;
             }
             uint32_t* last = words.data() + kLightChangeHeaderWords + (count - 1u) * kLightChangeWords;
@@ -1284,6 +1331,7 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
                 std::memcpy(last + kChangeMin + k, &lo, sizeof(float));
                 std::memcpy(last + kChangeMax + k, &hi, sizeof(float));
             }
+            last[kChangeWakes] = ~0u;
         }
     }
     // Everything changed: every light counts as listed as it is now.
@@ -1651,6 +1699,14 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.more[0] = cells_word;
     pc.more[1] = vs.probe_cells_woken;
     pc.more[2] = vs.light_changes_listed ? static_cast<uint32_t>(vs.light_changes.offset() / sizeof(uint32_t)) : kLightNone;
+    // The probes that cast rays (more.w), which the decide fills and the trace (bit 31) reads.
+    const uint32_t list_word = static_cast<uint32_t>(vs.light_probe_list.offset() / sizeof(uint32_t));
+    pc.more[3] = list_word;
+    RtPushC trace_pc = pc;
+    trace_pc.more[3] = list_word | 0x80000000u;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
+    if (!arena_buffer) return;
     // The filter: the ray store into this frame's store; then the cells no probe reads any more.
     RtPushC filter_pc = pc;
     filter_pc.extras[2] = store_word(vs.light_probe_parity);
@@ -1665,18 +1721,23 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
                           graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();
         if (!cmd) return;
-        // The gather, kLightProbeRays threads a probe, a group a 2 by 2 tile of the probe grid.
+        // The decide, a thread a probe; then the trace, kLightProbeRays threads a probe, four
+        // probes of the list a group, as many groups as the decide counted.
         DispatchCall dc{};
         dc.pipeline = pipeline.get();
-        dc.groups_x = ((across + 1u) / 2u) * ((down + 1u) / 2u);
+        dc.groups_x = (across * down + kLightProbeGroupThreads - 1u) / kLightProbeGroupThreads;
         dc.groups_y = 1;
         dc.groups_z = 1;
         dc.root_constants_size = sizeof(pc);
         std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        DispatchCall tc = dc;
+        std::memcpy(tc.root_constants, &trace_pc, sizeof(trace_pc));
         cmd->begin_recording();
         cmd->push_label("DeferredPath: light probes");
         cmd->record_global_barrier();
         cmd->record_dispatch(dc);
+        cmd->record_global_barrier();
+        cmd->record_dispatch_indirect(tc, arena_buffer, uint64_t(list_word + 1u) * sizeof(uint32_t));
         cmd->record_global_barrier();
         cmd->pop_label();
         cmd->end_recording();
