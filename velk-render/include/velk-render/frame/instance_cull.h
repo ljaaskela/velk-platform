@@ -5456,13 +5456,18 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 const uint32_t none = 0;
                 arena->update_at(wanted_at, &none, sizeof(none));
             }
-            if (wanted != 0 && pool.segments.size() < pool.max_segments) {
-                uint32_t free_pages = 0;
+            uint32_t free_pages = 0;
+            if (wanted != 0) {
                 arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages,
                                sizeof(free_pages));
-                // What was asked for, and a quarter of the pool more: room for pieces out of view to
-                // stay while it lasts (velk_pieces_keep_frames), so that turning back finds them.
-                const uint32_t asked = wanted + pool.pages() / 4u;
+            }
+            // Short only when a frame wanted more than the last sweep had free, or the pool is
+            // nearly full: else what pieces out of view hold (velk_pieces_keep_frames) is given back
+            // as the sweep frees them.
+            if (wanted != 0 && (wanted > free_pages || free_pages * 8u < pool.pages()) && pool.segments.size() < pool.max_segments) {
+                // What was asked for, and a segment more: room for pieces out of view to stay a
+                // while, so that turning back finds them.
+                const uint32_t asked = wanted + kLightSegmentPages;
                 const uint32_t added = grow_light_pool(pool, *arena, (asked + kLightSegmentPages - 1u) / kLightSegmentPages);
                 VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u free at the last sweep", added,
                          pool.pages(), wanted, free_pages);
